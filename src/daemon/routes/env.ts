@@ -227,6 +227,7 @@ async function handleGetEnv(opts: { readonly url: URL }): Promise<Response> {
   return jsonResponse(body as unknown as Record<string, unknown>);
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Env mutation route keeps request parsing and repair-safe writeback together.
 async function handleSetEnv(opts: {
   readonly req: Request;
 }): Promise<Response> {

@@ -1,3 +1,4 @@
+// biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: Unsupported experimental supervisor commands remain an explicit gateway-facing control surface.
 import { isAbsolute, resolve } from "node:path";
 
 import { requestDaemonJson } from "../../../daemon/client.ts";
@@ -533,6 +534,52 @@ type ParseResult =
   | { readonly ok: true; readonly value: SupervisorArgs }
   | { readonly ok: false; readonly error: string };
 
+type SupervisorStringOptionKey = "project" | "path";
+type SupervisorNumberOptionKey = "logsFrom" | "eventsFrom";
+
+const SUPERVISOR_STRING_OPTION_SPECS = [
+  {
+    flag: "--project",
+    key: "project",
+    missingValueError: "--project requires a value.",
+  },
+  {
+    flag: "--path",
+    key: "path",
+    missingValueError: "--path requires a value.",
+  },
+] as const satisfies readonly {
+  readonly flag: string;
+  readonly key: SupervisorStringOptionKey;
+  readonly missingValueError: string;
+}[];
+
+const SUPERVISOR_NUMBER_OPTION_SPECS = [
+  {
+    flag: "--logs-from",
+    key: "logsFrom",
+    missingValueError: "--logs-from requires a value.",
+    invalidValueError: "--logs-from must be a number.",
+  },
+  {
+    flag: "--from",
+    key: "logsFrom",
+    missingValueError: "--from requires a value.",
+    invalidValueError: "--from must be a number.",
+  },
+  {
+    flag: "--events-from",
+    key: "eventsFrom",
+    missingValueError: "--events-from requires a value.",
+    invalidValueError: "--events-from must be a number.",
+  },
+] as const satisfies readonly {
+  readonly flag: string;
+  readonly key: SupervisorNumberOptionKey;
+  readonly missingValueError: string;
+  readonly invalidValueError: string;
+}[];
+
 export function parseSupervisorArgs(opts: {
   readonly args: readonly string[];
   readonly allowLogsFrom?: boolean;
@@ -547,18 +594,9 @@ export function parseSupervisorArgs(opts: {
   let logsFrom: number | undefined;
   let eventsFrom: number | undefined;
 
-  const takeValue = (
-    _flag: string,
-    value: string | undefined
-  ): string | null => {
-    if (!value || value.startsWith("-")) {
-      return null;
-    }
-    return value;
-  };
-
   for (let i = 0; i < opts.args.length; i += 1) {
     const token = opts.args[i] ?? "";
+    const next = opts.args[i + 1];
     if (token === "--") {
       rest.push(...opts.args.slice(i + 1));
       break;
@@ -585,124 +623,37 @@ export function parseSupervisorArgs(opts: {
       continue;
     }
 
-    if (token.startsWith("--project=")) {
-      project = token.slice("--project=".length).trim();
+    const stringOption = parseSupervisorStringOption({ token, next });
+    if (stringOption.ok) {
+      if (stringOption.key === "project") {
+        project = stringOption.value;
+      } else {
+        path = stringOption.value;
+      }
+      i += stringOption.consumed;
       continue;
     }
-
-    if (token === "--project") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--project requires a value." };
-      }
-      project = value;
-      i += 1;
-      continue;
+    if (stringOption.error) {
+      return { ok: false, error: stringOption.error };
     }
 
-    if (token.startsWith("--path=")) {
-      path = token.slice("--path=".length).trim();
+    const numberOption = parseSupervisorNumberOption({
+      token,
+      next,
+      allowLogsFrom: opts.allowLogsFrom === true,
+      allowEventsFrom: opts.allowEventsFrom === true,
+    });
+    if (numberOption.ok) {
+      if (numberOption.key === "logsFrom") {
+        logsFrom = numberOption.value;
+      } else {
+        eventsFrom = numberOption.value;
+      }
+      i += numberOption.consumed;
       continue;
     }
-
-    if (token === "--path") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--path requires a value." };
-      }
-      path = value;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--logs-from=")) {
-      if (!opts.allowLogsFrom) {
-        return { ok: false, error: "--logs-from is not supported here." };
-      }
-      const value = token.slice("--logs-from=".length).trim();
-      const parsed = parseOffset(value);
-      if (parsed === null) {
-        return { ok: false, error: "--logs-from must be a number." };
-      }
-      logsFrom = parsed;
-      continue;
-    }
-
-    if (token === "--logs-from") {
-      if (!opts.allowLogsFrom) {
-        return { ok: false, error: "--logs-from is not supported here." };
-      }
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--logs-from requires a value." };
-      }
-      const parsed = parseOffset(value);
-      if (parsed === null) {
-        return { ok: false, error: "--logs-from must be a number." };
-      }
-      logsFrom = parsed;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--from=")) {
-      if (!opts.allowLogsFrom) {
-        return { ok: false, error: "--from is not supported here." };
-      }
-      const value = token.slice("--from=".length).trim();
-      const parsed = parseOffset(value);
-      if (parsed === null) {
-        return { ok: false, error: "--from must be a number." };
-      }
-      logsFrom = parsed;
-      continue;
-    }
-
-    if (token === "--from") {
-      if (!opts.allowLogsFrom) {
-        return { ok: false, error: "--from is not supported here." };
-      }
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--from requires a value." };
-      }
-      const parsed = parseOffset(value);
-      if (parsed === null) {
-        return { ok: false, error: "--from must be a number." };
-      }
-      logsFrom = parsed;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--events-from=")) {
-      if (!opts.allowEventsFrom) {
-        return { ok: false, error: "--events-from is not supported here." };
-      }
-      const value = token.slice("--events-from=".length).trim();
-      const parsed = parseOffset(value);
-      if (parsed === null) {
-        return { ok: false, error: "--events-from must be a number." };
-      }
-      eventsFrom = parsed;
-      continue;
-    }
-
-    if (token === "--events-from") {
-      if (!opts.allowEventsFrom) {
-        return { ok: false, error: "--events-from is not supported here." };
-      }
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--events-from requires a value." };
-      }
-      const parsed = parseOffset(value);
-      if (parsed === null) {
-        return { ok: false, error: "--events-from must be a number." };
-      }
-      eventsFrom = parsed;
-      i += 1;
-      continue;
+    if (numberOption.error) {
+      return { ok: false, error: numberOption.error };
     }
 
     if (token.startsWith("-")) {
@@ -724,6 +675,100 @@ export function parseSupervisorArgs(opts: {
       rest,
     },
   };
+}
+
+function takeSupervisorOptionValue(value: string | undefined): string | null {
+  if (!value || value.startsWith("-")) {
+    return null;
+  }
+  return value;
+}
+
+function parseSupervisorStringOption(opts: {
+  readonly token: string;
+  readonly next: string | undefined;
+}):
+  | {
+      readonly ok: true;
+      readonly key: SupervisorStringOptionKey;
+      readonly value: string;
+      readonly consumed: 0 | 1;
+    }
+  | { readonly ok: false; readonly error?: string } {
+  for (const spec of SUPERVISOR_STRING_OPTION_SPECS) {
+    if (opts.token === spec.flag) {
+      const value = takeSupervisorOptionValue(opts.next);
+      if (!value) {
+        return { ok: false, error: spec.missingValueError };
+      }
+      return {
+        ok: true,
+        key: spec.key,
+        value,
+        consumed: 1,
+      };
+    }
+
+    const inlinePrefix = `${spec.flag}=`;
+    if (opts.token.startsWith(inlinePrefix)) {
+      return {
+        ok: true,
+        key: spec.key,
+        value: opts.token.slice(inlinePrefix.length).trim(),
+        consumed: 0,
+      };
+    }
+  }
+
+  return { ok: false };
+}
+
+function parseSupervisorNumberOption(opts: {
+  readonly token: string;
+  readonly next: string | undefined;
+  readonly allowLogsFrom: boolean;
+  readonly allowEventsFrom: boolean;
+}):
+  | {
+      readonly ok: true;
+      readonly key: SupervisorNumberOptionKey;
+      readonly value: number;
+      readonly consumed: 0 | 1;
+    }
+  | { readonly ok: false; readonly error?: string } {
+  for (const spec of SUPERVISOR_NUMBER_OPTION_SPECS) {
+    const supported =
+      spec.key === "logsFrom" ? opts.allowLogsFrom : opts.allowEventsFrom;
+    if (opts.token !== spec.flag && !opts.token.startsWith(`${spec.flag}=`)) {
+      continue;
+    }
+    if (!supported) {
+      return { ok: false, error: `${spec.flag} is not supported here.` };
+    }
+
+    const inlinePrefix = `${spec.flag}=`;
+    const rawValue =
+      opts.token === spec.flag
+        ? takeSupervisorOptionValue(opts.next)
+        : opts.token.slice(inlinePrefix.length).trim();
+    if (!rawValue) {
+      return { ok: false, error: spec.missingValueError };
+    }
+
+    const parsed = parseOffset(rawValue);
+    if (parsed === null) {
+      return { ok: false, error: spec.invalidValueError };
+    }
+
+    return {
+      ok: true,
+      key: spec.key,
+      value: parsed,
+      consumed: opts.token === spec.flag ? 1 : 0,
+    };
+  }
+
+  return { ok: false };
 }
 
 type JobCreateArgs = {

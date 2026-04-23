@@ -11,10 +11,16 @@ Use the published node-runtime container to spin up a remote node with minimal h
 Recommended public image:
 - `hackdance/hack:latest`
 
+Companion portable base image for managed containers:
+- `hackdance/hack:slim`
+
 The container bundles:
 - `hack` CLI binary
 - `docker` CLI + `docker compose` plugin
 - bootstrap entrypoint that can initialize a project, enable gateway, and emit an enrollment bundle
+
+The slim image keeps only the portable baseline (`hack`, Bun, Git/SSH/curl, and slim-mode defaults)
+for Codex, CI, and other managed container workflows. It is not a remote-node replacement.
 
 ## Quick Start (manual host)
 
@@ -125,6 +131,21 @@ bun run build:node-runtime-image \
   --push \
   --platform linux/amd64,linux/arm64 \
   --tag hackdance/hack:latest
+```
+
+Build the slim managed-container image locally:
+
+```bash
+bun run build:slim-runtime-image --tag hack-slim-runtime:dev
+```
+
+Publish the slim image:
+
+```bash
+bun run build:slim-runtime-image \
+  --push \
+  --platform linux/amd64,linux/arm64 \
+  --tag hackdance/hack:slim
 ```
 
 GitHub Actions workflow:

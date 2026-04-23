@@ -1,3 +1,4 @@
+// biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: Local tickets git mutation paths intentionally keep sparse checkout and legacy-ref recovery explicit in one module.
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readdir, rm, stat, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -12,6 +13,8 @@ const DEFAULT_MUTATION_LOCK_HEARTBEAT_MS = 1000;
 const DEFAULT_MUTATION_LOCK_RETRY_MS = 100;
 const DEFAULT_MUTATION_LOCK_STALE_MS = 30_000;
 const DEFAULT_MUTATION_LOCK_TIMEOUT_MS = 30_000;
+const DEFAULT_REMOTE_GIT_TIMEOUT_MS = 15_000;
+const DEFAULT_REMOTE_SSH_COMMAND = "ssh -oBatchMode=yes -oConnectTimeout=5";
 const MAX_PUSH_ATTEMPTS = 3;
 
 export type TicketsGitChannel = {
@@ -112,6 +115,7 @@ export function createGitTicketsChannel(opts: {
     readonly mutationLockRetryMs?: number;
     readonly mutationLockStaleMs?: number;
     readonly mutationLockTimeoutMs?: number;
+    readonly remoteGitTimeoutMs?: number;
   };
 }): TicketsGitChannel {
   const ticketsDir = resolve(opts.projectRoot, ".hack/tickets");
@@ -143,6 +147,9 @@ export function createGitTicketsChannel(opts: {
   const mutationLockTimeoutMs =
     opts.testOverrides?.mutationLockTimeoutMs ??
     DEFAULT_MUTATION_LOCK_TIMEOUT_MS;
+  const remoteGitTimeoutMs =
+    opts.testOverrides?.remoteGitTimeoutMs ?? DEFAULT_REMOTE_GIT_TIMEOUT_MS;
+  let inProcessWorktreeAccess: Promise<void> = Promise.resolve();
 
   const resolvePushRefForCheckout = (input: {
     readonly checkoutRef: string;
@@ -156,6 +163,8 @@ export function createGitTicketsChannel(opts: {
 
   const runGitDir = async (input: {
     readonly args: readonly string[];
+    readonly remote?: boolean;
+    readonly timeoutMs?: number;
   }): Promise<{
     readonly ok: boolean;
     readonly stdout: string;
@@ -169,6 +178,8 @@ export function createGitTicketsChannel(opts: {
           `--work-tree=${worktreeDir}`,
           ...input.args,
         ],
+        remote: input.remote,
+        timeoutMs: input.timeoutMs,
       });
       if (result.ok) {
         return result;
@@ -201,6 +212,8 @@ export function createGitTicketsChannel(opts: {
         `--work-tree=${worktreeDir}`,
         ...input.args,
       ],
+      remote: input.remote,
+      timeoutMs: input.timeoutMs,
     });
   };
 
@@ -229,13 +242,104 @@ export function createGitTicketsChannel(opts: {
     readonly heartbeatTimer: ReturnType<typeof setInterval>;
   };
 
-  const withMutationLock = async <T>(fn: () => Promise<T>): Promise<T> => {
-    const lockHandle = await acquireMutationLock();
+  const withWorktreeAccess = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const prior = inProcessWorktreeAccess.catch(() => undefined);
+    let release!: () => void;
+    inProcessWorktreeAccess = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prior;
     try {
       return await fn();
     } finally {
-      await releaseMutationLock(lockHandle);
+      release();
     }
+  };
+
+  const withMutationLock = async <T>(fn: () => Promise<T>): Promise<T> => {
+    return await withWorktreeAccess(async () => {
+      const lockHandle = await acquireMutationLock();
+      try {
+        return await fn();
+      } finally {
+        await releaseMutationLock(lockHandle);
+      }
+    });
+  };
+
+  const ensureCheckedOutUnlocked = async (input?: {
+    readonly forceFreshCheckout?: boolean;
+    readonly refreshRemote?: boolean;
+  }): Promise<
+    | {
+        readonly ok: true;
+        readonly remoteUrl: string | null;
+        readonly pushRef: string;
+      }
+    | { readonly ok: false; readonly error: string }
+  > => {
+    await ensureDirs();
+    await ensureBareRepo();
+    await ensureSparseCheckout();
+    const refreshRemote = input?.refreshRemote !== false;
+    const remote = await ensureRemote();
+    if (refreshRemote) {
+      const refreshed = await refreshRemoteTrackingRefs({
+        remoteUrl: remote.remoteUrl,
+      });
+      if (!refreshed.ok) {
+        return refreshed;
+      }
+    }
+
+    const reusableCheckout = await resolveReusableCheckout({
+      forceFreshCheckout: input?.forceFreshCheckout === true,
+      remoteUrl: remote.remoteUrl,
+    });
+    if (reusableCheckout) {
+      return reusableCheckout;
+    }
+
+    const hasLocalBranch = await hasLocalTicketsBranch();
+    const checkoutRemoteUrl =
+      refreshRemote || !hasLocalBranch ? remote.remoteUrl : null;
+
+    const checkedOut = await checkoutHead({
+      allowRemoteFetchFailureFallback: !refreshRemote && hasLocalBranch,
+      remoteUrl: checkoutRemoteUrl,
+    });
+    if (!checkedOut.ok) {
+      return checkedOut;
+    }
+
+    const migratedLegacy = await mergeLegacyRefIntoCurrentBranch({
+      remoteUrl: checkoutRemoteUrl,
+    });
+    if (!migratedLegacy.ok) {
+      return migratedLegacy;
+    }
+
+    return {
+      ok: true,
+      remoteUrl: remote.remoteUrl,
+      pushRef: checkedOut.pushRef,
+    };
+  };
+
+  const ensureCheckedOut = async (input?: {
+    readonly forceFreshCheckout?: boolean;
+    readonly refreshRemote?: boolean;
+  }): Promise<
+    | {
+        readonly ok: true;
+        readonly remoteUrl: string | null;
+        readonly pushRef: string;
+      }
+    | { readonly ok: false; readonly error: string }
+  > => {
+    return await withWorktreeAccess(async () => {
+      return await ensureCheckedOutUnlocked(input);
+    });
   };
 
   const readMutationLockOwner = async (): Promise<string | null> => {
@@ -524,6 +628,8 @@ export function createGitTicketsChannel(opts: {
     ] as const;
     let fetched = await runGitDir({
       args: fetchArgs,
+      remote: true,
+      timeoutMs: remoteGitTimeoutMs,
     });
     if (!fetched.ok) {
       const retryableLockFailure = isRetryableTrackingRefLockFailure({
@@ -537,6 +643,8 @@ export function createGitTicketsChannel(opts: {
         void deletedTrackingRef;
         fetched = await runGitDir({
           args: fetchArgs,
+          remote: true,
+          timeoutMs: remoteGitTimeoutMs,
         });
       }
     }
@@ -547,7 +655,14 @@ export function createGitTicketsChannel(opts: {
     if (isMissingRemoteRef(message)) {
       return { ok: false, error: message, missing: true };
     }
-    return { ok: false, error: message, missing: false };
+    return {
+      ok: false,
+      error: formatTicketsGitRemoteError({
+        message,
+        operation: "fetch",
+      }),
+      missing: false,
+    };
   };
 
   const fetchRemoteRef = async (
@@ -579,6 +694,8 @@ export function createGitTicketsChannel(opts: {
     }
     const push = await runGitDir({
       args: ["push", "origin", `${localBranchRef}:${input.pushRef}`],
+      remote: true,
+      timeoutMs: remoteGitTimeoutMs,
     });
     if (push.ok) {
       return { ok: true, didPush: true };
@@ -615,6 +732,8 @@ export function createGitTicketsChannel(opts: {
 
     const prunedLegacy = await runGitDir({
       args: ["push", "origin", `:${legacyRemoteRef}`],
+      remote: true,
+      timeoutMs: remoteGitTimeoutMs,
     });
     if (!prunedLegacy.ok) {
       return {
@@ -777,6 +896,42 @@ export function createGitTicketsChannel(opts: {
     if (!(input.remoteUrl && legacyRemoteRef && legacyTrackingRef)) {
       return { ok: true, imported: false };
     }
+    const prepared = await prepareLegacyEventImport();
+    if (!prepared.ok) {
+      return prepared;
+    }
+    if (prepared.paths.length === 0) {
+      return { ok: true, imported: false };
+    }
+
+    let imported = false;
+    for (const relativePath of prepared.paths) {
+      const importedPath = await importLegacyEventPath({ relativePath });
+      if (!importedPath.ok) {
+        return importedPath;
+      }
+      imported ||= importedPath.imported;
+    }
+
+    if (!imported) {
+      return { ok: true, imported: false };
+    }
+
+    const normalized = await normalizeLogs();
+    if (!normalized.ok) {
+      return normalized;
+    }
+
+    return { ok: true, imported: true };
+  };
+
+  const prepareLegacyEventImport = async (): Promise<
+    | { readonly ok: true; readonly paths: readonly string[] }
+    | { readonly ok: false; readonly error: string }
+  > => {
+    if (!(legacyRemoteRef && legacyTrackingRef)) {
+      return { ok: true, paths: [] };
+    }
 
     const fetched = await fetchRemoteRefToTracking(
       legacyRemoteRef,
@@ -784,7 +939,7 @@ export function createGitTicketsChannel(opts: {
     );
     if (!fetched.ok) {
       if (fetched.missing) {
-        return { ok: true, imported: false };
+        return { ok: true, paths: [] };
       }
       return { ok: false, error: `git fetch failed: ${fetched.error}` };
     }
@@ -805,121 +960,86 @@ export function createGitTicketsChannel(opts: {
       };
     }
 
-    let imported = false;
-    const legacyPaths = listed.stdout
-      .split("\n")
-      .map((path) => path.trim())
-      .filter((path) => path.startsWith(".hack/tickets/events/"));
+    return {
+      ok: true,
+      paths: listed.stdout
+        .split("\n")
+        .map((path) => path.trim())
+        .filter((path) => path.startsWith(".hack/tickets/events/")),
+    };
+  };
 
-    for (const relativePath of legacyPaths) {
-      const shown = await runGitDir({
-        args: ["show", `${legacyTrackingRef}:${relativePath}`],
-      });
-      if (!shown.ok) {
-        return {
-          ok: false,
-          error: `git show failed: ${shown.stderr.trim() || shown.stdout.trim()}`,
-        };
-      }
-
-      const targetPath = resolve(worktreeDir, relativePath);
-      const existing = await Bun.file(targetPath)
-        .text()
-        .catch(() => "");
-      const merged = mergeTicketEventLogs({
-        existing,
-        incoming: shown.stdout,
-      });
-      if (merged === existing) {
-        continue;
-      }
-
-      await mkdir(dirname(targetPath), { recursive: true });
-      await Bun.write(targetPath, merged);
-      imported = true;
-    }
-
-    if (!imported) {
+  const importLegacyEventPath = async (input: {
+    readonly relativePath: string;
+  }): Promise<
+    | { readonly ok: true; readonly imported: boolean }
+    | { readonly ok: false; readonly error: string }
+  > => {
+    if (!legacyTrackingRef) {
       return { ok: true, imported: false };
     }
 
-    const normalized = await normalizeLogs();
-    if (!normalized.ok) {
-      return normalized;
+    const shown = await runGitDir({
+      args: ["show", `${legacyTrackingRef}:${input.relativePath}`],
+    });
+    if (!shown.ok) {
+      return {
+        ok: false,
+        error: `git show failed: ${shown.stderr.trim() || shown.stdout.trim()}`,
+      };
     }
 
+    const targetPath = resolve(worktreeDir, input.relativePath);
+    const existing = await Bun.file(targetPath)
+      .text()
+      .catch(() => "");
+    const merged = mergeTicketEventLogs({
+      existing,
+      incoming: shown.stdout,
+    });
+    if (merged === existing) {
+      return { ok: true, imported: false };
+    }
+
+    await mkdir(dirname(targetPath), { recursive: true });
+    await Bun.write(targetPath, merged);
     return { ok: true, imported: true };
   };
 
-  const ensureCheckedOut = async (input?: {
-    readonly forceFreshCheckout?: boolean;
-    readonly refreshRemote?: boolean;
-  }): Promise<
-    | {
-        readonly ok: true;
-        readonly remoteUrl: string | null;
-        readonly pushRef: string;
-      }
-    | { readonly ok: false; readonly error: string }
-  > => {
-    await ensureDirs();
-    await ensureBareRepo();
-    await ensureSparseCheckout();
-    const refreshRemote = input?.refreshRemote !== false;
-    const remote = await ensureRemote();
-    if (refreshRemote) {
-      const refreshed = await refreshRemoteTrackingRefs({
-        remoteUrl: remote.remoteUrl,
-      });
-      if (!refreshed.ok) {
-        return refreshed;
-      }
+  const resolveReusableCheckout = async (input: {
+    readonly forceFreshCheckout: boolean;
+    readonly remoteUrl: string | null;
+  }): Promise<{
+    readonly ok: true;
+    readonly remoteUrl: string | null;
+    readonly pushRef: string;
+  } | null> => {
+    if (input.forceFreshCheckout) {
+      return null;
     }
-
-    if (
-      !(input?.forceFreshCheckout === true) &&
-      (await hasPendingWorktreeChanges())
-    ) {
-      const pushRef =
-        refMode === "hidden" && legacyRemoteRef ? legacyRemoteRef : remoteRef;
-      return { ok: true, remoteUrl: remote.remoteUrl, pushRef };
+    if (await hasPendingWorktreeChanges()) {
+      return {
+        ok: true,
+        remoteUrl: input.remoteUrl,
+        pushRef:
+          refMode === "hidden" && legacyRemoteRef ? legacyRemoteRef : remoteRef,
+      };
     }
 
     const preferredTrackingRef = await resolvePreferredTrackingRef();
     if (
-      !(input?.forceFreshCheckout === true) &&
-      (await hasAheadLocalBranchCommits({ trackingRef: preferredTrackingRef }))
+      !(await hasAheadLocalBranchCommits({ trackingRef: preferredTrackingRef }))
     ) {
-      const pushRef =
-        preferredTrackingRef === legacyTrackingRef && legacyRemoteRef
-          ? legacyRemoteRef
-          : remoteRef;
-      return { ok: true, remoteUrl: remote.remoteUrl, pushRef };
-    }
-
-    const hasLocalBranch = await hasLocalTicketsBranch();
-    const checkoutRemoteUrl =
-      refreshRemote || !hasLocalBranch ? remote.remoteUrl : null;
-
-    const checkedOut = await checkoutHead({
-      allowRemoteFetchFailureFallback: !refreshRemote && hasLocalBranch,
-      remoteUrl: checkoutRemoteUrl,
-    });
-    if (!checkedOut.ok) {
-      return checkedOut;
-    }
-
-    const migratedLegacy = await mergeLegacyRefIntoCurrentBranch({
-      remoteUrl: checkoutRemoteUrl,
-    });
-    if (!migratedLegacy.ok) {
-      return migratedLegacy;
+      return null;
     }
 
     return {
       ok: true,
-      remoteUrl: remote.remoteUrl,
-      pushRef: checkedOut.pushRef,
+      remoteUrl: input.remoteUrl,
+      pushRef:
+        preferredTrackingRef === legacyTrackingRef && legacyRemoteRef
+          ? legacyRemoteRef
+          : remoteRef,
     };
   };
 
@@ -1065,38 +1185,54 @@ export function createGitTicketsChannel(opts: {
       opts.logger.warn({
         message: `git push failed, retrying after fetch: ${push.error.replace("git push failed: ", "")}`,
       });
-
-      const checkedOut = await checkoutHead({ remoteUrl: input.remoteUrl });
-      if (!checkedOut.ok) {
-        return checkedOut;
+      const recovered = await recoverRetryablePushFailure(input);
+      if (!recovered.ok) {
+        return recovered;
       }
-
-      if (input.replayPendingEvents) {
-        const replayed = await input.replayPendingEvents();
-        if (!replayed.ok) {
-          return replayed;
-        }
-      } else {
-        const rewrote = await rewritePendingEventsAfterCheckout({
-          pendingEvents: input.pendingEvents,
-        });
-        if (!rewrote.ok) {
-          return rewrote;
-        }
-      }
-
-      const committed = await commitAll("tickets: retry");
-      if (!committed.ok) {
-        return committed;
-      }
-
-      nextPushRef = checkedOut.pushRef;
+      nextPushRef = recovered.pushRef;
     }
 
     return {
       ok: false,
       error: "git push failed after exhausting retry attempts",
     };
+  };
+
+  const recoverRetryablePushFailure = async (input: {
+    readonly remoteUrl: string | null;
+    readonly pendingEvents?: readonly Record<string, unknown>[];
+    readonly replayPendingEvents?: () => Promise<
+      { readonly ok: true } | { readonly ok: false; readonly error: string }
+    >;
+  }): Promise<
+    | { readonly ok: true; readonly pushRef: string }
+    | { readonly ok: false; readonly error: string }
+  > => {
+    const checkedOut = await checkoutHead({ remoteUrl: input.remoteUrl });
+    if (!checkedOut.ok) {
+      return checkedOut;
+    }
+
+    if (input.replayPendingEvents) {
+      const replayed = await input.replayPendingEvents();
+      if (!replayed.ok) {
+        return replayed;
+      }
+    } else {
+      const rewrote = await rewritePendingEventsAfterCheckout({
+        pendingEvents: input.pendingEvents,
+      });
+      if (!rewrote.ok) {
+        return rewrote;
+      }
+    }
+
+    const committed = await commitAll("tickets: retry");
+    if (!committed.ok) {
+      return committed;
+    }
+
+    return { ok: true, pushRef: checkedOut.pushRef };
   };
 
   const listTrackedPaths = async (): Promise<
@@ -1123,8 +1259,15 @@ export function createGitTicketsChannel(opts: {
     if (!remoteUrl) {
       return false;
     }
-    const listed = await runGitDir({ args: ["ls-remote", "origin", ref] });
-    return listed.ok && listed.stdout.trim().length > 0;
+    const listed = await runGitDir({
+      args: ["ls-remote", "origin", ref],
+      remote: true,
+      timeoutMs: remoteGitTimeoutMs,
+    });
+    if (!listed.ok) {
+      return false;
+    }
+    return listed.stdout.trim().length > 0;
   };
 
   const resolveRefOid = async (ref: string): Promise<string | null> => {
@@ -1233,7 +1376,7 @@ export function createGitTicketsChannel(opts: {
     readonly pruneLegacyRef: boolean;
   }): Promise<TicketsGitRepairResult> => {
     return await withMutationLock(async () => {
-      const checkedOut = await ensureCheckedOut({
+      const checkedOut = await ensureCheckedOutUnlocked({
         forceFreshCheckout: true,
       });
       if (!checkedOut.ok) {
@@ -1284,7 +1427,7 @@ export function createGitTicketsChannel(opts: {
     { readonly ok: true } | { readonly ok: false; readonly error: string }
   > => {
     return await withMutationLock(async () => {
-      const checkedOut = await ensureCheckedOut();
+      const checkedOut = await ensureCheckedOutUnlocked();
       if (!checkedOut.ok) {
         return checkedOut;
       }
@@ -1326,7 +1469,7 @@ export function createGitTicketsChannel(opts: {
     | { readonly ok: false; readonly error: string }
   > => {
     return await withMutationLock(async () => {
-      const checkedOut = await ensureCheckedOut();
+      const checkedOut = await ensureCheckedOutUnlocked();
       if (!checkedOut.ok) {
         return checkedOut;
       }
@@ -1379,7 +1522,7 @@ export function createGitTicketsChannel(opts: {
     | { readonly ok: false; readonly error: string }
   > => {
     return await withMutationLock(async () => {
-      const checkedOut = await ensureCheckedOut();
+      const checkedOut = await ensureCheckedOutUnlocked();
       if (!checkedOut.ok) {
         return checkedOut;
       }
@@ -1431,6 +1574,8 @@ export function createGitTicketsChannel(opts: {
 async function runGit(opts: {
   readonly cwd: string;
   readonly args: readonly string[];
+  readonly remote?: boolean;
+  readonly timeoutMs?: number;
 }): Promise<{
   readonly ok: boolean;
   readonly stdout: string;
@@ -1441,18 +1586,101 @@ async function runGit(opts: {
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
+    detached: opts.remote === true,
     env: {
       ...process.env,
-      ...resolveTicketGitIdentityEnv(),
+      ...resolveTicketGitIdentityEnv({
+        remote: opts.remote === true,
+      }),
     },
   });
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = await proc.exited;
-  return { ok: exitCode === 0, stdout, stderr };
+  const stdoutPromise = new Response(proc.stdout).text();
+  const stderrPromise = new Response(proc.stderr).text();
+  const timeoutMs =
+    opts.remote === true
+      ? (opts.timeoutMs ?? DEFAULT_REMOTE_GIT_TIMEOUT_MS)
+      : opts.timeoutMs;
+  const exitCode = await waitForGitProcess({
+    proc,
+    timeoutMs,
+    remote: opts.remote === true,
+  });
+  const stdout = await stdoutPromise;
+  const rawStderr = await stderrPromise;
+  const stderr =
+    exitCode === 124 && rawStderr.trim().length === 0
+      ? `git ${opts.args[0] ?? "command"} timed out after ${timeoutMs ?? DEFAULT_REMOTE_GIT_TIMEOUT_MS}ms`
+      : rawStderr;
+  return {
+    ok: exitCode === 0,
+    stdout,
+    stderr,
+  };
 }
 
-function resolveTicketGitIdentityEnv(): Record<string, string> {
+async function waitForGitProcess(input: {
+  readonly proc: Bun.Subprocess;
+  readonly timeoutMs?: number;
+  readonly remote?: boolean;
+}): Promise<number> {
+  if (
+    !(typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs))
+  ) {
+    return await input.proc.exited;
+  }
+  const timeoutMs = Math.max(1, Math.floor(input.timeoutMs));
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      input.proc.exited,
+      new Promise<number>((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          terminateGitProcess({
+            proc: input.proc,
+            remote: input.remote === true,
+          });
+          resolve(124);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+function terminateGitProcess(input: {
+  readonly proc: Bun.Subprocess;
+  readonly remote: boolean;
+}): void {
+  if (input.remote) {
+    const pid = typeof input.proc.pid === "number" ? input.proc.pid : null;
+    if (pid !== null) {
+      try {
+        process.kill(-pid, "SIGKILL");
+        return;
+      } catch {
+        // Fall back to terminating the direct git process below.
+      }
+    }
+  }
+  input.proc.kill();
+}
+
+function resolveTicketGitIdentityEnv(input?: {
+  readonly remote?: boolean;
+}): Record<string, string> {
+  const env: Record<string, string> = {
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  if (
+    input?.remote &&
+    !readOptionalEnv("GIT_SSH_COMMAND") &&
+    !readOptionalEnv("GIT_SSH")
+  ) {
+    env.GIT_SSH_COMMAND = DEFAULT_REMOTE_SSH_COMMAND;
+  }
   const authorName =
     readOptionalEnv("GIT_AUTHOR_NAME") ??
     readOptionalEnv("GIT_COMMITTER_NAME") ??
@@ -1464,11 +1692,89 @@ function resolveTicketGitIdentityEnv(): Record<string, string> {
   const committerName = readOptionalEnv("GIT_COMMITTER_NAME") ?? authorName;
   const committerEmail = readOptionalEnv("GIT_COMMITTER_EMAIL") ?? authorEmail;
   return {
+    ...env,
     GIT_AUTHOR_NAME: authorName,
     GIT_AUTHOR_EMAIL: authorEmail,
     GIT_COMMITTER_NAME: committerName,
     GIT_COMMITTER_EMAIL: committerEmail,
   };
+}
+
+export function isTicketsGitRemoteConnectivityError(message: string): boolean {
+  if (isTicketsGitMissingRepositoryError(message)) {
+    return false;
+  }
+  return (
+    isTicketsGitRemoteAuthError(message) ||
+    isTicketsGitRemoteTimeoutError(message) ||
+    isTicketsGitRemoteTransportError(message)
+  );
+}
+
+function formatTicketsGitRemoteError(input: {
+  readonly message: string;
+  readonly operation: "fetch" | "push" | "ls-remote";
+}): string {
+  const message = input.message.trim();
+  if (!message) {
+    return message;
+  }
+  if (isTicketsGitRemoteAuthError(message)) {
+    return `${message}\nTickets ${input.operation} could not authenticate to the git remote. Unlock your SSH agent or 1Password, then retry. Check with: ssh -T git@github.com`;
+  }
+  if (isTicketsGitRemoteTimeoutError(message)) {
+    return `${message}\nTickets ${input.operation} timed out talking to the git remote. Check SSH reachability, agent state, and network access, then retry. Check with: ssh -T git@github.com`;
+  }
+  return message;
+}
+
+function isTicketsGitRemoteAuthError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("agent refused operation") ||
+    normalized.includes("permission denied (publickey)") ||
+    normalized.includes(
+      "could not open a connection to your authentication agent"
+    ) ||
+    normalized.includes("sign_and_send_pubkey") ||
+    normalized.includes("no such identity") ||
+    (normalized.includes("permission denied") &&
+      normalized.includes("publickey"))
+  );
+}
+
+function isTicketsGitMissingRepositoryError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("repository not found") ||
+    (normalized.includes("fatal: repository") &&
+      normalized.includes("not found"))
+  );
+}
+
+function isTicketsGitRemoteTimeoutError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("operation timed out") ||
+    normalized.includes("connection timed out") ||
+    normalized.includes("timed out after") ||
+    normalized.includes("connect timeout")
+  );
+}
+
+function isTicketsGitRemoteTransportError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("connection refused") ||
+    normalized.includes("connection reset by peer") ||
+    normalized.includes("could not read from remote repository") ||
+    normalized.includes("could not resolve hostname") ||
+    normalized.includes("name or service not known") ||
+    normalized.includes("network is unreachable") ||
+    normalized.includes("no route to host") ||
+    normalized.includes("ssh: connect to host") ||
+    normalized.includes("temporary failure in name resolution")
+  );
 }
 
 function readOptionalEnv(key: string): string | null {
@@ -1663,7 +1969,10 @@ function isGitIndexLockError(message: string): boolean {
 
 export const __testOnly = {
   createGitTicketsChannel,
+  formatTicketsGitRemoteError,
+  isTicketsGitRemoteConnectivityError,
   mergeTicketEventLogs,
+  resolveTicketGitIdentityEnv,
   resolvePushRefForCheckoutRef,
   resolveLocalCheckoutFallback,
   resolveLegacyImportFetchResult,

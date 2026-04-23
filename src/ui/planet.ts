@@ -1,3 +1,4 @@
+// biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: Animation playback keeps frame composition inline with rendering state to stay predictable.
 import { resolve } from "node:path";
 import { pathExists } from "../lib/fs.ts";
 import { loadLipgloss } from "./lipgloss.ts";

@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -197,6 +198,40 @@ test("resolvePushRefForCheckoutRef keeps hidden ref when checkout came from hidd
   expect(pushRef).toBe("refs/hack/tickets");
 });
 
+test("resolveTicketGitIdentityEnv leaves remote ssh defaults unset when GIT_SSH exists", () => {
+  const originalGitSsh = process.env.GIT_SSH;
+  const originalGitSshCommand = process.env.GIT_SSH_COMMAND;
+  process.env.GIT_SSH = "/tmp/custom-ssh-wrapper";
+  process.env.GIT_SSH_COMMAND = undefined;
+
+  try {
+    const env = __testOnly.resolveTicketGitIdentityEnv({
+      remote: true,
+    });
+    expect(env.GIT_SSH_COMMAND).toBeUndefined();
+  } finally {
+    process.env.GIT_SSH = originalGitSsh;
+    process.env.GIT_SSH_COMMAND = originalGitSshCommand;
+  }
+});
+
+test("resolveTicketGitIdentityEnv sets remote ssh defaults when no ssh env is configured", () => {
+  const originalGitSsh = process.env.GIT_SSH;
+  const originalGitSshCommand = process.env.GIT_SSH_COMMAND;
+  process.env.GIT_SSH = undefined;
+  process.env.GIT_SSH_COMMAND = undefined;
+
+  try {
+    const env = __testOnly.resolveTicketGitIdentityEnv({
+      remote: true,
+    });
+    expect(env.GIT_SSH_COMMAND).toBe("ssh -oBatchMode=yes -oConnectTimeout=5");
+  } finally {
+    process.env.GIT_SSH = originalGitSsh;
+    process.env.GIT_SSH_COMMAND = originalGitSshCommand;
+  }
+});
+
 test("mutation lock heartbeat prevents overlapping prepared mutations past stale threshold", async () => {
   const projectRoot = await createTempGitProject({
     prefix: "hack-cli-tickets-git-lock-",
@@ -338,6 +373,155 @@ test("resolveLegacyImportFetchResult ignores missing legacy refs", () => {
     imported: false,
   });
 });
+
+test("formatTicketsGitRemoteError adds actionable SSH guidance", () => {
+  const message = __testOnly.formatTicketsGitRemoteError({
+    message:
+      'sign_and_send_pubkey: signing failed for ED25519 "<ssh-key-path>" from agent: agent refused operation\nPermission denied (publickey).',
+    operation: "fetch",
+  });
+
+  expect(message).toContain("Unlock your SSH agent or 1Password");
+  expect(message).toContain("ssh -T git@github.com");
+  expect(__testOnly.isTicketsGitRemoteConnectivityError(message)).toBe(true);
+});
+
+test("repository not found is not treated as a recoverable connectivity error", () => {
+  const message = [
+    "fatal: repository 'git@github.com:hack-dance/missing.git' not found",
+    "fatal: Could not read from remote repository.",
+  ].join("\n");
+
+  expect(__testOnly.isTicketsGitRemoteConnectivityError(message)).toBe(false);
+});
+
+test("sync returns actionable SSH guidance when git remote auth fails", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-git-auth-failure-",
+  });
+  const remoteScriptPath = join(projectRoot, "fake-ssh.sh");
+  await writeFile(
+    remoteScriptPath,
+    [
+      "#!/bin/sh",
+      "echo 'sign_and_send_pubkey: signing failed for ED25519 \"<ssh-key-path>\" from agent: agent refused operation' >&2",
+      'echo "git@github.com: Permission denied (publickey)." >&2',
+      "exit 255",
+      "",
+    ].join("\n")
+  );
+  await chmod(remoteScriptPath, 0o755);
+  await run({
+    cwd: projectRoot,
+    cmd: [
+      "git",
+      "remote",
+      "add",
+      "origin",
+      "ssh://git@example.invalid/does-not-exist",
+    ],
+  });
+
+  const originalGitSshCommand = process.env.GIT_SSH_COMMAND;
+  process.env.GIT_SSH_COMMAND = remoteScriptPath;
+  try {
+    const channel = __testOnly.createGitTicketsChannel({
+      projectRoot,
+      config: {
+        enabled: true,
+        branch: "hack/tickets",
+        refMode: "hidden",
+        remote: "origin",
+        forceBareClone: false,
+      },
+      logger: {
+        info: (_input: { message: string }) => {},
+        warn: (_input: { message: string }) => {},
+      },
+    });
+
+    const synced = await channel.sync();
+    expect(synced.ok).toBe(false);
+    if (synced.ok) {
+      throw new Error("Expected sync to fail");
+    }
+    expect(synced.error).toContain("Unlock your SSH agent or 1Password");
+    expect(synced.error).toContain("ssh -T git@github.com");
+  } finally {
+    if (originalGitSshCommand === undefined) {
+      process.env.GIT_SSH_COMMAND = undefined;
+    } else {
+      process.env.GIT_SSH_COMMAND = originalGitSshCommand;
+    }
+  }
+});
+
+test("sync timeout kills remote git subprocess groups", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-git-timeout-",
+  });
+  const remoteScriptPath = join(projectRoot, "fake-ssh-timeout.sh");
+  await writeFile(
+    remoteScriptPath,
+    [
+      "#!/bin/sh",
+      "sleep 30 &",
+      "child=$!",
+      "trap 'kill \"$child\" 2>/dev/null; exit 0' TERM INT",
+      'wait "$child"',
+      "",
+    ].join("\n")
+  );
+  await chmod(remoteScriptPath, 0o755);
+  await run({
+    cwd: projectRoot,
+    cmd: [
+      "git",
+      "remote",
+      "add",
+      "origin",
+      "ssh://git@example.invalid/does-not-exist",
+    ],
+  });
+
+  const originalGitSshCommand = process.env.GIT_SSH_COMMAND;
+  process.env.GIT_SSH_COMMAND = remoteScriptPath;
+  try {
+    const channel = __testOnly.createGitTicketsChannel({
+      projectRoot,
+      config: {
+        enabled: true,
+        branch: "hack/tickets",
+        refMode: "hidden",
+        remote: "origin",
+        forceBareClone: false,
+      },
+      logger: {
+        info: (_input: { message: string }) => {},
+        warn: (_input: { message: string }) => {},
+      },
+      testOverrides: {
+        remoteGitTimeoutMs: 200,
+      },
+    });
+
+    const startedAt = Date.now();
+    const synced = await channel.sync();
+    const elapsedMs = Date.now() - startedAt;
+    expect(synced.ok).toBe(false);
+    if (synced.ok) {
+      throw new Error("Expected sync to fail");
+    }
+    expect(synced.error).toContain("timed out after");
+    expect(elapsedMs).toBeLessThan(5000);
+  } finally {
+    if (originalGitSshCommand === undefined) {
+      process.env.GIT_SSH_COMMAND = undefined;
+    } else {
+      process.env.GIT_SSH_COMMAND = originalGitSshCommand;
+    }
+  }
+}, 10_000);
 
 test("repair reapplies cleanup after a non-fast-forward push retry", async () => {
   const projectRoot = await createTempGitProject({

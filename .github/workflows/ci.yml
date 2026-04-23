@@ -19,6 +19,43 @@ jobs:
       - name: Gitleaks scan
         uses: gacts/gitleaks@v1
 
+  runtime-images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.3.9"
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Install dependencies
+        run: bun install
+      - name: Build full runtime image
+        run: |
+          bun run scripts/build-node-runtime-image.ts \
+            --variant node-runtime \
+            --platform linux/amd64 \
+            --tag hack-runtime-ci:full
+      - name: Smoke full runtime image
+        run: |
+          docker run --rm --entrypoint hack hack-runtime-ci:full --help >/tmp/hack-full-help.txt
+          grep -q "hack" /tmp/hack-full-help.txt
+      - name: Build slim runtime image
+        run: |
+          bun run scripts/build-node-runtime-image.ts \
+            --variant slim \
+            --platform linux/amd64 \
+            --tag hack-runtime-ci:slim
+      - name: Smoke slim runtime image defaults
+        run: |
+          docker run --rm --entrypoint sh hack-runtime-ci:slim -lc 'command -v bun >/dev/null && command -v hack >/dev/null && test "${HACK_EXECUTION_MODE}" = "codex" && test "${HACK_DAEMON_DISABLE_DOCKER_EVENTS}" = "1" && test "${HACK_SETUP_SYNC_MODE}" = "warn" && hack --help >/tmp/hack-help.txt && grep -q "Usage:" /tmp/hack-help.txt'
+      - name: Smoke slim runtime mounted-project env flow
+        run: bash scripts/portable-container-smoke.sh hack-runtime-ci:slim linux/amd64
+
   test:
     runs-on: macos-14
     steps:

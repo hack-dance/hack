@@ -187,6 +187,137 @@ test("crash capture summary infers stale daemon recovery from captured failures"
   }
 });
 
+test("crash capture summary restores projects prune guidance from doctor logs", async () => {
+  const captureRoot = await mkdtemp(resolve(tmpdir(), "hack-crash-capture-"));
+  const doctorLog = resolve(captureRoot, "hack_doctor_project.log");
+  await Bun.write(
+    doctorLog,
+    [
+      "$ hack doctor --path /tmp/demo",
+      "exit_code=1",
+      "",
+      "Temporary breakage:",
+      "- hack projects prune",
+    ].join("\n")
+  );
+
+  try {
+    const summary = await buildCrashCaptureSummary({
+      captureRoot,
+      projectRoot: "/tmp/demo",
+      results: [
+        {
+          name: "hack_doctor_project",
+          cmd: ["hack", "doctor", "--path", "/tmp/demo"],
+          exitCode: 0,
+          file: doctorLog,
+          bytes: 80,
+        },
+      ],
+      errors: ["hack_doctor_project failed (1)"],
+    });
+
+    expect(summary.recovery.temporaryBreakage).toEqual(["hack projects prune"]);
+    expect(summary.recovery.configurationRepair).toEqual([]);
+    expect(summary.nextSteps).toEqual([
+      "Run `hack doctor --path /tmp/demo` to classify restart versus repair work.",
+      "Temporary breakage: `hack projects prune`.",
+      "Verify with `hack doctor --path /tmp/demo`.",
+      "If it still fails, run `hack crash-capture --path /tmp/demo` again after the next repro.",
+    ]);
+  } finally {
+    await rm(captureRoot, { force: true, recursive: true });
+  }
+});
+
+test("crash capture summary restores lifecycle cleanup guidance from doctor logs", async () => {
+  const captureRoot = await mkdtemp(resolve(tmpdir(), "hack-crash-capture-"));
+  const doctorLog = resolve(captureRoot, "hack_doctor_project.log");
+  await Bun.write(
+    doctorLog,
+    [
+      "$ hack doctor --path /tmp/demo",
+      "exit_code=1",
+      "",
+      "Temporary breakage:",
+      "- hack down",
+    ].join("\n")
+  );
+
+  try {
+    const summary = await buildCrashCaptureSummary({
+      captureRoot,
+      projectRoot: "/tmp/demo",
+      results: [
+        {
+          name: "hack_doctor_project",
+          cmd: ["hack", "doctor", "--path", "/tmp/demo"],
+          exitCode: 0,
+          file: doctorLog,
+          bytes: 80,
+        },
+      ],
+      errors: ["hack_doctor_project failed (1)"],
+    });
+
+    expect(summary.recovery.temporaryBreakage).toEqual(["hack down"]);
+    expect(summary.recovery.configurationRepair).toEqual([]);
+    expect(summary.nextSteps).toEqual([
+      "Run `hack doctor --path /tmp/demo` to classify restart versus repair work.",
+      "Temporary breakage: `hack down --path /tmp/demo`.",
+      "Verify with `hack doctor --path /tmp/demo`.",
+      "If it still fails, run `hack crash-capture --path /tmp/demo` again after the next repro.",
+    ]);
+  } finally {
+    await rm(captureRoot, { force: true, recursive: true });
+  }
+});
+
+test("crash capture summary restores env materialization guidance from doctor logs", async () => {
+  const captureRoot = await mkdtemp(resolve(tmpdir(), "hack-crash-capture-"));
+  const doctorLog = resolve(captureRoot, "hack_doctor_project.log");
+  await Bun.write(
+    doctorLog,
+    [
+      "$ hack doctor --path /tmp/demo",
+      "exit_code=1",
+      "",
+      "Configuration repair:",
+      "- hack env materialize",
+    ].join("\n")
+  );
+
+  try {
+    const summary = await buildCrashCaptureSummary({
+      captureRoot,
+      projectRoot: "/tmp/demo",
+      results: [
+        {
+          name: "hack_doctor_project",
+          cmd: ["hack", "doctor", "--path", "/tmp/demo"],
+          exitCode: 0,
+          file: doctorLog,
+          bytes: 80,
+        },
+      ],
+      errors: ["hack_doctor_project failed (1)"],
+    });
+
+    expect(summary.recovery.temporaryBreakage).toEqual([]);
+    expect(summary.recovery.configurationRepair).toEqual([
+      "hack env materialize",
+    ]);
+    expect(summary.nextSteps).toEqual([
+      "Run `hack doctor --path /tmp/demo` to classify restart versus repair work.",
+      "Configuration repair: `hack env materialize --path /tmp/demo`.",
+      "Verify with `hack doctor --path /tmp/demo`.",
+      "If it still fails, run `hack crash-capture --path /tmp/demo` again after the next repro.",
+    ]);
+  } finally {
+    await rm(captureRoot, { force: true, recursive: true });
+  }
+});
+
 test("crash capture keeps unknown status failures as manual follow-up", async () => {
   const captureRoot = await mkdtemp(resolve(tmpdir(), "hack-crash-capture-"));
   const globalStatusLog = resolve(captureRoot, "hack_global_status.log");

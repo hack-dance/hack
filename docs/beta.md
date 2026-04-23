@@ -1,6 +1,6 @@
 # Beta Workflows
 
-This section holds remote and control-plane features that are still evolving.
+This section holds unsupported experimental remote workflows.
 
 Start in [Core docs](core.md) first if you are new to `hack`. Beta workflows build on the core
 local model instead of replacing it.
@@ -12,7 +12,6 @@ local model instead of replacing it.
 - [Run laptop-to-laptop node pairing e2e](guides/remote-node-laptop-e2e.md)
 - [Bootstrap a remote node on Railway](guides/remote-node-railway.md)
 - [Run a remote node via container image](guides/remote-node-container.md)
-- [Run the optional web control plane locally](guides/web-control-plane-local-dev.md)
 - [Use Hack in managed Codex containers](guides/codex-managed-environments.md)
 - [Expose the gateway over SSH](guides/remote-ssh.md)
 - [Expose the gateway with Cloudflare](guides/remote-cloudflare.md)
@@ -22,7 +21,7 @@ local model instead of replacing it.
 ## Before you start
 
 - Keep your local project flow working first: `hack init`, `hack up --detach`, `hack open`
-- Treat remote exposure and node orchestration as opt-in
+- Treat remote exposure and node orchestration as opt-in unsupported experimental workflows
 - Expect some pages here to be marked experimental while the surface is still settling
 
 ## Need lower-level detail?

@@ -194,7 +194,7 @@ struct RuntimeDetailView: View {
         Text("Daemon not running")
           .font(.mono(.subheadline, weight: .medium))
       }
-      Text("The hack daemon manages your local development environment. Start it to enable project monitoring, logs, and gateway access.")
+      Text("The hack daemon manages your local development environment. Start it to enable project monitoring and logs.")
         .font(.mono(.caption))
         .foregroundStyle(.secondary)
       Button {

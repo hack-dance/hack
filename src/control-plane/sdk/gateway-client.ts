@@ -128,24 +128,31 @@ export type GatewayNodeWorkspace = {
   readonly branch: string | null;
 };
 
-export type GatewayNodeBootstrapAuthSource =
-  | "native_git"
-  | "controller_github_token";
+export type GatewayNodeBootstrapAuthSource = "native_git";
 
 export type GatewayNodeWorkspaceBootstrap = {
   readonly repoUrl: string;
   readonly projectName?: string;
   readonly projectRoot?: string;
-  readonly githubAuth?: {
-    readonly token: string;
-    readonly owner?: string;
-    readonly repo?: string;
-  };
 };
 
 export type GatewayNodeWorkspaceResponse = {
   readonly workspace: GatewayNodeWorkspace;
   readonly bootstrapAuthSource?: GatewayNodeBootstrapAuthSource;
+};
+
+type GatewayEnsureNodeWorkspaceRequest = {
+  readonly project?: string;
+  readonly project_id?: string;
+  readonly controller_project_id?: string;
+  readonly controller_project_name?: string;
+  readonly path?: string;
+  readonly branch?: string;
+  readonly bootstrap?: {
+    readonly repo_url: string;
+    readonly project_name?: string;
+    readonly project_root?: string;
+  };
 };
 
 export type GatewayNodeGitProbeResponse = {
@@ -297,7 +304,6 @@ export type GatewayClient = {
    */
   probeNodeGitAccess: (opts: {
     readonly repoUrl: string;
-    readonly githubAuth?: GatewayNodeWorkspaceBootstrap["githubAuth"];
   }) => Promise<GatewayResponse<GatewayNodeGitProbeResponse>>;
   /**
    * Start devcontainer for a node workspace.
@@ -566,67 +572,18 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
     await requestJson({
       method: "POST",
       path: "/v1/node/workspaces/ensure",
-      body: {
-        ...(opts.project ? { project: opts.project } : {}),
-        ...(opts.projectId ? { project_id: opts.projectId } : {}),
-        ...(opts.controllerProjectId
-          ? { controller_project_id: opts.controllerProjectId }
-          : {}),
-        ...(opts.controllerProjectName
-          ? { controller_project_name: opts.controllerProjectName }
-          : {}),
-        ...(opts.path ? { path: opts.path } : {}),
-        ...(opts.branch ? { branch: opts.branch } : {}),
-        ...(opts.bootstrap
-          ? {
-              bootstrap: {
-                repo_url: opts.bootstrap.repoUrl,
-                ...(opts.bootstrap.projectName
-                  ? { project_name: opts.bootstrap.projectName }
-                  : {}),
-                ...(opts.bootstrap.projectRoot
-                  ? { project_root: opts.bootstrap.projectRoot }
-                  : {}),
-                ...(opts.bootstrap.githubAuth
-                  ? {
-                      github_auth: {
-                        token: opts.bootstrap.githubAuth.token,
-                        ...(opts.bootstrap.githubAuth.owner
-                          ? { owner: opts.bootstrap.githubAuth.owner }
-                          : {}),
-                        ...(opts.bootstrap.githubAuth.repo
-                          ? { repo: opts.bootstrap.githubAuth.repo }
-                          : {}),
-                      },
-                    }
-                  : {}),
-              },
-            }
-          : {}),
-      },
+      body: buildEnsureNodeWorkspaceBody(opts),
       parse: parseWorkspaceEnsure,
     });
 
   const probeNodeGitAccess = async (opts: {
     readonly repoUrl: string;
-    readonly githubAuth?: GatewayNodeWorkspaceBootstrap["githubAuth"];
   }): Promise<GatewayResponse<GatewayNodeGitProbeResponse>> =>
     await requestJson({
       method: "POST",
       path: "/v1/node/git/probe",
       body: {
         repo_url: opts.repoUrl,
-        ...(opts.githubAuth
-          ? {
-              github_auth: {
-                token: opts.githubAuth.token,
-                ...(opts.githubAuth.owner
-                  ? { owner: opts.githubAuth.owner }
-                  : {}),
-                ...(opts.githubAuth.repo ? { repo: opts.githubAuth.repo } : {}),
-              },
-            }
-          : {}),
       },
       parse: parseNodeGitProbe,
     });
@@ -711,6 +668,42 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
     getDevcontainer,
     openJobStream,
     openShellStream,
+  };
+}
+
+function buildEnsureNodeWorkspaceBody(opts: {
+  readonly project?: string;
+  readonly projectId?: string;
+  readonly controllerProjectId?: string;
+  readonly controllerProjectName?: string;
+  readonly path?: string;
+  readonly branch?: string;
+  readonly bootstrap?: GatewayNodeWorkspaceBootstrap;
+}): GatewayEnsureNodeWorkspaceRequest {
+  return {
+    ...(opts.project ? { project: opts.project } : {}),
+    ...(opts.projectId ? { project_id: opts.projectId } : {}),
+    ...(opts.controllerProjectId
+      ? { controller_project_id: opts.controllerProjectId }
+      : {}),
+    ...(opts.controllerProjectName
+      ? { controller_project_name: opts.controllerProjectName }
+      : {}),
+    ...(opts.path ? { path: opts.path } : {}),
+    ...(opts.branch ? { branch: opts.branch } : {}),
+    ...(opts.bootstrap
+      ? { bootstrap: buildGatewayWorkspaceBootstrap(opts.bootstrap) }
+      : {}),
+  };
+}
+
+function buildGatewayWorkspaceBootstrap(
+  bootstrap: GatewayNodeWorkspaceBootstrap
+): GatewayEnsureNodeWorkspaceRequest["bootstrap"] {
+  return {
+    repo_url: bootstrap.repoUrl,
+    ...(bootstrap.projectName ? { project_name: bootstrap.projectName } : {}),
+    ...(bootstrap.projectRoot ? { project_root: bootstrap.projectRoot } : {}),
   };
 }
 
@@ -899,8 +892,7 @@ function parseWorkspaceEnsure(
     return null;
   }
   const bootstrapAuthSource =
-    value.bootstrap_auth_source === "native_git" ||
-    value.bootstrap_auth_source === "controller_github_token"
+    value.bootstrap_auth_source === "native_git"
       ? value.bootstrap_auth_source
       : undefined;
   return {
@@ -916,11 +908,7 @@ function parseNodeGitProbe(value: unknown): GatewayNodeGitProbeResponse | null {
   if (
     typeof value.repo_url !== "string" ||
     typeof value.ok !== "boolean" ||
-    !(
-      value.auth_source === "native_git" ||
-      value.auth_source === "controller_github_token" ||
-      value.auth_source === "none"
-    )
+    !(value.auth_source === "native_git" || value.auth_source === "none")
   ) {
     return null;
   }

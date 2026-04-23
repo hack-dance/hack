@@ -718,6 +718,22 @@ function inferRecoveryCheckResultsFromOutput(input: {
     });
   }
 
+  if (input.output.includes("hack down")) {
+    inferred.push({
+      name: "lifecycle hygiene",
+      status: "warn",
+      message: "Captured lifecycle cleanup guidance (run: hack down)",
+    });
+  }
+
+  if (input.output.includes("hack projects prune")) {
+    inferred.push({
+      name: "runtime hygiene",
+      status: "warn",
+      message: "Captured cleanup guidance (run: hack projects prune)",
+    });
+  }
+
   if (input.output.includes("hack daemon clear")) {
     inferred.push({
       name: "daemon",
@@ -729,6 +745,15 @@ function inferRecoveryCheckResultsFromOutput(input: {
       name: "daemon",
       status: "warn",
       message: "Captured daemon status failure (run: hack daemon start)",
+    });
+  }
+
+  if (input.output.includes("hack env materialize")) {
+    inferred.push({
+      name: "env materialization",
+      status: "warn",
+      message:
+        "Captured env materialization guidance (run: hack env materialize)",
     });
   }
 

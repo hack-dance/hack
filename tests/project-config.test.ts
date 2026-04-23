@@ -241,6 +241,10 @@ test("readProjectConfig maps startup shorthand into lifecycle", async () => {
             run: "cd packages/infra && bun run proxy",
             persistent: true,
             cwd: ".",
+            singleton: {
+              ports: [3306, 9200, 9201, 8443, 8444, 8445],
+              onConflict: "adopt",
+            },
           },
           "echo warmup",
         ],
@@ -260,6 +264,10 @@ test("readProjectConfig maps startup shorthand into lifecycle", async () => {
       name: "ssm proxy",
       command: "cd packages/infra && bun run proxy",
       cwd: ".",
+      singleton: {
+        ports: [3306, 9200, 9201, 8443, 8444, 8445],
+        onConflict: "adopt",
+      },
     },
   ]);
 });
@@ -278,6 +286,10 @@ test("readProjectConfig parses persistent lifecycle up.before hooks", async () =
                 cwd: "packages/infra",
                 command: "bun run proxy",
                 persistent: true,
+                singleton: {
+                  ports: [3306, 9200, 9201],
+                  onConflict: "adopt",
+                },
               },
               {
                 name: "auth",
@@ -299,6 +311,10 @@ test("readProjectConfig parses persistent lifecycle up.before hooks", async () =
       cwd: "packages/infra",
       command: "bun run proxy",
       persistent: true,
+      singleton: {
+        ports: [3306, 9200, 9201],
+        onConflict: "adopt",
+      },
     },
     {
       name: "auth",

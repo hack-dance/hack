@@ -496,88 +496,60 @@ export function parseTailscaleOauthStatusArgs(opts: {
 export function parseTailscaleOauthConnectArgs(opts: {
   readonly args: readonly string[];
 }): TailscaleOauthConnectArgsParseResult {
-  let json = false;
-  let clientId = "";
-  let clientSecret = "";
-  let clientSecretStdin = false;
-  let authRef: string | undefined;
-  let tailnet: string | undefined;
-  let keyExpirySeconds: number | undefined;
+  const state: {
+    json: boolean;
+    clientId: string;
+    clientSecret: string;
+    clientSecretStdin: boolean;
+    authRef?: string;
+    tailnet?: string;
+    keyExpirySeconds?: number;
+  } = {
+    json: false,
+    clientId: "",
+    clientSecret: "",
+    clientSecretStdin: false,
+  };
 
   for (let i = 0; i < opts.args.length; i += 1) {
     const token = opts.args[i] ?? "";
     if (token === "--json") {
-      json = true;
+      state.json = true;
       continue;
     }
     if (token === "--client-secret-stdin") {
-      clientSecretStdin = true;
+      state.clientSecretStdin = true;
       continue;
     }
 
-    const next = opts.args[i + 1] ?? "";
-    if (token === "--client-id") {
-      if (!next) {
-        return {
-          ok: false,
-          error: "Missing value for --client-id.",
-        };
-      }
-      clientId = next;
+    const next = opts.args[i + 1];
+    const stringOption = parseOauthConnectStringOption({
+      token,
+      next,
+    });
+    if (stringOption.ok) {
+      applyOauthConnectStringOption({
+        state,
+        option: stringOption,
+      });
       i += 1;
       continue;
     }
-    if (token === "--client-secret") {
-      if (!next) {
-        return {
-          ok: false,
-          error: "Missing value for --client-secret.",
-        };
-      }
-      clientSecret = next;
+    if (stringOption.error) {
+      return { ok: false, error: stringOption.error };
+    }
+
+    const integerOption = parseOauthConnectIntegerOption({
+      token,
+      next,
+    });
+    if (integerOption.ok) {
+      state.keyExpirySeconds = integerOption.value;
       i += 1;
       continue;
     }
-    if (token === "--auth-ref") {
-      if (!next) {
-        return {
-          ok: false,
-          error: "Missing value for --auth-ref.",
-        };
-      }
-      authRef = next;
-      i += 1;
-      continue;
-    }
-    if (token === "--tailnet") {
-      if (!next) {
-        return {
-          ok: false,
-          error: "Missing value for --tailnet.",
-        };
-      }
-      tailnet = next;
-      i += 1;
-      continue;
-    }
-    if (token === "--key-expiry-seconds") {
-      if (!next) {
-        return {
-          ok: false,
-          error: "Missing value for --key-expiry-seconds.",
-        };
-      }
-      const parsedValue = Number.parseInt(next, 10);
-      if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
-        return {
-          ok: false,
-          error:
-            "Invalid value for --key-expiry-seconds (expected positive integer).",
-        };
-      }
-      keyExpirySeconds = Math.trunc(parsedValue);
-      i += 1;
-      continue;
+    if (integerOption.error) {
+      return { ok: false, error: integerOption.error };
     }
 
     return {
@@ -589,14 +561,127 @@ export function parseTailscaleOauthConnectArgs(opts: {
   return {
     ok: true,
     value: {
-      json,
-      clientId,
-      clientSecret,
-      clientSecretStdin,
-      ...(authRef ? { authRef } : {}),
-      ...(tailnet ? { tailnet } : {}),
-      ...(typeof keyExpirySeconds === "number" ? { keyExpirySeconds } : {}),
+      json: state.json,
+      clientId: state.clientId,
+      clientSecret: state.clientSecret,
+      clientSecretStdin: state.clientSecretStdin,
+      ...(state.authRef ? { authRef: state.authRef } : {}),
+      ...(state.tailnet ? { tailnet: state.tailnet } : {}),
+      ...(typeof state.keyExpirySeconds === "number"
+        ? { keyExpirySeconds: state.keyExpirySeconds }
+        : {}),
     },
+  };
+}
+
+function applyOauthConnectStringOption(opts: {
+  readonly state: {
+    json: boolean;
+    clientId: string;
+    clientSecret: string;
+    clientSecretStdin: boolean;
+    authRef?: string;
+    tailnet?: string;
+    keyExpirySeconds?: number;
+  };
+  readonly option: {
+    readonly key: "clientId" | "clientSecret" | "authRef" | "tailnet";
+    readonly value: string;
+  };
+}) {
+  if (opts.option.key === "clientId") {
+    opts.state.clientId = opts.option.value;
+    return;
+  }
+  if (opts.option.key === "clientSecret") {
+    opts.state.clientSecret = opts.option.value;
+    return;
+  }
+  if (opts.option.key === "authRef") {
+    opts.state.authRef = opts.option.value;
+    return;
+  }
+  opts.state.tailnet = opts.option.value;
+}
+
+function parseOauthConnectStringOption(opts: {
+  readonly token: string;
+  readonly next: string | undefined;
+}):
+  | {
+      readonly ok: true;
+      readonly key: "clientId" | "clientSecret" | "authRef" | "tailnet";
+      readonly value: string;
+    }
+  | { readonly ok: false; readonly error?: string } {
+  const optionMap = new Map<
+    string,
+    {
+      readonly key: "clientId" | "clientSecret" | "authRef" | "tailnet";
+      readonly missingValueError: string;
+    }
+  >([
+    [
+      "--client-id",
+      { key: "clientId", missingValueError: "Missing value for --client-id." },
+    ],
+    [
+      "--client-secret",
+      {
+        key: "clientSecret",
+        missingValueError: "Missing value for --client-secret.",
+      },
+    ],
+    [
+      "--auth-ref",
+      { key: "authRef", missingValueError: "Missing value for --auth-ref." },
+    ],
+    [
+      "--tailnet",
+      { key: "tailnet", missingValueError: "Missing value for --tailnet." },
+    ],
+  ]);
+
+  const option = optionMap.get(opts.token);
+  if (!option) {
+    return { ok: false };
+  }
+  if (!opts.next) {
+    return { ok: false, error: option.missingValueError };
+  }
+  return {
+    ok: true,
+    key: option.key,
+    value: opts.next,
+  };
+}
+
+function parseOauthConnectIntegerOption(opts: {
+  readonly token: string;
+  readonly next: string | undefined;
+}):
+  | { readonly ok: true; readonly value: number }
+  | { readonly ok: false; readonly error?: string } {
+  if (opts.token !== "--key-expiry-seconds") {
+    return { ok: false };
+  }
+  if (!opts.next) {
+    return {
+      ok: false,
+      error: "Missing value for --key-expiry-seconds.",
+    };
+  }
+  const parsedValue = Number.parseInt(opts.next, 10);
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+    return {
+      ok: false,
+      error:
+        "Invalid value for --key-expiry-seconds (expected positive integer).",
+    };
+  }
+  return {
+    ok: true,
+    value: Math.trunc(parsedValue),
   };
 }
 

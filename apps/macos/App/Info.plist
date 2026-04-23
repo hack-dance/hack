@@ -25,12 +25,6 @@
 			</array>
 		</dict>
 	</array>
-	<key>HackAuthCompletionURL</key>
-	<string>$(HACK_URL_SCHEME)://auth/complete</string>
-	<key>HackGitHubOAuthCallbackURL</key>
-	<string>$(HACK_URL_SCHEME)://auth/github/callback</string>
-	<key>HackLinearOAuthCallbackURL</key>
-	<string>$(HACK_URL_SCHEME)://auth/linear/callback</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -44,6 +38,6 @@
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Hack Desktop can open Terminal to run hack setup commands (some require sudo) so your local dev environment works.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Hack Desktop can access your local network to show LAN gateway status and open local development URLs.</string>
+	<string>Hack Desktop can access your local network to open local development URLs and inspect local runtime services on this machine.</string>
 </dict>
 </plist>

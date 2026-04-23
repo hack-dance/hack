@@ -27,7 +27,6 @@ struct HomeDashboardView: View {
         HStack(spacing: 10) {
           HealthMetricChip(title: "Runtime", value: runtimeState.label, tone: runtimeState.tone)
           HealthMetricChip(title: "Daemon", value: daemonState.label, tone: daemonState.tone)
-          HealthMetricChip(title: "Gateway", value: gatewayState.label, tone: gatewayState.tone)
           HealthMetricChip(title: "Global", value: globalState.label, tone: globalState.tone)
           Spacer(minLength: 0)
         }
@@ -419,20 +418,6 @@ struct HomeDashboardView: View {
     case nil:
       return ("Unknown", .neutral)
     }
-  }
-
-  private var gatewayState: (label: String, tone: HealthMetricChip.Tone) {
-    if let state = model.gatewaySummaryState {
-      switch state.tone {
-      case .good:
-        return (state.label, .good)
-      case .warn:
-        return (state.label, .warn)
-      case .neutral:
-        return (state.label, .neutral)
-      }
-    }
-    return ("Unknown", .neutral)
   }
 
   private var globalState: (label: String, tone: HealthMetricChip.Tone) {

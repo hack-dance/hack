@@ -99,6 +99,7 @@ export function filterRuntimeProjects(opts: {
   return opts.runtime.filter((project) => !project.isGlobal);
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Runtime project discovery merges compose state, daemon state, and lifecycle state in one read path.
 export async function readRuntimeProjects(opts: {
   readonly includeGlobal: boolean;
 }): Promise<RuntimeProjectsResult> {
@@ -288,6 +289,7 @@ type LifecycleActivity = {
   readonly runningWindows: ReadonlySet<string> | null;
 };
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Lifecycle pseudo-services are derived from several runtime sources in one normalization step.
 async function addLifecycleProcessServices(opts: {
   readonly runtime: readonly RuntimeProject[];
 }): Promise<RuntimeProject[]> {

@@ -108,10 +108,9 @@ struct HackDesktopApp: App {
 
   @MainActor
   private func handleIncomingDeepLink(url: URL) {
-    let handledHackAuth = model.ingestHackAuthDeepLink(url: url)
-    let handledGitHub = model.ingestGitHubOAuthDeepLink(url: url)
-    let handledLinear = model.ingestLinearOAuthDeepLink(url: url)
-    guard handledHackAuth || handledGitHub || handledLinear else { return }
+    guard url.scheme != nil else { return }
+
+    model.statusMessage = "Hosted auth and integration callbacks are no longer supported in Hack Desktop v3."
 
 #if os(macOS)
     NSApp.activate(ignoringOtherApps: true)
@@ -120,7 +119,7 @@ struct HackDesktopApp: App {
       name: .hackSettingsRequested,
       object: nil,
       userInfo: [
-        "pane": handledHackAuth ? "account" : (handledLinear ? "linear" : "github"),
+        "pane": "runtime",
       ]
     )
   }

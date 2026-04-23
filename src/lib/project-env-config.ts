@@ -5,7 +5,7 @@ import {
   randomBytes,
 } from "node:crypto";
 import { chmod, readdir, rm } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import {
   PROJECT_COMPOSE_FILENAME,
@@ -16,6 +16,7 @@ import {
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
+  PROJECT_ENV_LOCAL_SEGMENT,
   PROJECT_ENV_STATE_FILENAME,
 } from "../constants.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
@@ -27,7 +28,11 @@ import {
   writeTextFile,
   writeTextFileIfChanged,
 } from "./fs.ts";
-import { resolveGitPrimaryWorktreeRoot } from "./git-worktree.ts";
+import {
+  resolveGitPrimaryWorktreeRoot,
+  resolveGitRepositoryIdentity,
+  resolveGitWorktreeDir,
+} from "./git-worktree.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
 import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
@@ -75,6 +80,10 @@ export type ProjectEnvSelection = {
   readonly defaultPath: string;
   readonly overlayPath: string | null;
   readonly overlayExists: boolean;
+  readonly localDefaultPath: string;
+  readonly localDefaultExists: boolean;
+  readonly localOverlayPath: string | null;
+  readonly localOverlayExists: boolean;
 };
 
 export type ProjectEnvResolvedConfig = {
@@ -172,6 +181,23 @@ type ProjectEnvMutationResult = {
   readonly scope: string;
   readonly createdKey: boolean;
   readonly changed: boolean;
+  readonly local: boolean;
+};
+
+type ProjectEnvStateFile = {
+  readonly version: number;
+  readonly selectedOverlay: string | null;
+  readonly selectedService: string | null;
+  readonly generatedAt: string;
+  readonly inputs: Readonly<Record<string, string>>;
+};
+
+export type ProjectEnvMaterializationInspection = {
+  readonly envPath: string;
+  readonly statePath: string;
+  readonly status: "ok" | "warn";
+  readonly message: string;
+  readonly issues: readonly string[];
 };
 
 function defaultProjectEnvConfig(opts: {
@@ -200,10 +226,191 @@ export function resolveProjectEnvConfigPath(opts: {
   );
 }
 
+export function resolveProjectEnvLocalConfigPath(opts: {
+  readonly projectDir: string;
+  readonly envName: string | null;
+}): string {
+  if (opts.envName === null) {
+    return resolve(
+      opts.projectDir,
+      `${PROJECT_ENV_CONFIG_FILENAME_PREFIX}${PROJECT_ENV_LOCAL_SEGMENT}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`
+    );
+  }
+  return resolve(
+    opts.projectDir,
+    `${PROJECT_ENV_CONFIG_FILENAME_PREFIX}${opts.envName}.${PROJECT_ENV_LOCAL_SEGMENT}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`
+  );
+}
+
+function resolveProjectEnvLegacyCompatibleLocalDefaultConfigPath(opts: {
+  readonly projectDir: string;
+}): string {
+  return resolve(
+    opts.projectDir,
+    `${PROJECT_ENV_CONFIG_FILENAME_PREFIX}default.${PROJECT_ENV_LOCAL_SEGMENT}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`
+  );
+}
+
 export function resolveProjectEnvKeyPath(opts: {
   readonly projectRoot: string;
 }): string {
   return resolve(opts.projectRoot, PROJECT_ENV_KEY_FILENAME);
+}
+
+export async function resolveProjectEnvSharedKeyPath(opts: {
+  readonly projectRoot: string;
+}): Promise<string | null> {
+  const [commonDir, worktreeDir] = await Promise.all([
+    resolveGitRepositoryIdentity({
+      repoRoot: opts.projectRoot,
+    }),
+    resolveGitWorktreeDir({
+      repoRoot: opts.projectRoot,
+    }),
+  ]);
+  if (!(commonDir && worktreeDir)) {
+    return null;
+  }
+  const sharedKeyPath = resolve(commonDir, PROJECT_ENV_KEY_FILENAME);
+  if (commonDir !== worktreeDir) {
+    return sharedKeyPath;
+  }
+  return (await pathExists(sharedKeyPath)) ? sharedKeyPath : null;
+}
+
+async function ensureProjectEnvLocalIgnoreEntries(opts: {
+  readonly projectRoot: string;
+}): Promise<void> {
+  const gitDir = await resolveGitRepositoryIdentity({
+    repoRoot: opts.projectRoot,
+  });
+  const ignorePath =
+    gitDir === null
+      ? resolve(opts.projectRoot, ".gitignore")
+      : resolve(gitDir, "info", "exclude");
+  await ensureDir(dirname(ignorePath));
+  for (const entry of [
+    ".hack/hack.env.local.yaml",
+    ".hack/hack.env.*.local.yaml",
+  ]) {
+    await ensureGitignoreEntry({
+      gitignorePath: ignorePath,
+      entry,
+      comment: "# local project env overrides",
+    });
+  }
+}
+
+function toGitRelativePath(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): string {
+  return relative(opts.projectRoot, opts.path).split("\\").join("/");
+}
+
+async function isGitTrackedProjectEnvPath(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<boolean | null> {
+  const relativePath = toGitRelativePath(opts);
+  let proc: Bun.Subprocess<"ignore", "ignore", "ignore">;
+  try {
+    proc = Bun.spawn({
+      cmd: [
+        "git",
+        "-C",
+        opts.projectRoot,
+        "ls-files",
+        "--error-unmatch",
+        "--",
+        relativePath,
+      ],
+      stderr: "ignore",
+      stdin: "ignore",
+      stdout: "ignore",
+    });
+  } catch {
+    return null;
+  }
+
+  const exitCode = await proc.exited;
+  if (exitCode === 0) {
+    return true;
+  }
+  if (exitCode === 1) {
+    return false;
+  }
+  return null;
+}
+
+async function hasLegacyLocalEnvironment(opts: {
+  readonly path: string;
+}): Promise<boolean> {
+  const text = await readTextFile(opts.path);
+  if (text === null) {
+    return false;
+  }
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(text);
+  } catch {
+    return false;
+  }
+  if (!isRecord(parsed)) {
+    return false;
+  }
+  return getString(parsed, "environment") === "local";
+}
+
+async function isLegacyTrackedLocalOverlay(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<boolean> {
+  const localDefaultPath = resolveProjectEnvLocalConfigPath({
+    projectDir: opts.projectDir,
+    envName: null,
+  });
+  if (!(await pathExists(localDefaultPath))) {
+    return false;
+  }
+  const tracked = await isGitTrackedProjectEnvPath({
+    projectRoot: opts.projectRoot,
+    path: localDefaultPath,
+  });
+  if (tracked !== null) {
+    return tracked;
+  }
+  return await hasLegacyLocalEnvironment({
+    path: localDefaultPath,
+  });
+}
+
+async function resolveProjectEnvEffectiveLocalConfigPath(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly envName: string | null;
+}): Promise<string> {
+  if (opts.envName !== null) {
+    return resolveProjectEnvLocalConfigPath({
+      projectDir: opts.projectDir,
+      envName: opts.envName,
+    });
+  }
+
+  const legacyTrackedLocalOverlay = await isLegacyTrackedLocalOverlay({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+  });
+  if (legacyTrackedLocalOverlay) {
+    return resolveProjectEnvLegacyCompatibleLocalDefaultConfigPath({
+      projectDir: opts.projectDir,
+    });
+  }
+
+  return resolveProjectEnvLocalConfigPath({
+    projectDir: opts.projectDir,
+    envName: null,
+  });
 }
 
 function resolveProjectEnvStatePath(opts: {
@@ -241,6 +448,10 @@ export async function projectEnvConfigExists(opts: {
 export async function listProjectEnvOverlayNames(opts: {
   readonly projectDir: string;
 }): Promise<readonly string[]> {
+  const legacyTrackedLocalOverlay = await isLegacyTrackedLocalOverlay({
+    projectRoot: dirname(opts.projectDir),
+    projectDir: opts.projectDir,
+  });
   const entries = await readdir(opts.projectDir, { withFileTypes: true });
   return entries
     .filter((entry) => entry.isFile())
@@ -259,6 +470,10 @@ export async function listProjectEnvOverlayNames(opts: {
         .slice(PROJECT_ENV_CONFIG_FILENAME_PREFIX.length)
         .slice(0, -PROJECT_ENV_CONFIG_FILENAME_SUFFIX.length)
     )
+    .filter(
+      (name) => name !== PROJECT_ENV_LOCAL_SEGMENT || legacyTrackedLocalOverlay
+    )
+    .filter((name) => !name.endsWith(`.${PROJECT_ENV_LOCAL_SEGMENT}`))
     .filter((name) => name.length > 0)
     .sort((left, right) => left.localeCompare(right));
 }
@@ -430,10 +645,22 @@ export async function resolveProjectEnvSelection(opts: {
     projectDir: opts.projectDir,
     envName: null,
   });
+  const localDefaultPath = await resolveProjectEnvEffectiveLocalConfigPath({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    envName: null,
+  });
   const overlayPath =
     effectiveEnv === null
       ? null
       : resolveProjectEnvConfigPath({
+          projectDir: opts.projectDir,
+          envName: effectiveEnv,
+        });
+  const localOverlayPath =
+    effectiveEnv === null
+      ? null
+      : resolveProjectEnvLocalConfigPath({
           projectDir: opts.projectDir,
           envName: effectiveEnv,
         });
@@ -445,9 +672,15 @@ export async function resolveProjectEnvSelection(opts: {
     defaultPath,
     overlayPath,
     overlayExists: overlayPath === null ? false : await pathExists(overlayPath),
+    localDefaultPath,
+    localDefaultExists: await pathExists(localDefaultPath),
+    localOverlayPath,
+    localOverlayExists:
+      localOverlayPath === null ? false : await pathExists(localOverlayPath),
   };
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Env resolution keeps layered local/shared/worktree selection explicit in one place.
 export async function resolveProjectEnvConfig(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -471,8 +704,26 @@ export async function resolveProjectEnvConfig(opts: {
           path: selection.overlayPath,
           environment: selection.effectiveEnv ?? "default",
         });
+  const localDefaultRead = await readProjectEnvConfigFile({
+    path: selection.localDefaultPath,
+    environment: "default",
+  });
+  const localOverlayRead =
+    selection.localOverlayPath === null
+      ? null
+      : await readProjectEnvConfigFile({
+          path: selection.localOverlayPath,
+          environment: selection.effectiveEnv ?? "default",
+        });
 
-  if (!(defaultRead.exists || (overlayRead?.exists ?? false))) {
+  if (
+    !(
+      defaultRead.exists ||
+      (overlayRead?.exists ?? false) ||
+      localDefaultRead.exists ||
+      (localOverlayRead?.exists ?? false)
+    )
+  ) {
     return null;
   }
 
@@ -486,10 +737,24 @@ export async function resolveProjectEnvConfig(opts: {
       `Failed to parse ${overlayRead.path}: ${overlayRead.parseError}`
     );
   }
+  if (localDefaultRead.parseError) {
+    throw new Error(
+      `Failed to parse ${localDefaultRead.path}: ${localDefaultRead.parseError}`
+    );
+  }
+  if (localOverlayRead?.parseError) {
+    throw new Error(
+      `Failed to parse ${localOverlayRead.path}: ${localOverlayRead.parseError}`
+    );
+  }
 
-  const merged = mergeProjectEnvConfigs({
-    base: defaultRead.config,
-    overlay: overlayRead?.exists ? overlayRead.config : null,
+  const merged = mergeProjectEnvConfigLayers({
+    layers: [
+      defaultRead.exists ? defaultRead.config : null,
+      overlayRead?.exists ? overlayRead.config : null,
+      localDefaultRead.exists ? localDefaultRead.config : null,
+      localOverlayRead?.exists ? localOverlayRead.config : null,
+    ],
     environment: selection.effectiveEnv ?? "default",
   });
   const keyText = await resolveProjectEnvKey({
@@ -539,6 +804,12 @@ export async function resolveProjectEnvConfig(opts: {
   if (selection.overlayPath && overlayRead?.exists) {
     files.push(selection.overlayPath);
   }
+  if (localDefaultRead.exists) {
+    files.push(selection.localDefaultPath);
+  }
+  if (selection.localOverlayPath && localOverlayRead?.exists) {
+    files.push(selection.localOverlayPath);
+  }
 
   return {
     selection,
@@ -552,22 +823,23 @@ export async function resolveProjectEnvConfig(opts: {
   };
 }
 
-function mergeProjectEnvConfigs(opts: {
-  readonly base: ProjectEnvConfig;
-  readonly overlay: ProjectEnvConfig | null;
+function mergeProjectEnvConfigLayers(opts: {
+  readonly layers: readonly (ProjectEnvConfig | null)[];
   readonly environment: string;
 }): ProjectEnvConfig {
   const values: ProjectEnvValuesByScope = {};
-  const scopes = new Set<string>([
-    ...Object.keys(opts.base.values),
-    ...Object.keys(opts.overlay?.values ?? {}),
-    "global",
-  ]);
+  const scopes = new Set<string>(["global"]);
+  for (const layer of opts.layers) {
+    for (const scope of Object.keys(layer?.values ?? {})) {
+      scopes.add(scope);
+    }
+  }
   for (const scope of scopes) {
-    values[scope] = {
-      ...(opts.base.values[scope] ?? {}),
-      ...(opts.overlay?.values[scope] ?? {}),
-    };
+    const scopeValues: Record<string, ProjectEnvStoredValue> = {};
+    for (const layer of opts.layers) {
+      Object.assign(scopeValues, layer?.values[scope] ?? {});
+    }
+    values[scope] = scopeValues;
   }
   return {
     version: PROJECT_ENV_CONFIG_VERSION,
@@ -636,6 +908,7 @@ export async function setProjectEnvValue(opts: {
   readonly key: string;
   readonly value: string;
   readonly secret: boolean;
+  readonly local?: boolean;
 }): Promise<ProjectEnvMutationResult> {
   if (!PROJECT_ENV_KEY_PATTERN.test(opts.key)) {
     throw new Error(`Invalid env key: ${opts.key}`);
@@ -644,10 +917,17 @@ export async function setProjectEnvValue(opts: {
     scopeName: opts.scope,
   });
 
-  const filePath = resolveProjectEnvConfigPath({
-    projectDir: opts.projectDir,
-    envName: opts.envName,
-  });
+  const filePath =
+    opts.local === true
+      ? await resolveProjectEnvEffectiveLocalConfigPath({
+          projectRoot: opts.projectRoot,
+          projectDir: opts.projectDir,
+          envName: opts.envName,
+        })
+      : resolveProjectEnvConfigPath({
+          projectDir: opts.projectDir,
+          envName: opts.envName,
+        });
   const read = await readProjectEnvConfigFile({
     path: filePath,
     environment: opts.envName ?? "default",
@@ -677,6 +957,11 @@ export async function setProjectEnvValue(opts: {
       }),
     };
   }
+  if (opts.local === true) {
+    await ensureProjectEnvLocalIgnoreEntries({
+      projectRoot: opts.projectRoot,
+    });
+  }
 
   const nextScopeValues = nextValues[scope] ?? {};
   nextScopeValues[opts.key] = storedValue;
@@ -700,19 +985,29 @@ export async function setProjectEnvValue(opts: {
     scope,
     createdKey,
     changed,
+    local: opts.local === true,
   };
 }
 
 export async function unsetProjectEnvValue(opts: {
+  readonly projectRoot: string;
   readonly projectDir: string;
   readonly envName: string | null;
   readonly scope: string;
   readonly key: string;
+  readonly local?: boolean;
 }): Promise<{ readonly changed: boolean; readonly filePath: string }> {
-  const filePath = resolveProjectEnvConfigPath({
-    projectDir: opts.projectDir,
-    envName: opts.envName,
-  });
+  const filePath =
+    opts.local === true
+      ? await resolveProjectEnvEffectiveLocalConfigPath({
+          projectRoot: opts.projectRoot,
+          projectDir: opts.projectDir,
+          envName: opts.envName,
+        })
+      : resolveProjectEnvConfigPath({
+          projectDir: opts.projectDir,
+          envName: opts.envName,
+        });
   const read = await readProjectEnvConfigFile({
     path: filePath,
     environment: opts.envName ?? "default",
@@ -824,43 +1119,295 @@ async function buildProjectEnvStateDigests(opts: {
   return out;
 }
 
+export async function inspectProjectEnvMaterialization(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly envName?: string | null;
+  readonly serviceName?: string | null;
+  readonly serviceNames: readonly string[];
+}): Promise<ProjectEnvMaterializationInspection> {
+  const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
+  const statePath = resolveProjectEnvStatePath({ projectDir: opts.projectDir });
+  const [envExists, stateExists] = await Promise.all([
+    pathExists(envPath),
+    pathExists(statePath),
+  ]);
+
+  if (!(envExists || stateExists)) {
+    return {
+      envPath,
+      statePath,
+      status: "ok",
+      message: "No materialized .hack/.env compatibility output present",
+      issues: [],
+    };
+  }
+
+  if (envExists && !stateExists) {
+    return {
+      envPath,
+      statePath,
+      status: "warn",
+      message: `Materialized ${envPath} is missing ${statePath} (run: hack env materialize)`,
+      issues: [`missing ${statePath}`],
+    };
+  }
+
+  if (!envExists && stateExists) {
+    return {
+      envPath,
+      statePath,
+      status: "warn",
+      message: `Materialized env state exists but ${envPath} is missing (run: hack env materialize)`,
+      issues: [`missing ${envPath}`],
+    };
+  }
+
+  const stateRead = await readProjectEnvStateFile({ statePath });
+  if (!stateRead.ok) {
+    return {
+      envPath,
+      statePath,
+      status: "warn",
+      message: `Invalid ${statePath}: ${stateRead.error} (run: hack env materialize)`,
+      issues: [`invalid ${statePath}`],
+    };
+  }
+
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    envName: opts.envName,
+    serviceNames: opts.serviceNames,
+  });
+  if (!resolved) {
+    return {
+      envPath,
+      statePath,
+      status: "ok",
+      message: "No modern env config files found",
+      issues: [],
+    };
+  }
+
+  const issues = await collectProjectEnvMaterializationIssues({
+    state: stateRead.state,
+    resolved,
+    serviceName: opts.serviceName,
+    serviceNames: opts.serviceNames,
+  });
+  if (issues.length === 0) {
+    return {
+      envPath,
+      statePath,
+      status: "ok",
+      message:
+        "Materialized .hack/.env matches current env selection and inputs",
+      issues,
+    };
+  }
+
+  return {
+    envPath,
+    statePath,
+    status: "warn",
+    message: `${issues.join("; ")} (run: hack env materialize)`,
+    issues,
+  };
+}
+
+async function readProjectEnvStateFile(opts: {
+  readonly statePath: string;
+}): Promise<
+  | { readonly ok: true; readonly state: ProjectEnvStateFile }
+  | { readonly ok: false; readonly error: string }
+> {
+  const text = await readTextFile(opts.statePath);
+  if (text === null) {
+    return { ok: false, error: "file missing" };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Invalid JSON",
+    };
+  }
+
+  return parseProjectEnvStateFile({ parsed });
+}
+
+function parseProjectEnvStateFile(opts: {
+  readonly parsed: unknown;
+}):
+  | { readonly ok: true; readonly state: ProjectEnvStateFile }
+  | { readonly ok: false; readonly error: string } {
+  if (!isRecord(opts.parsed)) {
+    return { ok: false, error: "state root must be an object" };
+  }
+
+  const version = opts.parsed.version;
+  if (typeof version !== "number") {
+    return { ok: false, error: "version must be a number" };
+  }
+
+  const generatedAt = getString(opts.parsed, "generatedAt");
+  if (!generatedAt) {
+    return { ok: false, error: "generatedAt must be a string" };
+  }
+
+  const selectedOverlayRaw = opts.parsed.selectedOverlay;
+  if (
+    !(selectedOverlayRaw === null || typeof selectedOverlayRaw === "string")
+  ) {
+    return { ok: false, error: "selectedOverlay must be a string or null" };
+  }
+
+  const selectedServiceRaw = opts.parsed.selectedService;
+  if (
+    !(selectedServiceRaw === null || typeof selectedServiceRaw === "string")
+  ) {
+    return { ok: false, error: "selectedService must be a string or null" };
+  }
+
+  const inputsRaw = getRecord(opts.parsed, "inputs");
+  if (!inputsRaw) {
+    return { ok: false, error: "inputs must be an object" };
+  }
+
+  const inputs: Record<string, string> = {};
+  for (const [path, digest] of Object.entries(inputsRaw)) {
+    if (typeof digest !== "string") {
+      return {
+        ok: false,
+        error: `input digest for ${path} must be a string`,
+      };
+    }
+    inputs[path] = digest;
+  }
+
+  return {
+    ok: true,
+    state: {
+      version,
+      selectedOverlay: selectedOverlayRaw,
+      selectedService: selectedServiceRaw,
+      generatedAt,
+      inputs,
+    },
+  };
+}
+
+async function collectProjectEnvMaterializationIssues(opts: {
+  readonly state: ProjectEnvStateFile;
+  readonly resolved: ProjectEnvResolvedConfig;
+  readonly serviceName?: string | null;
+  readonly serviceNames: readonly string[];
+}): Promise<readonly string[]> {
+  const issues: string[] = [];
+  const effectiveOverlay = opts.resolved.selection.effectiveEnv;
+  if (opts.state.selectedOverlay !== effectiveOverlay) {
+    issues.push(
+      `materialized overlay ${formatProjectEnvStateValue({
+        value: opts.state.selectedOverlay,
+      })} does not match effective overlay ${formatProjectEnvStateValue({
+        value: effectiveOverlay,
+      })}`
+    );
+  }
+
+  const expectedService = opts.serviceName ?? null;
+  if (opts.state.selectedService !== expectedService) {
+    if (
+      opts.state.selectedService !== null &&
+      !opts.serviceNames.includes(opts.state.selectedService)
+    ) {
+      issues.push(
+        `materialized service scope ${opts.state.selectedService} no longer exists`
+      );
+    } else {
+      issues.push(
+        `materialized service scope ${formatProjectEnvStateValue({
+          value: opts.state.selectedService,
+        })} does not match effective service scope ${formatProjectEnvStateValue(
+          {
+            value: expectedService,
+          }
+        )}`
+      );
+    }
+  }
+
+  const currentInputs = await buildProjectEnvStateDigests({
+    files: opts.resolved.files,
+  });
+  const staleInputs = new Set<string>();
+  for (const [path, digest] of Object.entries(currentInputs)) {
+    if (opts.state.inputs[path] !== digest) {
+      staleInputs.add(path);
+    }
+  }
+  for (const path of Object.keys(opts.state.inputs)) {
+    if (!(path in currentInputs)) {
+      staleInputs.add(path);
+    }
+  }
+  if (staleInputs.size > 0) {
+    issues.push(
+      `${staleInputs.size} env input file${staleInputs.size === 1 ? "" : "s"} changed since materialization`
+    );
+  }
+
+  return issues;
+}
+
+function formatProjectEnvStateValue(opts: {
+  readonly value: string | null;
+}): string {
+  return opts.value === null ? "none" : opts.value;
+}
+
 async function resolveProjectEnvKey(opts: {
   readonly projectRoot: string;
   readonly required: boolean;
 }): Promise<string | null> {
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
+  const sharedKeyPath = await resolveProjectEnvSharedKeyPath({
+    projectRoot: opts.projectRoot,
+  });
   const text = await readTextFile(keyPath);
+  const sharedText =
+    sharedKeyPath === null ? null : await readTextFile(sharedKeyPath);
   const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";
   const inheritedKey = await resolveInheritedProjectEnvKey({
     projectRoot: opts.projectRoot,
   });
-  if (text === null) {
-    if (envFallback.length > 0) {
-      return envFallback;
-    }
-    if (inheritedKey) {
-      return inheritedKey.keyText;
-    }
-    if (opts.required) {
-      throw new Error(
-        `Missing ${keyPath}. Run "hack env add --secret ..." to generate it, restore the key file, or set ${PROJECT_ENV_SECRET_KEY_ENV}.`
-      );
-    }
-    return null;
+  const trimmed = text?.trim() ?? "";
+  if (trimmed.length > 0) {
+    return trimmed;
   }
-  const trimmed = text.trim();
-  if (trimmed.length === 0) {
-    if (envFallback.length > 0) {
-      return envFallback;
-    }
-    if (inheritedKey) {
-      return inheritedKey.keyText;
-    }
+  const sharedTrimmed = sharedText?.trim() ?? "";
+  if (sharedTrimmed.length > 0) {
+    return sharedTrimmed;
+  }
+  if (inheritedKey) {
+    return inheritedKey.keyText;
+  }
+  if (envFallback.length > 0) {
+    return envFallback;
+  }
+  if (opts.required) {
+    const searchedPaths = [keyPath, sharedKeyPath]
+      .filter((value): value is string => typeof value === "string")
+      .join(" or ");
     throw new Error(
-      `Project env key file is empty: ${keyPath}. Set ${PROJECT_ENV_SECRET_KEY_ENV} or restore the key file.`
+      `Missing project env key at ${searchedPaths}. Run "hack env add --secret ..." to generate it, restore the key file, or set ${PROJECT_ENV_SECRET_KEY_ENV}.`
     );
   }
-  return trimmed;
+  return null;
 }
 
 export async function ensureProjectEnvSecretKey(opts: {
@@ -871,6 +1418,9 @@ export async function ensureProjectEnvSecretKey(opts: {
   readonly created: boolean;
 }> {
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
+  const sharedKeyPath = await resolveProjectEnvSharedKeyPath({
+    projectRoot: opts.projectRoot,
+  });
   const existing = await readTextFile(keyPath);
   if (existing !== null && existing.trim().length > 0) {
     return {
@@ -879,35 +1429,56 @@ export async function ensureProjectEnvSecretKey(opts: {
       created: false,
     };
   }
+  const sharedExisting =
+    sharedKeyPath === null ? null : await readTextFile(sharedKeyPath);
+  if (
+    sharedKeyPath !== null &&
+    sharedExisting !== null &&
+    sharedExisting.trim().length > 0
+  ) {
+    return {
+      keyPath: sharedKeyPath,
+      keyText: sharedExisting.trim(),
+      created: false,
+    };
+  }
 
   const inheritedKey = await resolveInheritedProjectEnvKey({
     projectRoot: opts.projectRoot,
   });
   if (inheritedKey) {
-    await writeTextFile(keyPath, `${inheritedKey.keyText}\n`);
-    await chmod(keyPath, 0o600);
-    await ensureGitignoreEntry({
-      gitignorePath: resolve(opts.projectRoot, ".gitignore"),
-      entry: PROJECT_ENV_KEY_FILENAME,
-      comment: "# project env key",
-    });
+    const inheritedKeyPath = sharedKeyPath ?? keyPath;
+    await ensureDir(dirname(inheritedKeyPath));
+    await writeTextFile(inheritedKeyPath, `${inheritedKey.keyText}\n`);
+    await chmod(inheritedKeyPath, 0o600);
+    if (sharedKeyPath === null) {
+      await ensureGitignoreEntry({
+        gitignorePath: resolve(opts.projectRoot, ".gitignore"),
+        entry: PROJECT_ENV_KEY_FILENAME,
+        comment: "# project env key",
+      });
+    }
     return {
-      keyPath,
+      keyPath: inheritedKeyPath,
       keyText: inheritedKey.keyText,
       created: false,
     };
   }
 
   const keyText = randomBytes(32).toString("base64url");
-  await writeTextFile(keyPath, `${keyText}\n`);
-  await chmod(keyPath, 0o600);
-  await ensureGitignoreEntry({
-    gitignorePath: resolve(opts.projectRoot, ".gitignore"),
-    entry: PROJECT_ENV_KEY_FILENAME,
-    comment: "# project env key",
-  });
+  const nextKeyPath = sharedKeyPath ?? keyPath;
+  await ensureDir(dirname(nextKeyPath));
+  await writeTextFile(nextKeyPath, `${keyText}\n`);
+  await chmod(nextKeyPath, 0o600);
+  if (sharedKeyPath === null) {
+    await ensureGitignoreEntry({
+      gitignorePath: resolve(opts.projectRoot, ".gitignore"),
+      entry: PROJECT_ENV_KEY_FILENAME,
+      comment: "# project env key",
+    });
+  }
   return {
-    keyPath,
+    keyPath: nextKeyPath,
     keyText,
     created: true,
   };

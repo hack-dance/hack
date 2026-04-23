@@ -134,6 +134,8 @@ Tip: use `--body-stdin` for multi-line markdown.
 - The extension projects journal state into a local SQLite cache for durable reads and rebuilds that cache automatically when it is missing or stale.
 - Ticket writes automatically commit and push to the tickets ref when git sync is enabled and a remote exists.
 - `sync` normalizes the event logs, commits, and pushes the tickets ref.
+- Read paths fall back to the last healthy local tickets state when the git remote is temporarily unreachable, so `list` and `show` still work offline after an initial hydration.
+- When git remote auth fails, tickets surfaces return explicit SSH guidance and do not wait on interactive prompts. Check with `ssh -T git@github.com`.
 
 ### Storage layout
 
@@ -213,7 +215,7 @@ Notes:
 
 Use tickets when you want:
 - A local-first backlog that works offline.
-- A shared ticket stream without adding Jira/Linear.
+- A shared ticket stream without adding another external tracker.
 - A simple paper trail for small projects.
 
 Don’t use it when:

@@ -24,7 +24,10 @@ for (const filePath of files) {
   }
   const absolutePath = resolve(repoRoot, filePath);
   const file = Bun.file(absolutePath);
-  const stats = await file.stat();
+  const stats = await file.stat().catch(() => null);
+  if (stats === null) {
+    continue;
+  }
   if (typeof stats.isFile === "function" && !stats.isFile()) {
     continue;
   }
@@ -96,8 +99,8 @@ async function runCommand({
     stderr: "pipe",
   });
   const [stdout, stderr, exitCode] = await Promise.all([
-    proc.stdout.text(),
-    proc.stderr.text(),
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
     proc.exited,
   ]);
   return {

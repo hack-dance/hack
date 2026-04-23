@@ -60,6 +60,7 @@ import {
 import {
   discoverComposeServiceNames,
   inspectLegacyComposeEnvFileReferences,
+  inspectProjectEnvMaterialization,
   type LegacyComposeEnvFileReference,
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
@@ -67,6 +68,14 @@ import {
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
 } from "../lib/project-env-config.ts";
+import { inspectProjectLifecycleHygiene } from "../lib/project-lifecycle-hygiene.ts";
+import {
+  findMissingRegistryEntries,
+  findOrphanRuntimeProjects,
+  scopeRuntimeHygieneToProject,
+} from "../lib/project-runtime-hygiene.ts";
+import { readProjectsRegistry } from "../lib/projects-registry.ts";
+import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
@@ -193,8 +202,11 @@ const DOCTOR_SUMMARY_GROUPS = [
     title: "Project & env",
     checks: new Set([
       "project",
+      "runtime hygiene",
+      "lifecycle hygiene",
       "compose networks",
       "env mode",
+      "env materialization",
       "env overlay warnings",
     ]),
   },
@@ -439,6 +451,22 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   );
 
   if (projectCtx.status === "ok") {
+    if (
+      results.some(
+        (result) => result.name === "docker daemon" && result.status === "ok"
+      )
+    ) {
+      results.push(
+        await runCheck(s, "runtime hygiene", () =>
+          checkProjectRuntimeHygiene({ startDir })
+        )
+      );
+    }
+    results.push(
+      await runCheck(s, "lifecycle hygiene", () =>
+        checkProjectLifecycleHygiene({ startDir })
+      )
+    );
     results.push(
       await runCheck(s, "compose networks", () =>
         checkComposeNetworkHygiene({ startDir })
@@ -449,6 +477,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     );
     results.push(
       await runCheck(s, "env mode", () => checkProjectEnvMode({ startDir }))
+    );
+    results.push(
+      await runCheck(s, "env materialization", () =>
+        checkProjectEnvMaterialization({ startDir })
+      )
     );
     results.push(
       await runCheck(s, "env overlay warnings", () =>
@@ -1563,6 +1596,120 @@ async function checkProjectTicketsGitHealth({
   };
 }
 
+async function checkProjectRuntimeHygiene({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name: "runtime hygiene",
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+
+  const [registry, runtimeResult] = await Promise.all([
+    readProjectsRegistry(),
+    readRuntimeProjects({ includeGlobal: false }),
+  ]);
+
+  if (!runtimeResult.ok) {
+    return {
+      name: "runtime hygiene",
+      status: "warn",
+      message: "Skipped (docker runtime unavailable)",
+    };
+  }
+  const scoped = scopeRuntimeHygieneToProject({
+    projectRoot: ctx.projectRoot,
+    projectDir: ctx.projectDir,
+    projects: registry.projects,
+    runtime: runtimeResult.runtime,
+  });
+
+  const [missing, orphaned] = await Promise.all([
+    findMissingRegistryEntries({ projects: scoped.projects }),
+    findOrphanRuntimeProjects({ runtime: scoped.runtime }),
+  ]);
+
+  if (missing.length === 0 && orphaned.length === 0) {
+    return {
+      name: "runtime hygiene",
+      status: "ok",
+      message: "No missing registry entries or orphaned runtime containers",
+    };
+  }
+
+  const details: string[] = [];
+  if (missing.length > 0) {
+    details.push(
+      `${missing.length} missing registry entr${missing.length === 1 ? "y" : "ies"}`
+    );
+  }
+  if (orphaned.length > 0) {
+    details.push(
+      `${orphaned.length} orphaned runtime project${orphaned.length === 1 ? "" : "s"}`
+    );
+  }
+
+  return {
+    name: "runtime hygiene",
+    status: "warn",
+    message: `${details.join("; ")} (run: hack projects prune)`,
+  };
+}
+
+async function checkProjectLifecycleHygiene({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name: "lifecycle hygiene",
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+
+  const inspection = await inspectProjectLifecycleHygiene({
+    projectDir: ctx.projectDir,
+  });
+  if (inspection.staleEntries.length === 0) {
+    return {
+      name: "lifecycle hygiene",
+      status: "ok",
+      message:
+        "No stale lifecycle state entries or orphaned lifecycle processes",
+    };
+  }
+
+  const orphanedGroups = new Set<number>();
+  for (const entry of inspection.staleEntries) {
+    for (const group of entry.liveProcessGroups) {
+      orphanedGroups.add(group);
+    }
+  }
+
+  const details = [
+    `${inspection.staleEntries.length} stale lifecycle state entr${inspection.staleEntries.length === 1 ? "y" : "ies"}`,
+    ...(orphanedGroups.size > 0
+      ? [
+          `${orphanedGroups.size} orphaned lifecycle process group${orphanedGroups.size === 1 ? "" : "s"}`,
+        ]
+      : []),
+  ];
+
+  return {
+    name: "lifecycle hygiene",
+    status: "warn",
+    message: `${details.join("; ")} (run: hack down)`,
+  };
+}
+
 async function checkProjectEnvMode({
   startDir,
 }: {
@@ -1697,6 +1844,49 @@ async function checkProjectEnvOverlayWarnings({
     name: "env overlay warnings",
     status: "warn",
     message: `defaultEnvConfig=${cfg.defaultEnvConfig} contains plaintext entries for secret-backed vars (${keys}). Those overlay values are ignored; use "hack doctor --migrate-env-config" or "hack env add --env ${cfg.defaultEnvConfig} --secret KEY VALUE".`,
+  };
+}
+
+async function checkProjectEnvMaterialization({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name: "env materialization",
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+
+  if (
+    !(await projectEnvConfigExists({
+      projectDir: ctx.projectDir,
+    }))
+  ) {
+    return {
+      name: "env materialization",
+      status: "ok",
+      message: "Not applicable (legacy env format)",
+    };
+  }
+
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: ctx.composeFile,
+  });
+  const inspected = await inspectProjectEnvMaterialization({
+    projectRoot: ctx.projectRoot,
+    projectDir: ctx.projectDir,
+    envName: undefined,
+    serviceNames,
+  });
+
+  return {
+    name: "env materialization",
+    status: inspected.status,
+    message: inspected.message,
   };
 }
 
@@ -2784,7 +2974,10 @@ export function buildDoctorSummaryLines(input: {
       continue;
     }
 
-    const issues = members.filter((result) => result.status !== "ok");
+    const issues = members.filter(
+      (result) =>
+        result.status !== "ok" && !isIgnorableDoctorSummaryIssue(result)
+    );
     if (issues.length === 0) {
       lines.push(`${group.title}: ok`);
       continue;
@@ -2806,7 +2999,10 @@ export function buildDoctorSummaryLines(input: {
       !DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
   );
   if (ungrouped.length > 0) {
-    const issues = ungrouped.filter((result) => result.status !== "ok");
+    const issues = ungrouped.filter(
+      (result) =>
+        result.status !== "ok" && !isIgnorableDoctorSummaryIssue(result)
+    );
     lines.push(
       issues.length === 0
         ? "Other checks: ok"
@@ -2824,7 +3020,12 @@ async function renderDoctorSummary(
   let tone: "error" | "warn" | "info" = "info";
   if (results.some((result) => result.status === "error")) {
     tone = "error";
-  } else if (results.some((result) => result.status === "warn")) {
+  } else if (
+    results.some(
+      (result) =>
+        result.status === "warn" && !isIgnorableDoctorSummaryIssue(result)
+    )
+  ) {
     tone = "warn";
   }
 
@@ -2858,6 +3059,13 @@ function summarizeDoctorGroupIssues(input: {
   }
 
   return summarizeDoctorIssues(input.issues);
+}
+
+function isIgnorableDoctorSummaryIssue(issue: RecoveryCheckResult): boolean {
+  return (
+    issue.name === "gateway tokens" &&
+    issue.message.includes("No active tokens")
+  );
 }
 
 function summarizeDoctorIssues(issues: readonly RecoveryCheckResult[]): string {

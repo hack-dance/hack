@@ -1,41 +1,38 @@
 # Architecture
 
-Architectural decisions and patterns discovered during mission planning.
-
-**What belongs here:** durable architecture rules, canonical paths, ownership boundaries, and shared design constraints.
-
----
+Durable architecture rules for current Hack work.
 
 ## Core Product Boundary
 
-- Hack remains CLI-first and local-first.
-- `apps/web` is optional and must never become the only path for critical local workflows.
-- Shared administration, integration management, and env/secret-sharing can prefer the web app, but CLI parity and local usability must remain intact.
+- Hack v3 is CLI-first, local-first, and self-contained.
+- Supported product surface: project init, local runtime orchestration, routing/TLS, env and secrets, lifecycle, sessions, diagnostics, MCP/agent setup, the slim macOS companion, and optional local tickets.
+- Retired product surfaces: hosted auth, account/org/team admin, web dashboard, built-in GitHub workflows, and built-in Linear sync.
+- Remote/gateway/node/dispatch code may remain source-available, but it is unsupported experimental and must stay out of first-run docs, release gates, and default agent paths.
 
-## Auth Ownership
+## Runtime Ownership
 
-- Keep one coherent Better Auth model.
-- The browser app owns the interactive web auth UX.
-- `services/auth-broker` remains the auth/session and control-plane API backend.
-- Do not introduce a second independent auth authority.
+- `hack` is the source of truth for project start/stop/open/logs/session flows.
+- `.hack/.internal/**` and `.hack/.branch/**` are generated runtime state and should not be hand-edited.
+- Branch/worktree instances must clean up only their own runtime, lifecycle, and generated state.
+- Doctor output should classify recovery as restartable, repairable, or configuration drift and give one concrete next command.
 
-## Persistence Rules
+## Env Ownership
 
-- Shared org/team/project/integration state must be durable by default.
-- In-memory-only admin state is mission work to remove or explicitly surface as dev-only if temporarily retained during transition.
-- Use existing Neon + Drizzle foundations where practical instead of inventing a separate persistence layer.
+- Canonical shared env files are `.hack/hack.env.default.yaml` and optional `.hack/hack.env.<overlay>.yaml`.
+- Worktree-local overrides are `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`.
+- `.hack/.env` and `.hack/.env.state.json` are derived compatibility artifacts, not runtime source of truth.
+- Secret-key lookup order is checkout-local `.hack.secret.key`, git-common-dir shared key for linked worktrees, then `HACK_ENV_SECRET_KEY`.
 
-## Linear Canonical State
+## Lifecycle Ownership
 
-- Repo-bound Linear artifacts belong under `.hack/linear/projects/<project-id>/...`.
-- `.hack/.hack/linear/**` is a legacy bug surface and must not remain authoritative.
-- Mission closeout scope is the frozen set of Hack-project Linear work open at mission start plus mission-created optional-web-control-plane work.
+- Long-running host helpers belong in `lifecycle.processes` or `startup` entries with `persistent: true`.
+- Fixed-port helpers such as AWS SSM tunnels should declare `singleton.ports`.
+- Use `onConflict: "adopt"` only when a complete existing listener set is equivalent and should be reused.
+- `singleton` adoption is listener-level reuse, not ownership transfer; Hack must leave adopted external processes running on `hack down`.
+- Stale mux state should be recovered through lifecycle metadata carefully enough to avoid orphaning Hack-owned processes while not broadening cleanup to unrelated process groups.
 
-## Durable Persistence Targets
+## Tickets Ownership
 
-- Better Auth-owned tables and broker-specific auth persistence currently live under `services/auth-broker/src/db/schema.ts`.
-- Org/team admin state now persists in broker-owned `org_admin_*` tables under `services/auth-broker/src/db/schema.ts`, and the default auth-broker wiring uses the DB-backed store whenever `DATABASE_URL` is available.
-- Auth-broker startup now reports the selected org/team store mode. When `DATABASE_URL` is absent, the broker runs in an explicitly surfaced development-only in-memory mode, and durable initialization failures must throw instead of silently falling back to memory.
-- Broker-backed project registration and project-access visibility are now derived from the same org/team membership store (`services/auth-broker/src/modules/projects/service.ts` uses org/team visibility to decide which shared projects and grants are visible), so project-admin parity checks must account for active org/team scope rather than treating project ownership as independent state.
-- Shared control-plane tables currently live under `packages/db/src/schema/core.ts`, with migrations/verification through `bun run db:generate`, `bun run db:migrate`, and `bun run db:push`.
-- Workers may extract shared durable contracts, but they must keep one concrete Neon + Drizzle-backed persistence path and document any migration boundary changes in code/tests.
+- Tickets are optional local helpers, not a headline hosted workflow.
+- Durable ticket state is the git-backed JSONL journal under `refs/hack/tickets` or the configured branch ref.
+- Local projection and checkout state under `.hack/tickets/` is rebuildable.

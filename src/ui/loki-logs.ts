@@ -1,3 +1,4 @@
+// biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: Loki transport helpers intentionally keep query and stream parsing stateful and local.
 import { isRecord } from "../lib/guards.ts";
 import { formatPrettyLogLine } from "./log-format.ts";
 import { parseLokiLogLine, writeJsonLogLine } from "./log-json.ts";

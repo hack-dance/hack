@@ -15,9 +15,14 @@ async function readGitPath(opts: {
   readonly repoRoot: string;
   readonly args: readonly string[];
 }): Promise<string | null> {
-  const result = await exec(["git", "-C", opts.repoRoot, ...opts.args], {
-    stdin: "ignore",
-  });
+  let result: Awaited<ReturnType<typeof exec>>;
+  try {
+    result = await exec(["git", "-C", opts.repoRoot, ...opts.args], {
+      stdin: "ignore",
+    });
+  } catch {
+    return null;
+  }
   if (result.exitCode !== 0) {
     return null;
   }
@@ -29,6 +34,19 @@ async function readGitPath(opts: {
 
   const resolvedPath = isAbsolute(raw) ? raw : resolve(opts.repoRoot, raw);
   return await tryRealpath(resolvedPath);
+}
+
+/**
+ * Resolves the current checkout's git dir.
+ * Linked worktrees return their per-worktree git dir, not the shared common dir.
+ */
+export async function resolveGitWorktreeDir(opts: {
+  readonly repoRoot: string;
+}): Promise<string | null> {
+  return await readGitPath({
+    repoRoot: opts.repoRoot,
+    args: ["rev-parse", "--path-format=absolute", "--git-dir"],
+  });
 }
 
 /**

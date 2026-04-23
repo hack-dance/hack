@@ -1,6 +1,7 @@
 import { cancel } from "@clack/prompts";
 import { logger } from "../ui/logger.ts";
 import {
+  type AnyCommandSpec,
   CliUsageError,
   collectAllowedOptionNames,
   collectUnionOptionNames,
@@ -17,7 +18,10 @@ import { CLI_SPEC } from "./spec.ts";
 export async function runCli(argv: readonly string[]): Promise<number> {
   try {
     const cli = CLI_SPEC;
-    const allowUnknownOptions = isExtensionDispatch({ argv });
+    const allowUnknownOptions = shouldAllowUnknownOptions({
+      cli,
+      argv,
+    });
     const parsed = parseCliArgv(cli, argv, { allowUnknownOptions });
 
     const helpFlag = parsed.values.help === true;
@@ -41,36 +45,11 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       return parsed.positionals.length === 0 ? 1 : 1;
     }
 
-    const isExtensionDispatcher =
-      resolved.command?.name === "x" ||
-      resolved.command?.name === "tickets" ||
-      resolved.command?.name === "linear";
-    if (!isExtensionDispatcher) {
-      // Unknown options (not registered anywhere in the CLI)
-      const unionOptNames = collectUnionOptionNames(cli);
-      const unknownOptions = Object.keys(parsed.values).filter(
-        (k) => !unionOptNames.has(k)
-      );
-      if (unknownOptions.length > 0) {
-        throw new CliUsageError(
-          `Unknown option(s): ${unknownOptions.map((o) => `--${o}`).join(", ")}`
-        );
-      }
-
-      // Disallowed options for the resolved command
-      const allowedForCommand = collectAllowedOptionNames(
-        cli,
-        resolved.command
-      );
-      const disallowed = Object.keys(parsed.values).filter(
-        (k) => !allowedForCommand.has(k)
-      );
-      if (disallowed.length > 0) {
-        throw new CliUsageError(
-          `Option(s) not valid for "${resolved.command.name}": ${disallowed.map((o) => `--${o}`).join(", ")}`
-        );
-      }
-    }
+    validateResolvedCommandOptions({
+      cli,
+      command: resolved.command,
+      parsedValues: parsed.values,
+    });
 
     // If the resolved command has no handler, it acts as a namespace.
     if (!hasHandler(resolved.command)) {
@@ -127,7 +106,72 @@ function isExtensionDispatch(opts: {
     if (token.startsWith("-")) {
       continue;
     }
-    return token === "x" || token === "tickets" || token === "linear";
+    return token === "x" || token === "tickets";
   }
   return false;
+}
+
+function shouldAllowUnknownOptions(opts: {
+  readonly cli: typeof CLI_SPEC;
+  readonly argv: readonly string[];
+}): boolean {
+  if (isExtensionDispatch({ argv: opts.argv })) {
+    return true;
+  }
+
+  const firstCommandToken = opts.argv.find(
+    (token) => token !== "--" && !token.startsWith("-")
+  );
+  if (!firstCommandToken) {
+    return false;
+  }
+
+  const command = opts.cli.commands.find(
+    (entry) => entry.name === firstCommandToken
+  );
+  return allowsUnknownOptions({ command: command ?? null });
+}
+
+function validateResolvedCommandOptions(opts: {
+  readonly cli: typeof CLI_SPEC;
+  readonly command: AnyCommandSpec;
+  readonly parsedValues: Record<string, unknown>;
+}): void {
+  if (
+    opts.command.name === "x" ||
+    opts.command.name === "tickets" ||
+    allowsUnknownOptions({ command: opts.command })
+  ) {
+    return;
+  }
+
+  const unionOptNames = collectUnionOptionNames(opts.cli);
+  const unknownOptions = Object.keys(opts.parsedValues).filter(
+    (key) => !unionOptNames.has(key)
+  );
+  if (unknownOptions.length > 0) {
+    throw new CliUsageError(
+      `Unknown option(s): ${unknownOptions.map((option) => `--${option}`).join(", ")}`
+    );
+  }
+
+  const allowedForCommand = collectAllowedOptionNames(opts.cli, opts.command);
+  const disallowed = Object.keys(opts.parsedValues).filter(
+    (key) => !allowedForCommand.has(key)
+  );
+  if (disallowed.length > 0) {
+    throw new CliUsageError(
+      `Option(s) not valid for "${opts.command.name}": ${disallowed.map((option) => `--${option}`).join(", ")}`
+    );
+  }
+}
+
+function allowsUnknownOptions(opts: {
+  readonly command: AnyCommandSpec | null;
+}): boolean {
+  return (
+    opts.command !== null &&
+    "allowUnknownOptions" in opts.command &&
+    opts.command.allowUnknownOptions === true
+  );
 }

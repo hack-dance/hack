@@ -462,6 +462,7 @@ export async function provisionEncryptedFileKey(input: {
   };
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Secret key resolution deliberately walks multiple compatibility sources in order.
 async function resolveEncryptedFileKeyMaterial(input?: {
   readonly keyPath?: string;
   readonly storePath?: string;

@@ -20,7 +20,10 @@ import {
   projectNormalizedTicketSummary,
 } from "./domain.ts";
 import { createTicketsSqliteProjection } from "./sqlite-projection.ts";
-import { createGitTicketsChannel } from "./tickets-git-channel.ts";
+import {
+  createGitTicketsChannel,
+  isTicketsGitRemoteConnectivityError,
+} from "./tickets-git-channel.ts";
 import {
   compareTicketIds,
   generateTicketId,
@@ -666,6 +669,27 @@ export function createTicketsStore(opts: {
     };
   };
 
+  const loadStoreContextWithRemoteFallback = async (input?: {
+    readonly refreshRemote?: boolean;
+  }): Promise<TicketStoreContext> => {
+    try {
+      return await loadStoreContext(input);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : "Failed to load tickets state";
+      if (
+        input?.refreshRemote === false ||
+        !isTicketsGitRemoteConnectivityError(message)
+      ) {
+        throw error;
+      }
+      opts.logger.warn({
+        message: `Tickets remote refresh failed; using local ticket state: ${message}`,
+      });
+      return await loadStoreContext({ refreshRemote: false });
+    }
+  };
+
   const materializeTickets = async (input?: {
     readonly refreshRemote?: boolean;
   }): Promise<Map<string, TicketSummary>> => {
@@ -904,24 +928,24 @@ export function createTicketsStore(opts: {
     },
 
     listTickets: async () => {
-      const { snapshot } = await loadStoreContext();
+      const { snapshot } = await loadStoreContextWithRemoteFallback();
       return snapshot.tickets;
     },
 
     getTicket: async ({ ticketId }) => {
-      const { snapshot } = await loadStoreContext();
+      const { snapshot } = await loadStoreContextWithRemoteFallback();
       return (
         snapshot.tickets.find((ticket) => ticket.ticketId === ticketId) ?? null
       );
     },
 
     listEvents: async ({ ticketId }) => {
-      const { snapshot } = await loadStoreContext();
+      const { snapshot } = await loadStoreContextWithRemoteFallback();
       return snapshot.eventsByTicket.get(ticketId) ?? [];
     },
 
     getTicketDetail: async ({ ticketId }) => {
-      const { snapshot } = await loadStoreContext();
+      const { snapshot } = await loadStoreContextWithRemoteFallback();
       return {
         ticket:
           snapshot.tickets.find((ticket) => ticket.ticketId === ticketId) ??
@@ -1232,7 +1256,7 @@ export function createTicketsStore(opts: {
     },
 
     readSnapshot: async () => {
-      const { snapshot } = await loadStoreContext();
+      const { snapshot } = await loadStoreContextWithRemoteFallback();
       return snapshot;
     },
 

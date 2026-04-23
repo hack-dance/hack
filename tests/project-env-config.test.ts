@@ -16,6 +16,7 @@ import {
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
+  PROJECT_ENV_STATE_FILENAME,
 } from "../src/constants.ts";
 import { upsertDotEnvValue } from "../src/lib/hack-env.ts";
 import { readProjectDefaultEnvConfig } from "../src/lib/project.ts";
@@ -23,13 +24,18 @@ import {
   assertValidProjectEnvScopeName,
   ensureProjectEnvSecretKey,
   inspectLegacyComposeEnvFileReferences,
+  inspectProjectEnvMaterialization,
+  listProjectEnvOverlayNames,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
   parseProjectEnvTarget,
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
+  resolveProjectEnvLocalConfigPath,
+  resolveProjectEnvSharedKeyPath,
   selectProjectEnvValuesForExecutionTarget,
   setProjectEnvValue,
+  unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 
@@ -71,6 +77,30 @@ async function createRepo(): Promise<{
     )}\n`
   );
   return { tempRoot: root, projectRoot, projectDir, composeFile, configFile };
+}
+
+async function runGit(args: readonly string[], cwd: string): Promise<string> {
+  const proc = Bun.spawn({
+    cmd: ["git", ...args],
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(stderr || stdout || `git ${args.join(" ")} failed`);
+  }
+  return stdout.trim();
+}
+
+async function initGitRepo(repoRoot: string): Promise<void> {
+  await runGit(["init", "-b", "main"], repoRoot);
+  await runGit(["config", "user.name", "Hack Test"], repoRoot);
+  await runGit(["config", "user.email", "hack@example.com"], repoRoot);
 }
 
 test("readProjectDefaultEnvConfig prefers env.defaultOverlay", async () => {
@@ -182,6 +212,154 @@ test("materializeProjectEnv writes selected service env without touching runtime
   expect(envText).toContain("PORT=4000");
 });
 
+test("inspectProjectEnvMaterialization reports clean state after materialize", async () => {
+  const repo = await createRepo();
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "GLOBAL_FLAG",
+    value: "1",
+    secret: false,
+  });
+
+  await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+
+  const inspected = await inspectProjectEnvMaterialization({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: undefined,
+    serviceNames: ["api", "web"],
+  });
+
+  expect(inspected.status).toBe("ok");
+  expect(inspected.message).toContain(
+    "matches current env selection and inputs"
+  );
+  expect(inspected.issues).toEqual([]);
+});
+
+test("inspectProjectEnvMaterialization reports stale inputs after env config changes", async () => {
+  const repo = await createRepo();
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "GLOBAL_FLAG",
+    value: "1",
+    secret: false,
+  });
+
+  await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "NEW_FLAG",
+    value: "2",
+    secret: false,
+  });
+
+  const inspected = await inspectProjectEnvMaterialization({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: undefined,
+    serviceNames: ["api", "web"],
+  });
+
+  expect(inspected.status).toBe("warn");
+  expect(inspected.message).toContain("changed since materialization");
+  expect(inspected.message).toContain("hack env materialize");
+});
+
+test("inspectProjectEnvMaterialization reports selected service drift", async () => {
+  const repo = await createRepo();
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "GLOBAL_FLAG",
+    value: "1",
+    secret: false,
+  });
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "api",
+    key: "API_ONLY",
+    value: "yes",
+    secret: false,
+  });
+
+  await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceName: "api",
+    serviceNames: ["api", "web"],
+  });
+
+  const inspected = await inspectProjectEnvMaterialization({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: undefined,
+    serviceNames: ["api", "web"],
+  });
+
+  expect(inspected.status).toBe("warn");
+  expect(inspected.message).toContain(
+    "materialized service scope api does not match effective service scope none"
+  );
+  expect(inspected.message).toContain("hack env materialize");
+});
+
+test("inspectProjectEnvMaterialization reports missing state for materialized env output", async () => {
+  const repo = await createRepo();
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "GLOBAL_FLAG",
+    value: "1",
+    secret: false,
+  });
+
+  await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+  await unlink(resolve(repo.projectDir, PROJECT_ENV_STATE_FILENAME));
+
+  const inspected = await inspectProjectEnvMaterialization({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: undefined,
+    serviceNames: ["api", "web"],
+  });
+
+  expect(inspected.status).toBe("warn");
+  expect(inspected.message).toContain("missing");
+  expect(inspected.message).toContain("hack env materialize");
+});
+
 test("materializeProjectEnv rejects unknown service scopes", async () => {
   const repo = await createRepo();
   await setProjectEnvValue({
@@ -249,6 +427,527 @@ test("resolveProjectEnvConfig falls back to HACK_ENV_SECRET_KEY when the key fil
   expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe("super-secret-token");
 });
 
+test("resolveProjectEnvConfig merges shared and worktree-local overlays in order", async () => {
+  const repo = await createRepo();
+
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    SHARED_DEFAULT: shared-default",
+      "    SHARED_OVERRIDE: shared-default",
+      "  api:",
+      "    API_ONLY: shared-api",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.qa.yaml"),
+    [
+      "version: 1",
+      "environment: qa",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    SHARED_OVERRIDE: shared-qa",
+      "    SHARED_QA: shared-qa",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    resolveProjectEnvLocalConfigPath({
+      projectDir: repo.projectDir,
+      envName: null,
+    }),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    LOCAL_DEFAULT: local-default",
+      "    SHARED_OVERRIDE: local-default",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    resolveProjectEnvLocalConfigPath({
+      projectDir: repo.projectDir,
+      envName: "qa",
+    }),
+    [
+      "version: 1",
+      "environment: qa",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    LOCAL_QA: local-qa",
+      "    SHARED_OVERRIDE: local-qa",
+      "",
+    ].join("\n")
+  );
+
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: "qa",
+    serviceNames: ["api", "web"],
+  });
+
+  expect(resolved).not.toBeNull();
+  expect(resolved?.globalEnv).toMatchObject({
+    SHARED_DEFAULT: "shared-default",
+    SHARED_QA: "shared-qa",
+    LOCAL_DEFAULT: "local-default",
+    LOCAL_QA: "local-qa",
+    SHARED_OVERRIDE: "local-qa",
+  });
+  expect(resolved?.serviceEnv.api?.API_ONLY).toBe("shared-api");
+  expect(resolved?.files).toEqual([
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    resolve(repo.projectDir, "hack.env.qa.yaml"),
+    resolve(repo.projectDir, "hack.env.local.yaml"),
+    resolve(repo.projectDir, "hack.env.qa.local.yaml"),
+  ]);
+});
+
+test("legacy tracked local overlay remains selectable without acting as a local default", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    SHARED_DEFAULT: shared-default",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.local.yaml"),
+    [
+      "version: 1",
+      "environment: local",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    LEGACY_LOCAL: legacy-local",
+      "",
+    ].join("\n")
+  );
+  await runGit(["add", "."], repo.projectRoot);
+
+  expect(
+    await listProjectEnvOverlayNames({ projectDir: repo.projectDir })
+  ).toEqual(["local"]);
+
+  const defaultResolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+  expect(defaultResolved).not.toBeNull();
+  expect(defaultResolved?.globalEnv).toEqual({
+    SHARED_DEFAULT: "shared-default",
+  });
+  expect(defaultResolved?.files).toEqual([
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+  ]);
+
+  const localResolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: "local",
+    serviceNames: ["api", "web"],
+  });
+  expect(localResolved).not.toBeNull();
+  expect(localResolved?.globalEnv).toEqual({
+    LEGACY_LOCAL: "legacy-local",
+    SHARED_DEFAULT: "shared-default",
+  });
+  expect(localResolved?.files).toEqual([
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    resolve(repo.projectDir, "hack.env.local.yaml"),
+  ]);
+});
+
+test("legacy local overlays stay out of default resolution when git is unavailable", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    SHARED_DEFAULT: shared-default",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.local.yaml"),
+    [
+      "version: 1",
+      "environment: local",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    LEGACY_LOCAL: legacy-local",
+      "",
+    ].join("\n")
+  );
+  await runGit(["add", "."], repo.projectRoot);
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = resolve(repo.tempRoot, "missing-git-bin");
+
+  try {
+    const defaultResolved = await resolveProjectEnvConfig({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      serviceNames: ["api", "web"],
+    });
+    expect(defaultResolved?.globalEnv).toEqual({
+      SHARED_DEFAULT: "shared-default",
+    });
+    expect(defaultResolved?.files).toEqual([
+      resolve(repo.projectDir, "hack.env.default.yaml"),
+    ]);
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test("default local overrides still resolve when git is unavailable", async () => {
+  const repo = await createRepo();
+
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    SHARED_DEFAULT: shared-default",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.local.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    LOCAL_DEFAULT: local-default",
+      "",
+    ].join("\n")
+  );
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = resolve(repo.tempRoot, "missing-git-bin");
+
+  try {
+    const defaultResolved = await resolveProjectEnvConfig({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      serviceNames: ["api", "web"],
+    });
+    expect(defaultResolved?.globalEnv).toEqual({
+      LOCAL_DEFAULT: "local-default",
+      SHARED_DEFAULT: "shared-default",
+    });
+    expect(defaultResolved?.files).toEqual([
+      resolve(repo.projectDir, "hack.env.default.yaml"),
+      resolve(repo.projectDir, "hack.env.local.yaml"),
+    ]);
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test("legacy tracked local overlay keeps default local mutations in a compatibility file", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    SHARED_DEFAULT: shared-default",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.local.yaml"),
+    [
+      "version: 1",
+      "environment: local",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    LEGACY_LOCAL: legacy-local",
+      "",
+    ].join("\n")
+  );
+  await runGit(["add", "."], repo.projectRoot);
+
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "LOCAL_ONLY",
+    value: "true",
+    secret: false,
+    local: true,
+  });
+
+  const compatLocalDefaultPath = resolve(
+    repo.projectDir,
+    "hack.env.default.local.yaml"
+  );
+  expect(await readFile(compatLocalDefaultPath, "utf8")).toContain(
+    'LOCAL_ONLY: "true"'
+  );
+  expect(
+    await readFile(resolve(repo.projectDir, "hack.env.local.yaml"), "utf8")
+  ).toContain("LEGACY_LOCAL: legacy-local");
+  expect(
+    await readFile(resolve(repo.projectDir, "hack.env.local.yaml"), "utf8")
+  ).not.toContain("LOCAL_ONLY");
+
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+  expect(resolved?.globalEnv).toEqual({
+    LOCAL_ONLY: "true",
+    SHARED_DEFAULT: "shared-default",
+  });
+  expect(resolved?.files).toEqual([
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    compatLocalDefaultPath,
+  ]);
+
+  const unset = await unsetProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "LOCAL_ONLY",
+    local: true,
+  });
+  expect(unset.changed).toBe(true);
+  expect(await readFile(compatLocalDefaultPath, "utf8")).not.toContain(
+    "LOCAL_ONLY"
+  );
+});
+
+test("setProjectEnvValue writes worktree-local overrides when requested", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: "qa",
+    scope: "global",
+    key: "LOCAL_ONLY",
+    value: "true",
+    secret: false,
+    local: true,
+  });
+
+  const localOverlayPath = resolveProjectEnvLocalConfigPath({
+    projectDir: repo.projectDir,
+    envName: "qa",
+  });
+  const localOverlay = await readFile(localOverlayPath, "utf8");
+  expect(localOverlay).toContain('LOCAL_ONLY: "true"');
+
+  const excludeText = await readFile(
+    resolve(repo.projectRoot, ".git", "info", "exclude"),
+    "utf8"
+  );
+  expect(excludeText).toContain(".hack/hack.env.local.yaml");
+  expect(excludeText).toContain(".hack/hack.env.*.local.yaml");
+});
+
+test("setProjectEnvValue writes local override ignore rules to the git common-dir exclude", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "hack-project-env-ignore-"));
+  tempDirs.add(sandbox);
+
+  const sourceRoot = resolve(sandbox, "source");
+  await mkdir(resolve(sourceRoot, ".hack"), { recursive: true });
+  await initGitRepo(sourceRoot);
+  await writeFile(resolve(sourceRoot, "README.md"), "worktree fixture\n");
+  await writeFile(
+    resolve(sourceRoot, ".hack", PROJECT_COMPOSE_FILENAME),
+    "services:\n  api: {}\n"
+  );
+  await writeFile(
+    resolve(sourceRoot, ".hack", PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify(
+      { name: "linked-ignore-test", dev_host: "linked-ignore.hack" },
+      null,
+      2
+    )}\n`
+  );
+  await runGit(["add", "README.md", ".hack"], sourceRoot);
+  await runGit(["commit", "-m", "init"], sourceRoot);
+
+  const linkedRoot = resolve(sandbox, "linked");
+  await runGit(["worktree", "add", linkedRoot], sourceRoot);
+
+  await setProjectEnvValue({
+    projectRoot: linkedRoot,
+    projectDir: resolve(linkedRoot, ".hack"),
+    envName: "qa",
+    scope: "global",
+    key: "LOCAL_ONLY",
+    value: "true",
+    secret: false,
+    local: true,
+  });
+
+  const commonDir = await runGit(
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    linkedRoot
+  );
+  const excludeText = await readFile(
+    resolve(commonDir, "info", "exclude"),
+    "utf8"
+  );
+  expect(excludeText).toContain(".hack/hack.env.local.yaml");
+  expect(excludeText).toContain(".hack/hack.env.*.local.yaml");
+});
+
+test("normal git clones keep generated env keys at the repo root", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "api",
+    key: "SERVICE_TOKEN",
+    value: "secret-token",
+    secret: true,
+  });
+
+  expect(
+    await Bun.file(resolve(repo.projectRoot, PROJECT_ENV_KEY_FILENAME)).exists()
+  ).toBe(true);
+  expect(
+    await Bun.file(
+      resolve(repo.projectRoot, ".git", PROJECT_ENV_KEY_FILENAME)
+    ).exists()
+  ).toBe(false);
+});
+
+test("linked worktrees fall back to the shared git-common-dir env key", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "hack-project-env-worktree-"));
+  tempDirs.add(sandbox);
+
+  const sourceRoot = resolve(sandbox, "source");
+  await mkdir(sourceRoot, { recursive: true });
+  await initGitRepo(sourceRoot);
+  await writeFile(resolve(sourceRoot, "README.md"), "worktree fixture\n");
+  await runGit(["add", "README.md"], sourceRoot);
+  await runGit(["commit", "-m", "init"], sourceRoot);
+
+  const linkedRoot = resolve(sandbox, "linked");
+  await runGit(["worktree", "add", linkedRoot], sourceRoot);
+
+  const projectDir = resolve(linkedRoot, ".hack");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    resolve(projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api: {}\n"
+  );
+  await writeFile(
+    resolve(projectDir, PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify(
+      { name: "linked-repo", dev_host: "linked.hack" },
+      null,
+      2
+    )}\n`
+  );
+
+  await setProjectEnvValue({
+    projectRoot: linkedRoot,
+    projectDir,
+    envName: null,
+    scope: "api",
+    key: "SERVICE_TOKEN",
+    value: "shared-worktree-secret",
+    secret: true,
+    local: false,
+  });
+
+  const currentKeyPath = resolve(linkedRoot, PROJECT_ENV_KEY_FILENAME);
+  expect(await Bun.file(currentKeyPath).exists()).toBe(false);
+
+  const currentGitDir = await runGit(
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    linkedRoot
+  );
+  const sharedKeyPath = resolve(currentGitDir, PROJECT_ENV_KEY_FILENAME);
+  const sharedKeyText = (await readFile(sharedKeyPath, "utf8")).trim();
+  expect(sharedKeyText.length).toBeGreaterThan(10);
+
+  process.env.HACK_ENV_SECRET_KEY = undefined;
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: linkedRoot,
+    projectDir,
+    envName: null,
+    serviceNames: ["api"],
+  });
+  expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe(
+    "shared-worktree-secret"
+  );
+});
+
+test("resolveProjectEnvSharedKeyPath returns null when git is unavailable", async () => {
+  const repo = await createRepo();
+  const originalPath = process.env.PATH;
+  process.env.PATH = resolve(repo.tempRoot, "missing-git-bin");
+
+  try {
+    await expect(
+      resolveProjectEnvSharedKeyPath({
+        projectRoot: repo.projectRoot,
+      })
+    ).resolves.toBeNull();
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
 test("linked worktrees inherit the primary checkout env key", async () => {
   const repo = await createRepo();
   await writeFile(
@@ -291,6 +990,63 @@ test("linked worktrees inherit the primary checkout env key", async () => {
   });
 
   expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe("super-secret-token");
+});
+
+test("primary checkout reads shared env key created by a linked worktree", async () => {
+  const repo = await createRepo();
+  await writeFile(
+    resolve(repo.projectRoot, ".gitignore"),
+    ".hack.secret.key\n"
+  );
+
+  await initializeGitRepo({ projectRoot: repo.projectRoot });
+  const linkedRoot = resolve(repo.tempRoot, "repo-linked");
+  await createGitWorktree({
+    projectRoot: repo.projectRoot,
+    worktreeRoot: linkedRoot,
+    branch: "feature/shared-key-author",
+  });
+
+  await setProjectEnvValue({
+    projectRoot: linkedRoot,
+    projectDir: resolve(linkedRoot, ".hack"),
+    envName: null,
+    scope: "api",
+    key: "SERVICE_TOKEN",
+    value: "shared-from-linked-worktree",
+    secret: true,
+  });
+
+  const primaryKeyPath = resolve(repo.projectRoot, PROJECT_ENV_KEY_FILENAME);
+  expect(await Bun.file(primaryKeyPath).exists()).toBe(false);
+
+  const commonDir = await runGit(
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    repo.projectRoot
+  );
+  const sharedKeyPath = resolve(commonDir, PROJECT_ENV_KEY_FILENAME);
+  expect((await readFile(sharedKeyPath, "utf8")).trim().length).toBeGreaterThan(
+    10
+  );
+
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    await readFile(
+      resolve(linkedRoot, ".hack", "hack.env.default.yaml"),
+      "utf8"
+    )
+  );
+
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+
+  expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe(
+    "shared-from-linked-worktree"
+  );
 });
 
 test("host target only applies explicit host overrides on top of service values", async () => {
@@ -569,51 +1325,22 @@ test("migrateLegacyProjectEnv blocks cleanup for compose-referenced legacy env f
   expect(composeText).toContain("- ../.env.docker");
 });
 
-async function initializeGitRepo(opts: {
-  readonly projectRoot: string;
-}): Promise<void> {
-  await writeFile(resolve(opts.projectRoot, "README.md"), "# env test\n");
-  runGit({ cwd: opts.projectRoot, args: ["init"] });
-  runGit({
-    cwd: opts.projectRoot,
-    args: ["config", "user.email", "test@example.com"],
-  });
-  runGit({
-    cwd: opts.projectRoot,
-    args: ["config", "user.name", "Test User"],
-  });
-  runGit({ cwd: opts.projectRoot, args: ["add", "."] });
-  runGit({
-    cwd: opts.projectRoot,
-    args: ["commit", "-m", "test: seed env fixture"],
-  });
-  runGit({ cwd: opts.projectRoot, args: ["branch", "-M", "main"] });
-}
-
 async function createGitWorktree(opts: {
   readonly projectRoot: string;
   readonly worktreeRoot: string;
   readonly branch: string;
 }): Promise<void> {
-  runGit({
-    cwd: opts.projectRoot,
-    args: ["worktree", "add", "-b", opts.branch, opts.worktreeRoot],
-  });
+  await runGit(
+    ["worktree", "add", "-b", opts.branch, opts.worktreeRoot],
+    opts.projectRoot
+  );
 }
 
-function runGit(opts: {
-  readonly cwd: string;
-  readonly args: readonly string[];
-}): string {
-  const result = Bun.spawnSync(["git", "-C", opts.cwd, ...opts.args], {
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (result.exitCode !== 0) {
-    throw new Error(
-      `git ${opts.args.join(" ")} failed\n${Buffer.from(result.stderr).toString("utf8")}`
-    );
-  }
-  return Buffer.from(result.stdout).toString("utf8").trim();
+async function initializeGitRepo(opts: {
+  readonly projectRoot: string;
+}): Promise<void> {
+  await writeFile(resolve(opts.projectRoot, "README.md"), "# env test\n");
+  await initGitRepo(opts.projectRoot);
+  await runGit(["add", "."], opts.projectRoot);
+  await runGit(["commit", "-m", "test: seed env fixture"], opts.projectRoot);
 }

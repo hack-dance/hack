@@ -20,6 +20,7 @@ Optional:
 - `hack tui` for the interactive dashboard.
 - Configure log retention in `hack.config.json` via `logs.retention_period` (e.g. `7d`) and `logs.clear_on_down`.
 - Add startup hooks/host processes in `.hack/hack.config.json` under `lifecycle` (or `startup` shorthand). See `docs/lifecycle.md`.
+- For fixed-port host helpers such as SSM tunnels, add `singleton.ports` and usually `onConflict: "adopt"` so `hack up` reuses an already-running equivalent helper instead of starting duplicate tunnel stacks.
 
 Note:
 - Inside containers, `localhost` points at the container itself. Update any `localhost:PORT` references to:

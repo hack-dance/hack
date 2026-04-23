@@ -136,15 +136,14 @@ Expected:
 ### Private repo bootstrap behavior (default, no manual copy)
 
 GitHub is optional for public repos or for private repos when the remote machine already has working
-Git credentials. It becomes required only when Hack needs to supply controller-side credentials for
-private GitHub clone fallback.
+Git credentials. Hack v3 does not inject controller-side GitHub credentials during remote bootstrap.
 
 Workspace bootstrap now uses this order automatically:
 1. Attempt clone with the remote machine's existing Git credentials.
-2. If clone fails and origin is GitHub, retry with controller GitHub token auth (from `hack x github connect` or `HACK_GITHUB_APP_TOKEN`).
-3. Dispatch records a preflight probe (`native_git`, `controller_github_token`, or `none`) before workspace ensure so failures are diagnosable.
+2. If clone fails, repair native Git credentials on the remote first (for example `gh auth status`), then retry.
+3. Dispatch records a preflight probe (`native_git` or `none`) before workspace ensure so failures are diagnosable.
 
-No manual `rsync`/attach steps are required for normal private GitHub repo flows.
+No manual `rsync`/attach steps are required for normal private repo flows when native Git access is already in place.
 
 Repair commands when mapping is missing or incorrect:
 
@@ -212,8 +211,8 @@ cat ~/.hack/registry/runs/<run-id>/summary.md
 6. Topology shows empty node list unexpectedly
    - Fix: refresh topology, verify controller-host mode and local node registry (`hack node list`).
 7. `bootstrap_clone_failed: ... Permission denied (publickey)`
-   - Cause: remote node clone failed and no usable GitHub token fallback was available.
-   - Fix: connect a GitHub account on controller (`hack x github connect --profile <id>`), or set `HACK_GITHUB_APP_TOKEN`, then rerun.
+   - Cause: remote node clone failed because the node does not have usable native Git credentials.
+   - Fix: repair native Git credentials on the remote machine, then rerun.
 8. `probe_failed (404): not_found` before workspace ensure
    - Cause: remote node is running an older daemon build that does not expose `/v1/node/git/probe`.
    - Fix: update `hack` on the remote node to the same build as controller, restart daemon, then retry.

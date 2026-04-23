@@ -25,7 +25,7 @@ alive. You do not need gateway, remote nodes, or extension setup to use this pat
 
 ## When to leave core
 
-Move to [Beta workflows](beta.md) when you intentionally want:
+Move to [Beta workflows](beta.md) only when you intentionally want unsupported experimental:
 
 - gateway exposure
 - remote nodes

@@ -52,20 +52,12 @@ public struct MenuBarView: View {
   @ViewBuilder
   private var systemStatusSection: some View {
     let runtimeIcon = runtimeStatusIcon
-    let gatewayIcon = gatewayStatusIcon
     let daemonIcon = daemonStatusIcon
 
     Button {
       // No action - informational
     } label: {
       Label("Runtime: \(runtimeStatusText)", systemImage: runtimeIcon)
-    }
-    .disabled(true)
-
-    Button {
-      // No action - informational
-    } label: {
-      Label("Gateway: \(gatewayStatusText)", systemImage: gatewayIcon)
     }
     .disabled(true)
 
@@ -191,26 +183,6 @@ public struct MenuBarView: View {
       return "checkmark.circle.fill"
     case .down, .degraded:
       return "exclamationmark.triangle.fill"
-    case .unknown:
-      return "questionmark.circle"
-    }
-  }
-
-  private var gatewayStatusText: String {
-    model.gatewaySummaryState?.label ?? "Unknown"
-  }
-
-  private var gatewayStatusIcon: String {
-    guard let state = model.gatewaySummaryState else { return "questionmark.circle" }
-    switch state {
-    case .localOnly, .lan, .tailscale, .cloudflare, .mixed:
-      return "checkmark.circle.fill"
-    case .needsSetup:
-      return "exclamationmark.triangle.fill"
-    case .disabled:
-      return "minus.circle"
-    case .down:
-      return "xmark.circle.fill"
     case .unknown:
       return "questionmark.circle"
     }

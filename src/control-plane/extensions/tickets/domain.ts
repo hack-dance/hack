@@ -7,6 +7,11 @@ import {
   buildTicketProvenance,
   normalizeTicketFieldName,
   projectRemoteLinkToCompatibilityFields,
+  type TicketFieldAuthority,
+  type TicketFieldAuthorityEntry,
+  type TicketFieldVersion,
+  type TicketOrigin,
+  type TicketRemoteLink,
 } from "./provenance.ts";
 
 export type {
@@ -14,6 +19,13 @@ export type {
   TicketDocumentKind,
   TicketDocumentRole,
 } from "./documents.ts";
+export type {
+  TicketFieldAuthority,
+  TicketFieldAuthorityEntry,
+  TicketFieldVersion,
+  TicketOrigin,
+  TicketRemoteLink,
+} from "./provenance.ts";
 
 export type TicketStatus = "open" | "in_progress" | "blocked" | "done";
 
@@ -84,45 +96,6 @@ export type NormalizedTicketIdentity = {
   readonly ticketId: string;
   readonly projectId?: string;
   readonly projectName?: string;
-};
-
-export type TicketOrigin = {
-  readonly owner: string;
-  readonly source: string;
-  readonly system: string;
-};
-
-export type TicketRemoteLink = {
-  readonly provider: string;
-  readonly remoteId?: string;
-  readonly remoteKey?: string;
-  readonly remoteUrl?: string;
-  readonly profileId?: string;
-  readonly projectId?: string;
-  readonly projectName?: string;
-  readonly teamId?: string;
-  readonly remoteCursor?: string;
-  readonly remoteUpdatedAt?: string;
-};
-
-export type TicketFieldAuthority =
-  | "local"
-  | "remote"
-  | "append_only"
-  | "derived"
-  | "review_required";
-
-export type TicketFieldAuthorityEntry = {
-  readonly field: string;
-  readonly authority: TicketFieldAuthority;
-};
-
-export type TicketFieldVersion = {
-  readonly field: string;
-  readonly source: "local" | "remote";
-  readonly provider?: string;
-  readonly recordedAt: string;
-  readonly value?: TicketMetadataValue;
 };
 
 export type TicketFieldState = {

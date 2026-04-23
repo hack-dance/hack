@@ -9,21 +9,22 @@ import {
   readInternalExtraHostsIp,
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
-import { pathExists } from "../lib/fs.ts";
 import { type ProjectMeta, resolveProjectMeta } from "../lib/project-meta.ts";
+import {
+  findMissingRegistryEntries,
+  findOrphanRuntimeProjects,
+} from "../lib/project-runtime-hygiene.ts";
 import type { ProjectView } from "../lib/project-views.ts";
 import {
   buildProjectViews,
   serializeProjectView,
 } from "../lib/project-views.ts";
-import type { RegisteredProject } from "../lib/projects-registry.ts";
 import {
   readProjectsRegistry,
   removeProjectsById,
 } from "../lib/projects-registry.ts";
 import type {
   RuntimeContainer,
-  RuntimeProject,
   RuntimeService,
 } from "../lib/runtime-projects.ts";
 import {
@@ -133,7 +134,9 @@ const handlePrune: CommandHandlerFor<typeof pruneSpec> = async ({
 }): Promise<number> => {
   const includeGlobal = args.options.includeGlobal === true;
   const registry = await readProjectsRegistry();
-  const missing = await findMissingRegistryEntries(registry.projects);
+  const missing = await findMissingRegistryEntries({
+    projects: registry.projects,
+  });
   const runtimeResult = await readRuntimeProjects({ includeGlobal });
   if (!runtimeResult.ok) {
     await display.panel({
@@ -143,7 +146,9 @@ const handlePrune: CommandHandlerFor<typeof pruneSpec> = async ({
     });
     return 1;
   }
-  const orphaned = await findOrphanRuntimeProjects(runtimeResult.runtime);
+  const orphaned = await findOrphanRuntimeProjects({
+    runtime: runtimeResult.runtime,
+  });
   const orphanedContainerCount = orphaned.reduce(
     (sum, entry) => sum + entry.containerIds.length,
     0
@@ -996,78 +1001,6 @@ export const __testOnlyProjectsCommand = {
   buildRuntimeRecoveryNotice,
   parseDaemonRuntimeRecoveryMeta,
 };
-
-type MissingRegistryEntry = {
-  readonly project: RegisteredProject;
-  readonly reason: string;
-};
-
-type OrphanedRuntimeProject = {
-  readonly project: string;
-  readonly workingDir: string | null;
-  readonly reason: string;
-  readonly containerIds: readonly string[];
-};
-
-async function findMissingRegistryEntries(
-  projects: readonly RegisteredProject[]
-): Promise<MissingRegistryEntry[]> {
-  const out: MissingRegistryEntry[] = [];
-  for (const project of projects) {
-    if (!(await pathExists(project.projectDir))) {
-      out.push({ project, reason: "missing project dir" });
-      continue;
-    }
-    const composeFile = resolve(project.projectDir, PROJECT_COMPOSE_FILENAME);
-    if (!(await pathExists(composeFile))) {
-      out.push({ project, reason: "missing compose file" });
-    }
-  }
-  return out;
-}
-
-async function findOrphanRuntimeProjects(
-  runtime: readonly RuntimeProject[]
-): Promise<OrphanedRuntimeProject[]> {
-  const out: OrphanedRuntimeProject[] = [];
-  for (const project of runtime) {
-    const workingDir = project.workingDir;
-    if (!workingDir) {
-      continue;
-    }
-    if (!(await pathExists(workingDir))) {
-      out.push({
-        project: project.project,
-        workingDir,
-        reason: "missing working dir",
-        containerIds: collectContainerIds(project),
-      });
-      continue;
-    }
-    const composeFile = resolve(workingDir, PROJECT_COMPOSE_FILENAME);
-    if (!(await pathExists(composeFile))) {
-      out.push({
-        project: project.project,
-        workingDir,
-        reason: "missing compose file",
-        containerIds: collectContainerIds(project),
-      });
-    }
-  }
-  return out;
-}
-
-function collectContainerIds(project: RuntimeProject): readonly string[] {
-  const out: string[] = [];
-  for (const service of project.services.values()) {
-    for (const container of service.containers) {
-      if (container.id.length > 0) {
-        out.push(container.id);
-      }
-    }
-  }
-  return out;
-}
 
 async function removeContainerIds(ids: readonly string[]): Promise<void> {
   if (ids.length === 0) {

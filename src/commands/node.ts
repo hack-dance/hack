@@ -1,3 +1,4 @@
+// biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: Unsupported experimental node/provider flows intentionally keep provider bootstrap logic explicit in one file.
 import { randomBytes, randomUUID } from "node:crypto";
 import {
   chmod,

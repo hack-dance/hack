@@ -11,6 +11,7 @@ import {
 } from "../src/agents/init-assistant.ts";
 import { renderAgentInitPatterns } from "../src/agents/init-patterns.ts";
 import { renderAgentPrimer } from "../src/agents/primer.ts";
+import { renderAgentDocsSnippet } from "../src/mcp/agent-docs.ts";
 
 let tempDir: string | null = null;
 
@@ -33,6 +34,9 @@ test("installCursorRules writes hack.mdc with markers", async () => {
   const content = await Bun.file(rulesPath).text();
   expect(content).toContain("# BEGIN HACK INTEGRATION");
   expect(content).toContain("hack up --detach");
+  expect(content).toContain("Hack v3 is local-first");
+  expect(content).toContain("singleton.ports");
+  expect(content).not.toContain(".hack/hack.env.json");
 });
 
 test("installClaudeHooks writes settings.local.json hooks", async () => {
@@ -68,6 +72,10 @@ test("installCodexSkill writes SKILL.md with hack-cli frontmatter", async () => 
   const content = await Bun.file(skillPath).text();
   expect(content).toContain("name: hack-cli");
   expect(content).toContain("hack setup cursor");
+  expect(content).toContain("## Product Boundary");
+  expect(content).toContain("Unsupported Experimental Remote");
+  expect(content).toContain("singleton.ports");
+  expect(content).not.toContain(".hack/hack.env.json");
 });
 
 test("renderAgentPrimer is CLI-first and mentions MCP", () => {
@@ -76,6 +84,20 @@ test("renderAgentPrimer is CLI-first and mentions MCP", () => {
   expect(primer).toContain("hack agent init");
   expect(primer).toContain("hack agent patterns");
   expect(primer).toContain("MCP");
+  expect(primer).toContain("Supported v3 surface");
+  expect(primer).toContain("singleton.ports");
+  expect(primer).not.toContain(".hack/hack.env.json");
+});
+
+test("renderAgentDocsSnippet reflects local-first v3 boundaries", () => {
+  const snippet = renderAgentDocsSnippet();
+  expect(snippet).toContain("Supported v3 surface");
+  expect(snippet).toContain("built-in GitHub workflows");
+  expect(snippet).toContain("built-in Linear sync");
+  expect(snippet).toContain("singleton.ports");
+  expect(snippet).toContain("HACK_ENV_SECRET_KEY");
+  expect(snippet).not.toContain("services/auth-broker");
+  expect(snippet).not.toContain(".hack/hack.env.json");
 });
 
 test("renderAgentInitPatterns includes dependency signals", () => {

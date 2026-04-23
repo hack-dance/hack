@@ -218,6 +218,13 @@ export interface ProjectLifecycleConfig {
   readonly processes?: readonly ProjectLifecycleProcess[];
 }
 
+export type ProjectLifecycleSingletonConflictPolicy = "adopt" | "fail";
+
+export interface ProjectLifecycleSingletonConfig {
+  readonly ports: readonly number[];
+  readonly onConflict?: ProjectLifecycleSingletonConflictPolicy;
+}
+
 export interface ProjectLifecycleHooks {
   readonly before?: readonly ProjectLifecycleCommand[];
   readonly after?: readonly ProjectLifecycleCommand[];
@@ -228,12 +235,14 @@ export interface ProjectLifecycleCommand {
   readonly command: string;
   readonly cwd?: string;
   readonly persistent?: boolean;
+  readonly singleton?: ProjectLifecycleSingletonConfig;
 }
 
 export interface ProjectLifecycleProcess {
   readonly name: string;
   readonly command: string;
   readonly cwd?: string;
+  readonly singleton?: ProjectLifecycleSingletonConfig;
 }
 
 interface ProjectStartupEntry {
@@ -241,6 +250,7 @@ interface ProjectStartupEntry {
   readonly run: string;
   readonly cwd?: string;
   readonly persistent?: boolean;
+  readonly singleton?: ProjectLifecycleSingletonConfig;
 }
 
 export type LogsBackend = "compose" | "loki";
@@ -377,6 +387,7 @@ function parseProjectConfigToml(opts: {
   return parseProjectConfigRecord(parsed, opts.path);
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Project config parsing keeps schema migration and legacy compatibility explicit in one parser.
 function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
   if (!isRecord(value)) {
     return {
@@ -598,12 +609,16 @@ function parseStartupEntry(value: unknown): ProjectStartupEntry | null {
   const name = getString(value, "name")?.trim();
   const cwd = getString(value, "cwd")?.trim();
   const persistent = value.persistent === true ? true : undefined;
+  const singleton = parseLifecycleSingletonConfig(
+    getRecord(value, "singleton")
+  );
 
   return {
     ...(name && name.length > 0 ? { name } : {}),
     run,
     ...(cwd && cwd.length > 0 ? { cwd } : {}),
     ...(persistent ? { persistent } : {}),
+    ...(singleton ? { singleton } : {}),
   };
 }
 
@@ -657,6 +672,7 @@ function mapStartupEntriesToLifecycle(opts: {
         name: entry.name ?? `startup-${generatedProcessIndex}`,
         command: entry.run,
         ...(entry.cwd ? { cwd: entry.cwd } : {}),
+        ...(entry.singleton ? { singleton: entry.singleton } : {}),
       });
       continue;
     }
@@ -665,6 +681,7 @@ function mapStartupEntriesToLifecycle(opts: {
       ...(entry.name ? { name: entry.name } : {}),
       command: entry.run,
       ...(entry.cwd ? { cwd: entry.cwd } : {}),
+      ...(entry.singleton ? { singleton: entry.singleton } : {}),
     });
   }
 
@@ -770,12 +787,16 @@ function parseLifecycleCommand(value: unknown): ProjectLifecycleCommand | null {
   const name = getString(value, "name")?.trim();
   const cwd = getString(value, "cwd")?.trim();
   const persistent = value.persistent === true ? true : undefined;
+  const singleton = parseLifecycleSingletonConfig(
+    getRecord(value, "singleton")
+  );
 
   return {
     ...(name && name.length > 0 ? { name } : {}),
     command,
     ...(cwd && cwd.length > 0 ? { cwd } : {}),
     ...(persistent ? { persistent } : {}),
+    ...(singleton ? { singleton } : {}),
   };
 }
 
@@ -808,11 +829,53 @@ function parseLifecycleProcess(value: unknown): ProjectLifecycleProcess | null {
     return null;
   }
   const cwd = getString(value, "cwd")?.trim();
+  const singleton = parseLifecycleSingletonConfig(
+    getRecord(value, "singleton")
+  );
 
   return {
     name,
     command,
     ...(cwd && cwd.length > 0 ? { cwd } : {}),
+    ...(singleton ? { singleton } : {}),
+  };
+}
+
+function parseLifecycleSingletonConfig(
+  value: Record<string, unknown> | undefined
+): ProjectLifecycleSingletonConfig | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const portsRaw = value.ports;
+  if (!Array.isArray(portsRaw)) {
+    return undefined;
+  }
+
+  const ports = [
+    ...new Set(
+      portsRaw.flatMap((entry) => {
+        if (typeof entry !== "number" || !Number.isInteger(entry)) {
+          return [];
+        }
+        return entry > 0 ? [entry] : [];
+      })
+    ),
+  ];
+  if (ports.length === 0) {
+    return undefined;
+  }
+
+  const onConflictRaw = getString(value, "onConflict")?.trim();
+  const onConflict =
+    onConflictRaw === "adopt" || onConflictRaw === "fail"
+      ? onConflictRaw
+      : undefined;
+
+  return {
+    ports,
+    ...(onConflict ? { onConflict } : {}),
   };
 }
 

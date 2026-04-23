@@ -97,7 +97,7 @@ export function normalizeTicketFieldName(field: string): string {
   return field === "body" ? "description" : field;
 }
 
-export function inferTicketSourceSystem(input: {
+function inferTicketSourceSystem(input: {
   readonly ticket: Pick<
     TicketProvenanceCompatibility,
     "owner" | "source" | "externalSystem"
@@ -115,7 +115,7 @@ export function inferTicketSourceSystem(input: {
   return "hack";
 }
 
-export function buildTicketRemoteLinks(input: {
+function buildTicketRemoteLinks(input: {
   readonly ticket: Pick<
     TicketProvenanceCompatibility,
     | "owner"
@@ -271,7 +271,7 @@ function createCheckpointRemoteLink(input: {
   };
 }
 
-export function buildTicketFieldAuthorities(input: {
+function buildTicketFieldAuthorities(input: {
   readonly remotes: readonly TicketRemoteLink[];
   readonly conflicts?: readonly TicketSyncConflictCompatibility[];
 }): TicketFieldAuthorityEntry[] {
@@ -338,7 +338,7 @@ function normalizeConflictAuthority(input: {
   return undefined;
 }
 
-export function buildTicketFieldVersions(input: {
+function buildTicketFieldVersions(input: {
   readonly ticket: TicketProvenanceCompatibility;
   readonly conflicts?: readonly TicketSyncConflictCompatibility[];
 }): TicketFieldVersion[] {
@@ -430,33 +430,6 @@ export function buildTicketProvenance(input: {
       conflicts: input.conflicts,
     }),
   };
-}
-
-export function findTicketRemoteLink(input: {
-  readonly ticket: Pick<
-    TicketProvenanceCompatibility,
-    | "owner"
-    | "source"
-    | "updatedAt"
-    | "title"
-    | "status"
-    | "externalSystem"
-    | "externalId"
-    | "externalKey"
-    | "externalUrl"
-    | "externalProjectId"
-    | "externalProjectName"
-    | "externalTeamId"
-  >;
-  readonly provider: string;
-  readonly syncCheckpoints?: readonly TicketSyncCheckpointCompatibility[];
-}): TicketRemoteLink | null {
-  return (
-    buildTicketRemoteLinks({
-      ticket: input.ticket,
-      syncCheckpoints: input.syncCheckpoints,
-    }).find((remote) => remote.provider === input.provider) ?? null
-  );
 }
 
 export function projectRemoteLinkToCompatibilityFields(input: {

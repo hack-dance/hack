@@ -121,6 +121,15 @@ import {
 } from "../lib/project-env-config.ts";
 import { resolveProjectExecutionTarget } from "../lib/project-execution.ts";
 import {
+  readProcessSnapshot,
+  resolveLifecycleProcessGroupIdsForTmuxState,
+  resolveLifecycleStopProcessGroupIds,
+} from "../lib/project-lifecycle-processes.ts";
+import {
+  inspectListeningTcpPorts,
+  resolveLifecycleSingletonDecision,
+} from "../lib/project-lifecycle-singleton.ts";
+import {
   readProjectRuntimeStateEntry,
   removeProjectRuntimeStateEntry,
   upsertProjectRuntimeStateEntry,
@@ -170,7 +179,6 @@ const CADDY_LABEL_PATTERN = /^(\s*)caddy:\s*(.*)$/;
 
 /** Regex to check if a string starts with a URL scheme (e.g., "http://", "https://"). */
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
-const WHITESPACE_PATTERN = /\s+/;
 
 const optManual = defineOption({
   name: "manual",
@@ -1460,7 +1468,16 @@ function createLifecycleProcessStarter(opts: {
   const startedProcesses: StartedLifecycleProcess[] = [];
   let backendName: MuxBackendName | null = null;
   let sessionReady = false;
+  let existingSessionCleared = false;
   let nextIndex = 0;
+
+  const ensureExistingSessionCleared = async (): Promise<void> => {
+    if (existingSessionCleared) {
+      return;
+    }
+    await killLifecycleSessionByName({ sessionName });
+    existingSessionCleared = true;
+  };
 
   const ensureSession = async (): Promise<void> => {
     if (sessionReady) {
@@ -1483,7 +1500,7 @@ function createLifecycleProcessStarter(opts: {
     if (!backend?.available) {
       throw new Error(`${resolvedBackend} is not available`);
     }
-    await killLifecycleSessionByName({ sessionName });
+    await ensureExistingSessionCleared();
     const created = await backend.createSession({
       name: sessionName,
       cwd: opts.project.projectRoot,
@@ -1505,6 +1522,22 @@ function createLifecycleProcessStarter(opts: {
   const startProcess = async (
     process: ProjectLifecycleProcess
   ): Promise<void> => {
+    await ensureExistingSessionCleared();
+    const singletonDecision = await resolveLifecycleSingletonDecisionForProcess(
+      {
+        process,
+        projectDir: opts.project.projectDir,
+        composeProject: opts.composeProject,
+      }
+    );
+    if (singletonDecision.kind === "adopt") {
+      logger.info({ message: singletonDecision.message });
+      return;
+    }
+    if (singletonDecision.kind === "fail") {
+      throw new Error(singletonDecision.message);
+    }
+
     await ensureSession();
     const started = await startLifecycleProcess({
       backend: backendName as MuxBackendName,
@@ -1527,6 +1560,7 @@ function createLifecycleProcessStarter(opts: {
         name: serviceName,
         command: command.command,
         ...(command.cwd ? { cwd: command.cwd } : {}),
+        ...(command.singleton ? { singleton: command.singleton } : {}),
       });
     },
     startMany: async ({ processes }) => {
@@ -1601,75 +1635,60 @@ async function startLifecycleProcesses(opts: {
     return;
   }
 
-  const mux = await resolveMux({ project: opts.project });
-  const backendName = resolveDefaultBackendName({
-    mode: mux.mode,
-    backends: mux.backends,
-  });
-  if (!backendName) {
-    throw new Error(
-      [
-        "No session mux backend available for lifecycle processes.",
-        "Install tmux or zellij, or set sessions.mux to auto|tmux|zellij.",
-      ].join("\n")
-    );
-  }
-
-  const sessionName = resolveLifecycleSessionName({
+  const starter = createLifecycleProcessStarter({
+    project: opts.project,
     projectName: opts.projectName,
     branch: opts.branch,
+    env: opts.env,
+    composeProject: opts.composeProject,
   });
-  await killLifecycleSessionByName({ sessionName });
-
-  const backend = mux.backends.get(backendName);
-  if (!backend?.available) {
-    throw new Error(`${backendName} is not available`);
-  }
-
-  const created = await backend.createSession({
-    name: sessionName,
-    cwd: opts.project.projectRoot,
-  });
-  if (!created.ok) {
-    throw new Error(`Failed to create lifecycle session: ${sessionName}`);
-  }
-
-  if (backendName === "tmux") {
-    for (const [key, value] of Object.entries(opts.env)) {
-      await exec(["tmux", "set-environment", "-t", sessionName, key, value], {
-        stdin: "ignore",
-      });
+  try {
+    await starter.startMany({ processes });
+    await starter.finalize();
+  } catch (error: unknown) {
+    await starter.abort();
+    if (error instanceof Error) {
+      throw error;
     }
+    throw new Error("Failed to start lifecycle processes");
+  }
+}
+
+async function resolveLifecycleSingletonDecisionForProcess(opts: {
+  readonly process: ProjectLifecycleProcess;
+  readonly projectDir: string;
+  readonly composeProject: string;
+}): Promise<
+  | ReturnType<typeof resolveLifecycleSingletonDecision>
+  | Promise<ReturnType<typeof resolveLifecycleSingletonDecision>>
+> {
+  if (!opts.process.singleton) {
+    return { kind: "start" };
   }
 
-  const startedProcesses: StartedLifecycleProcess[] = [];
-
-  for (const [index, proc] of processes.entries()) {
-    const started = await startLifecycleProcess({
-      backend: backendName,
-      sessionName,
-      projectRoot: opts.project.projectRoot,
-      env: opts.env,
-      index,
-      process: proc,
-      projectDir: opts.project.projectDir,
-      composeProject: opts.composeProject,
-    });
-    startedProcesses.push(started);
-  }
-
-  await upsertLifecycleStateEntry({
-    projectDir: opts.project.projectDir,
-    entry: {
-      composeProject: opts.composeProject,
-      projectName: opts.projectName,
-      branch: opts.branch,
-      sessionName,
-      backend: backendName,
-      processes: startedProcesses,
-      updatedAt: new Date().toISOString(),
-    },
+  const occupiedPorts = await inspectListeningTcpPorts({
+    ports: opts.process.singleton.ports,
   });
+  const decision = resolveLifecycleSingletonDecision({
+    singleton: opts.process.singleton,
+    occupiedPorts,
+    serviceName: opts.process.name,
+  });
+
+  if (decision.kind === "adopt") {
+    await appendLifecycleLogRecord({
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      record: {
+        timestamp: new Date().toISOString(),
+        service: opts.process.name,
+        stream: "meta",
+        message: `[adopt] ${decision.message}`,
+      },
+    });
+  }
+
+  return decision;
 }
 
 async function streamLifecycleCommandOutput(opts: {
@@ -1843,6 +1862,7 @@ async function stopLifecycleProcesses(opts: {
     ) ?? null;
 
   const backends = getMuxBackends();
+  let matchedLiveSession = false;
   for (const backend of backends.values()) {
     if (!backend.available) {
       continue;
@@ -1851,6 +1871,7 @@ async function stopLifecycleProcesses(opts: {
     if (!sessions.some((s) => s.name === sessionName)) {
       continue;
     }
+    matchedLiveSession = true;
     if (backend.name === "tmux") {
       await interruptLifecycleTmuxProcesses({
         sessionName,
@@ -1859,6 +1880,13 @@ async function stopLifecycleProcesses(opts: {
     }
     await backend.killSession({ name: sessionName });
   }
+
+  await terminateLifecycleProcessGroups({
+    processGroupIds: await resolveLifecycleStopProcessGroupIdsForEntry({
+      matchedLiveSession,
+      lifecycleEntry,
+    }),
+  });
 
   await removeLifecycleStateEntry({
     projectDir: opts.project.projectDir,
@@ -1897,12 +1925,6 @@ async function interruptLifecycleTmuxProcesses(opts: {
   });
 }
 
-type ProcessSnapshotRow = {
-  readonly pid: number;
-  readonly ppid: number;
-  readonly processGroupId: number;
-};
-
 async function readTmuxPanePids(opts: {
   readonly sessionName: string;
   readonly windowName: string;
@@ -1940,104 +1962,6 @@ async function readProcessGroupIdForPid(opts: {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-async function readProcessSnapshot(): Promise<ProcessSnapshotRow[]> {
-  const result = await exec(["ps", "-axo", "pid=,ppid=,pgid="], {
-    stdin: "ignore",
-  });
-  if (result.exitCode !== 0) {
-    return [];
-  }
-  return parseProcessSnapshotOutput(result.stdout);
-}
-
-export function parseProcessSnapshotOutput(text: string): ProcessSnapshotRow[] {
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .flatMap((line) => {
-      const parts = line.split(WHITESPACE_PATTERN);
-      if (parts.length < 3) {
-        return [];
-      }
-      const pid = Number.parseInt(parts[0] ?? "", 10);
-      const ppid = Number.parseInt(parts[1] ?? "", 10);
-      const processGroupId = Number.parseInt(parts[2] ?? "", 10);
-      if (
-        !(
-          Number.isInteger(pid) &&
-          pid > 0 &&
-          Number.isInteger(ppid) &&
-          ppid >= 0 &&
-          Number.isInteger(processGroupId) &&
-          processGroupId > 0
-        )
-      ) {
-        return [];
-      }
-      return [{ pid, ppid, processGroupId }];
-    });
-}
-
-export function collectDescendantProcessGroupIds(opts: {
-  readonly snapshot: readonly ProcessSnapshotRow[];
-  readonly rootPids: readonly number[];
-}): number[] {
-  const processByParent = new Map<number, ProcessSnapshotRow[]>();
-  const groups = new Set<number>();
-  const queue = [...opts.rootPids];
-  const visited = new Set<number>();
-
-  for (const row of opts.snapshot) {
-    const siblings = processByParent.get(row.ppid) ?? [];
-    siblings.push(row);
-    processByParent.set(row.ppid, siblings);
-  }
-
-  while (queue.length > 0) {
-    const pid = queue.shift();
-    if (!(pid && pid > 0) || visited.has(pid)) {
-      continue;
-    }
-    visited.add(pid);
-
-    const current = opts.snapshot.find((row) => row.pid === pid);
-    if (current) {
-      groups.add(current.processGroupId);
-    }
-
-    for (const child of processByParent.get(pid) ?? []) {
-      groups.add(child.processGroupId);
-      if (!visited.has(child.pid)) {
-        queue.push(child.pid);
-      }
-    }
-  }
-
-  return [...groups].sort((left, right) => left - right);
-}
-
-export function resolveLifecycleProcessGroupIdsForTmuxState(opts: {
-  readonly lifecycleEntry: LifecycleStateEntry | null;
-  readonly panePidsByWindow: ReadonlyMap<string, readonly number[]>;
-  readonly snapshot: readonly ProcessSnapshotRow[];
-}): number[] {
-  const rootPids = new Set<number>();
-
-  for (const processInfo of opts.lifecycleEntry?.processes ?? []) {
-    const currentPanePids =
-      opts.panePidsByWindow.get(processInfo.windowName) ?? [];
-    for (const panePid of currentPanePids) {
-      rootPids.add(panePid);
-    }
-  }
-
-  return collectDescendantProcessGroupIds({
-    snapshot: opts.snapshot,
-    rootPids: [...rootPids],
-  });
-}
-
 async function resolveLifecycleProcessGroupIds(opts: {
   readonly sessionName: string;
   readonly lifecycleEntry: LifecycleStateEntry | null;
@@ -2054,6 +1978,17 @@ async function resolveLifecycleProcessGroupIds(opts: {
   return resolveLifecycleProcessGroupIdsForTmuxState({
     lifecycleEntry: opts.lifecycleEntry,
     panePidsByWindow,
+    snapshot: await readProcessSnapshot(),
+  });
+}
+
+async function resolveLifecycleStopProcessGroupIdsForEntry(opts: {
+  readonly matchedLiveSession: boolean;
+  readonly lifecycleEntry: LifecycleStateEntry | null;
+}): Promise<number[]> {
+  return resolveLifecycleStopProcessGroupIds({
+    matchedLiveSession: opts.matchedLiveSession,
+    lifecycleEntry: opts.lifecycleEntry,
     snapshot: await readProcessSnapshot(),
   });
 }
@@ -4117,7 +4052,7 @@ function validateRepoRelativeWorkingDir(
     return "Required";
   }
   if (v.startsWith("/")) {
-    return "Use a repo-relative path (e.g. ., apps/web)";
+    return "Use a repo-relative path (e.g. ., apps/api)";
   }
   return undefined;
 }

@@ -1,6 +1,6 @@
 ---
 name: control-plane-worker
-description: Implements CLI, broker, database, runtime, integration, and closeout features for the Hack control plane.
+description: Implements local-first CLI, runtime, env, lifecycle, tickets, and macOS companion features for Hack.
 ---
 
 # Control Plane Worker
@@ -11,95 +11,76 @@ NOTE: Startup and cleanup are handled by `worker-base`. This skill defines the W
 
 Use this skill for features that primarily touch:
 - `src/**` CLI and control-plane code
-- `services/auth-broker/**`
-- `packages/db/**`
 - `.hack/docker-compose.yml`, `.hack/hack.config.json`, or other source-of-truth Hack runtime files
-- Linear/GitHub auth resolution, project sync, status updates, env/runtime hardening, or mission closeout/audit work
+- local runtime orchestration, env/runtime hardening, lifecycle processes, tickets, sessions, MCP/agent setup, docs, or the slim macOS companion
+
+Do not use this skill for retired v3 surfaces:
+- hosted auth/account/org/team management
+- web dashboard work
+- built-in GitHub workflows
+- built-in Linear sync/project-artifact flows
 
 ## Required Skills
 
-- `agent-browser` — invoke when a control-plane feature changes visible web surfaces or when mission/user-testing guidance requires browser proof for user-facing behavior owned by this worker type.
-- `hack-cli` — invoke when the feature touches `.hack/**`, runtime orchestration, gateway/session flows, tickets, or any `hack up/ps/open/down` verification.
-- `linear` — invoke when the feature changes repo-bound Linear project sync, status-update publishing, artifact layout, or mission closeout behavior.
+- `hack-cli` — invoke when the feature touches `.hack/**`, runtime orchestration, lifecycle/session flows, tickets, env, or any `hack up/ps/open/down` verification.
 
 ## Work Procedure
 
 1. Read the assigned feature, `mission.md`, mission `AGENTS.md`, `.factory/services.yaml`, and relevant `.factory/library/*.md` files. Restate the exact assertions or outcomes the feature must complete.
-2. Investigate existing code paths and add the failing test or regression harness first. Prefer the narrowest relevant suites (`tests/*.test.ts`, `services/auth-broker/tests/*.test.ts`, `packages/db/tests/*.test.ts`). If the feature has no `fulfills` claims, still add characterization or regression coverage for the changed behavior.
-3. Implement the smallest coherent change set in CLI, broker, database, or Hack runtime config. Never hand-edit `.hack/.internal/**` or `.hack/.branch/**`; only change source-of-truth files.
-   - If the feature claims durable-store or database-backed parity coverage, prove it against a real durable backend path or explicitly narrow the claim in the handoff; do not substitute an in-memory fake or query-AST shim and still call it durable verification.
-4. Run focused validators first, then the smallest meaningful `typecheck`/`check` commands for the touched surfaces. For repo-bound CLI behavior, build and validate with `./dist/hack` or repo-local Bun entrypoints. For HTTP features, use declared service commands and `curl` health/API checks. When invoking `bun test` from the repo root against files outside `./tests`, use absolute paths or explicit `./`-prefixed paths that Bun actually honors in this repo so targeted commands do not silently skip files.
+2. Investigate existing code paths and add the failing test or regression harness first. Prefer the narrowest relevant suites under `tests/*.test.ts`. If the feature has no `fulfills` claims, still add characterization or regression coverage for the changed behavior.
+3. Implement the smallest coherent change set in CLI, runtime config, tickets, env, lifecycle, macOS, or agent setup. Never hand-edit `.hack/.internal/**` or `.hack/.branch/**`; only change source-of-truth files.
+4. Run focused validators first, then the smallest meaningful `typecheck`/`check` commands for the touched surfaces. For repo-bound CLI behavior, build and validate with `./dist/hack` or repo-local Bun entrypoints. When invoking `bun test` from the repo root against files outside `./tests`, use absolute paths or explicit `./`-prefixed paths that Bun actually honors in this repo so targeted commands do not silently skip files.
    - If the assigned feature is explicitly about fixing a known red baseline, capture the failing baseline evidence once, then continue the repair work and rerun the gate before handoff.
    - If repo-bound GitHub CLI routes cannot reach the changed auth code because `dance.hack.github` is not enabled in project config yet, use a direct resolver or similarly narrow deterministic smoke and record why the repo-bound path was unavailable.
    - If no safe repo-bound hook exists to force a failure mode (for example local-sync failure injection), deterministic regression tests are acceptable proof as long as you explain why a live manual repro would mutate real project state.
    - For daemon/gateway request-target hardening, raw-socket regression coverage against the proxy transport is preferred. If you also need live proof without mutating shared user daemon state, an isolated temp-HOME `bun index.ts daemon start --foreground` smoke is an acceptable validation pattern; record the isolation setup in the handoff.
-5. If the feature touches Linear project/state behavior, use repo-bound `./dist/hack linear ...` flows to verify the effect and record the exact commands/results. Do not rely on manual remote edits as the primary proof. For keychainless or broker-seeded auth work, `tokenSource: "broker"` alone is not sufficient proof: capture a stronger negative signal showing the broker path avoided local secret/keychain reads, or fail closed with explicit guidance instead of claiming success.
-6. If the feature changes user-facing web behavior even though the primary code lives outside `apps/web`, run `agent-browser` against the routed host unless the change is strictly non-visual. If the visible behavior cannot be exercised in-browser, record a justified deviation and pair it with the strongest available CLI/API proof.
-7. Capture any blockers, discovered issues, or scope mismatches immediately. If a feature needs new credentials, unavailable infrastructure, or a change that would violate CLI optionality/auth ownership, return to the orchestrator instead of guessing.
-8. Stop any processes you started and produce a detailed handoff with exact commands, observations, tests added, and remaining issues.
+   - For lifecycle changes, verify shell semantics, process-group cleanup, stale pane/process metadata reconciliation, singleton listener behavior, and doctor recovery guidance.
+   - For env changes, verify overlay order, worktree-local override behavior, linked-worktree secret-key lookup, host-vs-compose target behavior, and materialization drift detection.
+5. Capture any blockers, discovered issues, or scope mismatches immediately. If a feature needs credentials, unavailable infrastructure, or a change that would reintroduce hosted/web/integration dependencies, return to the orchestrator instead of guessing.
+6. Stop any processes you started and produce a detailed handoff with exact commands, observations, tests added, and remaining issues.
 9. If `bun run check` succeeds and only re-surfaces the known warning-only complexity diagnostics already documented in mission `AGENTS.md`, do not return to the orchestrator for that reason and do not record them as new discovered issues unless your feature directly worsened the warned files.
 
 ## Example Handoff
 
 ```json
 {
-  "salientSummary": "Hardened Linear unattended auth and artifact-path behavior so env-only mode fails closed without keychain fallback and repo-bound artifact commands no longer treat .hack/.hack/linear as authoritative. Added regression tests and verified the current branch CLI with ./dist/hack.",
-  "whatWasImplemented": "Updated the Linear auth resolver and command guidance paths, added canonical-path normalization/rejection in project artifact helpers, and extended regression coverage for env-only failure, refresh persistence, and legacy artifact-root handling. The repo-bound CLI now reports the correct repair guidance for broker-vs-local failures.",
-  "whatWasLeftUndone": "Did not touch the future apps/web runtime wiring; that remains for later milestones.",
+  "salientSummary": "Hardened lifecycle singleton behavior for local tunnel helpers so Hack adopts a healthy existing listener set, fails partial conflicts, and avoids duplicate host process churn.",
+  "whatWasImplemented": "Updated lifecycle config parsing, runtime startup decisions, docs, and regression coverage for singleton ports and adopt/fail behavior.",
+  "whatWasLeftUndone": "Remote/gateway/node/dispatch were intentionally left untouched because they are unsupported experimental in v3.",
   "verification": {
     "commandsRun": [
       {
-        "command": "bun test tests/linear-auth.test.ts tests/linear-project-artifacts.test.ts tests/linear-commands.test.ts tests/prerequisites-matrix.test.ts",
+        "command": "bun test tests/project-lifecycle-singleton.test.ts tests/project-config.test.ts tests/project-config-schema.test.ts",
         "exitCode": 0,
-        "observation": "Targeted Linear/auth regression suite passed after adding the new fail-closed and canonical-path cases."
+        "observation": "Targeted lifecycle singleton/config regression suite passed."
       },
       {
-        "command": "bun run build",
+        "command": "bun run typecheck",
         "exitCode": 0,
-        "observation": "Rebuilt ./dist/hack for repo-bound CLI verification."
-      },
-      {
-        "command": "./dist/hack linear status --json",
-        "exitCode": 0,
-        "observation": "Repo-bound Linear status still resolves the bound Hack project/profile after the auth-path changes."
+        "observation": "Workspace typecheck passed."
       }
     ],
     "interactiveChecks": [
       {
-        "action": "Ran a manual repo-bound artifact pull/apply smoke and inspected the working tree.",
-        "observed": "Only .hack/linear/projects/<project-id>/... changed; the legacy .hack/.hack/linear tree was not used as the active artifact root."
+        "action": "Ran hack doctor before and after hack down in a repo with stale lifecycle state.",
+        "observed": "Doctor classified stale lifecycle metadata and pointed to hack down; cleanup removed only the matching lifecycle state."
       }
     ]
   },
   "tests": {
     "added": [
       {
-        "file": "tests/linear-auth.test.ts",
+        "file": "tests/project-lifecycle-singleton.test.ts",
         "cases": [
           {
-            "name": "env-only mode fails closed when the env token is missing",
-            "verifies": "No keychain fallback or silent success occurs when HACK_LINEAR_PREFER_ENV_TOKEN_ONLY=true without a configured token."
-          }
-        ]
-      },
-      {
-        "file": "tests/linear-project-artifacts.test.ts",
-        "cases": [
-          {
-            "name": "legacy .hack/.hack/linear paths are rejected or ignored",
-            "verifies": "Artifact commands only treat the canonical .hack/linear tree as authoritative."
+            "name": "adopts a complete singleton listener set",
+            "verifies": "Hack does not start duplicate fixed-port tunnel helpers when all configured ports are already listening and onConflict is adopt."
           }
         ]
       }
     ]
   },
-  "discoveredIssues": [
-    {
-      "severity": "medium",
-      "description": "The broader auth-broker config harness is still environment-sensitive when repo-root env files leak into tests outside the focused Linear suites.",
-      "suggestedFix": "Keep the planned validation-harness-hardening feature near the top of the mission queue."
-    }
-  ]
+  "discoveredIssues": []
 }
 ```
 
@@ -107,5 +88,5 @@ Use this skill for features that primarily touch:
 
 - The feature needs credentials, accounts, or third-party setup that are not already present.
 - Hack global/runtime infrastructure is unavailable and cannot be restored within the mission boundaries.
-- The change would introduce a second auth authority or make a critical local-first workflow web-only.
+- The change would reintroduce hosted auth, built-in GitHub/Linear, web dashboard, or remote dependencies into the supported v3 product.
 - The feature requires a larger decomposition because the claimed assertions cannot be completed coherently in one session.

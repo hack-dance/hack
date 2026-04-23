@@ -1,7 +1,4 @@
 import {
-  DEFAULT_AUTH_ALIAS_HOST,
-  DEFAULT_AUTH_HOST,
-  DEFAULT_AUTH_SERVER_PORT,
   DEFAULT_CADDY_IP,
   DEFAULT_COREDNS_IP,
   DEFAULT_INGRESS_NETWORK,
@@ -50,9 +47,6 @@ export function renderGlobalCaddyCompose(opts?: {
     "      caddy.root: /srv/schemas",
     '      caddy.file_server: ""',
     "      caddy.tls: internal",
-    `      caddy_1: ${DEFAULT_AUTH_HOST}, ${DEFAULT_AUTH_ALIAS_HOST}`,
-    `      caddy_1.reverse_proxy: host.docker.internal:${DEFAULT_AUTH_SERVER_PORT}`,
-    "      caddy_1.tls: internal",
     "    environment:",
     `      CADDY_INGRESS_NETWORKS: ${DEFAULT_INGRESS_NETWORK}`,
     ...(useStaticCaddyIp
@@ -416,6 +410,23 @@ export function renderProjectConfigSchemaJson(): string {
                 command: { type: "string" },
                 cwd: { type: "string" },
                 persistent: { type: "boolean" },
+                singleton: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    ports: {
+                      type: "array",
+                      minItems: 1,
+                      uniqueItems: true,
+                      items: { type: "integer", minimum: 1 },
+                    },
+                    onConflict: {
+                      type: "string",
+                      enum: ["adopt", "fail"],
+                    },
+                  },
+                  required: ["ports"],
+                },
               },
               anyOf: [{ required: ["run"] }, { required: ["command"] }],
             },
@@ -444,6 +455,23 @@ export function renderProjectConfigSchemaJson(): string {
                         command: { type: "string" },
                         cwd: { type: "string" },
                         persistent: { type: "boolean" },
+                        singleton: {
+                          type: "object",
+                          additionalProperties: false,
+                          properties: {
+                            ports: {
+                              type: "array",
+                              minItems: 1,
+                              uniqueItems: true,
+                              items: { type: "integer", minimum: 1 },
+                            },
+                            onConflict: {
+                              type: "string",
+                              enum: ["adopt", "fail"],
+                            },
+                          },
+                          required: ["ports"],
+                        },
                       },
                     },
                   ],
@@ -463,6 +491,23 @@ export function renderProjectConfigSchemaJson(): string {
                         command: { type: "string" },
                         cwd: { type: "string" },
                         persistent: { type: "boolean" },
+                        singleton: {
+                          type: "object",
+                          additionalProperties: false,
+                          properties: {
+                            ports: {
+                              type: "array",
+                              minItems: 1,
+                              uniqueItems: true,
+                              items: { type: "integer", minimum: 1 },
+                            },
+                            onConflict: {
+                              type: "string",
+                              enum: ["adopt", "fail"],
+                            },
+                          },
+                          required: ["ports"],
+                        },
                       },
                     },
                   ],
@@ -488,6 +533,23 @@ export function renderProjectConfigSchemaJson(): string {
                         command: { type: "string" },
                         cwd: { type: "string" },
                         persistent: { type: "boolean" },
+                        singleton: {
+                          type: "object",
+                          additionalProperties: false,
+                          properties: {
+                            ports: {
+                              type: "array",
+                              minItems: 1,
+                              uniqueItems: true,
+                              items: { type: "integer", minimum: 1 },
+                            },
+                            onConflict: {
+                              type: "string",
+                              enum: ["adopt", "fail"],
+                            },
+                          },
+                          required: ["ports"],
+                        },
                       },
                     },
                   ],
@@ -507,6 +569,23 @@ export function renderProjectConfigSchemaJson(): string {
                         command: { type: "string" },
                         cwd: { type: "string" },
                         persistent: { type: "boolean" },
+                        singleton: {
+                          type: "object",
+                          additionalProperties: false,
+                          properties: {
+                            ports: {
+                              type: "array",
+                              minItems: 1,
+                              uniqueItems: true,
+                              items: { type: "integer", minimum: 1 },
+                            },
+                            onConflict: {
+                              type: "string",
+                              enum: ["adopt", "fail"],
+                            },
+                          },
+                          required: ["ports"],
+                        },
                       },
                     },
                   ],
@@ -524,6 +603,23 @@ export function renderProjectConfigSchemaJson(): string {
                 name: { type: "string" },
                 command: { type: "string" },
                 cwd: { type: "string" },
+                singleton: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    ports: {
+                      type: "array",
+                      minItems: 1,
+                      uniqueItems: true,
+                      items: { type: "integer", minimum: 1 },
+                    },
+                    onConflict: {
+                      type: "string",
+                      enum: ["adopt", "fail"],
+                    },
+                  },
+                  required: ["ports"],
+                },
               },
             },
           },

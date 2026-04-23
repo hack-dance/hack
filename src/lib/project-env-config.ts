@@ -311,23 +311,55 @@ function toGitRelativePath(opts: {
 async function isGitTrackedProjectEnvPath(opts: {
   readonly projectRoot: string;
   readonly path: string;
-}): Promise<boolean> {
+}): Promise<boolean | null> {
   const relativePath = toGitRelativePath(opts);
-  const proc = Bun.spawn({
-    cmd: [
-      "git",
-      "-C",
-      opts.projectRoot,
-      "ls-files",
-      "--error-unmatch",
-      "--",
-      relativePath,
-    ],
-    stderr: "ignore",
-    stdin: "ignore",
-    stdout: "ignore",
-  });
-  return (await proc.exited) === 0;
+  let proc: Bun.Subprocess<"ignore", "ignore", "ignore">;
+  try {
+    proc = Bun.spawn({
+      cmd: [
+        "git",
+        "-C",
+        opts.projectRoot,
+        "ls-files",
+        "--error-unmatch",
+        "--",
+        relativePath,
+      ],
+      stderr: "ignore",
+      stdin: "ignore",
+      stdout: "ignore",
+    });
+  } catch {
+    return null;
+  }
+
+  const exitCode = await proc.exited;
+  if (exitCode === 0) {
+    return true;
+  }
+  if (exitCode === 1) {
+    return false;
+  }
+  return null;
+}
+
+async function hasLegacyLocalEnvironment(opts: {
+  readonly path: string;
+}): Promise<boolean> {
+  const text = await readTextFile(opts.path);
+  if (text === null) {
+    return false;
+  }
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(text);
+  } catch {
+    return false;
+  }
+  if (!isRecord(parsed)) {
+    return false;
+  }
+  return getString(parsed, "environment") === "local";
 }
 
 async function isLegacyTrackedLocalOverlay(opts: {
@@ -341,8 +373,14 @@ async function isLegacyTrackedLocalOverlay(opts: {
   if (!(await pathExists(localDefaultPath))) {
     return false;
   }
-  return await isGitTrackedProjectEnvPath({
+  const tracked = await isGitTrackedProjectEnvPath({
     projectRoot: opts.projectRoot,
+    path: localDefaultPath,
+  });
+  if (tracked !== null) {
+    return tracked;
+  }
+  return await hasLegacyLocalEnvironment({
     path: localDefaultPath,
   });
 }

@@ -580,6 +580,108 @@ test("legacy tracked local overlay remains selectable without acting as a local 
   ]);
 });
 
+test("legacy local overlays stay out of default resolution when git is unavailable", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    SHARED_DEFAULT: shared-default",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.local.yaml"),
+    [
+      "version: 1",
+      "environment: local",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    LEGACY_LOCAL: legacy-local",
+      "",
+    ].join("\n")
+  );
+  await runGit(["add", "."], repo.projectRoot);
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = resolve(repo.tempRoot, "missing-git-bin");
+
+  try {
+    const defaultResolved = await resolveProjectEnvConfig({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      serviceNames: ["api", "web"],
+    });
+    expect(defaultResolved?.globalEnv).toEqual({
+      SHARED_DEFAULT: "shared-default",
+    });
+    expect(defaultResolved?.files).toEqual([
+      resolve(repo.projectDir, "hack.env.default.yaml"),
+    ]);
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test("default local overrides still resolve when git is unavailable", async () => {
+  const repo = await createRepo();
+
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    SHARED_DEFAULT: shared-default",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.local.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    LOCAL_DEFAULT: local-default",
+      "",
+    ].join("\n")
+  );
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = resolve(repo.tempRoot, "missing-git-bin");
+
+  try {
+    const defaultResolved = await resolveProjectEnvConfig({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      serviceNames: ["api", "web"],
+    });
+    expect(defaultResolved?.globalEnv).toEqual({
+      LOCAL_DEFAULT: "local-default",
+      SHARED_DEFAULT: "shared-default",
+    });
+    expect(defaultResolved?.files).toEqual([
+      resolve(repo.projectDir, "hack.env.default.yaml"),
+      resolve(repo.projectDir, "hack.env.local.yaml"),
+    ]);
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
 test("legacy tracked local overlay keeps default local mutations in a compatibility file", async () => {
   const repo = await createRepo();
   await initGitRepo(repo.projectRoot);

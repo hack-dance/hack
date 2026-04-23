@@ -281,7 +281,7 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
 async function ensureProjectEnvLocalIgnoreEntries(opts: {
   readonly projectRoot: string;
 }): Promise<void> {
-  const gitDir = await resolveGitWorktreeDir({
+  const gitDir = await resolveGitRepositoryIdentity({
     repoRoot: opts.projectRoot,
   });
   const ignorePath =

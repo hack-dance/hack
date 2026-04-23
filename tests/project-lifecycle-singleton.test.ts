@@ -87,3 +87,9 @@ test("inspectListeningTcpPorts detects occupied loopback ports without external 
     listener.stop();
   }
 });
+
+test("inspectListeningTcpPorts surfaces unexpected bind probe failures", async () => {
+  await expect(inspectListeningTcpPorts({ ports: [-1] })).rejects.toThrow(
+    "Failed to inspect singleton port :-1"
+  );
+});

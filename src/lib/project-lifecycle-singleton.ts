@@ -69,15 +69,26 @@ export function inspectListeningTcpPorts(input: {
   const occupied: number[] = [];
 
   for (const port of [...new Set(input.ports)]) {
-    if (isTcpPortOccupied({ port })) {
+    const state = inspectTcpPortState({ port });
+    if (state.kind === "occupied") {
       occupied.push(port);
+    }
+    if (state.kind === "error") {
+      return Promise.reject(
+        new Error(`Failed to inspect singleton port :${port}: ${state.message}`)
+      );
     }
   }
 
   return Promise.resolve(occupied.sort((left, right) => left - right));
 }
 
-function isTcpPortOccupied(input: { readonly port: number }): boolean {
+function inspectTcpPortState(input: {
+  readonly port: number;
+}):
+  | { readonly kind: "free" }
+  | { readonly kind: "occupied" }
+  | { readonly kind: "error"; readonly message: string } {
   try {
     const listener = Bun.listen({
       hostname: "127.0.0.1",
@@ -89,10 +100,36 @@ function isTcpPortOccupied(input: { readonly port: number }): boolean {
       },
     });
     listener.stop();
-    return false;
-  } catch {
+    return { kind: "free" };
+  } catch (error: unknown) {
+    if (isAddressInUseError({ error })) {
+      return { kind: "occupied" };
+    }
+    return {
+      kind: "error",
+      message:
+        error instanceof Error ? error.message : "Unknown bind probe error",
+    };
+  }
+}
+
+function isAddressInUseError(input: { readonly error: unknown }): boolean {
+  const code =
+    typeof input.error === "object" &&
+    input.error !== null &&
+    "code" in input.error
+      ? String((input.error as { readonly code?: unknown }).code ?? "")
+      : "";
+  if (code === "EADDRINUSE") {
     return true;
   }
+  const message =
+    input.error instanceof Error
+      ? input.error.message.toLowerCase()
+      : String(input.error).toLowerCase();
+  return (
+    message.includes("eaddrinuse") || message.includes("address already in use")
+  );
 }
 
 function formatPortList(input: { readonly ports: readonly number[] }): string {

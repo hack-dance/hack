@@ -693,6 +693,55 @@ test("setProjectEnvValue writes worktree-local overrides when requested", async 
   expect(excludeText).toContain(".hack/hack.env.*.local.yaml");
 });
 
+test("setProjectEnvValue writes local override ignore rules to the git common-dir exclude", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "hack-project-env-ignore-"));
+  tempDirs.add(sandbox);
+
+  const sourceRoot = resolve(sandbox, "source");
+  await mkdir(resolve(sourceRoot, ".hack"), { recursive: true });
+  await initGitRepo(sourceRoot);
+  await writeFile(resolve(sourceRoot, "README.md"), "worktree fixture\n");
+  await writeFile(
+    resolve(sourceRoot, ".hack", PROJECT_COMPOSE_FILENAME),
+    "services:\n  api: {}\n"
+  );
+  await writeFile(
+    resolve(sourceRoot, ".hack", PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify(
+      { name: "linked-ignore-test", dev_host: "linked-ignore.hack" },
+      null,
+      2
+    )}\n`
+  );
+  await runGit(["add", "README.md", ".hack"], sourceRoot);
+  await runGit(["commit", "-m", "init"], sourceRoot);
+
+  const linkedRoot = resolve(sandbox, "linked");
+  await runGit(["worktree", "add", linkedRoot], sourceRoot);
+
+  await setProjectEnvValue({
+    projectRoot: linkedRoot,
+    projectDir: resolve(linkedRoot, ".hack"),
+    envName: "qa",
+    scope: "global",
+    key: "LOCAL_ONLY",
+    value: "true",
+    secret: false,
+    local: true,
+  });
+
+  const commonDir = await runGit(
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    linkedRoot
+  );
+  const excludeText = await readFile(
+    resolve(commonDir, "info", "exclude"),
+    "utf8"
+  );
+  expect(excludeText).toContain(".hack/hack.env.local.yaml");
+  expect(excludeText).toContain(".hack/hack.env.*.local.yaml");
+});
+
 test("normal git clones keep generated env keys at the repo root", async () => {
   const repo = await createRepo();
   await initGitRepo(repo.projectRoot);

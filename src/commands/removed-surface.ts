@@ -32,6 +32,7 @@ export function createRemovedSurfaceCommand(input: {
       ].join("\n"),
       group: "Integrations",
       options: [] as const,
+      allowUnknownOptions: true,
       positionals: removedArgsPositionals,
       subcommands: [] as const,
     } as const),

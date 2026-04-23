@@ -123,7 +123,7 @@ import { resolveProjectExecutionTarget } from "../lib/project-execution.ts";
 import {
   readProcessSnapshot,
   resolveLifecycleProcessGroupIdsForTmuxState,
-  resolvePersistedLifecycleProcessGroupIds,
+  resolveLifecycleStopProcessGroupIds,
 } from "../lib/project-lifecycle-processes.ts";
 import {
   inspectListeningTcpPorts,
@@ -1862,6 +1862,7 @@ async function stopLifecycleProcesses(opts: {
     ) ?? null;
 
   const backends = getMuxBackends();
+  let matchedLiveSession = false;
   for (const backend of backends.values()) {
     if (!backend.available) {
       continue;
@@ -1870,6 +1871,7 @@ async function stopLifecycleProcesses(opts: {
     if (!sessions.some((s) => s.name === sessionName)) {
       continue;
     }
+    matchedLiveSession = true;
     if (backend.name === "tmux") {
       await interruptLifecycleTmuxProcesses({
         sessionName,
@@ -1880,7 +1882,8 @@ async function stopLifecycleProcesses(opts: {
   }
 
   await terminateLifecycleProcessGroups({
-    processGroupIds: await resolvePersistedLifecycleProcessGroupIdsForEntry({
+    processGroupIds: await resolveLifecycleStopProcessGroupIdsForEntry({
+      matchedLiveSession,
       lifecycleEntry,
     }),
   });
@@ -1979,14 +1982,12 @@ async function resolveLifecycleProcessGroupIds(opts: {
   });
 }
 
-async function resolvePersistedLifecycleProcessGroupIdsForEntry(opts: {
+async function resolveLifecycleStopProcessGroupIdsForEntry(opts: {
+  readonly matchedLiveSession: boolean;
   readonly lifecycleEntry: LifecycleStateEntry | null;
 }): Promise<number[]> {
-  if (!opts.lifecycleEntry) {
-    return [];
-  }
-
-  return resolvePersistedLifecycleProcessGroupIds({
+  return resolveLifecycleStopProcessGroupIds({
+    matchedLiveSession: opts.matchedLiveSession,
     lifecycleEntry: opts.lifecycleEntry,
     snapshot: await readProcessSnapshot(),
   });

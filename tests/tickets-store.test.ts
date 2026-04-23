@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -1296,6 +1297,52 @@ test("ticket provenance infers a remote provider from source metadata when exter
       }),
     ])
   );
+});
+
+test("tickets store surfaces repository-not-found instead of falling back to stale local state", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-store-missing-remote-",
+  });
+  const store = await createStore({ projectRoot });
+
+  const created = await store.createTicket({
+    title: "Local snapshot",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+
+  const remoteScriptPath = join(projectRoot, "fake-ssh.sh");
+  await writeFile(
+    remoteScriptPath,
+    [
+      "#!/bin/sh",
+      "echo \"fatal: repository 'git@github.com:hack-dance/missing.git' not found\" >&2",
+      "exit 128",
+      "",
+    ].join("\n")
+  );
+  await chmod(remoteScriptPath, 0o755);
+  await run({
+    cwd: projectRoot,
+    cmd: [
+      "git",
+      "remote",
+      "add",
+      "origin",
+      "git@github.com:hack-dance/missing.git",
+    ],
+  });
+
+  const originalGitSshCommand = process.env.GIT_SSH_COMMAND;
+  process.env.GIT_SSH_COMMAND = remoteScriptPath;
+
+  try {
+    await expect(store.readSnapshot()).rejects.toThrow("repository");
+  } finally {
+    process.env.GIT_SSH_COMMAND = originalGitSshCommand;
+  }
 });
 
 async function createStore(opts: { readonly projectRoot: string }) {

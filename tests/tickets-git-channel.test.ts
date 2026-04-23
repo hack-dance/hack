@@ -386,6 +386,15 @@ test("formatTicketsGitRemoteError adds actionable SSH guidance", () => {
   expect(__testOnly.isTicketsGitRemoteConnectivityError(message)).toBe(true);
 });
 
+test("repository not found is not treated as a recoverable connectivity error", () => {
+  const message = [
+    "fatal: repository 'git@github.com:hack-dance/missing.git' not found",
+    "fatal: Could not read from remote repository.",
+  ].join("\n");
+
+  expect(__testOnly.isTicketsGitRemoteConnectivityError(message)).toBe(false);
+});
+
 test("sync returns actionable SSH guidance when git remote auth fails", async () => {
   const projectRoot = await createTempGitProject({
     prefix: "hack-cli-tickets-git-auth-failure-",

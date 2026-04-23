@@ -1701,6 +1701,9 @@ function resolveTicketGitIdentityEnv(input?: {
 }
 
 export function isTicketsGitRemoteConnectivityError(message: string): boolean {
+  if (isTicketsGitMissingRepositoryError(message)) {
+    return false;
+  }
   return (
     isTicketsGitRemoteAuthError(message) ||
     isTicketsGitRemoteTimeoutError(message) ||
@@ -1735,9 +1738,17 @@ function isTicketsGitRemoteAuthError(message: string): boolean {
     ) ||
     normalized.includes("sign_and_send_pubkey") ||
     normalized.includes("no such identity") ||
-    normalized.includes("repository not found") ||
     (normalized.includes("permission denied") &&
       normalized.includes("publickey"))
+  );
+}
+
+function isTicketsGitMissingRepositoryError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("repository not found") ||
+    (normalized.includes("fatal: repository") &&
+      normalized.includes("not found"))
   );
 }
 

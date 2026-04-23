@@ -100,6 +100,7 @@ export interface CommandSpec<
   readonly positionals: Pos;
   readonly subcommands: Subs;
   readonly expandInRootHelp?: boolean;
+  readonly allowUnknownOptions?: boolean;
 }
 
 export type AnyCommandSpec = CommandSpec<

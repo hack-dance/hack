@@ -121,11 +121,17 @@ test("dispatch rejects removed GitHub PR automation flags with migration guidanc
   expect(result.stderr).toContain("gh pr create");
 });
 
-test("removed linear stub rejects unknown options instead of using extension parsing", async () => {
-  const result = await runCliWithCapturedOutput(["linear", "--bogus"]);
+test("removed linear stub still emits migration guidance for legacy flags", async () => {
+  const result = await runCliWithCapturedOutput([
+    "linear",
+    "status",
+    "--profile",
+    "demo",
+  ]);
 
   expect(result.exitCode).toBe(1);
-  expect(result.stderr).toContain("--bogus");
+  expect(result.stderr).toContain("`hack linear status` was removed in v3.");
+  expect(result.stderr).toContain("Use repo-local tickets");
 });
 
 async function runCliWithCapturedOutput(

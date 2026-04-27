@@ -39,7 +39,7 @@ env:
 
 jobs:
   build-and-notarize:
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     permissions:
       contents: write
     steps:

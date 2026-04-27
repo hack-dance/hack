@@ -12,7 +12,7 @@ on:
 
 jobs:
   create-release:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write
     outputs:
@@ -66,7 +66,7 @@ jobs:
           - os: macos-15
             upload_install: false
             skip_tests: true
-          - os: macos-15-large
+          - os: blacksmith-6vcpu-macos-15
             upload_install: false
             skip_tests: true
     steps:
@@ -153,7 +153,7 @@ jobs:
 
   update-homebrew-tap:
     needs: [create-release, build]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
     steps:

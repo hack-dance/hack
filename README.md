@@ -4,93 +4,29 @@
 
 # Hack
 
-Hack is a local-first developer runtime for running repo environments cleanly on one machine.
+Hack is a local-first developer runtime for repo environments.
 
-Hack v3 narrows the product to the local core:
+It gives each project a predictable local runtime, stable HTTPS hostnames, resolved environment
+variables, persistent work sessions, diagnostics, and optional git-backed tickets without requiring a
+hosted Hack service.
 
-- project init and runtime orchestration
-- stable local routing and TLS
-- env management and host/container env injection
-- persistent sessions
-- diagnostics and recovery
-- optional repo-local tickets
-- a slim macOS companion for local status, control, and logs
+## What Hack Does
 
-Hack no longer treats hosted auth, the web dashboard, built-in GitHub workflows, or Linear sync as supported product surfaces.
+Hack is built for local development on machines that run many projects, branches, agents, and
+supporting services at the same time.
 
-## Core workflow
+- Start and stop project runtimes with `hack up`, `hack down`, and `hack restart`.
+- Open stable local HTTPS URLs like `https://myapp.hack` with `hack open`.
+- Route service subdomains through local Caddy and trusted development TLS.
+- Resolve env overlays and secrets from `.hack/` and inject them into compose, host commands, and sessions.
+- Keep tmux-backed project workspaces alive with `hack session`.
+- Diagnose Docker, DNS, TLS, env, lifecycle, and stale runtime state with `hack doctor`.
+- Track optional repo-local work with `hack tickets`.
+- Use a slim macOS companion for local project status, controls, logs, and quick actions.
 
-```bash
-hack global install
-hack init
-hack up --detach
-hack open
-hack logs --pretty
-```
-
-Useful follow-ups:
-
-```bash
-hack restart
-hack doctor
-hack session
-hack env list
-hack host exec --scope api -- bun test
-hack tickets list
-```
-
-Portable envs and secrets:
-
-- Commit `.hack/hack.env.default.yaml` and optional `.hack/hack.env.<overlay>.yaml`.
-- Keep `.hack.secret.key` out of git, or provide `HACK_ENV_SECRET_KEY` in CI and managed containers.
-- Linked git worktrees can reuse an existing checkout-family secret key when their local copy is missing.
-- Let Hack inject resolved env directly into runtime commands by default.
-- Materialize `.hack/.env` only when you explicitly need a compatibility file.
-
-## What stays in v3
-
-- `hack init`
-- `hack up`, `hack down`, `hack restart`
-- `hack open`, `hack logs`, `hack ps`
-- `hack env`, `hack host exec`, `hack host shell`
-- `hack session`
-- `hack doctor`, `hack daemon`, `hack crash-capture`
-- `hack tickets`
-- macOS app for local project/global status and Ghostty-backed bottom logs panel
-
-## What was removed
-
-- hosted Hack auth and account/org/team management
-- built-in GitHub integration flows
-- built-in Linear integration flows
-- web dashboard and browser control plane
-- auth-broker service and hosted control-plane dependency
-
-Removed commands remain as compatibility stubs and print migration guidance.
-
-## Env model
-
-Hack’s canonical env files live in `.hack/`:
-
-- shared repo files:
-  - `.hack/hack.env.default.yaml`
-  - `.hack/hack.env.<overlay>.yaml`
-- worktree-local override files:
-  - `.hack/hack.env.local.yaml`
-  - `.hack/hack.env.<overlay>.local.yaml`
-
-Resolution order:
-
-1. shared default
-2. shared selected overlay
-3. worktree-local default
-4. worktree-local selected overlay
-
-Secrets use the project key provider. Key lookup order is:
-
-1. current checkout `.hack.secret.key`
-2. shared key under the git common dir for linked worktrees
-3. `HACK_ENV_SECRET_KEY`
+Hack v3 is intentionally self-contained. The supported product is the local CLI/runtime and macOS
+companion. Hosted auth, account/org/team management, the web dashboard, built-in GitHub workflows,
+and built-in Linear sync are not part of the v3 product.
 
 ## Install
 
@@ -109,44 +45,184 @@ curl -fsSL \
   | bash
 ```
 
-## Portable containers
+Codex or managed container installer:
 
-Hack ships public runtime images on Docker Hub and GHCR:
+```bash
+curl -fsSL \
+  https://github.com/hack-dance/hack/releases/latest/download/hack-codex-install.sh \
+  | bash
+```
 
-- full remote runtime: `hackdance/hack:latest`
-- slim portable base: `hackdance/hack:slim`
+## Quick Start
 
-Use the full image when you need the remote node runtime with bundled Docker CLI, compose, and
-gateway bootstrap. Use the slim image as a base for Codex, CI, or other managed containers where
-you want `hack`, Bun, and the local-first env/session/tickets workflows available without the full
-host stack.
+Bootstrap the global local infrastructure once:
 
-For portable container setups, pass `HACK_ENV_SECRET_KEY` at runtime instead of copying
-`.hack.secret.key` into the image.
+```bash
+hack global install
+```
 
-The Codex-first managed-container example lives in [docs/guides/codex-managed-environments.md](./docs/guides/codex-managed-environments.md)
-and the mounted-project smoke harness lives at [scripts/portable-container-smoke.sh](./scripts/portable-container-smoke.sh).
+Initialize a repo:
 
-## macOS app
+```bash
+cd /path/to/project
+hack init
+```
 
-The macOS app is a thin local companion. It keeps:
+Run it:
+
+```bash
+hack up --detach
+hack open
+hack logs --pretty
+```
+
+Stop it:
+
+```bash
+hack down
+```
+
+If anything looks wrong, start with:
+
+```bash
+hack doctor
+hack doctor --fix
+```
+
+## Daily Commands
+
+```bash
+hack status
+hack ps
+hack restart
+hack open
+hack logs --pretty
+hack logs <service>
+hack exec <service> -- bun test
+hack run <service> -- bun db:migrate
+```
+
+Host-side commands can use the same resolved project env:
+
+```bash
+hack host exec --scope api -- bun test
+hack host shell --env qa --scope api
+```
+
+Persistent workspaces:
+
+```bash
+hack session
+hack session start <project>
+hack session exec <workspace> "bun test"
+```
+
+Optional repo-local tickets:
+
+```bash
+hack tickets create --title "Fix lifecycle cleanup"
+hack tickets list
+hack tickets show T-00001
+hack tickets status T-00001 in_progress
+```
+
+## Env And Secrets
+
+Hack uses YAML env files in `.hack/` as the source of truth:
+
+```text
+.hack/hack.env.default.yaml
+.hack/hack.env.<overlay>.yaml
+.hack/hack.env.local.yaml
+.hack/hack.env.<overlay>.local.yaml
+```
+
+Shared files can be committed. `*.local.yaml` files are worktree-local overrides.
+
+Runtime commands read the YAML model directly. Use `hack env materialize` only when an external tool
+needs a compatibility `.hack/.env` file on disk.
+
+Secret key lookup is local-first:
+
+1. current checkout `.hack.secret.key`
+2. shared key under the git common dir for linked worktrees
+3. `HACK_ENV_SECRET_KEY`
+
+Use `HACK_ENV_SECRET_KEY` in CI and managed containers instead of copying `.hack.secret.key` into an
+image.
+
+Read more in [Env & secrets](./docs/env.md).
+
+## Lifecycle Processes
+
+Projects often need host-side setup before the compose stack starts: AWS SSO, SSM tunnels, local
+proxies, database forwards, or one-off bootstrap commands.
+
+Put that work in `.hack/hack.config.json` under `lifecycle` or `startup` so Hack can run it
+consistently during `hack up` and clean up the processes it owns during `hack down`.
+
+For fixed-port helpers, use `singleton.ports` and usually `onConflict: "adopt"` when an existing
+healthy listener set should be reused instead of starting duplicate tunnel stacks.
+
+Read more in [Lifecycle](./docs/lifecycle.md).
+
+## Portable Containers
+
+Hack publishes runtime images to Docker Hub and GHCR.
+
+```bash
+docker pull hackdance/hack:latest
+docker pull hackdance/hack:slim
+```
+
+Use `hackdance/hack:latest` when you want the fuller runtime image with Docker CLI, compose, and
+remote-node support available.
+
+Use `hackdance/hack:slim` as a smaller base for Codex, CI, or managed containers where you want
+`hack`, Bun, env resolution, sessions, and tickets without the full host stack.
+
+For reproducible remote or managed environments, install project dependencies normally, install Hack,
+and pass `HACK_ENV_SECRET_KEY` at runtime so encrypted project env can be resolved.
+
+Start with [Codex managed environments](./docs/guides/codex-managed-environments.md) for a concrete
+setup guide.
+
+## macOS Companion
+
+The macOS app is a thin local companion for Hack-managed projects.
+
+It provides:
 
 - project list and project detail
-- global and daemon status
-- start/stop/restart/open actions
-- log entrypoints
-- trust and doctor guidance
+- global runtime and daemon status
+- `up`, `down`, `restart`, and `open` actions
+- log entrypoints and a Ghostty-backed bottom panel
+- doctor and trust guidance
 - menu bar quick actions
-- the Ghostty-backed bottom panel for local logs and terminal output
 
-## Experimental remote
+The CLI remains the source of truth. The app is there to make local runtime state easier to see and
+operate.
 
-Remote, gateway, node, and dispatch remain in the repo as unsupported experimental surfaces. They are not part of the default v3 product story and are not release blockers unless they break the local core.
+## Documentation
 
-## Docs
+Start here:
 
+- [Core docs](./docs/core.md)
 - [CLI reference](./docs/cli.md)
-- [Environment model](./docs/env.md)
-- [Architecture](./docs/architecture.md)
+- [Initialize a project](./docs/guides/init-project.md)
+- [Env & secrets](./docs/env.md)
+- [Lifecycle](./docs/lifecycle.md)
 - [Sessions](./docs/sessions.md)
 - [Tickets](./docs/guides/tickets.md)
+- [Portable Codex environments](./docs/guides/codex-managed-environments.md)
+- [Architecture](./docs/architecture.md)
+
+Reference and advanced material:
+
+- [Docs index](./docs/README.md)
+- [Extensions and reference](./docs/reference.md)
+- [Integrations boundary](./docs/integrations.md)
+- [Unsupported experimental beta workflows](./docs/beta.md)
+
+Remote, gateway, node, and dispatch commands remain source-available but unsupported experimental.
+They are not required for the default local development path.

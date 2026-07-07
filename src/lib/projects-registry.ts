@@ -140,6 +140,25 @@ export async function upsertProjectRegistration(opts: {
   });
 }
 
+/**
+ * Best-effort registry touch for read-style commands (e.g. `hack projects`).
+ *
+ * Runs the same upsert as full registration — so linked-worktree checkouts
+ * get recorded/refreshed on the family entry's `worktrees` array — but never
+ * throws: registry maintenance must not break a read command.
+ *
+ * @returns The registration outcome, or null when the touch failed.
+ */
+export async function touchProjectRegistration(opts: {
+  readonly project: ProjectContext;
+}): Promise<RegisterOutcome | null> {
+  try {
+    return await upsertProjectRegistration({ project: opts.project });
+  } catch {
+    return null;
+  }
+}
+
 export async function resolveRegisteredProjectByName(opts: {
   readonly name: string;
 }): Promise<ProjectContext | null> {

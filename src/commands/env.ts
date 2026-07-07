@@ -36,6 +36,11 @@ import {
   serializeEnvClassificationForJson,
   serializeEnvStorageForJson as serializeEnvStorageForJsonShape,
 } from "../lib/hack-env-status.ts";
+import {
+  canPrompt,
+  confirmSafe,
+  requireInteractive,
+} from "../lib/interactivity.ts";
 import { appendHackHostTrustEnvironment } from "../lib/local-ca.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import {
@@ -789,11 +794,7 @@ async function maybeMigrateLegacyProjectEnv(input: {
     composeFile: input.project.composeFile,
   });
 
-  if (
-    process.stdin.isTTY &&
-    process.stdout.isTTY &&
-    input.reason === "runtime"
-  ) {
+  if (canPrompt() && input.reason === "runtime") {
     const ok = await confirm({
       message:
         "Legacy env format detected. Migrate to the new Hack env config files now?",
@@ -831,6 +832,13 @@ async function promptForEnvAddInput(input: {
   readonly key: string;
   readonly value: string;
 }> {
+  if (!canPrompt()) {
+    requireInteractive({
+      what: "hack env add needs a key and value",
+      hint: "Pass them as arguments: `hack env add <scope>/<KEY> <value>` (or `hack env add KEY VALUE --service <scope>`, with --secret for secrets).",
+    });
+  }
+
   const secretChoice = await select({
     message: "Value kind:",
     options: [
@@ -1785,13 +1793,11 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
       key: (args.positionals.key ?? "").trim(),
     });
 
-    const okLegacy = await confirm({
+    const okLegacy = await confirmSafe({
       message: `Unset "${key}" from ${resolveEnvFilePath({ projectDir: project.projectDir, envName })} and ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}${envName ? ` (env ${envName})` : ""}?`,
       initialValue: true,
+      nonInteractive: "accept-default",
     });
-    if (isCancel(okLegacy)) {
-      return 1;
-    }
     if (!okLegacy) {
       return 0;
     }
@@ -1823,13 +1829,11 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
     scopeOverride: args.options.service,
   });
 
-  const ok = await confirm({
+  const ok = await confirmSafe({
     message: `Unset "${parsedTarget.key}" from ${parsedTarget.scope} in ${envName ?? "default"}?`,
     initialValue: true,
+    nonInteractive: "accept-default",
   });
-  if (isCancel(ok)) {
-    return 1;
-  }
   if (!ok) {
     return 0;
   }
@@ -2034,6 +2038,13 @@ async function resolveEnvKey(opts: { readonly key: string }): Promise<string> {
     return fromPos;
   }
 
+  if (!canPrompt()) {
+    requireInteractive({
+      what: "an env key is required",
+      hint: "Pass the key as an argument (e.g. `hack env set AWS_PROFILE <value>`).",
+    });
+  }
+
   const key = await text({
     message: "Env key:",
     validate: (value) => {
@@ -2061,6 +2072,13 @@ async function resolveEnvValue(opts: {
   const fromSpec = opts.value;
   if (typeof fromSpec === "string" && fromSpec.length > 0) {
     return fromSpec;
+  }
+
+  if (!canPrompt()) {
+    requireInteractive({
+      what: `a value for "${opts.key}" is required`,
+      hint: "Pass the value as an argument (e.g. `hack env set KEY value` or `hack env add KEY value --secret`).",
+    });
   }
 
   if (opts.secret) {

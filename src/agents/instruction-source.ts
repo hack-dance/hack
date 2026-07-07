@@ -38,7 +38,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     bullets: [
       "Supported v3 surface: project init, up/down/restart, open, logs, env, host exec/shell, sessions, doctor, and daemon.",
       "Removed surfaces: hosted auth/account/org/team flows, web dashboard, built-in GitHub workflows, and built-in Linear sync.",
-      "Experimental and unsupported: remote/gateway/node/dispatch commands. Do not use them unless explicitly requested.",
+      "Experimental and unsupported: remote/gateway/node/dispatch commands. They are hidden from default help (list with `hack help --all`) and warn on use; do not use them unless explicitly requested.",
     ],
   },
   {
@@ -49,7 +49,8 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Prefer `hack` over raw `docker` / `docker compose` for project workflows.",
       "Do not start/stop services from Docker Desktop UI for `hack`-managed projects.",
       "Treat `.hack/.internal` and `.hack/.branch` as hack-managed artifacts; do not hand-edit generated files there.",
-      "Use `--json` for machine-readable output when available.",
+      "Use `--json` for machine-readable output when available; `hack up/down/restart/doctor --json` emit an `{ok, data | error: {code, message}}` envelope with stable E_* error codes.",
+      "Scripted/agent runs: pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) so commands never block on prompts — they apply documented defaults or fail fast with E_INTERACTIVE_REQUIRED.",
       "Use MCP only when shell access is unavailable.",
       "If runtime state looks wrong, run `hack doctor`, then `hack doctor --fix` before manual repair.",
     ],
@@ -144,6 +145,18 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Open app URL: `hack open --json`",
       "Restart: `hack restart`",
       "Stop services: `hack down`",
+    ],
+  },
+  {
+    id: "running-things",
+    title: "Running things (decision guide)",
+    surfaces: ALL_SURFACES,
+    bullets: [
+      "One-off command in a fresh service container (deps started as needed): `hack run <service> <cmd...>`.",
+      "Command inside an already-running service container: `hack exec <service> -- <cmd...>`.",
+      "Host script that needs hack-stored env: `hack host exec --env <overlay> --scope <service> -- <cmd...>` — this is THE way to run repo scripts; never read .env files directly.",
+      "Interactive host shell with injected env: `hack host shell --env <overlay> --scope <service>`.",
+      "Call a service over HTTP (from the host or between containers): use its Caddy hostname `https://<sub>.<dev_host>`; discover routable URLs with `hack open --json`.",
     ],
   },
   {

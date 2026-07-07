@@ -1,4 +1,10 @@
 import { cancel } from "@clack/prompts";
+import {
+  emitCliResult,
+  errorResultFromUnknown,
+  HackCliError,
+} from "../lib/cli-result.ts";
+import { setNoInteractiveFlag } from "../lib/interactivity.ts";
 import { logger } from "../ui/logger.ts";
 import {
   type AnyCommandSpec,
@@ -15,7 +21,13 @@ import { printHelpForPath } from "./help.ts";
 import { maybeEnsureAgentIntegrations } from "./integration-sync.ts";
 import { CLI_SPEC } from "./spec.ts";
 
+function isTruthyEnv(value: string | undefined): boolean {
+  const v = (value ?? "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
 export async function runCli(argv: readonly string[]): Promise<number> {
+  const jsonRequested = argv.includes("--json");
   try {
     const cli = CLI_SPEC;
     const allowUnknownOptions = shouldAllowUnknownOptions({
@@ -23,6 +35,10 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       argv,
     });
     const parsed = parseCliArgv(cli, argv, { allowUnknownOptions });
+
+    setNoInteractiveFlag({
+      enabled: parsed.values["no-interactive"] === true,
+    });
 
     const helpFlag = parsed.values.help === true;
     const versionFlag = parsed.values.version === true;
@@ -35,7 +51,9 @@ export async function runCli(argv: readonly string[]): Promise<number> {
     const resolved = resolveCommand(cli, parsed.positionals);
 
     if (helpFlag) {
-      await printHelpForPath(cli, parsed.positionals);
+      await printHelpForPath(cli, parsed.positionals, {
+        showExperimental: parsed.values.all === true,
+      });
       return 0;
     }
 
@@ -67,6 +85,11 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       resolved.remainingPositionals
     );
 
+    maybeWarnExperimentalCommand({
+      path: resolved.path,
+      jsonRequested: parsed.values.json === true,
+    });
+
     await maybeEnsureAgentIntegrations({
       cwd: process.cwd(),
       commandPath: resolved.path.map((command) => command.name),
@@ -87,6 +110,16 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       return 1;
     }
 
+    if (jsonRequested) {
+      emitCliResult({ result: errorResultFromUnknown({ error }) });
+      return 1;
+    }
+
+    if (error instanceof HackCliError) {
+      logger.error({ message: `${error.code}: ${error.message}` });
+      return 1;
+    }
+
     const message = error instanceof Error ? error.message : "Unknown error";
     cancel(message);
     if (error instanceof Error && error.stack) {
@@ -94,6 +127,32 @@ export async function runCli(argv: readonly string[]): Promise<number> {
     }
     return 1;
   }
+}
+
+/**
+ * One-line stderr warning when an experimental (Beta-group) command is
+ * invoked. Suppressed under `--json` output and when the user acknowledged
+ * the experimental surface via `HACK_EXPERIMENTAL_ACK=1`.
+ */
+function maybeWarnExperimentalCommand(opts: {
+  readonly path: readonly AnyCommandSpec[];
+  readonly jsonRequested: boolean;
+}): void {
+  const experimental = opts.path.find((command) => command.group === "Beta");
+  if (!experimental) {
+    return;
+  }
+  if (opts.jsonRequested) {
+    return;
+  }
+  if (isTruthyEnv(process.env.HACK_EXPERIMENTAL_ACK)) {
+    return;
+  }
+
+  const invocation = opts.path.map((command) => command.name).join(" ");
+  process.stderr.write(
+    `Warning: \`hack ${invocation}\` is experimental and unsupported; behavior may change or break. Set HACK_EXPERIMENTAL_ACK=1 to silence this warning.\n`
+  );
 }
 
 function isExtensionDispatch(opts: {

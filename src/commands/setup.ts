@@ -35,6 +35,7 @@ import {
   removeTicketsSkill,
 } from "../control-plane/extensions/tickets/tickets-skill.ts";
 import { pathExists, readTextFile, writeTextFile } from "../lib/fs.ts";
+import { canPrompt } from "../lib/interactivity.ts";
 import { findRepoRootForInit } from "../lib/project.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
 import type { AgentDocTarget } from "../mcp/agent-docs.ts";
@@ -396,16 +397,9 @@ async function installTmuxIntegration(): Promise<number> {
     return 0;
   }
 
-  // Ask about keybinding
-  const keyChoice = await select({
-    message: "Add the recommended tmux binding for `hack session`?",
-    options: [
-      { value: "s", label: "Yes, use prefix + s (recommended)" },
-      { value: "S", label: "Yes, use prefix + S (capital S)" },
-      { value: "none", label: "No, I'll configure manually" },
-    ],
-  });
-  if (isCancel(keyChoice)) {
+  // Ask about keybinding (non-interactive runs take the recommended default).
+  const keyChoice = await resolveTmuxKeybindingChoice();
+  if (keyChoice === null) {
     return 1;
   }
 
@@ -433,6 +427,35 @@ async function installTmuxIntegration(): Promise<number> {
   return 0;
 }
 
+type TmuxKeybindingChoice = "s" | "S" | "none";
+
+/**
+ * Pick the `hack session` tmux binding. Interactive sessions get a select;
+ * non-interactive runs take the recommended default (`prefix + s`).
+ */
+async function resolveTmuxKeybindingChoice(): Promise<TmuxKeybindingChoice | null> {
+  if (!canPrompt()) {
+    logger.info({
+      message:
+        "Non-interactive run: using the recommended binding (prefix + s).",
+    });
+    return "s";
+  }
+
+  const keyChoice = await select<TmuxKeybindingChoice>({
+    message: "Add the recommended tmux binding for `hack session`?",
+    options: [
+      { value: "s", label: "Yes, use prefix + s (recommended)" },
+      { value: "S", label: "Yes, use prefix + S (capital S)" },
+      { value: "none", label: "No, I'll configure manually" },
+    ],
+  });
+  if (isCancel(keyChoice)) {
+    return null;
+  }
+  return keyChoice;
+}
+
 async function resolveTmuxConfigToEdit(opts: {
   readonly home: string;
   readonly existingConfigs: readonly string[];
@@ -443,6 +466,14 @@ async function resolveTmuxConfigToEdit(opts: {
     const selected = opts.existingConfigs[0];
     logger.info({ message: `Using ${selected}` });
     return selected;
+  }
+
+  if (!canPrompt()) {
+    const fallback = opts.existingConfigs[0] ?? opts.xdgConfig;
+    logger.info({
+      message: `Non-interactive run: using ${fallback} (recommended default).`,
+    });
+    return fallback;
   }
 
   const options =

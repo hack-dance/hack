@@ -9,6 +9,7 @@ import {
   readInternalExtraHostsIp,
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
+import { findProjectContext } from "../lib/project.ts";
 import { type ProjectMeta, resolveProjectMeta } from "../lib/project-meta.ts";
 import {
   findMissingRegistryEntries,
@@ -22,6 +23,7 @@ import {
 import {
   readProjectsRegistry,
   removeProjectsById,
+  touchProjectRegistration,
 } from "../lib/projects-registry.ts";
 import type {
   RuntimeContainer,
@@ -113,12 +115,14 @@ const spec = defineCommand({
 } as const);
 
 const handleProjects: CommandHandlerFor<typeof spec> = async ({
+  ctx,
   args,
 }): Promise<number> => {
   const filter =
     typeof args.options.project === "string"
       ? sanitizeName(args.options.project)
       : null;
+  await touchCwdProjectRegistration({ cwd: ctx.cwd });
   return await runProjects({
     filter,
     includeGlobal: args.options.includeGlobal === true,
@@ -128,6 +132,21 @@ const handleProjects: CommandHandlerFor<typeof spec> = async ({
     json: args.options.json === true,
   });
 };
+
+/**
+ * Lightweight registry touch for the current checkout: keeps `lastSeenAt`
+ * fresh and records linked-worktree checkouts on the family registration
+ * even when no full registration command runs.
+ */
+async function touchCwdProjectRegistration(opts: {
+  readonly cwd: string;
+}): Promise<void> {
+  const project = await findProjectContext(opts.cwd);
+  if (!project) {
+    return;
+  }
+  await touchProjectRegistration({ project });
+}
 
 const handlePrune: CommandHandlerFor<typeof pruneSpec> = async ({
   args,
@@ -232,12 +251,14 @@ export const projectsCommand = withHandler(
 );
 
 const handleStatus: CommandHandlerFor<typeof statusSpec> = async ({
+  ctx,
   args,
 }): Promise<number> => {
   const filter =
     typeof args.options.project === "string"
       ? sanitizeName(args.options.project)
       : null;
+  await touchCwdProjectRegistration({ cwd: ctx.cwd });
   return await runProjects({
     filter,
     includeGlobal: args.options.includeGlobal === true,

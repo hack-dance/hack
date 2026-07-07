@@ -4,7 +4,7 @@ import { confirm, isCancel, note, spinner } from "@clack/prompts";
 import { YAML } from "bun";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
-import { optPath } from "../cli/options.ts";
+import { optJson, optPath } from "../cli/options.ts";
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_GRAFANA_HOST,
@@ -34,6 +34,7 @@ import {
   readInternalExtraHostsIp,
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
+import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
@@ -142,7 +143,7 @@ const optMigrateEnvConfig = defineOption({
     "Migrate legacy hack.env.json/.env state to the new env config files",
 } as const);
 
-const doctorOptions = [optPath, optFix, optMigrateEnvConfig] as const;
+const doctorOptions = [optPath, optFix, optMigrateEnvConfig, optJson] as const;
 const doctorPositionals = [] as const;
 
 const doctorSpec = defineCommand({
@@ -230,8 +231,9 @@ const DOCTOR_SUMMARY_GROUPS = [
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
+  const json = args.options.json === true;
   const results: TimedCheckResult[] = [];
-  const s = spinner();
+  const s = createDoctorProgress({ json });
   s.start("Running doctor checks...");
 
   // Tools
@@ -562,6 +564,18 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   }
 
   s.stop(`Doctor checks complete (${results.length} checks)`);
+
+  const hasError = results.some((r) => r.status === "error");
+
+  if (json) {
+    return finishDoctorJson({
+      results,
+      hasError,
+      fixRequested:
+        args.options.fix === true || args.options.migrateEnvConfig === true,
+    });
+  }
+
   await renderDoctorSummary(results);
   emitSlowChecksNote(results);
   renderMacNote();
@@ -577,7 +591,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     note("Re-run: hack doctor", "doctor");
   }
 
-  const hasError = results.some((r) => r.status === "error");
   if (hasError) {
     note("Fix the errors above, then rerun: hack doctor", "doctor");
     return 1;
@@ -585,6 +598,98 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 
   return 0;
 };
+
+export type DoctorJsonCheck = {
+  readonly id: string;
+  readonly status: CheckStatus;
+  readonly detail: string;
+  readonly durationMs: number;
+};
+
+export type DoctorJsonData = {
+  readonly checks: readonly DoctorJsonCheck[];
+  readonly summary: readonly string[];
+  readonly counts: {
+    readonly ok: number;
+    readonly warn: number;
+    readonly error: number;
+  };
+};
+
+/**
+ * Shape the doctor check results for the `--json` envelope.
+ */
+export function buildDoctorJsonData(opts: {
+  readonly results: readonly TimedCheckResult[];
+}): DoctorJsonData {
+  const counts = { ok: 0, warn: 0, error: 0 };
+  for (const result of opts.results) {
+    counts[result.status] += 1;
+  }
+  return {
+    checks: opts.results.map((result) => ({
+      id: result.name,
+      status: result.status,
+      detail: result.message,
+      durationMs: result.durationMs,
+    })),
+    summary: buildDoctorSummaryLines({ results: opts.results }),
+    counts,
+  };
+}
+
+/**
+ * JSON tail for `hack doctor --json`: emits the envelope and maps error
+ * checks to exit 1. `--fix` is intentionally not combined with `--json`.
+ */
+function finishDoctorJson(opts: {
+  readonly results: readonly TimedCheckResult[];
+  readonly hasError: boolean;
+  readonly fixRequested: boolean;
+}): number {
+  if (opts.fixRequested) {
+    process.stderr.write(
+      "--fix/--migrate-env-config are ignored with --json; run them separately.\n"
+    );
+  }
+  emitCliResult({
+    result: okResult({ data: buildDoctorJsonData({ results: opts.results }) }),
+  });
+  return opts.hasError ? 1 : 0;
+}
+
+type DoctorProgress = {
+  start(message?: string): void;
+  stop(message?: string): void;
+};
+
+/**
+ * Spinner wrapper that stays silent on non-TTY stdout (piped/automation) so
+ * cursor-control ANSI sequences never leak into machine-read output, and
+ * emits nothing at all in `--json` mode.
+ */
+function createDoctorProgress(opts: {
+  readonly json: boolean;
+}): DoctorProgress {
+  const interactive =
+    !opts.json &&
+    process.stdout.isTTY === true &&
+    (process.env.NO_COLOR ?? "").trim().length === 0;
+  if (interactive) {
+    return spinner();
+  }
+
+  return {
+    start: (_message?: string) => {
+      // Quiet in non-TTY/JSON mode.
+    },
+    stop: (message?: string) => {
+      if (!opts.json && message) {
+        process.stdout.write(`${message}\n`);
+      }
+    },
+  };
+}
 
 export const doctorCommand = withHandler(doctorSpec, handleDoctor);
 
@@ -3322,7 +3427,7 @@ async function canConnectTcp(opts: {
 // Keep macOS guidance at the end so it doesn't push other output off-screen.
 // (Called from the command handler.)
 async function runCheck(
-  _s: ReturnType<typeof spinner>,
+  _s: DoctorProgress,
   name: string,
   fn: () => CheckResult | Promise<CheckResult>,
   opts?: { readonly timeoutMs?: number }

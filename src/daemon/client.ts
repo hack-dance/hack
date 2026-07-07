@@ -3,7 +3,7 @@ import pkg from "../../package.json";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
-import { exec } from "../lib/shell.ts";
+import { canPrompt } from "../lib/interactivity.ts";
 import {
   getLaunchdServiceStatus,
   installLaunchdService,
@@ -91,10 +91,18 @@ export async function requestDaemonJson(opts: {
  *
  * Uses launchd on macOS for startup/login persistence and process keepalive, with bounded retries
  * and cooldown to avoid runaway restart loops.
+ *
+ * Non-interactive invocations (no TTY, HACK_NO_INTERACTIVE, --no-interactive)
+ * never autostart: callers fall back to direct docker inspection instead of
+ * blocking a scripted/agent run on daemon spawn side effects.
  */
 async function ensureDaemonReady(opts: {
   readonly paths: ReturnType<typeof resolveDaemonPaths>;
 }): Promise<boolean> {
+  if (!canPrompt()) {
+    return false;
+  }
+
   const controlPlane = await readControlPlaneConfig({});
   if (!controlPlane.config.daemon.autoStart) {
     return false;
@@ -219,16 +227,27 @@ async function ensureLaunchdDaemonReady(opts: {
 
 /**
  * Starts hackd through the current CLI invocation path.
+ *
+ * Spawns fully detached (stdio ignored + unref) so the parent process never
+ * inherits pipes held open by the daemon; readiness is verified separately
+ * by {@link waitForDaemonSocket} with a bounded timeout.
  */
 async function startDaemonViaCli(): Promise<boolean> {
   const invocation = await resolveHackInvocation();
-  const result = await exec(
-    [invocation.bin, ...invocation.args, "daemon", "start"],
-    {
-      stdin: "ignore",
-    }
-  );
-  return result.exitCode === 0;
+  try {
+    const proc = Bun.spawn(
+      [invocation.bin, ...invocation.args, "daemon", "start"],
+      {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      }
+    );
+    proc.unref();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -4,46 +4,55 @@
 
 # Hack
 
-Hack is a local-first developer runtime for repo environments.
+Run every project on your machine at once, each at its own local HTTPS URL.
 
-It gives each project a predictable local runtime, stable HTTPS hostnames, resolved environment
-variables, persistent work sessions, diagnostics, and optional git-backed tickets without requiring a
-hosted Hack service.
+```bash
+cd any-repo && hack up
+# → https://myapp.hack is live, TLS trusted, env injected
+```
 
-## What Hack Does
+Local development breaks down when one machine runs many things. Two projects fight
+over port 3000. A repo you haven't touched in a month needs an afternoon of
+archaeology to start. Secrets live in `.env` files passed around in Slack. Testing a
+PR means tearing down the branch you were working on.
 
-Hack is built for local development on machines that run many projects, branches, agents, and
-supporting services at the same time.
+Hack fixes this by giving each repo a small committed config (`.hack/`) and running
+it against shared local infrastructure — Docker Compose for services, Caddy for DNS
+and trusted TLS. Nothing is hosted. Your machine is the platform.
 
-- Start and stop project runtimes with `hack up`, `hack down`, and `hack restart`.
-- Open stable local HTTPS URLs like `https://myapp.hack` with `hack open`.
-- Route service subdomains through local Caddy and trusted development TLS.
-- Resolve env overlays and secrets from `.hack/` and inject them into compose, host commands, and sessions.
-- In a linked git worktree, `hack up` defaults to a branch instance named after the worktree's git
-  branch (opt out with `worktree.auto_branch=false`, or target one explicitly with `--branch <name>`).
-- Keep tmux-backed project workspaces alive with `hack session`.
-- Diagnose Docker, DNS, TLS, env, lifecycle, and stale runtime state with `hack doctor` /
-  `hack doctor --fix`.
-- Script and automate against a stable surface: `--no-interactive` (or `HACK_NO_INTERACTIVE=1`)
-  never prompts, and `up`/`down`/`restart`/`doctor --json` emit a `{ok, data | error: {code,
-  message}}` envelope; `NO_COLOR` disables ANSI output.
-- Track optional repo-local work with the opt-in `hack tickets` extension.
-- Use a slim macOS companion for local project status, controls, logs, and quick actions.
+## What you get
 
-Hack v3 is intentionally self-contained. The supported product is the local CLI/runtime and macOS
-companion. Hosted auth, account/org/team management, the web dashboard, built-in GitHub workflows,
-and built-in Linear sync are not part of the v3 product.
+**A real URL for every project.** `https://myapp.hack`, with per-service subdomains
+like `api.myapp.hack` and locally-trusted certificates. No ports to remember, no
+collisions, and OAuth-friendly alias hosts when a provider rejects `.hack`.
+
+**`hack up` is the whole answer to "how do I run this repo".** Services, env,
+lifecycle hooks, and host-side helpers (tunnels, SSO, proxies) are declared in
+`.hack/` and committed. Anyone who clones the repo — teammate or agent — is one
+command from a running environment.
+
+**Env that travels with the repo.** Values live in committed YAML; secrets are
+encrypted per-value, so they're safe to commit. One gitignored key decrypts them —
+linked worktrees inherit it automatically, CI passes `HACK_ENV_SECRET_KEY`. Scripts
+get injected env through `hack host exec` instead of reading `.env` files.
+
+**Parallel everything.** Branch instances run side by side with their own URLs. In a
+linked git worktree, `hack up` automatically becomes a separate instance named after
+the branch — review a PR while your main checkout keeps running.
+
+**Built for agents.** `hack init --with claude|codex` hands setup to an agent.
+Machine surfaces are first-class: `--json` envelopes with stable error codes,
+`--no-interactive`, and agent instructions that sync themselves into
+AGENTS.md/CLAUDE.md, Cursor rules, and Codex skills.
 
 ## Install
-
-Homebrew:
 
 ```bash
 brew tap hack-dance/tap
 brew install hack-dance/tap/hack
 ```
 
-Shell installer:
+Or without Homebrew:
 
 ```bash
 curl -fsSL \
@@ -51,199 +60,50 @@ curl -fsSL \
   | bash
 ```
 
-Codex or managed container installer:
+## Quick start
 
 ```bash
-curl -fsSL \
-  https://github.com/hack-dance/hack/releases/latest/download/hack-codex-install.sh \
-  | bash
-```
-
-## Quick Start
-
-Bootstrap the global local infrastructure once:
-
-```bash
-hack global install
-```
-
-Initialize a repo:
-
-```bash
+hack global install        # once per machine: DNS, TLS, proxy
 cd /path/to/project
-hack init
-```
-
-Prefer an agent to drive setup? `hack init --with claude|codex|both` hands the onboarding prompt to
-an agent CLI for a new repo; `hack agent onboard` does the same for an existing project.
-
-Run it:
-
-```bash
+hack init                  # or: hack init --with claude
 hack up --detach
 hack open
-hack logs --pretty
 ```
 
-Stop it:
-
-```bash
-hack down
-```
-
-If anything looks wrong, start with:
+When something looks wrong:
 
 ```bash
 hack doctor
 hack doctor --fix
 ```
 
-## Daily Commands
+## Everyday commands
 
 ```bash
-hack status
-hack ps
-hack restart
-hack open
-hack logs --pretty
-hack logs <service>
-hack exec <service> -- bun test
-hack run <service> -- bun db:migrate
-hack projects prune
+hack status                          # what's running
+hack logs --pretty                   # tail logs (or: hack logs <service>)
+hack exec api -- bun test            # run inside a running service
+hack run api -- bun db:migrate       # one-off container command
+hack host exec --scope api -- bun db:seed   # host command with injected env
+hack up --branch review              # parallel branch instance
+hack session start myapp             # persistent tmux workspace
+hack down
 ```
 
-`hack projects prune` removes stale entries from the local project registry and stops orphaned
-containers.
+Every command works from the repo root, or anywhere with `--project <name>`.
 
-Host-side commands can use the same resolved project env:
+## Learn more
 
-```bash
-hack host exec --scope api -- bun test
-hack host shell --env qa --scope api
-```
+- [Docs index](./docs/README.md) — concepts, guides, and reference
+- [CLI overview](./docs/cli.md) and the [generated command reference](./docs/reference/cli.md)
+- [Env & secrets](./docs/env.md) · [Lifecycle](./docs/lifecycle.md) · [Sessions](./docs/sessions.md)
+- [Agent-first setup](./docs/guides/agent-first-setup.md)
 
-Persistent workspaces:
+A slim macOS companion app shows project status and quick actions; the CLI stays the
+source of truth. Runtime container images (`hackdance/hack:latest`, `:slim`) and
+optional extensions are covered in the docs. Remote/gateway/node/dispatch commands
+are source-available but unsupported experimental — hidden behind `hack help --all`.
 
-```bash
-hack session
-hack session start <project>
-hack session exec <workspace> "bun test"
-```
+## License
 
-Optional repo-local tickets (opt-in extension, not part of default agent instructions — `hack tickets
-setup` is the one subcommand that bypasses the enable check and auto-enables the extension):
-
-```bash
-hack tickets setup
-hack tickets create --title "Fix lifecycle cleanup"
-hack tickets list
-hack tickets show T-00001
-hack tickets status T-00001 in_progress
-```
-
-## Env And Secrets
-
-Hack uses YAML env files in `.hack/` as the source of truth:
-
-```text
-.hack/hack.env.default.yaml
-.hack/hack.env.<overlay>.yaml
-.hack/hack.env.local.yaml
-.hack/hack.env.<overlay>.local.yaml
-```
-
-Shared files can be committed. `*.local.yaml` files are worktree-local overrides. Hack owns a
-committed `.hack/.gitignore` that keeps machine-local generated files (`.internal/`, `.branch/`,
-`.env`, `.env.state.json`, `hack.env*.local.yaml`) out of git; it self-heals on `init`/`up`, and if
-generated files ever leak into git, `hack doctor --fix` untracks them (files stay on disk).
-
-Runtime commands read the YAML model directly. Use `hack env materialize` only when an external tool
-needs a compatibility `.hack/.env` file on disk.
-
-Secret key lookup is local-first:
-
-1. current checkout `.hack.secret.key`
-2. shared key under the git common dir for linked worktrees
-3. key inherited from the primary checkout's `.hack.secret.key` (linked worktrees)
-4. `HACK_ENV_SECRET_KEY`
-
-Use `HACK_ENV_SECRET_KEY` in CI and managed containers instead of copying `.hack.secret.key` into an
-image.
-
-Read more in [Env & secrets](./docs/env.md).
-
-## Lifecycle Processes
-
-Projects often need host-side setup before the compose stack starts: AWS SSO, SSM tunnels, local
-proxies, database forwards, or one-off bootstrap commands.
-
-Put that work in `.hack/hack.config.json` under `lifecycle` or `startup` so Hack can run it
-consistently during `hack up` and clean up the processes it owns during `hack down`.
-
-For fixed-port helpers, use `singleton.ports` and usually `onConflict: "adopt"` when an existing
-healthy listener set should be reused instead of starting duplicate tunnel stacks.
-
-Read more in [Lifecycle](./docs/lifecycle.md).
-
-## Portable Containers
-
-Hack publishes runtime images to Docker Hub and GHCR.
-
-```bash
-docker pull hackdance/hack:latest
-docker pull hackdance/hack:slim
-```
-
-Use `hackdance/hack:latest` when you want the fuller runtime image with Docker CLI, compose, and
-remote-node support available.
-
-Use `hackdance/hack:slim` as a smaller base for Codex, CI, or managed containers where you want
-`hack`, Bun, env resolution, sessions, and tickets without the full host stack.
-
-For reproducible remote or managed environments, install project dependencies normally, install Hack,
-and pass `HACK_ENV_SECRET_KEY` at runtime so encrypted project env can be resolved. Set `HACK_HOME`
-alongside it when you also want to redirect global state (registry, daemon, secrets) to an isolated
-root instead of `~/.hack`.
-
-Start with [Codex managed environments](./docs/guides/codex-managed-environments.md) for a concrete
-setup guide.
-
-## macOS Companion
-
-The macOS app is a thin local companion for Hack-managed projects.
-
-It provides:
-
-- project list and project detail
-- global runtime and daemon status
-- `up`, `down`, `restart`, and `open` actions
-- log entrypoints and a Ghostty-backed bottom panel
-- doctor and trust guidance
-- menu bar quick actions
-
-The CLI remains the source of truth. The app is there to make local runtime state easier to see and
-operate.
-
-## Documentation
-
-Start here:
-
-- [Core docs](./docs/core.md)
-- [CLI reference](./docs/cli.md)
-- [Initialize a project](./docs/guides/init-project.md)
-- [Env & secrets](./docs/env.md)
-- [Lifecycle](./docs/lifecycle.md)
-- [Sessions](./docs/sessions.md)
-- [Tickets](./docs/guides/tickets.md)
-- [Portable Codex environments](./docs/guides/codex-managed-environments.md)
-- [Architecture](./docs/architecture.md)
-
-Reference and advanced material:
-
-- [Docs index](./docs/README.md)
-- [Extensions and reference](./docs/reference.md)
-- [Integrations boundary](./docs/integrations.md)
-- [Unsupported experimental beta workflows](./docs/beta.md)
-
-Remote, gateway, node, and dispatch commands remain source-available but unsupported experimental.
-They are not required for the default local development path.
+See [LICENSE](./LICENSE).

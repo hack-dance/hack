@@ -122,10 +122,11 @@ async function handleRunCliError(opts: {
   const { error, jsonRequested } = opts;
   if (error instanceof CliUsageError) {
     if (jsonRequested) {
+      // Envelope only: the message is inside it, and logger backends may
+      // write to stdout on some hosts, corrupting the parseable output.
       emitCliResult({
         result: errorResult({ code: "E_USAGE", message: error.message }),
       });
-      logger.error({ message: error.message });
       return 1;
     }
     logger.error({ message: error.message });

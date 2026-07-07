@@ -1946,6 +1946,14 @@ function removeLegacyComposeEnvFileEntries(opts: {
   return kept.length > 0 ? kept : undefined;
 }
 
+/**
+ * Migrates a legacy v2 `.env`-based project env layout to the v3
+ * `hack.env.*.yaml` config system.
+ *
+ * @deprecated v2→v3 migration path. TODO(remove: v3.2) together with its
+ * callers in commands/project.ts, commands/doctor.ts, commands/session.ts,
+ * and commands/env.ts (`maybeMigrateLegacyProjectEnv`).
+ */
 export async function migrateLegacyProjectEnv(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;

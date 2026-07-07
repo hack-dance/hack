@@ -1,5 +1,7 @@
 # Beta Workflows
 
+> **Status: unsupported experimental.** These surfaces are source-available but outside the supported v3 product contract. They are hidden from default `hack --help` (see `hack help --all`) and print a warning when invoked.
+
 This section holds unsupported experimental remote workflows.
 
 Start in [Core docs](core.md) first if you are new to `hack`. Beta workflows build on the core

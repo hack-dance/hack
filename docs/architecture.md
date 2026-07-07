@@ -1,7 +1,8 @@
 ## System overview
  
 `hack` is a Bun CLI that writes per-project Compose files under `.hack/` and manages a machine-wide
-proxy, DNS helpers, and logging stack under `~/.hack/`.
+proxy, DNS helpers, and logging stack under `~/.hack/` (overridable via the `HACK_HOME` env var,
+which redirects all global state — registry, daemon, secrets — to another root).
 
 - **Caddy** (docker-proxy) routes `*.hack` based on container labels.
 - **CoreDNS** resolves `*.hack` inside containers to the Caddy IP, with `extra_hosts` mappings for resolver compatibility.
@@ -65,8 +66,11 @@ graph LR
   - `controlPlane.gateway.enabled` marks the project as gateway-capable
   - Optional overrides:
     - `.internal/compose.override.yml` (generated internal DNS/TLS injection)
-    - `.internal/extra-hosts.json` (user-managed extra_hosts merged into the override)
+    - `.internal/extra-hosts.json` — CLI-managed, not hand-edited (use
+      `hack internal extra-hosts set/unset/list`)
     - `.branch/compose.<branch>.override.yml` (branch builds)
+  - Everything under `.hack/.internal` is a hack-managed artifact; do not hand-edit generated files
+    there.
 
 
 ## Internal DNS + TLS (containers)
@@ -96,7 +100,9 @@ Projects can declare shareable env overlays and safely inject secrets into compo
 
 - Canonical env: `.hack/hack.env.default.yaml` plus optional `.hack/hack.env.<overlay>.yaml`
 - Compatibility output: `.hack/.env` only when explicitly materialized
-- Secret key: `.hack.secret.key` locally, or `HACK_ENV_SECRET_KEY` in CI/managed environments
+- Secret key: checkout-local `.hack.secret.key`, or — in a linked git worktree — inherited
+  automatically from the primary checkout through the shared git common dir; `HACK_ENV_SECRET_KEY`
+  covers CI/detached environments. `hack doctor` flags divergent keys across checkouts.
 
 At runtime, hack resolves the selected overlay and injects the effective env directly into compose and
 host-side command flows. For service-scoped values, hack still generates
@@ -152,7 +158,8 @@ sequenceDiagram
 - **compose**: fast, direct `docker compose logs`
 - **loki**: searchable history + LogQL filters
 
-NDJSON streaming (`hack logs --json`) emits `start`, `log`, and `end` events for MCP/TUI consumers.
+NDJSON streaming (`hack logs --json`) emits `start`, `log`, `error`, and `end` events for MCP/TUI
+consumers.
 
 Retention:
 - Loki retention is set in the global Loki config (`~/.hack/logging/loki.yaml`), default `168h` in the template.
@@ -208,8 +215,14 @@ graph LR
 The control plane keeps the core CLI minimal while adding features as extensions. `hackd` loads
 extension manifests and exposes their APIs; the CLI dispatches extension commands via `hack x`.
 
-- **Gateway**: optional HTTP/WS access to `hackd` (localhost by default).
-- **Supervisor**: job execution + streaming for agents.
+Builtin extensions: **Tickets** (opt-in local ticket store — disabled by default, requires enabling
+before use), **Supervisor** (job execution + streaming for agents), **Gateway** (optional HTTP/WS
+access to `hackd`), **Cloudflare**, and **Tailscale** (exposure/tunnel helpers).
+
+> Gateway, remote, node, and dispatch surfaces are experimental and unsupported. They are hidden
+> from default `hack help` (use `hack help --all` to see them) and print a warning when invoked.
+> See [Beta workflows](beta.md) and [Gateway API](gateway-api.md) for details — this doc only
+> summarizes where they fit in the system.
 
 ```mermaid
 graph LR
@@ -217,24 +230,21 @@ graph LR
   Hackd --> ExtMgr["ExtensionManager"]
   ExtMgr --> Gateway["Gateway"]
   ExtMgr --> Supervisor["Supervisor"]
-  ExtMgr --> Tickets["Tickets"]
+  ExtMgr --> Tickets["Tickets (opt-in)"]
+  ExtMgr --> Cloudflare["Cloudflare"]
+  ExtMgr --> Tailscale["Tailscale"]
   Remote["Remote client"] -->|HTTP/WS| Gateway
   Gateway --> Hackd
 ```
 
-### Gateway API + remote workflows
+### Gateway API + remote workflows (unsupported experimental)
 
-The gateway exposes:
+Summary only — see `gateway-api.md` for full usage, security posture, and end-to-end examples:
 - `GET /v1/projects` with `project_id` for remote workflow routing
 - job execution + streaming (`/control-plane/projects/:id/jobs`)
 - PTY-backed shells (`/control-plane/projects/:id/shells`, WS stream)
-
-Current gateway routing:
-- One gateway instance is active per machine (global config).
-- Projects opt in with `controlPlane.gateway.enabled` in their project config.
-- Remote clients route by `project_id` in the API paths.
-
-For full usage, security posture, and end-to-end examples, see `gateway-api.md`.
+- One gateway instance is active per machine (global config); projects opt in with
+  `controlPlane.gateway.enabled`; remote clients route by `project_id` in the API paths.
 
 ## Branch builds
 
@@ -245,9 +255,18 @@ For full usage, security posture, and end-to-end examples, see `gateway-api.md`.
 
 This enables parallel worktrees without port or hostname collisions.
 
+In a linked git worktree, `hack up` defaults to a branch instance named after the worktree's git
+branch instead of requiring an explicit `--branch` — opt out with config `worktree.auto_branch=false`
+or pass an explicit `--branch`. The secret key for a linked worktree is inherited automatically from
+the primary checkout through the shared git common dir (see "Project env + secrets" above), and
+`hack doctor` checks for divergent secret keys and `dev_host` collisions across checkouts sharing the
+same repo.
+
 ## Files and directories
 
-- `~/.hack/`
+- `~/.hack/` (default; override the whole root with `HACK_HOME`)
+  - `hack.config.json` (global config: control-plane defaults, gateway bind/port/allowWrites,
+    extension settings)
   - `daemon/hackd.sock`
   - `daemon/hackd.pid`
   - `daemon/hackd.log`
@@ -260,13 +279,24 @@ This enables parallel worktrees without port or hostname collisions.
   - `schemas/hack.config.schema.json`
   - `schemas/hack.branches.schema.json`
   - `certs/` (mkcert output for non-Caddy services)
-  - `projects.json` (best-effort registry)
+  - `projects.json` (best-effort registry; `hack projects prune` removes stale entries and stops
+    orphaned containers)
 
 - `<repo>/.hack/`
   - `docker-compose.yml`
   - `hack.config.json`
   - `hack.branches.json` (optional)
+  - `.gitignore` (committed, self-healing on `init`/`up`; covers machine-local generated files —
+    `.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`. If generated files
+    leaked into git, `hack doctor --fix` untracks them without deleting them from disk.)
+  - `hack.env.default.yaml` plus optional `hack.env.<overlay>.yaml` (committed env)
+  - `hack.env.local.yaml` / `hack.env.<overlay>.local.yaml` (worktree-local overrides)
+  - `.env.state.json`
+  - `.env` (optional, only when explicitly materialized)
   - `.internal/compose.override.yml`
+  - `.internal/compose.env.override.yml`
+  - `.internal/extra-hosts.json`
+  - `.internal/lifecycle/state.json` and `.internal/lifecycle/*.log`
   - `.branch/compose.<branch>.override.yml`
 
 ## Key design choices

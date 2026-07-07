@@ -105,6 +105,10 @@ Each startup item can be:
 
 `cwd` is always resolved from the repo root (not from `.hack/`).
 
+A `persistent: true` startup entry with no `name` gets a generated name (`startup-1`, `startup-2`, ...
+in config order). That generated name is what shows up as the window name and what you pass to
+`hack logs <name>`, so naming persistent entries explicitly makes logs easier to find.
+
 ### Hooks
 
 Hook lists live under:
@@ -186,6 +190,13 @@ Lifecycle output is now surfaced across CLI/runtime views:
 
 `hack restart` performs the same lifecycle steps as `hack down` followed by `hack up`.
 
+### `--json`
+
+`hack up`, `hack down`, and `hack restart` accept `--json`. A lifecycle hook failure surfaces as
+`{ok: false, error: {code: 'E_LIFECYCLE_FAILED', message}}`; a `docker compose` failure surfaces as
+`E_COMPOSE_FAILED`. Lifecycle failures are one of the primary consumers of the `--json` error envelope,
+since hook and process startup are common failure points around `hack up`.
+
 ## Sessions backend
 
 Lifecycle processes run inside the configured mux backend (tmux or zellij), using the same selection rules as `hack session`.
@@ -201,8 +212,10 @@ Lifecycle session name:
 Notes:
 - If no mux backend is available, lifecycle process startup fails with an actionable error.
 - Teardown is implemented by killing the lifecycle session; anything running inside that session will be stopped.
-- For tmux-backed lifecycle sessions, Hack also persists pane PID and process-group metadata. If tmux pane state disappears before teardown, `hack down` still uses that persisted metadata to clean up any live lifecycle process groups instead of leaving orphaned host processes behind.
-- `hack doctor` reports stale lifecycle state when the persisted lifecycle entry no longer has a live mux session and points operators to `hack down` so cleanup and state removal happen through the supported path.
+- For tmux-backed lifecycle sessions, Hack also persists pane PID and process-group metadata to
+  `.hack/.internal/lifecycle/state.json`, with per-hook/process output logged to
+  `.hack/.internal/lifecycle/*.log`. If tmux pane state disappears before teardown, `hack down` still uses that persisted metadata to clean up any live lifecycle process groups instead of leaving orphaned host processes behind.
+- `hack doctor` reports stale lifecycle state when the persisted lifecycle entry no longer has a live mux session and points operators to `hack down` so cleanup and state removal happen through the supported path. `hack doctor --fix` does not tear down lifecycle sessions itself — use `hack down` for that.
 
 ## Tips
 
@@ -211,3 +224,9 @@ Notes:
 - Keep non-persistent hooks short and deterministic.
 - Store lifecycle secrets in `hack.env.*.yaml` as encrypted `secure:` values and prefer runtime injection over relying on `.hack/.env`.
 - If a hook requires interactive auth (e.g. browser-based SSO), it will still work; it runs with `stdin: inherit`.
+- Global `--no-interactive` (or `HACK_NO_INTERACTIVE=1`) affects only the env-prompt step in `hack up`
+  (step 1 above): with prompting disallowed, missing required env is never prompted for — the run
+  fails fast with an actionable error instead of blocking on a prompt, following the same
+  `--no-interactive` convention used across the CLI (documented defaults or `E_INTERACTIVE_REQUIRED`).
+  It does not change hook `stdin` behavior — a hook that itself blocks on interactive auth still
+  blocks under `--no-interactive`.

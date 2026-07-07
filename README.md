@@ -19,9 +19,15 @@ supporting services at the same time.
 - Open stable local HTTPS URLs like `https://myapp.hack` with `hack open`.
 - Route service subdomains through local Caddy and trusted development TLS.
 - Resolve env overlays and secrets from `.hack/` and inject them into compose, host commands, and sessions.
+- In a linked git worktree, `hack up` defaults to a branch instance named after the worktree's git
+  branch (opt out with `worktree.auto_branch=false`, or target one explicitly with `--branch <name>`).
 - Keep tmux-backed project workspaces alive with `hack session`.
-- Diagnose Docker, DNS, TLS, env, lifecycle, and stale runtime state with `hack doctor`.
-- Track optional repo-local work with `hack tickets`.
+- Diagnose Docker, DNS, TLS, env, lifecycle, and stale runtime state with `hack doctor` /
+  `hack doctor --fix`.
+- Script and automate against a stable surface: `--no-interactive` (or `HACK_NO_INTERACTIVE=1`)
+  never prompts, and `up`/`down`/`restart`/`doctor --json` emit a `{ok, data | error: {code,
+  message}}` envelope; `NO_COLOR` disables ANSI output.
+- Track optional repo-local work with the opt-in `hack tickets` extension.
 - Use a slim macOS companion for local project status, controls, logs, and quick actions.
 
 Hack v3 is intentionally self-contained. The supported product is the local CLI/runtime and macOS
@@ -68,6 +74,9 @@ cd /path/to/project
 hack init
 ```
 
+Prefer an agent to drive setup? `hack init --with claude|codex|both` hands the onboarding prompt to
+an agent CLI for a new repo; `hack agent onboard` does the same for an existing project.
+
 Run it:
 
 ```bash
@@ -100,7 +109,11 @@ hack logs --pretty
 hack logs <service>
 hack exec <service> -- bun test
 hack run <service> -- bun db:migrate
+hack projects prune
 ```
+
+`hack projects prune` removes stale entries from the local project registry and stops orphaned
+containers.
 
 Host-side commands can use the same resolved project env:
 
@@ -117,9 +130,11 @@ hack session start <project>
 hack session exec <workspace> "bun test"
 ```
 
-Optional repo-local tickets:
+Optional repo-local tickets (opt-in extension, not part of default agent instructions — `hack tickets
+setup` is the one subcommand that bypasses the enable check and auto-enables the extension):
 
 ```bash
+hack tickets setup
 hack tickets create --title "Fix lifecycle cleanup"
 hack tickets list
 hack tickets show T-00001
@@ -137,7 +152,10 @@ Hack uses YAML env files in `.hack/` as the source of truth:
 .hack/hack.env.<overlay>.local.yaml
 ```
 
-Shared files can be committed. `*.local.yaml` files are worktree-local overrides.
+Shared files can be committed. `*.local.yaml` files are worktree-local overrides. Hack owns a
+committed `.hack/.gitignore` that keeps machine-local generated files (`.internal/`, `.branch/`,
+`.env`, `.env.state.json`, `hack.env*.local.yaml`) out of git; it self-heals on `init`/`up`, and if
+generated files ever leak into git, `hack doctor --fix` untracks them (files stay on disk).
 
 Runtime commands read the YAML model directly. Use `hack env materialize` only when an external tool
 needs a compatibility `.hack/.env` file on disk.
@@ -146,7 +164,8 @@ Secret key lookup is local-first:
 
 1. current checkout `.hack.secret.key`
 2. shared key under the git common dir for linked worktrees
-3. `HACK_ENV_SECRET_KEY`
+3. key inherited from the primary checkout's `.hack.secret.key` (linked worktrees)
+4. `HACK_ENV_SECRET_KEY`
 
 Use `HACK_ENV_SECRET_KEY` in CI and managed containers instead of copying `.hack.secret.key` into an
 image.
@@ -182,7 +201,9 @@ Use `hackdance/hack:slim` as a smaller base for Codex, CI, or managed containers
 `hack`, Bun, env resolution, sessions, and tickets without the full host stack.
 
 For reproducible remote or managed environments, install project dependencies normally, install Hack,
-and pass `HACK_ENV_SECRET_KEY` at runtime so encrypted project env can be resolved.
+and pass `HACK_ENV_SECRET_KEY` at runtime so encrypted project env can be resolved. Set `HACK_HOME`
+alongside it when you also want to redirect global state (registry, daemon, secrets) to an isolated
+root instead of `~/.hack`.
 
 Start with [Codex managed environments](./docs/guides/codex-managed-environments.md) for a concrete
 setup guide.

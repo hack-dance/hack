@@ -1,5 +1,7 @@
 # Supervisor (jobs + shells)
 
+> **Status: unsupported experimental.** These surfaces are source-available but outside the supported v3 product contract. They are hidden from default `hack --help` (see `hack help --all`) and print a warning when invoked.
+
 The supervisor is the execution engine behind remote workflows. It can run commands as jobs,
 stream logs/events, and host PTY-backed shells. The CLI exposes it locally via `hack x supervisor`
 and remotely through the gateway API.

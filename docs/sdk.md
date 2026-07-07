@@ -1,5 +1,7 @@
 # Control Plane SDK
 
+> **Status: unsupported experimental.** These surfaces are source-available but outside the supported v3 product contract. They are hidden from default `hack --help` (see `hack help --all`) and print a warning when invoked.
+
 Internal SDK helpers for the control plane and gateway clients.
 
 ## Gateway client

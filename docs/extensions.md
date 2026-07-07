@@ -12,7 +12,7 @@ built-in GitHub integration, or built-in Linear integration.
 ## Scope
 
 - Supported local helpers:
-  - Tickets: `hack x tickets ...`
+  - Tickets: `hack x tickets ...` (opt-in — see [Built-in Extensions](#built-in-extensions))
 - Unsupported experimental workflows:
   - Gateway: `hack x gateway ...`
   - Supervisor: `hack x supervisor ...`
@@ -28,12 +28,20 @@ built-in GitHub integration, or built-in Linear integration.
 - The CLI dispatches extension commands via `hack x <namespace> <command>`.
 - Global enablement lives in `~/.hack/hack.config.json` via `controlPlane.extensions`.
 - Per-project overrides live in `.hack/hack.config.json`.
-- Built-in gateway enablement remains project-scoped through `controlPlane.gateway.enabled`.
+- Built-in gateway enablement remains project-scoped through `controlPlane.gateway.enabled` — the
+  global config's `gateway.enabled` field is explicitly ignored when resolving gateway state; only
+  the per-project opt-in decides whether gateway is enabled.
+- When a disabled extension's command is run, the CLI prints the exact enable command for that
+  extension (and on a TTY offers to run it for you). Gateway is a special case: its enable hint
+  always routes to `hack gateway enable` rather than a `hack config set` invocation.
 
 ## Built-in Extensions
 
-- Tickets:
-  - `hack x tickets setup|create|update|list|show|status|sync|tui`
+- Tickets (opt-in; disabled unless `controlPlane.extensions["dance.hack.tickets"].enabled` is
+  `true` — running `hack x tickets setup` auto-enables it in the project config):
+  - `hack x tickets setup|create|update|comment|review-note|document|list|show|status|resolve-conflict|sync|tui`
+  - Also available as the top-level alias `hack tickets <command>` (see
+    [docs/guides/tickets.md](guides/tickets.md)).
 - Unsupported experimental:
   - `hack x gateway token-create|token-list|token-revoke`
   - `hack x supervisor job-create|job-list|job-show|job-tail|job-attach|job-cancel|shell`
@@ -48,7 +56,8 @@ GitHub and Linear are intentionally not part of the shipped built-in extension s
 hack x <namespace> <command> [args...]
 ```
 
-Use `hack x <namespace> help` to list commands for an enabled extension.
+Use `hack x <namespace> help` to list commands for an enabled extension, or `hack x list` to list
+all registered extensions (enabled and disabled) with their namespaces.
 
 ## Experimental Boundary
 
@@ -58,6 +67,8 @@ the default local-first product contract.
 - Do not depend on it for first-run onboarding.
 - Do not expect hosted Hack services or browser auth flows.
 - Treat bugs here as experimental unless they break the core local runtime.
+- These commands are hidden from default `hack --help` output; list them with `hack help --all`.
+  Invoking one prints a one-line experimental/unsupported warning.
 
 ## Gateway API Surface
 

@@ -61,7 +61,8 @@
     "test:e2e:local:docker": "HACK_E2E_DOCKER=1 bun tests/e2e/run.ts",
     "test:e2e:gateway": "bun run scripts/gateway-e2e.ts",
     "test:e2e:dispatch": "bun run scripts/dispatch-e2e.ts",
-    "test:e2e:railway": "bun run scripts/railway-node-e2e.ts"
+    "test:e2e:railway": "bun run scripts/railway-node-e2e.ts",
+    "docs:cli-reference": "bun run scripts/generate-cli-reference.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.11",

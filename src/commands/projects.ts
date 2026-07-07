@@ -1,5 +1,4 @@
 import { resolve } from "node:path";
-import { confirm, isCancel } from "@clack/prompts";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optJson, optProject } from "../cli/options.ts";
@@ -9,11 +8,14 @@ import {
   readInternalExtraHostsIp,
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
+import { emitCliResult, okResult } from "../lib/cli-result.ts";
+import { confirmSafe } from "../lib/interactivity.ts";
 import { findProjectContext } from "../lib/project.ts";
 import { type ProjectMeta, resolveProjectMeta } from "../lib/project-meta.ts";
 import {
   findMissingRegistryEntries,
   findOrphanRuntimeProjects,
+  type OrphanedRuntimeProject,
 } from "../lib/project-runtime-hygiene.ts";
 import type { ProjectView } from "../lib/project-views.ts";
 import {
@@ -21,6 +23,8 @@ import {
   serializeProjectView,
 } from "../lib/project-views.ts";
 import {
+  findDeadProjectRegistrations,
+  type RegisteredProject,
   readProjectsRegistry,
   removeProjectsById,
   touchProjectRegistration,
@@ -34,7 +38,7 @@ import {
   countRunningServices,
   readRuntimeProjects,
 } from "../lib/runtime-projects.ts";
-import { run } from "../lib/shell.ts";
+import { exec } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
 
 const optDetails = defineOption({
@@ -94,10 +98,10 @@ const statusSpec = defineCommand({
   expandInRootHelp: true,
 } as const);
 
-const pruneOptions = [optIncludeGlobal] as const;
+const pruneOptions = [optIncludeGlobal, optJson] as const;
 const pruneSpec = defineCommand({
   name: "prune",
-  summary: "Remove missing registry entries and stop orphaned containers",
+  summary: "Remove stale registry entries and stop orphaned containers",
   group: "Global",
   options: pruneOptions,
   positionals,
@@ -148,49 +152,132 @@ async function touchCwdProjectRegistration(opts: {
   await touchProjectRegistration({ project });
 }
 
+type PruneRegistryCandidate = {
+  readonly project: RegisteredProject;
+  readonly reason: string;
+};
+
+/**
+ * Collect registry entries eligible for pruning: entries whose repo root is
+ * gone plus entries whose project dir / compose file is missing, deduped by
+ * registration id.
+ */
+async function collectPruneRegistryCandidates(opts: {
+  readonly projects: readonly RegisteredProject[];
+}): Promise<PruneRegistryCandidate[]> {
+  const [dead, missing] = await Promise.all([
+    findDeadProjectRegistrations({ projects: opts.projects }),
+    findMissingRegistryEntries({ projects: opts.projects }),
+  ]);
+
+  const byId = new Map<string, PruneRegistryCandidate>();
+  for (const entry of [...dead, ...missing]) {
+    if (!byId.has(entry.project.id)) {
+      byId.set(entry.project.id, entry);
+    }
+  }
+  return [...byId.values()];
+}
+
+async function applyPrune(opts: {
+  readonly candidates: readonly PruneRegistryCandidate[];
+  readonly orphaned: readonly OrphanedRuntimeProject[];
+}): Promise<void> {
+  if (opts.candidates.length > 0) {
+    await removeProjectsById({
+      ids: opts.candidates.map((entry) => entry.project.id),
+    });
+  }
+  if (opts.orphaned.length > 0) {
+    const ids = opts.orphaned.flatMap((entry) => entry.containerIds);
+    await removeContainerIds(ids);
+  }
+}
+
+/**
+ * `hack projects prune`: removes registry entries whose checkout no longer
+ * exists (missing repo root, project dir, or compose file) and stops
+ * containers of compose projects whose working dir is gone.
+ *
+ * A missing Docker runtime only skips the container half — registry pruning
+ * never requires Docker. `--json` runs non-interactively, applies the prune,
+ * and emits the standard `{ok, data}` envelope reporting what was removed.
+ */
 const handlePrune: CommandHandlerFor<typeof pruneSpec> = async ({
   args,
 }): Promise<number> => {
   const includeGlobal = args.options.includeGlobal === true;
+  const json = args.options.json === true;
   const registry = await readProjectsRegistry();
-  const missing = await findMissingRegistryEntries({
+  const candidates = await collectPruneRegistryCandidates({
     projects: registry.projects,
   });
+
   const runtimeResult = await readRuntimeProjects({ includeGlobal });
-  if (!runtimeResult.ok) {
-    await display.panel({
-      title: "Runtime unavailable",
-      tone: "error",
-      lines: [runtimeResult.error ?? "Docker runtime is not responding."],
-    });
-    return 1;
-  }
-  const orphaned = await findOrphanRuntimeProjects({
-    runtime: runtimeResult.runtime,
-  });
+  const orphaned = runtimeResult.ok
+    ? await findOrphanRuntimeProjects({ runtime: runtimeResult.runtime })
+    : [];
   const orphanedContainerCount = orphaned.reduce(
     (sum, entry) => sum + entry.containerIds.length,
     0
   );
 
-  if (missing.length === 0 && orphaned.length === 0) {
+  if (json) {
+    await applyPrune({ candidates, orphaned });
+    emitCliResult({
+      result: okResult({
+        data: {
+          runtimeOk: runtimeResult.ok,
+          runtimeError: runtimeResult.ok ? null : (runtimeResult.error ?? null),
+          removedRegistryEntries: candidates.map((entry) => ({
+            id: entry.project.id,
+            name: entry.project.name,
+            repoRoot: entry.project.repoRoot,
+            projectDir: entry.project.projectDir,
+            reason: entry.reason,
+          })),
+          removedOrphanedProjects: orphaned.map((entry) => ({
+            project: entry.project,
+            workingDir: entry.workingDir,
+            reason: entry.reason,
+            containerCount: entry.containerIds.length,
+          })),
+          removedContainerCount: orphanedContainerCount,
+        },
+      }),
+    });
+    return 0;
+  }
+
+  if (!runtimeResult.ok) {
+    await display.panel({
+      title: "Runtime unavailable",
+      tone: "warn",
+      lines: [
+        runtimeResult.error ?? "Docker runtime is not responding.",
+        "Orphaned-container detection skipped; registry pruning continues.",
+      ],
+    });
+  }
+
+  if (candidates.length === 0 && orphaned.length === 0) {
     await display.panel({
       title: "Prune",
       tone: "info",
-      lines: ["No missing registry entries or orphaned containers found."],
+      lines: ["No stale registry entries or orphaned containers found."],
     });
     return 0;
   }
 
   await display.section("Prune candidates");
 
-  if (missing.length > 0) {
+  if (candidates.length > 0) {
     await display.section("Registry entries");
     await display.table({
-      columns: ["Project", "Project Dir", "Reason"],
-      rows: missing.map((entry) => [
+      columns: ["Project", "Repo Root", "Reason"],
+      rows: candidates.map((entry) => [
         entry.project.name,
-        entry.project.projectDir,
+        entry.project.repoRoot,
         entry.reason,
       ]),
     });
@@ -209,33 +296,23 @@ const handlePrune: CommandHandlerFor<typeof pruneSpec> = async ({
     });
   }
 
-  const ok = await confirm({
-    message: `Remove ${missing.length} registry entr${missing.length === 1 ? "y" : "ies"} and stop ${orphanedContainerCount} container${orphanedContainerCount === 1 ? "" : "s"} from ${orphaned.length} orphaned project${orphaned.length === 1 ? "" : "s"}?`,
+  const ok = await confirmSafe({
+    message: `Remove ${candidates.length} registry entr${candidates.length === 1 ? "y" : "ies"} and stop ${orphanedContainerCount} container${orphanedContainerCount === 1 ? "" : "s"} from ${orphaned.length} orphaned project${orphaned.length === 1 ? "" : "s"}?`,
     initialValue: false,
+    nonInteractive: "fail",
+    hint: "Pass --json to apply the prune non-interactively.",
   });
-  if (isCancel(ok)) {
-    throw new Error("Canceled");
-  }
   if (!ok) {
     return 0;
   }
 
-  if (missing.length > 0) {
-    await removeProjectsById({
-      ids: missing.map((entry) => entry.project.id),
-    });
-  }
-
-  if (orphaned.length > 0) {
-    const ids = orphaned.flatMap((entry) => entry.containerIds);
-    await removeContainerIds(ids);
-  }
+  await applyPrune({ candidates, orphaned });
 
   await display.panel({
     title: "Prune complete",
     tone: "success",
     lines: [
-      `Registry entries removed: ${missing.length}`,
+      `Registry entries removed: ${candidates.length}`,
       `Orphaned containers removed: ${orphanedContainerCount}`,
     ],
   });
@@ -1031,6 +1108,10 @@ export const __testOnlyProjectsCommand = {
   parseDaemonRuntimeRecoveryMeta,
 };
 
+/**
+ * Force-remove containers by id. Output is captured (not inherited) so
+ * `--json` code paths keep stdout reserved for the result envelope.
+ */
 async function removeContainerIds(ids: readonly string[]): Promise<void> {
   if (ids.length === 0) {
     return;
@@ -1038,10 +1119,10 @@ async function removeContainerIds(ids: readonly string[]): Promise<void> {
   const unique = [...new Set(ids)];
   const chunks = chunkArray(unique, 50);
   for (const chunk of chunks) {
-    const code = await run(["docker", "rm", "-f", ...chunk], {
+    const result = await exec(["docker", "rm", "-f", ...chunk], {
       stdin: "ignore",
     });
-    if (code !== 0) {
+    if (result.exitCode !== 0) {
       break;
     }
   }

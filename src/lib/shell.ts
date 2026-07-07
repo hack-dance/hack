@@ -79,8 +79,18 @@ async function streamToText(
   return await new Response(stream).text();
 }
 
+/**
+ * Resolve an executable from the CURRENT `process.env.PATH`.
+ *
+ * `Bun.which(name)` consults the PATH snapshot captured at process startup,
+ * so runtime PATH edits (tests isolating tool discovery, wrappers that
+ * prepend shim dirs) would be ignored. Passing PATH explicitly keeps lookup
+ * behavior identical for normal runs while honoring runtime changes.
+ */
 export function findExecutableInPath(executableName: string): string | null {
-  const resolved = Bun.which(executableName);
+  const resolved = Bun.which(executableName, {
+    PATH: process.env.PATH ?? "",
+  });
   return typeof resolved === "string" ? resolved : null;
 }
 

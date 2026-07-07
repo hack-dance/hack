@@ -29,10 +29,12 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
+import { resolveTicketsIntegrationEnablement } from "../control-plane/extensions/tickets/enablement.ts";
 import {
   checkTicketsSkill,
   installTicketsSkill,
   removeTicketsSkill,
+  type TicketsSkillResult,
 } from "../control-plane/extensions/tickets/tickets-skill.ts";
 import { pathExists, readTextFile, writeTextFile } from "../lib/fs.ts";
 import { canPrompt } from "../lib/interactivity.ts";
@@ -619,6 +621,11 @@ async function handleSetupTickets({
       ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
       : undefined;
 
+  logger.info({
+    message:
+      'Note: tickets is an optional/legacy extension — it is no longer part of default agent instructions (enable via controlPlane.extensions["dance.hack.tickets"].enabled).',
+  });
+
   let result: Awaited<ReturnType<typeof checkTicketsSkill>>;
   if (action === "check") {
     result = await checkTicketsSkill({ scope, projectRoot });
@@ -691,6 +698,8 @@ async function handleSetupAgents({
   });
 }
 
+type SetupSyncAction = "install" | "check" | "remove";
+
 async function handleSetupSync({
   ctx,
   args,
@@ -708,177 +717,217 @@ async function handleSetupSync({
   const projectRoot = includesProject
     ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
     : undefined;
+  const ticketsEnablement = await resolveTicketsIntegrationEnablement({
+    projectRoot,
+  });
 
   let exitCode = 0;
 
-  const runSingle = (
-    result: {
-      readonly status: string;
-      readonly path: string;
-      readonly message?: string;
-    },
-    okMessage: string
-  ) => {
-    exitCode = Math.max(
-      exitCode,
-      logSingleResult({
-        action,
-        okMessage,
-        result,
-      })
-    );
-  };
-
   if (includesProject && projectRoot) {
-    let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
-    let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
-    let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
-    let ticketsResult: Awaited<ReturnType<typeof checkTicketsSkill>>;
-    let mcpResults: SetupMultiLogResult[];
-    let docsResults: SetupMultiLogResult[];
-
-    if (action === "check") {
-      cursorResult = await checkCursorRules({ scope: "project", projectRoot });
-      claudeResult = await checkClaudeHooks({ scope: "project", projectRoot });
-      codexResult = await checkCodexSkill({ scope: "project", projectRoot });
-      ticketsResult = await checkTicketsSkill({
-        scope: "project",
-        projectRoot,
-      });
-      mcpResults = await checkMcpConfig({
-        scope: "project",
-        targets: ["cursor", "claude", "codex"],
-        projectRoot,
-      });
-      docsResults = await checkAgentDocs({
-        projectRoot,
-        targets: ["agents", "claude"],
-      });
-    } else if (action === "remove") {
-      cursorResult = await removeCursorRules({
-        scope: "project",
-        projectRoot,
-      });
-      claudeResult = await removeClaudeHooks({
-        scope: "project",
-        projectRoot,
-      });
-      codexResult = await removeCodexSkill({ scope: "project", projectRoot });
-      ticketsResult = await removeTicketsSkill({
-        scope: "project",
-        projectRoot,
-      });
-      mcpResults = await removeMcpConfig({
-        scope: "project",
-        targets: ["cursor", "claude", "codex"],
-        projectRoot,
-      });
-      docsResults = await removeAgentDocs({
-        projectRoot,
-        targets: ["agents", "claude"],
-      });
-    } else {
-      cursorResult = await installCursorRules({
-        scope: "project",
-        projectRoot,
-      });
-      claudeResult = await installClaudeHooks({
-        scope: "project",
-        projectRoot,
-      });
-      codexResult = await installCodexSkill({
-        scope: "project",
-        projectRoot,
-      });
-      ticketsResult = await installTicketsSkill({
-        scope: "project",
-        projectRoot,
-      });
-      mcpResults = await installMcpConfig({
-        scope: "project",
-        targets: ["cursor", "claude", "codex"],
-        projectRoot,
-      });
-      docsResults = await upsertAgentDocs({
-        projectRoot,
-        targets: ["agents", "claude"],
-      });
-    }
-
-    runSingle(cursorResult, "Cursor integration (project)");
-    runSingle(claudeResult, "Claude integration (project)");
-    runSingle(codexResult, "Codex integration (project)");
-    runSingle(ticketsResult, "Tickets skill (project)");
-
     exitCode = Math.max(
       exitCode,
-      logMultiResults({
+      await runProjectScopeSync({
         action,
-        okMessage: "MCP config (project)",
-        results: mcpResults,
-      })
-    );
-    exitCode = Math.max(
-      exitCode,
-      logMultiResults({
-        action,
-        okMessage: "Agent docs",
-        results: docsResults,
+        projectRoot,
+        ticketsEnabled: ticketsEnablement.project,
       })
     );
   }
 
   if (includesUser) {
-    let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
-    let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
-    let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
-    let ticketsResult: Awaited<ReturnType<typeof checkTicketsSkill>>;
-    let mcpResults: SetupMultiLogResult[];
-
-    if (action === "check") {
-      cursorResult = await checkCursorRules({ scope: "user" });
-      claudeResult = await checkClaudeHooks({ scope: "user" });
-      codexResult = await checkCodexSkill({ scope: "user" });
-      ticketsResult = await checkTicketsSkill({ scope: "user" });
-      mcpResults = await checkMcpConfig({
-        scope: "user",
-        targets: ["cursor", "claude", "codex"],
-      });
-    } else if (action === "remove") {
-      cursorResult = await removeCursorRules({ scope: "user" });
-      claudeResult = await removeClaudeHooks({ scope: "user" });
-      codexResult = await removeCodexSkill({ scope: "user" });
-      ticketsResult = await removeTicketsSkill({ scope: "user" });
-      mcpResults = await removeMcpConfig({
-        scope: "user",
-        targets: ["cursor", "claude", "codex"],
-      });
-    } else {
-      cursorResult = await installCursorRules({ scope: "user" });
-      claudeResult = await installClaudeHooks({ scope: "user" });
-      codexResult = await installCodexSkill({ scope: "user" });
-      ticketsResult = await installTicketsSkill({ scope: "user" });
-      mcpResults = await installMcpConfig({
-        scope: "user",
-        targets: ["cursor", "claude", "codex"],
-      });
-    }
-
-    runSingle(cursorResult, "Cursor integration (global)");
-    runSingle(claudeResult, "Claude integration (global)");
-    runSingle(codexResult, "Codex integration (global)");
-    runSingle(ticketsResult, "Tickets skill (global)");
-
     exitCode = Math.max(
       exitCode,
-      logMultiResults({
+      await runUserScopeSync({
         action,
-        okMessage: "MCP config (global)",
-        results: mcpResults,
+        ticketsEnabled: ticketsEnablement.global,
       })
     );
   }
 
+  return exitCode;
+}
+
+/**
+ * Run one sync action across all project-scope integrations and log results.
+ * Tickets is optional/legacy: its skill is only checked/installed when the
+ * extension is enabled for the project; removal always runs so leftover
+ * artifacts get cleaned up even after the extension was disabled.
+ */
+async function runProjectScopeSync(opts: {
+  readonly action: SetupSyncAction;
+  readonly projectRoot: string;
+  readonly ticketsEnabled: boolean;
+}): Promise<number> {
+  const { action, projectRoot, ticketsEnabled } = opts;
+  let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
+  let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
+  let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
+  let ticketsResult: TicketsSkillResult | null;
+  let mcpResults: SetupMultiLogResult[];
+  let docsResults: SetupMultiLogResult[];
+
+  if (action === "check") {
+    cursorResult = await checkCursorRules({ scope: "project", projectRoot });
+    claudeResult = await checkClaudeHooks({ scope: "project", projectRoot });
+    codexResult = await checkCodexSkill({ scope: "project", projectRoot });
+    ticketsResult = ticketsEnabled
+      ? await checkTicketsSkill({ scope: "project", projectRoot })
+      : null;
+    mcpResults = await checkMcpConfig({
+      scope: "project",
+      targets: ["cursor", "claude", "codex"],
+      projectRoot,
+    });
+    docsResults = await checkAgentDocs({
+      projectRoot,
+      targets: ["agents", "claude"],
+    });
+  } else if (action === "remove") {
+    cursorResult = await removeCursorRules({ scope: "project", projectRoot });
+    claudeResult = await removeClaudeHooks({ scope: "project", projectRoot });
+    codexResult = await removeCodexSkill({ scope: "project", projectRoot });
+    ticketsResult = await removeTicketsSkill({ scope: "project", projectRoot });
+    mcpResults = await removeMcpConfig({
+      scope: "project",
+      targets: ["cursor", "claude", "codex"],
+      projectRoot,
+    });
+    docsResults = await removeAgentDocs({
+      projectRoot,
+      targets: ["agents", "claude"],
+    });
+  } else {
+    cursorResult = await installCursorRules({ scope: "project", projectRoot });
+    claudeResult = await installClaudeHooks({ scope: "project", projectRoot });
+    codexResult = await installCodexSkill({ scope: "project", projectRoot });
+    ticketsResult = ticketsEnabled
+      ? await installTicketsSkill({ scope: "project", projectRoot })
+      : null;
+    mcpResults = await installMcpConfig({
+      scope: "project",
+      targets: ["cursor", "claude", "codex"],
+      projectRoot,
+    });
+    docsResults = await upsertAgentDocs({
+      projectRoot,
+      targets: ["agents", "claude"],
+    });
+  }
+
+  const singleResults: readonly (readonly [
+    SetupMultiLogResult & { readonly path: string },
+    string,
+  ])[] = [
+    [cursorResult, "Cursor integration (project)"],
+    [claudeResult, "Claude integration (project)"],
+    [codexResult, "Codex integration (project)"],
+    ...(ticketsResult
+      ? ([[ticketsResult, "Tickets skill (project)"]] as const)
+      : []),
+  ];
+
+  let exitCode = 0;
+  for (const [result, okMessage] of singleResults) {
+    exitCode = Math.max(
+      exitCode,
+      logSingleResult({ action, okMessage, result })
+    );
+  }
+  exitCode = Math.max(
+    exitCode,
+    logMultiResults({
+      action,
+      okMessage: "MCP config (project)",
+      results: mcpResults,
+    })
+  );
+  exitCode = Math.max(
+    exitCode,
+    logMultiResults({
+      action,
+      okMessage: "Agent docs",
+      results: docsResults,
+    })
+  );
+  return exitCode;
+}
+
+/**
+ * Run one sync action across all global (user) scope integrations and log
+ * results. The tickets skill follows the global-config enablement only;
+ * removal always runs (cleanup of leftovers is always safe).
+ */
+async function runUserScopeSync(opts: {
+  readonly action: SetupSyncAction;
+  readonly ticketsEnabled: boolean;
+}): Promise<number> {
+  const { action, ticketsEnabled } = opts;
+  let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
+  let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
+  let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
+  let ticketsResult: TicketsSkillResult | null;
+  let mcpResults: SetupMultiLogResult[];
+
+  if (action === "check") {
+    cursorResult = await checkCursorRules({ scope: "user" });
+    claudeResult = await checkClaudeHooks({ scope: "user" });
+    codexResult = await checkCodexSkill({ scope: "user" });
+    ticketsResult = ticketsEnabled
+      ? await checkTicketsSkill({ scope: "user" })
+      : null;
+    mcpResults = await checkMcpConfig({
+      scope: "user",
+      targets: ["cursor", "claude", "codex"],
+    });
+  } else if (action === "remove") {
+    cursorResult = await removeCursorRules({ scope: "user" });
+    claudeResult = await removeClaudeHooks({ scope: "user" });
+    codexResult = await removeCodexSkill({ scope: "user" });
+    ticketsResult = await removeTicketsSkill({ scope: "user" });
+    mcpResults = await removeMcpConfig({
+      scope: "user",
+      targets: ["cursor", "claude", "codex"],
+    });
+  } else {
+    cursorResult = await installCursorRules({ scope: "user" });
+    claudeResult = await installClaudeHooks({ scope: "user" });
+    codexResult = await installCodexSkill({ scope: "user" });
+    ticketsResult = ticketsEnabled
+      ? await installTicketsSkill({ scope: "user" })
+      : null;
+    mcpResults = await installMcpConfig({
+      scope: "user",
+      targets: ["cursor", "claude", "codex"],
+    });
+  }
+
+  const singleResults: readonly (readonly [
+    SetupMultiLogResult & { readonly path: string },
+    string,
+  ])[] = [
+    [cursorResult, "Cursor integration (global)"],
+    [claudeResult, "Claude integration (global)"],
+    [codexResult, "Codex integration (global)"],
+    ...(ticketsResult
+      ? ([[ticketsResult, "Tickets skill (global)"]] as const)
+      : []),
+  ];
+
+  let exitCode = 0;
+  for (const [result, okMessage] of singleResults) {
+    exitCode = Math.max(
+      exitCode,
+      logSingleResult({ action, okMessage, result })
+    );
+  }
+  exitCode = Math.max(
+    exitCode,
+    logMultiResults({
+      action,
+      okMessage: "MCP config (global)",
+      results: mcpResults,
+    })
+  );
   return exitCode;
 }
 

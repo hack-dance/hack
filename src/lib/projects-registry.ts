@@ -251,6 +251,29 @@ export async function removeProjectsById(opts: {
   });
 }
 
+export type DeadProjectRegistration = {
+  readonly project: RegisteredProject;
+  readonly reason: "missing repo root";
+};
+
+/**
+ * Find registry entries whose `repoRoot` no longer exists on disk (e.g.
+ * deleted checkouts or stale temp-dir test projects).
+ *
+ * Detection only — pair with {@link removeProjectsById} to prune, so callers
+ * can show candidates and confirm before mutating the registry.
+ */
+export async function findDeadProjectRegistrations(opts: {
+  readonly projects: readonly RegisteredProject[];
+}): Promise<DeadProjectRegistration[]> {
+  const checks = await Promise.all(
+    opts.projects.map((project) => pathExists(project.repoRoot))
+  );
+  return opts.projects
+    .filter((_, index) => checks[index] === false)
+    .map((project) => ({ project, reason: "missing repo root" as const }));
+}
+
 function parseRegistry(value: unknown): ProjectsRegistry | null {
   if (!isRecord(value)) {
     return null;

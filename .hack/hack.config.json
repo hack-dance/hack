@@ -5,13 +5,13 @@
   "controlPlane": {
     "extensions": {
       "dance.hack.github": {
-        "enabled": true
+        "enabled": false
       },
       "dance.hack.tickets": {
         "enabled": false
       },
       "dance.hack.linear": {
-        "enabled": true
+        "enabled": false
       }
     },
     "gateway": {

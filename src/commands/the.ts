@@ -64,11 +64,11 @@ async function handlePlanet({
   const variant = parseVariant(raw);
   const animations =
     variant === "cycle"
-      ? [
+      ? await Promise.all([
           getPlanetAnimation({ variant: "cut" }),
           getPlanetAnimation({ variant: "mash" }),
-        ]
-      : [getPlanetAnimation({ variant })];
+        ])
+      : [await getPlanetAnimation({ variant })];
   const ok = await playPlanetAnimation({
     animations,
     loop: args.options.loop === true,

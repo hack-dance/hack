@@ -770,6 +770,16 @@ function rewriteUrlLikeValueForHostExecution(input: {
   return `${prefix}${rewrittenHost}${suffix}`;
 }
 
+/**
+ * @deprecated v2→v3 legacy `.env`→`hack.env` migration shim. Only fires for
+ * projects that still carry a v2 env contract without the v3 config files.
+ * The underlying migrator is `migrateLegacyProjectEnv` in
+ * `src/lib/project-env-config.ts`.
+ *
+ * TODO(remove: v3.2): drop this migration path (and its callers in
+ * project/doctor/session command flows) once v2 projects are no longer
+ * supported.
+ */
 async function maybeMigrateLegacyProjectEnv(input: {
   readonly project: ProjectContext;
   readonly projectName: string;

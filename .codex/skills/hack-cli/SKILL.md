@@ -63,6 +63,7 @@ Use `hack` as the primary interface for local-first development.
 - Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.
 - Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).
 - Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.
+- Ignore rules: hack owns a committed `.hack/.gitignore` (self-healing on init/up) covering machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`); keep it committed, and if generated files leaked into git, `hack doctor --fix` untracks them (files stay on disk).
 
 ## Linked git worktrees
 
@@ -172,6 +173,7 @@ Use `hack` as the primary interface for local-first development.
 - Audit integration state only: `hack setup sync --all-scopes --check`
 - Remove generated integration artifacts: `hack setup sync --all-scopes --remove`
 - After upgrading CLI: `hack update` then `hack setup sync --all-scopes`
+- When changing hack itself: interface or behavior changes must update docs/ in the same change (regenerate the CLI reference with `bun run docs:cli-reference`).
 
 ## Agent setup (CLI-first)
 
@@ -179,6 +181,7 @@ Use `hack` as the primary interface for local-first development.
 - Claude hooks: `hack setup claude`
 - Codex skill: `hack setup codex`
 - Refresh all local agent integrations: `hack setup sync --all-scopes`
+- Agent-assisted onboarding: `hack init --with claude|codex|both` (new repos) or `hack agent onboard` (existing projects) print/hand off the full setup prompt; the `/hack-init` skill and the `hack-init` MCP prompt return the same content.
 - Init prompt: `hack agent init` (use --client cursor|claude|codex to open)
 - Init patterns: `hack agent patterns`
 - MCP (no-shell only): `hack setup mcp`

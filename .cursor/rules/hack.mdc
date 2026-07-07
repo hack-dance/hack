@@ -29,6 +29,7 @@ Prefer `hack` when shell access is available. Use MCP only when shell access is 
 - Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.
 - Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).
 - Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.
+- Ignore rules: hack owns a committed `.hack/.gitignore` (self-healing on init/up) covering machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`); keep it committed, and if generated files leaked into git, `hack doctor --fix` untracks them (files stay on disk).
 
 ## Linked git worktrees
 
@@ -77,6 +78,7 @@ Prefer `hack` when shell access is available. Use MCP only when shell access is 
 - Audit integration state only: `hack setup sync --all-scopes --check`
 - Remove generated integration artifacts: `hack setup sync --all-scopes --remove`
 - After upgrading CLI: `hack update` then `hack setup sync --all-scopes`
+- When changing hack itself: interface or behavior changes must update docs/ in the same change (regenerate the CLI reference with `bun run docs:cli-reference`).
 
 ## Optional extensions
 

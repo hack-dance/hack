@@ -281,6 +281,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Audit integration state only: `hack setup sync --all-scopes --check`",
       "Remove generated integration artifacts: `hack setup sync --all-scopes --remove`",
       "After upgrading CLI: `hack update` then `hack setup sync --all-scopes`",
+      "When changing hack itself: interface or behavior changes must update docs/ in the same change (regenerate the CLI reference with `bun run docs:cli-reference`).",
     ],
   },
   {

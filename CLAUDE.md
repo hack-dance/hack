@@ -38,6 +38,13 @@ TypeScript (strict). Runtimes: Bun 1.3+, Node 23. Prettier: 2 spaces, no semicol
 Always default to useing named paramaters in functions eg myFunction({ ctx, other }) vs myFunction(ctx, other)
 Never use any types and always default to leveraging generics and smart types to sensure the best possible tpye inference across the project.
 
+## Docs Currency (non-negotiable)
+
+- ANY interface or behavior change (commands, flags, config keys, file layouts, env vars, defaults) must update the affected docs/ pages in the same patch.
+- The CLI reference is generated: after changing the CLI surface, run `bun run docs:cli-reference` and commit `docs/reference/cli.md` (a drift test fails otherwise).
+- Agent-facing behavior phrasing lives in `src/agents/instruction-source.ts`; update it (not the generated surfaces) and run `hack setup sync --all-scopes`.
+- Real end-to-end coverage lives in `tests/e2e/` (`bun run test:e2e:local`) — extend it when adding user-facing workflows.
+
 ## Project Notes (Obsidian)
 
 This project uses Obsidian for project context, specs, research, and progress tracking.
@@ -118,6 +125,7 @@ Project files (managed vs generated):
 - Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.
 - Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).
 - Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.
+- Ignore rules: hack owns a committed `.hack/.gitignore` (self-healing on init/up) covering machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`); keep it committed, and if generated files leaked into git, `hack doctor --fix` untracks them (files stay on disk).
 
 Linked git worktrees:
 - Secret key inherits from the primary checkout automatically through the shared git common dir; set `HACK_ENV_SECRET_KEY` for CI or detached environments.
@@ -212,12 +220,14 @@ Agent integration maintenance:
 - Audit integration state only: `hack setup sync --all-scopes --check`
 - Remove generated integration artifacts: `hack setup sync --all-scopes --remove`
 - After upgrading CLI: `hack update` then `hack setup sync --all-scopes`
+- When changing hack itself: interface or behavior changes must update docs/ in the same change (regenerate the CLI reference with `bun run docs:cli-reference`).
 
 Agent setup (CLI-first):
 - Cursor rules: `hack setup cursor`
 - Claude hooks: `hack setup claude`
 - Codex skill: `hack setup codex`
 - Refresh all local agent integrations: `hack setup sync --all-scopes`
+- Agent-assisted onboarding: `hack init --with claude|codex|both` (new repos) or `hack agent onboard` (existing projects) print/hand off the full setup prompt; the `/hack-init` skill and the `hack-init` MCP prompt return the same content.
 - Init prompt: `hack agent init` (use --client cursor|claude|codex to open)
 - Init patterns: `hack agent patterns`
 - MCP (no-shell only): `hack setup mcp`

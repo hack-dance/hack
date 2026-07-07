@@ -292,6 +292,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Claude hooks: `hack setup claude`",
       "Codex skill: `hack setup codex`",
       "Refresh all local agent integrations: `hack setup sync --all-scopes`",
+      "Agent-assisted onboarding: `hack init --with claude|codex|both` (new repos) or `hack agent onboard` (existing projects) print/hand off the full setup prompt; the `/hack-init` skill and the `hack-init` MCP prompt return the same content.",
       "Init prompt: `hack agent init` (use --client cursor|claude|codex to open)",
       "Init patterns: `hack agent patterns`",
       "MCP (no-shell only): `hack setup mcp`",

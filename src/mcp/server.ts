@@ -5,6 +5,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import pkg from "../../package.json";
+import {
+  type OnboardingMode,
+  renderOnboardingPrompt,
+} from "../agents/onboarding-prompt.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { ensureDir, pathExists } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
@@ -64,14 +68,70 @@ export async function startMcpServer(): Promise<void> {
       version: packageJson.version,
     },
     {
-      capabilities: { tools: {} },
+      capabilities: { tools: {}, prompts: {} },
     }
   );
 
   registerTools({ server });
+  registerPrompts({ server });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+}
+
+const ONBOARDING_MODES: ReadonlySet<string> = new Set([
+  "new-project",
+  "existing-project",
+]);
+
+/**
+ * Register MCP prompts for no-shell clients.
+ *
+ * `hack-init` returns the canonical project-onboarding prompt (same content
+ * as `hack agent onboard`, `hack init --with`, and the `/hack-init` skill).
+ */
+function registerPrompts(opts: { readonly server: McpServer }): void {
+  opts.server.registerPrompt(
+    "hack-init",
+    {
+      title: "hack project onboarding",
+      description:
+        "Agent-assisted onboarding prompt: stand up or adopt hack in a project (inventory, compose + env setup, deps/ops container patterns, verification loop).",
+      argsSchema: {
+        mode: z
+          .string()
+          .describe(
+            'Onboarding mode: "new-project" (no .hack/ yet) or "existing-project" (adopt/refine an existing setup). Default: existing-project.'
+          )
+          .optional(),
+        projectName: z.string().describe("Project slug, when known").optional(),
+        devHost: z
+          .string()
+          .describe("Project dev host (e.g. myapp.hack), when known")
+          .optional(),
+      },
+    },
+    ({ mode, projectName, devHost }) => {
+      const resolvedMode: OnboardingMode = ONBOARDING_MODES.has(mode ?? "")
+        ? ((mode ?? "existing-project") as OnboardingMode)
+        : "existing-project";
+
+      const prompt = renderOnboardingPrompt({
+        mode: resolvedMode,
+        projectName,
+        devHost,
+      });
+
+      return {
+        messages: [
+          {
+            role: "user" as const,
+            content: { type: "text" as const, text: prompt },
+          },
+        ],
+      };
+    }
+  );
 }
 
 function registerTools(opts: { readonly server: McpServer }): void {

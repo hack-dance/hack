@@ -8,6 +8,11 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import {
+  checkHackInitSkill,
+  installHackInitSkill,
+  removeHackInitSkill,
+} from "./hack-init-skill.ts";
+import {
   normalizeInstructionText,
   renderInstructionSections,
 } from "./instruction-source.ts";
@@ -34,7 +39,11 @@ const SKILL_DIR = ".codex/skills";
 const HACK_CLI_MARKER_REGEX = /name:\s*hack-cli\b/i;
 
 /**
- * Install or update the Codex skill for hack CLI usage.
+ * Install or update the Codex skills for hack usage.
+ *
+ * Writes the main `hack-cli` skill and the companion `/hack-init` onboarding
+ * skill. The returned path points at the main skill; the status reflects both
+ * artifacts (any change reports as created/updated).
  */
 export async function installCodexSkill(opts: {
   readonly scope: CodexSkillScope;
@@ -55,7 +64,26 @@ export async function installCodexSkill(opts: {
   const existed = await pathExists(path);
   const result = await writeTextFileIfChanged(path, renderCodexSkill());
 
-  const status = resolveInstallStatus({ changed: result.changed, existed });
+  const initResult = await installHackInitSkill({
+    client: "codex",
+    scope: opts.scope,
+    projectRoot: opts.projectRoot,
+  });
+  if (initResult.status === "error") {
+    return {
+      scope: opts.scope,
+      status: "error",
+      path: initResult.path,
+      message: initResult.message,
+    };
+  }
+
+  const initChanged =
+    initResult.status === "created" || initResult.status === "updated";
+  const status = resolveInstallStatus({
+    changed: result.changed || initChanged,
+    existed,
+  });
   return { scope: opts.scope, status, path };
 }
 
@@ -99,6 +127,22 @@ export async function checkCodexSkill(opts: {
     };
   }
 
+  const initResult = await checkHackInitSkill({
+    client: "codex",
+    scope: opts.scope,
+    projectRoot: opts.projectRoot,
+  });
+  if (initResult.status !== "noop") {
+    return {
+      scope: opts.scope,
+      status: initResult.status === "error" ? "error" : "stale",
+      path: initResult.path,
+      message:
+        initResult.message ??
+        "hack-init skill is missing or out of date. Run: hack setup codex",
+    };
+  }
+
   return { scope: opts.scope, status: "noop", path };
 }
 
@@ -122,8 +166,15 @@ export async function removeCodexSkill(opts: {
   const path = resolved.path;
   const skillDir = resolve(path, "..");
 
+  const initResult = await removeHackInitSkill({
+    client: "codex",
+    scope: opts.scope,
+    projectRoot: opts.projectRoot,
+  });
+
   if (!(await pathExists(path))) {
-    return { scope: opts.scope, status: "missing", path };
+    const status = initResult.status === "removed" ? "removed" : "missing";
+    return { scope: opts.scope, status, path };
   }
 
   await rm(skillDir, { recursive: true, force: true });

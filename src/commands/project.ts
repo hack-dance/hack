@@ -13,6 +13,15 @@ import { YAML } from "bun";
 import { installClaudeHooks } from "../agents/claude.ts";
 import { installCodexSkill } from "../agents/codex-skill.ts";
 import { installCursorRules } from "../agents/cursor.ts";
+import {
+  type OnboardingWith,
+  parseOnboardingWith,
+  runOnboardingHandoff,
+} from "../agents/onboarding-handoff.ts";
+import {
+  type OnboardingMode,
+  renderOnboardingPrompt,
+} from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
@@ -242,6 +251,15 @@ const optNoDiscovery = defineOption({
   description: "Skip discovery and generate a minimal compose",
 } as const);
 
+const optWith = defineOption({
+  name: "with",
+  type: "string",
+  long: "--with",
+  valueHint: "<claude|codex|both>",
+  description:
+    "After init, hand the onboarding prompt to an agent CLI (prints the prompt when the CLI is missing or the run is non-interactive)",
+} as const);
+
 const optTarget = defineOption({
   name: "target",
   type: "string",
@@ -260,6 +278,7 @@ const initOptions = [
   optOauth,
   optOauthTld,
   optNoDiscovery,
+  optWith,
 ] as const;
 const upOptions = [
   optPath,
@@ -3180,8 +3199,10 @@ async function handleInit({
   readonly ctx: CliContext;
   readonly args: InitArgs;
 }): Promise<number> {
+  const withValue = resolveInitWithOption({ withRaw: args.options.with });
+
   if (args.options.auto) {
-    return await handleInitAuto({ ctx, args });
+    return await handleInitAuto({ ctx, args, withValue });
   }
 
   if (!canPrompt()) {
@@ -3247,6 +3268,18 @@ async function handleInit({
     return 1;
   }
   if (hackDirAction === "skip") {
+    if (withValue) {
+      logger.info({
+        message:
+          ".hack/ already exists — handing off the onboarding prompt for the existing setup.",
+      });
+      await runInitOnboardingHandoff({
+        withValue,
+        mode: "existing-project",
+        projectName: slug,
+        devHost,
+      });
+    }
     return 0;
   }
 
@@ -3328,15 +3361,26 @@ async function handleInit({
     "Initialized"
   );
 
+  if (withValue) {
+    await runInitOnboardingHandoff({
+      withValue,
+      mode: "new-project",
+      projectName: slug,
+      devHost,
+    });
+  }
+
   return 0;
 }
 
 async function handleInitAuto({
   ctx,
   args,
+  withValue,
 }: {
   readonly ctx: CliContext;
   readonly args: InitArgs;
+  readonly withValue: OnboardingWith | null;
 }): Promise<number> {
   const startDir = resolveStartDir(ctx, args.options.path);
   const repoRoot = await findRepoRootForInit(startDir);
@@ -3373,6 +3417,18 @@ async function handleInitAuto({
   const configFile = resolve(hackDir, PROJECT_CONFIG_FILENAME);
 
   if (await pathExists(hackDir)) {
+    if (withValue) {
+      logger.info({
+        message: `${HACK_PROJECT_DIR_PRIMARY}/ already exists — skipping init and handing off the onboarding prompt for the existing setup.`,
+      });
+      await runInitOnboardingHandoff({
+        withValue,
+        mode: "existing-project",
+        projectName: slug,
+        devHost,
+      });
+      return 0;
+    }
     throw new Error(
       `${HACK_PROJECT_DIR_PRIMARY}/ already exists. Run without --auto to overwrite.`
     );
@@ -3449,7 +3505,62 @@ async function handleInitAuto({
     message: "Next: hack up --detach && hack open",
   });
 
+  if (withValue) {
+    await runInitOnboardingHandoff({
+      withValue,
+      mode: "new-project",
+      projectName: slug,
+      devHost,
+    });
+  }
+
   return 0;
+}
+
+/**
+ * Validate the raw `--with` init option.
+ *
+ * @throws CliUsageError when the value is not `claude`, `codex`, or `both`.
+ */
+function resolveInitWithOption(opts: {
+  readonly withRaw: string | undefined;
+}): OnboardingWith | null {
+  if (opts.withRaw === undefined) {
+    return null;
+  }
+  const parsed = parseOnboardingWith({ value: opts.withRaw });
+  if (!parsed) {
+    throw new CliUsageError(
+      `Invalid --with "${opts.withRaw}". Use claude, codex, or both.`
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Hand the onboarding prompt to the requested agent CLI(s) after init.
+ *
+ * Never spawns on non-interactive runs (`--no-interactive`,
+ * `HACK_NO_INTERACTIVE`, or no TTY) — the prompt is printed for copy-paste
+ * instead. Init success is never rolled back by handoff problems.
+ */
+async function runInitOnboardingHandoff(opts: {
+  readonly withValue: OnboardingWith;
+  readonly mode: OnboardingMode;
+  readonly projectName: string;
+  readonly devHost: string;
+}): Promise<void> {
+  const prompt = renderOnboardingPrompt({
+    mode: opts.mode,
+    projectName: opts.projectName,
+    devHost: opts.devHost,
+  });
+
+  await runOnboardingHandoff({
+    prompt,
+    withValue: opts.withValue,
+    interactive: canPrompt(),
+  });
 }
 
 function resolveInitSlug(opts: {

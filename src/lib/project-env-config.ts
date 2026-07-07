@@ -19,10 +19,16 @@ import {
   PROJECT_ENV_LOCAL_SEGMENT,
   PROJECT_ENV_STATE_FILENAME,
 } from "../constants.ts";
+import {
+  HACK_DIR_GITIGNORE_BEGIN_MARKER,
+  HACK_DIR_GITIGNORE_END_MARKER,
+  HACK_DIR_GITIGNORE_ENTRIES,
+} from "../templates.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import {
   ensureDir,
   ensureGitignoreEntry,
+  ensureManagedGitignoreBlock,
   pathExists,
   readTextFile,
   writeTextFile,
@@ -304,27 +310,27 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
   return (await pathExists(location.path)) ? location.path : null;
 }
 
-async function ensureProjectEnvLocalIgnoreEntries(opts: {
-  readonly projectRoot: string;
-}): Promise<void> {
-  const gitDir = await resolveGitRepositoryIdentity({
-    repoRoot: opts.projectRoot,
+/**
+ * Ensures the committed, hack-owned `.hack/.gitignore` exists and carries the
+ * canonical managed block for machine-local generated files (`.internal/`,
+ * `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`).
+ *
+ * The file is meant to be committed, so fresh clones and linked worktrees
+ * inherit the ignore rules with zero setup. User lines outside the managed
+ * markers are preserved; see `ensureManagedGitignoreBlock` for the merge
+ * scheme. Self-healing: called from `hack init`, `hack up`, the internal
+ * override writers, and env-local override writes.
+ */
+export async function ensureHackDirGitignore(opts: {
+  readonly projectDir: string;
+}): Promise<{ readonly changed: boolean }> {
+  await ensureDir(opts.projectDir);
+  return await ensureManagedGitignoreBlock({
+    gitignorePath: resolve(opts.projectDir, ".gitignore"),
+    beginMarker: HACK_DIR_GITIGNORE_BEGIN_MARKER,
+    endMarker: HACK_DIR_GITIGNORE_END_MARKER,
+    entries: HACK_DIR_GITIGNORE_ENTRIES,
   });
-  const ignorePath =
-    gitDir === null
-      ? resolve(opts.projectRoot, ".gitignore")
-      : resolve(gitDir, "info", "exclude");
-  await ensureDir(dirname(ignorePath));
-  for (const entry of [
-    ".hack/hack.env.local.yaml",
-    ".hack/hack.env.*.local.yaml",
-  ]) {
-    await ensureGitignoreEntry({
-      gitignorePath: ignorePath,
-      entry,
-      comment: "# local project env overrides",
-    });
-  }
 }
 
 function toGitRelativePath(opts: {
@@ -984,8 +990,8 @@ export async function setProjectEnvValue(opts: {
     };
   }
   if (opts.local === true) {
-    await ensureProjectEnvLocalIgnoreEntries({
-      projectRoot: opts.projectRoot,
+    await ensureHackDirGitignore({
+      projectDir: opts.projectDir,
     });
   }
 

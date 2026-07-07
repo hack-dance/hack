@@ -53,12 +53,16 @@ export const initScenario: Scenario = {
       });
     }
 
-    const gitignore = await Bun.file(join(fixture.root, ".gitignore")).text();
-    expect({
-      that: gitignore.includes(".hack/.internal/"),
-      message: "init should ensure .hack/.internal/ is gitignored",
-      result,
-    });
+    const hackGitignore = await Bun.file(
+      join(fixture.hackDir, ".gitignore")
+    ).text();
+    for (const entry of [".internal/", ".branch/", ".env.state.json"]) {
+      expect({
+        that: hackGitignore.includes(entry),
+        message: `init should write ${entry} to the committed .hack/.gitignore`,
+        result,
+      });
+    }
 
     const rerun = await ctx.cli({
       args: ["init", "--auto", "--name", name],

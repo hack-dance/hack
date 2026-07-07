@@ -788,15 +788,21 @@ test("setProjectEnvValue writes worktree-local overrides when requested", async 
   const localOverlay = await readFile(localOverlayPath, "utf8");
   expect(localOverlay).toContain('LOCAL_ONLY: "true"');
 
+  const nestedIgnoreText = await readFile(
+    resolve(repo.projectDir, ".gitignore"),
+    "utf8"
+  );
+  expect(nestedIgnoreText).toContain("hack.env.local.yaml");
+  expect(nestedIgnoreText).toContain("hack.env.*.local.yaml");
+
   const excludeText = await readFile(
     resolve(repo.projectRoot, ".git", "info", "exclude"),
     "utf8"
   );
-  expect(excludeText).toContain(".hack/hack.env.local.yaml");
-  expect(excludeText).toContain(".hack/hack.env.*.local.yaml");
+  expect(excludeText).not.toContain("hack.env");
 });
 
-test("setProjectEnvValue writes local override ignore rules to the git common-dir exclude", async () => {
+test("setProjectEnvValue writes local override ignore rules to the committed .hack/.gitignore in a linked worktree", async () => {
   const sandbox = await mkdtemp(join(tmpdir(), "hack-project-env-ignore-"));
   tempDirs.add(sandbox);
 
@@ -833,6 +839,13 @@ test("setProjectEnvValue writes local override ignore rules to the git common-di
     local: true,
   });
 
+  const nestedIgnoreText = await readFile(
+    resolve(linkedRoot, ".hack", ".gitignore"),
+    "utf8"
+  );
+  expect(nestedIgnoreText).toContain("hack.env.local.yaml");
+  expect(nestedIgnoreText).toContain("hack.env.*.local.yaml");
+
   const commonDir = await runGit(
     ["rev-parse", "--path-format=absolute", "--git-common-dir"],
     linkedRoot
@@ -841,8 +854,7 @@ test("setProjectEnvValue writes local override ignore rules to the git common-di
     resolve(commonDir, "info", "exclude"),
     "utf8"
   );
-  expect(excludeText).toContain(".hack/hack.env.local.yaml");
-  expect(excludeText).toContain(".hack/hack.env.*.local.yaml");
+  expect(excludeText).not.toContain("hack.env");
 });
 
 test("normal git clones keep generated env keys at the repo root", async () => {

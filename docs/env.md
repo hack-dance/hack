@@ -38,6 +38,43 @@ Encryption key material is local-only by default:
 
 `hack init` now scaffolds `.hack/hack.env.default.yaml` by default.
 
+## Ignore rules (committed `.hack/.gitignore`)
+
+Hack owns a committed `.hack/.gitignore` that keeps machine-local generated
+files out of git. Because the file is committed, fresh clones and linked git
+worktrees inherit the rules with zero setup. It covers (patterns relative to
+`.hack/`):
+
+- `.internal/`
+- `.branch/`
+- `.env`
+- `.env.state.json`
+- `hack.env.local.yaml`
+- `hack.env.*.local.yaml`
+
+How it is maintained:
+
+- written by `hack init`, and self-healed by `hack up` and whenever hack
+  writes `.hack/.internal/` overrides or `--local` env overrides
+- the entries live inside a marked, hack-managed block; anything you add
+  outside the markers is preserved on every rewrite
+- the root `.gitignore` still gets a `.hack.secret.key` entry when the secret
+  key is first generated (the key lives at the repo root, not under `.hack/`)
+- older repos that added `.hack/.internal/` to the root `.gitignore` keep
+  working; the entries are equivalent and nothing is removed
+
+Leak detection and repair:
+
+- `hack doctor` runs a "generated files" check: it lists any of the paths
+  above (plus `.hack.secret.key`) that are tracked in git
+- a tracked `.hack.secret.key` is reported as an error — it is a committed
+  secret; rotate it after untracking
+- `hack doctor --fix` untracks the offenders with `git rm --cached` (files
+  stay on disk) and re-ensures `.hack/.gitignore`; commit the removal
+- exception: a tracked `.hack/hack.env.local.yaml` is not flagged, because
+  older repos may intentionally track it as the shared `--env local` overlay
+  (see the legacy compatibility note above)
+
 ## File format
 
 Each env file is YAML with:

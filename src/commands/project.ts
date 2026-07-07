@@ -81,7 +81,6 @@ import {
 } from "../lib/execution-mode.ts";
 import {
   ensureDir,
-  ensureGitignoreEntry,
   pathExists,
   readTextFile,
   writeTextFileIfChanged,
@@ -124,6 +123,7 @@ import {
 } from "../lib/project.ts";
 import {
   discoverComposeServiceNames,
+  ensureHackDirGitignore,
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
@@ -1125,6 +1125,7 @@ async function resolveModernComposeEnvOverrides(opts: {
   const override = { services: overrideServices };
   const yaml = YAML.stringify(override, null, 2);
   const text = ensureTrailingNewline(cleanupYaml(yaml));
+  await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
   const overrideDir = resolve(opts.project.projectDir, ".internal");
   await ensureDir(overrideDir);
   const overridePath = resolve(overrideDir, "compose.env.override.yml");
@@ -1254,6 +1255,7 @@ async function resolveComposeEnvOverrides(opts: {
   const override = { services: overrideServices };
   const yaml = YAML.stringify(override, null, 2);
   const text = ensureTrailingNewline(cleanupYaml(yaml));
+  await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
   const overrideDir = resolve(opts.project.projectDir, ".internal");
   await ensureDir(overrideDir);
   const overridePath = resolve(overrideDir, "compose.env.override.yml");
@@ -2558,6 +2560,7 @@ async function writeInternalComposeOverride(opts: {
   readonly projectDir: string;
   readonly text: string;
 }): Promise<string> {
+  await ensureHackDirGitignore({ projectDir: opts.projectDir });
   const overrideDir = resolve(opts.projectDir, ".internal");
   await ensureDir(overrideDir);
   const overridePath = resolve(overrideDir, "compose.override.yml");
@@ -3247,12 +3250,9 @@ async function handleInit({
     return 0;
   }
 
-  // Ensure .hack/.internal is gitignored (contains local paths, certs, etc)
-  await ensureGitignoreEntry({
-    gitignorePath: resolve(repoRoot, ".gitignore"),
-    entry: ".hack/.internal/",
-    comment: "# hack internal (local overrides)",
-  });
+  // Committed, hack-owned ignore file for machine-local generated files
+  // (.internal/, .branch/, .env, env state, env-local overrides).
+  await ensureHackDirGitignore({ projectDir: hackDir });
 
   await writeTextFileIfChanged(
     configFile,
@@ -3380,12 +3380,9 @@ async function handleInitAuto({
 
   await ensureDir(hackDir);
 
-  // Ensure .hack/.internal is gitignored (contains local paths, certs, etc)
-  await ensureGitignoreEntry({
-    gitignorePath: resolve(repoRoot, ".gitignore"),
-    entry: ".hack/.internal/",
-    comment: "# hack internal (local overrides)",
-  });
+  // Committed, hack-owned ignore file for machine-local generated files
+  // (.internal/, .branch/, .env, env state, env-local overrides).
+  await ensureHackDirGitignore({ projectDir: hackDir });
 
   await writeTextFileIfChanged(
     configFile,
@@ -4979,6 +4976,9 @@ async function runUpCommand({
     return remoteUpCode;
   }
   await maybeSyncOauthAliasesInCompose({ project });
+  // Self-heal the committed .hack/.gitignore so machine-local generated files
+  // (.internal/, .branch/, .env, env state) never leak into git history.
+  await ensureHackDirGitignore({ projectDir: project.projectDir });
 
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {

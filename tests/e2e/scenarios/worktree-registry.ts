@@ -1,3 +1,5 @@
+import { realpath } from "node:fs/promises";
+
 import { addLinkedWorktree, createMonorepoFixture } from "../fixture.ts";
 import {
   expect,
@@ -105,13 +107,13 @@ export const worktreeRegistryScenario: Scenario = {
       result: projects,
     });
 
+    const realWorktreePath = await realpath(worktreePath);
     const worktrees = entries[0]?.worktrees ?? null;
-    const worktreeRecorded =
-      worktrees?.some((entry) => entry.path === worktreePath) === true;
-    ctx.log(
-      worktreeRecorded
-        ? "worktree checkout recorded on the registration (worktrees array)"
-        : "note: worktree checkout not (yet) recorded on the registration"
-    );
+    expect({
+      that: worktrees?.some((entry) => entry.path === realWorktreePath) === true,
+      message:
+        "worktree checkout should be recorded on the registration (worktrees array)",
+      result: projects,
+    });
   },
 };

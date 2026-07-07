@@ -22,6 +22,7 @@ import {
   GLOBAL_LOGGING_DIR_NAME,
   HACK_PROJECT_DIR_PRIMARY,
   PROJECT_ENV_CONTRACT_FILENAME,
+  PROJECT_ENV_KEY_FILENAME,
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
@@ -39,6 +40,10 @@ import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
 } from "../lib/config-paths.ts";
+import {
+  inspectTrackedGeneratedFiles,
+  untrackGeneratedFiles,
+} from "../lib/doctor-generated-files.ts";
 import { checkMacHostTlsTrust } from "../lib/doctor-host-tls.ts";
 import {
   findCrossCheckoutInstances,
@@ -69,6 +74,7 @@ import {
 } from "../lib/project.ts";
 import {
   discoverComposeServiceNames,
+  ensureHackDirGitignore,
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
   type LegacyComposeEnvFileReference,
@@ -220,6 +226,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       "env overlay warnings",
       "worktree keys",
       "worktree instances",
+      "generated files",
     ]),
   },
   {
@@ -506,6 +513,16 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
         s,
         "worktree keys",
         () => checkWorktreeSecretKeys({ startDir }),
+        {
+          timeoutMs: 5000,
+        }
+      )
+    );
+    results.push(
+      await runCheck(
+        s,
+        "generated files",
+        () => checkTrackedGeneratedFiles({ startDir }),
         {
           timeoutMs: 5000,
         }
@@ -2073,6 +2090,63 @@ async function checkWorktreeSecretKeys({
   };
 }
 
+/**
+ * Warns when hack-generated machine-local files (`.hack/.internal/`,
+ * `.hack/.branch/`, `.hack/.env`, `.hack/.env.state.json`,
+ * `.hack/hack.env.*.local.yaml`, `.hack.secret.key`) are tracked in git.
+ * A tracked secret key is reported as an error because it is a committed
+ * secret. `hack doctor --fix` untracks the offenders (files stay on disk) and
+ * ensures the committed `.hack/.gitignore`.
+ */
+async function checkTrackedGeneratedFiles({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const name = "generated files";
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+
+  const inspection = await inspectTrackedGeneratedFiles({
+    projectRoot: ctx.projectRoot,
+    projectDirName: ctx.projectDirName,
+  });
+  if (!inspection) {
+    return {
+      name,
+      status: "ok",
+      message: "Skipped (not a git checkout)",
+    };
+  }
+  if (inspection.trackedPaths.length === 0) {
+    return {
+      name,
+      status: "ok",
+      message: "No generated files tracked in git",
+    };
+  }
+
+  const offenders = inspection.trackedPaths.join(", ");
+  if (inspection.secretKeyTracked) {
+    return {
+      name,
+      status: "error",
+      message: `${PROJECT_ENV_KEY_FILENAME} is committed to git — it is a secret. Run 'hack doctor --fix' to untrack it (file stays on disk), rewrite or rotate the key ('hack env' secrets encrypted with it should be re-encrypted), and commit the removal. Tracked generated files: ${offenders}`,
+    };
+  }
+  return {
+    name,
+    status: "warn",
+    message: `Machine-local generated files are tracked in git: ${offenders}. Run 'hack doctor --fix' to untrack them (files stay on disk) and ensure the committed ${ctx.projectDirName}/.gitignore.`,
+  };
+}
+
 async function checkWorktreeInstanceCollisions({
   startDir,
 }: {
@@ -2296,6 +2370,7 @@ async function runDoctorFix(opts: {
   }
 
   await maybeInstallMutagenForDoctorFix();
+  await maybeUntrackGeneratedFiles({ startDir: opts.startDir });
 
   const dockerOk = await dockerInfoOk();
   if (!dockerOk) {
@@ -2553,48 +2628,109 @@ export async function buildDoctorRemediationPlanLines(opts: {
   readonly startDir: string;
   readonly migrateEnvConfig: boolean;
 }): Promise<string[]> {
-  const lines = [
-    "1. Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
-    "2. Repair tickets refs if the project repo needs it.",
+  const steps = [
+    "Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
+    "Repair tickets refs if the project repo needs it.",
   ];
-  if (!opts.migrateEnvConfig) {
-    return lines;
-  }
 
   const project = await findProjectContext(opts.startDir);
-  if (!project) {
-    lines.push(
-      "3. Skip env migration because no project was detected from this path."
+  const trackedGenerated = project
+    ? await inspectTrackedGeneratedFiles({
+        projectRoot: project.projectRoot,
+        projectDirName: project.projectDirName,
+      })
+    : null;
+  if (trackedGenerated && trackedGenerated.trackedPaths.length > 0) {
+    steps.push(
+      `Untrack machine-local generated files from git (git rm --cached; files stay on disk) and ensure the committed ${project?.projectDirName}/.gitignore: ${trackedGenerated.trackedPaths.join(", ")}`
     );
-    return lines;
+  }
+
+  if (opts.migrateEnvConfig) {
+    steps.push(await buildEnvMigrationPlanStep({ project }));
+  }
+
+  return steps.map((step, index) => `${index + 1}. ${step}`);
+}
+
+async function buildEnvMigrationPlanStep(opts: {
+  readonly project: Awaited<ReturnType<typeof findProjectContext>>;
+}): Promise<string> {
+  if (!opts.project) {
+    return "Skip env migration because no project was detected from this path.";
   }
 
   if (
     await projectEnvConfigExists({
-      projectDir: project.projectDir,
+      projectDir: opts.project.projectDir,
     })
   ) {
-    lines.push(
-      "3. Skip env migration because this project already uses hack.env.*.yaml."
-    );
-    return lines;
+    return "Skip env migration because this project already uses hack.env.*.yaml.";
   }
 
   const contractPath = resolve(
-    project.projectDir,
+    opts.project.projectDir,
     PROJECT_ENV_CONTRACT_FILENAME
   );
   if (await pathExists(contractPath)) {
-    lines.push(
-      "3. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml."
-    );
-    return lines;
+    return "Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.";
   }
 
-  lines.push(
-    "3. Skip env migration because no legacy project env config was found."
+  return "Skip env migration because no legacy project env config was found.";
+}
+
+/**
+ * `hack doctor --fix` step: untracks hack-generated machine-local files from
+ * the git index (`git rm --cached`; working-tree files are untouched) and
+ * ensures the committed `.hack/.gitignore` so they cannot leak back in.
+ */
+async function maybeUntrackGeneratedFiles(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findProjectContext(opts.startDir);
+  if (!project) {
+    return;
+  }
+
+  const inspection = await inspectTrackedGeneratedFiles({
+    projectRoot: project.projectRoot,
+    projectDirName: project.projectDirName,
+  });
+  if (!inspection || inspection.trackedPaths.length === 0) {
+    return;
+  }
+
+  note(
+    [
+      "Untracking machine-local generated files from git (files stay on disk):",
+      ...inspection.trackedPaths.map((path) => `- ${path}`),
+    ].join("\n"),
+    "generated files"
   );
-  return lines;
+
+  const untracked = await untrackGeneratedFiles({
+    projectRoot: project.projectRoot,
+    paths: inspection.trackedPaths,
+  });
+  if (!untracked.ok) {
+    note(
+      `Failed to untrack generated files: ${untracked.error ?? "unknown error"}`,
+      "generated files"
+    );
+    return;
+  }
+
+  await ensureHackDirGitignore({ projectDir: project.projectDir });
+  const notes = [
+    `Removed ${inspection.trackedPaths.length} path(s) from the git index and ensured ${project.projectDirName}/.gitignore.`,
+    "Commit the removal to stop sharing these files.",
+  ];
+  if (inspection.secretKeyTracked) {
+    notes.push(
+      `${PROJECT_ENV_KEY_FILENAME} was committed — treat it as leaked: rotate the key and re-encrypt secrets, and consider rewriting git history if the repo is shared.`
+    );
+  }
+  note(notes.join("\n"), "generated files");
 }
 
 async function maybeRepairProjectTicketsGitHealth(opts: {

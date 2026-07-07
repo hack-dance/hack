@@ -111,6 +111,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.",
       "Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).",
       "Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.",
+      "Ignore rules: hack owns a committed `.hack/.gitignore` (self-healing on init/up) covering machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`); keep it committed, and if generated files leaked into git, `hack doctor --fix` untracks them (files stay on disk).",
     ],
   },
   {

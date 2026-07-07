@@ -18,7 +18,10 @@ import {
   type ProjectOwnershipConfig,
   readProjectConfig,
 } from "./project.ts";
-import type { RegisteredProject } from "./projects-registry.ts";
+import type {
+  RegisteredProject,
+  RegisteredProjectWorktree,
+} from "./projects-registry.ts";
 import {
   countRunningServices,
   type RuntimeProject,
@@ -90,6 +93,7 @@ export type ProjectView = {
   readonly branchRuntime: readonly BranchRuntime[];
   readonly sessions: readonly ProjectSession[];
   readonly lifecycle: ProjectLifecycleView | null;
+  readonly worktrees: readonly RegisteredProjectWorktree[] | null;
   readonly kind: "registered" | "unregistered";
   readonly status:
     | "running"
@@ -288,6 +292,7 @@ async function buildRegisteredProjectView(opts: {
     branchRuntime,
     sessions,
     lifecycle,
+    worktrees: opts.registration.worktrees ?? null,
     kind: "registered",
     status,
   };
@@ -319,6 +324,7 @@ function buildUnregisteredProjectView(opts: {
     branchRuntime: [],
     sessions: [],
     lifecycle: null,
+    worktrees: null,
     kind: "unregistered",
     status: "unregistered",
   };
@@ -361,6 +367,13 @@ export function serializeProjectView(
       windows: entry.windows,
       created_at: entry.createdAt,
     })),
+    worktrees: view.worktrees
+      ? view.worktrees.map((entry) => ({
+          path: entry.path,
+          branch: entry.branch,
+          last_seen_at: entry.lastSeenAt,
+        }))
+      : null,
     lifecycle: view.lifecycle
       ? {
           up_before: view.lifecycle.upBefore.map((entry) => ({

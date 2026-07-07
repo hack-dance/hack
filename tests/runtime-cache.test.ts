@@ -178,6 +178,7 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
     sessions: [],
     lifecycle: null,
     ownership: null,
+    worktrees: null,
     kind: "registered",
     status: "unknown",
   });

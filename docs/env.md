@@ -242,6 +242,15 @@ Linked worktree behavior:
 - sibling worktrees can decrypt the same committed secrets without manually copying gitignored files
 - if a checkout-local `.hack.secret.key` exists, it still wins for that checkout
 
+Write-path guarantees in a linked worktree (first secret added from any checkout):
+
+- an existing checkout-local key is reused as-is
+- otherwise an existing shared key (git common dir) is reused
+- otherwise the primary checkout's key is adopted by copying it to the shared location, so sibling checkouts converge on one key
+- only then is a new key generated, and it is written to the shared location — never silently to the checkout
+- if the shared location cannot be resolved (git unavailable) or written, Hack falls back to a checkout-local key and prints a loud divergence warning
+- `hack doctor` flags divergent `.hack.secret.key` contents across checkouts with the exact paths
+
 CI and managed container fallback:
 
 - if `.hack.secret.key` is missing, Hack falls back to `HACK_ENV_SECRET_KEY`

@@ -178,6 +178,7 @@ export interface ProjectConfig {
   readonly logs?: ProjectLogsConfig;
   readonly oauth?: ProjectOauthConfig;
   readonly internal?: ProjectInternalConfig;
+  readonly worktree?: ProjectWorktreeConfig;
   readonly sessions?: ProjectSessionsConfig;
   readonly lifecycle?: ProjectLifecycleConfig;
   readonly ownership: ProjectOwnershipConfig;
@@ -321,6 +322,25 @@ export interface ProjectInternalConfig {
   readonly extraHosts?: Record<string, string>;
 }
 
+export interface ProjectWorktreeConfig {
+  /**
+   * When true (default), project commands run from a linked git worktree with
+   * no explicit `--branch` default to a branch instance named after the
+   * sanitized current git branch. Set to false (`worktree.auto_branch`) to
+   * target the base instance from linked worktrees.
+   */
+  readonly autoBranch?: boolean;
+}
+
+/**
+ * Resolves whether worktree branch auto-defaulting is enabled (default: true).
+ */
+export function resolveWorktreeAutoBranch(
+  cfg: Pick<ProjectConfig, "worktree"> | undefined
+): boolean {
+  return cfg?.worktree?.autoBranch !== false;
+}
+
 export function resolveProjectOauthTld(
   cfg: ProjectOauthConfig | undefined
 ): string | null {
@@ -409,6 +429,7 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
   const logs = parseLogsConfig(getRecord(value, "logs"));
   const oauth = parseOauthConfig(getRecord(value, "oauth"));
   const internal = parseInternalConfig(getRecord(value, "internal"));
+  const worktree = parseWorktreeConfig(getRecord(value, "worktree"));
   const sessions = parseSessionsConfig(getRecord(value, "sessions"));
   const lifecycleBase = parseLifecycleConfig(getRecord(value, "lifecycle"));
   const startup = parseStartupEntries(value.startup);
@@ -449,6 +470,7 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     ...(logs ? { logs } : {}),
     ...(oauth ? { oauth } : {}),
     ...(internal ? { internal } : {}),
+    ...(worktree ? { worktree } : {}),
     ...(sessions ? { sessions } : {}),
     ...(lifecycle ? { lifecycle } : {}),
     ownership: parsedOwnership.ownership,
@@ -877,6 +899,23 @@ function parseLifecycleSingletonConfig(
     ports,
     ...(onConflict ? { onConflict } : {}),
   };
+}
+
+function parseWorktreeConfig(
+  value: Record<string, unknown> | undefined
+): ProjectWorktreeConfig | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const autoBranch = parseOptionalBoolean(
+    value.auto_branch ?? value.autoBranch
+  );
+
+  const out: ProjectWorktreeConfig = {
+    ...(autoBranch !== undefined ? { autoBranch } : {}),
+  };
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function parseSessionsConfig(

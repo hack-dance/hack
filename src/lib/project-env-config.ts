@@ -257,9 +257,21 @@ export function resolveProjectEnvKeyPath(opts: {
   return resolve(opts.projectRoot, PROJECT_ENV_KEY_FILENAME);
 }
 
-export async function resolveProjectEnvSharedKeyPath(opts: {
+export type ProjectEnvSharedKeyLocation = {
+  /** Absolute path of the shared key file under the git common dir (may not exist yet). */
+  readonly path: string;
+  /** True when the checkout is a linked worktree (worktree git dir differs from the common dir). */
+  readonly linkedWorktree: boolean;
+};
+
+/**
+ * Resolves the shared key LOCATION for the repo family that contains
+ * `projectRoot`, regardless of whether the key file exists yet.
+ * Returns null when git is unavailable or the path is not a git checkout.
+ */
+export async function resolveProjectEnvSharedKeyLocation(opts: {
   readonly projectRoot: string;
-}): Promise<string | null> {
+}): Promise<ProjectEnvSharedKeyLocation | null> {
   const [commonDir, worktreeDir] = await Promise.all([
     resolveGitRepositoryIdentity({
       repoRoot: opts.projectRoot,
@@ -271,11 +283,25 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
   if (!(commonDir && worktreeDir)) {
     return null;
   }
-  const sharedKeyPath = resolve(commonDir, PROJECT_ENV_KEY_FILENAME);
-  if (commonDir !== worktreeDir) {
-    return sharedKeyPath;
+  return {
+    path: resolve(commonDir, PROJECT_ENV_KEY_FILENAME),
+    linkedWorktree: commonDir !== worktreeDir,
+  };
+}
+
+export async function resolveProjectEnvSharedKeyPath(opts: {
+  readonly projectRoot: string;
+}): Promise<string | null> {
+  const location = await resolveProjectEnvSharedKeyLocation({
+    projectRoot: opts.projectRoot,
+  });
+  if (!location) {
+    return null;
   }
-  return (await pathExists(sharedKeyPath)) ? sharedKeyPath : null;
+  if (location.linkedWorktree) {
+    return location.path;
+  }
+  return (await pathExists(location.path)) ? location.path : null;
 }
 
 async function ensureProjectEnvLocalIgnoreEntries(opts: {
@@ -1410,23 +1436,43 @@ async function resolveProjectEnvKey(opts: {
   return null;
 }
 
-export async function ensureProjectEnvSecretKey(opts: {
-  readonly projectRoot: string;
-}): Promise<{
+export type EnsureProjectEnvSecretKeyResult = {
   readonly keyPath: string;
   readonly keyText: string;
   readonly created: boolean;
-}> {
+  /** Non-empty when the key had to be written somewhere that risks divergence across checkouts. */
+  readonly warnings: readonly string[];
+};
+
+/**
+ * Ensures a decryption key exists for the project, preferring locations that
+ * keep linked worktrees converged on one key:
+ * 1. existing checkout-local `.hack.secret.key` (always wins for that checkout)
+ * 2. existing shared key under the git common dir
+ * 3. adopt the primary checkout's key (written to the shared location in a
+ *    linked worktree so sibling checkouts converge)
+ * 4. generate a new key, written to the shared location in a linked worktree
+ *    (checkout-local only in a primary/non-git checkout)
+ *
+ * A checkout-local key is never silently created in a linked worktree: if the
+ * shared location cannot be resolved (degraded git) or written, the fallback
+ * local write carries a loud divergence warning (also returned in `warnings`).
+ */
+export async function ensureProjectEnvSecretKey(opts: {
+  readonly projectRoot: string;
+}): Promise<EnsureProjectEnvSecretKeyResult> {
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
-  const sharedKeyPath = await resolveProjectEnvSharedKeyPath({
+  const sharedLocation = await resolveProjectEnvSharedKeyLocation({
     projectRoot: opts.projectRoot,
   });
+  const sharedKeyPath = await resolveSharedKeyPathFromLocation(sharedLocation);
   const existing = await readTextFile(keyPath);
   if (existing !== null && existing.trim().length > 0) {
     return {
       keyPath,
       keyText: existing.trim(),
       created: false,
+      warnings: [],
     };
   }
   const sharedExisting =
@@ -1440,6 +1486,7 @@ export async function ensureProjectEnvSecretKey(opts: {
       keyPath: sharedKeyPath,
       keyText: sharedExisting.trim(),
       created: false,
+      warnings: [],
     };
   }
 
@@ -1447,41 +1494,113 @@ export async function ensureProjectEnvSecretKey(opts: {
     projectRoot: opts.projectRoot,
   });
   if (inheritedKey) {
-    const inheritedKeyPath = sharedKeyPath ?? keyPath;
-    await ensureDir(dirname(inheritedKeyPath));
-    await writeTextFile(inheritedKeyPath, `${inheritedKey.keyText}\n`);
-    await chmod(inheritedKeyPath, 0o600);
-    if (sharedKeyPath === null) {
-      await ensureGitignoreEntry({
-        gitignorePath: resolve(opts.projectRoot, ".gitignore"),
-        entry: PROJECT_ENV_KEY_FILENAME,
-        comment: "# project env key",
-      });
-    }
+    const written = await writeProjectEnvKeyWithFallback({
+      projectRoot: opts.projectRoot,
+      preferredKeyPath: sharedKeyPath,
+      localKeyPath: keyPath,
+      keyText: inheritedKey.keyText,
+      sharedLocation,
+    });
     return {
-      keyPath: inheritedKeyPath,
+      keyPath: written.keyPath,
       keyText: inheritedKey.keyText,
       created: false,
+      warnings: written.warnings,
     };
   }
 
   const keyText = randomBytes(32).toString("base64url");
-  const nextKeyPath = sharedKeyPath ?? keyPath;
-  await ensureDir(dirname(nextKeyPath));
-  await writeTextFile(nextKeyPath, `${keyText}\n`);
-  await chmod(nextKeyPath, 0o600);
-  if (sharedKeyPath === null) {
-    await ensureGitignoreEntry({
-      gitignorePath: resolve(opts.projectRoot, ".gitignore"),
-      entry: PROJECT_ENV_KEY_FILENAME,
-      comment: "# project env key",
-    });
-  }
+  const written = await writeProjectEnvKeyWithFallback({
+    projectRoot: opts.projectRoot,
+    preferredKeyPath: sharedKeyPath,
+    localKeyPath: keyPath,
+    keyText,
+    sharedLocation,
+  });
   return {
-    keyPath: nextKeyPath,
+    keyPath: written.keyPath,
     keyText,
     created: true,
+    warnings: written.warnings,
   };
+}
+
+async function resolveSharedKeyPathFromLocation(
+  location: ProjectEnvSharedKeyLocation | null
+): Promise<string | null> {
+  if (!location) {
+    return null;
+  }
+  if (location.linkedWorktree) {
+    return location.path;
+  }
+  return (await pathExists(location.path)) ? location.path : null;
+}
+
+/**
+ * Writes the key to the preferred (shared) path when available, falling back
+ * to the checkout-local path with a divergence warning when the shared write
+ * fails or the shared location could not be resolved for a git checkout.
+ */
+async function writeProjectEnvKeyWithFallback(opts: {
+  readonly projectRoot: string;
+  readonly preferredKeyPath: string | null;
+  readonly localKeyPath: string;
+  readonly keyText: string;
+  readonly sharedLocation: ProjectEnvSharedKeyLocation | null;
+}): Promise<{ readonly keyPath: string; readonly warnings: string[] }> {
+  const warnings: string[] = [];
+
+  if (opts.preferredKeyPath !== null) {
+    try {
+      await writeProjectEnvKeyFile({
+        path: opts.preferredKeyPath,
+        keyText: opts.keyText,
+      });
+      return { keyPath: opts.preferredKeyPath, warnings };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      warnings.push(
+        `Failed to write shared env key at ${opts.preferredKeyPath} (${message}); falling back to a checkout-local key at ${opts.localKeyPath}. Sibling git worktrees will NOT share this key and secrets encrypted here may not decrypt elsewhere.`
+      );
+    }
+  } else if (
+    opts.sharedLocation === null &&
+    (await pathExists(resolve(opts.projectRoot, ".git")))
+  ) {
+    warnings.push(
+      `git could not resolve the shared env key location for ${opts.projectRoot}; creating a checkout-local key at ${opts.localKeyPath}. If this repo uses linked worktrees, sibling checkouts may mint divergent keys. Restore git availability and re-run, or copy ${PROJECT_ENV_KEY_FILENAME} between checkouts.`
+    );
+  }
+
+  await writeProjectEnvKeyFile({
+    path: opts.localKeyPath,
+    keyText: opts.keyText,
+  });
+  await ensureGitignoreEntry({
+    gitignorePath: resolve(opts.projectRoot, ".gitignore"),
+    entry: PROJECT_ENV_KEY_FILENAME,
+    comment: "# project env key",
+  });
+  emitProjectEnvKeyWarnings({ warnings });
+  return { keyPath: opts.localKeyPath, warnings };
+}
+
+async function writeProjectEnvKeyFile(opts: {
+  readonly path: string;
+  readonly keyText: string;
+}): Promise<void> {
+  await ensureDir(dirname(opts.path));
+  await writeTextFile(opts.path, `${opts.keyText}\n`);
+  await chmod(opts.path, 0o600);
+}
+
+function emitProjectEnvKeyWarnings(opts: {
+  readonly warnings: readonly string[];
+}): void {
+  for (const warning of opts.warnings) {
+    process.stderr.write(`WARN: ${warning}\n`);
+  }
 }
 
 async function resolveInheritedProjectEnvKey(opts: {

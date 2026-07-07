@@ -475,6 +475,14 @@ async function renderProjectDetails(opts: {
   if (caddySummary) {
     meta.push(["Caddy IP", caddySummary]);
   }
+  if (p.worktrees && p.worktrees.length > 0) {
+    meta.push([
+      "Worktrees",
+      p.worktrees
+        .map((w) => `${w.path}${w.branch ? ` (${w.branch})` : ""}`)
+        .join(", "),
+    ]);
+  }
   await display.kv({ entries: meta });
 
   const defined = new Set(p.definedServices ?? []);

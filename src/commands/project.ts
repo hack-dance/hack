@@ -66,7 +66,7 @@ import {
   guessServiceName,
   inferPortFromScript,
 } from "../init/heuristics.ts";
-import { touchBranchUsage } from "../lib/branches.ts";
+import { resolveEffectiveBranch, touchBranchUsage } from "../lib/branches.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
   isSlimExecutionMode,
@@ -110,6 +110,7 @@ import {
   readProjectConfig,
   readProjectDevHost,
   resolveProjectOauthTld,
+  resolveWorktreeAutoBranch,
   sanitizeBranchSlug,
   sanitizeProjectSlug,
 } from "../lib/project.ts";
@@ -518,6 +519,41 @@ function resolveBranchSlug(raw: string | undefined): string | null {
   }
   const slug = sanitizeBranchSlug(trimmed);
   return slug.length > 0 ? slug : "branch";
+}
+
+/**
+ * Resolves the branch instance for up/down/restart/ps/logs/open so every
+ * command in the same checkout targets the same instance: explicit `--branch`
+ * wins; otherwise linked git worktrees default to the sanitized current git
+ * branch unless `worktree.auto_branch` is false. Primary checkouts are
+ * unchanged. Emits a one-line notice when the worktree default kicks in
+ * (to stderr when `json` output is requested).
+ */
+async function resolveEffectiveBranchForCommand(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly branchOption: string | undefined;
+  readonly json?: boolean;
+}): Promise<string | null> {
+  const explicit = resolveBranchSlug(opts.branchOption);
+  if (explicit) {
+    return explicit;
+  }
+
+  const cfg = await readProjectConfig(opts.project);
+  const resolved = await resolveEffectiveBranch({
+    explicitBranch: null,
+    projectRoot: opts.project.projectRoot,
+    autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
+  });
+  if (resolved.source === "worktree" && resolved.branch) {
+    const message = `Linked worktree detected → using branch instance "${resolved.branch}" (override with --branch <name>, disable with worktree.auto_branch=false)`;
+    if (opts.json === true) {
+      process.stderr.write(`${message}\n`);
+    } else {
+      logger.info({ message });
+    }
+  }
+  return resolved.branch;
 }
 
 async function resolveComposeProjectName(opts: {
@@ -4722,7 +4758,10 @@ async function handleUp({
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
-  const branch = resolveBranchSlug(args.options.branch);
+  const branch = await resolveEffectiveBranchForCommand({
+    project,
+    branchOption: args.options.branch,
+  });
   const profiles = parseCsvList(args.options.profile);
 
   await touchBranchUsageIfNeeded({ project, branch });
@@ -4899,7 +4938,10 @@ async function handleDown({
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
-  const branch = resolveBranchSlug(args.options.branch);
+  const branch = await resolveEffectiveBranchForCommand({
+    project,
+    branchOption: args.options.branch,
+  });
   const profiles = parseCsvList(args.options.profile);
 
   await touchBranchUsageIfNeeded({ project, branch });
@@ -5188,7 +5230,10 @@ async function handleRestart({
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
-  const branch = resolveBranchSlug(args.options.branch);
+  const branch = await resolveEffectiveBranchForCommand({
+    project,
+    branchOption: args.options.branch,
+  });
   const profiles = parseCsvList(args.options.profile);
 
   await touchBranchUsageIfNeeded({ project, branch });
@@ -5398,9 +5443,13 @@ async function handlePs({
     pathOpt: args.options.path,
     projectOpt: args.options.project,
   });
-  const branch = resolveBranchSlug(args.options.branch);
-  const profiles = parseCsvList(args.options.profile);
   const json = args.options.json === true;
+  const branch = await resolveEffectiveBranchForCommand({
+    project,
+    branchOption: args.options.branch,
+    json,
+  });
+  const profiles = parseCsvList(args.options.profile);
 
   await touchBranchUsageIfNeeded({ project, branch });
   const cfg = await readProjectConfig(project);
@@ -6057,12 +6106,16 @@ async function handleLogs({
     pathOpt: args.options.path,
     projectOpt: args.options.project,
   });
-  const branch = resolveBranchSlug(args.options.branch);
+  const json = args.options.json === true;
+  const branch = await resolveEffectiveBranchForCommand({
+    project,
+    branchOption: args.options.branch,
+    json,
+  });
   const follow = !args.options.noFollow;
   const tail = args.options.tail ?? 200;
   const service = args.positionals.service;
   const profiles = parseCsvList(args.options.profile);
-  const json = args.options.json === true;
   const format = resolveLogFormat({ json, pretty: args.options.pretty });
   const timeRange = parseLogTimeRange({
     since: args.options.since,
@@ -6231,8 +6284,12 @@ async function handleOpen({
     pathOpt: args.options.path,
     projectOpt: args.options.project,
   });
-  const branch = resolveBranchSlug(args.options.branch);
   const json = args.options.json === true;
+  const branch = await resolveEffectiveBranchForCommand({
+    project,
+    branchOption: args.options.branch,
+    json,
+  });
   const derivedHost = `${defaultProjectSlugFromPath(project.projectRoot)}.${DEFAULT_PROJECT_TLD}`;
   const devHost = (await readProjectDevHost(project)) ?? derivedHost;
   await touchBranchUsageIfNeeded({ project, branch });

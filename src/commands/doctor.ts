@@ -1,6 +1,7 @@
 import { lookup } from "node:dns/promises";
 import { dirname, resolve } from "node:path";
 import { confirm, isCancel, note, spinner } from "@clack/prompts";
+import { YAML } from "bun";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
@@ -36,6 +37,10 @@ import {
 } from "../lib/caddy-hosts.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
 import { checkMacHostTlsTrust } from "../lib/doctor-host-tls.ts";
+import {
+  findCrossCheckoutInstances,
+  inspectWorktreeSecretKeys,
+} from "../lib/doctor-worktree.ts";
 import { parseDotEnv } from "../lib/env.ts";
 import {
   ensureDir,
@@ -43,6 +48,7 @@ import {
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
 import {
@@ -53,6 +59,7 @@ import {
 } from "../lib/mutagen.ts";
 import { isMac } from "../lib/os.ts";
 import {
+  defaultProjectSlugFromPath,
   findProjectContext,
   readProjectConfig,
   readProjectDevHost,
@@ -208,6 +215,8 @@ const DOCTOR_SUMMARY_GROUPS = [
       "env mode",
       "env materialization",
       "env overlay warnings",
+      "worktree keys",
+      "worktree instances",
     ]),
   },
   {
@@ -488,6 +497,32 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
         checkProjectEnvOverlayWarnings({ startDir })
       )
     );
+    results.push(
+      await runCheck(
+        s,
+        "worktree keys",
+        () => checkWorktreeSecretKeys({ startDir }),
+        {
+          timeoutMs: 5000,
+        }
+      )
+    );
+    if (
+      results.some(
+        (result) => result.name === "docker daemon" && result.status === "ok"
+      )
+    ) {
+      results.push(
+        await runCheck(
+          s,
+          "worktree instances",
+          () => checkWorktreeInstanceCollisions({ startDir }),
+          {
+            timeoutMs: 5000,
+          }
+        )
+      );
+    }
     results.push(
       await runCheck(
         s,
@@ -1888,6 +1923,149 @@ async function checkProjectEnvMaterialization({
     status: inspected.status,
     message: inspected.message,
   };
+}
+
+async function checkWorktreeSecretKeys({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const name = "worktree keys";
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+
+  const inspection = await inspectWorktreeSecretKeys({
+    projectRoot: ctx.projectRoot,
+  });
+  if (!inspection) {
+    return {
+      name,
+      status: "ok",
+      message: "Skipped (not a git checkout)",
+    };
+  }
+  if (inspection.checkouts.length <= 1) {
+    return {
+      name,
+      status: "ok",
+      message: "Single checkout (no linked worktrees)",
+    };
+  }
+  if (inspection.divergent) {
+    const shared = inspection.sharedKeyPath ?? "unavailable";
+    return {
+      name,
+      status: "warn",
+      message: `Divergent .hack.secret.key contents across checkouts: ${inspection.divergentKeyPaths.join(
+        ", "
+      )}. Secrets encrypted in one checkout will not decrypt in another. Keep one key (shared location: ${shared}) and remove the divergent copies.`,
+    };
+  }
+
+  return {
+    name,
+    status: "ok",
+    message: `Env key consistent across ${inspection.checkouts.length} checkouts`,
+  };
+}
+
+async function checkWorktreeInstanceCollisions({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const name = "worktree instances";
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+
+  const baseProjectName = await resolveDoctorBaseProjectName(ctx);
+  const runtime = await readRuntimeProjects({ includeGlobal: false });
+  if (!runtime.ok) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (${runtime.error})`,
+    };
+  }
+
+  const instances = findCrossCheckoutInstances({
+    baseProjectName,
+    currentProjectDir: ctx.projectDir,
+    runtime: runtime.runtime,
+  });
+  const runningBase = instances.filter(
+    (instance) => instance.running && instance.branch === null
+  );
+  if (runningBase.length > 0) {
+    const dirs = runningBase
+      .map((instance) => instance.workingDir ?? "unknown path")
+      .join(", ");
+    return {
+      name,
+      status: "warn",
+      message: `Base instance "${baseProjectName}" is running from another checkout (${dirs}) and claims this project's dev_host. Use --branch here (linked worktrees default to a branch instance) or run 'hack down' in that checkout.`,
+    };
+  }
+
+  const runningBranches = instances.filter(
+    (instance) => instance.running && instance.branch !== null
+  );
+  if (runningBranches.length > 0) {
+    const summary = runningBranches
+      .map(
+        (instance) =>
+          `${instance.composeProject} (${instance.workingDir ?? "unknown path"})`
+      )
+      .join(", ");
+    return {
+      name,
+      status: "ok",
+      message: `Branch instances running from other checkouts: ${summary}`,
+    };
+  }
+
+  return {
+    name,
+    status: "ok",
+    message: "No cross-checkout instances running",
+  };
+}
+
+async function resolveDoctorBaseProjectName(
+  ctx: NonNullable<Awaited<ReturnType<typeof findProjectContext>>>
+): Promise<string> {
+  const text = await readTextFile(ctx.composeFile);
+  if (text) {
+    let parsed: unknown = null;
+    try {
+      parsed = YAML.parse(text);
+    } catch {
+      parsed = null;
+    }
+    if (isRecord(parsed)) {
+      const composeName = getString(parsed, "name")?.trim();
+      if (composeName && composeName.length > 0) {
+        return composeName;
+      }
+    }
+  }
+
+  const cfg = await readProjectConfig(ctx);
+  const derived = defaultProjectSlugFromPath(ctx.projectRoot);
+  const cfgName = (cfg.name ?? derived).trim();
+  return cfgName.length > 0 ? cfgName : derived;
 }
 
 async function checkCaddyHostMapping({

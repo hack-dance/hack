@@ -389,6 +389,13 @@ export function renderProjectConfigSchemaJson(): string {
           tld: { type: "string" },
         },
       },
+      worktree: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          auto_branch: { type: "boolean" },
+        },
+      },
       sessions: {
         type: "object",
         additionalProperties: true,

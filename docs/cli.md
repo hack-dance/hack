@@ -57,6 +57,23 @@ hack up --detach
 hack open
 ```
 
+## Branch instances and linked worktrees
+
+`--branch <name>` on `hack up/down/restart/ps/logs/open` targets a separate branch instance
+(compose project `<name>--<branch>`, hostnames prefixed with the branch).
+
+In a linked git worktree, these commands default the branch instance to the sanitized current
+git branch when no `--branch` is passed, so two checkouts never fight over the same hostnames.
+A one-line notice is printed when the default kicks in.
+
+Opt out:
+
+- pass `--branch <name>` explicitly (always wins), or
+- set `worktree.auto_branch` to `false` in `.hack/hack.config.json` to target the base instance.
+
+The primary checkout is unchanged: no `--branch` means the base instance.
+`hack run` and `hack exec` still target the base instance unless `--branch` is passed.
+
 ## Environment model
 
 Canonical env files:

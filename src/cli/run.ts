@@ -1,6 +1,7 @@
 import { cancel } from "@clack/prompts";
 import {
   emitCliResult,
+  errorResult,
   errorResultFromUnknown,
   HackCliError,
 } from "../lib/cli-result.ts";
@@ -104,29 +105,50 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       },
     });
   } catch (error: unknown) {
-    if (error instanceof CliUsageError) {
-      logger.error({ message: error.message });
-      await printHelpForPath(CLI_SPEC, []);
-      return 1;
-    }
+    return await handleRunCliError({ error, jsonRequested });
+  }
+}
 
+/**
+ * Maps a top-level CLI failure to its exit path. Under `--json`, stdout
+ * stays a single parseable envelope for every error class (usage errors
+ * included — they emit E_USAGE and skip the printed help); the human-readable
+ * message still reaches stderr.
+ */
+async function handleRunCliError(opts: {
+  readonly error: unknown;
+  readonly jsonRequested: boolean;
+}): Promise<number> {
+  const { error, jsonRequested } = opts;
+  if (error instanceof CliUsageError) {
     if (jsonRequested) {
-      emitCliResult({ result: errorResultFromUnknown({ error }) });
+      emitCliResult({
+        result: errorResult({ code: "E_USAGE", message: error.message }),
+      });
+      logger.error({ message: error.message });
       return 1;
     }
-
-    if (error instanceof HackCliError) {
-      logger.error({ message: `${error.code}: ${error.message}` });
-      return 1;
-    }
-
-    const message = error instanceof Error ? error.message : "Unknown error";
-    cancel(message);
-    if (error instanceof Error && error.stack) {
-      logger.error({ message: error.stack });
-    }
+    logger.error({ message: error.message });
+    await printHelpForPath(CLI_SPEC, []);
     return 1;
   }
+
+  if (jsonRequested) {
+    emitCliResult({ result: errorResultFromUnknown({ error }) });
+    return 1;
+  }
+
+  if (error instanceof HackCliError) {
+    logger.error({ message: `${error.code}: ${error.message}` });
+    return 1;
+  }
+
+  const message = error instanceof Error ? error.message : "Unknown error";
+  cancel(message);
+  if (error instanceof Error && error.stack) {
+    logger.error({ message: error.stack });
+  }
+  return 1;
 }
 
 /**

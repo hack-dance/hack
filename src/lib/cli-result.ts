@@ -25,6 +25,7 @@ export type HackErrorCode =
   | "E_ENV_KEY_MISSING"
   | "E_PERMISSION"
   | "E_INTERACTIVE_REQUIRED"
+  | "E_USAGE"
   | "E_UNEXPECTED";
 
 export type CliResultError = {

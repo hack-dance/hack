@@ -99,6 +99,23 @@ for (const action of ["up", "down", "restart"] as const) {
   });
 }
 
+test("usage errors under --json emit an E_USAGE envelope instead of help text", async () => {
+  const result = await runCliWithCapturedOutput([
+    "up",
+    "--json",
+    "--definitely-not-a-flag",
+  ]);
+
+  expect(result.exitCode).toBe(1);
+  const parsed = JSON.parse(result.stdout) as {
+    ok: boolean;
+    error?: { code: string; message: string };
+  };
+  expect(parsed.ok).toBe(false);
+  expect(parsed.error?.code).toBe("E_USAGE");
+  expect(result.stdout).not.toContain("Usage:");
+});
+
 async function runCliWithCapturedOutput(
   args: readonly string[]
 ): Promise<CapturedRunResult> {

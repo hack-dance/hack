@@ -10,20 +10,25 @@ export interface ExecOptions {
   readonly stdin?: "inherit" | "pipe" | "ignore";
 }
 
+/**
+ * Build the child env from the CURRENT `process.env` plus overrides.
+ *
+ * Always returns an explicit env (never undefined): `Bun.spawn` without an
+ * env resolves argv[0] against the PATH snapshot captured at process
+ * startup, which ignores runtime PATH changes — the same pitfall
+ * `findExecutableInPath` documents. Passing the live env keeps child
+ * behavior identical for normal runs while honoring runtime PATH.
+ */
 function buildSpawnEnv(
   override: Record<string, string> | undefined
-): Record<string, string> | undefined {
-  if (!override) {
-    return undefined;
-  }
-
+): Record<string, string> {
   const base: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (typeof value === "string") {
       base[key] = value;
     }
   }
-  return { ...base, ...override };
+  return override ? { ...base, ...override } : base;
 }
 
 export async function exec(

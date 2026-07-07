@@ -52,6 +52,7 @@ import {
 import { parseDotEnv } from "../lib/env.ts";
 import {
   ensureDir,
+  ensureGitignoreEntry,
   pathExists,
   readTextFile,
   writeTextFileIfChanged,
@@ -2726,7 +2727,16 @@ async function maybeUntrackGeneratedFiles(opts: {
     "Commit the removal to stop sharing these files.",
   ];
   if (inspection.secretKeyTracked) {
+    // The nested .hack/.gitignore cannot cover the repo-root key file; without
+    // the root entry the just-untracked key shows up as untracked and gets
+    // re-committed.
+    await ensureGitignoreEntry({
+      gitignorePath: resolve(project.projectRoot, ".gitignore"),
+      entry: PROJECT_ENV_KEY_FILENAME,
+      comment: "# project env key",
+    });
     notes.push(
+      `Ensured ${PROJECT_ENV_KEY_FILENAME} is ignored in the root .gitignore.`,
       `${PROJECT_ENV_KEY_FILENAME} was committed — treat it as leaked: rotate the key and re-encrypt secrets, and consider rewriting git history if the repo is shared.`
     );
   }

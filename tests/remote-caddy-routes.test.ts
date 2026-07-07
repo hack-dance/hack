@@ -12,14 +12,22 @@ import {
 } from "../src/lib/remote-caddy-routes.ts";
 
 let tempHome: string | null = null;
-let previousHome: string | undefined;
+// Captured at module scope: afterEach runs after EVERY test, including ones
+// that never reassign HOME — a per-test capture would restore `undefined`
+// and unset HOME for the rest of the process (Bun deletes on
+// undefined-assign, unlike Node's string coercion).
+const previousHome: string | undefined = process.env.HOME;
 
 afterEach(async () => {
   if (tempHome) {
     await rm(tempHome, { recursive: true, force: true });
     tempHome = null;
   }
-  process.env.HOME = previousHome;
+  if (previousHome === undefined) {
+    Reflect.deleteProperty(process.env, "HOME");
+  } else {
+    process.env.HOME = previousHome;
+  }
 });
 
 test("extractCaddyHostsFromCompose returns normalized hostnames from caddy labels", () => {
@@ -65,7 +73,6 @@ test("resolveProjectHostsForBridge falls back to <project>.hack when compose has
 
 test("reconcileRemoteCaddyRoutesForProject writes registry and compose when global caddy is not installed", async () => {
   tempHome = await mkdtemp(join(tmpdir(), "hack-remote-routes-reconcile-"));
-  previousHome = process.env.HOME;
   process.env.HOME = tempHome;
 
   const projectDir = resolve(tempHome, "workspace", "bridge-project", ".hack");
@@ -108,7 +115,6 @@ test("reconcileRemoteCaddyRoutesForProject writes registry and compose when glob
 
 test("readRemoteCaddyRoutesState reports persisted registry/compose metadata", async () => {
   tempHome = await mkdtemp(join(tmpdir(), "hack-remote-routes-state-"));
-  previousHome = process.env.HOME;
   process.env.HOME = tempHome;
 
   const projectDir = resolve(tempHome, "workspace", "state-project", ".hack");

@@ -9,7 +9,7 @@ import {
   inspectTrackedGeneratedFiles,
   untrackGeneratedFiles,
 } from "../src/lib/doctor-generated-files.ts";
-import { pathExists } from "../src/lib/fs.ts";
+import { ensureGitignoreEntry, pathExists } from "../src/lib/fs.ts";
 import { ensureHackDirGitignore } from "../src/lib/project-env-config.ts";
 
 const tempDirs = new Set<string>();
@@ -178,4 +178,39 @@ test("untrackGeneratedFiles with no paths is a no-op", async () => {
     paths: [],
   });
   expect(result).toEqual({ ok: true, error: null });
+});
+
+test("untracked secret key stays ignored once the root gitignore entry is ensured", async () => {
+  const repoRoot = await createLeakedRepo();
+
+  const inspection = await inspectTrackedGeneratedFiles({
+    projectRoot: repoRoot,
+    projectDirName: ".hack",
+  });
+  expect(inspection?.secretKeyTracked).toBe(true);
+
+  const untracked = await untrackGeneratedFiles({
+    projectRoot: repoRoot,
+    paths: inspection?.trackedPaths ?? [],
+  });
+  expect(untracked.ok).toBe(true);
+
+  await ensureHackDirGitignore({ projectDir: resolve(repoRoot, ".hack") });
+  await ensureGitignoreEntry({
+    gitignorePath: resolve(repoRoot, ".gitignore"),
+    entry: PROJECT_ENV_KEY_FILENAME,
+    comment: "# project env key",
+  });
+
+  const ignored = await runGit(
+    ["check-ignore", PROJECT_ENV_KEY_FILENAME],
+    repoRoot
+  );
+  expect(ignored).toBe(PROJECT_ENV_KEY_FILENAME);
+
+  const status = await runGit(["status", "--porcelain"], repoRoot);
+  expect(status).not.toContain(`?? ${PROJECT_ENV_KEY_FILENAME}`);
+  expect(await pathExists(resolve(repoRoot, PROJECT_ENV_KEY_FILENAME))).toBe(
+    true
+  );
 });

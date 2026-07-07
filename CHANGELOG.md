@@ -1,3 +1,8 @@
+## <small>3.1.1 (2026-07-07)</small>
+
+* Merge pull request #55 from hack-dance/fix/release-intel-macos-build ([e5f7646](https://github.com/hack-dance/hack/commit/e5f7646)), closes [#55](https://github.com/hack-dance/hack/issues/55)
+* fix(ci): restore Intel macOS build in the release matrix ([52bcb28](https://github.com/hack-dance/hack/commit/52bcb28))
+
 ## 3.1.0 (2026-07-07)
 
 * Merge pull request #52 from hack-dance/blacksmith-migration-6707f0f ([6774244](https://github.com/hack-dance/hack/commit/6774244)), closes [#52](https://github.com/hack-dance/hack/issues/52)

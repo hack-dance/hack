@@ -4,7 +4,8 @@
 
 # Hack
 
-Run every project on your machine at once, each at its own local HTTPS URL.
+One command runs the whole project — services, env, secrets, TLS, logs — at its own
+local HTTPS URL. Every project on your machine, all at once, none of them colliding.
 
 ```bash
 cd any-repo && hack up
@@ -16,9 +17,11 @@ over port 3000. A repo you haven't touched in a month needs an afternoon of
 archaeology to start. Secrets live in `.env` files passed around in Slack. Testing a
 PR means tearing down the branch you were working on.
 
-Hack fixes this by giving each repo a small committed config (`.hack/`) and running
-it against shared local infrastructure — Docker Compose for services, Caddy for DNS
-and trusted TLS. Nothing is hosted. Your machine is the platform.
+Hack's bet is that these aren't separate problems. Project isolation isn't port
+management — it's the whole environment, isolated together, or it isn't isolation.
+So the environment is the unit: a small committed config (`.hack/`) running on
+shared local infrastructure — Docker Compose for services, Caddy for DNS and
+trusted TLS. Nothing is hosted. Your machine is the platform.
 
 ## What you get
 

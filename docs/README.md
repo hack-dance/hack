@@ -1,6 +1,7 @@
 # Docs
 
-This directory contains the public documentation for `hack`.
+Hack runs the whole project — services, env, secrets, TLS, logs — at its own local
+HTTPS URL, for every project on your machine at once. These docs cover how.
 
 The docs are split into three areas so the default path stays on core local workflows.
 

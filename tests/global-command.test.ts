@@ -1,4 +1,11 @@
-import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  test,
+} from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,6 +23,8 @@ import {
   GLOBAL_MANAGED_ENV_SCHEMA_FILENAME,
   GLOBAL_SCHEMAS_DIR_NAME,
 } from "../src/constants.ts";
+import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -28,32 +37,45 @@ let execMockResponder:
     ) => { exitCode: number; stdout: string; stderr: string } | null)
   | null = null;
 
-mock.module("../src/lib/shell.ts", () => ({
-  exec: async (cmd: readonly string[]) => {
-    execCalls.push([...cmd]);
-    const custom = execMockResponder?.(cmd) ?? null;
-    if (custom) {
-      return custom;
-    }
-    return { exitCode: 0, stdout: "", stderr: "" };
+const shellMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/shell.ts",
+  overrides: {
+    exec: async (cmd: readonly string[]) => {
+      execCalls.push([...cmd]);
+      const custom = execMockResponder?.(cmd) ?? null;
+      if (custom) {
+        return custom;
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    execOrThrow: async (cmd: readonly string[]) => {
+      execCalls.push([...cmd]);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    run: async (cmd: readonly string[]) => {
+      runCalls.push([...cmd]);
+      return 0;
+    },
+    findExecutableInPath: (name?: string) =>
+      name === "hack" ? "/usr/local/bin/hack" : "/usr/bin/mkcert",
+    CommandError: class CommandError extends Error {},
   },
-  execOrThrow: async (cmd: readonly string[]) => {
-    execCalls.push([...cmd]);
-    return { exitCode: 0, stdout: "", stderr: "" };
-  },
-  run: async (cmd: readonly string[]) => {
-    runCalls.push([...cmd]);
-    return 0;
-  },
-  findExecutableInPath: (name?: string) =>
-    name === "hack" ? "/usr/local/bin/hack" : "/usr/bin/mkcert",
-  CommandError: class CommandError extends Error {},
-}));
+});
 
-mock.module("../src/lib/os.ts", () => ({
-  isMac: () => false,
-  openUrl: async () => 0,
-}));
+const osMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/os.ts",
+  overrides: {
+    isMac: () => false,
+    openUrl: async () => 0,
+  },
+});
+
+beforeAll(() => {
+  shellMock.activate();
+  osMock.activate();
+});
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
@@ -73,10 +95,12 @@ afterEach(async () => {
   }
   process.env.HOME = originalHome;
   process.env.HACK_LOGGER = originalLogger;
+  resetGumPathCacheForTests();
 });
 
 afterAll(() => {
-  mock.restore();
+  shellMock.deactivate();
+  osMock.deactivate();
 });
 
 async function writeComposeFile(path: string): Promise<void> {

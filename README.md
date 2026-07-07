@@ -47,9 +47,11 @@ AGENTS.md/CLAUDE.md, Cursor rules, and Codex skills.
 
 ## More than ports
 
-Hack gets compared to local-domain tools like portless. Stable URLs are one slice.
-A project isn't running until *all* of it is running, and every other slice usually
-means another tool, another script, another README section:
+Hack gets compared to local-domain tools like portless. Portless names your ports.
+Hack runs your project — the URL is just the front door.
+
+A project isn't running until *all* of it is running, and every slice beyond the
+URL usually means another tool, another script, another README section:
 
 | The job | The usual duct tape | With hack |
 | --- | --- | --- |
@@ -61,9 +63,26 @@ means another tool, another script, another README section:
 | Parallel branches | a second clone and port surgery | branch instances; worktrees isolate automatically |
 | Workspaces | hand-rolled tmux setups | `hack session` |
 
-Each row is a tool you don't install or a script you don't maintain. The pieces
-compose because they share one model of the project — the same config that names
-your URL also resolves your env, starts your tunnels, and labels your logs.
+Each row is a tool you don't install or a script you don't maintain. And the
+pieces compose because they share one model of the project: the same identity that
+routes `api.myapp.hack` also decrypts its secrets, starts its tunnels, labels its
+logs, and namespaces its branch instances. That's why none of it needs glue code.
+
+## Your environment, anywhere
+
+Remote coding environments — Codex, Claude Code, Cursor, your own sandboxes — all
+stall on the same problem: someone has to hand-build the project's environment
+inside the box. Services, env, secrets, startup order. It's manual, it drifts, and
+it has to be redone for every project and every platform.
+
+A hack project has already done this work. The environment is committed with the
+repo and isolated by design, so it runs the same on a teammate's laptop, in CI, or
+inside an agent's sandbox. Install hack, pass `HACK_ENV_SECRET_KEY`, run `hack up`.
+That is the entire setup — make a repo portable once and every environment,
+human or machine, gets it for free.
+
+There's a slim container image (`hackdance/hack:slim`) built for exactly this; see
+[managed environments](./docs/guides/codex-managed-environments.md).
 
 ## Install
 
@@ -120,9 +139,9 @@ Every command works from the repo root, or anywhere with `--project <name>`.
 - [Agent-first setup](./docs/guides/agent-first-setup.md)
 
 A slim macOS companion app shows project status and quick actions; the CLI stays the
-source of truth. Runtime container images (`hackdance/hack:latest`, `:slim`) and
-optional extensions are covered in the docs. Remote/gateway/node/dispatch commands
-are source-available but unsupported experimental — hidden behind `hack help --all`.
+source of truth. Optional extensions and container images are covered in the docs.
+Remote/gateway/node/dispatch commands are source-available but unsupported
+experimental — hidden behind `hack help --all`.
 
 ## License
 

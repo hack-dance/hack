@@ -97,6 +97,16 @@ and phase-out of tickets from default instructions.
 - Spec: `experimental: true` on node/dispatch/gateway/remote; default help hides them
   behind an "experimental (unsupported)" one-liner; runtime warning banner on use.
 - Respect `NO_COLOR` in gum/logger/help.
+- `hack run` / `hack exec` get the same linked-worktree branch defaulting as
+  up/down/logs/open (via resolveEffectiveBranch) — closes the footgun where `up`
+  targets the branch instance but a bare `run` hits the base instance.
+- New canonical "Running things" decision guide in instruction-source.ts: an explicit
+  if-you-need-X-use-Y table covering `hack run` (one-off in service container),
+  `hack exec` (inside running container), `hack host exec --env <overlay> --scope <svc>`
+  (host scripts with injected env — THE way to run repo scripts that need hack-stored
+  env), `hack host shell`, env overlays, and calling services via caddy hostnames
+  (`https://api.<dev_host>`) from host or between containers. Rendered on all surfaces;
+  also becomes the backbone of Phase 4's onboarding prompt.
 
 ### Phase 4 — Agent-assisted onboarding
 - `hack init --with claude|codex|both` (and `hack agent onboard` for existing projects):
@@ -105,8 +115,19 @@ and phase-out of tickets from default instructions.
   macOS-host installs never leak into linux containers), ops/tooling container pattern,
   `hack run` vs `exec` vs `host exec` vs env overlays guidance, verification loop
   (up → open --json → logs). Launch agent CLI if present, else print prompt.
+- Onboarding prompt content is a single module consumed by: the CLI flag, an agent-side
+  skill/command (`/hack-init`) installed by `hack setup claude|codex`, an MCP prompt for
+  no-shell clients, and a copy-paste block in the docs.
 - `docs/guides/agent-first-setup.md` + surface via `hack agent patterns` and the
   instruction source (Phase 1 section).
+
+### Phase 5.5 — Docs overhaul + docs-currency enforcement
+- Fan-out audit of every docs/ file against actual code; remove removed/deprecated
+  surfaces; refresh for everything this branch adds.
+- Generate the CLI command reference from CLI_SPEC (existing markdown help renderer)
+  with a drift test so the reference can never rot.
+- Docs-currency rule added to repo CLAUDE.md/AGENTS.md and the instruction source
+  maintenance section: interface/behavior changes must update docs in the same change.
 
 ### Phase 5 — Tickets phase-out + cleanup
 - Docs: tickets marked optional/legacy; removed from README quickstart and repo CLAUDE.md;

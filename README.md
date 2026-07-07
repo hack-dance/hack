@@ -45,6 +45,26 @@ Machine surfaces are first-class: `--json` envelopes with stable error codes,
 `--no-interactive`, and agent instructions that sync themselves into
 AGENTS.md/CLAUDE.md, Cursor rules, and Codex skills.
 
+## More than ports
+
+Hack gets compared to local-domain tools like portless. Stable URLs are one slice.
+A project isn't running until *all* of it is running, and every other slice usually
+means another tool, another script, another README section:
+
+| The job | The usual duct tape | With hack |
+| --- | --- | --- |
+| Local domains + trusted TLS | portless, mkcert, `/etc/hosts` edits | `https://myapp.hack`, CA trusted once |
+| Secrets & env | Doppler, `.env` files in Slack | encrypted values committed with the repo |
+| "How do I run this" | README + Makefile + tribal knowledge | `.hack/` config + `hack up` |
+| Tunnels, SSO, proxies | ad-hoc shell scripts in a terminal tab | declared lifecycle processes, cleaned up on `down` |
+| Logs | terminal scrollback, gone on restart | persisted history: `hack logs --loki --since 2h` |
+| Parallel branches | a second clone and port surgery | branch instances; worktrees isolate automatically |
+| Workspaces | hand-rolled tmux setups | `hack session` |
+
+Each row is a tool you don't install or a script you don't maintain. The pieces
+compose because they share one model of the project — the same config that names
+your URL also resolves your env, starts your tunnels, and labels your logs.
+
 ## Install
 
 ```bash

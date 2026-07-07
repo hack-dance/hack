@@ -1013,16 +1013,11 @@ function logSingleResult(opts: {
   }
 
   if (opts.action === "check") {
-    if (opts.result.status === "missing") {
-      logger.warn({
-        message: `${opts.okMessage} not installed at ${opts.result.path}`,
-      });
-      return 1;
-    }
-    logger.success({
-      message: `${opts.okMessage} installed at ${opts.result.path}`,
+    return logCheckResult({
+      okMessage: opts.okMessage,
+      path: opts.result.path,
+      result: opts.result,
     });
-    return 0;
   }
 
   if (opts.action === "remove") {
@@ -1051,6 +1046,32 @@ function logSingleResult(opts: {
   return 0;
 }
 
+function logCheckResult(opts: {
+  readonly okMessage: string;
+  readonly path: string;
+  readonly result: {
+    readonly status: string;
+    readonly message?: string;
+  };
+}): number {
+  if (opts.result.status === "missing") {
+    logger.warn({
+      message: `${opts.okMessage} not installed at ${opts.path}`,
+    });
+    return 1;
+  }
+  if (opts.result.status === "stale") {
+    logger.warn({
+      message:
+        opts.result.message ??
+        `${opts.okMessage} content is stale at ${opts.path}`,
+    });
+    return 1;
+  }
+  logger.success({ message: `${opts.okMessage} installed at ${opts.path}` });
+  return 0;
+}
+
 function logMultiResults(opts: {
   readonly action: "install" | "check" | "remove";
   readonly okMessage: string;
@@ -1072,12 +1093,10 @@ function logMultiResults(opts: {
     }
 
     if (opts.action === "check") {
-      if (result.status === "missing") {
-        logger.warn({ message: `${opts.okMessage} not installed at ${path}` });
-        exitCode = 1;
-        continue;
-      }
-      logger.success({ message: `${opts.okMessage} installed at ${path}` });
+      exitCode = Math.max(
+        exitCode,
+        logCheckResult({ okMessage: opts.okMessage, path, result })
+      );
       continue;
     }
 

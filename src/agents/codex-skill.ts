@@ -7,6 +7,10 @@ import {
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import {
+  normalizeInstructionText,
+  renderInstructionSections,
+} from "./instruction-source.ts";
 
 export type CodexSkillScope = "project" | "user";
 
@@ -16,6 +20,7 @@ export type CodexSkillResult = {
     | "created"
     | "updated"
     | "noop"
+    | "stale"
     | "removed"
     | "missing"
     | "error";
@@ -55,7 +60,10 @@ export async function installCodexSkill(opts: {
 }
 
 /**
- * Check whether the Codex skill is installed.
+ * Check whether the Codex skill is installed and current.
+ *
+ * Reports `stale` when the skill file exists but its content no longer
+ * matches the current render (normalized comparison).
  */
 export async function checkCodexSkill(opts: {
   readonly scope: CodexSkillScope;
@@ -77,8 +85,21 @@ export async function checkCodexSkill(opts: {
     return { scope: opts.scope, status: "missing", path };
   }
 
-  const hasMarker = HACK_CLI_MARKER_REGEX.test(content);
-  return { scope: opts.scope, status: hasMarker ? "noop" : "error", path };
+  if (!HACK_CLI_MARKER_REGEX.test(content)) {
+    return { scope: opts.scope, status: "error", path };
+  }
+
+  const current = normalizeInstructionText({ text: renderCodexSkill() });
+  if (normalizeInstructionText({ text: content }) !== current) {
+    return {
+      scope: opts.scope,
+      status: "stale",
+      path,
+      message: "Codex skill content is out of date. Run: hack setup codex",
+    };
+  }
+
+  return { scope: opts.scope, status: "noop", path };
 }
 
 /**
@@ -111,13 +132,16 @@ export async function removeCodexSkill(opts: {
 
 /**
  * Render the Codex skill template for hack CLI usage.
+ *
+ * Frontmatter and top-level framing live here; the instructional content is
+ * the `skill`-tagged sections from the shared instruction source.
  */
 export function renderCodexSkill(): string {
   const lines = [
     "---",
     "name: hack-cli",
     "description: >",
-    "  Use the hack CLI for local runtime orchestration (compose, DNS/TLS, logs, persistent project workspaces, tickets) and agent setup.",
+    "  Use the hack CLI for local runtime orchestration (compose, DNS/TLS, logs, env, persistent project workspaces) and agent setup.",
     "  Trigger when asked to run/start/stop services, inspect logs, manage lifecycle/workspace workflows, or update",
     "  agent integrations. Prefer CLI over MCP when shell access is available.",
     "---",
@@ -126,169 +150,7 @@ export function renderCodexSkill(): string {
     "",
     "Use `hack` as the primary interface for local-first development.",
     "",
-    "## Product Boundary",
-    "",
-    "- Supported v3 surface: project init, up/down/restart, open, logs, env, host exec/shell, sessions, doctor, daemon, and optional local tickets.",
-    "- Removed surfaces: hosted auth/account/org/team flows, web dashboard, built-in GitHub workflows, and built-in Linear sync.",
-    "- Remote/gateway/node/dispatch code is unsupported experimental. Do not put it on the critical path for local dev unless explicitly requested.",
-    "",
-    "## Operating Rules",
-    "",
-    "- Prefer `hack` over raw `docker` / `docker compose`.",
-    "- Do not start/stop project services from Docker Desktop UI for `hack`-managed repos.",
-    "- Treat `.hack/.internal` and `.hack/.branch` as hack-managed artifacts; avoid hand-editing generated files.",
-    "- Use MCP only when shell access is unavailable.",
-    "- Run `hack doctor` (and `hack doctor --fix`) before manual runtime/network repair.",
-    "",
-    "## Config + Schema",
-    "",
-    "- Project config: `.hack/hack.config.json`",
-    "- Global config: `~/.hack/hack.config.json`",
-    "- Schema URL: `https://schemas.hack/hack.config.schema.json`",
-    "- Prefer CLI config edits via `hack config get/set`.",
-    "",
-    "## Hostname Routing",
-    "",
-    "- Primary host is `dev_host` (default: `<project>.hack`).",
-    "- Subdomains use `<sub>.<dev_host>` (for example: `api.myapp.hack`).",
-    "- OAuth alias can add `<dev_host>.<tld>` and `<sub>.<dev_host>.<tld>` (default: `gy`).",
-    "- Only HTTP services with Caddy labels and `hack-dev` network attachment are routable.",
-    "- Required labels: `caddy`, `caddy.reverse_proxy`, `caddy.tls=internal`.",
-    "- Quick checks: `hack open`, `hack open <sub>`, `hack open --json`.",
-    "",
-    "## TLS + OAuth Host Rules",
-    "",
-    "- Caddy internal PKI provides HTTPS for routed hosts; trust CA with `hack global trust`.",
-    "- `.hack` is local-first and not a public suffix.",
-    "- Use alias hosts like `*.hack.gy` when provider callback validation rejects non-public-suffix hosts.",
-    "- Alias hosts are local routes unless you explicitly add remote ingress/tunnel plumbing.",
-    "",
-    "## Managed Files",
-    "",
-    "- Source-of-truth files: `.hack/docker-compose.yml`, `.hack/hack.config.json`, `.hack/hack.env.default.yaml`, and optional `.hack/hack.env.<overlay>.yaml`.",
-    "- Worktree-local override files: `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`.",
-    "- Local-only files: `.hack.secret.key`, optional `.hack/.env` compatibility output, `.hack/.env.state.json`, and `.hack/.internal/` (gitignored; machine-specific state).",
-    "- Generated by hack: `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.",
-    "- Managed via CLI: `.hack/.internal/extra-hosts.json` using `hack internal extra-hosts ...` commands.",
-    "- Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.",
-    "",
-    "## Advanced Networking",
-    "",
-    "- Static host mappings: set `internal.extra_hosts` in `.hack/hack.config.json`.",
-    "- Dynamic mappings for local proxies/tunnels: `hack internal extra-hosts set <hostname> <target>`.",
-    "- List/remove mappings: `hack internal extra-hosts list` / `hack internal extra-hosts unset <hostname>`.",
-    "- Prefer `host-gateway` for host-local proxy targets when possible.",
-    "- Apply changes with `hack restart`; verify with `hack doctor`.",
-    "",
-    "## Quick Start",
-    "",
-    "- Bootstrap project config: `hack init`",
-    "- Start services: `hack up --detach`",
-    "- Alternate shorthand: `hack up -d`",
-    "- Restart services: `hack restart`",
-    "- Open app: `hack open --json`",
-    "- Tail logs (compose): `hack logs --pretty`",
-    "- Per-service logs: `hack logs <service>`",
-    "- Snapshot logs: `hack logs --json --no-follow`",
-    "- Loki history/query: `hack logs --loki --since 2h --pretty`",
-    "- Run commands: `hack run <service> <cmd...>`",
-    "- Stop services: `hack down`",
-    "",
-    "## Global Infra",
-    "",
-    "- Install once: `hack global install`",
-    "- Start/stop/status: `hack global up`, `hack global down`, `hack global status`",
-    "- Global logs: `hack global logs <service> --no-follow --tail 200`",
-    "",
-    "## Unsupported Experimental Remote",
-    "",
-    "These commands are source-available but outside the supported v3 product contract:",
-    "",
-    "- Pair/register a node: `hack node pair ...`, then verify via `hack node list` and `hack node status --watch`.",
-    "- Repair SSH access for remote Git/mutagen: `hack node ssh setup --node <id>`.",
-    "- Inspect node workspace map on the node host: `ssh <user@host> 'hack node workspace list --json'`.",
-    "- Inspect/repair controller route bridge: `hack node routes status`, `hack node routes repair`.",
-    '- Dispatch command to remote workspace: `hack dispatch run --project <name|id> --node default --branch <branch> --runner generic -- "pwd"`.',
-    "",
-    "## Lifecycle + Startup",
-    "",
-    "- Put host setup in `.hack/hack.config.json` under `startup` / `lifecycle`.",
-    "- Use lifecycle processes for long-running host tasks, not ad-hoc terminals.",
-    '- For fixed-port host helpers such as SSM tunnels or local proxies, set `singleton.ports` and usually `onConflict: "adopt"` so Hack reuses a healthy existing listener instead of starting duplicate tunnel stacks.',
-    "- `singleton` is a listener guard, not process ownership transfer; adopted external processes are left running on `hack down`.",
-    "- Inspect via `hack projects --details` and `hack logs <service-or-process>`.",
-    "",
-    "## Verification Loops",
-    "",
-    "- For `hack run` / `hack exec` / env-resolution changes, verify the effective env transition matrix in",
-    "  `tests/project-run-command.test.ts`.",
-    "- Cover omitted env, explicit overlay, explicit `base`, default-overlay resolution, cached runtime-state env,",
-    "  target-service running/not-running, worktree-local overrides, and host-vs-compose target mode.",
-    "- For lifecycle or startup-process changes, verify `tests/project-lifecycle-processes.test.ts` and",
-    "  `tests/project-lifecycle-singleton.test.ts`.",
-    "- Preserve `sh -c` semantics, process-group cleanup, stale pane-metadata reconciliation, singleton listener",
-    "  behavior, and interactive stdin behavior.",
-    "- When semantics change, update `docs/env.md` or `docs/lifecycle.md` in the same patch so future agent work starts",
-    "  from the current contract.",
-    "",
-    "## Branch Instances",
-    "",
-    "Use branch instances to run parallel environments:",
-    "",
-    "- `hack up --branch <name> --detach`",
-    "- `hack open --branch <name>`",
-    "- `hack logs --branch <name>`",
-    "- `hack down --branch <name>`",
-    "",
-    "## Workspaces",
-    "",
-    "- Picker: `hack session` for persistent project workspaces.",
-    "- Reuse/create: `hack session start <project>`",
-    "- Env-scoped workspace: `hack session start <project> --env qa --service api --detach`",
-    "- Isolated agent workspace: `hack session start <project> --new --name agent-1` (`<project>--agent-1`).",
-    '- Exec in workspace: `hack session exec <workspace> "<command>"`',
-    '- Exec in workspace with injected env: `hack session exec <workspace> --env qa --service api "bun db:migrate"`',
-    "- Stop workspace: `hack session stop <workspace>`",
-    "",
-    "## Host-side env helpers",
-    "",
-    "- One-off host command with injected env: `hack host exec --env qa --scope api -- bun db:migrate`",
-    "- Host commands default to a host-local env view; use `--target compose` when you explicitly want container-oriented addresses.",
-    "- `--scope` selects which env scope to inject; it does not move execution into that service container.",
-    "- Interactive host shell with injected env: `hack host shell --env qa --scope api`",
-    "- Run inside an already-running service container: `hack exec api -- bun test`",
-    "",
-    "## Tickets",
-    "",
-    '- Create: `hack tickets create --title "..." --body-stdin`',
-    "- List/show: `hack tickets list`, `hack tickets show T-AB12CD34EF`",
-    "- Status/sync: `hack tickets status T-AB12CD34EF in_progress`, `hack tickets sync`",
-    "",
-    "## Project Targeting",
-    "",
-    "- Run from repo root when possible.",
-    "- Otherwise use `--project <name>` or `--path <repo-root>`.",
-    "- List projects: `hack projects --json`.",
-    "",
-    "## Agent Maintenance",
-    "",
-    "- Project-level hack commands auto-check integration drift and attempt auto-sync.",
-    "- Set `HACK_SETUP_SYNC_MODE=warn` to warn-only, or `HACK_SETUP_SYNC_MODE=off` to disable.",
-    "- Refresh project + global integrations: `hack setup sync --all-scopes`",
-    "- Check generated integrations: `hack setup sync --all-scopes --check`",
-    "- Remove generated integrations: `hack setup sync --all-scopes --remove`",
-    "- After self-update: `hack update` then `hack setup sync --all-scopes`",
-    "",
-    "## Agent Setup",
-    "",
-    "- Cursor rules: `hack setup cursor`",
-    "- Claude hooks: `hack setup claude`",
-    "- Codex skill: `hack setup codex`",
-    "- Tickets skill: `hack setup tickets`",
-    "- Init prompt: `hack agent init` (use --client cursor|claude|codex to open)",
-    "- Init patterns: `hack agent patterns`",
-    "- MCP (no shell only): `hack setup mcp`",
-    "- MCP install (explicit): `hack mcp install --all --scope project`",
+    renderInstructionSections({ surface: "skill", headingStyle: "markdown" }),
     "",
   ];
 

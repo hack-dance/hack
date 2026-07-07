@@ -1,5 +1,6 @@
 import { renderHackBanner } from "../lib/hack-banner.ts";
 import { gumFormat, isGumAvailable } from "../ui/gum.ts";
+import { isColorDisabledByEnv } from "../ui/terminal.ts";
 import type {
   AnyCommandSpec,
   CliGroup,
@@ -12,34 +13,55 @@ import {
   resolveCommand,
 } from "./command.ts";
 
+export interface HelpRenderOptions {
+  /**
+   * Include experimental (Beta-group) commands in root help. Defaults to
+   * true for the pure renderers (stable programmatic contract); the CLI
+   * print path hides them unless `hack help --all` is used.
+   */
+  readonly showExperimental?: boolean;
+}
+
 export function renderHelpForPath(
   cli: CliSpec,
-  positionals: readonly string[]
+  positionals: readonly string[],
+  opts?: HelpRenderOptions
 ): string {
   const resolved = resolveCommand(cli, positionals);
   const matchedNames = resolved.path.map((c) => c.name);
   return resolved.command
     ? renderCommandHelp(cli, resolved.command, matchedNames)
-    : renderRootHelp(cli);
+    : renderRootHelp(cli, {
+        showExperimental: opts?.showExperimental !== false,
+      });
 }
 
 export function renderHelpMarkdownForPath(
   cli: CliSpec,
-  positionals: readonly string[]
+  positionals: readonly string[],
+  opts?: HelpRenderOptions
 ): string {
   const resolved = resolveCommand(cli, positionals);
   const matchedNames = resolved.path.map((c) => c.name);
   return resolved.command
     ? renderCommandHelpMarkdown(cli, resolved.command, matchedNames)
-    : renderRootHelpMarkdown(cli);
+    : renderRootHelpMarkdown(cli, {
+        showExperimental: opts?.showExperimental !== false,
+      });
 }
 
 export async function printHelpForPath(
   cli: CliSpec,
-  positionals: readonly string[]
+  positionals: readonly string[],
+  opts?: HelpRenderOptions
 ): Promise<void> {
+  // The printed CLI surface hides experimental commands by default; the
+  // pure render* functions keep them visible for programmatic callers.
+  const renderOpts: HelpRenderOptions = {
+    showExperimental: opts?.showExperimental === true,
+  };
   const banner = await renderHackBanner({ trimEmpty: true });
-  const markdown = renderHelpMarkdownForPath(cli, positionals);
+  const markdown = renderHelpMarkdownForPath(cli, positionals, renderOpts);
   const markdownWithBanner =
     banner.length > 0
       ? `\`\`\`text\n${banner}\n\`\`\`\n\n${markdown}`
@@ -55,7 +77,7 @@ export async function printHelpForPath(
     }
   }
 
-  const plain = renderHelpForPath(cli, positionals);
+  const plain = renderHelpForPath(cli, positionals, renderOpts);
   const plainWithBanner = banner.length > 0 ? `${banner}\n\n${plain}` : plain;
   writeStdout(plainWithBanner);
 }
@@ -64,14 +86,29 @@ function isPrettyHelpEnabled(): boolean {
   if (!process.stdout.isTTY) {
     return false;
   }
+  if (isColorDisabledByEnv()) {
+    return false;
+  }
   return isGumAvailable();
+}
+
+function countExperimentalRootCommands(cli: CliSpec): number {
+  return cli.commands.filter((command) => command.group === "Beta").length;
+}
+
+function renderExperimentalHiddenLine(cli: CliSpec): string {
+  const count = countExperimentalRootCommands(cli);
+  return `${count} experimental command${count === 1 ? "" : "s"} hidden — run \`hack help --all\` to show them.`;
 }
 
 function writeStdout(text: string): void {
   process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
 }
 
-function renderRootHelp(cli: CliSpec): string {
+function renderRootHelp(
+  cli: CliSpec,
+  opts: { readonly showExperimental: boolean }
+): string {
   const lines: string[] = [];
 
   lines.push(`${cli.name} v${cli.version} — ${cli.summary}`);
@@ -92,6 +129,12 @@ function renderRootHelp(cli: CliSpec): string {
   for (const group of groupsInOrder()) {
     const entries = grouped.get(group);
     if (!entries || entries.length === 0) {
+      continue;
+    }
+    if (group === "Beta" && !opts.showExperimental) {
+      lines.push(`${groupLabel(group)}:`);
+      lines.push(`  ${renderExperimentalHiddenLine(cli)}`);
+      lines.push("");
       continue;
     }
     lines.push(`${groupLabel(group)}:`);
@@ -115,7 +158,10 @@ function renderRootHelp(cli: CliSpec): string {
   return lines.join("\n");
 }
 
-function renderRootHelpMarkdown(cli: CliSpec): string {
+function renderRootHelpMarkdown(
+  cli: CliSpec,
+  opts: { readonly showExperimental: boolean }
+): string {
   const lines: string[] = [];
 
   lines.push(`## ${cli.name} v${cli.version}`);
@@ -142,6 +188,13 @@ function renderRootHelpMarkdown(cli: CliSpec): string {
   for (const group of groupsInOrder()) {
     const entries = grouped.get(group);
     if (!entries || entries.length === 0) {
+      continue;
+    }
+    if (group === "Beta" && !opts.showExperimental) {
+      lines.push(`### ${groupLabel(group)}`);
+      lines.push("");
+      lines.push(mdEscape(renderExperimentalHiddenLine(cli)));
+      lines.push("");
       continue;
     }
     lines.push(`### ${groupLabel(group)}`);

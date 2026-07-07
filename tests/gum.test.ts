@@ -21,12 +21,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  process.env.HACK_GUM_PATH = undefined;
-  process.env.GUM_FIXTURE_LOG = undefined;
-  process.env.GUM_FIXTURE_CONFIRM_EXIT = undefined;
-  process.env.GUM_FIXTURE_INPUT_OUTPUT = undefined;
-  process.env.GUM_FIXTURE_CHOOSE_OUTPUT = undefined;
-  process.env.GUM_FIXTURE_FILTER_OUTPUT = undefined;
+  Reflect.deleteProperty(process.env, "HACK_GUM_PATH");
+  Reflect.deleteProperty(process.env, "GUM_FIXTURE_LOG");
+  Reflect.deleteProperty(process.env, "GUM_FIXTURE_CONFIRM_EXIT");
+  Reflect.deleteProperty(process.env, "GUM_FIXTURE_INPUT_OUTPUT");
+  Reflect.deleteProperty(process.env, "GUM_FIXTURE_CHOOSE_OUTPUT");
+  Reflect.deleteProperty(process.env, "GUM_FIXTURE_FILTER_OUTPUT");
   resetGumPathCacheForTests();
 });
 

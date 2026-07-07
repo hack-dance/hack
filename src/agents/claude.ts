@@ -7,12 +7,23 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
+import {
+  checkHackInitSkill,
+  installHackInitSkill,
+  removeHackInitSkill,
+} from "./hack-init-skill.ts";
 
 export type ClaudeScope = "project" | "user";
 
 export type ClaudeHookResult = {
   readonly scope: ClaudeScope;
-  readonly status: "updated" | "noop" | "removed" | "missing" | "error";
+  readonly status:
+    | "updated"
+    | "noop"
+    | "stale"
+    | "removed"
+    | "missing"
+    | "error";
   readonly path: string;
   readonly message?: string;
 };
@@ -21,7 +32,11 @@ const HOOK_COMMAND = "hack agent prime";
 const HOOK_EVENTS = ["SessionStart", "PreCompact"] as const;
 
 /**
- * Install Claude Code hooks to run the hack agent primer.
+ * Install the Claude Code integration: primer hooks in settings plus the
+ * `/hack-init` onboarding skill (`.claude/skills/hack-init/SKILL.md`).
+ *
+ * The returned path points at the settings file; the status reflects both
+ * artifacts (any change reports as updated).
  */
 export async function installClaudeHooks(opts: {
   readonly scope: ClaudeScope;
@@ -57,9 +72,25 @@ export async function installClaudeHooks(opts: {
   const nextText = `${JSON.stringify(settings.value, null, 2)}\n`;
   const result = await writeTextFileIfChanged(path, nextText);
 
+  const initResult = await installHackInitSkill({
+    client: "claude",
+    scope: opts.scope,
+    projectRoot: opts.projectRoot,
+  });
+  if (initResult.status === "error") {
+    return {
+      scope: opts.scope,
+      status: "error",
+      path: initResult.path,
+      message: initResult.message,
+    };
+  }
+  const initChanged =
+    initResult.status === "created" || initResult.status === "updated";
+
   return {
     scope: opts.scope,
-    status: updated || result.changed ? "updated" : "noop",
+    status: updated || result.changed || initChanged ? "updated" : "noop",
     path,
   };
 }
@@ -97,7 +128,27 @@ export async function checkClaudeHooks(opts: {
   }
 
   const hasAll = hasHooks({ settings: settings.value, command: HOOK_COMMAND });
-  return { scope: opts.scope, status: hasAll ? "noop" : "missing", path };
+  if (!hasAll) {
+    return { scope: opts.scope, status: "missing", path };
+  }
+
+  const initResult = await checkHackInitSkill({
+    client: "claude",
+    scope: opts.scope,
+    projectRoot: opts.projectRoot,
+  });
+  if (initResult.status !== "noop") {
+    return {
+      scope: opts.scope,
+      status: initResult.status === "error" ? "error" : "stale",
+      path: initResult.path,
+      message:
+        initResult.message ??
+        "hack-init skill is missing or out of date. Run: hack setup claude",
+    };
+  }
+
+  return { scope: opts.scope, status: "noop", path };
 }
 
 /**
@@ -118,8 +169,16 @@ export async function removeClaudeHooks(opts: {
   }
 
   const path = resolved.path;
+  const initResult = await removeHackInitSkill({
+    client: "claude",
+    scope: opts.scope,
+    projectRoot: opts.projectRoot,
+  });
+  const initRemoved = initResult.status === "removed";
+
   if (!(await pathExists(path))) {
-    return { scope: opts.scope, status: "missing", path };
+    const status = initRemoved ? "removed" : "missing";
+    return { scope: opts.scope, status, path };
   }
 
   const settings = await readSettingsFile({ path });
@@ -137,7 +196,11 @@ export async function removeClaudeHooks(opts: {
     command: HOOK_COMMAND,
   });
   if (!changed) {
-    return { scope: opts.scope, status: "noop", path };
+    return {
+      scope: opts.scope,
+      status: initRemoved ? "removed" : "noop",
+      path,
+    };
   }
 
   const nextText = `${JSON.stringify(settings.value, null, 2)}\n`;

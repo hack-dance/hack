@@ -9,9 +9,9 @@ import {
   GLOBAL_CADDY_REMOTE_ROUTES_COMPOSE_FILENAME,
   GLOBAL_CADDY_REMOTE_ROUTES_PROJECT_NAME,
   GLOBAL_CADDY_REMOTE_ROUTES_REGISTRY_FILENAME,
-  GLOBAL_HACK_DIR_NAME,
   PROJECT_COMPOSE_FILENAME,
 } from "../constants.ts";
+import { resolveGlobalHackDir } from "./config-paths.ts";
 import {
   ensureDir,
   pathExists,
@@ -104,7 +104,7 @@ export async function reconcileRemoteCaddyRoutesForProject(input: {
   readonly fallbackProjectHost?: string;
   readonly node: NodeRecord;
 }): Promise<RemoteCaddyRouteBridgeResult> {
-  const paths = resolveRemoteRouteBridgePaths({ homeDir: resolveHomeDir() });
+  const paths = resolveRemoteRouteBridgePaths();
   const hosts = await resolveProjectHostsForBridge({
     projectDir: input.projectDir,
     fallbackProjectHost: input.fallbackProjectHost,
@@ -189,7 +189,7 @@ export async function reconcileRemoteCaddyRoutesStack(): Promise<
       readonly error: string;
     }
 > {
-  const paths = resolveRemoteRouteBridgePaths({ homeDir: resolveHomeDir() });
+  const paths = resolveRemoteRouteBridgePaths();
   const registry = await readRemoteRouteRegistry({
     registryPath: paths.routesRegistryPath,
   });
@@ -237,7 +237,7 @@ export async function stopRemoteCaddyRoutesStack(): Promise<
       readonly error: string;
     }
 > {
-  const paths = resolveRemoteRouteBridgePaths({ homeDir: resolveHomeDir() });
+  const paths = resolveRemoteRouteBridgePaths();
   if (!(await pathExists(paths.routesComposePath))) {
     return {
       status: "missing",
@@ -278,7 +278,7 @@ export async function stopRemoteCaddyRoutesStack(): Promise<
  * Reads persisted controller-side remote route bridge state without mutating it.
  */
 export async function readRemoteCaddyRoutesState(): Promise<RemoteCaddyRouteBridgeState> {
-  const paths = resolveRemoteRouteBridgePaths({ homeDir: resolveHomeDir() });
+  const paths = resolveRemoteRouteBridgePaths();
   const registry = await readRemoteRouteRegistry({
     registryPath: paths.routesRegistryPath,
   });
@@ -385,10 +385,8 @@ export function extractCaddyHostsFromCompose(input: {
   return Array.from(hosts).sort((left, right) => left.localeCompare(right));
 }
 
-function resolveRemoteRouteBridgePaths(input: {
-  readonly homeDir: string;
-}): RemoteRouteBridgePaths {
-  const hackRoot = resolve(input.homeDir, GLOBAL_HACK_DIR_NAME);
+function resolveRemoteRouteBridgePaths(): RemoteRouteBridgePaths {
+  const hackRoot = resolveGlobalHackDir();
   const caddyDir = resolve(hackRoot, GLOBAL_CADDY_DIR_NAME);
   return {
     caddyDir,
@@ -711,12 +709,4 @@ function buildRemoteRouteServiceKey(input: {
     .slice(0, 10);
   const slug = sanitizeProjectSlug(input.routeId).slice(0, 32);
   return `route-${slug}-${digest}`;
-}
-
-function resolveHomeDir(): string {
-  const homeDir = process.env.HOME?.trim();
-  if (!homeDir) {
-    throw new Error("HOME is not set");
-  }
-  return homeDir;
 }

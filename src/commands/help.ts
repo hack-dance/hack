@@ -1,18 +1,27 @@
 import type { CliContext, CommandArgs } from "../cli/command.ts";
-import { defineCommand, withHandler } from "../cli/command.ts";
+import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { printHelpForPath } from "../cli/help.ts";
 
 const helpPositionals = [
   { name: "path", required: false, multiple: true },
 ] as const;
 
-type HelpArgs = CommandArgs<readonly [], typeof helpPositionals>;
+const optHelpAll = defineOption({
+  name: "all",
+  type: "boolean",
+  long: "--all",
+  description: "Include experimental (unsupported) commands in help output",
+} as const);
+
+const helpOptions = [optHelpAll] as const;
+
+type HelpArgs = CommandArgs<typeof helpOptions, typeof helpPositionals>;
 
 const helpSpec = defineCommand({
   name: "help",
   summary: "Show help for a command (e.g. hack help global logs)",
   group: "Diagnostics",
-  options: [],
+  options: helpOptions,
   positionals: helpPositionals,
   subcommands: [],
 } as const);
@@ -28,6 +37,8 @@ async function handleHelp({
 }): Promise<number> {
   const parts = args.positionals.path;
   const path = Array.isArray(parts) ? parts : [];
-  await printHelpForPath(ctx.cli, path);
+  await printHelpForPath(ctx.cli, path, {
+    showExperimental: args.options.all === true,
+  });
   return 0;
 }

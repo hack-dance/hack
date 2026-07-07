@@ -48,6 +48,55 @@ export async function writeTextFileIfChanged(
 }
 
 /**
+ * Ensures a marker-delimited managed block exists in a gitignore-style file.
+ *
+ * Merge scheme (simple + robust):
+ * - File missing: write just the managed block.
+ * - Both markers present: replace the lines between them with the canonical
+ *   entries; everything before/after the block (user additions) is preserved.
+ * - Begin marker present but end marker missing (corrupted block): replace
+ *   from the begin marker to end-of-file with a fresh block.
+ * - No markers: preserve the existing content and append the managed block.
+ *
+ * Idempotent: rewrites only when the resulting content differs.
+ * @returns Whether the file was modified
+ */
+export async function ensureManagedGitignoreBlock(opts: {
+  readonly gitignorePath: string;
+  readonly beginMarker: string;
+  readonly endMarker: string;
+  readonly entries: readonly string[];
+}): Promise<{ readonly changed: boolean }> {
+  const block = [opts.beginMarker, ...opts.entries, opts.endMarker].join("\n");
+  const existing = await readTextFile(opts.gitignorePath);
+  if (existing === null) {
+    return await writeTextFileIfChanged(opts.gitignorePath, `${block}\n`);
+  }
+
+  const lines = existing.split("\n");
+  const beginIndex = lines.findIndex(
+    (line) => line.trim() === opts.beginMarker
+  );
+  if (beginIndex !== -1) {
+    const endOffset = lines
+      .slice(beginIndex + 1)
+      .findIndex((line) => line.trim() === opts.endMarker);
+    const tail =
+      endOffset === -1 ? [] : lines.slice(beginIndex + 1 + endOffset + 1);
+    const next = [...lines.slice(0, beginIndex), block, ...tail].join("\n");
+    const withNewline = next.endsWith("\n") ? next : `${next}\n`;
+    return await writeTextFileIfChanged(opts.gitignorePath, withNewline);
+  }
+
+  const base = existing.endsWith("\n") ? existing : `${existing}\n`;
+  const separator = existing.trim().length > 0 ? "\n" : "";
+  return await writeTextFileIfChanged(
+    opts.gitignorePath,
+    `${base}${separator}${block}\n`
+  );
+}
+
+/**
  * Ensures an entry exists in .gitignore. Creates the file if it doesn't exist.
  * @returns Whether the file was modified
  */

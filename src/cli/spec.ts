@@ -44,6 +44,7 @@ import { usageCommand } from "../commands/usage.ts";
 import { versionCommand } from "../commands/version.ts";
 import { xCommand } from "../commands/x.ts";
 import { defineCli } from "./command.ts";
+import { optNoInteractive } from "./options.ts";
 
 type PackageJsonType = {
   name: string;
@@ -60,7 +61,7 @@ export const CLI_SPEC = defineCli({
     "Give every project a stable HTTPS URL like https://myapp.hack.",
     "Keep env, sessions, diagnostics, and optional tickets close to the repo.",
   ] as const,
-  globalOptions: [],
+  globalOptions: [optNoInteractive],
   commands: [
     globalCommand,
     authCommand,

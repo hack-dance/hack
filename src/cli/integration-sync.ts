@@ -1,9 +1,11 @@
 import { checkClaudeHooks, installClaudeHooks } from "../agents/claude.ts";
 import { checkCodexSkill, installCodexSkill } from "../agents/codex-skill.ts";
 import { checkCursorRules, installCursorRules } from "../agents/cursor.ts";
+import { resolveTicketsIntegrationEnablement } from "../control-plane/extensions/tickets/enablement.ts";
 import {
   checkTicketsSkill,
   installTicketsSkill,
+  type TicketsSkillResult,
 } from "../control-plane/extensions/tickets/tickets-skill.ts";
 import { findProjectContext } from "../lib/project.ts";
 import {
@@ -112,6 +114,10 @@ function resolveIntegrationSyncMode(): IntegrationSyncMode {
 async function detectIntegrationDrift(opts: {
   readonly projectRoot: string;
 }): Promise<{ readonly hasDrift: boolean }> {
+  const ticketsEnablement = await resolveTicketsIntegrationEnablement({
+    projectRoot: opts.projectRoot,
+  });
+
   const [
     cursorProject,
     cursorUser,
@@ -131,8 +137,12 @@ async function detectIntegrationDrift(opts: {
     checkClaudeHooks({ scope: "user" }),
     checkCodexSkill({ scope: "project", projectRoot: opts.projectRoot }),
     checkCodexSkill({ scope: "user" }),
-    checkTicketsSkill({ scope: "project", projectRoot: opts.projectRoot }),
-    checkTicketsSkill({ scope: "user" }),
+    ticketsEnablement.project
+      ? checkTicketsSkill({ scope: "project", projectRoot: opts.projectRoot })
+      : skippedTicketsResult({ scope: "project" }),
+    ticketsEnablement.global
+      ? checkTicketsSkill({ scope: "user" })
+      : skippedTicketsResult({ scope: "user" }),
     checkMcpConfig({
       scope: "project",
       projectRoot: opts.projectRoot,
@@ -172,6 +182,21 @@ function hasSingleCheckDrift(status: string): boolean {
   return status !== "noop";
 }
 
+/**
+ * Placeholder result for tickets integrations when the tickets extension is
+ * disabled for the checked scope. Tickets is optional/legacy: its skill must
+ * never count as drift (or get auto-installed) unless explicitly enabled.
+ */
+function skippedTicketsResult(opts: {
+  readonly scope: "project" | "user";
+}): TicketsSkillResult {
+  return {
+    scope: opts.scope,
+    status: "noop",
+    path: "(tickets extension disabled)",
+  };
+}
+
 function hasMcpDrift(opts: {
   readonly checks: readonly McpCheckResult[];
 }): boolean {
@@ -187,6 +212,10 @@ function hasDocDrift(opts: {
 async function autoSyncIntegrations(opts: {
   readonly projectRoot: string;
 }): Promise<{ readonly ok: boolean }> {
+  const ticketsEnablement = await resolveTicketsIntegrationEnablement({
+    projectRoot: opts.projectRoot,
+  });
+
   const [
     cursorProject,
     cursorUser,
@@ -206,8 +235,12 @@ async function autoSyncIntegrations(opts: {
     installClaudeHooks({ scope: "user" }),
     installCodexSkill({ scope: "project", projectRoot: opts.projectRoot }),
     installCodexSkill({ scope: "user" }),
-    installTicketsSkill({ scope: "project", projectRoot: opts.projectRoot }),
-    installTicketsSkill({ scope: "user" }),
+    ticketsEnablement.project
+      ? installTicketsSkill({ scope: "project", projectRoot: opts.projectRoot })
+      : skippedTicketsResult({ scope: "project" }),
+    ticketsEnablement.global
+      ? installTicketsSkill({ scope: "user" })
+      : skippedTicketsResult({ scope: "user" }),
     installMcpConfig({
       scope: "project",
       projectRoot: opts.projectRoot,

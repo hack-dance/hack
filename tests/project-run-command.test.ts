@@ -1,4 +1,4 @@
-import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -8,6 +8,7 @@ import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: Array<{
   readonly composeFiles: readonly string[];
@@ -18,46 +19,59 @@ const psJsonByComposeProject = new Map<string, string>();
 const warnCalls: string[] = [];
 const tempDirs = new Set<string>();
 
-mock.module("../src/backends/runtime-backend.ts", () => ({
-  composeRuntimeBackend: {
-    name: "compose",
-    up: async () => 0,
-    down: async () => 0,
-    psJson: async (opts: { readonly composeFiles: readonly string[] }) => ({
-      exitCode: 0,
-      stdout: psJsonByComposeProject.get(opts.composeFiles[0] ?? "") ?? "",
-      stderr: "",
-    }),
-    ps: async () => 0,
-    run: async (opts: {
-      readonly composeFiles: readonly string[];
-      readonly env?: Record<string, string>;
-      readonly noDeps?: boolean;
-    }) => {
-      runCalls.push({
-        composeFiles: [...opts.composeFiles],
-        env: opts.env ? { ...opts.env } : undefined,
-        noDeps: opts.noDeps,
-      });
-      return 0;
+const runtimeBackendMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/backends/runtime-backend.ts",
+  overrides: {
+    composeRuntimeBackend: {
+      name: "compose",
+      up: async () => 0,
+      down: async () => 0,
+      psJson: async (opts: { readonly composeFiles: readonly string[] }) => ({
+        exitCode: 0,
+        stdout: psJsonByComposeProject.get(opts.composeFiles[0] ?? "") ?? "",
+        stderr: "",
+      }),
+      ps: async () => 0,
+      run: async (opts: {
+        readonly composeFiles: readonly string[];
+        readonly env?: Record<string, string>;
+        readonly noDeps?: boolean;
+      }) => {
+        runCalls.push({
+          composeFiles: [...opts.composeFiles],
+          env: opts.env ? { ...opts.env } : undefined,
+          noDeps: opts.noDeps,
+        });
+        return 0;
+      },
     },
   },
-}));
+});
 
-mock.module("../src/ui/logger.ts", () => ({
-  logger: {
-    debug: () => {},
-    info: () => {},
-    warn: (input: { readonly message: string }) => {
-      warnCalls.push(input.message);
+const loggerMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/ui/logger.ts",
+  overrides: {
+    logger: {
+      debug: () => {},
+      info: () => {},
+      warn: (input: { readonly message: string }) => {
+        warnCalls.push(input.message);
+      },
+      error: () => {},
+      success: () => {},
+      step: () => {},
     },
-    error: () => {},
-    success: () => {},
-    step: () => {},
   },
-}));
+});
 
 const { runCommand } = await import("../src/commands/project.ts");
+
+beforeAll(() => {
+  runtimeBackendMock.activate();
+  loggerMock.activate();
+});
 
 afterEach(async () => {
   runCalls.length = 0;
@@ -70,7 +84,8 @@ afterEach(async () => {
 });
 
 afterAll(() => {
-  mock.restore();
+  runtimeBackendMock.deactivate();
+  loggerMock.deactivate();
 });
 
 function expectNoEnvScopeWarnings(): void {

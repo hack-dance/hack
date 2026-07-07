@@ -3,6 +3,7 @@ import { basename, dirname, resolve } from "node:path";
 
 import { DAEMON_LAUNCHD_LABEL } from "../constants.ts";
 import type { DaemonLaunchdConfig } from "../control-plane/sdk/config.ts";
+import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import {
   ensureDir,
   pathExists,
@@ -171,7 +172,7 @@ async function resolveLaunchdHackBinPath(opts: {
     opts.invocation.args[0] ?? null,
     opts.invocation.bin,
     await findExecutableInPath("hack"),
-    resolve(process.env.HOME ?? homedir(), ".hack", "bin", "hack"),
+    resolve(resolveGlobalHackDir(), "bin", "hack"),
   ];
 
   for (const raw of candidates) {

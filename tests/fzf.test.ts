@@ -78,12 +78,26 @@ describe("fzf", () => {
   });
 
   describe("ensureBundledFzfInstalled", () => {
-    it("returns home-not-set when HOME is not defined", async () => {
-      const savedHome = process.env.HOME;
-      process.env.HOME = undefined;
-      const result = await ensureBundledFzfInstalled();
-      process.env.HOME = savedHome;
-      expect(result).toEqual({ ok: false, reason: "home-not-set" });
+    it("honors HACK_HOME for the bundled install path", async () => {
+      const hackHome = await mkdtemp(join(tmpdir(), "hack-fzf-hackhome-"));
+      const binDir = join(hackHome, "bin");
+      const fzfPath = join(binDir, "fzf");
+
+      try {
+        await mkdir(binDir, { recursive: true });
+        await writeFile(fzfPath, "#!/bin/sh\necho fzf");
+        process.env.HACK_HOME = hackHome;
+        resetFzfPathCacheForTests();
+
+        const result = await ensureBundledFzfInstalled();
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.installed).toBe(false);
+          expect(result.fzfPath).toBe(fzfPath);
+        }
+      } finally {
+        await rm(hackHome, { recursive: true, force: true });
+      }
     });
 
     it("returns already installed when fzf exists at bundled path", async () => {

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -10,6 +10,7 @@ import {
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: Array<{
   readonly cmd: readonly string[];
@@ -20,24 +21,32 @@ const tempDirs = new Set<string>();
 const originalHome = process.env.HOME;
 const originalShell = process.env.SHELL;
 
-mock.module("../src/lib/shell.ts", () => ({
-  run: async (
-    cmd: readonly string[],
-    opts: {
-      readonly cwd?: string;
-      readonly env?: Record<string, string>;
-    } = {}
-  ) => {
-    runCalls.push({
-      cmd: [...cmd],
-      cwd: opts.cwd,
-      env: opts.env ? { ...opts.env } : undefined,
-    });
-    return 0;
+const shellMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/shell.ts",
+  overrides: {
+    run: async (
+      cmd: readonly string[],
+      opts: {
+        readonly cwd?: string;
+        readonly env?: Record<string, string>;
+      } = {}
+    ) => {
+      runCalls.push({
+        cmd: [...cmd],
+        cwd: opts.cwd,
+        env: opts.env ? { ...opts.env } : undefined,
+      });
+      return 0;
+    },
   },
-}));
+});
 
 const { envCommand, hostCommand } = await import("../src/commands/env.ts");
+
+beforeAll(() => {
+  shellMock.activate();
+});
 
 afterEach(async () => {
   runCalls.length = 0;
@@ -50,7 +59,7 @@ afterEach(async () => {
 });
 
 afterAll(() => {
-  mock.restore();
+  shellMock.deactivate();
 });
 
 test("env exec injects merged overlay env into one-off host commands", async () => {

@@ -2,14 +2,17 @@ import { createHash } from "node:crypto";
 import { open, realpath, rename, stat, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
-  GLOBAL_HACK_DIR_NAME,
   GLOBAL_PROJECTS_REGISTRY_FILENAME,
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
+import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, pathExists, readTextFile } from "./fs.ts";
-import { resolveGitRepositoryIdentity } from "./git-worktree.ts";
+import {
+  resolveGitCurrentBranch,
+  resolveGitRepositoryIdentity,
+} from "./git-worktree.ts";
 import { getString, isRecord } from "./guards.ts";
 import type { ProjectContext, ProjectDirName } from "./project.ts";
 import { defaultProjectSlugFromPath, readProjectConfig } from "./project.ts";
@@ -20,6 +23,12 @@ const REGISTRY_LOCK_TIMEOUT_MS = 2000;
 const REGISTRY_LOCK_STALE_MS = 30_000;
 const REGISTRY_LOCK_RETRY_MS = 50;
 
+export interface RegisteredProjectWorktree {
+  readonly path: string;
+  readonly branch: string | null;
+  readonly lastSeenAt: string;
+}
+
 export interface RegisteredProject {
   readonly id: string;
   readonly name: string;
@@ -29,6 +38,8 @@ export interface RegisteredProject {
   readonly devHost?: string;
   readonly createdAt: string;
   readonly lastSeenAt?: string;
+  /** Linked git worktree checkouts of this project seen by the CLI (additive; absent in older registries). */
+  readonly worktrees?: readonly RegisteredProjectWorktree[];
 }
 
 export interface ProjectsRegistry {
@@ -89,6 +100,7 @@ export async function upsertProjectRegistration(opts: {
   const derivedName = defaultProjectSlugFromPath(repoRootReal);
   const name = sanitizeProjectName(cfg.name ?? derivedName);
   const devHost = cfg.devHost?.trim();
+  const gitBranch = await resolveGitCurrentBranch({ repoRoot: repoRootReal });
 
   return await withRegistryLock(async () => {
     const current = await readProjectsRegistry();
@@ -100,6 +112,7 @@ export async function upsertProjectRegistration(opts: {
         devHost,
         repoRoot: repoRootReal,
         repoIdentity,
+        gitBranch,
         projectDirName: opts.project.projectDirName,
         projectDir: projectDirReal,
       },
@@ -109,6 +122,12 @@ export async function upsertProjectRegistration(opts: {
       return status;
     }
     if (status.status === "noop") {
+      if (status.changed) {
+        await writeRegistryAtomic(registryPath, {
+          version: REGISTRY_VERSION,
+          projects: status.projects,
+        });
+      }
       return { status: "noop", project };
     }
 
@@ -119,6 +138,25 @@ export async function upsertProjectRegistration(opts: {
 
     return { status: status.status, project };
   });
+}
+
+/**
+ * Best-effort registry touch for read-style commands (e.g. `hack projects`).
+ *
+ * Runs the same upsert as full registration — so linked-worktree checkouts
+ * get recorded/refreshed on the family entry's `worktrees` array — but never
+ * throws: registry maintenance must not break a read command.
+ *
+ * @returns The registration outcome, or null when the touch failed.
+ */
+export async function touchProjectRegistration(opts: {
+  readonly project: ProjectContext;
+}): Promise<RegisterOutcome | null> {
+  try {
+    return await upsertProjectRegistration({ project: opts.project });
+  } catch {
+    return null;
+  }
 }
 
 export async function resolveRegisteredProjectByName(opts: {
@@ -213,6 +251,29 @@ export async function removeProjectsById(opts: {
   });
 }
 
+export type DeadProjectRegistration = {
+  readonly project: RegisteredProject;
+  readonly reason: "missing repo root";
+};
+
+/**
+ * Find registry entries whose `repoRoot` no longer exists on disk (e.g.
+ * deleted checkouts or stale temp-dir test projects).
+ *
+ * Detection only — pair with {@link removeProjectsById} to prune, so callers
+ * can show candidates and confirm before mutating the registry.
+ */
+export async function findDeadProjectRegistrations(opts: {
+  readonly projects: readonly RegisteredProject[];
+}): Promise<DeadProjectRegistration[]> {
+  const checks = await Promise.all(
+    opts.projects.map((project) => pathExists(project.repoRoot))
+  );
+  return opts.projects
+    .filter((_, index) => checks[index] === false)
+    .map((project) => ({ project, reason: "missing repo root" as const }));
+}
+
 function parseRegistry(value: unknown): ProjectsRegistry | null {
   if (!isRecord(value)) {
     return null;
@@ -258,6 +319,7 @@ function parseProject(value: unknown): RegisteredProject | null {
 
   const devHost = getString(value, "devHost") ?? undefined;
   const lastSeenAt = getString(value, "lastSeenAt") ?? undefined;
+  const worktrees = parseWorktrees(value.worktrees);
 
   return {
     id,
@@ -268,7 +330,29 @@ function parseProject(value: unknown): RegisteredProject | null {
     ...(devHost ? { devHost } : {}),
     createdAt,
     ...(lastSeenAt ? { lastSeenAt } : {}),
+    ...(worktrees.length > 0 ? { worktrees } : {}),
   };
+}
+
+function parseWorktrees(value: unknown): readonly RegisteredProjectWorktree[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const out: RegisteredProjectWorktree[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) {
+      continue;
+    }
+    const path = getString(item, "path");
+    const lastSeenAt = getString(item, "lastSeenAt");
+    if (!(path && lastSeenAt)) {
+      continue;
+    }
+    const branch = getString(item, "branch") ?? null;
+    out.push({ path, branch, lastSeenAt });
+  }
+  return out;
 }
 
 function resolveGlobalRegistryRoot(): string {
@@ -276,11 +360,7 @@ function resolveGlobalRegistryRoot(): string {
   if (override.length > 0) {
     return dirname(override);
   }
-  const home = process.env.HOME;
-  if (!home) {
-    throw new Error("HOME is not set");
-  }
-  return resolve(home, GLOBAL_HACK_DIR_NAME);
+  return resolveGlobalHackDir();
 }
 
 function getRegistryPath(): string {
@@ -400,6 +480,7 @@ function isPathLikelyMissing(path: string): Promise<boolean> {
   return pathExists(path).then((ok) => !ok);
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Registry upsert keeps conflict, migration, and worktree-tracking rules explicit in one decision tree.
 async function upsertInMemory(opts: {
   readonly current: ProjectsRegistry;
   readonly nowIso: string;
@@ -408,6 +489,7 @@ async function upsertInMemory(opts: {
     readonly devHost?: string;
     readonly repoRoot: string;
     readonly repoIdentity: string | null;
+    readonly gitBranch: string | null;
     readonly projectDirName: ProjectDirName;
     readonly projectDir: string;
   };
@@ -426,6 +508,7 @@ async function upsertInMemory(opts: {
     | {
         readonly status: "noop" | "updated";
         readonly projects: readonly RegisteredProject[];
+        readonly changed?: boolean;
       }
     | {
         readonly status: "created";
@@ -463,13 +546,18 @@ async function upsertInMemory(opts: {
       };
     }
 
+    const prunedWorktrees = await pruneWorktreeEntries(existingByDir.worktrees);
+    const { worktrees: _staleWorktrees, ...existingBase } = existingByDir;
     const updated: RegisteredProject = {
-      ...existingByDir,
+      ...existingBase,
       name: incoming.name,
       repoRoot: incoming.repoRoot,
       projectDirName: incoming.projectDirName,
       ...(incoming.devHost ? { devHost: incoming.devHost } : {}),
       lastSeenAt: opts.nowIso,
+      ...(prunedWorktrees && prunedWorktrees.length > 0
+        ? { worktrees: prunedWorktrees }
+        : {}),
     };
     return {
       project: updated,
@@ -488,11 +576,36 @@ async function upsertInMemory(opts: {
       incomingRepoIdentity: incoming.repoIdentity,
     });
     if (sameRepositoryFamily && !oldMissing) {
+      const nextWorktrees = await mergeWorktreeEntry({
+        worktrees: existingByName.worktrees,
+        entry: {
+          path: incoming.repoRoot,
+          branch: incoming.gitBranch,
+          lastSeenAt: opts.nowIso,
+        },
+      });
+      if (nextWorktrees === existingByName.worktrees) {
+        return {
+          project: existingByName,
+          status: {
+            status: "noop",
+            projects: current,
+          },
+        };
+      }
+
+      const withWorktrees: RegisteredProject = {
+        ...existingByName,
+        ...(nextWorktrees && nextWorktrees.length > 0
+          ? { worktrees: nextWorktrees }
+          : {}),
+      };
       return {
-        project: existingByName,
+        project: withWorktrees,
         status: {
           status: "noop",
-          projects: current,
+          projects: replaceById(current, withWorktrees),
+          changed: true,
         },
       };
     }
@@ -546,6 +659,59 @@ async function upsertInMemory(opts: {
     project: created,
     status: { status: "created", projects: [...current, created] },
   };
+}
+
+/**
+ * Removes worktree entries whose paths no longer exist.
+ * Returns the input reference unchanged when nothing was pruned so callers
+ * can cheaply detect "no change".
+ */
+async function pruneWorktreeEntries(
+  worktrees: readonly RegisteredProjectWorktree[] | undefined
+): Promise<readonly RegisteredProjectWorktree[] | undefined> {
+  if (!worktrees || worktrees.length === 0) {
+    return worktrees;
+  }
+
+  const checks = await Promise.all(
+    worktrees.map((entry) => pathExists(entry.path))
+  );
+  if (checks.every((exists) => exists)) {
+    return worktrees;
+  }
+  return worktrees.filter((_, index) => checks[index] === true);
+}
+
+/**
+ * Upserts a sibling-checkout entry (deduped by realpath) into the worktrees
+ * list and prunes entries whose paths no longer exist.
+ * Returns the input reference unchanged when nothing changed.
+ */
+async function mergeWorktreeEntry(opts: {
+  readonly worktrees: readonly RegisteredProjectWorktree[] | undefined;
+  readonly entry: RegisteredProjectWorktree;
+}): Promise<readonly RegisteredProjectWorktree[] | undefined> {
+  const entryPath = await tryRealpath(opts.entry.path);
+  const pruned = (await pruneWorktreeEntries(opts.worktrees)) ?? [];
+
+  const existing = pruned.find((item) => item.path === entryPath) ?? null;
+  if (
+    existing &&
+    existing.branch === opts.entry.branch &&
+    existing.lastSeenAt === opts.entry.lastSeenAt &&
+    pruned === opts.worktrees
+  ) {
+    return opts.worktrees;
+  }
+
+  const next = pruned.filter((item) => item.path !== entryPath);
+  next.push({
+    path: entryPath,
+    branch: opts.entry.branch,
+    lastSeenAt: opts.entry.lastSeenAt,
+  });
+  next.sort((a, b) => a.path.localeCompare(b.path));
+  return next;
 }
 
 function replaceById(

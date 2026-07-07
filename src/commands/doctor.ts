@@ -1,9 +1,10 @@
 import { lookup } from "node:dns/promises";
 import { dirname, resolve } from "node:path";
 import { confirm, isCancel, note, spinner } from "@clack/prompts";
+import { YAML } from "bun";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
-import { optPath } from "../cli/options.ts";
+import { optJson, optPath } from "../cli/options.ts";
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_GRAFANA_HOST,
@@ -17,11 +18,11 @@ import {
   GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_CADDY_DIR_NAME,
   GLOBAL_COREDNS_FILENAME,
-  GLOBAL_HACK_DIR_NAME,
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
   HACK_PROJECT_DIR_PRIMARY,
   PROJECT_ENV_CONTRACT_FILENAME,
+  PROJECT_ENV_KEY_FILENAME,
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
@@ -34,15 +35,29 @@ import {
   readInternalExtraHostsIp,
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
-import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import { emitCliResult, okResult } from "../lib/cli-result.ts";
+import {
+  resolveGlobalConfigPath,
+  resolveGlobalHackDir,
+} from "../lib/config-paths.ts";
+import {
+  inspectTrackedGeneratedFiles,
+  untrackGeneratedFiles,
+} from "../lib/doctor-generated-files.ts";
 import { checkMacHostTlsTrust } from "../lib/doctor-host-tls.ts";
+import {
+  findCrossCheckoutInstances,
+  inspectWorktreeSecretKeys,
+} from "../lib/doctor-worktree.ts";
 import { parseDotEnv } from "../lib/env.ts";
 import {
   ensureDir,
+  ensureGitignoreEntry,
   pathExists,
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
 import {
@@ -53,12 +68,14 @@ import {
 } from "../lib/mutagen.ts";
 import { isMac } from "../lib/os.ts";
 import {
+  defaultProjectSlugFromPath,
   findProjectContext,
   readProjectConfig,
   readProjectDevHost,
 } from "../lib/project.ts";
 import {
   discoverComposeServiceNames,
+  ensureHackDirGitignore,
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
   type LegacyComposeEnvFileReference,
@@ -133,7 +150,7 @@ const optMigrateEnvConfig = defineOption({
     "Migrate legacy hack.env.json/.env state to the new env config files",
 } as const);
 
-const doctorOptions = [optPath, optFix, optMigrateEnvConfig] as const;
+const doctorOptions = [optPath, optFix, optMigrateEnvConfig, optJson] as const;
 const doctorPositionals = [] as const;
 
 const doctorSpec = defineCommand({
@@ -208,6 +225,9 @@ const DOCTOR_SUMMARY_GROUPS = [
       "env mode",
       "env materialization",
       "env overlay warnings",
+      "worktree keys",
+      "worktree instances",
+      "generated files",
     ]),
   },
   {
@@ -219,8 +239,9 @@ const DOCTOR_SUMMARY_GROUPS = [
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
+  const json = args.options.json === true;
   const results: TimedCheckResult[] = [];
-  const s = spinner();
+  const s = createDoctorProgress({ json });
   s.start("Running doctor checks...");
 
   // Tools
@@ -491,6 +512,42 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     results.push(
       await runCheck(
         s,
+        "worktree keys",
+        () => checkWorktreeSecretKeys({ startDir }),
+        {
+          timeoutMs: 5000,
+        }
+      )
+    );
+    results.push(
+      await runCheck(
+        s,
+        "generated files",
+        () => checkTrackedGeneratedFiles({ startDir }),
+        {
+          timeoutMs: 5000,
+        }
+      )
+    );
+    if (
+      results.some(
+        (result) => result.name === "docker daemon" && result.status === "ok"
+      )
+    ) {
+      results.push(
+        await runCheck(
+          s,
+          "worktree instances",
+          () => checkWorktreeInstanceCollisions({ startDir }),
+          {
+            timeoutMs: 5000,
+          }
+        )
+      );
+    }
+    results.push(
+      await runCheck(
+        s,
         "caddy hosts",
         () => checkCaddyHostMapping({ startDir }),
         {
@@ -525,6 +582,18 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   }
 
   s.stop(`Doctor checks complete (${results.length} checks)`);
+
+  const hasError = results.some((r) => r.status === "error");
+
+  if (json) {
+    return finishDoctorJson({
+      results,
+      hasError,
+      fixRequested:
+        args.options.fix === true || args.options.migrateEnvConfig === true,
+    });
+  }
+
   await renderDoctorSummary(results);
   emitSlowChecksNote(results);
   renderMacNote();
@@ -540,7 +609,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     note("Re-run: hack doctor", "doctor");
   }
 
-  const hasError = results.some((r) => r.status === "error");
   if (hasError) {
     note("Fix the errors above, then rerun: hack doctor", "doctor");
     return 1;
@@ -548,6 +616,98 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 
   return 0;
 };
+
+export type DoctorJsonCheck = {
+  readonly id: string;
+  readonly status: CheckStatus;
+  readonly detail: string;
+  readonly durationMs: number;
+};
+
+export type DoctorJsonData = {
+  readonly checks: readonly DoctorJsonCheck[];
+  readonly summary: readonly string[];
+  readonly counts: {
+    readonly ok: number;
+    readonly warn: number;
+    readonly error: number;
+  };
+};
+
+/**
+ * Shape the doctor check results for the `--json` envelope.
+ */
+export function buildDoctorJsonData(opts: {
+  readonly results: readonly TimedCheckResult[];
+}): DoctorJsonData {
+  const counts = { ok: 0, warn: 0, error: 0 };
+  for (const result of opts.results) {
+    counts[result.status] += 1;
+  }
+  return {
+    checks: opts.results.map((result) => ({
+      id: result.name,
+      status: result.status,
+      detail: result.message,
+      durationMs: result.durationMs,
+    })),
+    summary: buildDoctorSummaryLines({ results: opts.results }),
+    counts,
+  };
+}
+
+/**
+ * JSON tail for `hack doctor --json`: emits the envelope and maps error
+ * checks to exit 1. `--fix` is intentionally not combined with `--json`.
+ */
+function finishDoctorJson(opts: {
+  readonly results: readonly TimedCheckResult[];
+  readonly hasError: boolean;
+  readonly fixRequested: boolean;
+}): number {
+  if (opts.fixRequested) {
+    process.stderr.write(
+      "--fix/--migrate-env-config are ignored with --json; run them separately.\n"
+    );
+  }
+  emitCliResult({
+    result: okResult({ data: buildDoctorJsonData({ results: opts.results }) }),
+  });
+  return opts.hasError ? 1 : 0;
+}
+
+type DoctorProgress = {
+  start(message?: string): void;
+  stop(message?: string): void;
+};
+
+/**
+ * Spinner wrapper that stays silent on non-TTY stdout (piped/automation) so
+ * cursor-control ANSI sequences never leak into machine-read output, and
+ * emits nothing at all in `--json` mode.
+ */
+function createDoctorProgress(opts: {
+  readonly json: boolean;
+}): DoctorProgress {
+  const interactive =
+    !opts.json &&
+    process.stdout.isTTY === true &&
+    (process.env.NO_COLOR ?? "").trim().length === 0;
+  if (interactive) {
+    return spinner();
+  }
+
+  return {
+    start: (_message?: string) => {
+      // Quiet in non-TTY/JSON mode.
+    },
+    stop: (message?: string) => {
+      if (!opts.json && message) {
+        process.stdout.write(`${message}\n`);
+      }
+    },
+  };
+}
 
 export const doctorCommand = withHandler(doctorSpec, handleDoctor);
 
@@ -769,16 +929,7 @@ async function checkIngressSubnet(): Promise<CheckResult> {
 }
 
 async function checkGlobalFiles(): Promise<CheckResult> {
-  const home = getHomeDir();
-  if (!home) {
-    return {
-      name: "global files",
-      status: "error",
-      message: "HOME is not set",
-    };
-  }
-
-  const root = resolve(home, GLOBAL_HACK_DIR_NAME);
+  const root = resolveGlobalHackDir();
   const caddyCompose = resolve(
     root,
     GLOBAL_CADDY_DIR_NAME,
@@ -1890,6 +2041,206 @@ async function checkProjectEnvMaterialization({
   };
 }
 
+async function checkWorktreeSecretKeys({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const name = "worktree keys";
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+
+  const inspection = await inspectWorktreeSecretKeys({
+    projectRoot: ctx.projectRoot,
+  });
+  if (!inspection) {
+    return {
+      name,
+      status: "ok",
+      message: "Skipped (not a git checkout)",
+    };
+  }
+  if (inspection.checkouts.length <= 1) {
+    return {
+      name,
+      status: "ok",
+      message: "Single checkout (no linked worktrees)",
+    };
+  }
+  if (inspection.divergent) {
+    const shared = inspection.sharedKeyPath ?? "unavailable";
+    return {
+      name,
+      status: "warn",
+      message: `Divergent .hack.secret.key contents across checkouts: ${inspection.divergentKeyPaths.join(
+        ", "
+      )}. Secrets encrypted in one checkout will not decrypt in another. Keep one key (shared location: ${shared}) and remove the divergent copies.`,
+    };
+  }
+
+  return {
+    name,
+    status: "ok",
+    message: `Env key consistent across ${inspection.checkouts.length} checkouts`,
+  };
+}
+
+/**
+ * Warns when hack-generated machine-local files (`.hack/.internal/`,
+ * `.hack/.branch/`, `.hack/.env`, `.hack/.env.state.json`,
+ * `.hack/hack.env.*.local.yaml`, `.hack.secret.key`) are tracked in git.
+ * A tracked secret key is reported as an error because it is a committed
+ * secret. `hack doctor --fix` untracks the offenders (files stay on disk) and
+ * ensures the committed `.hack/.gitignore`.
+ */
+async function checkTrackedGeneratedFiles({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const name = "generated files";
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+
+  const inspection = await inspectTrackedGeneratedFiles({
+    projectRoot: ctx.projectRoot,
+    projectDirName: ctx.projectDirName,
+  });
+  if (!inspection) {
+    return {
+      name,
+      status: "ok",
+      message: "Skipped (not a git checkout)",
+    };
+  }
+  if (inspection.trackedPaths.length === 0) {
+    return {
+      name,
+      status: "ok",
+      message: "No generated files tracked in git",
+    };
+  }
+
+  const offenders = inspection.trackedPaths.join(", ");
+  if (inspection.secretKeyTracked) {
+    return {
+      name,
+      status: "error",
+      message: `${PROJECT_ENV_KEY_FILENAME} is committed to git — it is a secret. Run 'hack doctor --fix' to untrack it (file stays on disk), rewrite or rotate the key ('hack env' secrets encrypted with it should be re-encrypted), and commit the removal. Tracked generated files: ${offenders}`,
+    };
+  }
+  return {
+    name,
+    status: "warn",
+    message: `Machine-local generated files are tracked in git: ${offenders}. Run 'hack doctor --fix' to untrack them (files stay on disk) and ensure the committed ${ctx.projectDirName}/.gitignore.`,
+  };
+}
+
+async function checkWorktreeInstanceCollisions({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const name = "worktree instances";
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+
+  const baseProjectName = await resolveDoctorBaseProjectName(ctx);
+  const runtime = await readRuntimeProjects({ includeGlobal: false });
+  if (!runtime.ok) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (${runtime.error})`,
+    };
+  }
+
+  const instances = findCrossCheckoutInstances({
+    baseProjectName,
+    currentProjectDir: ctx.projectDir,
+    runtime: runtime.runtime,
+  });
+  const runningBase = instances.filter(
+    (instance) => instance.running && instance.branch === null
+  );
+  if (runningBase.length > 0) {
+    const dirs = runningBase
+      .map((instance) => instance.workingDir ?? "unknown path")
+      .join(", ");
+    return {
+      name,
+      status: "warn",
+      message: `Base instance "${baseProjectName}" is running from another checkout (${dirs}) and claims this project's dev_host. Use --branch here (linked worktrees default to a branch instance) or run 'hack down' in that checkout.`,
+    };
+  }
+
+  const runningBranches = instances.filter(
+    (instance) => instance.running && instance.branch !== null
+  );
+  if (runningBranches.length > 0) {
+    const summary = runningBranches
+      .map(
+        (instance) =>
+          `${instance.composeProject} (${instance.workingDir ?? "unknown path"})`
+      )
+      .join(", ");
+    return {
+      name,
+      status: "ok",
+      message: `Branch instances running from other checkouts: ${summary}`,
+    };
+  }
+
+  return {
+    name,
+    status: "ok",
+    message: "No cross-checkout instances running",
+  };
+}
+
+async function resolveDoctorBaseProjectName(
+  ctx: NonNullable<Awaited<ReturnType<typeof findProjectContext>>>
+): Promise<string> {
+  const text = await readTextFile(ctx.composeFile);
+  if (text) {
+    let parsed: unknown = null;
+    try {
+      parsed = YAML.parse(text);
+    } catch {
+      parsed = null;
+    }
+    if (isRecord(parsed)) {
+      const composeName = getString(parsed, "name")?.trim();
+      if (composeName && composeName.length > 0) {
+        return composeName;
+      }
+    }
+  }
+
+  const cfg = await readProjectConfig(ctx);
+  const derived = defaultProjectSlugFromPath(ctx.projectRoot);
+  const cfgName = (cfg.name ?? derived).trim();
+  return cfgName.length > 0 ? cfgName : derived;
+}
+
 async function checkCaddyHostMapping({
   startDir,
 }: {
@@ -2020,6 +2371,7 @@ async function runDoctorFix(opts: {
   }
 
   await maybeInstallMutagenForDoctorFix();
+  await maybeUntrackGeneratedFiles({ startDir: opts.startDir });
 
   const dockerOk = await dockerInfoOk();
   if (!dockerOk) {
@@ -2277,48 +2629,118 @@ export async function buildDoctorRemediationPlanLines(opts: {
   readonly startDir: string;
   readonly migrateEnvConfig: boolean;
 }): Promise<string[]> {
-  const lines = [
-    "1. Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
-    "2. Repair tickets refs if the project repo needs it.",
+  const steps = [
+    "Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
+    "Repair tickets refs if the project repo needs it.",
   ];
-  if (!opts.migrateEnvConfig) {
-    return lines;
-  }
 
   const project = await findProjectContext(opts.startDir);
-  if (!project) {
-    lines.push(
-      "3. Skip env migration because no project was detected from this path."
+  const trackedGenerated = project
+    ? await inspectTrackedGeneratedFiles({
+        projectRoot: project.projectRoot,
+        projectDirName: project.projectDirName,
+      })
+    : null;
+  if (trackedGenerated && trackedGenerated.trackedPaths.length > 0) {
+    steps.push(
+      `Untrack machine-local generated files from git (git rm --cached; files stay on disk) and ensure the committed ${project?.projectDirName}/.gitignore: ${trackedGenerated.trackedPaths.join(", ")}`
     );
-    return lines;
+  }
+
+  if (opts.migrateEnvConfig) {
+    steps.push(await buildEnvMigrationPlanStep({ project }));
+  }
+
+  return steps.map((step, index) => `${index + 1}. ${step}`);
+}
+
+async function buildEnvMigrationPlanStep(opts: {
+  readonly project: Awaited<ReturnType<typeof findProjectContext>>;
+}): Promise<string> {
+  if (!opts.project) {
+    return "Skip env migration because no project was detected from this path.";
   }
 
   if (
     await projectEnvConfigExists({
-      projectDir: project.projectDir,
+      projectDir: opts.project.projectDir,
     })
   ) {
-    lines.push(
-      "3. Skip env migration because this project already uses hack.env.*.yaml."
-    );
-    return lines;
+    return "Skip env migration because this project already uses hack.env.*.yaml.";
   }
 
   const contractPath = resolve(
-    project.projectDir,
+    opts.project.projectDir,
     PROJECT_ENV_CONTRACT_FILENAME
   );
   if (await pathExists(contractPath)) {
-    lines.push(
-      "3. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml."
-    );
-    return lines;
+    return "Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.";
   }
 
-  lines.push(
-    "3. Skip env migration because no legacy project env config was found."
+  return "Skip env migration because no legacy project env config was found.";
+}
+
+/**
+ * `hack doctor --fix` step: untracks hack-generated machine-local files from
+ * the git index (`git rm --cached`; working-tree files are untouched) and
+ * ensures the committed `.hack/.gitignore` so they cannot leak back in.
+ */
+async function maybeUntrackGeneratedFiles(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findProjectContext(opts.startDir);
+  if (!project) {
+    return;
+  }
+
+  const inspection = await inspectTrackedGeneratedFiles({
+    projectRoot: project.projectRoot,
+    projectDirName: project.projectDirName,
+  });
+  if (!inspection || inspection.trackedPaths.length === 0) {
+    return;
+  }
+
+  note(
+    [
+      "Untracking machine-local generated files from git (files stay on disk):",
+      ...inspection.trackedPaths.map((path) => `- ${path}`),
+    ].join("\n"),
+    "generated files"
   );
-  return lines;
+
+  const untracked = await untrackGeneratedFiles({
+    projectRoot: project.projectRoot,
+    paths: inspection.trackedPaths,
+  });
+  if (!untracked.ok) {
+    note(
+      `Failed to untrack generated files: ${untracked.error ?? "unknown error"}`,
+      "generated files"
+    );
+    return;
+  }
+
+  await ensureHackDirGitignore({ projectDir: project.projectDir });
+  const notes = [
+    `Removed ${inspection.trackedPaths.length} path(s) from the git index and ensured ${project.projectDirName}/.gitignore.`,
+    "Commit the removal to stop sharing these files.",
+  ];
+  if (inspection.secretKeyTracked) {
+    // The nested .hack/.gitignore cannot cover the repo-root key file; without
+    // the root entry the just-untracked key shows up as untracked and gets
+    // re-committed.
+    await ensureGitignoreEntry({
+      gitignorePath: resolve(project.projectRoot, ".gitignore"),
+      entry: PROJECT_ENV_KEY_FILENAME,
+      comment: "# project env key",
+    });
+    notes.push(
+      `Ensured ${PROJECT_ENV_KEY_FILENAME} is ignored in the root .gitignore.`,
+      `${PROJECT_ENV_KEY_FILENAME} was committed — treat it as leaked: rotate the key and re-encrypt secrets, and consider rewriting git history if the repo is shared.`
+    );
+  }
+  note(notes.join("\n"), "generated files");
 }
 
 async function maybeRepairProjectTicketsGitHealth(opts: {
@@ -2878,11 +3300,7 @@ type GlobalPaths = {
 };
 
 function getGlobalPaths(): GlobalPaths {
-  const home = getHomeDir();
-  if (!home) {
-    throw new Error("HOME is not set");
-  }
-  const root = resolve(home, GLOBAL_HACK_DIR_NAME);
+  const root = resolveGlobalHackDir();
   const caddyDir = resolve(root, GLOBAL_CADDY_DIR_NAME);
   const caddyCompose = resolve(caddyDir, GLOBAL_CADDY_COMPOSE_FILENAME);
   const coreDnsConfig = resolve(caddyDir, GLOBAL_COREDNS_FILENAME);
@@ -3155,7 +3573,7 @@ async function canConnectTcp(opts: {
 // Keep macOS guidance at the end so it doesn't push other output off-screen.
 // (Called from the command handler.)
 async function runCheck(
-  _s: ReturnType<typeof spinner>,
+  _s: DoctorProgress,
   name: string,
   fn: () => CheckResult | Promise<CheckResult>,
   opts?: { readonly timeoutMs?: number }
@@ -3181,8 +3599,4 @@ async function runCheck(
     const res: CheckResult = { name, status: "error", message };
     return { ...res, durationMs };
   }
-}
-
-function getHomeDir(): string | null {
-  return process.env.HOME ?? null;
 }

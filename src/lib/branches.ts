@@ -4,7 +4,12 @@ import {
   PROJECT_BRANCHES_FILENAME,
 } from "../constants.ts";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "./fs.ts";
+import {
+  isLinkedGitWorktree,
+  resolveGitCurrentBranch,
+} from "./git-worktree.ts";
 import { getString, isRecord } from "./guards.ts";
+import { sanitizeBranchSlug } from "./project.ts";
 
 export const BRANCHES_VERSION = 1 as const;
 export const BRANCHES_SCHEMA_URL = `https://${DEFAULT_SCHEMAS_HOST}/hack.branches.schema.json`;
@@ -152,6 +157,63 @@ export async function touchBranchUsage(opts: {
     file: { ...read.file, branches: nextBranches },
   });
   return { updated: true, created, path: read.path };
+}
+
+export type EffectiveBranchSource = "explicit" | "worktree" | "none";
+
+export type EffectiveBranchResolution = {
+  /** Branch instance slug to target, or null for the base instance. */
+  readonly branch: string | null;
+  readonly source: EffectiveBranchSource;
+  /** Raw git branch name the default was derived from (worktree source only). */
+  readonly gitBranch: string | null;
+};
+
+/**
+ * Resolves the branch instance a project command should target.
+ *
+ * Rules:
+ * - an explicit `--branch` slug always wins (`source: "explicit"`)
+ * - otherwise, in a LINKED git worktree with `autoBranchEnabled` (config
+ *   `worktree.auto_branch`, default true), default to the sanitized current
+ *   git branch name (`source: "worktree"`)
+ * - primary checkouts, non-git paths, detached HEAD, and opted-out projects
+ *   resolve to the base instance (`branch: null`, `source: "none"`)
+ */
+export async function resolveEffectiveBranch(opts: {
+  readonly explicitBranch: string | null;
+  readonly projectRoot: string;
+  readonly autoBranchEnabled: boolean;
+}): Promise<EffectiveBranchResolution> {
+  if (opts.explicitBranch !== null && opts.explicitBranch.length > 0) {
+    return {
+      branch: opts.explicitBranch,
+      source: "explicit",
+      gitBranch: null,
+    };
+  }
+  if (!opts.autoBranchEnabled) {
+    return { branch: null, source: "none", gitBranch: null };
+  }
+
+  const linked = await isLinkedGitWorktree({ repoRoot: opts.projectRoot });
+  if (linked !== true) {
+    return { branch: null, source: "none", gitBranch: null };
+  }
+
+  const gitBranch = await resolveGitCurrentBranch({
+    repoRoot: opts.projectRoot,
+  });
+  if (!gitBranch) {
+    return { branch: null, source: "none", gitBranch: null };
+  }
+
+  const slug = sanitizeBranchSlug(gitBranch);
+  if (slug.length === 0) {
+    return { branch: null, source: "none", gitBranch };
+  }
+
+  return { branch: slug, source: "worktree", gitBranch };
 }
 
 function defaultBranchesFile(): BranchesFile {

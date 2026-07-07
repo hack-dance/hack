@@ -1,6 +1,5 @@
-import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { confirm, isCancel, note, spinner } from "@clack/prompts";
+import { note, spinner } from "@clack/prompts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 
@@ -33,7 +32,6 @@ import {
   GLOBAL_GRAFANA_DASHBOARD_FILENAME,
   GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
   GLOBAL_GRAFANA_DATASOURCE_FILENAME,
-  GLOBAL_HACK_DIR_NAME,
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
   GLOBAL_LOKI_CONFIG_FILENAME,
@@ -48,7 +46,10 @@ import { getLaunchdServiceStatus } from "../daemon/launchd.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
-import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import {
+  resolveGlobalConfigPath,
+  resolveGlobalHackDir,
+} from "../lib/config-paths.ts";
 import {
   isSlimExecutionMode,
   renderSlimModeUnavailableMessage,
@@ -62,6 +63,7 @@ import {
 } from "../lib/fs.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import { confirmSafe } from "../lib/interactivity.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import {
   buildHackHostTrustEnvironment,
@@ -285,16 +287,8 @@ export const globalCommand = defineCommand({
   ],
 } as const);
 
-function getHomeDir(): string {
-  const home = process.env.HOME;
-  if (!home) {
-    throw new Error("HOME is not set");
-  }
-  return home;
-}
-
 function getGlobalPaths() {
-  const root = resolve(getHomeDir(), GLOBAL_HACK_DIR_NAME);
+  const root = resolveGlobalHackDir();
   const caddyDir = resolve(root, GLOBAL_CADDY_DIR_NAME);
   const loggingDir = resolve(root, GLOBAL_LOGGING_DIR_NAME);
   const schemasDir = resolve(root, GLOBAL_SCHEMAS_DIR_NAME);
@@ -341,13 +335,11 @@ async function ensureDockerRunning(): Promise<void> {
     );
   }
 
-  const ok = await confirm({
+  const ok = await confirmSafe({
     message: `Docker is not running. Start ${backend.name}?`,
     initialValue: true,
+    nonInteractive: "accept-default",
   });
-  if (isCancel(ok)) {
-    throw new Error("Canceled");
-  }
   if (!ok) {
     throw new Error("Docker is not running (user declined to start)");
   }
@@ -753,14 +745,12 @@ async function globalLogsReset(): Promise<number> {
     return 1;
   }
 
-  const ok = await confirm({
+  const ok = await confirmSafe({
     message:
       "This will stop the logging stack and delete ALL Loki logs and Grafana state (volumes).\nContinue?",
     initialValue: false,
+    nonInteractive: "accept-default",
   });
-  if (isCancel(ok)) {
-    throw new Error("Canceled");
-  }
   if (!ok) {
     return 0;
   }
@@ -812,14 +802,12 @@ async function globalAuthorize(): Promise<number> {
     return 1;
   }
 
-  const ok = await confirm({
+  const ok = await confirmSafe({
     message:
       "Install a sudoers rule so Hack can restart dnsmasq and flush DNS cache without asking for your password during recovery?",
     initialValue: true,
+    nonInteractive: "decline",
   });
-  if (isCancel(ok)) {
-    throw new Error("Canceled");
-  }
   if (!ok) {
     logger.info({ message: "Skipped DNS authorization setup" });
     return 0;
@@ -1197,14 +1185,12 @@ async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
     return;
   }
 
-  const ok = await confirm({
+  const ok = await confirmSafe({
     message:
       "Install hackd as a launchd service so it restarts automatically on login and daemon crashes?",
     initialValue: true,
+    nonInteractive: "accept-default",
   });
-  if (isCancel(ok)) {
-    throw new Error("Canceled");
-  }
   if (!ok) {
     logger.warn({
       message:
@@ -1238,13 +1224,11 @@ async function writeWithPromptIfDifferent(
   }
 
   if (existing !== null) {
-    const ok = await confirm({
+    const ok = await confirmSafe({
       message: `Overwrite existing file?\n${absolutePath}`,
       initialValue: false,
+      nonInteractive: "accept-default",
     });
-    if (isCancel(ok)) {
-      throw new Error("Canceled");
-    }
     if (!ok) {
       return;
     }
@@ -1822,13 +1806,11 @@ async function globalDown(): Promise<number> {
   }
 
   if (isMac()) {
-    const ok = await confirm({
+    const ok = await confirmSafe({
       message: `Stop dnsmasq? (disables *.${DEFAULT_PROJECT_TLD} and *.${DEFAULT_OAUTH_ALIAS_ROOT} DNS; requires sudo)`,
       initialValue: false,
+      nonInteractive: "accept-default",
     });
-    if (isCancel(ok)) {
-      throw new Error("Canceled");
-    }
     if (ok) {
       logger.step({ message: "Stopping dnsmasq (requires sudo)…" });
       if (await pathExists(MAC_DNS_RECOVERY_HELPER_PATH)) {
@@ -2528,13 +2510,8 @@ async function readTailscaleStatus(): Promise<
 }
 
 async function readCloudflaredPid(): Promise<number | null> {
-  const baseHome = (process.env.HOME ?? homedir()).trim();
-  if (!baseHome) {
-    return null;
-  }
   const pidPath = resolve(
-    baseHome,
-    GLOBAL_HACK_DIR_NAME,
+    resolveGlobalHackDir(),
     GLOBAL_CLOUDFLARE_DIR_NAME,
     "cloudflared.pid"
   );
@@ -2989,13 +2966,11 @@ async function ensureDnsmasqInstalled(): Promise<boolean> {
     return true;
   }
 
-  const ok = await confirm({
+  const ok = await confirmSafe({
     message: "Install dnsmasq via Homebrew? (required for *.hack DNS)",
     initialValue: true,
+    nonInteractive: "accept-default",
   });
-  if (isCancel(ok)) {
-    throw new Error("Canceled");
-  }
   if (!ok) {
     logger.warn({
       message: "Skipping dnsmasq install; *.hack hostnames may not resolve.",
@@ -3118,13 +3093,11 @@ async function maybeWriteResolver(opts: {
   readonly domain: string;
 }): Promise<void> {
   const resolverPath = `/etc/resolver/${opts.domain}`;
-  const resolverOk = await confirm({
+  const resolverOk = await confirmSafe({
     message: `Write ${resolverPath} (requires sudo)?`,
     initialValue: true,
+    nonInteractive: "decline",
   });
-  if (isCancel(resolverOk)) {
-    throw new Error("Canceled");
-  }
   if (!resolverOk) {
     logger.warn({
       message: `Skipping /etc/resolver setup for ${opts.domain}; *.${opts.domain} may not resolve.`,
@@ -3295,13 +3268,11 @@ async function ensureMacChafa(): Promise<void> {
     return;
   }
 
-  const ok = await confirm({
+  const ok = await confirmSafe({
     message: "Install chafa via Homebrew? (used for hack the planet)",
     initialValue: true,
+    nonInteractive: "accept-default",
   });
-  if (isCancel(ok)) {
-    throw new Error("Canceled");
-  }
   if (!ok) {
     logger.warn({
       message:
@@ -3333,13 +3304,11 @@ async function ensureMacMkcert(): Promise<void> {
     return;
   }
 
-  const ok = await confirm({
+  const ok = await confirmSafe({
     message: "Install mkcert via Homebrew? (used for hack global cert)",
     initialValue: false,
+    nonInteractive: "accept-default",
   });
-  if (isCancel(ok)) {
-    throw new Error("Canceled");
-  }
   if (!ok) {
     logger.warn({
       message: "Skipping mkcert install; hack global cert will be unavailable.",
@@ -3359,14 +3328,12 @@ async function ensureMacMkcert(): Promise<void> {
 async function ensureMacTrustCaddyLocalCa(input: {
   readonly certPath: string;
 }): Promise<boolean> {
-  const ok = await confirm({
+  const ok = await confirmSafe({
     message:
       "Trust Caddy Local CA in macOS System keychain? (enables trusted https://*.hack; requires sudo)",
     initialValue: true,
+    nonInteractive: "decline",
   });
-  if (isCancel(ok)) {
-    throw new Error("Canceled");
-  }
   if (!ok) {
     logger.info({
       message:

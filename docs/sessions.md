@@ -61,6 +61,10 @@ When selecting an attached session, you can choose to:
 
 This is the recommended entry point when you want to resume a project context but do not remember the exact workspace name.
 
+`hack session` with no subcommand is inherently interactive (it prompts with a picker) and is not a
+scripted/agent entry point. For scripted or agent-driven runs, use `hack session start <project>`
+(optionally with `--detach`) or `hack session list --json` instead of the bare picker.
+
 ### Start and create
 
 ```bash
@@ -104,6 +108,16 @@ hack session attach my-project
 Use `attach` when you already know which workspace you want. If you are already inside tmux, hack switches clients instead of nesting tmux inside tmux. When attaching, tmux detaches other clients to avoid terminal size conflicts across multiple devices.
 If the workspace is running in zellij, hack attaches to that named session directly instead.
 
+### Stop
+
+```bash
+hack session stop <workspace>
+```
+
+`stop` kills the underlying mux session (`backend.killSession`) outright — anything still running
+inside it, including a long-lived dev server or an in-progress agent task, is terminated. There is
+no graceful shutdown step; if you need cleanup hooks to run first, do that before stopping.
+
 ### Exec
 
 ```bash
@@ -129,13 +143,18 @@ Use `hack session panes` to list panes with useful metadata (target, active flag
 # List panes (NDJSON start/log/end)
 hack session panes my-project
 
+# Explicit NDJSON output (same as the default)
+hack session panes my-project --json
+
 # Single JSON object output
 hack session panes my-project --pretty
 ```
 
+`--json` and `--pretty` are mutually exclusive; passing both is an error.
+
 ### Capturing output (tmux only)
 
-`hack session capture` emits NDJSON events by default for machine parsing (start/log/end). By default it targets the active pane; use `--target` to select a specific pane. Use `--pretty` for raw pane output.
+`hack session capture` emits NDJSON events by default for machine parsing (start/log/end). By default it targets the active pane; use `--target` to select a specific pane. Use `--pretty` for raw pane output; `--json` and `--pretty` are mutually exclusive.
 
 ```bash
 # Capture last 200 lines (default) as NDJSON
@@ -150,7 +169,7 @@ hack session capture my-project --pretty
 
 ### Tailing output (tmux only)
 
-`hack session tail` also emits NDJSON events by default and stops after `--max-ms` (default 5000). By default it tails the active pane; use `--target` to select a specific pane.
+`hack session tail` also emits NDJSON events by default and stops after `--max-ms` (default 5000), polling every `--interval-ms` (default 500). By default it tails the active pane; use `--target` to select a specific pane. `--json` and `--pretty` are mutually exclusive.
 
 ```bash
 # Poll capture-pane and emit only new lines for 5s (default)
@@ -254,7 +273,20 @@ hack config set --global sessions.mux zellij
 
 ## Daemon sessions API
 
-The hack daemon exposes a REST API for managing mux-backed workspaces programmatically (tmux and zellij). This is useful for:
+> **Status: unsupported experimental.** This HTTP surface is served by the gateway, which the
+> codebase itself labels "the unsupported experimental gateway server." It is outside the
+> supported v3 product contract, hidden from default `hack --help` (see `hack help --all`), and
+> prints a warning when the underlying `hack remote`/`hack gateway`/`hack node`/`hack dispatch`
+> commands are invoked.
+
+`hackd` (the daemon) itself listens on a local unix socket for the CLI's own use (fast JSON
+status/ps, etc.) — it does not speak HTTP. The HTTP/WS surface described below, including the
+`127.0.0.1:7788` examples, is served by the separate **gateway** process and requires it to be
+explicitly enabled; it is not part of the daemon's normal listener.
+
+The gateway exposes REST endpoints for managing **tmux** workspaces programmatically. Session
+handlers shell out to `tmux` directly — there is no zellij code path in the gateway/daemon session
+routes, even though `sessions.mux` supports zellij for local `hack session` usage. This is useful for:
 - Remote workspace control via the gateway
 - Building automation tools
 - Agent orchestration
@@ -287,7 +319,6 @@ Response:
 {
   "sessions": [
     {
-      "backend": "tmux",
       "name": "my-project",
       "attached": false,
       "path": "/Users/dev/my-project",
@@ -304,6 +335,8 @@ Response:
 }
 ```
 
+Session objects have no `backend` field — every session in this API is a tmux session.
+
 ### Create workspace
 
 ```bash
@@ -318,13 +351,13 @@ Request body:
 | --- | --- | --- | --- |
 | `name` | string | yes | Workspace name (alphanumeric, dash, underscore) |
 | `cwd` | string | no | Working directory |
-| `backend` | string | no | Override backend (`tmux` or `zellij`) |
+
+Creation always uses tmux; there is no backend override.
 
 Response (201):
 ```json
 {
   "session": {
-    "backend": "tmux",
     "name": "agent-1",
     "attached": false,
     "path": "/path/to/project",
@@ -390,8 +423,7 @@ Send raw keystrokes without Enter. Useful for:
 - `Tab`
 
 Note:
-- tmux: `keys` are passed to `tmux send-keys`
-- zellij: `keys` are best-effort character injection (not full key chord support)
+- `keys` are passed directly to `tmux send-keys` — there is no zellij branch on this endpoint.
 
 Response:
 ```json
@@ -434,6 +466,12 @@ Response:
 | 500 | `input_failed` | Session input failed |
 
 ## Example: Remote agent workflow
+
+> **Status: unsupported experimental.** Like the Daemon sessions API above, this workflow depends
+> on the gateway, which is outside the supported v3 product contract and hidden behind
+> `hack help --all`. `gateway.example.com` below stands in for whatever tunnel/ingress you put in
+> front of the gateway yourself (Cloudflare, Tailscale, SSH port-forward) — hack does not provide
+> that ingress.
 
 1. **Create a workspace from your remote client**:
    ```bash

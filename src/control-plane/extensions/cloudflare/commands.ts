@@ -1,14 +1,12 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import {
-  GLOBAL_CLOUDFLARE_DIR_NAME,
-  GLOBAL_HACK_DIR_NAME,
-} from "../../../constants.ts";
+import { GLOBAL_CLOUDFLARE_DIR_NAME } from "../../../constants.ts";
 import {
   isProcessRunning,
   removeFileIfExists,
   waitForProcessExit,
 } from "../../../daemon/process.ts";
+import { resolveGlobalHackDir } from "../../../lib/config-paths.ts";
 import {
   ensureDir,
   pathExists,
@@ -1000,12 +998,7 @@ type CloudflareStatePaths = {
 };
 
 function resolveCloudflareStatePaths(): CloudflareStatePaths {
-  const baseHome = (process.env.HOME ?? homedir()).trim();
-  const root = resolve(
-    baseHome,
-    GLOBAL_HACK_DIR_NAME,
-    GLOBAL_CLOUDFLARE_DIR_NAME
-  );
+  const root = resolve(resolveGlobalHackDir(), GLOBAL_CLOUDFLARE_DIR_NAME);
   return {
     root,
     pidPath: resolve(root, CLOUDFLARED_PID_FILENAME),

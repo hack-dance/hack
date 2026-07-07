@@ -5,6 +5,7 @@ import { confirm, isCancel } from "@clack/prompts";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optJson } from "../cli/options.ts";
+import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { ensureDir } from "../lib/fs.ts";
 import {
   ensureBundledMutagenInstalled,
@@ -276,12 +277,7 @@ function resolveAssetsDir(): string {
     return resolve(env);
   }
 
-  const home = (process.env.HOME ?? "").trim();
-  if (home.length > 0) {
-    return resolve(home, ".hack", "assets");
-  }
-
-  return resolve(".hack", "assets");
+  return resolve(resolveGlobalHackDir(), "assets");
 }
 
 type MutagenProvisionResult = {
@@ -404,12 +400,7 @@ function resolveHackBinaryCandidate(): string | null {
     return which;
   }
 
-  const home = (process.env.HOME ?? "").trim();
-  if (home.length > 0) {
-    return resolve(home, ".hack", "bin", "hack");
-  }
-
-  return null;
+  return resolve(resolveGlobalHackDir(), "bin", "hack");
 }
 
 type UpdateOutput =

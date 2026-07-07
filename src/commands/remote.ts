@@ -1,6 +1,5 @@
 import { stat } from "node:fs/promises";
 
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 import {
   BoxRenderable,
@@ -21,7 +20,6 @@ import {
 import { optPath, optProject } from "../cli/options.ts";
 import {
   GLOBAL_CLOUDFLARE_DIR_NAME,
-  GLOBAL_HACK_DIR_NAME,
   HACK_PROJECT_DIR_PRIMARY,
 } from "../constants.ts";
 import type { GatewayAuditEntry } from "../control-plane/extensions/gateway/audit.ts";
@@ -35,7 +33,10 @@ import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import type { DaemonStatus } from "../daemon/status.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
-import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import {
+  resolveGlobalConfigPath,
+  resolveGlobalHackDir,
+} from "../lib/config-paths.ts";
 import { pathExists, readTextFile } from "../lib/fs.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -811,10 +812,8 @@ async function resolveCloudflareStatus(opts: {
 }
 
 async function readCloudflaredPid(): Promise<number | null> {
-  const baseHome = (process.env.HOME ?? homedir()).trim();
   const pidPath = resolve(
-    baseHome,
-    GLOBAL_HACK_DIR_NAME,
+    resolveGlobalHackDir(),
     GLOBAL_CLOUDFLARE_DIR_NAME,
     "cloudflared.pid"
   );

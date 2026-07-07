@@ -1,17 +1,27 @@
-import { afterAll, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 
-mock.module("../src/lib/shell.ts", () => ({
-  exec: async () => {
-    throw new Error("exec should not run when docker is unavailable");
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
+
+const shellMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/shell.ts",
+  overrides: {
+    exec: () => {
+      throw new Error("exec should not run when docker is unavailable");
+    },
+    findExecutableInPath: (executableName: string) =>
+      executableName === "docker" ? null : executableName,
   },
-  findExecutableInPath: (executableName: string) =>
-    executableName === "docker" ? null : executableName,
-}));
+});
 
 const { readRuntimeProjects } = await import("../src/lib/runtime-projects.ts");
 
+beforeAll(() => {
+  shellMock.activate();
+});
+
 afterAll(() => {
-  mock.restore();
+  shellMock.deactivate();
 });
 
 test("readRuntimeProjects reports docker absence instead of throwing", async () => {

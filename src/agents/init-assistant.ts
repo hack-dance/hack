@@ -6,6 +6,7 @@ import { pathExists, readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import { findProjectContext } from "../lib/project.ts";
+import { renderOnboardingPrompt } from "./onboarding-prompt.ts";
 
 export type ComposeSignal = {
   readonly path: string;
@@ -84,6 +85,11 @@ export async function buildInitAssistantReport(opts: {
 
 /**
  * Render the init assistant prompt based on repo signals.
+ *
+ * The dynamic repo-signal report is rendered here; the canonical onboarding
+ * guidance (phases, deps/ops container patterns, verification loop) comes
+ * from the shared onboarding prompt module so content never forks between
+ * `hack agent init`, `hack agent onboard`, and `hack init --with`.
  */
 export function renderInitAssistantPrompt(opts: {
   readonly report: InitAssistantReport;
@@ -96,6 +102,7 @@ export function renderInitAssistantPrompt(opts: {
     [
       "You are helping a user bootstrap hack in this repo.",
       "Prefer hack CLI; ask before making assumptions.",
+      "A pre-computed repo inventory follows — confirm and extend it while working through the onboarding phases below.",
     ].join(" ")
   );
   lines.push("");
@@ -151,16 +158,16 @@ export function renderInitAssistantPrompt(opts: {
     }
   }
   lines.push("");
-  lines.push("Suggested flow:");
-  for (const step of buildSuggestedSteps({ report: opts.report })) {
-    lines.push(`- ${step}`);
-  }
-  lines.push("");
-  lines.push("Questions to confirm:");
+  lines.push("Questions to confirm with the user:");
   for (const question of buildSuggestedQuestions({ report: opts.report })) {
     lines.push(`- ${question}`);
   }
   lines.push("");
+  lines.push(
+    renderOnboardingPrompt({
+      mode: opts.report.projectContext ? "existing-project" : "new-project",
+    })
+  );
   lines.push("Need dependency/ops patterns? Run `hack agent patterns`.");
   lines.push("");
 
@@ -484,39 +491,6 @@ function formatScriptSignal(opts: { readonly signal: ScriptSignal }): string {
     ? `${location} (${opts.signal.packageName})`
     : location;
   return `${pkgLabel}: ${opts.signal.scriptName} -> ${opts.signal.scriptCommand}`;
-}
-
-function buildSuggestedSteps(opts: {
-  readonly report: InitAssistantReport;
-}): string[] {
-  const steps: string[] = [
-    "Read README/docs to confirm local dev entrypoints and requirements.",
-  ];
-
-  if (opts.report.projectContext) {
-    steps.push(
-      "Review existing .hack config and update services/ports if needed."
-    );
-  } else {
-    const autoHint =
-      opts.report.candidates.length > 0
-        ? "Run `hack init` (consider `--auto` since dev scripts were detected)."
-        : "Run `hack init` and choose manual mode if scripts are unclear.";
-    steps.push(autoHint);
-  }
-
-  steps.push(
-    "Ensure compose includes app + dependencies (db/cache/queue) and correct ports."
-  );
-
-  if (opts.report.setupScripts.length > 0) {
-    steps.push("Run setup scripts (migrations/seeds) after services are up.");
-  }
-
-  steps.push("Start services: `hack up --detach`.");
-  steps.push("Verify: `hack ps`, `hack open --json`, `hack logs --pretty`.");
-
-  return steps;
 }
 
 function buildSuggestedQuestions(opts: {

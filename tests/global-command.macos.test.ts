@@ -1,4 +1,11 @@
-import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  test,
+} from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -12,6 +19,8 @@ import {
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
 } from "../src/constants.ts";
+import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: string[][] = [];
 const execCalls: string[][] = [];
@@ -33,151 +42,179 @@ let statMetadataByPath = new Map<string, string>();
 let brewExecutablePath = "/opt/homebrew/bin/brew";
 let confirmResponder: (() => boolean) | null = null;
 
-mock.module("@clack/prompts", () => ({
-  access: async () => true,
-  autocompleteMultiselect: async () => [],
-  cancel: () => {},
-  confirm: async () => confirmResponder?.() ?? true,
-  multiselect: async () => [],
-  isCancel: () => false,
-  log: {
-    error: () => {},
-    info: () => {},
-    message: () => {},
-    success: () => {},
-    step: () => {},
-    warn: () => {},
+const clackMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "@clack/prompts",
+  overrides: {
+    access: async () => true,
+    autocompleteMultiselect: async () => [],
+    cancel: () => {},
+    confirm: async () => confirmResponder?.() ?? true,
+    multiselect: async () => [],
+    isCancel: () => false,
+    log: {
+      error: () => {},
+      info: () => {},
+      message: () => {},
+      success: () => {},
+      step: () => {},
+      warn: () => {},
+    },
+    note: () => {},
+    password: async () => "",
+    select: async () => "",
+    spinner: () => ({
+      start: () => {},
+      stop: () => {},
+    }),
+    text: async () => "",
   },
-  note: () => {},
-  password: async () => "",
-  select: async () => "",
-  spinner: () => ({
-    start: () => {},
-    stop: () => {},
-  }),
-  text: async () => "",
-}));
+});
 
-mock.module("node:net", () => ({
-  createConnection: (opts: { host: string }) => {
-    const handlers = new Map<string, () => void>();
-    const reachable = reachabilityByHost[opts.host] ?? false;
+const netMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "node:net",
+  overrides: {
+    createConnection: (opts: { host: string }) => {
+      const handlers = new Map<string, () => void>();
+      const reachable = reachabilityByHost[opts.host] ?? false;
 
-    queueMicrotask(() => {
-      const event = reachable ? "connect" : "error";
-      handlers.get(event)?.();
-    });
+      queueMicrotask(() => {
+        const event = reachable ? "connect" : "error";
+        handlers.get(event)?.();
+      });
 
-    return {
-      destroy: () => {},
-      on: (event: string, handler: () => void) => {
-        handlers.set(event, handler);
-      },
-    };
-  },
-  createServer: () => ({
-    close: () => {},
-    listen: () => {},
-    on: () => {},
-  }),
-}));
-
-mock.module("../src/lib/fs.ts", () => ({
-  ensureDir: async (absoluteDir: string) => {
-    await mkdir(absoluteDir, { recursive: true });
-  },
-  ensureGitignoreEntry: async () => ({ changed: false }),
-  pathExists: async (absolutePath: string) => {
-    const override = pathExistsOverrides.get(absolutePath);
-    if (override !== undefined) {
-      return override;
-    }
-    try {
-      await Bun.file(absolutePath).stat();
-      return true;
-    } catch {
-      return false;
-    }
-  },
-  readTextFile: async (absolutePath: string) => {
-    try {
-      return await Bun.file(absolutePath).text();
-    } catch {
-      return null;
-    }
-  },
-  writeTextFile: async (absolutePath: string, content: string) => {
-    await Bun.write(absolutePath, content);
-  },
-  writeTextFileIfChanged: async (absolutePath: string, content: string) => {
-    const existing = await Bun.file(absolutePath)
-      .text()
-      .catch(() => null);
-    if (existing === content) {
-      return { changed: false };
-    }
-    await Bun.write(absolutePath, content);
-    return { changed: true };
-  },
-}));
-
-mock.module("../src/lib/shell.ts", () => ({
-  exec: async (cmd: readonly string[]) => {
-    execCalls.push([...cmd]);
-    const custom = execMockResponder?.(cmd) ?? null;
-    if (custom) {
-      return custom;
-    }
-    if (cmd[0] === "docker" && cmd[1] === "info") {
-      return { exitCode: 0, stdout: "", stderr: "" };
-    }
-    if (cmd[0] === "brew" && cmd[1] === "--prefix") {
       return {
-        exitCode: 0,
-        stdout: resolve(tempDir ?? "/tmp", "brew-prefix"),
-        stderr: "",
+        destroy: () => {},
+        on: (event: string, handler: () => void) => {
+          handlers.set(event, handler);
+        },
       };
-    }
-    if (cmd[0] === "brew" && cmd[1] === "list" && cmd[2] === "dnsmasq") {
-      return { exitCode: 0, stdout: "", stderr: "" };
-    }
-    if (cmd[0] === "docker" && cmd[1] === "network" && cmd[2] === "inspect") {
-      return { exitCode: 0, stdout: "[]", stderr: "" };
-    }
-    if (cmd[0] === "id" && cmd[1] === "-un") {
-      return { exitCode: 0, stdout: `${idUser}\n`, stderr: "" };
-    }
-    if (cmd[0] === "/usr/bin/stat" && cmd[1] === "-f") {
-      const metadata = statMetadataByPath.get(cmd[3] ?? "");
-      if (!metadata) {
-        return { exitCode: 1, stdout: "", stderr: "missing" };
+    },
+    createServer: () => ({
+      close: () => {},
+      listen: () => {},
+      on: () => {},
+    }),
+  },
+});
+
+const fsMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/fs.ts",
+  overrides: {
+    ensureDir: async (absoluteDir: string) => {
+      await mkdir(absoluteDir, { recursive: true });
+    },
+    ensureGitignoreEntry: async () => ({ changed: false }),
+    pathExists: async (absolutePath: string) => {
+      const override = pathExistsOverrides.get(absolutePath);
+      if (override !== undefined) {
+        return override;
       }
-      return { exitCode: 0, stdout: `${metadata}\n`, stderr: "" };
-    }
+      try {
+        await Bun.file(absolutePath).stat();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    readTextFile: async (absolutePath: string) => {
+      try {
+        return await Bun.file(absolutePath).text();
+      } catch {
+        return null;
+      }
+    },
+    writeTextFile: async (absolutePath: string, content: string) => {
+      await Bun.write(absolutePath, content);
+    },
+    writeTextFileIfChanged: async (absolutePath: string, content: string) => {
+      const existing = await Bun.file(absolutePath)
+        .text()
+        .catch(() => null);
+      if (existing === content) {
+        return { changed: false };
+      }
+      await Bun.write(absolutePath, content);
+      return { changed: true };
+    },
+  },
+});
 
-    return { exitCode: 0, stdout: "", stderr: "" };
-  },
-  execOrThrow: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-  run: async (cmd: readonly string[]) => {
-    runCalls.push([...cmd]);
-    return runResponder?.(cmd) ?? 0;
-  },
-  findExecutableInPath: (name?: string) => {
-    if (name === "hack") {
-      return "/usr/local/bin/hack";
-    }
-    if (name === "brew") {
-      return brewExecutablePath;
-    }
-    return "/usr/bin/mock-bin";
-  },
-  CommandError: class CommandError extends Error {},
-}));
+const shellMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/shell.ts",
+  overrides: {
+    exec: async (cmd: readonly string[]) => {
+      execCalls.push([...cmd]);
+      const custom = execMockResponder?.(cmd) ?? null;
+      if (custom) {
+        return custom;
+      }
+      if (cmd[0] === "docker" && cmd[1] === "info") {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (cmd[0] === "brew" && cmd[1] === "--prefix") {
+        return {
+          exitCode: 0,
+          stdout: resolve(tempDir ?? "/tmp", "brew-prefix"),
+          stderr: "",
+        };
+      }
+      if (cmd[0] === "brew" && cmd[1] === "list" && cmd[2] === "dnsmasq") {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (cmd[0] === "docker" && cmd[1] === "network" && cmd[2] === "inspect") {
+        return { exitCode: 0, stdout: "[]", stderr: "" };
+      }
+      if (cmd[0] === "id" && cmd[1] === "-un") {
+        return { exitCode: 0, stdout: `${idUser}\n`, stderr: "" };
+      }
+      if (cmd[0] === "/usr/bin/stat" && cmd[1] === "-f") {
+        const metadata = statMetadataByPath.get(cmd[3] ?? "");
+        if (!metadata) {
+          return { exitCode: 1, stdout: "", stderr: "missing" };
+        }
+        return { exitCode: 0, stdout: `${metadata}\n`, stderr: "" };
+      }
 
-mock.module("../src/lib/os.ts", () => ({
-  isMac: () => true,
-  openUrl: async () => 0,
-}));
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    execOrThrow: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    run: async (cmd: readonly string[]) => {
+      runCalls.push([...cmd]);
+      return runResponder?.(cmd) ?? 0;
+    },
+    findExecutableInPath: (name?: string) => {
+      if (name === "hack") {
+        return "/usr/local/bin/hack";
+      }
+      if (name === "brew") {
+        return brewExecutablePath;
+      }
+      return "/usr/bin/mock-bin";
+    },
+    CommandError: class CommandError extends Error {},
+  },
+});
+
+const osMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/os.ts",
+  overrides: {
+    isMac: () => true,
+    openUrl: async () => 0,
+  },
+});
+
+beforeAll(() => {
+  clackMock.activate();
+  netMock.activate();
+  fsMock.activate();
+  shellMock.activate();
+  osMock.activate();
+});
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
@@ -215,10 +252,15 @@ afterEach(async () => {
   process.env.HOME = originalHome;
   process.env.USER = originalUser;
   process.env.HACK_LOGGER = originalLogger;
+  resetGumPathCacheForTests();
 });
 
 afterAll(() => {
-  mock.restore();
+  clackMock.deactivate();
+  netMock.deactivate();
+  fsMock.deactivate();
+  shellMock.deactivate();
+  osMock.deactivate();
 });
 
 async function writeExecutable(path: string): Promise<void> {
@@ -820,14 +862,26 @@ test("global up falls back to interactive sudo when stdin is tty but stdout is r
       ])
     );
   } finally {
-    if (stdinDescriptor) {
-      Object.defineProperty(process.stdin, "isTTY", stdinDescriptor);
-    }
-    if (stdoutDescriptor) {
-      Object.defineProperty(process.stdout, "isTTY", stdoutDescriptor);
-    }
+    restoreIsTty({ stream: process.stdin, descriptor: stdinDescriptor });
+    restoreIsTty({ stream: process.stdout, descriptor: stdoutDescriptor });
   }
 });
+
+/**
+ * Restores a stubbed isTTY property. When the stream had no own isTTY
+ * descriptor before the stub, the stubbed own property must be deleted
+ * (skipping the restore would leak the stubbed value into other test files).
+ */
+function restoreIsTty(opts: {
+  readonly stream: NodeJS.ReadStream | NodeJS.WriteStream;
+  readonly descriptor: PropertyDescriptor | undefined;
+}): void {
+  if (opts.descriptor) {
+    Object.defineProperty(opts.stream, "isTTY", opts.descriptor);
+    return;
+  }
+  Reflect.deleteProperty(opts.stream, "isTTY");
+}
 
 test("global down falls back to brew stop when the dns recovery helper is missing", async () => {
   const { runCli } = await import("../src/cli/run.ts");

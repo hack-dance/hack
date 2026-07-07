@@ -8,7 +8,8 @@ Use this path when:
 - the container is ephemeral or cache-backed
 - you only have a setup script and optional maintenance script
 - `hack global install` is too heavy or not applicable
-- you want tickets, integrations, docs, and repo-local CLI workflows without the full local host stack
+- you want env resolution, host exec, agent integrations, and repo-local CLI workflows without the
+  full local host stack
 
 ## Published slim image
 
@@ -74,9 +75,16 @@ hack host exec -- printenv DATABASE_URL
 hack host exec --scope api -- bun test
 ```
 
-CI uses this exact contract in `scripts/portable-container-smoke.sh`: it mounts `examples/basic`
-into the slim image, removes the local `.hack.secret.key`, injects `HACK_ENV_SECRET_KEY`, and
-verifies both `hack env list` and `hack host exec` resolve the committed env correctly.
+CI exercises this contract in `scripts/portable-container-smoke.sh`: it copies `examples/basic`
+into a temp fixture, seeds values with `hack env add`, removes the local `.hack.secret.key`,
+mounts the fixture into the CI-built slim image, injects `HACK_ENV_SECRET_KEY`, and verifies both
+`hack env list` and `hack host exec` resolve the committed env correctly.
+
+Scripts and agents in containers should also set `HACK_NO_INTERACTIVE=1` (or pass
+`--no-interactive`): commands then fail fast with `E_INTERACTIVE_REQUIRED` instead of blocking on
+a prompt that can never be answered. Set `NO_COLOR=1` for log-clean output, and use the `--json`
+envelope (`{ok, data | error: {code, message}}`) on `up`/`down`/`restart`/`doctor` for CI
+assertions.
 
 ## What slim mode does
 
@@ -103,15 +111,21 @@ curl -fsSL \
   | bash
 ```
 
-The installer downloads the latest Hack release tarball, installs the binary into `~/.hack/bin`,
-and writes a thin `hack` wrapper with these defaults:
+The installer resolves the latest release tag, downloads the platform tarball, installs the
+binary and bundled assets under `~/.hack/` (override with `HACK_INSTALL_BIN`), and writes a thin
+`hack` wrapper with these defaults:
 
 - `HACK_EXECUTION_MODE=codex`
 - `HACK_DAEMON_DISABLE_DOCKER_EVENTS=1`
 - `HACK_SETUP_SYNC_MODE=warn`
+- `HACK_ASSETS_DIR` pointed at the installed assets
+
+For reproducible CI, pin the release with `HACK_INSTALL_TAG` or `HACK_INSTALL_VERSION` (and
+`HACK_RELEASE_BASE_URL` for mirrors) instead of tracking `latest`.
 
 If you are already inside a container built from `hackdance/hack:slim`, Hack and Bun are already
-available and you can skip the installer entirely.
+available with the same three mode defaults baked into the image env, and you can skip the
+installer entirely.
 
 ## Recommended setup script
 
@@ -120,7 +134,7 @@ When you are not using the slim image:
 ```bash
 set -euo pipefail
 
-mise install bun@1.3.5
+mise install "bun@$(awk '/^bun /{print $2}' .tool-versions)"
 export PATH="$HOME/.local/share/mise/shims:$PATH"
 
 bun install
@@ -144,7 +158,7 @@ When you are not using the slim image:
 ```bash
 set -euo pipefail
 
-mise install bun@1.3.5
+mise install "bun@$(awk '/^bun /{print $2}' .tool-versions)"
 export PATH="$HOME/.local/share/mise/shims:$PATH"
 
 bun install --frozen-lockfile || bun install
@@ -167,15 +181,18 @@ bash scripts/maintain-codex-slim.sh
 
 ## Good fit for slim mode
 
-- `hack tickets`
 - `hack env list`
 - `hack host exec`
 - `hack host shell`
 - repo-local docs, specs, and agent setup
 - command and config surfaces that do not require the machine-wide runtime stack
+- `hack tickets`, if the project opts in — the extension is disabled by default; run
+  `hack tickets setup` once (it works even while the extension is disabled and enables it)
 
 If the repo uses the modern env overlay model, provide secret decryption material with
-`HACK_ENV_SECRET_KEY` instead of relying on a local `.hack.secret.key` file:
+`HACK_ENV_SECRET_KEY` instead of relying on a local `.hack.secret.key` file. (On a developer
+machine you rarely need this: linked worktrees inherit the key through the git common dir — the
+env var is for CI, containers, and detached checkouts. See [Env & secrets](../env.md).)
 
 ```bash
 export HACK_ENV_SECRET_KEY="..."
@@ -207,11 +224,10 @@ child shell after env injection.
 
 ## Not available in slim mode
 
-- `hack global install`
-- `hack global up`
-- `hack global status`
-- `hack global logs`
-- explicit Loki-backed log paths such as `hack logs --loki`
+The machine-wide `hack global` surface (install, up, down, status, trust, ca, cert, logs, and
+logs-reset) is slim-gated, along with explicit Loki-backed log paths such as `hack logs --loki`.
 
-When you need full remote runtime orchestration instead of repo-local agent workflows, use the
-[remote node container image](remote-node-container.md) instead.
+When you need full remote runtime orchestration instead of repo-local agent workflows, the
+[remote node container image](remote-node-container.md) exists — but note that the entire
+remote/node/gateway/dispatch surface is unsupported experimental in v3 (hidden behind
+`hack help --all`), not a supported product path.

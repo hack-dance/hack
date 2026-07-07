@@ -5,7 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import pkg from "../../package.json";
-import { GLOBAL_HACK_DIR_NAME } from "../constants.ts";
+import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { ensureDir, pathExists } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -1048,11 +1048,7 @@ async function appendAuditLog(opts: {
   readonly command: string;
   readonly exitCode: number;
 }): Promise<void> {
-  const home = (process.env.HOME ?? "").trim();
-  if (home.length === 0) {
-    return;
-  }
-  const logPath = resolve(home, GLOBAL_HACK_DIR_NAME, "mcp-audit.log");
+  const logPath = resolve(resolveGlobalHackDir(), "mcp-audit.log");
   try {
     await ensureDir(dirname(logPath));
     const payload = {

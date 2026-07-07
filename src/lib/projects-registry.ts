@@ -2,12 +2,12 @@ import { createHash } from "node:crypto";
 import { open, realpath, rename, stat, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
-  GLOBAL_HACK_DIR_NAME,
   GLOBAL_PROJECTS_REGISTRY_FILENAME,
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
+import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, pathExists, readTextFile } from "./fs.ts";
 import {
   resolveGitCurrentBranch,
@@ -318,11 +318,7 @@ function resolveGlobalRegistryRoot(): string {
   if (override.length > 0) {
     return dirname(override);
   }
-  const home = process.env.HOME;
-  if (!home) {
-    throw new Error("HOME is not set");
-  }
-  return resolve(home, GLOBAL_HACK_DIR_NAME);
+  return resolveGlobalHackDir();
 }
 
 function getRegistryPath(): string {

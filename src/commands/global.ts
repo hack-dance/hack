@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { confirm, isCancel, note, spinner } from "@clack/prompts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
@@ -33,7 +32,6 @@ import {
   GLOBAL_GRAFANA_DASHBOARD_FILENAME,
   GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
   GLOBAL_GRAFANA_DATASOURCE_FILENAME,
-  GLOBAL_HACK_DIR_NAME,
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
   GLOBAL_LOKI_CONFIG_FILENAME,
@@ -48,7 +46,10 @@ import { getLaunchdServiceStatus } from "../daemon/launchd.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
-import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import {
+  resolveGlobalConfigPath,
+  resolveGlobalHackDir,
+} from "../lib/config-paths.ts";
 import {
   isSlimExecutionMode,
   renderSlimModeUnavailableMessage,
@@ -285,16 +286,8 @@ export const globalCommand = defineCommand({
   ],
 } as const);
 
-function getHomeDir(): string {
-  const home = process.env.HOME;
-  if (!home) {
-    throw new Error("HOME is not set");
-  }
-  return home;
-}
-
 function getGlobalPaths() {
-  const root = resolve(getHomeDir(), GLOBAL_HACK_DIR_NAME);
+  const root = resolveGlobalHackDir();
   const caddyDir = resolve(root, GLOBAL_CADDY_DIR_NAME);
   const loggingDir = resolve(root, GLOBAL_LOGGING_DIR_NAME);
   const schemasDir = resolve(root, GLOBAL_SCHEMAS_DIR_NAME);
@@ -2528,13 +2521,8 @@ async function readTailscaleStatus(): Promise<
 }
 
 async function readCloudflaredPid(): Promise<number | null> {
-  const baseHome = (process.env.HOME ?? homedir()).trim();
-  if (!baseHome) {
-    return null;
-  }
   const pidPath = resolve(
-    baseHome,
-    GLOBAL_HACK_DIR_NAME,
+    resolveGlobalHackDir(),
     GLOBAL_CLOUDFLARE_DIR_NAME,
     "cloudflared.pid"
   );

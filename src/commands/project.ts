@@ -45,7 +45,6 @@ import {
   DEFAULT_PROJECT_TLD,
   GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_CADDY_DIR_NAME,
-  GLOBAL_HACK_DIR_NAME,
   HACK_PROJECT_DIR_PRIMARY,
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
@@ -67,6 +66,7 @@ import {
   inferPortFromScript,
 } from "../init/heuristics.ts";
 import { resolveEffectiveBranch, touchBranchUsage } from "../lib/branches.ts";
+import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
   isSlimExecutionMode,
@@ -2660,14 +2660,8 @@ async function resolveCoreDnsServer(): Promise<string | null> {
     return env;
   }
 
-  const home = process.env.HOME;
-  if (!home) {
-    return null;
-  }
-
   const composePath = resolve(
-    home,
-    GLOBAL_HACK_DIR_NAME,
+    resolveGlobalHackDir(),
     GLOBAL_CADDY_DIR_NAME,
     GLOBAL_CADDY_COMPOSE_FILENAME
   );
@@ -2721,14 +2715,8 @@ async function resolveCaddyServer(): Promise<string | null> {
     return env;
   }
 
-  const home = process.env.HOME;
-  if (!home) {
-    return null;
-  }
-
   const composePath = resolve(
-    home,
-    GLOBAL_HACK_DIR_NAME,
+    resolveGlobalHackDir(),
     GLOBAL_CADDY_DIR_NAME,
     GLOBAL_CADDY_COMPOSE_FILENAME
   );
@@ -2777,13 +2765,8 @@ async function resolveCaddyServer(): Promise<string | null> {
 }
 
 async function resolveCaddyLocalCaPath(): Promise<string | null> {
-  const home = process.env.HOME;
-  if (!home) {
-    return null;
-  }
   const certPath = resolve(
-    home,
-    GLOBAL_HACK_DIR_NAME,
+    resolveGlobalHackDir(),
     GLOBAL_CADDY_DIR_NAME,
     "pki",
     "caddy-local-authority.crt"

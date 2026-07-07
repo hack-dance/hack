@@ -18,7 +18,6 @@ import {
   GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_CADDY_DIR_NAME,
   GLOBAL_COREDNS_FILENAME,
-  GLOBAL_HACK_DIR_NAME,
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
   HACK_PROJECT_DIR_PRIMARY,
@@ -35,7 +34,10 @@ import {
   readInternalExtraHostsIp,
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
-import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import {
+  resolveGlobalConfigPath,
+  resolveGlobalHackDir,
+} from "../lib/config-paths.ts";
 import { checkMacHostTlsTrust } from "../lib/doctor-host-tls.ts";
 import {
   findCrossCheckoutInstances,
@@ -804,16 +806,7 @@ async function checkIngressSubnet(): Promise<CheckResult> {
 }
 
 async function checkGlobalFiles(): Promise<CheckResult> {
-  const home = getHomeDir();
-  if (!home) {
-    return {
-      name: "global files",
-      status: "error",
-      message: "HOME is not set",
-    };
-  }
-
-  const root = resolve(home, GLOBAL_HACK_DIR_NAME);
+  const root = resolveGlobalHackDir();
   const caddyCompose = resolve(
     root,
     GLOBAL_CADDY_DIR_NAME,
@@ -3056,11 +3049,7 @@ type GlobalPaths = {
 };
 
 function getGlobalPaths(): GlobalPaths {
-  const home = getHomeDir();
-  if (!home) {
-    throw new Error("HOME is not set");
-  }
-  const root = resolve(home, GLOBAL_HACK_DIR_NAME);
+  const root = resolveGlobalHackDir();
   const caddyDir = resolve(root, GLOBAL_CADDY_DIR_NAME);
   const caddyCompose = resolve(caddyDir, GLOBAL_CADDY_COMPOSE_FILENAME);
   const coreDnsConfig = resolve(caddyDir, GLOBAL_COREDNS_FILENAME);
@@ -3359,8 +3348,4 @@ async function runCheck(
     const res: CheckResult = { name, status: "error", message };
     return { ...res, durationMs };
   }
-}
-
-function getHomeDir(): string | null {
-  return process.env.HOME ?? null;
 }

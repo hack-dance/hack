@@ -8,7 +8,7 @@
         "enabled": true
       },
       "dance.hack.tickets": {
-        "enabled": true
+        "enabled": false
       },
       "dance.hack.linear": {
         "enabled": true

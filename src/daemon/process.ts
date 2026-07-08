@@ -68,6 +68,7 @@ function sleep({ ms }: { readonly ms: number }): Promise<void> {
 }
 
 const DAEMON_COMMAND_MARKER = "daemon start --foreground";
+const WHITESPACE_PATTERN = /\s+/;
 
 /**
  * Finds hackd processes that the pid file does not track ("orphans").
@@ -119,13 +120,13 @@ export async function findOrphanDaemonProcesses(opts: {
  * would also kill unrelated processes that merely mention them.
  */
 function isHackDaemonCommand(opts: { readonly command: string }): boolean {
-  const firstToken = opts.command.trim().split(/\s+/)[0] ?? "";
+  const firstToken = opts.command.trim().split(WHITESPACE_PATTERN)[0] ?? "";
   const base = firstToken.split("/").pop()?.toLowerCase() ?? "";
   if (base === "hack" || base.startsWith("hack-")) {
     return true;
   }
   if (base === "bun") {
-    const secondToken = opts.command.trim().split(/\s+/)[1] ?? "";
+    const secondToken = opts.command.trim().split(WHITESPACE_PATTERN)[1] ?? "";
     const secondBase = secondToken.split("/").pop()?.toLowerCase() ?? "";
     return secondBase === "index.ts" || secondBase.startsWith("hack");
   }

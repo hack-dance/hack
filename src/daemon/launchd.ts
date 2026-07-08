@@ -218,6 +218,8 @@ export function isVirtualExecutablePath(path: string): boolean {
 /**
  * Extracts ProgramArguments[0] from rendered launchd plist text.
  */
+const PLIST_STRING_PATTERN = /<string>([^<]+)<\/string>/;
+
 export function extractLaunchdProgramPath(opts: {
   readonly plistText: string;
 }): string | null {
@@ -225,7 +227,7 @@ export function extractLaunchdProgramPath(opts: {
   if (anchor < 0) {
     return null;
   }
-  const match = opts.plistText.slice(anchor).match(/<string>([^<]+)<\/string>/);
+  const match = opts.plistText.slice(anchor).match(PLIST_STRING_PATTERN);
   return match?.[1] ?? null;
 }
 

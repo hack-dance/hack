@@ -1,3 +1,15 @@
+## <small>3.3.2 (2026-07-08)</small>
+
+* Merge pull request #60 from hack-dance/fix/field-findings-round3 ([69f6caa](https://github.com/hack-dance/hack/commit/69f6caa)), closes [#60](https://github.com/hack-dance/hack/issues/60)
+* docs: tickets/ in every durable ignore-block listing ([103575a](https://github.com/hack-dance/hack/commit/103575a))
+* fix: gate tickets git cache on extension enablement, cover it in ignores ([fc56b74](https://github.com/hack-dance/hack/commit/fc56b74))
+* fix: support non-interactive hack global trust and hack doctor --fix ([78e068b](https://github.com/hack-dance/hack/commit/78e068b))
+* fix(daemon): address PR review — strict orphan match, stale-path repair, docs sync ([61ac7f6](https://github.com/hack-dance/hack/commit/61ac7f6))
+* fix(daemon): repair virtual plist paths, sweep orphans, launchd-exclusive start ([c3958bb](https://github.com/hack-dance/hack/commit/c3958bb))
+* fix(doctor): host TLS repair runs under --no-interactive ([71c3601](https://github.com/hack-dance/hack/commit/71c3601))
+* fix(global): install prepares host trust env independent of keychain step ([a0bcde4](https://github.com/hack-dance/hack/commit/a0bcde4))
+* style(daemon): hoist regexes to module scope for the repo lint profile ([90d1514](https://github.com/hack-dance/hack/commit/90d1514))
+
 ## <small>3.3.1 (2026-07-08)</small>
 
 * Merge pull request #59 from hack-dance/fix/review-comments-round2 ([e941ca3](https://github.com/hack-dance/hack/commit/e941ca3)), closes [#59](https://github.com/hack-dance/hack/issues/59)

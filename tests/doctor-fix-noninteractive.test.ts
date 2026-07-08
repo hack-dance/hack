@@ -203,15 +203,16 @@ test("doctor --fix under HACK_NO_INTERACTIVE skips macOS keychain repair and rep
   ]);
 
   expect(code).toBe(0);
-  // Destructive/system-level step (macOS host TLS trust repair, which chains
-  // into a System keychain sudo prompt) is declined automatically and
-  // surfaced in the skipped-steps summary instead of hanging on a prompt.
+  // Host TLS repair is safe to run non-interactively: it delegates to
+  // `hack global trust`, which preflights sudo and skips only the System
+  // keychain step while still writing the host trust env. It must NOT be
+  // in the skipped-steps summary.
   const skippedNote = noteCalls.find((message) =>
     message.includes("Skipped (non-interactive")
   );
-  expect(skippedNote).toBeDefined();
-  expect(skippedNote).toContain("Repair macOS host TLS trust");
-  expect(skippedNote).toContain("hack doctor --fix");
+  if (skippedNote !== undefined) {
+    expect(skippedNote).not.toContain("Repair macOS host TLS trust");
+  }
 });
 
 test("doctor --fix never calls the raw clack confirm prompt under HACK_NO_INTERACTIVE", async () => {

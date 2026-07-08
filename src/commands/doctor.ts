@@ -3138,11 +3138,13 @@ async function maybeRepairMacHostTlsTrust(): Promise<void> {
   }
 
   note(hostTlsTrust.message, "doctor");
+  // Not classified destructive: `hack global trust` is itself
+  // non-interactive-safe — it preflights sudo and skips only the System
+  // keychain step, while the safe host trust env/bundle writes always run.
   const okRepair = await doctorConfirm({
     message:
-      "Repair macOS host TLS trust now? (Bun/Node/curl/git trust for https://*.hack; may prompt for sudo to update the System keychain)",
+      "Repair macOS host TLS trust now? (Bun/Node/curl/git trust for https://*.hack; the sudo System-keychain step is skipped automatically when it would prompt)",
     initialValue: true,
-    destructive: true,
   });
   if (!okRepair) {
     return;

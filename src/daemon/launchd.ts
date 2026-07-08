@@ -249,12 +249,22 @@ export async function repairLaunchdProgramIfInvalid(opts: {
     return "not-installed";
   }
   const program = extractLaunchdProgramPath({ plistText });
-  const valid =
+  const invocation = await resolveHackInvocation();
+  const resolved = await resolveLaunchdHackBinPath({ invocation });
+  const exists =
     program !== null &&
     !isVirtualExecutablePath(program) &&
     (await pathExists(program));
+  // A program that still exists can still be stale: a versioned homebrew
+  // Cellar path survives until brew cleanup, so kickstart would relaunch
+  // the OLD binary forever (incompatible-daemon loop). Normalize to the
+  // current stable resolution whenever it differs.
+  const valid = exists && (resolved === null || program === resolved);
   if (valid) {
     return "ok";
+  }
+  if (!exists && resolved === null) {
+    return "failed";
   }
 
   const result = await installLaunchdService({

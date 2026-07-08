@@ -101,12 +101,35 @@ export async function findOrphanDaemonProcesses(opts: {
     if (!command.includes(DAEMON_COMMAND_MARKER)) {
       continue;
     }
+    if (!isHackDaemonCommand({ command })) {
+      continue;
+    }
     if (pid === opts.trackedPid || pid === process.pid) {
       continue;
     }
     orphans.push(pid);
   }
   return orphans;
+}
+
+/**
+ * True when the process command line is actually a hack daemon: the
+ * executable's basename must be `hack`/`hack-*` (or a `bun .../hack`
+ * dev-tree invocation). A bare substring match on the daemon arguments
+ * would also kill unrelated processes that merely mention them.
+ */
+function isHackDaemonCommand(opts: { readonly command: string }): boolean {
+  const firstToken = opts.command.trim().split(/\s+/)[0] ?? "";
+  const base = firstToken.split("/").pop()?.toLowerCase() ?? "";
+  if (base === "hack" || base.startsWith("hack-")) {
+    return true;
+  }
+  if (base === "bun") {
+    const secondToken = opts.command.trim().split(/\s+/)[1] ?? "";
+    const secondBase = secondToken.split("/").pop()?.toLowerCase() ?? "";
+    return secondBase === "index.ts" || secondBase.startsWith("hack");
+  }
+  return false;
 }
 
 async function listProcessTable(): Promise<readonly string[]> {

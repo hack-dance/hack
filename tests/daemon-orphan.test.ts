@@ -25,16 +25,18 @@ test("all daemon processes are orphans when no pid is tracked", async () => {
   expect(orphans).toEqual([123, 456]);
 });
 
-test("ignores its own pid and requires the exact daemon marker", async () => {
+test("ignores its own pid, non-hack executables, and near-miss commands", async () => {
   const orphans = await findOrphanDaemonProcesses({
     trackedPid: null,
     psLines: [
       `  ${process.pid} hack daemon start --foreground`,
       "  789 tail -f daemon-start-foreground.log",
       "  790 node something daemon start --foreground",
+      "  791 /tmp/hack-repo/bin/hack-dev daemon start --foreground",
+      "  792 bun /tmp/hack-repo/index.ts daemon start --foreground",
     ],
   });
-  expect(orphans).toEqual([790]);
+  expect(orphans).toEqual([791, 792]);
 });
 
 import {

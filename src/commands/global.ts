@@ -63,7 +63,10 @@ import {
 } from "../lib/fs.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
-import { confirmSafe } from "../lib/interactivity.ts";
+import {
+  confirmSafe,
+  isExplicitlyNonInteractive,
+} from "../lib/interactivity.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import {
   buildHackHostTrustEnvironment,
@@ -720,8 +723,15 @@ async function bootstrapMacGlobalInstall(): Promise<void> {
   const certPath = await exportCaddyLocalCaCert();
   if (certPath) {
     const trustReady = await ensureMacTrustCaddyLocalCa({ certPath });
-    if (trustReady) {
-      await configureMacHostTlsTrust({ certPath });
+    // Mirror globalTrust: the host trust env (Bun/Node/curl/git) is
+    // independent of the macOS System keychain step — prepare it regardless
+    // so non-interactive installs still get CLI-tool trust.
+    await configureMacHostTlsTrust({ certPath });
+    if (!trustReady) {
+      note(
+        "Host trust env is prepared, but the browser will still show warnings for https://*.hack until the System keychain step runs. Run `hack global trust` interactively to finish it.",
+        "TLS"
+      );
     }
   }
   await maybeOfferMacRecoverySetup();
@@ -2724,10 +2734,19 @@ async function globalTrust(): Promise<number> {
     const trustReady = await ensureMacTrustCaddyLocalCa({
       certPath,
     });
-    if (trustReady) {
-      await configureMacHostTlsTrust({
-        certPath,
-      });
+    // Host trust env (Bun/Node/curl/git) is independent of the macOS System
+    // keychain step, which is what makes the browser trust *.hack. Prepare
+    // it regardless so non-interactive runs still get CLI-tool trust even
+    // when the keychain step was skipped (declined, or sudo would have
+    // prompted for a password with no TTY to answer it).
+    await configureMacHostTlsTrust({
+      certPath,
+    });
+    if (!trustReady) {
+      note(
+        "Host trust env is prepared, but the browser will still show warnings for https://*.hack until the System keychain step runs. Run `hack global trust` interactively to finish it.",
+        "TLS"
+      );
     }
     return 0;
   }
@@ -3330,6 +3349,16 @@ async function ensureMacMkcert(): Promise<void> {
   }
 }
 
+/**
+ * Whether `sudo` can run without prompting for a password right now
+ * (`sudo -n true`). Used to avoid launching a `sudo` command that would hang
+ * waiting on a password prompt when there is no TTY to answer it.
+ */
+async function canSudoWithoutPassword(): Promise<boolean> {
+  const check = await exec(["sudo", "-n", "true"], { stdin: "ignore" });
+  return check.exitCode === 0;
+}
+
 async function ensureMacTrustCaddyLocalCa(input: {
   readonly certPath: string;
 }): Promise<boolean> {
@@ -3337,7 +3366,7 @@ async function ensureMacTrustCaddyLocalCa(input: {
     message:
       "Trust Caddy Local CA in macOS System keychain? (enables trusted https://*.hack; requires sudo)",
     initialValue: true,
-    nonInteractive: "decline",
+    nonInteractive: "accept-default",
   });
   if (!ok) {
     logger.info({
@@ -3363,6 +3392,14 @@ async function ensureMacTrustCaddyLocalCa(input: {
       message: "Caddy Local CA already present in System keychain",
     });
     return true;
+  }
+
+  if (isExplicitlyNonInteractive() && !(await canSudoWithoutPassword())) {
+    logger.info({
+      message:
+        "Skipped macOS System keychain trust (non-interactive; sudo would prompt for a password). Run `hack global trust` interactively to finish browser trust.",
+    });
+    return false;
   }
 
   logger.step({

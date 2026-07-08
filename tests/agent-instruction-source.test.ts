@@ -103,6 +103,9 @@ test("tickets appear at most once, only as an optional extension", () => {
   for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
     const ticketLines = rendered
       .split("\n")
+      // The gitignore pattern literal `tickets/` (managed-files section) is
+      // a filename, not tickets promotion — the thing this test guards.
+      .map((line) => line.replaceAll("`tickets/`", ""))
       .filter((line) => /ticket/i.test(line));
     expect(
       ticketLines.length,

@@ -167,12 +167,16 @@ async function resolveLaunchdHackBinPath(opts: {
     readonly args: readonly string[];
   };
 }): Promise<string | null> {
+  // Stable locations first: versioned paths (homebrew Cellar) rot on
+  // upgrade, and argv paths inside a compiled Bun binary report the
+  // virtual /$bunfs mount, which only exists inside that process —
+  // launchd exec'ing it fails forever with status 78.
   const candidates = [
-    process.argv[1] ?? null,
+    resolve(resolveGlobalHackDir(), "bin", "hack"),
+    await findExecutableInPath("hack"),
     opts.invocation.args[0] ?? null,
     opts.invocation.bin,
-    await findExecutableInPath("hack"),
-    resolve(resolveGlobalHackDir(), "bin", "hack"),
+    process.argv[1] ?? null,
   ];
 
   for (const raw of candidates) {
@@ -192,11 +196,88 @@ function normalizeHackExecutablePath(raw: string | null): string | null {
   if (!trimmed) {
     return null;
   }
+  if (isVirtualExecutablePath(trimmed)) {
+    return null;
+  }
   const base = basename(trimmed).toLowerCase();
   if (!(base === "hack" || base.startsWith("hack-"))) {
     return null;
   }
   return trimmed;
+}
+
+/**
+ * Paths inside a compiled Bun binary's virtual filesystem. They pass
+ * pathExists from INSIDE the same process but no other process (launchd
+ * included) can exec them.
+ */
+export function isVirtualExecutablePath(path: string): boolean {
+  return path.startsWith("/$bunfs/") || path.includes("~BUN");
+}
+
+/**
+ * Extracts ProgramArguments[0] from rendered launchd plist text.
+ */
+const PLIST_STRING_PATTERN = /<string>([^<]+)<\/string>/;
+
+export function extractLaunchdProgramPath(opts: {
+  readonly plistText: string;
+}): string | null {
+  const anchor = opts.plistText.indexOf("<key>ProgramArguments</key>");
+  if (anchor < 0) {
+    return null;
+  }
+  const match = opts.plistText.slice(anchor).match(PLIST_STRING_PATTERN);
+  return match?.[1] ?? null;
+}
+
+export type LaunchdProgramRepairResult =
+  | "ok"
+  | "repaired"
+  | "not-installed"
+  | "failed";
+
+/**
+ * Repairs an installed launchd plist whose program path is invalid — a
+ * compiled-binary virtual path (/$bunfs) or a binary that no longer exists
+ * (e.g. an upgraded homebrew Cellar path). Broken plists leave launchd
+ * flapping with exit status 78 and the daemon unable to stay up.
+ */
+export async function repairLaunchdProgramIfInvalid(opts: {
+  readonly paths: DaemonPaths;
+}): Promise<LaunchdProgramRepairResult> {
+  const plistText = await readTextFile(opts.paths.launchdPlistPath);
+  if (plistText === null) {
+    return "not-installed";
+  }
+  const program = extractLaunchdProgramPath({ plistText });
+  const invocation = await resolveHackInvocation();
+  const resolved = await resolveLaunchdHackBinPath({ invocation });
+  const exists =
+    program !== null &&
+    !isVirtualExecutablePath(program) &&
+    (await pathExists(program));
+  // A program that still exists can still be stale: a versioned homebrew
+  // Cellar path survives until brew cleanup, so kickstart would relaunch
+  // the OLD binary forever (incompatible-daemon loop). Normalize to the
+  // current stable resolution whenever it differs.
+  const valid = exists && (resolved === null || program === resolved);
+  if (valid) {
+    return "ok";
+  }
+  if (!exists && resolved === null) {
+    return "failed";
+  }
+
+  const result = await installLaunchdService({
+    paths: opts.paths,
+    config: {
+      installed: true,
+      runAtLoad: plistText.includes("<key>RunAtLoad</key>\n  <true/>"),
+      guiSessionOnly: plistText.includes("LimitLoadToSessionType"),
+    },
+  });
+  return result.ok ? "repaired" : "failed";
 }
 
 export interface LaunchdUninstallResult {

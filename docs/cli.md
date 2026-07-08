@@ -128,7 +128,8 @@ materialized `.hack/.env` or `.hack/.env.state.json` is stale and should be rege
 ## Project files
 
 Hack owns a committed `.hack/.gitignore` (self-healing on `init`/`up`) that ignores machine-local
-generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`). Keep
+generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`,
+`tickets/`). Keep
 it committed. If generated files ever leak into git, `hack doctor --fix` untracks them (the files
 stay on disk). See [Architecture](architecture.md) for the full file map.
 

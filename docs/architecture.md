@@ -292,7 +292,7 @@ same repo.
   - `hack.config.json`
   - `hack.branches.json` (optional)
   - `.gitignore` (committed, self-healing on `init`/`up`; covers machine-local generated files —
-    `.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`. If generated files
+    `.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`, `tickets/`. If generated files
     leaked into git, `hack doctor --fix` untracks them without deleting them from disk.)
   - `hack.env.default.yaml` plus optional `hack.env.<overlay>.yaml` (committed env)
   - `hack.env.local.yaml` / `hack.env.<overlay>.local.yaml` (worktree-local overrides)

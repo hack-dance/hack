@@ -1,3 +1,11 @@
+## 3.3.0 (2026-07-08)
+
+* Merge branch 'docs/partial-adoption' into feat/init-discovery-validation ([064db0e](https://github.com/hack-dance/hack/commit/064db0e))
+* Merge pull request #58 from hack-dance/feat/init-discovery-validation ([9dd469f](https://github.com/hack-dance/hack/commit/9dd469f)), closes [#58](https://github.com/hack-dance/hack/issues/58)
+* feat(init): add post-discovery validation pass for hack init ([6b50b76](https://github.com/hack-dance/hack/commit/6b50b76))
+* feat(init): surface the hack global install requirement in init output ([739a581](https://github.com/hack-dance/hack/commit/739a581))
+* docs: document partial adoption (backing-services-only) as a valid hack setup ([871a247](https://github.com/hack-dance/hack/commit/871a247))
+
 ## 3.2.0 (2026-07-08)
 
 * Merge branch 'main' into fix/container-trust-bundle ([8338b58](https://github.com/hack-dance/hack/commit/8338b58))

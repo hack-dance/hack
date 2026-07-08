@@ -249,7 +249,12 @@ function buildServiceCandidates(
   return out;
 }
 
-function scoreDevScript(name: string): number {
+/**
+ * Score a script name by how likely it is to be a dev/serve entrypoint.
+ * Higher scores win when multiple scripts in the same package qualify as
+ * candidates (see `dedupeCandidatesByPackage` in `./validation.ts`).
+ */
+export function scoreDevScript(name: string): number {
   const n = name.toLowerCase();
   if (n === "dev") {
     return 100;

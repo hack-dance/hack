@@ -64,7 +64,7 @@ import {
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { requestDaemonJson } from "../daemon/client.ts";
-import { renderCompose } from "../init/compose.ts";
+import { renderCompose, TODO_IMAGE_SENTINEL } from "../init/compose.ts";
 import type { ServiceCandidate } from "../init/discovery.ts";
 import { discoverRepo } from "../init/discovery.ts";
 import {
@@ -74,6 +74,21 @@ import {
   guessServiceName,
   inferPortFromScript,
 } from "../init/heuristics.ts";
+import type {
+  InitDiscoveryFinding,
+  PortCollisionDraft,
+} from "../init/validation.ts";
+import {
+  buildDiscoveryHeaderComments,
+  buildExistingComposeFindings,
+  dedupeCandidates,
+  describeUnknownRuntimeComment,
+  detectBackingServices,
+  detectPackageRuntime,
+  findExistingComposeFiles,
+  reassignCollidingPorts,
+  reportInitDiscoveryFindings,
+} from "../init/validation.ts";
 import { resolveEffectiveBranch, touchBranchUsage } from "../lib/branches.ts";
 import {
   type CliResult,
@@ -3837,7 +3852,9 @@ function logInstallResult(opts: {
   logger.success({ message: `Updated ${opts.label} at ${opts.path}` });
 }
 
-interface ComposeWizardInput {
+// Exported for direct unit-testing of the auto (non-interactive) discovery
+// + validation pipeline without going through the CLI prompt flow.
+export interface ComposeWizardInput {
   readonly repoRoot: string;
   readonly devHost: string;
   readonly projectSlug: string;
@@ -4114,13 +4131,27 @@ function validateSubdomain(value: string | undefined): string | undefined {
 
 async function selectCandidatesForDiscoveredCompose(opts: {
   readonly candidates: readonly ServiceCandidate[];
-}): Promise<ServiceCandidate[]> {
+}): Promise<{
+  readonly selectedCandidates: ServiceCandidate[];
+  readonly dedupeFindings: readonly InitDiscoveryFinding[];
+}> {
   const byId = new Map(opts.candidates.map((c) => [c.id, c] as const));
+
+  // Default-select the deduped set (best script per package, aggregator
+  // scripts dropped in favor of the package's own script) so the common
+  // case is a single confirm — the user can still add dropped candidates
+  // back via the multiselect.
+  const dedupe = dedupeCandidates({ candidates: opts.candidates });
+  const defaultIds = dedupe.selected.map((c) => c.id);
+  const droppedIds = new Set(
+    opts.candidates.filter((c) => !defaultIds.includes(c.id)).map((c) => c.id)
+  );
 
   const selectedIds = unwrapPromptValue(
     await autocompleteMultiselect<string>({
       message: "Select dev scripts to include as services:",
       required: true,
+      initialValues: defaultIds,
       options: opts.candidates.map((c) => ({
         value: c.id,
         label: formatCandidateLabel(c),
@@ -4141,7 +4172,13 @@ async function selectCandidatesForDiscoveredCompose(opts: {
     throw new Error("No services selected");
   }
 
-  return selectedCandidates;
+  // Only report dedupe findings when the user kept the pruned selection —
+  // if they manually re-added every dropped candidate, there's nothing left
+  // to warn about.
+  const stillDropped = [...droppedIds].some((id) => !selectedIds.includes(id));
+  const dedupeFindings = stillDropped ? dedupe.findings : [];
+
+  return { selectedCandidates, dedupeFindings };
 }
 
 async function promptDraftForDiscoveredCandidate(opts: {
@@ -4227,6 +4264,7 @@ async function promptDraftForDiscoveredCandidate(opts: {
     port: portNum,
     workingDir,
     command,
+    candidate: opts.candidate,
   };
 }
 
@@ -4280,9 +4318,10 @@ async function promptHttpSubdomainsForDrafts(opts: {
 async function buildDiscoveredCompose(
   input: ComposeWizardInput
 ): Promise<string> {
-  const selectedCandidates = await selectCandidatesForDiscoveredCompose({
-    candidates: input.candidates,
-  });
+  const { selectedCandidates, dedupeFindings } =
+    await selectCandidatesForDiscoveredCompose({
+      candidates: input.candidates,
+    });
   const usedServiceNames = new Set<string>();
   const drafts: AutoComposeDraft[] = [];
 
@@ -4300,13 +4339,40 @@ async function buildDiscoveredCompose(
     devHost: input.devHost,
   });
 
+  const findings = [...dedupeFindings];
+  await applyRuntimeDetectionToDrafts({
+    drafts,
+    repoRoot: input.repoRoot,
+    findings,
+  });
+  applyPortCollisionReassignment({ drafts, findings });
+
+  const discoveryForServices = await discoverRepo(input.repoRoot);
+  const backingServices = await detectBackingServices({
+    repoRoot: input.repoRoot,
+    packages: discoveryForServices.packages,
+  });
+  const existingComposeFiles = await findExistingComposeFiles({
+    repoRoot: input.repoRoot,
+  });
+  findings.push(...buildExistingComposeFindings({ existingComposeFiles }));
+
+  reportInitDiscoveryFindings({ findings });
+
   const services = buildServicesFromDrafts({
     drafts,
     devHost: input.devHost,
     oauth: input.oauth,
   });
 
-  return renderCompose({ name: input.projectSlug, services });
+  return renderCompose({
+    name: input.projectSlug,
+    services,
+    headerComments: buildDiscoveryHeaderComments({
+      detections: backingServices,
+      existingComposeFiles,
+    }),
+  });
 }
 
 type AutoComposeDraft = {
@@ -4317,15 +4383,104 @@ type AutoComposeDraft = {
   workingDir: string;
   command: string;
   image?: string;
+  candidate?: ServiceCandidate;
+  comments?: string[];
 };
 
-function buildDiscoveredComposeAuto(input: ComposeWizardInput): string {
+/**
+ * Runs `detectPackageRuntime` for each draft that carries its source
+ * candidate and, for non-JS runtimes, sets the compose TODO-image sentinel
+ * plus an explanatory comment instead of silently defaulting to the
+ * bun-node image. Mutates `drafts` in place and appends one
+ * `unknown-runtime` finding per detected draft.
+ */
+async function applyRuntimeDetectionToDrafts(opts: {
+  readonly drafts: AutoComposeDraft[];
+  readonly repoRoot: string;
+  readonly findings: InitDiscoveryFinding[];
+}): Promise<void> {
+  for (const draft of opts.drafts) {
+    const candidate = draft.candidate;
+    if (!candidate) {
+      continue;
+    }
+
+    const runtime = await detectPackageRuntime({
+      dir:
+        candidate.packageRelativeDir === "."
+          ? opts.repoRoot
+          : resolve(opts.repoRoot, candidate.packageRelativeDir),
+      scriptCommand: candidate.scriptCommand,
+      repoRoot: opts.repoRoot,
+    });
+    if (!runtime) {
+      continue;
+    }
+
+    draft.image = TODO_IMAGE_SENTINEL;
+    draft.comments = [
+      ...(draft.comments ?? []),
+      describeUnknownRuntimeComment({ serviceName: draft.name, runtime }),
+    ];
+    opts.findings.push({
+      kind: "unknown-runtime",
+      serviceName: draft.name,
+      runtime,
+    });
+  }
+}
+
+/**
+ * Detects HTTP drafts sharing a port, reassigns duplicates to the next
+ * free port (ascending), and rewrites their command via
+ * `buildSuggestedCommand`. Mutates `drafts` in place and appends one
+ * `port-reassigned` finding per reassignment.
+ */
+function applyPortCollisionReassignment(opts: {
+  readonly drafts: AutoComposeDraft[];
+  readonly findings: InitDiscoveryFinding[];
+}): void {
+  const collisionDrafts: PortCollisionDraft[] = [];
+  for (const draft of opts.drafts) {
+    if (!draft.candidate) {
+      continue;
+    }
+    collisionDrafts.push({
+      name: draft.name,
+      role: draft.role,
+      port: draft.port,
+      candidate: draft.candidate,
+    });
+  }
+
+  const { reassignments, findings } = reassignCollidingPorts({
+    drafts: collisionDrafts,
+  });
+  opts.findings.push(...findings);
+
+  for (const draft of opts.drafts) {
+    const reassignment = reassignments.get(draft.name);
+    if (!reassignment) {
+      continue;
+    }
+    draft.port = reassignment.port;
+    draft.command = reassignment.command;
+  }
+}
+
+// Exported for direct unit-testing (see tests/init-discovery-validation.test.ts).
+export async function buildDiscoveredComposeAuto(
+  input: ComposeWizardInput
+): Promise<string> {
+  const dedupe = dedupeCandidates({ candidates: input.candidates });
   const selectedCandidates = selectAutoCandidates({
-    candidates: input.candidates,
+    candidates: dedupe.selected,
   });
   if (selectedCandidates.length === 0) {
     throw new Error("No dev scripts discovered for auto init.");
   }
+
+  const findings: InitDiscoveryFinding[] = [...dedupe.findings];
 
   const usedServiceNames = new Set<string>();
   const drafts: AutoComposeDraft[] = [];
@@ -4352,10 +4507,30 @@ function buildDiscoveredComposeAuto(input: ComposeWizardInput): string {
       port,
       workingDir,
       command,
+      candidate,
     });
   }
 
   assignAutoSubdomains({ drafts });
+
+  await applyRuntimeDetectionToDrafts({
+    drafts,
+    repoRoot: input.repoRoot,
+    findings,
+  });
+  applyPortCollisionReassignment({ drafts, findings });
+
+  const discovery = await discoverRepo(input.repoRoot);
+  const backingServices = await detectBackingServices({
+    repoRoot: input.repoRoot,
+    packages: discovery.packages,
+  });
+  const existingComposeFiles = await findExistingComposeFiles({
+    repoRoot: input.repoRoot,
+  });
+  findings.push(...buildExistingComposeFindings({ existingComposeFiles }));
+
+  reportInitDiscoveryFindings({ findings });
 
   const services = buildServicesFromDrafts({
     drafts,
@@ -4363,7 +4538,14 @@ function buildDiscoveredComposeAuto(input: ComposeWizardInput): string {
     oauth: input.oauth,
   });
 
-  return renderCompose({ name: input.projectSlug, services });
+  return renderCompose({
+    name: input.projectSlug,
+    services,
+    headerComments: buildDiscoveryHeaderComments({
+      detections: backingServices,
+      existingComposeFiles,
+    }),
+  });
 }
 
 interface ManualComposeWizardInput {
@@ -4691,6 +4873,7 @@ function buildServicesFromDrafts(opts: {
       env,
       labels,
       networks,
+      ...(d.comments && d.comments.length > 0 ? { comments: d.comments } : {}),
     };
   });
 }

@@ -1,6 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { dirname, resolve } from "node:path";
-import { confirm, isCancel, note, spinner } from "@clack/prompts";
+import { note, spinner } from "@clack/prompts";
 import { YAML } from "bun";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
@@ -60,6 +60,10 @@ import {
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
+import {
+  confirmSafe,
+  isExplicitlyNonInteractive,
+} from "../lib/interactivity.ts";
 import {
   ensureBundledMutagenInstalled,
   getManagedMutagenAgentBundlePath,
@@ -604,7 +608,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   if (args.options.fix || args.options.migrateEnvConfig) {
     await runDoctorFix({
       startDir,
-      migrateEnvConfig: args.options.fix || args.options.migrateEnvConfig,
+      migrateEnvConfig: args.options.migrateEnvConfig === true,
     });
     note("Re-run: hack doctor", "doctor");
   }
@@ -2359,8 +2363,9 @@ async function runDoctorFix(opts: {
     migrateEnvConfig: opts.migrateEnvConfig,
   });
   note(remediationPlan.join("\n"), "doctor plan");
+  skippedDoctorFixSteps.length = 0;
 
-  const ok = await confirmOrThrow({
+  const ok = await doctorConfirm({
     message: opts.migrateEnvConfig
       ? "Start guided remediation steps now? (includes env migration when applicable)"
       : "Start guided remediation steps now?",
@@ -2408,6 +2413,27 @@ async function runDoctorFix(opts: {
   if (opts.migrateEnvConfig) {
     await maybeMigrateProjectEnvConfig({ startDir: opts.startDir });
   }
+
+  renderSkippedDoctorFixSteps();
+}
+
+/**
+ * Prints a single summary of destructive/system-level `--fix` steps that
+ * were skipped because the run was non-interactive (no TTY, `--no-interactive`,
+ * or `HACK_NO_INTERACTIVE`), with the command to run them interactively.
+ */
+function renderSkippedDoctorFixSteps(): void {
+  if (skippedDoctorFixSteps.length === 0) {
+    return;
+  }
+  note(
+    [
+      "Skipped (non-interactive; involve sudo/system-level changes):",
+      ...skippedDoctorFixSteps.map((what) => `- ${what}`),
+      "Run interactively (without --no-interactive/HACK_NO_INTERACTIVE) to apply them: hack doctor --fix",
+    ].join("\n"),
+    "doctor fix"
+  );
 }
 
 async function maybeMigrateProjectEnvConfig(opts: {
@@ -2457,7 +2483,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
     ].join("\n"),
     "env migration"
   );
-  const shouldMigrate = await confirmOrThrow({
+  const shouldMigrate = await doctorConfirm({
     message:
       "Migrate project env from .hack/hack.env.json/.hack/.env to hack.env.*.yaml now?",
     initialValue: true,
@@ -2493,7 +2519,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
       }),
       "compose env repair"
     );
-    const shouldRepairCompose = await confirmOrThrow({
+    const shouldRepairCompose = await doctorConfirm({
       message:
         "Remove legacy .hack/.env* env_file references from compose now?",
       initialValue: true,
@@ -2544,7 +2570,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
     ].join("\n"),
     "env cleanup"
   );
-  const shouldCleanup = await confirmOrThrow({
+  const shouldCleanup = await doctorConfirm({
     message:
       "Remove legacy env files and obsolete project env config entries now?",
     initialValue: true,
@@ -2592,7 +2618,7 @@ async function maybeRepairModernProjectComposeEnvReferences(opts: {
     }),
     "compose env repair"
   );
-  const shouldRepairCompose = await confirmOrThrow({
+  const shouldRepairCompose = await doctorConfirm({
     message: "Remove legacy .hack/.env* env_file references from compose now?",
     initialValue: true,
   });
@@ -2794,7 +2820,7 @@ async function maybeRepairProjectTicketsGitHealth(opts: {
     reasons.push("non-ticket files present");
   }
 
-  const okRepair = await confirmOrThrow({
+  const okRepair = await doctorConfirm({
     message: `Repair tickets git storage now? (${reasons.join("; ")})`,
     initialValue: true,
   });
@@ -2804,7 +2830,7 @@ async function maybeRepairProjectTicketsGitHealth(opts: {
 
   const pruneLegacyRef =
     health.hasLegacyRef &&
-    (await confirmOrThrow({
+    (await doctorConfirm({
       message: `Prune legacy tickets ref ${health.legacyRef ?? "refs/heads/hack/tickets"} after repair?`,
       initialValue: true,
     }));
@@ -2850,7 +2876,7 @@ async function maybeInstallMutagenForDoctorFix(): Promise<void> {
     return;
   }
 
-  const okMutagen = await confirmOrThrow({
+  const okMutagen = await doctorConfirm({
     message: "Install managed mutagen at ~/.hack/bin/mutagen?",
     initialValue: true,
   });
@@ -2873,18 +2899,48 @@ async function maybeInstallMutagenForDoctorFix(): Promise<void> {
   note(`Mutagen install failed (${installed.reason}${detail})`, "doctor");
 }
 
-async function confirmOrThrow(opts: {
+/**
+ * `hack doctor --fix` confirmation helper.
+ *
+ * Wraps {@link confirmSafe} with the doctor-specific non-interactive
+ * defaults: safe remediations (network/CoreDNS/CA/daemon restarts, generated
+ * file writes, tickets git repair) proceed automatically
+ * (`nonInteractive: "accept-default"`); destructive/system-level steps
+ * (anything invoking `sudo`, touching the macOS keychain, or writing outside
+ * the project) decline automatically and print a note via
+ * {@link noteSkippedDoctorFixStep} so the run stays non-blocking and
+ * auditable.
+ */
+async function doctorConfirm(opts: {
   readonly message: string;
   readonly initialValue: boolean;
+  readonly destructive?: boolean;
 }): Promise<boolean> {
-  const ok = await confirm({
+  const ok = await confirmSafe({
     message: opts.message,
     initialValue: opts.initialValue,
+    nonInteractive: opts.destructive ? "decline" : "accept-default",
   });
-  if (isCancel(ok)) {
-    throw new Error("Canceled");
+  if (!ok && opts.destructive && isExplicitlyNonInteractive()) {
+    noteSkippedDoctorFixStep({ what: firstLine(opts.message) });
   }
   return ok;
+}
+
+function firstLine(text: string): string {
+  return text.split("\n")[0] ?? text;
+}
+
+const skippedDoctorFixSteps: string[] = [];
+
+/**
+ * Records a destructive/system-level `--fix` step skipped under
+ * non-interactive mode so {@link runDoctorFix} can print a single summary
+ * note (with the interactive command to run them) instead of scattering the
+ * detail across the remediation log.
+ */
+function noteSkippedDoctorFixStep(opts: { readonly what: string }): void {
+  skippedDoctorFixSteps.push(opts.what);
 }
 
 async function dockerInfoOk(): Promise<boolean> {
@@ -2899,7 +2955,7 @@ async function maybeRepairHackd(): Promise<void> {
   }
 
   if (report.status === "incompatible") {
-    const okRestart = await confirmOrThrow({
+    const okRestart = await doctorConfirm({
       message: "Restart incompatible hackd now?",
       initialValue: true,
     });
@@ -2910,7 +2966,7 @@ async function maybeRepairHackd(): Promise<void> {
   }
 
   if (report.status === "stale") {
-    const okClear = await confirmOrThrow({
+    const okClear = await doctorConfirm({
       message: "Clear stale hackd pid/socket files?",
       initialValue: true,
     });
@@ -2919,7 +2975,7 @@ async function maybeRepairHackd(): Promise<void> {
     }
   }
 
-  const okStart = await confirmOrThrow({
+  const okStart = await doctorConfirm({
     message: "Start hackd now?",
     initialValue: true,
   });
@@ -2969,7 +3025,7 @@ async function ensureIngressNetwork(): Promise<{
   }
 
   const action = ingress.exists ? "Recreate" : "Create";
-  const okNetwork = await confirmOrThrow({
+  const okNetwork = await doctorConfirm({
     message: `${action} ${DEFAULT_INGRESS_NETWORK} with subnet ${DEFAULT_INGRESS_SUBNET}?`,
     initialValue: true,
   });
@@ -3041,7 +3097,7 @@ async function maybeExportCaddyCaCert(opts: {
     return;
   }
 
-  const okCa = await confirmOrThrow({
+  const okCa = await doctorConfirm({
     message: "Export Caddy Local CA cert for container trust?",
     initialValue: true,
   });
@@ -3063,10 +3119,11 @@ async function maybeRepairMacHostTlsTrust(): Promise<void> {
   }
 
   note(hostTlsTrust.message, "doctor");
-  const okRepair = await confirmOrThrow({
+  const okRepair = await doctorConfirm({
     message:
-      "Repair macOS host TLS trust now? (Bun/Node/curl/git trust for https://*.hack)",
+      "Repair macOS host TLS trust now? (Bun/Node/curl/git trust for https://*.hack; may prompt for sudo to update the System keychain)",
     initialValue: true,
+    destructive: true,
   });
   if (!okRepair) {
     return;
@@ -3131,13 +3188,11 @@ async function migrateDnsmasqToContainerIpIfNeeded(): Promise<
     return "not-needed";
   }
 
-  const okMigrate = await confirm({
-    message: `Update dnsmasq to use ${targetIp} for host routing?`,
+  const okMigrate = await doctorConfirm({
+    message: `Update dnsmasq to use ${targetIp} for host routing? (requires sudo to restart dnsmasq and flush the DNS cache)`,
     initialValue: true,
+    destructive: true,
   });
-  if (isCancel(okMigrate)) {
-    throw new Error("Canceled");
-  }
   if (!okMigrate) {
     return "skipped";
   }
@@ -3330,13 +3385,10 @@ async function writeWithPromptIfDifferent(
   }
 
   if (existing !== null) {
-    const ok = await confirm({
+    const ok = await doctorConfirm({
       message: `Overwrite existing file?\n${absolutePath}`,
       initialValue: true,
     });
-    if (isCancel(ok)) {
-      throw new Error("Canceled");
-    }
     if (!ok) {
       return;
     }

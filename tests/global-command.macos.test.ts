@@ -19,6 +19,7 @@ import {
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
 } from "../src/constants.ts";
+import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
 import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
@@ -35,6 +36,7 @@ let tempDir: string | null = null;
 let originalHome: string | undefined;
 let originalLogger: string | undefined;
 let originalUser: string | undefined;
+let originalNoInteractive: string | undefined;
 let reachabilityByHost: Record<string, boolean> = {};
 let idUser = "mock-user";
 let pathExistsOverrides = new Map<string, boolean>();
@@ -221,6 +223,7 @@ beforeEach(async () => {
   originalHome = process.env.HOME;
   originalLogger = process.env.HACK_LOGGER;
   originalUser = process.env.USER;
+  originalNoInteractive = process.env.HACK_NO_INTERACTIVE;
   tempDir = await mkdtemp(join(tmpdir(), "hack-global-macos-"));
   process.env.HOME = tempDir;
   process.env.USER = "env-user";
@@ -246,6 +249,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  resetNoInteractiveFlagForTests();
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
@@ -253,6 +257,11 @@ afterEach(async () => {
   process.env.HOME = originalHome;
   process.env.USER = originalUser;
   process.env.HACK_LOGGER = originalLogger;
+  if (originalNoInteractive === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_NO_INTERACTIVE");
+  } else {
+    process.env.HACK_NO_INTERACTIVE = originalNoInteractive;
+  }
   resetGumPathCacheForTests();
 });
 
@@ -1043,7 +1052,7 @@ test("global trust prepares host runtime trust env for future shells", async () 
   );
 });
 
-test("global trust leaves host TLS env unchanged when keychain trust is declined", async () => {
+test("global trust still prepares host TLS env when keychain trust is declined", async () => {
   const caddyCompose = join(
     tempDir!,
     GLOBAL_HACK_DIR_NAME,
@@ -1075,6 +1084,19 @@ test("global trust leaves host TLS env unchanged when keychain trust is declined
     ) {
       return { exitCode: 0, stdout: "caddy-123\n", stderr: "" };
     }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-a" &&
+      cmd[3] === "-p"
+    ) {
+      return {
+        exitCode: 0,
+        stdout:
+          "-----BEGIN CERTIFICATE-----\nSYSTEM\n-----END CERTIFICATE-----\n",
+        stderr: "",
+      };
+    }
     return null;
   };
 
@@ -1097,8 +1119,10 @@ test("global trust leaves host TLS env unchanged when keychain trust is declined
   );
 
   expect(code).toBe(0);
-  expect(await fileExists(bundlePath)).toBe(false);
-  expect(await fileExists(envScriptPath)).toBe(false);
+  // Declining the System keychain step (browser trust) no longer blocks
+  // Bun/Node/curl/git trust env, which is independent of the keychain.
+  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+  expect(await fileExists(envScriptPath)).toBe(true);
   expect(runCalls).toEqual(
     expect.arrayContaining([
       [
@@ -1107,11 +1131,12 @@ test("global trust leaves host TLS env unchanged when keychain trust is declined
         "caddy-123:/data/caddy/pki/authorities/local/root.crt",
         localCaPath,
       ],
+      ["launchctl", "setenv", "NODE_EXTRA_CA_CERTS", localCaPath],
     ])
   );
   expect(runCalls).not.toEqual(
     expect.arrayContaining([
-      ["launchctl", "setenv", "NODE_EXTRA_CA_CERTS", localCaPath],
+      expect.arrayContaining(["sudo", "security", "add-trusted-cert"]),
     ])
   );
 });
@@ -1195,5 +1220,195 @@ test("global trust falls back to an existing exported CA when Caddy is unavailab
   );
   expect(runCalls).not.toEqual(
     expect.arrayContaining([expect.arrayContaining(["docker", "cp"])])
+  );
+});
+
+test("global trust proceeds under --no-interactive when sudo is passwordless", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+
+  const localCaPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-local-authority.crt"
+  );
+  await mkdir(dirname(localCaPath), { recursive: true });
+  await writeFile(
+    localCaPath,
+    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
+  );
+
+  execMockResponder = (cmd) => {
+    if (
+      cmd[0] === "docker" &&
+      cmd[1] === "compose" &&
+      cmd[2] === "-f" &&
+      cmd[4] === "ps"
+    ) {
+      return { exitCode: 0, stdout: "caddy-123\n", stderr: "" };
+    }
+    if (cmd[0] === "sudo" && cmd[1] === "-n" && cmd[2] === "true") {
+      return { exitCode: 0, stdout: "", stderr: "" };
+    }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-c"
+    ) {
+      // Not yet trusted: fast-path lookup misses so the confirmed flow
+      // proceeds to the `sudo security add-trusted-cert` install.
+      return { exitCode: 1, stdout: "", stderr: "" };
+    }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-a" &&
+      cmd[3] === "-p"
+    ) {
+      return {
+        exitCode: 0,
+        stdout:
+          "-----BEGIN CERTIFICATE-----\nSYSTEM\n-----END CERTIFICATE-----\n",
+        stderr: "",
+      };
+    }
+    return null;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "trust", "--no-interactive"]);
+
+  const bundlePath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-bundle.pem"
+  );
+
+  expect(code).toBe(0);
+  // Non-interactive proceeds with the documented default (trust): the sudo
+  // keychain install runs without ever calling clack's confirm prompt.
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      [
+        "sudo",
+        "security",
+        "add-trusted-cert",
+        "-d",
+        "-r",
+        "trustRoot",
+        "-k",
+        "/Library/Keychains/System.keychain",
+        localCaPath,
+      ],
+    ])
+  );
+  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+});
+
+test("global trust skips the keychain step under --no-interactive when sudo needs a password, but still writes host trust env", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+
+  const localCaPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-local-authority.crt"
+  );
+  await mkdir(dirname(localCaPath), { recursive: true });
+  await writeFile(
+    localCaPath,
+    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
+  );
+
+  execMockResponder = (cmd) => {
+    if (
+      cmd[0] === "docker" &&
+      cmd[1] === "compose" &&
+      cmd[2] === "-f" &&
+      cmd[4] === "ps"
+    ) {
+      return { exitCode: 0, stdout: "caddy-123\n", stderr: "" };
+    }
+    if (cmd[0] === "sudo" && cmd[1] === "-n" && cmd[2] === "true") {
+      // sudo would prompt for a password; there is no TTY to answer it.
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: "sudo: a password is required",
+      };
+    }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-c"
+    ) {
+      return { exitCode: 1, stdout: "", stderr: "" };
+    }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-a" &&
+      cmd[3] === "-p"
+    ) {
+      return {
+        exitCode: 0,
+        stdout:
+          "-----BEGIN CERTIFICATE-----\nSYSTEM\n-----END CERTIFICATE-----\n",
+        stderr: "",
+      };
+    }
+    return null;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "trust", "--no-interactive"]);
+
+  const bundlePath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-bundle.pem"
+  );
+  const envScriptPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-env.sh"
+  );
+
+  expect(code).toBe(0);
+  // The sudo-gated keychain install never runs (would have blocked on a
+  // password prompt), but host trust env (Bun/Node/curl/git) is still
+  // prepared so non-interactive runs get CLI-tool trust.
+  expect(runCalls).not.toEqual(
+    expect.arrayContaining([
+      expect.arrayContaining(["sudo", "security", "add-trusted-cert"]),
+    ])
+  );
+  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+  expect(await Bun.file(bundlePath).text()).toContain("SYSTEM");
+  expect(await Bun.file(envScriptPath).text()).toContain("NODE_EXTRA_CA_CERTS");
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      ["launchctl", "setenv", "NODE_EXTRA_CA_CERTS", localCaPath],
+    ])
   );
 });

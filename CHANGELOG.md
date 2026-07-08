@@ -1,3 +1,14 @@
+## 3.2.0 (2026-07-08)
+
+* Merge branch 'main' into fix/container-trust-bundle ([8338b58](https://github.com/hack-dance/hack/commit/8338b58))
+* Merge pull request #56 from hack-dance/fix/container-trust-bundle ([9cb82c1](https://github.com/hack-dance/hack/commit/9cb82c1)), closes [#56](https://github.com/hack-dance/hack/issues/56)
+* Merge pull request #57 from hack-dance/fix/global-trust-platform-order ([e3c6da0](https://github.com/hack-dance/hack/commit/e3c6da0)), closes [#57](https://github.com/hack-dance/hack/issues/57)
+* fix(tls): check isMac before isLinux in globalTrust; pin platform in mac suite ([4d35428](https://github.com/hack-dance/hack/commit/4d35428))
+* fix(tls): containers get combined public+local trust, never a stripped bundle ([651f234](https://github.com/hack-dance/hack/commit/651f234))
+* fix(tls): generate the combined trust bundle on Linux hosts ([e339920](https://github.com/hack-dance/hack/commit/e339920))
+* test(tls): neutral fixture paths for the privacy check ([c4be004](https://github.com/hack-dance/hack/commit/c4be004))
+* feat(agents): onboarding lessons from first field hack init --with run ([2190dd8](https://github.com/hack-dance/hack/commit/2190dd8))
+
 ## <small>3.1.1 (2026-07-07)</small>
 
 * Merge pull request #55 from hack-dance/fix/release-intel-macos-build ([e5f7646](https://github.com/hack-dance/hack/commit/e5f7646)), closes [#55](https://github.com/hack-dance/hack/issues/55)

@@ -6,6 +6,7 @@ import {
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import {
   isLinkedGitWorktree,
+  listGitWorktrees,
   resolveGitCurrentBranch,
 } from "./git-worktree.ts";
 import { getString, isRecord } from "./guards.ts";
@@ -213,7 +214,46 @@ export async function resolveEffectiveBranch(opts: {
     return { branch: null, source: "none", gitBranch };
   }
 
-  return { branch: slug, source: "worktree", gitBranch };
+  const branch = await resolveCollisionFreeBranchSlug({
+    slug,
+    gitBranch,
+    projectRoot: opts.projectRoot,
+  });
+  return { branch, source: "worktree", gitBranch };
+}
+
+/**
+ * Guards the auto-derived branch slug against sanitization collisions:
+ * `feature/api` and `feature-api` both sanitize to `feature-api`, which
+ * would silently share one branch instance between two worktrees (and let
+ * either stop the other's containers). When another linked worktree's
+ * branch sanitizes to the same slug from a DIFFERENT raw name, both sides
+ * deterministically get a short raw-name hash suffix, keeping every
+ * worktree's derived instance distinct and stable across invocations.
+ */
+async function resolveCollisionFreeBranchSlug(opts: {
+  readonly slug: string;
+  readonly gitBranch: string;
+  readonly projectRoot: string;
+}): Promise<string> {
+  const worktrees = await listGitWorktrees({ repoRoot: opts.projectRoot });
+  if (worktrees === null) {
+    return opts.slug;
+  }
+  const colliding = worktrees.some(
+    (entry) =>
+      entry.branch !== null &&
+      entry.branch !== opts.gitBranch &&
+      sanitizeBranchSlug(entry.branch) === opts.slug
+  );
+  if (!colliding) {
+    return opts.slug;
+  }
+  const hash = new Bun.CryptoHasher("sha1")
+    .update(opts.gitBranch)
+    .digest("hex")
+    .slice(0, 4);
+  return `${opts.slug}-${hash}`;
 }
 
 function defaultBranchesFile(): BranchesFile {

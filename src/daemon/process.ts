@@ -66,3 +66,83 @@ export async function waitForProcessExit({
 function sleep({ ms }: { readonly ms: number }): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+const DAEMON_COMMAND_MARKER = "daemon start --foreground";
+
+/**
+ * Finds hackd processes that the pid file does not track ("orphans").
+ *
+ * Orphans appear when a daemon keeps running after its pid/socket files were
+ * replaced or cleared (e.g. a launchd-managed instance surviving a manual
+ * restart). They are invisible to status/start/clear, which only consult the
+ * pid file — the root cause of "daemon starts then exits" contradictions:
+ * the orphan holds the API while every newly spawned daemon exits.
+ *
+ * @param opts.trackedPid - pid currently recorded in the pid file, if any.
+ * @param opts.psLines - injectable `ps -axo pid=,command=` lines for tests.
+ */
+export async function findOrphanDaemonProcesses(opts: {
+  readonly trackedPid: number | null;
+  readonly psLines?: readonly string[];
+}): Promise<readonly number[]> {
+  const lines = opts.psLines ?? (await listProcessTable());
+  const orphans: number[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const spaceIdx = trimmed.indexOf(" ");
+    if (spaceIdx <= 0) {
+      continue;
+    }
+    const pid = Number.parseInt(trimmed.slice(0, spaceIdx), 10);
+    const command = trimmed.slice(spaceIdx + 1);
+    if (!Number.isFinite(pid) || pid <= 0) {
+      continue;
+    }
+    if (!command.includes(DAEMON_COMMAND_MARKER)) {
+      continue;
+    }
+    if (pid === opts.trackedPid || pid === process.pid) {
+      continue;
+    }
+    orphans.push(pid);
+  }
+  return orphans;
+}
+
+async function listProcessTable(): Promise<readonly string[]> {
+  const proc = Bun.spawn(["ps", "-axo", "pid=,command="], {
+    stdout: "pipe",
+    stderr: "ignore",
+    stdin: "ignore",
+  });
+  const text = await new Response(proc.stdout).text();
+  await proc.exited;
+  return text.split("\n");
+}
+
+/**
+ * Terminates orphan daemon processes (SIGTERM, bounded wait). Returns the
+ * pids that were actually terminated.
+ */
+export async function terminateOrphanDaemonProcesses(opts: {
+  readonly pids: readonly number[];
+  readonly timeoutMs?: number;
+}): Promise<readonly number[]> {
+  const terminated: number[] = [];
+  for (const pid of opts.pids) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      continue;
+    }
+    const exited = await waitForProcessExit({
+      pid,
+      timeoutMs: opts.timeoutMs ?? 3000,
+      pollMs: 100,
+    });
+    if (exited) {
+      terminated.push(pid);
+    }
+  }
+  return terminated;
+}

@@ -14,10 +14,16 @@ import {
   installLaunchdService,
   kickstartLaunchdService,
   type LaunchdServiceStatus,
+  repairLaunchdProgramIfInvalid,
   uninstallLaunchdService,
 } from "../daemon/launchd.ts";
 import { type DaemonPaths, resolveDaemonPaths } from "../daemon/paths.ts";
-import { removeFileIfExists, waitForProcessExit } from "../daemon/process.ts";
+import {
+  findOrphanDaemonProcesses,
+  removeFileIfExists,
+  terminateOrphanDaemonProcesses,
+  waitForProcessExit,
+} from "../daemon/process.ts";
 import { runDaemon } from "../daemon/server.ts";
 import {
   buildDaemonRepairMessage,
@@ -220,11 +226,38 @@ async function handleDaemonStart({
   const paths = resolveDaemonPaths({});
   const status = await readDaemonStatus({ paths });
 
-  if (status.running) {
-    logger.success({
-      message: `hackd already running (pid ${status.pid ?? "unknown"})`,
+  if (status.running && status.pid !== null) {
+    const api = await checkDaemonApi({
+      socketExists: status.socketExists,
+      paths,
     });
-    return 0;
+    if (api.reachable && !api.compatible) {
+      // An incompatible daemon (usually a pre-upgrade binary) must be
+      // replaced, not reported as success — leaving it running is how
+      // machines end up with doctor/status contradictions.
+      logger.warn({
+        message: `Replacing incompatible hackd (pid ${status.pid})`,
+      });
+      await stopDaemonProcess({ pid: status.pid, paths });
+    } else {
+      logger.success({
+        message: `hackd already running (pid ${status.pid})`,
+      });
+      return 0;
+    }
+  }
+
+  // Daemons that outlived their pid file (e.g. a launchd-managed instance
+  // surviving a manual clear/restart) hold the API socket invisibly and
+  // make every freshly spawned daemon exit cleanly. Sweep them first.
+  const orphans = await findOrphanDaemonProcesses({
+    trackedPid: status.pid,
+  });
+  if (orphans.length > 0) {
+    logger.warn({
+      message: `Stopping orphaned hackd process(es) not tracked by the pid file: ${orphans.join(", ")}`,
+    });
+    await terminateOrphanDaemonProcesses({ pids: orphans });
   }
 
   await removeFileIfExists({ path: paths.socketPath });
@@ -233,6 +266,43 @@ async function handleDaemonStart({
   if (args.options.foreground) {
     await runDaemon({ paths, foreground: true });
     return 0;
+  }
+
+  // When launchd manages the daemon, start through launchd — spawning a
+  // bare process next to a loaded agent means two process managers fight
+  // over one socket and pid file.
+  const launchdStatus = await resolveLaunchdStatus({ paths });
+  if (launchdStatus?.loaded) {
+    const repair = await repairLaunchdProgramIfInvalid({ paths });
+    if (repair === "repaired") {
+      logger.warn({
+        message:
+          "Repaired launchd service: its program path was invalid (stale or compiled-binary virtual path)",
+      });
+    }
+    // launchd owns the daemon: never spawn a bare process next to it —
+    // two process managers for one socket is how machines end up with
+    // start-then-exit flapping and stale-pid contradictions.
+    const kick = await kickstartLaunchdService();
+    if (!kick.ok) {
+      logger.error({
+        message: `launchd kickstart failed: ${kick.error ?? "unknown error"} | Check: hack daemon logs --tail 200`,
+      });
+      return 1;
+    }
+    const startedViaLaunchd = await waitForDaemonStart({
+      paths,
+      timeoutMs: 8000,
+    });
+    if (startedViaLaunchd) {
+      logger.success({ message: "hackd started (launchd)" });
+      return 0;
+    }
+    logger.warn({
+      message:
+        "launchd kickstarted hackd but it did not report ready yet | Check: hack daemon logs --tail 200",
+    });
+    return 1;
   }
 
   const invocation = await resolveHackInvocation();
@@ -254,6 +324,31 @@ async function handleDaemonStart({
 
   logger.success({ message: "hackd started" });
   return 0;
+}
+
+async function stopDaemonProcess(opts: {
+  readonly pid: number;
+  readonly paths: DaemonPaths;
+}): Promise<void> {
+  try {
+    process.kill(opts.pid, "SIGTERM");
+  } catch {
+    // Already gone.
+  }
+  const exited = await waitForProcessExit({
+    pid: opts.pid,
+    timeoutMs: 2000,
+    pollMs: 200,
+  });
+  if (!exited) {
+    try {
+      process.kill(opts.pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+  await removeFileIfExists({ path: opts.paths.pidPath });
+  await removeFileIfExists({ path: opts.paths.socketPath });
 }
 
 async function handleDaemonStop({
@@ -506,11 +601,26 @@ async function handleDaemonClear({
     return 1;
   }
 
+  const orphans = await findOrphanDaemonProcesses({
+    trackedPid: status.pid,
+  });
+  if (orphans.length > 0) {
+    logger.warn({
+      message: `Stopping orphaned hackd process(es): ${orphans.join(", ")}`,
+    });
+    await terminateOrphanDaemonProcesses({ pids: orphans });
+  }
+
   const pidExists = await pathExists(paths.pidPath);
   const socketExists = await pathExists(paths.socketPath);
 
   if (!(pidExists || socketExists)) {
-    logger.info({ message: "No stale hackd state found" });
+    logger.info({
+      message:
+        orphans.length > 0
+          ? "Cleared orphaned hackd process(es); no stale files found"
+          : "No stale hackd state found",
+    });
     return 0;
   }
 
@@ -549,10 +659,12 @@ async function handleDaemonRestart({
 
 async function waitForDaemonStart({
   paths,
+  timeoutMs,
 }: {
   readonly paths: ReturnType<typeof resolveDaemonPaths>;
+  readonly timeoutMs?: number;
 }): Promise<boolean> {
-  const deadline = Date.now() + 2000;
+  const deadline = Date.now() + (timeoutMs ?? 2000);
   while (Date.now() < deadline) {
     const status = await readDaemonStatus({ paths });
     if (status.running && status.socketExists) {

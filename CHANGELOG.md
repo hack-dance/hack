@@ -1,3 +1,8 @@
+## <small>3.3.1 (2026-07-08)</small>
+
+* Merge pull request #59 from hack-dance/fix/review-comments-round2 ([e941ca3](https://github.com/hack-dance/hack/commit/e941ca3)), closes [#59](https://github.com/hack-dance/hack/issues/59)
+* fix: address post-merge review findings across PRs 54 and 58 ([11f5788](https://github.com/hack-dance/hack/commit/11f5788))
+
 ## 3.3.0 (2026-07-08)
 
 * Merge branch 'docs/partial-adoption' into feat/init-discovery-validation ([064db0e](https://github.com/hack-dance/hack/commit/064db0e))

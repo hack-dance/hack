@@ -204,6 +204,7 @@ const osMock = await registerScopedModuleMock({
   specifier: "../src/lib/os.ts",
   overrides: {
     isMac: () => true,
+    isLinux: () => false,
     openUrl: async () => 0,
   },
 });

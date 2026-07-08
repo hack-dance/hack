@@ -2720,20 +2720,19 @@ async function globalTrust(): Promise<number> {
     return 1;
   }
 
-  if (isLinux()) {
-    await configureLinuxHostTlsTrust({ certPath });
+  if (isMac()) {
+    const trustReady = await ensureMacTrustCaddyLocalCa({
+      certPath,
+    });
+    if (trustReady) {
+      await configureMacHostTlsTrust({
+        certPath,
+      });
+    }
     return 0;
   }
 
-  const trustReady = await ensureMacTrustCaddyLocalCa({
-    certPath,
-  });
-  if (trustReady) {
-    await configureMacHostTlsTrust({
-      certPath,
-    });
-  }
-
+  await configureLinuxHostTlsTrust({ certPath });
   return 0;
 }
 

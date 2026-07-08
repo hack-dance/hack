@@ -3420,6 +3420,8 @@ async function handleInit({
       "Next:",
       "  hack up",
       "  hack open",
+      "",
+      "First time on this machine? Run `hack global install` for *.hack DNS/TLS (needs sudo).",
     ].join("\n"),
     "Initialized"
   );
@@ -3566,6 +3568,10 @@ async function handleInitAuto({
   });
   logger.info({
     message: "Next: hack up --detach && hack open",
+  });
+  logger.info({
+    message:
+      "First time on this machine? Run `hack global install` for *.hack DNS/TLS (needs sudo).",
   });
 
   if (withValue) {

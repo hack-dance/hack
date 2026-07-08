@@ -108,7 +108,10 @@ import {
   resolveLifecycleLogPath,
   upsertLifecycleStateEntry,
 } from "../lib/lifecycle-runtime.ts";
-import { appendHackHostTrustEnvironment } from "../lib/local-ca.ts";
+import {
+  appendHackHostTrustEnvironment,
+  findHackHostTrustBundlePath,
+} from "../lib/local-ca.ts";
 import {
   buildLogSelector,
   resolveShouldTryLoki,
@@ -2335,6 +2338,7 @@ async function resolveBranchComposeFiles(opts: {
 
 const INTERNAL_CA_CONTAINER_DIR = "/etc/hack/ca";
 const INTERNAL_CA_CONTAINER_PATH = `${INTERNAL_CA_CONTAINER_DIR}/caddy-local-authority.crt`;
+const INTERNAL_TRUST_BUNDLE_CONTAINER_PATH = `${INTERNAL_CA_CONTAINER_DIR}/trust-bundle.pem`;
 
 async function resolveInternalComposeOverride(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
@@ -2367,8 +2371,8 @@ async function resolveInternalComposeOverride(opts: {
     devHost: opts.devHost ?? null,
     aliasHost: opts.aliasHost ?? null,
   });
-  const caPath = await resolveInternalTlsCaPath({ enabled: internal.tls });
-  if (!(dns.dnsServer || caPath || dns.caddyIp)) {
+  const tls = await resolveInternalTlsPaths({ enabled: internal.tls });
+  if (!(dns.dnsServer || tls.caPath || dns.caddyIp)) {
     return null;
   }
 
@@ -2382,7 +2386,8 @@ async function resolveInternalComposeOverride(opts: {
     services,
     dnsServer: dns.dnsServer,
     extraHosts,
-    caPath,
+    caPath: tls.caPath,
+    trustBundlePath: tls.bundlePath,
   });
 
   return await writeInternalComposeOverride({
@@ -2484,11 +2489,14 @@ async function resolveCaddyHostsForBranch(opts: {
   });
 }
 
-async function resolveInternalTlsCaPath(opts: {
+async function resolveInternalTlsPaths(opts: {
   readonly enabled: boolean;
-}): Promise<string | null> {
+}): Promise<{
+  readonly caPath: string | null;
+  readonly bundlePath: string | null;
+}> {
   if (!opts.enabled) {
-    return null;
+    return { caPath: null, bundlePath: null };
   }
 
   const caPath = await resolveCaddyLocalCaPath();
@@ -2497,8 +2505,17 @@ async function resolveInternalTlsCaPath(opts: {
       message:
         "Caddy Local CA cert not found; internal TLS trust is disabled. Run `hack global trust` (or `hack global ca`).",
     });
+    return { caPath: null, bundlePath: null };
   }
-  return caPath;
+
+  const bundlePath = await findHackHostTrustBundlePath();
+  if (!bundlePath) {
+    logger.warn({
+      message:
+        "Combined trust bundle not found; containers get Node-only trust for *.hack hosts (OpenSSL-based tools keep public roots but won't trust internal TLS). Run `hack global trust` to generate it.",
+    });
+  }
+  return { caPath, bundlePath };
 }
 
 function buildInternalExtraHosts(opts: {
@@ -2516,24 +2533,26 @@ function buildInternalExtraHosts(opts: {
   };
 }
 
-function renderInternalOverride(opts: {
+export function renderInternalOverride(opts: {
   readonly services: readonly InternalOverrideService[];
   readonly dnsServer: string | null;
   readonly extraHosts: Record<string, string>;
   readonly caPath: string | null;
+  readonly trustBundlePath: string | null;
 }): string {
   const overrideServices = buildInternalOverrideServices({
     services: opts.services,
     dnsServer: opts.dnsServer,
     extraHosts: opts.extraHosts,
     caPath: opts.caPath,
+    trustBundlePath: opts.trustBundlePath,
   });
   const override = { services: overrideServices };
   const yaml = YAML.stringify(override, null, 2);
   return ensureTrailingNewline(cleanupYaml(yaml));
 }
 
-interface InternalOverrideService {
+export interface InternalOverrideService {
   readonly name: string;
   readonly enableInternalDns: boolean;
 }
@@ -2543,6 +2562,7 @@ function buildInternalOverrideServices(opts: {
   readonly dnsServer: string | null;
   readonly extraHosts: Record<string, string>;
   readonly caPath: string | null;
+  readonly trustBundlePath: string | null;
 }): Record<string, Record<string, unknown>> {
   const overrideServices: Record<string, Record<string, unknown>> = {};
 
@@ -2555,8 +2575,17 @@ function buildInternalOverrideServices(opts: {
       entry.extra_hosts = opts.extraHosts;
     }
     if (opts.caPath) {
-      entry.volumes = [`${opts.caPath}:${INTERNAL_CA_CONTAINER_PATH}:ro`];
-      entry.environment = buildInternalTlsEnvironment();
+      entry.volumes = [
+        `${opts.caPath}:${INTERNAL_CA_CONTAINER_PATH}:ro`,
+        ...(opts.trustBundlePath
+          ? [
+              `${opts.trustBundlePath}:${INTERNAL_TRUST_BUNDLE_CONTAINER_PATH}:ro`,
+            ]
+          : []),
+      ];
+      entry.environment = buildInternalTlsEnvironment({
+        bundleMounted: opts.trustBundlePath !== null,
+      });
     }
     overrideServices[service.name] = entry;
   }
@@ -2564,14 +2593,33 @@ function buildInternalOverrideServices(opts: {
   return overrideServices;
 }
 
-function buildInternalTlsEnvironment(): Record<string, string> {
-  return {
-    SSL_CERT_FILE: INTERNAL_CA_CONTAINER_PATH,
-    SSL_CERT_DIR: INTERNAL_CA_CONTAINER_DIR,
+/**
+ * Env vars granting containers trust for hack's internal TLS hosts.
+ *
+ * Replace-semantics vars (SSL_CERT_FILE, CURL_CA_BUNDLE, REQUESTS_CA_BUNDLE,
+ * GIT_SSL_CAINFO) may ONLY point at the combined public+local bundle — never
+ * at the bare local CA, which would strip public roots from every
+ * OpenSSL-based tool in the container (.NET/NuGet, git, python-requests).
+ * Without the bundle, only append-semantics trust is set. SSL_CERT_DIR is
+ * never set: overriding it discards the image's default hashed cert dir.
+ */
+export function buildInternalTlsEnvironment(opts: {
+  readonly bundleMounted: boolean;
+}): Record<string, string> {
+  const base: Record<string, string> = {
     NODE_EXTRA_CA_CERTS: INTERNAL_CA_CONTAINER_PATH,
-    REQUESTS_CA_BUNDLE: INTERNAL_CA_CONTAINER_PATH,
-    CURL_CA_BUNDLE: INTERNAL_CA_CONTAINER_PATH,
-    GIT_SSL_CAINFO: INTERNAL_CA_CONTAINER_PATH,
+    HACK_LOCAL_CA_CERT: INTERNAL_CA_CONTAINER_PATH,
+  };
+  if (!opts.bundleMounted) {
+    return base;
+  }
+  return {
+    ...base,
+    SSL_CERT_FILE: INTERNAL_TRUST_BUNDLE_CONTAINER_PATH,
+    CURL_CA_BUNDLE: INTERNAL_TRUST_BUNDLE_CONTAINER_PATH,
+    REQUESTS_CA_BUNDLE: INTERNAL_TRUST_BUNDLE_CONTAINER_PATH,
+    GIT_SSL_CAINFO: INTERNAL_TRUST_BUNDLE_CONTAINER_PATH,
+    HACK_HOST_TRUST_BUNDLE: INTERNAL_TRUST_BUNDLE_CONTAINER_PATH,
   };
 }
 

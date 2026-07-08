@@ -148,6 +148,9 @@ function renderPlatformPhase(): string[] {
     "",
     "- Ops/tooling container: add a dedicated service (same image/network as the app, no ports, no Caddy labels) for one-off tooling — migrations, seeds, cron-like jobs — and run it with `hack run <ops-service> <cmd...>` instead of baking tooling into app images or running it on the host.",
     "- Keep images matched to the project runtime version (check `.nvmrc`, `engines`, or the lockfile) so container installs match CI/prod.",
+    "- Dev-server host checks: framework dev servers reject unknown hostnames by default — allow the project's `.hack` hosts through (Vite `server.allowedHosts`, Astro/Vike equivalents, Next.js `allowedDevOrigins`, Rails `config.hosts`). Dev-server config only; leave prod builds untouched.",
+    '- App-level "is this URL local?" guards (auth callbacks, transactional-email gates, CSRF origin checks) may not recognize `*.hack` as local — extend them to treat `*.hack` as a local dev host, but keep the public-resolvable OAuth alias (`*.hack.gy` by default) OUT of the local allowlist so deployed-environment guards still apply to it. Lock both behaviors in with tests.',
+    "- `hack global install` and `hack global trust` need sudo/interactive steps (DNS resolver, CA trust) an agent cannot complete — set the stack up fully, verify with in-container checks or `curl --resolve`, and hand the human the exact global commands to run for browser access.",
   ];
 }
 

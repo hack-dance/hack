@@ -78,8 +78,13 @@ graph LR
 When `internal.dns` / `internal.tls` are enabled, `hack up` writes a Compose override that:
 
 - sets each service’s DNS to the CoreDNS container
-- mounts Caddy’s local CA cert into each service
-- sets common SSL env vars (Node, curl, git, requests)
+- mounts Caddy’s local CA cert into each service, and — once `hack global trust` has generated it —
+  the combined public+local trust bundle alongside it
+- points replace-semantics SSL env vars (`SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`,
+  `GIT_SSL_CAINFO`) at the combined bundle, so OpenSSL-based tools (.NET/NuGet, git,
+  python-requests) trust both public roots and `*.hack`; `NODE_EXTRA_CA_CERTS` appends the local CA
+  for Node. Without the bundle, only the append-semantics vars are set — public TLS is never broken
+  as a side effect of internal trust
 - injects `extra_hosts` mappings for `*.hack` → current Caddy IP (for runtimes that ignore custom DNS)
 - merges any repo-local `.hack/.internal/extra-hosts.json` entries (for host tunnels / dynamic domains)
 

@@ -55,15 +55,15 @@ describe("container TLS trust environment", () => {
       services: [{ name: "api", enableInternalDns: true }],
       dnsServer: null,
       extraHosts: {},
-      caPath: "/home/x/.hack/caddy/pki/caddy-local-authority.crt",
-      trustBundlePath: "/home/x/.hack/caddy/pki/caddy-host-trust-bundle.pem",
+      caPath: "/tmp/hack-pki/caddy-local-authority.crt",
+      trustBundlePath: "/tmp/hack-pki/caddy-host-trust-bundle.pem",
     });
 
     expect(yaml).toContain(
-      "/home/x/.hack/caddy/pki/caddy-local-authority.crt:/etc/hack/ca/caddy-local-authority.crt:ro"
+      "/tmp/hack-pki/caddy-local-authority.crt:/etc/hack/ca/caddy-local-authority.crt:ro"
     );
     expect(yaml).toContain(
-      "/home/x/.hack/caddy/pki/caddy-host-trust-bundle.pem:/etc/hack/ca/trust-bundle.pem:ro"
+      "/tmp/hack-pki/caddy-host-trust-bundle.pem:/etc/hack/ca/trust-bundle.pem:ro"
     );
     expect(yaml).toContain("SSL_CERT_FILE: /etc/hack/ca/trust-bundle.pem");
     expect(yaml).not.toContain("SSL_CERT_DIR");
@@ -74,7 +74,7 @@ describe("container TLS trust environment", () => {
       services: [{ name: "api", enableInternalDns: true }],
       dnsServer: null,
       extraHosts: {},
-      caPath: "/home/x/.hack/caddy/pki/caddy-local-authority.crt",
+      caPath: "/tmp/hack-pki/caddy-local-authority.crt",
       trustBundlePath: null,
     });
 

@@ -5431,6 +5431,7 @@ async function runUpCommand({
     detach,
     cwd: dirname(project.composeFile),
     env: envOverrides.env,
+    routeStdoutToStderr: json,
   });
   if (upCode !== 0) {
     await removeProjectRuntimeStateEntry({
@@ -5673,6 +5674,7 @@ async function runDownCommand({
     composeProject: composeProjectName,
     profiles,
     cwd: dirname(project.composeFile),
+    routeStdoutToStderr: json,
   });
 
   try {
@@ -5756,6 +5758,7 @@ async function runRestartDownPhase(opts: {
   readonly lifecycleComposeProject: string;
   readonly profiles: readonly string[];
   readonly branch: string | null;
+  readonly routeStdoutToStderr?: boolean;
   readonly envForCompose: Readonly<Record<string, string>>;
 }): Promise<number> {
   const downBefore = await runLifecycleCommands({
@@ -5775,6 +5778,7 @@ async function runRestartDownPhase(opts: {
     composeProject: opts.composeProjectName,
     profiles: opts.profiles,
     cwd: dirname(opts.project.composeFile),
+    routeStdoutToStderr: opts.routeStdoutToStderr === true,
   });
   try {
     await stopLifecycleProcesses({
@@ -5821,6 +5825,7 @@ async function runRestartUpPhase(opts: {
   readonly branch: string | null;
   readonly envName?: string | null;
   readonly detach?: boolean;
+  readonly routeStdoutToStderr?: boolean;
 }): Promise<number> {
   await maybeSyncOauthAliasesInCompose({ project: opts.project });
 
@@ -5906,6 +5911,7 @@ async function runRestartUpPhase(opts: {
     detach: opts.detach === true,
     cwd: dirname(opts.project.composeFile),
     env: envOverrides.env,
+    routeStdoutToStderr: opts.routeStdoutToStderr === true,
   });
   if (upCode !== 0) {
     await removeProjectRuntimeStateEntry({
@@ -6043,6 +6049,7 @@ async function runRestartCommand({
     profiles,
     branch,
     envForCompose: lifecycleEnv,
+    routeStdoutToStderr: json,
   });
   if (downCode !== 0) {
     if (json) {
@@ -6074,6 +6081,7 @@ async function runRestartCommand({
     envName: effectiveEnvName,
     // `--json` implies detach so the command terminates with a result.
     detach: json,
+    routeStdoutToStderr: json,
   });
 
   if (!json) {

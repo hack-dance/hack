@@ -58,6 +58,12 @@ export interface RunOptions {
   readonly cwd?: string;
   readonly env?: Record<string, string>;
   readonly stdin?: "inherit" | "pipe" | "ignore";
+  /**
+   * Route the child's stdout to THIS process's stderr (fd 2). Used by
+   * `--json` code paths where stdout must stay a single parseable
+   * envelope while subprocess output remains visible to humans.
+   */
+  readonly stdout?: "inherit" | "stderr";
 }
 
 export async function run(
@@ -68,7 +74,7 @@ export async function run(
     cwd: opts.cwd,
     env: buildSpawnEnv(opts.env),
     stdin: opts.stdin ?? "inherit",
-    stdout: "inherit",
+    stdout: opts.stdout === "stderr" ? 2 : "inherit",
     stderr: "inherit",
   });
 

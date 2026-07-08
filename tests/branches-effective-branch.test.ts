@@ -134,3 +134,46 @@ test("non-git directories resolve to the base instance", async () => {
   expect(resolved.source).toBe("none");
   expect(resolved.branch).toBeNull();
 });
+
+test("colliding sanitized slugs across worktrees get deterministic distinct suffixes", async () => {
+  const fixture = await createFixture({ branch: "feature/api" });
+  const secondRoot = resolve(fixture.primaryRoot, "..", "linked-2");
+  await runGit(
+    ["worktree", "add", "-b", "feature-api", secondRoot],
+    fixture.primaryRoot
+  );
+
+  const first = await resolveEffectiveBranch({
+    explicitBranch: null,
+    projectRoot: fixture.linkedRoot,
+    autoBranchEnabled: true,
+  });
+  const second = await resolveEffectiveBranch({
+    explicitBranch: null,
+    projectRoot: secondRoot,
+    autoBranchEnabled: true,
+  });
+
+  expect(first.branch).not.toBe(second.branch);
+  expect(first.branch).toStartWith("feature-api-");
+  expect(second.branch).toStartWith("feature-api-");
+
+  const firstAgain = await resolveEffectiveBranch({
+    explicitBranch: null,
+    projectRoot: fixture.linkedRoot,
+    autoBranchEnabled: true,
+  });
+  expect(firstAgain.branch).toBe(first.branch);
+});
+
+test("non-colliding worktree slugs stay unsuffixed", async () => {
+  const fixture = await createFixture({ branch: "feature/solo" });
+
+  const resolved = await resolveEffectiveBranch({
+    explicitBranch: null,
+    projectRoot: fixture.linkedRoot,
+    autoBranchEnabled: true,
+  });
+
+  expect(resolved.branch).toBe("feature-solo");
+});

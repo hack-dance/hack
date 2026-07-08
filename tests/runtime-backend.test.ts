@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: string[][] = [];
+const runOpts: { stdout?: string }[] = [];
 const execCalls: string[][] = [];
 
 const shellMock = await registerScopedModuleMock({
@@ -17,8 +18,12 @@ const shellMock = await registerScopedModuleMock({
       execCalls.push([...cmd]);
       return { exitCode: 0, stdout: "", stderr: "" };
     },
-    run: async (cmd: readonly string[]) => {
+    run: async (
+      cmd: readonly string[],
+      opts: { readonly stdout?: string } = {}
+    ) => {
       runCalls.push([...cmd]);
+      runOpts.push({ stdout: opts.stdout });
       return 0;
     },
     findExecutableInPath: () => "/usr/bin/docker",
@@ -56,6 +61,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   runCalls.length = 0;
+  runOpts.length = 0;
   execCalls.length = 0;
 });
 
@@ -286,4 +292,38 @@ test("composeRuntimeBackend.exec disables TTY for non-interactive sessions", asy
     "bun",
     "dev",
   ]);
+});
+
+test("detached up routes stdout to stderr when requested (--json purity)", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
+  await composeRuntimeBackend.up({
+    composeFiles: ["/tmp/compose.yml"],
+    composeProject: "demo",
+    detach: true,
+    cwd: "/tmp",
+    routeStdoutToStderr: true,
+  });
+  expect(runOpts[0]?.stdout).toBe("stderr");
+});
+
+test("detached up inherits stdout by default", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
+  await composeRuntimeBackend.up({
+    composeFiles: ["/tmp/compose.yml"],
+    composeProject: "demo",
+    detach: true,
+    cwd: "/tmp",
+  });
+  expect(runOpts[0]?.stdout).toBe("inherit");
+});
+
+test("down routes stdout to stderr when requested (--json purity)", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
+  await composeRuntimeBackend.down({
+    composeFiles: ["/tmp/compose.yml"],
+    composeProject: "demo",
+    cwd: "/tmp",
+    routeStdoutToStderr: true,
+  });
+  expect(runOpts[0]?.stdout).toBe("stderr");
 });

@@ -20,6 +20,11 @@ export interface RuntimeBaseOptions {
   readonly profiles?: readonly string[];
   readonly cwd: string;
   readonly env?: Record<string, string>;
+  /**
+   * Route subprocess stdout to stderr — required by `--json` callers whose
+   * stdout must remain a single parseable envelope.
+   */
+  readonly routeStdoutToStderr?: boolean;
 }
 
 export interface RuntimeUpOptions extends RuntimeBaseOptions {
@@ -68,7 +73,11 @@ export const composeRuntimeBackend: RuntimeBackend = {
       ...(opts.detach ? ["-d"] : []),
     ];
     if (opts.detach) {
-      return await run(cmd, { cwd: opts.cwd, env: opts.env });
+      return await run(cmd, {
+        cwd: opts.cwd,
+        env: opts.env,
+        stdout: opts.routeStdoutToStderr ? "stderr" : "inherit",
+      });
     }
 
     const env = mergeSpawnEnv(opts.env);
@@ -80,8 +89,11 @@ export const composeRuntimeBackend: RuntimeBackend = {
       stderr: "pipe",
     });
 
+    const stdoutTarget = opts.routeStdoutToStderr
+      ? process.stderr
+      : process.stdout;
     const stdoutGrouper = createStructuredLogGrouper({
-      write: (text) => process.stdout.write(text),
+      write: (text) => stdoutTarget.write(text),
     });
     const stderrGrouper = createStructuredLogGrouper({
       write: (text) => process.stderr.write(text),
@@ -107,7 +119,11 @@ export const composeRuntimeBackend: RuntimeBackend = {
   },
   async down(opts) {
     const cmd = [...buildComposeArgs(opts), "down"];
-    return await run(cmd, { cwd: opts.cwd, env: opts.env });
+    return await run(cmd, {
+      cwd: opts.cwd,
+      env: opts.env,
+      stdout: opts.routeStdoutToStderr ? "stderr" : "inherit",
+    });
   },
   async psJson(opts) {
     const cmd = [...buildComposeArgs(opts), "ps", "--format", "json"];

@@ -125,6 +125,16 @@ test("dedupeCandidatesByPackage keeps the highest-scored script per package", ()
   expect(result.dropped).toEqual([{ candidate: start, keptScriptName: "dev" }]);
 });
 
+test("dedupeCandidatesByPackage preserves distinct dev:* services in a single package", () => {
+  const web = candidate({ id: "root:dev:web", scriptName: "dev:web" });
+  const api = candidate({ id: "root:dev:api", scriptName: "dev:api" });
+
+  const result = dedupeCandidatesByPackage({ candidates: [web, api] });
+
+  expect(result.selected).toEqual([web, api]);
+  expect(result.dropped).toEqual([]);
+});
+
 test("dedupeAggregatorCandidates drops a root --filter aggregator in favor of the package's own script", () => {
   const webDev = candidate({
     id: "apps/web/package.json:dev",

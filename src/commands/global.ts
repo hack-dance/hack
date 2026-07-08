@@ -723,8 +723,15 @@ async function bootstrapMacGlobalInstall(): Promise<void> {
   const certPath = await exportCaddyLocalCaCert();
   if (certPath) {
     const trustReady = await ensureMacTrustCaddyLocalCa({ certPath });
-    if (trustReady) {
-      await configureMacHostTlsTrust({ certPath });
+    // Mirror globalTrust: the host trust env (Bun/Node/curl/git) is
+    // independent of the macOS System keychain step — prepare it regardless
+    // so non-interactive installs still get CLI-tool trust.
+    await configureMacHostTlsTrust({ certPath });
+    if (!trustReady) {
+      note(
+        "Host trust env is prepared, but the browser will still show warnings for https://*.hack until the System keychain step runs. Run `hack global trust` interactively to finish it.",
+        "TLS"
+      );
     }
   }
   await maybeOfferMacRecoverySetup();

@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { findOrphanDaemonProcesses } from "../src/daemon/process.ts";
 
 const PS_LINES = [
-  "  123 /Users/x/.hack/bin/hack daemon start --foreground",
+  "  123 /tmp/hack-home/.hack/bin/hack daemon start --foreground",
   "  456 /opt/homebrew/bin/hack daemon start --foreground",
   "  789 vim src/commands/daemon.ts",
   "  999 hack daemon status",
@@ -44,7 +44,7 @@ import {
 
 test("virtual bunfs executable paths are rejected", () => {
   expect(isVirtualExecutablePath("/$bunfs/root/hack")).toBe(true);
-  expect(isVirtualExecutablePath("/Users/x/.hack/bin/hack")).toBe(false);
+  expect(isVirtualExecutablePath("/tmp/hack-home/.hack/bin/hack")).toBe(false);
 });
 
 test("extracts the launchd program path from plist text", () => {

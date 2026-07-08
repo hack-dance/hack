@@ -76,7 +76,7 @@ import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
 } from "../lib/mutagen.ts";
-import { isMac } from "../lib/os.ts";
+import { isLinux, isMac } from "../lib/os.ts";
 import {
   reconcileRemoteCaddyRoutesStack,
   stopRemoteCaddyRoutesStack,
@@ -2692,9 +2692,10 @@ async function globalTrust(): Promise<number> {
     return slimExit;
   }
 
-  if (!isMac()) {
+  if (!(isMac() || isLinux())) {
     logger.warn({
-      message: "Trust is only implemented for macOS (System keychain).",
+      message:
+        "Trust automation is only implemented for macOS and Linux; export the CA with `hack global ca` and trust it manually.",
     });
     return 0;
   }
@@ -2717,6 +2718,11 @@ async function globalTrust(): Promise<number> {
   }
   if (!certPath) {
     return 1;
+  }
+
+  if (isLinux()) {
+    await configureLinuxHostTlsTrust({ certPath });
+    return 0;
   }
 
   const trustReady = await ensureMacTrustCaddyLocalCa({
@@ -3493,6 +3499,94 @@ async function writeMacHostTrustBundle(input: {
   await ensureDir(dirname(bundlePath));
   await writeTextFileIfChanged(bundlePath, bundleText);
   return bundlePath;
+}
+
+const LINUX_SYSTEM_BUNDLE_CANDIDATES = [
+  "/etc/ssl/certs/ca-certificates.crt",
+  "/etc/pki/tls/certs/ca-bundle.crt",
+  "/etc/ssl/ca-bundle.pem",
+  "/etc/ssl/cert.pem",
+] as const;
+
+/**
+ * Builds the combined public+local trust bundle on Linux by concatenating the
+ * distro's canonical CA bundle with the Caddy local CA. Containers and host
+ * tools point replace-semantics SSL vars at this bundle so public roots and
+ * `*.hack` trust coexist (the same contract writeMacHostTrustBundle provides
+ * via the macOS system keychain export).
+ */
+export async function writeLinuxHostTrustBundle(input: {
+  readonly certPath: string;
+  readonly systemBundleCandidates?: readonly string[];
+  readonly bundlePath?: string;
+}): Promise<string | null> {
+  const bundlePath = input.bundlePath ?? resolveHackHostTrustBundlePath();
+  const candidates = input.systemBundleCandidates ?? [
+    ...LINUX_SYSTEM_BUNDLE_CANDIDATES,
+  ];
+
+  let systemBundle = "";
+  for (const candidate of candidates) {
+    const text = (await readTextFile(candidate))?.trim() ?? "";
+    if (text.length > 0) {
+      systemBundle = text;
+      break;
+    }
+  }
+  if (systemBundle.length === 0) {
+    logger.warn({
+      message:
+        "No Linux system CA bundle found; falling back to NODE_EXTRA_CA_CERTS only.",
+    });
+    return null;
+  }
+
+  const localCaPem = (await readTextFile(input.certPath))?.trim() ?? "";
+  if (localCaPem.length === 0) {
+    logger.warn({
+      message: `Unable to read exported Caddy Local CA at ${input.certPath}.`,
+    });
+    return null;
+  }
+
+  await ensureDir(dirname(bundlePath));
+  await writeTextFileIfChanged(bundlePath, `${systemBundle}\n${localCaPem}\n`);
+  return bundlePath;
+}
+
+/**
+ * Linux host trust setup: generates the combined bundle and the shell env
+ * script. System trust-store installation (update-ca-certificates and
+ * friends) stays a manual, distro-specific step.
+ */
+async function configureLinuxHostTlsTrust(input: {
+  readonly certPath: string;
+}): Promise<void> {
+  const bundlePath = await writeLinuxHostTrustBundle({
+    certPath: input.certPath,
+  });
+  const scriptPath = resolveHackHostTrustEnvScriptPath();
+  await ensureDir(dirname(scriptPath));
+  await writeTextFile(
+    scriptPath,
+    renderHackHostTrustShellExports({
+      certPath: input.certPath,
+      bundlePath,
+    })
+  );
+
+  logger.success({
+    message: bundlePath
+      ? "Generated the combined public+local trust bundle and host trust env."
+      : "Prepared host trust env (NODE_EXTRA_CA_CERTS only; no system bundle found).",
+  });
+  note(
+    [
+      `Current shell: source ${scriptPath}`,
+      "To trust the CA system-wide, add it to your distro trust store (for example: copy the CA into /usr/local/share/ca-certificates/ and run update-ca-certificates).",
+    ].join("\n"),
+    "Host TLS"
+  );
 }
 
 async function exportCaddyLocalCaCert(): Promise<string | null> {

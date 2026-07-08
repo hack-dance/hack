@@ -26,6 +26,7 @@ import {
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
+import { resolveTicketsIntegrationEnablement } from "../control-plane/extensions/tickets/enablement.ts";
 import { createGitTicketsChannel } from "../control-plane/extensions/tickets/tickets-git-channel.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { probeDaemonApi } from "../daemon/client.ts";
@@ -1695,6 +1696,17 @@ async function checkProjectTicketsGitHealth({
     };
   }
 
+  const ticketsEnablement = await resolveTicketsIntegrationEnablement({
+    projectRoot: project.projectRoot,
+  });
+  if (!ticketsEnablement.project) {
+    return {
+      name: "tickets git",
+      status: "ok",
+      message: "Disabled",
+    };
+  }
+
   const controlPlane = await readControlPlaneConfig({
     projectDir: project.projectDir,
   });
@@ -2774,6 +2786,13 @@ async function maybeRepairProjectTicketsGitHealth(opts: {
 }): Promise<void> {
   const project = await findProjectContext(opts.startDir);
   if (!project) {
+    return;
+  }
+
+  const ticketsEnablement = await resolveTicketsIntegrationEnablement({
+    projectRoot: project.projectRoot,
+  });
+  if (!ticketsEnablement.project) {
     return;
   }
 

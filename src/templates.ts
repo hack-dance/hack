@@ -318,6 +318,7 @@ export const HACK_DIR_GITIGNORE_ENTRIES = [
   ".env.state.json",
   "hack.env.local.yaml",
   "hack.env.*.local.yaml",
+  "tickets/",
 ] as const;
 
 /**

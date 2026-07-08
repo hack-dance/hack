@@ -114,6 +114,8 @@ Hostname routing + Caddy labels:
 
 TLS + valid-hostname constraints:
 - `hack` uses Caddy internal PKI for HTTPS on routed hosts; trust CA with `hack global trust`.
+- Containers get a combined public+local trust bundle (SSL_CERT_FILE etc.) once `hack global trust` has run; public TLS (package registries, external APIs) keeps working alongside `*.hack` trust.
+- If the combined bundle is missing, only Node gets `*.hack` trust (NODE_EXTRA_CA_CERTS); OpenSSL-based tools keep public roots — run `hack global trust` to enable both.
 - `.hack` is local-first and great for dev, but it is not a public suffix.
 - Use OAuth alias hosts (for example `*.hack.gy`) when providers require public-suffix-style callback domains.
 - Alias hosts are still local-dev routes unless you add an external tunnel/remote ingress path.

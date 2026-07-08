@@ -108,7 +108,7 @@ function renderInventoryPhase(): string[] {
     "- Read the root package.json, workspace globs, and lockfiles to identify the package manager and monorepo layout.",
     "- Identify runnable services (web, api, workers): dev/start scripts, framework configs, and the ports they listen on.",
     "- Detect databases, caches, and queues from code and config: ORM schemas (prisma/drizzle), migration dirs, existing Dockerfiles and compose files.",
-    "- List every `.env*` file. Their keys and values are candidates for `hack env add`; treat `.env.example` values as placeholders (ask the user for real values or leave them unset).",
+    "- List every `.env*` file. Their keys and values are candidates for `hack env add`; treat `.env.example` values as placeholders (ask the user for real values or leave them unset). Not every repo has `.env*` files — also harvest candidate keys from `environment:` blocks in existing compose files, `ENV` lines in Dockerfiles, and CI config (workflow env/secrets).",
     "- Note repo scripts that need env vars to run (migrations, seeds, codegen) — they will run via `hack host exec` or an ops container later.",
     "- Read README/docs for one-time setup steps you might otherwise miss.",
   ];
@@ -128,6 +128,8 @@ function renderSetupPhase(opts: {
     "## Phase 2 — Set up hack",
     "",
     bootstrap,
+    "- Decide full containerization vs backing-services-only (partial adoption): if the inventory shows heavy native toolchains (.NET, large native builds) or the human prefers host dev servers, compose backing services (db/queue/cache) only and keep app dev servers on the host pointed at the routed services — ask the human when it's ambiguous; partial adoption is a valid end state, not a fallback to fix later.",
+    "- Check for reuse before authoring new services: if the repo already containerizes for prod (existing Dockerfiles/compose with build contexts, runtime-config injection points like an nginx-served runtime-config.js), prefer reusing those images/contexts with minimal glue over hand-authoring new dev-mode services from scratch.",
     "- Define one compose service per runnable process in `.hack/docker-compose.yml`. HTTP services need the Caddy labels (`caddy`, `caddy.reverse_proxy`, `caddy.tls=internal`) and the `hack-dev` network to be routable.",
     `- Design hostnames: the primary app answers on dev_host (${devHostExample}); every other routable service gets a subdomain (\`api.${devHostExample}\`, \`grafana.${devHostExample}\`, ...). Set dev_host in \`.hack/hack.config.json\`.`,
     "- Migrate env values: for each key found during inventory run `hack env add <KEY> <value>` — add `--secret` for anything sensitive (API keys, tokens, passwords, connection strings with credentials). Never commit plaintext secrets to the repo.",

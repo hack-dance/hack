@@ -1,3 +1,8 @@
+## <small>3.3.4 (2026-07-09)</small>
+
+* Merge pull request #62 from hack-dance/codex/homebrew-bin-link-repair ([30841be](https://github.com/hack-dance/hack/commit/30841be)), closes [#62](https://github.com/hack-dance/hack/issues/62)
+* fix(release): install Homebrew executable path ([3c6e0d9](https://github.com/hack-dance/hack/commit/3c6e0d9))
+
 ## <small>3.3.3 (2026-07-09)</small>
 
 * Merge pull request #61 from hack-dance/codex/event-agent-runtime-repair ([f1de71e](https://github.com/hack-dance/hack/commit/f1de71e)), closes [#61](https://github.com/hack-dance/hack/issues/61)

@@ -1,3 +1,7 @@
+## <small>3.3.5 (2026-07-09)</small>
+
+* fix(lifecycle): recover owned mux sessions ([c1da123](https://github.com/hack-dance/hack/commit/c1da123))
+
 ## <small>3.3.4 (2026-07-09)</small>
 
 * Merge pull request #62 from hack-dance/codex/homebrew-bin-link-repair ([30841be](https://github.com/hack-dance/hack/commit/30841be)), closes [#62](https://github.com/hack-dance/hack/issues/62)

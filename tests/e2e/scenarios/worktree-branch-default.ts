@@ -3,6 +3,7 @@ import {
   expect,
   expectExit,
   extractJsonObject,
+  runCommand,
   type Scenario,
 } from "../harness.ts";
 
@@ -95,6 +96,53 @@ export const worktreeBranchDefaultScenario: Scenario = {
       that: optOutUrl.includes("main-instance"),
       message: `explicit --branch should win over the worktree default, got "${optOutUrl}"`,
       result: optOut,
+    });
+
+    const detach = await runCommand({
+      argv: ["git", "checkout", "--detach"],
+      cwd: worktreePath,
+    });
+    expectExit({
+      result: detach,
+      codes: [0],
+      message: "failed to detach the linked worktree fixture",
+    });
+
+    const detachedOpen = await ctx.cli({
+      args: ["open", "--json"],
+      cwd: worktreePath,
+    });
+    expectExit({
+      result: detachedOpen,
+      codes: [1],
+      message: "detached linked worktree must refuse an implicit base instance",
+    });
+    expect({
+      that:
+        detachedOpen.combined.includes("Detached linked worktree") &&
+        detachedOpen.combined.includes("--branch <name>"),
+      message:
+        "detached worktree failure must explain the safe explicit override",
+      result: detachedOpen,
+    });
+
+    const detachedExplicit = await ctx.cli({
+      args: ["open", "--json", "--branch", "detached-review"],
+      cwd: worktreePath,
+    });
+    expectExit({
+      result: detachedExplicit,
+      codes: [0],
+      message:
+        "explicit branch should remain available from detached worktrees",
+    });
+    const detachedExplicitUrl =
+      extractJsonObject<OpenPayload>({ text: detachedExplicit.stdout })?.url ??
+      "";
+    expect({
+      that: detachedExplicitUrl.includes("detached-review"),
+      message: `explicit detached branch URL should carry the requested slug, got "${detachedExplicitUrl}"`,
+      result: detachedExplicit,
     });
   },
 };

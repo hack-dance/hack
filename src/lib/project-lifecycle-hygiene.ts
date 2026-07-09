@@ -7,6 +7,7 @@ import { readLifecycleState } from "./lifecycle-runtime.ts";
 import {
   type ProcessSnapshotRow,
   readProcessSnapshot,
+  resolveLeaderlessPersistedLifecycleProcessGroupIds,
   resolvePersistedLifecycleProcessGroupIds,
 } from "./project-lifecycle-processes.ts";
 
@@ -17,6 +18,7 @@ export type StaleLifecycleStateEntry = {
 
 export type LifecycleHygieneInspection = {
   readonly staleEntries: readonly StaleLifecycleStateEntry[];
+  readonly orphanedProcessGroups: readonly number[];
 };
 
 /** Inspect persisted lifecycle state for entries whose mux session is gone. */
@@ -25,7 +27,7 @@ export async function inspectProjectLifecycleHygiene(opts: {
 }): Promise<LifecycleHygieneInspection> {
   const entries = await readLifecycleState({ projectDir: opts.projectDir });
   if (entries.length === 0) {
-    return { staleEntries: [] };
+    return { staleEntries: [], orphanedProcessGroups: [] };
   }
 
   const [sessionsByBackend, snapshot] = await Promise.all([
@@ -50,11 +52,20 @@ export function inspectLifecycleStateEntries(opts: {
   readonly snapshot: readonly ProcessSnapshotRow[];
 }): LifecycleHygieneInspection {
   const staleEntries: StaleLifecycleStateEntry[] = [];
+  const orphanedProcessGroups = new Set<number>();
 
   for (const entry of opts.entries) {
     const sessions = opts.sessionsByBackend.get(entry.backend);
     const sessionPresent = sessions?.has(entry.sessionName) ?? false;
     if (sessionPresent) {
+      const leaderlessGroups =
+        resolveLeaderlessPersistedLifecycleProcessGroupIds({
+          lifecycleEntry: entry,
+          snapshot: opts.snapshot,
+        });
+      for (const processGroupId of leaderlessGroups) {
+        orphanedProcessGroups.add(processGroupId);
+      }
       continue;
     }
 
@@ -67,7 +78,12 @@ export function inspectLifecycleStateEntries(opts: {
     });
   }
 
-  return { staleEntries };
+  return {
+    staleEntries,
+    orphanedProcessGroups: [...orphanedProcessGroups].sort(
+      (left, right) => left - right
+    ),
+  };
 }
 
 async function listSessionsByBackend(): Promise<

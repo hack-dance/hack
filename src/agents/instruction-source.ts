@@ -122,7 +122,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     surfaces: ALL_SURFACES,
     bullets: [
       "Secret key inherits from the primary checkout automatically through the shared git common dir; set `HACK_ENV_SECRET_KEY` for CI or detached environments.",
-      "`hack up` in a linked worktree defaults to a branch instance named after the worktree's git branch; opt out with config `worktree.auto_branch=false` or an explicit `--branch`.",
+      "`hack up` in a linked worktree defaults to a branch instance named after the worktree's git branch; a detached linked worktree requires an explicit `--branch`, unless config `worktree.auto_branch=false` explicitly opts into the base instance.",
       "`hack doctor` flags divergent secret keys and dev_host collisions across checkouts.",
     ],
   },

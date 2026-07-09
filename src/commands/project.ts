@@ -594,6 +594,11 @@ async function resolveEffectiveBranchForCommand(opts: {
     projectRoot: opts.project.projectRoot,
     autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
   });
+  if (resolved.source === "detached-worktree") {
+    throw new CliUsageError(
+      "Detached linked worktree cannot auto-select an isolated instance. Pass --branch <name>, or set worktree.auto_branch=false to target the base instance explicitly."
+    );
+  }
   if (resolved.source === "worktree" && resolved.branch) {
     const message = `Linked worktree detected → using branch instance "${resolved.branch}" (override with --branch <name>, disable with worktree.auto_branch=false)`;
     if (opts.noticeToStderr === true) {

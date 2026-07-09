@@ -160,7 +160,11 @@ export async function touchBranchUsage(opts: {
   return { updated: true, created, path: read.path };
 }
 
-export type EffectiveBranchSource = "explicit" | "worktree" | "none";
+export type EffectiveBranchSource =
+  | "explicit"
+  | "worktree"
+  | "detached-worktree"
+  | "none";
 
 export type EffectiveBranchResolution = {
   /** Branch instance slug to target, or null for the base instance. */
@@ -178,8 +182,10 @@ export type EffectiveBranchResolution = {
  * - otherwise, in a LINKED git worktree with `autoBranchEnabled` (config
  *   `worktree.auto_branch`, default true), default to the sanitized current
  *   git branch name (`source: "worktree"`)
- * - primary checkouts, non-git paths, detached HEAD, and opted-out projects
- *   resolve to the base instance (`branch: null`, `source: "none"`)
+ * - a detached linked worktree is reported separately so callers can refuse
+ *   an implicit base instance instead of colliding with the primary checkout
+ * - primary checkouts, non-git paths, and opted-out projects resolve to the
+ *   base instance (`branch: null`, `source: "none"`)
  */
 export async function resolveEffectiveBranch(opts: {
   readonly explicitBranch: string | null;
@@ -206,7 +212,11 @@ export async function resolveEffectiveBranch(opts: {
     repoRoot: opts.projectRoot,
   });
   if (!gitBranch) {
-    return { branch: null, source: "none", gitBranch: null };
+    return {
+      branch: null,
+      source: "detached-worktree",
+      gitBranch: null,
+    };
   }
 
   const slug = sanitizeBranchSlug(gitBranch);

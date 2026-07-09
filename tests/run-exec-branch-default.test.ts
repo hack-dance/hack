@@ -180,6 +180,25 @@ test("hack exec in a linked worktree targets the branch compose project by defau
   expect(combined).toContain('branch instance "feature-run-default"');
 });
 
+test("hack run in a detached linked worktree refuses to target the base compose project", async () => {
+  const fixture = await createWorktreeFixture();
+  runGit({ cwd: fixture.worktreeRoot, args: ["checkout", "--detach"] });
+
+  const result = await runCliWithCapturedOutput([
+    "run",
+    "--path",
+    fixture.worktreeRoot,
+    "api",
+    "echo",
+    "hi",
+  ]);
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("Detached linked worktree");
+  expect(result.stderr).toContain("--branch <name>");
+  expect(await Bun.file(fixture.dockerLogPath).exists()).toBe(false);
+});
+
 async function runCliWithCapturedOutput(
   args: readonly string[]
 ): Promise<CapturedRunResult> {

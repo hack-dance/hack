@@ -122,6 +122,13 @@ Projects can run host-side hooks around `hack up/down` and start managed host pr
 local proxies/tunnels). Processes are started inside a mux session (tmux or zellij) so they have a
 stable home and can be torn down on `hack down`.
 
+Lifecycle state is checkout-local at `.hack/.internal/lifecycle/state.json`. Each compose instance
+has its own entry, so starting a branch instance does not replace the base instance's entry in the
+same checkout. Cleanup reconciles the saved process group with the live process table; if the group
+leader exited while members remain, `hack doctor` reports the orphan and `hack down` terminates the
+persisted leaderless group. A live group leader without its saved pane PID is not trusted as lifecycle
+ownership because the PID may have been reused.
+
 For fixed-port helpers such as SSM/database/search tunnels, lifecycle config can also declare a
 `singleton` listener set. This lets Hack reuse an already-running equivalent helper or fail fast on
 partial conflicts instead of launching a competing duplicate supervisor. The intent is to reduce local
@@ -266,6 +273,10 @@ or pass an explicit `--branch`. The secret key for a linked worktree is inherite
 the primary checkout through the shared git common dir (see "Project env + secrets" above), and
 `hack doctor` checks for divergent secret keys and `dev_host` collisions across checkouts sharing the
 same repo.
+
+If the linked worktree is detached, Hack refuses to silently target the base compose project because
+there is no branch name from which to derive an isolated instance. Pass `--branch <name>` to select
+one, or set `worktree.auto_branch=false` to opt into the base instance explicitly.
 
 ## Files and directories
 

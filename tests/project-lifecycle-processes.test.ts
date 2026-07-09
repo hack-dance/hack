@@ -179,10 +179,42 @@ test("resolveLifecycleProcessGroupIdsForTmuxState ignores recycled process group
       ],
     },
     panePidsByWindow: new Map([["proxy", []]]),
-    snapshot: [{ pid: 700, ppid: 1, processGroupId: 500 }],
+    snapshot: [
+      { pid: 500, ppid: 1, processGroupId: 500 },
+      { pid: 700, ppid: 500, processGroupId: 500 },
+    ],
   });
 
   expect(groups).toEqual([]);
+});
+
+test("resolveLifecycleProcessGroupIdsForTmuxState recovers a persisted leaderless group", () => {
+  const groups = resolveLifecycleProcessGroupIdsForTmuxState({
+    lifecycleEntry: {
+      composeProject: "event-agent",
+      projectName: "event-agent",
+      branch: "feature-cleanup",
+      sessionName: "event-agent--lifecycle-feature-cleanup",
+      backend: "tmux",
+      updatedAt: "2026-04-01T14:00:00.000Z",
+      processes: [
+        {
+          name: "proxy",
+          windowName: "proxy",
+          logPath: "/tmp/event-agent.log",
+          panePid: 500,
+          processGroupId: 500,
+        },
+      ],
+    },
+    panePidsByWindow: new Map([["proxy", []]]),
+    snapshot: [
+      { pid: 501, ppid: 1, processGroupId: 500 },
+      { pid: 502, ppid: 501, processGroupId: 500 },
+    ],
+  });
+
+  expect(groups).toEqual([500]);
 });
 
 test("resolvePersistedLifecycleProcessGroupIds recovers live groups without a mux session", () => {
@@ -240,6 +272,35 @@ test("resolveLifecycleStopProcessGroupIds skips persisted cleanup without a live
   });
 
   expect(groups).toEqual([]);
+});
+
+test("resolveLifecycleStopProcessGroupIds recovers a leaderless persisted group without a mux session", () => {
+  const groups = resolveLifecycleStopProcessGroupIds({
+    matchedLiveSession: false,
+    lifecycleEntry: {
+      composeProject: "event-agent",
+      projectName: "event-agent",
+      branch: "feature-cleanup",
+      sessionName: "event-agent--lifecycle-feature-cleanup",
+      backend: "tmux",
+      updatedAt: "2026-04-01T14:00:00.000Z",
+      processes: [
+        {
+          name: "proxy",
+          windowName: "proxy",
+          logPath: "/tmp/event-agent.log",
+          panePid: 500,
+          processGroupId: 500,
+        },
+      ],
+    },
+    snapshot: [
+      { pid: 501, ppid: 1, processGroupId: 500 },
+      { pid: 502, ppid: 501, processGroupId: 500 },
+    ],
+  });
+
+  expect(groups).toEqual([500]);
 });
 
 test("wrapLifecyclePersistentCommand uses external kill for process-group cleanup", () => {

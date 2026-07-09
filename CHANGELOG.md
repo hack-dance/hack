@@ -1,3 +1,13 @@
+## <small>3.3.3 (2026-07-09)</small>
+
+* Merge pull request #61 from hack-dance/codex/event-agent-runtime-repair ([f1de71e](https://github.com/hack-dance/hack/commit/f1de71e)), closes [#61](https://github.com/hack-dance/hack/issues/61)
+* fix(cli): preserve usage code for lifecycle json ([f50f408](https://github.com/hack-dance/hack/commit/f50f408))
+* fix(runtime): clean descendant lifecycle groups ([57f2358](https://github.com/hack-dance/hack/commit/57f2358))
+* fix(runtime): isolate detached worktrees and recover orphan groups ([80a8dd2](https://github.com/hack-dance/hack/commit/80a8dd2))
+* fix(runtime): persist wrapped command process group ([2f4a4be](https://github.com/hack-dance/hack/commit/2f4a4be))
+* fix(runtime): retain session proof for lifecycle cleanup ([f87e5cf](https://github.com/hack-dance/hack/commit/f87e5cf))
+* docs(cli): explain detached worktree targeting ([966b863](https://github.com/hack-dance/hack/commit/966b863))
+
 ## <small>3.3.2 (2026-07-08)</small>
 
 * Merge pull request #60 from hack-dance/fix/field-findings-round3 ([69f6caa](https://github.com/hack-dance/hack/commit/69f6caa)), closes [#60](https://github.com/hack-dance/hack/issues/60)

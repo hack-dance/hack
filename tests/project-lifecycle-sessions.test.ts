@@ -5,6 +5,7 @@ import {
   classifyLifecycleSession,
   killLifecycleSessionWithOwnership,
   resolveLifecycleDefinitionHash,
+  resolveLifecycleEnvironmentFingerprint,
 } from "../src/lib/project-lifecycle-sessions.ts";
 import type { MuxBackend, MuxSession } from "../src/mux/mux-backend.ts";
 
@@ -37,6 +38,41 @@ const entry: LifecycleStateEntry = {
     },
   ],
 };
+
+test("resolveLifecycleEnvironmentFingerprint is stable without exposing env data", () => {
+  const first = resolveLifecycleEnvironmentFingerprint({
+    effectiveEnvName: "qa",
+    env: { SECOND: "two", FIRST: "one" },
+  });
+  const reordered = resolveLifecycleEnvironmentFingerprint({
+    effectiveEnvName: "qa",
+    env: { FIRST: "one", SECOND: "two" },
+  });
+
+  expect(first).toBe(reordered);
+  expect(first).toMatch(/^sha256:[a-f0-9]{64}$/);
+  expect(first).not.toContain("qa");
+  expect(first).not.toContain("FIRST");
+  expect(first).not.toContain("one");
+});
+
+test("resolveLifecycleEnvironmentFingerprint changes with overlay or values", () => {
+  const base = resolveLifecycleEnvironmentFingerprint({
+    effectiveEnvName: "qa",
+    env: { SERVICE_URL: "https://qa.invalid" },
+  });
+  const changedValue = resolveLifecycleEnvironmentFingerprint({
+    effectiveEnvName: "qa",
+    env: { SERVICE_URL: "https://prod.invalid" },
+  });
+  const changedOverlay = resolveLifecycleEnvironmentFingerprint({
+    effectiveEnvName: "prod",
+    env: { SERVICE_URL: "https://qa.invalid" },
+  });
+
+  expect(changedValue).not.toBe(base);
+  expect(changedOverlay).not.toBe(base);
+});
 
 test("classifyLifecycleSession creates when the expected session is absent", () => {
   const inspection = classifyLifecycleSession({

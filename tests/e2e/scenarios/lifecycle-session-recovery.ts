@@ -1,6 +1,7 @@
 import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
+import { resolveExecutableCapability } from "../capabilities.ts";
 import { createMonorepoFixture } from "../fixture.ts";
 import {
   buildCliEnv,
@@ -18,6 +19,18 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
   tier: "local",
   summary: "owned lifecycle sessions reconcile and clean up without Docker",
   run: async (ctx) => {
+    const tmux = resolveExecutableCapability({
+      executable: "tmux",
+      executablePath: Bun.which("tmux"),
+      required: process.env.HACK_E2E_REQUIRE_TMUX === "1",
+      installHint: "install tmux to run lifecycle recovery E2E",
+    });
+    if (tmux.kind === "skip") {
+      ctx.skip(tmux.reason);
+    }
+    if (tmux.kind === "fail") {
+      throw new Error(tmux.reason);
+    }
     const fixture = await createMonorepoFixture({
       parentDir: ctx.tempRoot,
       withHackConfig: true,
@@ -74,6 +87,66 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
           firstToken,
         message: "healthy adoption replaced the owner token",
         result: repeatedUp,
+      });
+
+      await writeEnvOverlay({
+        hackDir: fixture.hackDir,
+        envName: "qa",
+        value: "qa-first",
+      });
+      const qaUp = await ctx.cli({
+        args: ["up", "--detach", "--json", "--env", "qa"],
+        cwd: fixture.root,
+        env: cliEnv,
+      });
+      expectExit({
+        result: qaUp,
+        codes: [0],
+        message: "switching lifecycle overlays should succeed",
+      });
+      const qaToken = (await readState({ statePath })).entries[0]
+        ?.ownershipToken;
+      expect({
+        that: Boolean(qaToken) && qaToken !== firstToken,
+        message:
+          "switching overlays adopted lifecycle helpers from the old environment",
+        result: qaUp,
+      });
+      await expectSessionEnvironment({
+        sessionName,
+        cwd: fixture.root,
+        key: "E2E_PLAIN",
+        value: "qa-first",
+      });
+
+      await writeEnvOverlay({
+        hackDir: fixture.hackDir,
+        envName: "qa",
+        value: "qa-second",
+      });
+      const changedValueUp = await ctx.cli({
+        args: ["up", "--detach", "--json", "--env", "qa"],
+        cwd: fixture.root,
+        env: cliEnv,
+      });
+      expectExit({
+        result: changedValueUp,
+        codes: [0],
+        message: "changing lifecycle env values should succeed",
+      });
+      const changedValueToken = (await readState({ statePath })).entries[0]
+        ?.ownershipToken;
+      expect({
+        that: Boolean(changedValueToken) && changedValueToken !== qaToken,
+        message:
+          "changed env values adopted lifecycle helpers from the old environment",
+        result: changedValueUp,
+      });
+      await expectSessionEnvironment({
+        sessionName,
+        cwd: fixture.root,
+        key: "E2E_PLAIN",
+        value: "qa-second",
       });
 
       const branchName = "feat-msp-human-handoff";
@@ -415,6 +488,44 @@ async function writeFakeDocker(opts: {
     ].join("\n")
   );
   await chmod(path, 0o755);
+}
+
+async function writeEnvOverlay(opts: {
+  readonly hackDir: string;
+  readonly envName: string;
+  readonly value: string;
+}): Promise<void> {
+  await Bun.write(
+    join(opts.hackDir, `hack.env.${opts.envName}.yaml`),
+    [
+      "version: 1",
+      `environment: ${opts.envName}`,
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      `    E2E_PLAIN: ${opts.value}`,
+      "",
+    ].join("\n")
+  );
+}
+
+async function expectSessionEnvironment(opts: {
+  readonly sessionName: string;
+  readonly cwd: string;
+  readonly key: string;
+  readonly value: string;
+}): Promise<void> {
+  const result = await runCommand({
+    argv: ["tmux", "show-environment", "-t", opts.sessionName, opts.key],
+    cwd: opts.cwd,
+  });
+  expect({
+    that:
+      result.exitCode === 0 &&
+      result.stdout.trim() === `${opts.key}=${opts.value}`,
+    message: `lifecycle session did not receive ${opts.key}=${opts.value}`,
+    result,
+  });
 }
 
 async function ageLifecycleState(opts: {

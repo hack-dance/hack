@@ -43,6 +43,29 @@ export function resolveLifecycleDefinitionHash(opts: {
     .digest("hex");
 }
 
+/** Return a stable digest without persisting environment names, keys, or values. */
+export function resolveLifecycleEnvironmentFingerprint(opts: {
+  readonly effectiveEnvName: string | null;
+  readonly env: Readonly<Record<string, string>>;
+}): string {
+  const entries = Object.entries(opts.env).sort(([left], [right]) => {
+    if (left === right) {
+      return 0;
+    }
+    return left < right ? -1 : 1;
+  });
+  const digest = new Bun.CryptoHasher("sha256")
+    .update(
+      JSON.stringify({
+        version: 1,
+        effectiveEnvName: opts.effectiveEnvName,
+        entries,
+      })
+    )
+    .digest("hex");
+  return `sha256:${digest}`;
+}
+
 export function classifyLifecycleSession(opts: {
   readonly session: MuxSession | null;
   readonly entry: LifecycleStateEntry | null;

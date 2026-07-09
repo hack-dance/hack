@@ -23,6 +23,7 @@ import { worktreeSecretsScenario } from "./scenarios/worktree-secrets.ts";
  *   HACK_E2E_KEEP=1 ...                     # keep temp fixtures for debugging
  *   HACK_E2E_CLI_BIN=./dist/hack ...        # exercise the compiled binary
  *   HACK_E2E_REQUIRE_DOCKER=1 ...            # fail if a Docker scenario skips
+ *   HACK_E2E_REQUIRE_TMUX=1 ...              # fail if tmux recovery cannot run
  *
  * Exit codes: 0 all pass/skip, 1 any scenario failed, 2 isolation canary
  * failed (nothing ran).

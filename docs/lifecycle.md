@@ -230,6 +230,9 @@ Notes:
 - Teardown is implemented by killing the lifecycle session; anything running inside that session will be stopped.
 - Current lifecycle sessions carry the same random ownership token in mux metadata and persisted state.
   Cleanup requires an exact token match; deterministic names alone never authorize session teardown.
+- Healthy-session adoption also matches a stable SHA-256 fingerprint of the effective overlay and
+  sorted lifecycle environment. Environment names, keys, and values are never persisted; changing an
+  overlay or value replaces the owned session so host helpers cannot retain stale configuration.
 - For tmux-backed lifecycle sessions, Hack also persists the pane PID and the wrapped command's actual
   process-group metadata to `.hack/.internal/lifecycle/state.json`, with per-hook/process output logged to
   `.hack/.internal/lifecycle/*.log`. If tmux pane state disappears before teardown, `hack down` still uses that persisted metadata to clean up any live lifecycle process groups instead of leaving orphaned host processes behind.

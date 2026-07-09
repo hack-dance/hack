@@ -74,7 +74,7 @@ jobs:
       - name: Create isolated Hack network
         run: docker network create --subnet 172.30.0.0/16 hack-dev
       - name: Run local and Docker E2E
-        run: HACK_E2E_REQUIRE_DOCKER=1 bun run test:e2e:local:docker
+        run: HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun run test:e2e:local:docker
 
   test:
     runs-on: blacksmith-6vcpu-macos-15

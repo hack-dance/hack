@@ -170,6 +170,7 @@ import {
   killInspectedLifecycleSession,
   killLifecycleSessionWithOwnership,
   resolveLifecycleDefinitionHash,
+  resolveLifecycleEnvironmentFingerprint,
 } from "../lib/project-lifecycle-sessions.ts";
 import {
   inspectListeningTcpPorts,
@@ -1618,12 +1619,15 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   readonly projectName: string;
   readonly branch: string | null;
   readonly env: Readonly<Record<string, string>>;
+  readonly effectiveEnvName: string | null;
   readonly composeProject: string;
 }): Promise<LifecycleUpResult> {
   const beforeCommands = opts.cfg.lifecycle?.up?.before;
   const definitionHash = resolveProjectLifecycleDefinitionHash({
     beforeCommands,
     processes: opts.cfg.lifecycle?.processes,
+    env: opts.env,
+    effectiveEnvName: opts.effectiveEnvName,
   });
   if (!hasPersistentLifecycleCommands(beforeCommands)) {
     const beforeCode = await runLifecycleCommands({
@@ -1753,6 +1757,8 @@ function installLifecycleSignalCleanup(opts: {
 function resolveProjectLifecycleDefinitionHash(opts: {
   readonly beforeCommands: readonly ProjectLifecycleCommand[] | undefined;
   readonly processes: readonly ProjectLifecycleProcess[] | undefined;
+  readonly env?: Readonly<Record<string, string>>;
+  readonly effectiveEnvName?: string | null;
 }): string {
   const persistentBefore = (opts.beforeCommands ?? [])
     .map((command, index) => ({ command, index }))
@@ -1771,8 +1777,16 @@ function resolveProjectLifecycleDefinitionHash(opts: {
     cwd: process.cwd ?? null,
     singleton: process.singleton ?? null,
   }));
+  const environmentFingerprint = resolveLifecycleEnvironmentFingerprint({
+    effectiveEnvName: opts.effectiveEnvName ?? null,
+    env: opts.env ?? {},
+  });
   return resolveLifecycleDefinitionHash({
-    definitions: [...persistentBefore, ...processes],
+    definitions: [
+      ...persistentBefore,
+      ...processes,
+      { kind: "environment", fingerprint: environmentFingerprint },
+    ],
   });
 }
 
@@ -5757,6 +5771,7 @@ async function runUpCommand({
       projectName,
       branch,
       env: envOverrides.env,
+      effectiveEnvName: envOverrides.effectiveEnvName,
       composeProject: lifecycleComposeProject,
     });
     if (lifecycleUp.code !== 0) {
@@ -6274,6 +6289,7 @@ async function runRestartUpPhase(opts: {
       projectName: opts.projectName,
       branch: opts.branch,
       env: envOverrides.env,
+      effectiveEnvName: envOverrides.effectiveEnvName,
       composeProject: opts.lifecycleComposeProject,
     });
     if (lifecycleUp.code !== 0) {

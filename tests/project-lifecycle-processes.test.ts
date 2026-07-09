@@ -339,6 +339,7 @@ test("resolveLifecycleStopProcessGroupIds recovers a leaderless persisted group 
 test("wrapLifecyclePersistentCommand uses external kill for process-group cleanup", () => {
   const script = wrapLifecyclePersistentCommand({
     command: "bun run proxy",
+    commandPidPath: "/tmp/event-agent.pid",
     logPath: "/tmp/event-agent.log",
     serviceName: "proxy",
   });
@@ -353,12 +354,18 @@ test("wrapLifecyclePersistentCommand uses external kill for process-group cleanu
 test("wrapLifecyclePersistentCommand avoids login-shell execution", () => {
   const script = wrapLifecyclePersistentCommand({
     command: "bun run proxy",
+    commandPidPath: "/tmp/event-agent.pid",
     logPath: "/tmp/event-agent.log",
     serviceName: "proxy",
   });
 
   expect(script).toContain('os.execvp("sh", ["sh", "-c", sys.argv[1]])');
   expect(script).toContain('sh -c "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &');
+  expect(script).toContain("os.setsid()");
+  expect(script).toContain("pid_file.write(str(os.getpid()))");
+  expect(script).toContain(
+    'printf "%s\\n" "$cmd_pid" > "$HACK_LIFECYCLE_COMMAND_PID_FILE"'
+  );
   expect(script).not.toContain('os.execvp("sh", ["sh", "-lc", sys.argv[1]])');
   expect(script).not.toContain(
     'sh -lc "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &'

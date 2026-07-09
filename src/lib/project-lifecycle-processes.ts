@@ -191,3 +191,38 @@ export async function readProcessSnapshot(): Promise<ProcessSnapshotRow[]> {
   }
   return parseProcessSnapshotOutput(result.stdout);
 }
+
+/** Terminate ownership-proven lifecycle groups with a bounded TERM/KILL sequence. */
+export async function terminateLifecycleProcessGroups(opts: {
+  readonly processGroupIds: readonly number[];
+}): Promise<void> {
+  const groups = [...new Set(opts.processGroupIds)].filter(
+    (processGroupId) => processGroupId > 1
+  );
+  if (groups.length === 0) {
+    return;
+  }
+
+  for (const processGroupId of groups) {
+    try {
+      process.kill(-processGroupId, "SIGTERM");
+    } catch {
+      // Ignore groups that already exited between snapshot and shutdown.
+    }
+  }
+
+  await Bun.sleep(500);
+
+  for (const processGroupId of groups) {
+    try {
+      process.kill(-processGroupId, 0);
+    } catch {
+      continue;
+    }
+    try {
+      process.kill(-processGroupId, "SIGKILL");
+    } catch {
+      // Ignore groups that exited after the SIGTERM grace period.
+    }
+  }
+}

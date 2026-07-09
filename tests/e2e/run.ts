@@ -21,6 +21,7 @@ import { worktreeSecretsScenario } from "./scenarios/worktree-secrets.ts";
  *   bun tests/e2e/run.ts --only=init,doctor # subset by name
  *   bun tests/e2e/run.ts --list             # list scenarios and exit
  *   HACK_E2E_KEEP=1 ...                     # keep temp fixtures for debugging
+ *   HACK_E2E_CLI_BIN=./dist/hack ...        # exercise the compiled binary
  *
  * Exit codes: 0 all pass/skip, 1 any scenario failed, 2 isolation canary
  * failed (nothing ran).

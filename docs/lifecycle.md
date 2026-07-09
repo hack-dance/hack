@@ -228,12 +228,16 @@ Lifecycle session name:
 Notes:
 - If no mux backend is available, lifecycle process startup fails with an actionable error.
 - Teardown is implemented by killing the lifecycle session; anything running inside that session will be stopped.
-- For tmux-backed lifecycle sessions, Hack also persists the pane PID and the wrapped command's actual
-  process-group metadata to `.hack/.internal/lifecycle/state.json`, with per-hook/process output logged to
 - Current lifecycle sessions carry the same random ownership token in mux metadata and persisted state.
   Cleanup requires an exact token match; deterministic names alone never authorize session teardown.
+- For tmux-backed lifecycle sessions, Hack also persists the pane PID and the wrapped command's actual
+  process-group metadata to `.hack/.internal/lifecycle/state.json`, with per-hook/process output logged to
   `.hack/.internal/lifecycle/*.log`. If tmux pane state disappears before teardown, `hack down` still uses that persisted metadata to clean up any live lifecycle process groups instead of leaving orphaned host processes behind.
-- `hack doctor` reports stale lifecycle state when the persisted lifecycle entry no longer has a live mux session and points operators to `hack down` so cleanup and state removal happen through the supported path. `hack doctor --fix` does not tear down lifecycle sessions itself — use `hack down` for that.
+- `hack doctor` reports stale lifecycle state, leaderless process groups, ownership collisions, and
+  ownership-proven sessions with no running Compose instance. Recently updated sessions are treated
+  as possible in-flight startups for five minutes and stay untouched. `hack doctor --fix` reaps only
+  established orphans after rechecking runtime liveness and mux ownership; unverified same-name
+  sessions stay untouched.
 
 ## Tips
 

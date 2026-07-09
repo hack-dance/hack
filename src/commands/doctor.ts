@@ -90,7 +90,10 @@ import {
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
 } from "../lib/project-env-config.ts";
-import { inspectProjectLifecycleHygiene } from "../lib/project-lifecycle-hygiene.ts";
+import {
+  inspectProjectLifecycleHygiene,
+  repairProjectLifecycleSessions,
+} from "../lib/project-lifecycle-hygiene.ts";
 import {
   findMissingRegistryEntries,
   findOrphanRuntimeProjects,
@@ -1844,10 +1847,13 @@ async function checkProjectLifecycleHygiene({
 
   const inspection = await inspectProjectLifecycleHygiene({
     projectDir: ctx.projectDir,
+    projectRoot: ctx.projectRoot,
   });
   if (
     inspection.staleEntries.length === 0 &&
-    inspection.orphanedProcessGroups.length === 0
+    inspection.orphanedProcessGroups.length === 0 &&
+    inspection.orphanedSessions.length === 0 &&
+    inspection.unverifiedSessions.length === 0
   ) {
     return {
       name: "lifecycle hygiene",
@@ -1875,12 +1881,29 @@ async function checkProjectLifecycleHygiene({
           `${orphanedGroups.size} orphaned lifecycle process group${orphanedGroups.size === 1 ? "" : "s"}`,
         ]
       : []),
+    ...(inspection.orphanedSessions.length > 0
+      ? [
+          `${inspection.orphanedSessions.length} owned lifecycle session${inspection.orphanedSessions.length === 1 ? "" : "s"} without a running instance`,
+        ]
+      : []),
+    ...(inspection.unverifiedSessions.length > 0
+      ? [
+          `${inspection.unverifiedSessions.length} same-name lifecycle session collision${inspection.unverifiedSessions.length === 1 ? "" : "s"} with unverified ownership`,
+        ]
+      : []),
   ];
+
+  let nextStep = "run: hack down";
+  if (inspection.orphanedSessions.length > 0) {
+    nextStep = "run: hack doctor --fix";
+  } else if (inspection.unverifiedSessions.length > 0) {
+    nextStep = "manual review required; no session was modified";
+  }
 
   return {
     name: "lifecycle hygiene",
     status: "warn",
-    message: `${details.join("; ")} (run: hack down)`,
+    message: `${details.join("; ")} (${nextStep})`,
   };
 }
 
@@ -2403,6 +2426,7 @@ async function runDoctorFix(opts: {
     return;
   }
 
+  await maybeRepairProjectLifecycleSessions({ startDir: opts.startDir });
   await maybeRepairHackd();
 
   const paths = getGlobalPaths();
@@ -2680,6 +2704,11 @@ export async function buildDoctorRemediationPlanLines(opts: {
   ];
 
   const project = await findProjectContext(opts.startDir);
+  if (project) {
+    steps.push(
+      "Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent."
+    );
+  }
   const trackedGenerated = project
     ? await inspectTrackedGeneratedFiles({
         projectRoot: project.projectRoot,
@@ -2895,6 +2924,37 @@ function describeLegacyRepairStatus(input: {
     return "left intact";
   }
   return input.didPruneLegacy ? "pruned" : "prune failed";
+}
+
+async function maybeRepairProjectLifecycleSessions(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findProjectContext(opts.startDir);
+  if (!project) {
+    return;
+  }
+  const repaired = await repairProjectLifecycleSessions({
+    projectDir: project.projectDir,
+    projectRoot: project.projectRoot,
+  });
+  if (repaired.repairedSessions.length > 0) {
+    note(
+      [
+        `Removed ${repaired.repairedSessions.length} ownership-proven orphan lifecycle session${repaired.repairedSessions.length === 1 ? "" : "s"}:`,
+        ...repaired.repairedSessions.map((sessionName) => `- ${sessionName}`),
+      ].join("\n"),
+      "lifecycle repair"
+    );
+  }
+  if (repaired.failures.length > 0) {
+    note(
+      [
+        "Lifecycle sessions left unchanged because safe repair could not be re-proven:",
+        ...repaired.failures.map((failure) => `- ${failure}`),
+      ].join("\n"),
+      "lifecycle repair"
+    );
+  }
 }
 
 async function maybeInstallMutagenForDoctorFix(): Promise<void> {

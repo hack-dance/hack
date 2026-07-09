@@ -218,6 +218,34 @@ export async function removeLifecycleStateEntryIfOwned(opts: {
   return true;
 }
 
+export async function removeLifecycleStateEntryIfMatching(opts: {
+  readonly projectDir: string;
+  readonly expectedEntry: LifecycleStateEntry;
+}): Promise<boolean> {
+  const state = await readLifecycleState({ projectDir: opts.projectDir });
+  const current = state.find(
+    (entry) => entry.composeProject === opts.expectedEntry.composeProject
+  );
+  if (
+    !current ||
+    current.sessionName !== opts.expectedEntry.sessionName ||
+    current.backend !== opts.expectedEntry.backend ||
+    current.updatedAt !== opts.expectedEntry.updatedAt ||
+    current.ownershipToken !== opts.expectedEntry.ownershipToken
+  ) {
+    return false;
+  }
+  await writeLifecycleStateFile({
+    projectDir: opts.projectDir,
+    state: {
+      entries: state.filter(
+        (entry) => entry.composeProject !== opts.expectedEntry.composeProject
+      ),
+    },
+  });
+  return true;
+}
+
 function parseLifecycleStateEntry(value: unknown): LifecycleStateEntry | null {
   if (!isRecord(value)) {
     return null;

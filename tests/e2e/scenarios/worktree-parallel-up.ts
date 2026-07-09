@@ -88,6 +88,53 @@ export const worktreeParallelUpScenario: Scenario = {
         message: `docker compose ls should show a distinct branch-instance project for "${BRANCH}" while the primary is also running`,
       });
 
+      const primaryProject = fixture.name;
+      const branchProject = `${fixture.name}--${BRANCH}`;
+      const primaryIdsBefore = await readContainerIds({
+        cwd: fixture.root,
+        composeProject: primaryProject,
+      });
+      const branchIdsBefore = await readContainerIds({
+        cwd: fixture.root,
+        composeProject: branchProject,
+      });
+      expect({
+        that: primaryIdsBefore.length > 0 && branchIdsBefore.length > 0,
+        message: "both compose instances should expose running container ids",
+      });
+
+      const restartPrimary = await ctx.cli({
+        args: ["restart", "--json"],
+        cwd: fixture.root,
+        timeoutMs: UP_TIMEOUT_MS,
+      });
+      expectExit({
+        result: restartPrimary,
+        codes: [0],
+        message: "primary checkout restart should succeed",
+      });
+      const primaryIdsAfter = await readContainerIds({
+        cwd: fixture.root,
+        composeProject: primaryProject,
+      });
+      const branchIdsAfter = await readContainerIds({
+        cwd: fixture.root,
+        composeProject: branchProject,
+      });
+      expect({
+        that:
+          primaryIdsAfter.length > 0 &&
+          primaryIdsAfter.join(",") !== primaryIdsBefore.join(","),
+        message: "primary restart did not replace the primary containers",
+        result: restartPrimary,
+      });
+      expect({
+        that: branchIdsAfter.join(",") === branchIdsBefore.join(","),
+        message:
+          "primary restart changed the linked-worktree branch containers",
+        result: restartPrimary,
+      });
+
       const downWorktree = await ctx.cli({
         args: ["down"],
         cwd: worktreePath,
@@ -113,6 +160,31 @@ export const worktreeParallelUpScenario: Scenario = {
     }
   },
 };
+
+async function readContainerIds(opts: {
+  readonly cwd: string;
+  readonly composeProject: string;
+}): Promise<string[]> {
+  const result = await runCommand({
+    argv: [
+      "docker",
+      "ps",
+      "--filter",
+      `label=com.docker.compose.project=${opts.composeProject}`,
+      "--format",
+      "{{.ID}}",
+    ],
+    cwd: opts.cwd,
+  });
+  if (result.exitCode !== 0) {
+    return [];
+  }
+  return result.stdout
+    .split("\n")
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0)
+    .sort((left, right) => left.localeCompare(right));
+}
 
 async function resolveOpenUrl(opts: {
   readonly ctx: Parameters<Scenario["run"]>[0];

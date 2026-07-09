@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { createMonorepoFixture } from "../fixture.ts";
 import {
   buildCliEnv,
-  CLI_ENTRYPOINT,
   expect,
   expectExit,
+  resolveCliSpawnArgs,
   runCommand,
   type Scenario,
 } from "../harness.ts";
@@ -301,6 +301,80 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
           cwd: downFailureFixture.root,
         });
       }
+
+      const doctorFixture = await createMonorepoFixture({
+        parentDir: ctx.tempRoot,
+        withHackConfig: true,
+        lifecycle: {
+          persistentProcess: true,
+          disableInternal: true,
+        },
+      });
+      const doctorSession = `${doctorFixture.name}--lifecycle`;
+      const doctorStatePath = join(
+        doctorFixture.hackDir,
+        ".internal",
+        "lifecycle",
+        "state.json"
+      );
+      try {
+        const doctorUp = await ctx.cli({
+          args: ["up", "--detach", "--json"],
+          cwd: doctorFixture.root,
+          env: cliEnv,
+        });
+        expectExit({
+          result: doctorUp,
+          codes: [0],
+          message: "doctor orphan fixture should start its lifecycle session",
+        });
+        await ageLifecycleState({ statePath: doctorStatePath });
+        const doctor = await ctx.cli({
+          args: ["doctor"],
+          cwd: doctorFixture.root,
+          env: cliEnv,
+          timeoutMs: 240_000,
+        });
+        expect({
+          that:
+            !doctor.timedOut &&
+            doctor.combined.includes("owned lifecycle session") &&
+            doctor.combined.includes("hack doctor --fix"),
+          message: "doctor did not report the ownership-proven orphan session",
+          result: doctor,
+        });
+        const doctorFix = await ctx.cli({
+          args: ["doctor", "--fix"],
+          cwd: doctorFixture.root,
+          env: cliEnv,
+          timeoutMs: 240_000,
+        });
+        expect({
+          that:
+            !doctorFix.timedOut &&
+            (doctorFix.exitCode === 0 || doctorFix.exitCode === 1) &&
+            doctorFix.combined.includes("lifecycle repair"),
+          message: "doctor --fix did not run lifecycle repair",
+          result: doctorFix,
+        });
+        await expectSessionAbsent({
+          sessionName: doctorSession,
+          cwd: doctorFixture.root,
+          phase: "doctor --fix",
+        });
+        expect({
+          that:
+            (await readState({ statePath: doctorStatePath })).entries.length ===
+            0,
+          message: "doctor --fix left lifecycle ownership state behind",
+          result: doctorFix,
+        });
+      } finally {
+        await runCommand({
+          argv: ["tmux", "kill-session", "-t", doctorSession],
+          cwd: doctorFixture.root,
+        });
+      }
     } finally {
       await runCommand({
         argv: ["tmux", "kill-session", "-t", sessionName],
@@ -335,11 +409,31 @@ async function writeFakeDocker(opts: {
       "  esac",
       "fi",
       'if [ "$1" = "info" ]; then exit 0; fi',
+      'if [ "$1" = "ps" ]; then exit 0; fi',
       "exit 1",
       "",
     ].join("\n")
   );
   await chmod(path, 0o755);
+}
+
+async function ageLifecycleState(opts: {
+  readonly statePath: string;
+}): Promise<void> {
+  const state = await readState({ statePath: opts.statePath });
+  await Bun.write(
+    opts.statePath,
+    `${JSON.stringify(
+      {
+        entries: state.entries.map((entry) => ({
+          ...entry,
+          updatedAt: "2020-01-01T00:00:00.000Z",
+        })),
+      },
+      null,
+      2
+    )}\n`
+  );
 }
 
 async function runSignalProbe(opts: {
@@ -348,7 +442,7 @@ async function runSignalProbe(opts: {
   readonly path: string;
   readonly sessionName: string;
 }): Promise<{ readonly exitCode: number; readonly stderr: string }> {
-  const proc = Bun.spawn(["bun", CLI_ENTRYPOINT, "up", "--detach", "--json"], {
+  const proc = Bun.spawn(resolveCliSpawnArgs(["up", "--detach", "--json"]), {
     cwd: opts.cwd,
     env: buildCliEnv({
       hackHome: opts.hackHome,

@@ -125,12 +125,17 @@ stable home and can be torn down on `hack down`.
 Lifecycle state is checkout-local at `.hack/.internal/lifecycle/state.json`. For tmux processes, the
 saved process group belongs to the wrapped user command rather than its mux pane shell. Each compose
 instance has its own entry, so starting a branch instance does not replace the base instance's entry
-in the same checkout. Cleanup reconciles the saved process group with the live process table; if the group
+in the same checkout. A random token mirrored in mux metadata and lifecycle state proves current
+session ownership; deterministic session names never authorize teardown. Cleanup reconciles the saved process group with the live process table; if the group
 leader exited while members remain, `hack doctor` reports the orphan. `hack down` terminates the
 persisted leaderless group and descendant process groups only while a matching lifecycle mux session
 still proves ownership; without that session, cleanup stays non-destructive because the numeric PGID
 may have been reused. A live group leader without its saved pane PID is likewise not trusted as
 lifecycle ownership.
+
+Doctor also compares ownership-proven lifecycle sessions with live Compose instances. `doctor --fix`
+can remove a proven session only when its corresponding instance is absent and a second liveness and
+ownership check still agrees. Foreign or ambiguous same-name sessions remain non-destructive findings.
 
 For fixed-port helpers such as SSM/database/search tunnels, lifecycle config can also declare a
 `singleton` listener set. This lets Hack reuse an already-running equivalent helper or fail fast on

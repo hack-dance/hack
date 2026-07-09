@@ -2357,6 +2357,8 @@ async function startLifecycleProcess(opts: {
   const result = await exec(
     [
       "zellij",
+      "--session",
+      opts.sessionName,
       "run",
       "--close-on-exit",
       "--name",
@@ -2369,7 +2371,7 @@ async function startLifecycleProcess(opts: {
     {
       stdin: "ignore",
       cwd,
-      env: { ...opts.env, ZELLIJ_SESSION_NAME: opts.sessionName },
+      env: { ...opts.env },
     }
   );
   if (result.exitCode !== 0) {
@@ -6066,7 +6068,6 @@ async function runDownCommand({
       composeProject: lifecycleComposeProject,
     });
     if (beforeCode !== 0) {
-      await lifecycleDownCleanup();
       if (json) {
         return emitLifecycleResult({
           result: errorResult({
@@ -6182,7 +6183,6 @@ async function runRestartDownPhase(opts: {
       composeProject: opts.lifecycleComposeProject,
     });
     if (downBefore !== 0) {
-      await lifecycleDownCleanup();
       return downBefore;
     }
 

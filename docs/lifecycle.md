@@ -200,6 +200,9 @@ signals received while the mux session is still being initialized.
 3. Stop lifecycle processes by killing the lifecycle session.
 4. Run `lifecycle.down.after` hooks.
 
+If `lifecycle.down.before` fails, shutdown is aborted before Compose or lifecycle processes are
+stopped. `hack restart` preserves the same guard semantics during its down phase.
+
 ### `hack restart`
 
 `hack restart` performs the same lifecycle steps as `hack down` followed by `hack up`.

@@ -340,6 +340,12 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
         },
       });
       const downFailureSession = `${downFailureFixture.name}--lifecycle`;
+      const downFailureStatePath = join(
+        downFailureFixture.hackDir,
+        ".internal",
+        "lifecycle",
+        "state.json"
+      );
       try {
         const downFailureUp = await ctx.cli({
           args: ["up", "--detach", "--json"],
@@ -351,6 +357,15 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
           codes: [0],
           message: "down-failure fixture should start",
         });
+        const downFailureToken = (
+          await readState({ statePath: downFailureStatePath })
+        ).entries[0]?.ownershipToken;
+        expect({
+          that: Boolean(downFailureToken),
+          message: "down-failure fixture did not persist lifecycle ownership",
+          result: downFailureUp,
+        });
+        await Bun.write(dockerLog, "");
         const failedDown = await ctx.cli({
           args: ["down", "--json"],
           cwd: downFailureFixture.root,
@@ -363,10 +378,54 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
           message: "down.before failure should propagate",
           result: failedDown,
         });
-        await expectSessionAbsent({
+        await expectSessionPresent({
           sessionName: downFailureSession,
           cwd: downFailureFixture.root,
           phase: "down.before failure",
+        });
+        expect({
+          that:
+            (await readState({ statePath: downFailureStatePath })).entries[0]
+              ?.ownershipToken === downFailureToken,
+          message: "down.before failure removed lifecycle ownership state",
+          result: failedDown,
+        });
+        expect({
+          that: !(await Bun.file(dockerLog).text()).includes(" down"),
+          message: "down.before failure still invoked compose down",
+          result: failedDown,
+        });
+
+        await Bun.write(dockerLog, "");
+        const failedRestart = await ctx.cli({
+          args: ["restart", "--json"],
+          cwd: downFailureFixture.root,
+          env: cliEnv,
+        });
+        expect({
+          that:
+            failedRestart.exitCode !== 0 &&
+            failedRestart.combined.includes("Restart down phase failed"),
+          message: "restart down.before failure should propagate",
+          result: failedRestart,
+        });
+        await expectSessionPresent({
+          sessionName: downFailureSession,
+          cwd: downFailureFixture.root,
+          phase: "restart down.before failure",
+        });
+        expect({
+          that:
+            (await readState({ statePath: downFailureStatePath })).entries[0]
+              ?.ownershipToken === downFailureToken,
+          message:
+            "restart down.before failure removed lifecycle ownership state",
+          result: failedRestart,
+        });
+        expect({
+          that: !(await Bun.file(dockerLog).text()).includes(" down"),
+          message: "restart down.before failure still invoked compose down",
+          result: failedRestart,
         });
       } finally {
         await runCommand({
@@ -613,6 +672,19 @@ async function expectSessionAbsent(opts: {
   expect({
     that: !presence.present,
     message: `${opts.phase}: lifecycle session ${opts.sessionName} is still present`,
+    result: presence.result,
+  });
+}
+
+async function expectSessionPresent(opts: {
+  readonly sessionName: string;
+  readonly cwd: string;
+  readonly phase: string;
+}): Promise<void> {
+  const presence = await inspectSessionPresence(opts);
+  expect({
+    that: presence.present,
+    message: `${opts.phase}: lifecycle session ${opts.sessionName} is absent`,
     result: presence.result,
   });
 }

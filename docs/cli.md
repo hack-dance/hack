@@ -94,6 +94,10 @@ branch when no `--branch` is passed (`worktree.auto_branch`), so two checkouts n
 same hostnames. A one-line notice is printed to stderr when the default kicks in, so captured
 stdout stays clean.
 
+A detached linked worktree has no branch name to derive, so these commands fail instead of silently
+targeting the base instance. Pass `--branch <name>` to select an isolated instance, or set
+`worktree.auto_branch` to `false` only when intentionally opting into the base instance.
+
 Opt out:
 
 - pass `--branch <name>` explicitly (always wins), or

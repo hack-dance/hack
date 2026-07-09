@@ -711,6 +711,13 @@ function emitLifecycleResult(opts: {
   return opts.exitCode;
 }
 
+function buildLifecycleJsonErrorResult(opts: { readonly error: unknown }) {
+  if (opts.error instanceof CliUsageError) {
+    return errorResult({ code: "E_USAGE", message: opts.error.message });
+  }
+  return errorResultFromUnknown({ error: opts.error });
+}
+
 /**
  * Envelope for lifecycle actions that were routed to a remote node — the
  * remote runner owns per-service detail, so the payload reports the routing
@@ -5303,7 +5310,7 @@ async function handleUp({
     return await runUpCommand({ ctx, args, json: true, startedAtMs });
   } catch (error: unknown) {
     return emitLifecycleResult({
-      result: errorResultFromUnknown({ error }),
+      result: buildLifecycleJsonErrorResult({ error }),
       exitCode: 1,
     });
   }
@@ -5628,7 +5635,7 @@ async function handleDown({
       });
     }
     return emitLifecycleResult({
-      result: errorResultFromUnknown({ error }),
+      result: buildLifecycleJsonErrorResult({ error }),
       exitCode: 1,
     });
   }
@@ -6026,7 +6033,7 @@ async function handleRestart({
       });
     }
     return emitLifecycleResult({
-      result: errorResultFromUnknown({ error }),
+      result: buildLifecycleJsonErrorResult({ error }),
       exitCode: 1,
     });
   }

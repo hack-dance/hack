@@ -25,7 +25,7 @@ interface GithubReleaseView {
   readonly assets?: unknown;
 }
 
-interface ReleaseAssetInfo {
+export interface ReleaseAssetInfo {
   readonly name: string;
   readonly sha256: string;
 }
@@ -56,12 +56,14 @@ const HELP_TEXT = [
   "  --repo <owner/name>   GitHub repo to query (default: hack-dance/hack)",
 ].join("\n");
 
-const parsed = parseArgs({ argv: Bun.argv.slice(2) });
-if (parsed.ok) {
-  process.exitCode = await main({ args: parsed.args });
-} else {
-  process.stderr.write(`${parsed.message}\n`);
-  process.exitCode = 1;
+if (import.meta.main) {
+  const parsed = parseArgs({ argv: Bun.argv.slice(2) });
+  if (parsed.ok) {
+    process.exitCode = await main({ args: parsed.args });
+  } else {
+    process.stderr.write(`${parsed.message}\n`);
+    process.exitCode = 1;
+  }
 }
 
 async function main({ args }: { readonly args: Args }): Promise<number> {
@@ -246,7 +248,7 @@ function parseAssets({
   return out;
 }
 
-function renderFormula({
+export function renderFormula({
   repo,
   tag,
   version,
@@ -287,7 +289,7 @@ function renderFormula({
     '    libexec.install "hack"',
     '    (libexec/"assets").install Dir["assets/*"] if (buildpath/"assets").directory?',
     '    (libexec/"assets/binaries").install Dir["binaries/*"] if (buildpath/"binaries").directory?',
-    '    bin.write_env_script libexec/"hack", HACK_ASSETS_DIR: libexec/"assets"',
+    '    (bin/"hack").write_env_script libexec/"hack", HACK_ASSETS_DIR: libexec/"assets"',
     "  end",
     "",
     "  test do",

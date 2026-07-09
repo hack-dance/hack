@@ -160,17 +160,14 @@ export function resolvePersistedLifecycleProcessGroupIds(opts: {
   });
 }
 
-/** Trust all live roots with a session, or only leaderless persisted groups without one. */
+/** Only trust persisted lifecycle metadata when a matching mux session was observed live. */
 export function resolveLifecycleStopProcessGroupIds(opts: {
   readonly matchedLiveSession: boolean;
   readonly lifecycleEntry: LifecycleStateEntry | null;
   readonly snapshot: readonly ProcessSnapshotRow[];
 }): number[] {
   if (!opts.matchedLiveSession) {
-    return resolveLeaderlessPersistedLifecycleProcessGroupIds({
-      lifecycleEntry: opts.lifecycleEntry,
-      snapshot: opts.snapshot,
-    });
+    return [];
   }
   return resolvePersistedLifecycleProcessGroupIds({
     lifecycleEntry: opts.lifecycleEntry,

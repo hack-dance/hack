@@ -126,9 +126,10 @@ Lifecycle state is checkout-local at `.hack/.internal/lifecycle/state.json`. Eac
 has its own entry, so starting a branch instance does not replace the base instance's entry in the
 same checkout. Cleanup reconciles the saved process group with the live process table; if the group
 leader exited while members remain, `hack doctor` reports the orphan. `hack down` terminates the
-persisted leaderless group only while a matching lifecycle mux session still proves ownership; without
-that session, cleanup stays non-destructive because the numeric PGID may have been reused. A live group
-leader without its saved pane PID is likewise not trusted as lifecycle ownership.
+persisted leaderless group and descendant process groups only while a matching lifecycle mux session
+still proves ownership; without that session, cleanup stays non-destructive because the numeric PGID
+may have been reused. A live group leader without its saved pane PID is likewise not trusted as
+lifecycle ownership.
 
 For fixed-port helpers such as SSM/database/search tunnels, lifecycle config can also declare a
 `singleton` listener set. This lets Hack reuse an already-running equivalent helper or fail fast on

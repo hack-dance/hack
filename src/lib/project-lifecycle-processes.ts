@@ -134,14 +134,20 @@ export function resolveLeaderlessPersistedLifecycleProcessGroupIds(opts: {
     const groupLeaderStillExists = opts.snapshot.some(
       (row) => row.pid === processGroupId
     );
-    const groupHasMembers = opts.snapshot.some(
-      (row) => row.processGroupId === processGroupId
-    );
+    const groupMemberPids = opts.snapshot
+      .filter((row) => row.processGroupId === processGroupId)
+      .map((row) => row.pid);
     if (
       !(persistedPaneStillExists || groupLeaderStillExists) &&
-      groupHasMembers
+      groupMemberPids.length > 0
     ) {
-      groups.add(processGroupId);
+      const descendantGroups = collectDescendantProcessGroupIds({
+        snapshot: opts.snapshot,
+        rootPids: groupMemberPids,
+      });
+      for (const descendantGroup of descendantGroups) {
+        groups.add(descendantGroup);
+      }
     }
   }
 

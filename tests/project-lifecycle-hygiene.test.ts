@@ -58,9 +58,10 @@ test("inspectLifecycleStateEntries reports leaderless groups behind a live mux s
     snapshot: [
       { pid: 501, ppid: 1, processGroupId: 500 },
       { pid: 502, ppid: 501, processGroupId: 500 },
+      { pid: 503, ppid: 502, processGroupId: 503 },
     ],
   });
 
   expect(inspection.staleEntries).toEqual([]);
-  expect(inspection.orphanedProcessGroups).toEqual([500]);
+  expect(inspection.orphanedProcessGroups).toEqual([500, 503]);
 });

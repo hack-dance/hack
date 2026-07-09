@@ -188,7 +188,7 @@ test("resolveLifecycleProcessGroupIdsForTmuxState ignores recycled process group
   expect(groups).toEqual([]);
 });
 
-test("resolveLifecycleProcessGroupIdsForTmuxState recovers a persisted leaderless group", () => {
+test("resolveLifecycleProcessGroupIdsForTmuxState recovers a persisted leaderless group and descendants", () => {
   const groups = resolveLifecycleProcessGroupIdsForTmuxState({
     lifecycleEntry: {
       composeProject: "event-agent",
@@ -211,10 +211,11 @@ test("resolveLifecycleProcessGroupIdsForTmuxState recovers a persisted leaderles
     snapshot: [
       { pid: 501, ppid: 1, processGroupId: 500 },
       { pid: 502, ppid: 501, processGroupId: 500 },
+      { pid: 503, ppid: 502, processGroupId: 503 },
     ],
   });
 
-  expect(groups).toEqual([500]);
+  expect(groups).toEqual([500, 503]);
 });
 
 test("resolvePersistedLifecycleProcessGroupIds recovers live groups without a mux session", () => {
@@ -297,13 +298,14 @@ test("resolveLifecycleStopProcessGroupIds skips a leaderless persisted group wit
     snapshot: [
       { pid: 501, ppid: 1, processGroupId: 500 },
       { pid: 502, ppid: 501, processGroupId: 500 },
+      { pid: 503, ppid: 502, processGroupId: 503 },
     ],
   });
 
   expect(groups).toEqual([]);
 });
 
-test("resolveLifecycleStopProcessGroupIds recovers a leaderless persisted group with a live mux session", () => {
+test("resolveLifecycleStopProcessGroupIds recovers a leaderless persisted group and descendants with a live mux session", () => {
   const groups = resolveLifecycleStopProcessGroupIds({
     matchedLiveSession: true,
     lifecycleEntry: {
@@ -326,10 +328,12 @@ test("resolveLifecycleStopProcessGroupIds recovers a leaderless persisted group 
     snapshot: [
       { pid: 501, ppid: 1, processGroupId: 500 },
       { pid: 502, ppid: 501, processGroupId: 500 },
+      { pid: 503, ppid: 502, processGroupId: 503 },
+      { pid: 504, ppid: 503, processGroupId: 504 },
     ],
   });
 
-  expect(groups).toEqual([500]);
+  expect(groups).toEqual([500, 503, 504]);
 });
 
 test("wrapLifecyclePersistentCommand uses external kill for process-group cleanup", () => {

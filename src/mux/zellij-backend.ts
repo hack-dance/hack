@@ -7,6 +7,11 @@ import type {
   MuxSessionCreateResult,
 } from "./mux-backend.ts";
 
+const LIFECYCLE_OWNER_TAB_PREFIX = "hack-lifecycle-owner-";
+const LIFECYCLE_OWNER_TAB_PATTERN =
+  /tab name="hack-lifecycle-owner-([a-zA-Z0-9-]+)"/;
+const NAMED_PANE_PATTERN = /pane name="([^"]+)"/g;
+
 export function createZellijBackend(): MuxBackend {
   const available = Boolean(findExecutableInPath("zellij"));
 
@@ -47,6 +52,7 @@ export function createZellijBackend(): MuxBackend {
     readonly name: string;
     readonly cwd?: string;
     readonly env?: Readonly<Record<string, string>>;
+    readonly lifecycleOwnerToken?: string;
   }): Promise<MuxSessionCreateResult> => {
     if (!available) {
       return { ok: false, error: "zellij_unavailable" };
@@ -58,23 +64,36 @@ export function createZellijBackend(): MuxBackend {
       {
         stdin: "ignore",
         cwd: opts.cwd,
-        env: opts.name
-          ? {
-              ...(opts.env ?? {}),
-              ZELLIJ_SESSION_NAME: opts.name,
-            }
-          : opts.env,
+        env: opts.env,
       }
     );
 
     if (result.exitCode !== 0) {
       const stderr = result.stderr.trim();
-      if (stderr.toLowerCase().includes("session already exists")) {
-        const sessions = await listSessions();
-        const session = sessions.find((s) => s.name === opts.name) ?? null;
-        return { ok: true, session };
-      }
       return { ok: false, error: "create_failed", stderr };
+    }
+
+    if (opts.lifecycleOwnerToken) {
+      const ownerResult = await exec(
+        [
+          "zellij",
+          "action",
+          "rename-tab",
+          `${LIFECYCLE_OWNER_TAB_PREFIX}${opts.lifecycleOwnerToken}`,
+        ],
+        {
+          stdin: "ignore",
+          env: { ZELLIJ_SESSION_NAME: opts.name },
+        }
+      );
+      if (ownerResult.exitCode !== 0) {
+        await exec(["zellij", "kill-session", opts.name], { stdin: "ignore" });
+        return {
+          ok: false,
+          error: "owner_metadata_failed",
+          stderr: ownerResult.stderr.trim(),
+        };
+      }
     }
 
     const sessions = await listSessions();
@@ -88,6 +107,37 @@ export function createZellijBackend(): MuxBackend {
     return await exec(["zellij", "kill-session", opts.name], {
       stdin: "ignore",
     });
+  };
+
+  const readLifecycleOwnerToken = async (opts: {
+    readonly name: string;
+  }): Promise<string | null> => {
+    const result = await exec(["zellij", "action", "dump-layout"], {
+      stdin: "ignore",
+      env: { ZELLIJ_SESSION_NAME: opts.name },
+    });
+    if (result.exitCode !== 0) {
+      return null;
+    }
+    const match = result.stdout.match(LIFECYCLE_OWNER_TAB_PATTERN);
+    return match?.[1] ?? null;
+  };
+
+  const listSessionWindowNames = async (opts: {
+    readonly name: string;
+  }): Promise<ReadonlySet<string> | null> => {
+    const result = await exec(["zellij", "action", "dump-layout"], {
+      stdin: "ignore",
+      env: { ZELLIJ_SESSION_NAME: opts.name },
+    });
+    if (result.exitCode !== 0) {
+      return null;
+    }
+    return new Set(
+      [...result.stdout.matchAll(NAMED_PANE_PATTERN)]
+        .map((match) => match[1]?.trim() ?? "")
+        .filter((name) => name.length > 0)
+    );
   };
 
   const execInSession = async (opts: {
@@ -122,6 +172,8 @@ export function createZellijBackend(): MuxBackend {
     listSessions,
     createSession,
     killSession,
+    readLifecycleOwnerToken,
+    listSessionWindowNames,
     execInSession,
     sendInput,
   };

@@ -179,6 +179,20 @@ Lifecycle output is now surfaced across CLI/runtime views:
 5. Run `docker compose up` (or `up -d` when `--detach`).
 6. Run `lifecycle.up.after` hooks.
 
+Before starting persistent work, Hack reconciles the expected lifecycle session with
+`.hack/.internal/lifecycle/state.json`:
+
+- A session whose mux ownership token, saved definition hash, and live process windows all match is
+  adopted without starting duplicate processes.
+- A token-owned stale session is replaced. Pre-ownership tmux sessions are replaced only when saved
+  state, checkout path, creation time, and window count provide deterministic legacy ownership proof.
+- A same-name session without matching ownership proof is left untouched and `hack up` fails with an
+  actionable collision error.
+
+If the operation later fails in Compose or `up.after`, Hack removes only the lifecycle session created
+by that operation. The same exact-token cleanup runs for supported `SIGINT` and `SIGTERM` paths, including
+signals received while the mux session is still being initialized.
+
 ### `hack down`
 
 1. Run `lifecycle.down.before` hooks.
@@ -189,6 +203,8 @@ Lifecycle output is now surfaced across CLI/runtime views:
 ### `hack restart`
 
 `hack restart` performs the same lifecycle steps as `hack down` followed by `hack up`.
+From the primary checkout, it targets only the base Compose/lifecycle instance. A linked worktree uses
+its isolated derived branch instance, and `--branch <name>` targets only that explicit branch.
 
 ### `--json`
 
@@ -214,6 +230,8 @@ Notes:
 - Teardown is implemented by killing the lifecycle session; anything running inside that session will be stopped.
 - For tmux-backed lifecycle sessions, Hack also persists the pane PID and the wrapped command's actual
   process-group metadata to `.hack/.internal/lifecycle/state.json`, with per-hook/process output logged to
+- Current lifecycle sessions carry the same random ownership token in mux metadata and persisted state.
+  Cleanup requires an exact token match; deterministic names alone never authorize session teardown.
   `.hack/.internal/lifecycle/*.log`. If tmux pane state disappears before teardown, `hack down` still uses that persisted metadata to clean up any live lifecycle process groups instead of leaving orphaned host processes behind.
 - `hack doctor` reports stale lifecycle state when the persisted lifecycle entry no longer has a live mux session and points operators to `hack down` so cleanup and state removal happen through the supported path. `hack doctor --fix` does not tear down lifecycle sessions itself — use `hack down` for that.
 

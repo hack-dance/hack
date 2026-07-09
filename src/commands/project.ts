@@ -120,6 +120,7 @@ import {
   type LifecycleStateEntry,
   readLifecycleState,
   removeLifecycleStateEntry,
+  removeLifecycleStateEntryIfOwned,
   resolveLifecycleComposeProjectName,
   resolveLifecycleLogPath,
   upsertLifecycleStateEntry,
@@ -163,6 +164,13 @@ import {
   resolveLifecycleStopProcessGroupIds,
 } from "../lib/project-lifecycle-processes.ts";
 import {
+  createLifecycleOwnershipToken,
+  inspectLifecycleSession,
+  killInspectedLifecycleSession,
+  killLifecycleSessionWithOwnership,
+  resolveLifecycleDefinitionHash,
+} from "../lib/project-lifecycle-sessions.ts";
+import {
   inspectListeningTcpPorts,
   resolveLifecycleSingletonDecision,
 } from "../lib/project-lifecycle-singleton.ts";
@@ -185,7 +193,7 @@ import { parseTimeInput } from "../lib/time.ts";
 import { upsertAgentDocs } from "../mcp/agent-docs.ts";
 import type { McpTarget } from "../mcp/install.ts";
 import { installMcpConfig } from "../mcp/install.ts";
-import type { MuxBackendName } from "../mux/mux-backend.ts";
+import type { MuxBackend, MuxBackendName } from "../mux/mux-backend.ts";
 import {
   getMuxBackends,
   resolveDefaultBackendName,
@@ -1587,6 +1595,15 @@ type StartedLifecycleProcess = {
   readonly logPath: string;
 };
 
+type LifecycleOperationCleanup = () => Promise<void>;
+
+type LifecycleUpResult = {
+  readonly code: number;
+  readonly sessionName: string | null;
+  readonly cleanup: LifecycleOperationCleanup | null;
+  readonly signalCleanup: { readonly dispose: () => void } | null;
+};
+
 function hasPersistentLifecycleCommands(
   commands: readonly ProjectLifecycleCommand[] | undefined
 ): boolean {
@@ -1601,8 +1618,12 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   readonly branch: string | null;
   readonly env: Readonly<Record<string, string>>;
   readonly composeProject: string;
-}): Promise<{ readonly code: number; readonly sessionName: string | null }> {
+}): Promise<LifecycleUpResult> {
   const beforeCommands = opts.cfg.lifecycle?.up?.before;
+  const definitionHash = resolveProjectLifecycleDefinitionHash({
+    beforeCommands,
+    processes: opts.cfg.lifecycle?.processes,
+  });
   if (!hasPersistentLifecycleCommands(beforeCommands)) {
     const beforeCode = await runLifecycleCommands({
       title: opts.title,
@@ -1613,15 +1634,21 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
       composeProject: opts.composeProject,
     });
     if (beforeCode !== 0) {
-      return { code: beforeCode, sessionName: null };
+      return {
+        code: beforeCode,
+        sessionName: null,
+        cleanup: null,
+        signalCleanup: null,
+      };
     }
-    await startLifecycleProcesses({
+    const lifecycleStart = await startLifecycleProcesses({
       project: opts.project,
       cfg: opts.cfg,
       projectName: opts.projectName,
       branch: opts.branch,
       env: opts.env,
       composeProject: opts.composeProject,
+      definitionHash,
     });
     const hasProcesses = (opts.cfg.lifecycle?.processes ?? []).length > 0;
     return {
@@ -1632,6 +1659,8 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
             branch: opts.branch,
           })
         : null,
+      cleanup: lifecycleStart.cleanup,
+      signalCleanup: lifecycleStart.signalCleanup,
     };
   }
 
@@ -1641,6 +1670,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     branch: opts.branch,
     env: opts.env,
     composeProject: opts.composeProject,
+    definitionHash,
   });
   const beforeCode = await runLifecycleCommands({
     title: opts.title,
@@ -1658,7 +1688,12 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   });
   if (beforeCode !== 0) {
     await starter.abort();
-    return { code: beforeCode, sessionName: null };
+    return {
+      code: beforeCode,
+      sessionName: null,
+      cleanup: null,
+      signalCleanup: null,
+    };
   }
 
   try {
@@ -1677,7 +1712,137 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   return {
     code: 0,
     sessionName: starter.hasStarted() ? starter.sessionName : null,
+    cleanup: starter.getOperationCleanup(),
+    signalCleanup: starter.getSignalCleanup(),
   };
+}
+
+function installLifecycleSignalCleanup(opts: {
+  readonly cleanup: LifecycleOperationCleanup | null;
+}): { readonly dispose: () => void } {
+  if (!opts.cleanup) {
+    return { dispose: () => undefined };
+  }
+
+  let handlingSignal = false;
+  const handlers = new Map<NodeJS.Signals, () => void>();
+  const dispose = (): void => {
+    for (const [signal, handler] of handlers) {
+      process.off(signal, handler);
+    }
+    handlers.clear();
+  };
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    const handler = (): void => {
+      if (handlingSignal) {
+        return;
+      }
+      handlingSignal = true;
+      void opts.cleanup?.().finally(() => {
+        dispose();
+        process.kill(process.pid, signal);
+      });
+    };
+    handlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+  return { dispose };
+}
+
+function resolveProjectLifecycleDefinitionHash(opts: {
+  readonly beforeCommands: readonly ProjectLifecycleCommand[] | undefined;
+  readonly processes: readonly ProjectLifecycleProcess[] | undefined;
+}): string {
+  const persistentBefore = (opts.beforeCommands ?? [])
+    .map((command, index) => ({ command, index }))
+    .filter(({ command }) => command.persistent === true)
+    .map(({ command, index }) => ({
+      kind: "up-before",
+      name: resolveLifecycleCommandServiceName({ command, index }),
+      command: command.command,
+      cwd: command.cwd ?? null,
+      singleton: command.singleton ?? null,
+    }));
+  const processes = (opts.processes ?? []).map((process) => ({
+    kind: "process",
+    name: process.name,
+    command: process.command,
+    cwd: process.cwd ?? null,
+    singleton: process.singleton ?? null,
+  }));
+  return resolveLifecycleDefinitionHash({
+    definitions: [...persistentBefore, ...processes],
+  });
+}
+
+async function reconcileChangedLifecycleBackend(opts: {
+  readonly mux: Awaited<ReturnType<typeof resolveMux>>;
+  readonly entry: LifecycleStateEntry | null;
+  readonly resolvedBackend: MuxBackendName;
+  readonly sessionName: string;
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly definitionHash: string;
+}): Promise<LifecycleStateEntry | null> {
+  if (!opts.entry || opts.entry.backend === opts.resolvedBackend) {
+    return opts.entry;
+  }
+  const previousBackend = opts.mux.backends.get(opts.entry.backend);
+  if (!previousBackend?.available) {
+    throw new Error(
+      `Lifecycle backend changed to ${opts.resolvedBackend}, but the owned ${opts.entry.backend} session cannot be inspected safely because ${opts.entry.backend} is unavailable.`
+    );
+  }
+  const inspection = await inspectLifecycleSession({
+    backend: previousBackend,
+    entry: opts.entry,
+    expectedSessionName: opts.sessionName,
+    expectedProjectRoot: opts.projectRoot,
+    expectedDefinitionHash: opts.definitionHash,
+  });
+  if (inspection.decision.kind === "block") {
+    throw new Error(inspection.decision.reason);
+  }
+  if (
+    inspection.classification !== "absent" &&
+    !(await killInspectedLifecycleSession({
+      backend: previousBackend,
+      inspection,
+    }))
+  ) {
+    throw new Error(
+      `Failed to stop the owned ${opts.entry.backend} lifecycle session before switching to ${opts.resolvedBackend}.`
+    );
+  }
+  await removeLifecycleStateEntry({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+  });
+  return null;
+}
+
+async function replaceInspectedLifecycleSession(opts: {
+  readonly backend: MuxBackend;
+  readonly inspection: Awaited<ReturnType<typeof inspectLifecycleSession>>;
+  readonly sessionName: string;
+  readonly projectDir: string;
+  readonly composeProject: string;
+}): Promise<void> {
+  if (
+    !(await killInspectedLifecycleSession({
+      backend: opts.backend,
+      inspection: opts.inspection,
+    }))
+  ) {
+    throw new Error(
+      `Failed to replace stale lifecycle session: ${opts.sessionName}`
+    );
+  }
+  await removeLifecycleStateEntry({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+  });
 }
 
 function createLifecycleProcessStarter(opts: {
@@ -1686,6 +1851,7 @@ function createLifecycleProcessStarter(opts: {
   readonly branch: string | null;
   readonly env: Readonly<Record<string, string>>;
   readonly composeProject: string;
+  readonly definitionHash: string;
 }): {
   readonly sessionName: string;
   startFromCommand: (opts: {
@@ -1698,6 +1864,8 @@ function createLifecycleProcessStarter(opts: {
   finalize: () => Promise<void>;
   abort: () => Promise<void>;
   hasStarted: () => boolean;
+  getOperationCleanup: () => LifecycleOperationCleanup | null;
+  getSignalCleanup: () => { readonly dispose: () => void } | null;
 } {
   const sessionName = resolveLifecycleSessionName({
     projectName: opts.projectName,
@@ -1706,19 +1874,15 @@ function createLifecycleProcessStarter(opts: {
   const startedProcesses: StartedLifecycleProcess[] = [];
   let backendName: MuxBackendName | null = null;
   let sessionReady = false;
-  let existingSessionCleared = false;
+  let sessionDispositionResolved = false;
+  let createdOwnershipToken: string | null = null;
+  let adoptedEntry: LifecycleStateEntry | null = null;
+  let operationSignalCleanup: { readonly dispose: () => void } | null = null;
+  let sessionCreationSettled: Promise<void> = Promise.resolve();
   let nextIndex = 0;
 
-  const ensureExistingSessionCleared = async (): Promise<void> => {
-    if (existingSessionCleared) {
-      return;
-    }
-    await killLifecycleSessionByName({ sessionName });
-    existingSessionCleared = true;
-  };
-
-  const ensureSession = async (): Promise<void> => {
-    if (sessionReady) {
+  const resolveSessionDisposition = async (): Promise<void> => {
+    if (sessionDispositionResolved) {
       return;
     }
     const mux = await resolveMux({ project: opts.project });
@@ -1738,29 +1902,119 @@ function createLifecycleProcessStarter(opts: {
     if (!backend?.available) {
       throw new Error(`${resolvedBackend} is not available`);
     }
-    await ensureExistingSessionCleared();
-    const created = await backend.createSession({
-      name: sessionName,
-      cwd: opts.project.projectRoot,
+    const entries = await readLifecycleState({
+      projectDir: opts.project.projectDir,
     });
-    if (!created.ok) {
-      throw new Error(`Failed to create lifecycle session: ${sessionName}`);
-    }
-    if (resolvedBackend === "tmux") {
-      for (const [key, value] of Object.entries(opts.env)) {
-        await exec(["tmux", "set-environment", "-t", sessionName, key, value], {
-          stdin: "ignore",
-        });
-      }
-    }
+    const persistedEntry =
+      entries.find(
+        (candidate) => candidate.composeProject === opts.composeProject
+      ) ?? null;
+    const entry = await reconcileChangedLifecycleBackend({
+      mux,
+      entry: persistedEntry,
+      resolvedBackend,
+      sessionName,
+      projectRoot: opts.project.projectRoot,
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+      definitionHash: opts.definitionHash,
+    });
     backendName = resolvedBackend;
+    const inspection = await inspectLifecycleSession({
+      backend,
+      entry,
+      expectedSessionName: sessionName,
+      expectedProjectRoot: opts.project.projectRoot,
+      expectedDefinitionHash: opts.definitionHash,
+    });
+    if (inspection.decision.kind === "block") {
+      throw new Error(inspection.decision.reason);
+    }
+    if (inspection.decision.kind === "adopt") {
+      adoptedEntry = inspection.decision.entry;
+      startedProcesses.push(...inspection.decision.entry.processes);
+      sessionReady = true;
+      sessionDispositionResolved = true;
+      return;
+    }
+    if (inspection.decision.kind === "replace") {
+      await replaceInspectedLifecycleSession({
+        backend,
+        inspection,
+        sessionName,
+        projectDir: opts.project.projectDir,
+        composeProject: opts.composeProject,
+      });
+    }
+    sessionDispositionResolved = true;
+  };
+
+  const ensureSession = async (): Promise<void> => {
+    await resolveSessionDisposition();
+    if (sessionReady) {
+      return;
+    }
+    const backend = backendName
+      ? (await resolveMux({ project: opts.project })).backends.get(backendName)
+      : null;
+    if (!(backendName && backend?.available)) {
+      throw new Error("Lifecycle mux backend became unavailable");
+    }
+    const ownershipToken = createLifecycleOwnershipToken();
+    let settleSessionCreation = (): void => undefined;
+    sessionCreationSettled = new Promise<void>((resolvePromise) => {
+      settleSessionCreation = resolvePromise;
+    });
+    operationSignalCleanup = installLifecycleSignalCleanup({
+      cleanup: starterAbort,
+    });
+    try {
+      const created = await backend.createSession({
+        name: sessionName,
+        cwd: opts.project.projectRoot,
+        lifecycleOwnerToken: ownershipToken,
+      });
+      if (!created.ok) {
+        throw new Error(`Failed to create lifecycle session: ${sessionName}`);
+      }
+      createdOwnershipToken = ownershipToken;
+      await upsertLifecycleStateEntry({
+        projectDir: opts.project.projectDir,
+        entry: {
+          composeProject: opts.composeProject,
+          projectName: opts.projectName,
+          branch: opts.branch,
+          sessionName,
+          backend: backendName,
+          ownershipToken,
+          definitionHash: opts.definitionHash,
+          processes: [],
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      if (backendName === "tmux") {
+        for (const [key, value] of Object.entries(opts.env)) {
+          await exec(
+            ["tmux", "set-environment", "-t", sessionName, key, value],
+            {
+              stdin: "ignore",
+            }
+          );
+        }
+      }
+    } finally {
+      settleSessionCreation();
+    }
     sessionReady = true;
   };
 
   const startProcess = async (
     process: ProjectLifecycleProcess
   ): Promise<void> => {
-    await ensureExistingSessionCleared();
+    await resolveSessionDisposition();
+    if (adoptedEntry?.processes.some((entry) => entry.name === process.name)) {
+      return;
+    }
     const singletonDecision = await resolveLifecycleSingletonDecisionForProcess(
       {
         process,
@@ -1802,6 +2056,7 @@ function createLifecycleProcessStarter(opts: {
       });
     },
     startMany: async ({ processes }) => {
+      await resolveSessionDisposition();
       for (const process of processes) {
         await startProcess(process);
       }
@@ -1814,6 +2069,8 @@ function createLifecycleProcessStarter(opts: {
         });
         return;
       }
+      const ownershipToken =
+        createdOwnershipToken ?? adoptedEntry?.ownershipToken;
       await upsertLifecycleStateEntry({
         projectDir: opts.project.projectDir,
         entry: {
@@ -1822,37 +2079,47 @@ function createLifecycleProcessStarter(opts: {
           branch: opts.branch,
           sessionName,
           backend: backendName,
+          ...(ownershipToken ? { ownershipToken } : {}),
+          definitionHash: opts.definitionHash,
           processes: startedProcesses,
           updatedAt: new Date().toISOString(),
         },
       });
     },
     abort: async () => {
-      if (sessionReady) {
-        await killLifecycleSessionByName({ sessionName });
-      }
-      await removeLifecycleStateEntry({
-        projectDir: opts.project.projectDir,
-        composeProject: opts.composeProject,
-      });
+      await starterAbort();
+      operationSignalCleanup?.dispose();
     },
     hasStarted: () => startedProcesses.length > 0,
+    getOperationCleanup: () =>
+      createdOwnershipToken
+        ? async () => {
+            await starterAbort();
+          }
+        : null,
+    getSignalCleanup: () => operationSignalCleanup,
   };
-}
 
-async function killLifecycleSessionByName(opts: {
-  readonly sessionName: string;
-}): Promise<void> {
-  const backends = getMuxBackends();
-  for (const backend of backends.values()) {
-    if (!backend.available) {
-      continue;
+  async function starterAbort(): Promise<void> {
+    await sessionCreationSettled;
+    if (!(createdOwnershipToken && backendName)) {
+      return;
     }
-    const sessions = await backend.listSessions();
-    if (!sessions.some((session) => session.name === opts.sessionName)) {
-      continue;
+    const backend = (await resolveMux({ project: opts.project })).backends.get(
+      backendName
+    );
+    if (backend?.available) {
+      await killLifecycleSessionWithOwnership({
+        backend,
+        sessionName,
+        ownershipToken: createdOwnershipToken,
+      });
     }
-    await backend.killSession({ name: opts.sessionName });
+    await removeLifecycleStateEntryIfOwned({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+      ownershipToken: createdOwnershipToken,
+    });
   }
 }
 
@@ -1863,14 +2130,23 @@ async function startLifecycleProcesses(opts: {
   readonly branch: string | null;
   readonly env: Readonly<Record<string, string>>;
   readonly composeProject: string;
-}): Promise<void> {
+  readonly definitionHash: string;
+}): Promise<{
+  readonly cleanup: LifecycleOperationCleanup | null;
+  readonly signalCleanup: { readonly dispose: () => void } | null;
+}> {
   const processes = opts.cfg.lifecycle?.processes ?? [];
   if (processes.length === 0) {
-    await removeLifecycleStateEntry({
+    const existingEntries = await readLifecycleState({
       projectDir: opts.project.projectDir,
-      composeProject: opts.composeProject,
     });
-    return;
+    if (
+      !existingEntries.some(
+        (entry) => entry.composeProject === opts.composeProject
+      )
+    ) {
+      return { cleanup: null, signalCleanup: null };
+    }
   }
 
   const starter = createLifecycleProcessStarter({
@@ -1879,10 +2155,15 @@ async function startLifecycleProcesses(opts: {
     branch: opts.branch,
     env: opts.env,
     composeProject: opts.composeProject,
+    definitionHash: opts.definitionHash,
   });
   try {
     await starter.startMany({ processes });
     await starter.finalize();
+    return {
+      cleanup: starter.getOperationCleanup(),
+      signalCleanup: starter.getSignalCleanup(),
+    };
   } catch (error: unknown) {
     await starter.abort();
     if (error instanceof Error) {
@@ -2059,7 +2340,17 @@ async function startLifecycleProcess(opts: {
     serviceName: opts.process.name,
   });
   const result = await exec(
-    ["zellij", "run", "--", "sh", "-c", wrappedCommand],
+    [
+      "zellij",
+      "run",
+      "--close-on-exit",
+      "--name",
+      windowName,
+      "--",
+      "sh",
+      "-c",
+      wrappedCommand,
+    ],
     {
       stdin: "ignore",
       cwd,
@@ -2095,15 +2386,6 @@ async function stopLifecycleProcesses(opts: {
   readonly branch: string | null;
   readonly composeProject: string;
 }): Promise<void> {
-  const lifecycle = opts.cfg.lifecycle;
-  if (!lifecycle) {
-    await removeLifecycleStateEntry({
-      projectDir: opts.project.projectDir,
-      composeProject: opts.composeProject,
-    });
-    return;
-  }
-
   const sessionName = resolveLifecycleSessionName({
     projectName: opts.projectName,
     branch: opts.branch,
@@ -2116,24 +2398,53 @@ async function stopLifecycleProcesses(opts: {
       (entry) => entry.composeProject === opts.composeProject
     ) ?? null;
 
-  const backends = getMuxBackends();
-  let matchedLiveSession = false;
-  for (const backend of backends.values()) {
-    if (!backend.available) {
-      continue;
+  const backend = lifecycleEntry
+    ? getMuxBackends().get(lifecycleEntry.backend)
+    : null;
+  if (!lifecycleEntry) {
+    return;
+  }
+  if (!backend?.available) {
+    throw new Error(
+      `Lifecycle backend ${lifecycleEntry.backend} is unavailable; refusing unverified session cleanup`
+    );
+  }
+
+  const definitionHash =
+    lifecycleEntry.definitionHash ??
+    resolveProjectLifecycleDefinitionHash({
+      beforeCommands: opts.cfg.lifecycle?.up?.before,
+      processes: opts.cfg.lifecycle?.processes,
+    });
+  const inspection = await inspectLifecycleSession({
+    backend,
+    entry: lifecycleEntry,
+    expectedSessionName: sessionName,
+    expectedProjectRoot: opts.project.projectRoot,
+    expectedDefinitionHash: definitionHash,
+  });
+  if (inspection.decision.kind === "block") {
+    throw new Error(inspection.decision.reason);
+  }
+
+  const matchedLiveSession = inspection.classification !== "absent";
+  if (matchedLiveSession && backend.name === "tmux") {
+    await interruptLifecycleTmuxProcesses({
+      sessionName,
+      lifecycleEntry,
+    });
+  }
+  if (matchedLiveSession) {
+    const killed = lifecycleEntry.ownershipToken
+      ? await killLifecycleSessionWithOwnership({
+          backend,
+          sessionName,
+          ownershipToken: lifecycleEntry.ownershipToken,
+        })
+      : (await backend.killSession({ name: sessionName })).exitCode === 0;
+    if (!killed) {
+      throw new Error(`Failed to stop owned lifecycle session: ${sessionName}`);
     }
-    const sessions = await backend.listSessions();
-    if (!sessions.some((s) => s.name === sessionName)) {
-      continue;
-    }
-    matchedLiveSession = true;
-    if (backend.name === "tmux") {
-      await interruptLifecycleTmuxProcesses({
-        sessionName,
-        lifecycleEntry,
-      });
-    }
-    await backend.killSession({ name: sessionName });
   }
 
   await terminateLifecycleProcessGroups({
@@ -2147,6 +2458,20 @@ async function stopLifecycleProcesses(opts: {
     projectDir: opts.project.projectDir,
     composeProject: opts.composeProject,
   });
+}
+
+async function stopLifecycleProcessesBestEffort(
+  opts: Parameters<typeof stopLifecycleProcesses>[0]
+): Promise<void> {
+  try {
+    await stopLifecycleProcesses(opts);
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Failed to stop lifecycle processes";
+    logger.warn({ message });
+  }
 }
 
 async function interruptLifecycleTmuxProcesses(opts: {
@@ -5455,6 +5780,8 @@ async function runUpCommand({
     envName: envOverrides.effectiveEnvName,
   });
 
+  let lifecycleCleanup: LifecycleOperationCleanup | null = null;
+  let lifecycleSignalCleanup: { readonly dispose: () => void } | null = null;
   try {
     const lifecycleUp = await runLifecycleUpBeforeAndProcesses({
       title: "Lifecycle (up before)",
@@ -5482,6 +5809,8 @@ async function runUpCommand({
         message: `Lifecycle processes running in session: ${lifecycleUp.sessionName}`,
       });
     }
+    lifecycleCleanup = lifecycleUp.cleanup;
+    lifecycleSignalCleanup = lifecycleUp.signalCleanup;
   } catch (error: unknown) {
     const message =
       error instanceof Error
@@ -5497,76 +5826,88 @@ async function runUpCommand({
     return 1;
   }
 
-  const upCode = await composeRuntimeBackend.up({
-    composeFiles: composeFilesWithEnv,
-    composeProject: composeProjectName,
-    profiles,
-    detach,
-    cwd: dirname(project.composeFile),
-    env: envOverrides.env,
-    routeStdoutToStderr: json,
-  });
-  if (upCode !== 0) {
-    await removeProjectRuntimeStateEntry({
+  const signalCleanup =
+    lifecycleSignalCleanup ??
+    installLifecycleSignalCleanup({ cleanup: lifecycleCleanup });
+  try {
+    const upCode = await composeRuntimeBackend.up({
+      composeFiles: composeFilesWithEnv,
+      composeProject: composeProjectName,
+      profiles,
+      detach,
+      cwd: dirname(project.composeFile),
+      env: envOverrides.env,
+      routeStdoutToStderr: json,
+    });
+    if (upCode !== 0) {
+      await lifecycleCleanup?.();
+      await removeProjectRuntimeStateEntry({
+        projectDir: project.projectDir,
+        composeProject: lifecycleComposeProject,
+      });
+      if (json) {
+        return emitLifecycleResult({
+          result: errorResult({
+            code: "E_COMPOSE_FAILED",
+            message: `docker compose up failed (exit ${upCode})`,
+            detail: { exitCode: upCode },
+          }),
+          exitCode: upCode,
+        });
+      }
+      return upCode;
+    }
+
+    const afterCode = await runLifecycleCommands({
+      title: "Lifecycle (up after)",
+      commands: cfg.lifecycle?.up?.after,
+      projectRoot: project.projectRoot,
+      env: envOverrides.env,
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
     });
-    if (json) {
+
+    if (!json) {
+      if (afterCode !== 0) {
+        await lifecycleCleanup?.();
+      }
+      return afterCode;
+    }
+
+    if (afterCode !== 0) {
+      await lifecycleCleanup?.();
       return emitLifecycleResult({
         result: errorResult({
-          code: "E_COMPOSE_FAILED",
-          message: `docker compose up failed (exit ${upCode})`,
-          detail: { exitCode: upCode },
+          code: "E_LIFECYCLE_FAILED",
+          message: `Lifecycle (up after) failed (exit ${afterCode})`,
         }),
-        exitCode: upCode,
+        exitCode: afterCode,
       });
     }
-    return upCode;
-  }
 
-  const afterCode = await runLifecycleCommands({
-    title: "Lifecycle (up after)",
-    commands: cfg.lifecycle?.up?.after,
-    projectRoot: project.projectRoot,
-    env: envOverrides.env,
-    projectDir: project.projectDir,
-    composeProject: lifecycleComposeProject,
-  });
-
-  if (!json) {
-    return afterCode;
-  }
-
-  if (afterCode !== 0) {
-    return emitLifecycleResult({
-      result: errorResult({
-        code: "E_LIFECYCLE_FAILED",
-        message: `Lifecycle (up after) failed (exit ${afterCode})`,
-      }),
-      exitCode: afterCode,
+    const states = await readComposeServiceStates({
+      project,
+      composeProjectName,
+      profiles,
     });
-  }
-
-  const states = await readComposeServiceStates({
-    project,
-    composeProjectName,
-    profiles,
-  });
-  const { running, notRunning } = splitServiceStates(states);
-  return emitLifecycleResult({
-    result: okResult({
-      data: buildLifecycleJsonData({
-        action: "up",
-        project: baseProjectName,
-        branch,
-        composeProject: composeProjectName ?? baseProjectName,
-        started: running,
-        failed: notRunning,
-        durationMs: Date.now() - (startedAtMs ?? Date.now()),
+    const { running, notRunning } = splitServiceStates(states);
+    return emitLifecycleResult({
+      result: okResult({
+        data: buildLifecycleJsonData({
+          action: "up",
+          project: baseProjectName,
+          branch,
+          composeProject: composeProjectName ?? baseProjectName,
+          started: running,
+          failed: notRunning,
+          durationMs: Date.now() - (startedAtMs ?? Date.now()),
+        }),
       }),
-    }),
-    exitCode: 0,
-  });
+      exitCode: 0,
+    });
+  } finally {
+    signalCleanup.dispose();
+  }
 }
 
 async function maybePromptToStartGlobal(opts: {
@@ -5698,7 +6039,6 @@ async function runDownCommand({
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
-
   const projectName = sanitizeProjectSlug(baseProjectName);
   const lifecycleComposeProject = resolveLifecycleComposeProjectName({
     projectName,
@@ -5721,49 +6061,52 @@ async function runDownCommand({
     ? await readComposeServiceStates({ project, composeProjectName, profiles })
     : [];
 
-  const beforeCode = await runLifecycleCommands({
-    title: "Lifecycle (down before)",
-    commands: cfg.lifecycle?.down?.before,
-    projectRoot: project.projectRoot,
-    env: lifecycleEnv,
-    projectDir: project.projectDir,
-    composeProject: lifecycleComposeProject,
-  });
-  if (beforeCode !== 0) {
-    if (json) {
-      return emitLifecycleResult({
-        result: errorResult({
-          code: "E_LIFECYCLE_FAILED",
-          message: `Lifecycle (down before) failed (exit ${beforeCode})`,
-        }),
-        exitCode: beforeCode,
-      });
-    }
-    return beforeCode;
-  }
-
-  const code = await composeRuntimeBackend.down({
-    composeFiles: [project.composeFile],
-    composeProject: composeProjectName,
-    profiles,
-    cwd: dirname(project.composeFile),
-    routeStdoutToStderr: json,
-  });
-
-  try {
-    await stopLifecycleProcesses({
+  const lifecycleDownCleanup = async (): Promise<void> => {
+    await stopLifecycleProcessesBestEffort({
       project,
       cfg,
       projectName,
       branch,
       composeProject: lifecycleComposeProject,
     });
-  } catch (error: unknown) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : "Failed to stop lifecycle processes";
-    logger.warn({ message });
+  };
+  const signalCleanup = installLifecycleSignalCleanup({
+    cleanup: lifecycleDownCleanup,
+  });
+  let code: number;
+  try {
+    const beforeCode = await runLifecycleCommands({
+      title: "Lifecycle (down before)",
+      commands: cfg.lifecycle?.down?.before,
+      projectRoot: project.projectRoot,
+      env: lifecycleEnv,
+      projectDir: project.projectDir,
+      composeProject: lifecycleComposeProject,
+    });
+    if (beforeCode !== 0) {
+      await lifecycleDownCleanup();
+      if (json) {
+        return emitLifecycleResult({
+          result: errorResult({
+            code: "E_LIFECYCLE_FAILED",
+            message: `Lifecycle (down before) failed (exit ${beforeCode})`,
+          }),
+          exitCode: beforeCode,
+        });
+      }
+      return beforeCode;
+    }
+
+    code = await composeRuntimeBackend.down({
+      composeFiles: [project.composeFile],
+      composeProject: composeProjectName,
+      profiles,
+      cwd: dirname(project.composeFile),
+      routeStdoutToStderr: json,
+    });
+    await lifecycleDownCleanup();
+  } finally {
+    signalCleanup.dispose();
   }
 
   if (code !== 0) {
@@ -5834,39 +6177,43 @@ async function runRestartDownPhase(opts: {
   readonly routeStdoutToStderr?: boolean;
   readonly envForCompose: Readonly<Record<string, string>>;
 }): Promise<number> {
-  const downBefore = await runLifecycleCommands({
-    title: "Lifecycle (restart down before)",
-    commands: opts.cfg.lifecycle?.down?.before,
-    projectRoot: opts.project.projectRoot,
-    env: opts.envForCompose,
-    projectDir: opts.project.projectDir,
-    composeProject: opts.lifecycleComposeProject,
-  });
-  if (downBefore !== 0) {
-    return downBefore;
-  }
-
-  const downCode = await composeRuntimeBackend.down({
-    composeFiles: [opts.project.composeFile],
-    composeProject: opts.composeProjectName,
-    profiles: opts.profiles,
-    cwd: dirname(opts.project.composeFile),
-    routeStdoutToStderr: opts.routeStdoutToStderr === true,
-  });
-  try {
-    await stopLifecycleProcesses({
+  const lifecycleDownCleanup = async (): Promise<void> => {
+    await stopLifecycleProcessesBestEffort({
       project: opts.project,
       cfg: opts.cfg,
       projectName: opts.projectName,
       branch: opts.branch,
       composeProject: opts.lifecycleComposeProject,
     });
-  } catch (error: unknown) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : "Failed to stop lifecycle processes";
-    logger.warn({ message });
+  };
+  const signalCleanup = installLifecycleSignalCleanup({
+    cleanup: lifecycleDownCleanup,
+  });
+  let downCode: number;
+  try {
+    const downBefore = await runLifecycleCommands({
+      title: "Lifecycle (restart down before)",
+      commands: opts.cfg.lifecycle?.down?.before,
+      projectRoot: opts.project.projectRoot,
+      env: opts.envForCompose,
+      projectDir: opts.project.projectDir,
+      composeProject: opts.lifecycleComposeProject,
+    });
+    if (downBefore !== 0) {
+      await lifecycleDownCleanup();
+      return downBefore;
+    }
+
+    downCode = await composeRuntimeBackend.down({
+      composeFiles: [opts.project.composeFile],
+      composeProject: opts.composeProjectName,
+      profiles: opts.profiles,
+      cwd: dirname(opts.project.composeFile),
+      routeStdoutToStderr: opts.routeStdoutToStderr === true,
+    });
+    await lifecycleDownCleanup();
+  } finally {
+    signalCleanup.dispose();
   }
   if (downCode !== 0) {
     return downCode;
@@ -5950,6 +6297,8 @@ async function runRestartUpPhase(opts: {
     envName: envOverrides.effectiveEnvName,
   });
 
+  let lifecycleCleanup: LifecycleOperationCleanup | null = null;
+  let lifecycleSignalCleanup: { readonly dispose: () => void } | null = null;
   try {
     const lifecycleUp = await runLifecycleUpBeforeAndProcesses({
       title: "Lifecycle (restart up before)",
@@ -5968,6 +6317,8 @@ async function runRestartUpPhase(opts: {
         message: `Lifecycle processes running in session: ${lifecycleUp.sessionName}`,
       });
     }
+    lifecycleCleanup = lifecycleUp.cleanup;
+    lifecycleSignalCleanup = lifecycleUp.signalCleanup;
   } catch (error: unknown) {
     const message =
       error instanceof Error
@@ -5977,32 +6328,43 @@ async function runRestartUpPhase(opts: {
     return 1;
   }
 
-  const upCode = await composeRuntimeBackend.up({
-    composeFiles: composeFilesWithEnv,
-    composeProject: opts.composeProjectName,
-    profiles: opts.profiles,
-    detach: opts.detach === true,
-    cwd: dirname(opts.project.composeFile),
-    env: envOverrides.env,
-    routeStdoutToStderr: opts.routeStdoutToStderr === true,
-  });
-  if (upCode !== 0) {
-    await removeProjectRuntimeStateEntry({
+  const signalCleanup =
+    lifecycleSignalCleanup ??
+    installLifecycleSignalCleanup({ cleanup: lifecycleCleanup });
+  try {
+    const upCode = await composeRuntimeBackend.up({
+      composeFiles: composeFilesWithEnv,
+      composeProject: opts.composeProjectName,
+      profiles: opts.profiles,
+      detach: opts.detach === true,
+      cwd: dirname(opts.project.composeFile),
+      env: envOverrides.env,
+      routeStdoutToStderr: opts.routeStdoutToStderr === true,
+    });
+    if (upCode !== 0) {
+      await lifecycleCleanup?.();
+      await removeProjectRuntimeStateEntry({
+        projectDir: opts.project.projectDir,
+        composeProject: opts.lifecycleComposeProject,
+      });
+      return upCode;
+    }
+
+    const upAfter = await runLifecycleCommands({
+      title: "Lifecycle (restart up after)",
+      commands: opts.cfg.lifecycle?.up?.after,
+      projectRoot: opts.project.projectRoot,
+      env: envOverrides.env,
       projectDir: opts.project.projectDir,
       composeProject: opts.lifecycleComposeProject,
     });
-    return upCode;
+    if (upAfter !== 0) {
+      await lifecycleCleanup?.();
+    }
+    return upAfter;
+  } finally {
+    signalCleanup.dispose();
   }
-
-  const upAfter = await runLifecycleCommands({
-    title: "Lifecycle (restart up after)",
-    commands: opts.cfg.lifecycle?.up?.after,
-    projectRoot: opts.project.projectRoot,
-    env: envOverrides.env,
-    projectDir: opts.project.projectDir,
-    composeProject: opts.lifecycleComposeProject,
-  });
-  return upAfter;
 }
 
 async function handleRestart({
@@ -6095,13 +6457,11 @@ async function runRestartCommand({
   }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
-  const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
-
-  const projectName = sanitizeProjectSlug(baseProjectName);
-  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
-    projectName,
+  const { composeProjectName, lifecycleComposeProject } = resolveRestartTarget({
+    baseProjectName,
     branch,
   });
+  const projectName = sanitizeProjectSlug(baseProjectName);
   const effectiveEnvName = await resolveStoredRuntimeEnvName({
     requestedEnvName: envName,
     projectDir: project.projectDir,
@@ -6208,6 +6568,24 @@ export async function resolveStoredRuntimeEnvName(opts: {
     composeProject: opts.composeProject,
   });
   return state?.envName ?? undefined;
+}
+
+export function resolveRestartTarget(opts: {
+  readonly baseProjectName: string;
+  readonly branch: string | null;
+}): {
+  readonly composeProjectName: string | null;
+  readonly lifecycleComposeProject: string;
+} {
+  return {
+    composeProjectName: opts.branch
+      ? `${opts.baseProjectName}--${opts.branch}`
+      : null,
+    lifecycleComposeProject: resolveLifecycleComposeProjectName({
+      projectName: sanitizeProjectSlug(opts.baseProjectName),
+      branch: opts.branch,
+    }),
+  };
 }
 
 async function persistProjectRuntimeEnvSelection(opts: {

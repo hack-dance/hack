@@ -185,6 +185,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       'For fixed-port host helpers such as SSM tunnels or local proxies, set `singleton.ports` and usually `onConflict: "adopt"` so Hack reuses a healthy existing listener instead of starting duplicate tunnel stacks.',
       "`singleton` is a listener guard, not process ownership transfer; adopted external processes are left running on `hack down`.",
       "Inspect lifecycle status via `hack projects --details` and stream via `hack logs <service-or-process>`.",
+      "Lifecycle session recovery is ownership-proven: Hack adopts healthy token-matched sessions, replaces owned stale sessions, and refuses to kill same-name sessions without deterministic ownership proof.",
     ],
   },
   {

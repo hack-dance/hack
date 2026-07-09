@@ -19,6 +19,8 @@ export type LifecycleStateEntry = {
   readonly branch: string | null;
   readonly sessionName: string;
   readonly backend: LifecycleBackend;
+  readonly ownershipToken?: string;
+  readonly definitionHash?: string;
   readonly processes: readonly LifecycleStateProcess[];
   readonly updatedAt: string;
 };
@@ -193,6 +195,29 @@ export async function removeLifecycleStateEntry(opts: {
   });
 }
 
+export async function removeLifecycleStateEntryIfOwned(opts: {
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly ownershipToken: string;
+}): Promise<boolean> {
+  const state = await readLifecycleState({ projectDir: opts.projectDir });
+  const current = state.find(
+    (entry) => entry.composeProject === opts.composeProject
+  );
+  if (current?.ownershipToken !== opts.ownershipToken) {
+    return false;
+  }
+  await writeLifecycleStateFile({
+    projectDir: opts.projectDir,
+    state: {
+      entries: state.filter(
+        (entry) => entry.composeProject !== opts.composeProject
+      ),
+    },
+  });
+  return true;
+}
+
 function parseLifecycleStateEntry(value: unknown): LifecycleStateEntry | null {
   if (!isRecord(value)) {
     return null;
@@ -202,6 +227,8 @@ function parseLifecycleStateEntry(value: unknown): LifecycleStateEntry | null {
   const sessionName = getString(value, "sessionName")?.trim();
   const backendRaw = getString(value, "backend")?.trim();
   const updatedAt = getString(value, "updatedAt")?.trim();
+  const ownershipToken = getString(value, "ownershipToken")?.trim();
+  const definitionHash = getString(value, "definitionHash")?.trim();
   if (
     !(composeProject && projectName && sessionName && backendRaw && updatedAt)
   ) {
@@ -216,7 +243,7 @@ function parseLifecycleStateEntry(value: unknown): LifecycleStateEntry | null {
       ? branchRaw.trim()
       : null;
   const processesRaw = value.processes;
-  if (!Array.isArray(processesRaw) || processesRaw.length === 0) {
+  if (!Array.isArray(processesRaw)) {
     return null;
   }
   const processes: LifecycleStateProcess[] = [];
@@ -226,15 +253,14 @@ function parseLifecycleStateEntry(value: unknown): LifecycleStateEntry | null {
       processes.push(parsed);
     }
   }
-  if (processes.length === 0) {
-    return null;
-  }
   return {
     composeProject,
     projectName,
     branch,
     sessionName,
     backend: backendRaw,
+    ...(ownershipToken ? { ownershipToken } : {}),
+    ...(definitionHash ? { definitionHash } : {}),
     processes,
     updatedAt,
   };

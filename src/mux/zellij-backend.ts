@@ -77,13 +77,14 @@ export function createZellijBackend(): MuxBackend {
       const ownerResult = await exec(
         [
           "zellij",
+          "--session",
+          opts.name,
           "action",
           "rename-tab",
           `${LIFECYCLE_OWNER_TAB_PREFIX}${opts.lifecycleOwnerToken}`,
         ],
         {
           stdin: "ignore",
-          env: { ZELLIJ_SESSION_NAME: opts.name },
         }
       );
       if (ownerResult.exitCode !== 0) {
@@ -112,10 +113,10 @@ export function createZellijBackend(): MuxBackend {
   const readLifecycleOwnerToken = async (opts: {
     readonly name: string;
   }): Promise<string | null> => {
-    const result = await exec(["zellij", "action", "dump-layout"], {
-      stdin: "ignore",
-      env: { ZELLIJ_SESSION_NAME: opts.name },
-    });
+    const result = await exec(
+      ["zellij", "--session", opts.name, "action", "dump-layout"],
+      { stdin: "ignore" }
+    );
     if (result.exitCode !== 0) {
       return null;
     }
@@ -126,10 +127,10 @@ export function createZellijBackend(): MuxBackend {
   const listSessionWindowNames = async (opts: {
     readonly name: string;
   }): Promise<ReadonlySet<string> | null> => {
-    const result = await exec(["zellij", "action", "dump-layout"], {
-      stdin: "ignore",
-      env: { ZELLIJ_SESSION_NAME: opts.name },
-    });
+    const result = await exec(
+      ["zellij", "--session", opts.name, "action", "dump-layout"],
+      { stdin: "ignore" }
+    );
     if (result.exitCode !== 0) {
       return null;
     }
@@ -145,14 +146,22 @@ export function createZellijBackend(): MuxBackend {
     readonly command: string;
     readonly env?: Readonly<Record<string, string>>;
   }): Promise<ExecResult> => {
-    // `zellij run` requires an active session; set env to target the desired session.
-    return await exec(["zellij", "run", "--", "sh", "-lc", opts.command], {
-      stdin: "ignore",
-      env: {
-        ...(opts.env ?? {}),
-        ZELLIJ_SESSION_NAME: opts.name,
-      },
-    });
+    return await exec(
+      [
+        "zellij",
+        "--session",
+        opts.name,
+        "run",
+        "--",
+        "sh",
+        "-lc",
+        opts.command,
+      ],
+      {
+        stdin: "ignore",
+        env: { ...(opts.env ?? {}) },
+      }
+    );
   };
 
   const sendInput = async (opts: {
@@ -160,10 +169,10 @@ export function createZellijBackend(): MuxBackend {
     readonly keys: string;
   }): Promise<ExecResult> => {
     // Best-effort. This sends raw characters and does not attempt to encode special key chords.
-    return await exec(["zellij", "action", "write-chars", opts.keys], {
-      stdin: "ignore",
-      env: { ZELLIJ_SESSION_NAME: opts.name },
-    });
+    return await exec(
+      ["zellij", "--session", opts.name, "action", "write-chars", opts.keys],
+      { stdin: "ignore" }
+    );
   };
 
   return {

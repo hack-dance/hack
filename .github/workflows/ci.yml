@@ -71,8 +71,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes tmux
       - name: Install dependencies
         run: bun install
+      - name: Create isolated Hack network
+        run: docker network create --subnet 172.30.0.0/16 hack-dev
       - name: Run local and Docker E2E
-        run: bun run test:e2e:local:docker
+        run: HACK_E2E_REQUIRE_DOCKER=1 bun run test:e2e:local:docker
 
   test:
     runs-on: blacksmith-6vcpu-macos-15

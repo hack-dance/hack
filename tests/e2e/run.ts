@@ -22,6 +22,7 @@ import { worktreeSecretsScenario } from "./scenarios/worktree-secrets.ts";
  *   bun tests/e2e/run.ts --list             # list scenarios and exit
  *   HACK_E2E_KEEP=1 ...                     # keep temp fixtures for debugging
  *   HACK_E2E_CLI_BIN=./dist/hack ...        # exercise the compiled binary
+ *   HACK_E2E_REQUIRE_DOCKER=1 ...            # fail if a Docker scenario skips
  *
  * Exit codes: 0 all pass/skip, 1 any scenario failed, 2 isolation canary
  * failed (nothing ran).
@@ -108,6 +109,7 @@ async function main(): Promise<void> {
   );
 
   const dockerEnabled = (process.env.HACK_E2E_DOCKER ?? "") === "1";
+  const requireDocker = (process.env.HACK_E2E_REQUIRE_DOCKER ?? "") === "1";
   const keepTempDirs = (process.env.HACK_E2E_KEEP ?? "") === "1";
   const outcomes = await runScenarios({
     scenarios: ALL_SCENARIOS,
@@ -116,9 +118,14 @@ async function main(): Promise<void> {
     keepTempDirs,
   });
 
-  process.exitCode = outcomes.some((outcome) => outcome.status === "fail")
-    ? 1
-    : 0;
+  const dockerSkipped = outcomes.some(
+    (outcome) => outcome.tier === "docker" && outcome.status === "skip"
+  );
+  process.exitCode =
+    outcomes.some((outcome) => outcome.status === "fail") ||
+    (requireDocker && dockerSkipped)
+      ? 1
+      : 0;
 }
 
 await main();

@@ -6,9 +6,9 @@ import { join, resolve } from "node:path";
 /**
  * Core end-to-end harness for the hack CLI.
  *
- * Every scenario drives the ACTUAL working-tree CLI by spawning
- * `bun <repoRoot>/index.ts <args>` (non-TTY by design — this is the
- * agent-reality surface we are testing) against disposable fixture repos.
+ * Every scenario drives the actual working-tree CLI by spawning
+ * `bun <repoRoot>/index.ts <args>`, or the compiled binary selected by
+ * `HACK_E2E_CLI_BIN`, against disposable fixture repos.
  *
  * Isolation model: every CLI invocation runs with `HACK_HOME=<tempdir>` so
  * global state (projects registry, global config) never touches the real
@@ -21,6 +21,12 @@ export const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 
 /** CLI entrypoint spawned for every scenario command. */
 export const CLI_ENTRYPOINT = resolve(REPO_ROOT, "index.ts");
+
+/** Resolve the source or compiled CLI command used by the E2E harness. */
+export function resolveCliSpawnArgs(args: readonly string[]): string[] {
+  const binary = process.env.HACK_E2E_CLI_BIN?.trim();
+  return binary ? [resolve(binary), ...args] : ["bun", CLI_ENTRYPOINT, ...args];
+}
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const REGISTRY_SCAN_MAX_DEPTH = 6;
@@ -237,7 +243,7 @@ export async function seedIsolatedHackHome(opts: {
 let outputCaptureCounter = 0;
 
 /**
- * Spawn the working-tree CLI (`bun index.ts <args>`) with stdin closed so any
+ * Spawn the selected working-tree CLI with stdin closed so any
  * unexpected prompt fails fast instead of hanging. stdout/stderr are captured
  * via temp files (not pipes) so a spawned grandchild (e.g. a daemon) can
  * never hold the capture open past the CLI's own exit.
@@ -260,7 +266,7 @@ export async function runCli(opts: {
   const stdoutPath = join(captureDir, `${outputCaptureCounter}.out`);
   const stderrPath = join(captureDir, `${outputCaptureCounter}.err`);
 
-  const proc = Bun.spawn(["bun", CLI_ENTRYPOINT, ...opts.invocation.args], {
+  const proc = Bun.spawn(resolveCliSpawnArgs(opts.invocation.args), {
     cwd: opts.invocation.cwd,
     env,
     stdin: "ignore",

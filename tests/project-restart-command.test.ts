@@ -3,7 +3,10 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { resolveStoredRuntimeEnvName } from "../src/commands/project.ts";
+import {
+  resolveRestartTarget,
+  resolveStoredRuntimeEnvName,
+} from "../src/commands/project.ts";
 
 const tempDirs = new Set<string>();
 
@@ -57,6 +60,30 @@ test("restart preserves an explicit base env selection over stored runtime state
   });
 
   expect(resolved).toBeNull();
+});
+
+test("restart from the primary checkout targets only the base compose instance", () => {
+  expect(
+    resolveRestartTarget({
+      baseProjectName: "event-agent",
+      branch: null,
+    })
+  ).toEqual({
+    composeProjectName: null,
+    lifecycleComposeProject: "event-agent",
+  });
+});
+
+test("restart with an explicit branch targets only that branch instance", () => {
+  expect(
+    resolveRestartTarget({
+      baseProjectName: "event-agent",
+      branch: "feat-msp-human-handoff",
+    })
+  ).toEqual({
+    composeProjectName: "event-agent--feat-msp-human-handoff",
+    lifecycleComposeProject: "event-agent--feat-msp-human-handoff",
+  });
 });
 
 async function createProjectDirWithRuntimeState(opts: {

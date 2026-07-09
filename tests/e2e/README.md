@@ -14,6 +14,7 @@ bun run test:e2e:local:docker       # tier 1 + tier 2 (docker + real global infr
 bun tests/e2e/run.ts --list         # list scenarios
 bun tests/e2e/run.ts --only=init    # run a subset by name
 HACK_E2E_KEEP=1 bun tests/e2e/run.ts --only=doctor   # keep temp dirs for debugging
+HACK_E2E_REQUIRE_TMUX=1 bun tests/e2e/run.ts --only=lifecycle-session-recovery
 ```
 
 Exit codes: `0` all pass/skip, `1` any scenario failed, `2` isolation canary
@@ -49,7 +50,10 @@ any e2e result.
 - **Tier 1 (`local`)** — runs everywhere; no docker needed:
   `automation-check`, `init`, `env-secrets`, `worktree-secrets`,
   `worktree-registry`, `worktree-branch-default`, `agent-docs-sync`,
-  `doctor` (doctor tolerates missing docker — it must report, not crash).
+  `doctor` (doctor tolerates missing docker — it must report, not crash), and
+  `lifecycle-session-recovery`. The lifecycle recovery scenario skips when
+  tmux is unavailable unless `HACK_E2E_REQUIRE_TMUX=1` makes that capability
+  mandatory (as it is in the dedicated Docker/tmux CI job).
 - **Tier 2 (`docker`)** — opt-in via `HACK_E2E_DOCKER=1`; requires a running
   docker daemon, the machine's global `hack-dev` network (`hack global
   install`), and pulls `oven/bun:1`: `up-down`, `lifecycle-host-process`,

@@ -36,6 +36,14 @@ export type LifecycleFixtureOptions = {
   readonly upBeforeMarkerFile?: string;
   /** Adds a long-running lifecycle host process (bun sleep loop). */
   readonly persistentProcess?: boolean;
+  /** Makes docker compose reject the fixture after lifecycle startup. */
+  readonly composeFailure?: boolean;
+  /** Runs fixture containers without a host bind mount. */
+  readonly standaloneContainers?: boolean;
+  /** Disables global DNS/TLS integration for local lifecycle-only scenarios. */
+  readonly disableInternal?: boolean;
+  /** Adds a failing lifecycle.down.before hook. */
+  readonly downBeforeFailure?: boolean;
 };
 
 /** Random, collision-proof project slug (also used for dev_host). */
@@ -298,8 +306,8 @@ async function writeHackConfig(opts: {
       clear_on_down: false,
     },
     internal: {
-      dns: true,
-      tls: true,
+      dns: opts.lifecycle?.disableInternal !== true,
+      tls: opts.lifecycle?.disableInternal !== true,
     },
     oauth: {
       enabled: false,
@@ -314,7 +322,12 @@ async function writeHackConfig(opts: {
 
   await Bun.write(
     join(opts.hackDir, "docker-compose.yml"),
-    renderComposeYaml({ name: opts.name, devHost: opts.devHost })
+    renderComposeYaml({
+      name: opts.name,
+      devHost: opts.devHost,
+      composeFailure: opts.lifecycle?.composeFailure,
+      standaloneContainers: opts.lifecycle?.standaloneContainers,
+    })
   );
 
   await Bun.write(
@@ -339,6 +352,7 @@ function buildLifecycleConfig(opts: {
   }
   const upBefore: Record<string, unknown>[] = [];
   const processes: Record<string, unknown>[] = [];
+  const downBefore: Record<string, unknown>[] = [];
 
   if (opts.lifecycle.upBeforeMarkerFile) {
     upBefore.push({
@@ -354,12 +368,19 @@ function buildLifecycleConfig(opts: {
       cwd: ".",
     });
   }
+  if (opts.lifecycle.downBeforeFailure === true) {
+    downBefore.push({
+      name: "e2e-down-failure",
+      command: "exit 23",
+      cwd: ".",
+    });
+  }
   if (upBefore.length === 0 && processes.length === 0) {
     return null;
   }
   return {
     up: { before: upBefore, after: [] },
-    down: { before: [], after: [] },
+    down: { before: downBefore, after: [] },
     ...(processes.length > 0 ? { processes } : {}),
   };
 }
@@ -367,16 +388,23 @@ function buildLifecycleConfig(opts: {
 function renderComposeYaml(opts: {
   readonly name: string;
   readonly devHost: string;
+  readonly composeFailure?: boolean;
+  readonly standaloneContainers?: boolean;
 }): string {
   return [
     `name: ${opts.name}`,
     "services:",
     "  web:",
+    ...(opts.composeFailure ? ["    unsupported_e2e_key: true"] : []),
     "    image: oven/bun:1",
-    "    working_dir: /app",
-    "    volumes:",
-    "      - ..:/app",
-    "    command: bun apps/web/index.ts",
+    ...(opts.standaloneContainers
+      ? ["    command: bun -e 'setInterval(() => {}, 60000)'"]
+      : [
+          "    working_dir: /app",
+          "    volumes:",
+          "      - ..:/app",
+          "    command: bun apps/web/index.ts",
+        ]),
     "    environment:",
     `      PORT: "${WEB_PORT}"`,
     "    labels:",
@@ -388,10 +416,14 @@ function renderComposeYaml(opts: {
     "      - default",
     "  api:",
     "    image: oven/bun:1",
-    "    working_dir: /app",
-    "    volumes:",
-    "      - ..:/app",
-    "    command: bun apps/api/index.ts",
+    ...(opts.standaloneContainers
+      ? ["    command: bun -e 'setInterval(() => {}, 60000)'"]
+      : [
+          "    working_dir: /app",
+          "    volumes:",
+          "      - ..:/app",
+          "    command: bun apps/api/index.ts",
+        ]),
     "    environment:",
     `      PORT: "${API_PORT}"`,
     "    labels:",

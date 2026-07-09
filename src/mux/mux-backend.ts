@@ -24,8 +24,16 @@ export interface MuxBackend {
     readonly name: string;
     readonly cwd?: string;
     readonly env?: Readonly<Record<string, string>>;
+    readonly lifecycleOwnerToken?: string;
   }): Promise<MuxSessionCreateResult>;
   killSession(opts: { readonly name: string }): Promise<ExecResult>;
+
+  readLifecycleOwnerToken?(opts: {
+    readonly name: string;
+  }): Promise<string | null>;
+  listSessionWindowNames?(opts: {
+    readonly name: string;
+  }): Promise<ReadonlySet<string> | null>;
 
   execInSession(opts: {
     readonly name: string;

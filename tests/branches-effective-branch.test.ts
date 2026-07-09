@@ -107,7 +107,7 @@ test("primary checkout resolves to the base instance", async () => {
   expect(resolved.branch).toBeNull();
 });
 
-test("detached HEAD in a linked worktree resolves to the base instance", async () => {
+test("detached HEAD in a linked worktree refuses an implicit base instance", async () => {
   const fixture = await createFixture({ branch: "feature/detach-me" });
   await runGit(["checkout", "--detach"], fixture.linkedRoot);
 
@@ -115,6 +115,20 @@ test("detached HEAD in a linked worktree resolves to the base instance", async (
     explicitBranch: null,
     projectRoot: fixture.linkedRoot,
     autoBranchEnabled: true,
+  });
+
+  expect(resolved.source).toBe("detached-worktree");
+  expect(resolved.branch).toBeNull();
+});
+
+test("worktree.auto_branch=false explicitly allows the base instance from detached HEAD", async () => {
+  const fixture = await createFixture({ branch: "feature/detached-opt-out" });
+  await runGit(["checkout", "--detach"], fixture.linkedRoot);
+
+  const resolved = await resolveEffectiveBranch({
+    explicitBranch: null,
+    projectRoot: fixture.linkedRoot,
+    autoBranchEnabled: false,
   });
 
   expect(resolved.source).toBe("none");

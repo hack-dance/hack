@@ -138,6 +138,7 @@ test("linked worktree guidance is present in every surface", () => {
   for (const rendered of Object.values(RENDERED_SURFACES)) {
     expect(rendered).toContain("Linked git worktrees");
     expect(rendered).toContain("HACK_ENV_SECRET_KEY");
+    expect(rendered).toContain("detached linked worktree");
     expect(rendered).toContain("worktree.auto_branch=false");
   }
 });

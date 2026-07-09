@@ -1,3 +1,4 @@
+import { rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
   autocompleteMultiselect,
@@ -209,6 +210,9 @@ const LABELS_LINE_PATTERN = /^(\s*)labels:\s*$/;
 
 /** Regex to extract leading whitespace (indentation). */
 const INDENT_PATTERN = /^(\s*)/;
+
+const LIFECYCLE_COMMAND_PID_WAIT_ATTEMPTS = 50;
+const LIFECYCLE_COMMAND_PID_WAIT_INTERVAL_MS = 20;
 
 /** Regex to match caddy label line in YAML. */
 const CADDY_LABEL_PATTERN = /^(\s*)caddy:\s*(.*)$/;
@@ -594,6 +598,11 @@ async function resolveEffectiveBranchForCommand(opts: {
     projectRoot: opts.project.projectRoot,
     autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
   });
+  if (resolved.source === "detached-worktree") {
+    throw new CliUsageError(
+      "Detached linked worktree cannot auto-select an isolated instance. Pass --branch <name>, or set worktree.auto_branch=false to target the base instance explicitly."
+    );
+  }
   if (resolved.source === "worktree" && resolved.branch) {
     const message = `Linked worktree detected → using branch instance "${resolved.branch}" (override with --branch <name>, disable with worktree.auto_branch=false)`;
     if (opts.noticeToStderr === true) {
@@ -700,6 +709,13 @@ function emitLifecycleResult(opts: {
 }): number {
   emitCliResult({ result: opts.result });
   return opts.exitCode;
+}
+
+function buildLifecycleJsonErrorResult(opts: { readonly error: unknown }) {
+  if (opts.error instanceof CliUsageError) {
+    return errorResult({ code: "E_USAGE", message: opts.error.message });
+  }
+  return errorResultFromUnknown({ error: opts.error });
 }
 
 /**
@@ -1969,13 +1985,16 @@ async function startLifecycleProcess(opts: {
     projectDir: opts.projectDir,
     composeProject: opts.composeProject,
   });
-  const wrappedCommand = wrapLifecyclePersistentCommand({
-    command: opts.process.command,
-    logPath,
-    serviceName: opts.process.name,
-  });
-
   if (opts.backend === "tmux") {
+    const commandPidPath = `${logPath}.${windowName}.pid`;
+    await ensureDir(dirname(commandPidPath));
+    await rm(commandPidPath, { force: true });
+    const wrappedCommand = wrapLifecyclePersistentCommand({
+      command: opts.process.command,
+      commandPidPath,
+      logPath,
+      serviceName: opts.process.name,
+    });
     const result = await exec(
       [
         "tmux",
@@ -1993,6 +2012,7 @@ async function startLifecycleProcess(opts: {
       { stdin: "ignore" }
     );
     if (result.exitCode !== 0) {
+      await rm(commandPidPath, { force: true });
       throw new Error(
         `Failed to start lifecycle process "${opts.process.name}": ${result.stderr.trim()}`
       );
@@ -2002,10 +2022,17 @@ async function startLifecycleProcess(opts: {
       windowName,
     });
     const panePid = panePids[0];
-    const processGroupId =
-      panePid !== undefined
-        ? await readProcessGroupIdForPid({ pid: panePid })
-        : null;
+    let processGroupId: number | null = null;
+    try {
+      processGroupId = await waitForLifecycleCommandProcessGroupId({
+        commandPidPath,
+      });
+    } finally {
+      await rm(commandPidPath, { force: true });
+    }
+    if (!processGroupId && panePid !== undefined) {
+      processGroupId = await readProcessGroupIdForPid({ pid: panePid });
+    }
     await appendLifecycleLogRecord({
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
@@ -2025,6 +2052,12 @@ async function startLifecycleProcess(opts: {
     };
   }
 
+  const wrappedCommand = wrapLifecyclePersistentCommand({
+    command: opts.process.command,
+    commandPidPath: null,
+    logPath,
+    serviceName: opts.process.name,
+  });
   const result = await exec(
     ["zellij", "run", "--", "sh", "-c", wrappedCommand],
     {
@@ -2184,6 +2217,29 @@ async function readProcessGroupIdForPid(opts: {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
+async function waitForLifecycleCommandProcessGroupId(opts: {
+  readonly commandPidPath: string;
+}): Promise<number | null> {
+  for (
+    let attempt = 0;
+    attempt < LIFECYCLE_COMMAND_PID_WAIT_ATTEMPTS;
+    attempt += 1
+  ) {
+    const commandPidRaw = await readTextFile(opts.commandPidPath);
+    const commandPid = Number.parseInt(commandPidRaw?.trim() ?? "", 10);
+    if (Number.isInteger(commandPid) && commandPid > 1) {
+      const processGroupId = await readProcessGroupIdForPid({
+        pid: commandPid,
+      });
+      if (processGroupId) {
+        return processGroupId;
+      }
+    }
+    await Bun.sleep(LIFECYCLE_COMMAND_PID_WAIT_INTERVAL_MS);
+  }
+  return null;
+}
+
 async function resolveLifecycleProcessGroupIds(opts: {
   readonly sessionName: string;
   readonly lifecycleEntry: LifecycleStateEntry | null;
@@ -2262,16 +2318,22 @@ function resolveLifecycleCommandServiceName(opts: {
 
 export function wrapLifecyclePersistentCommand(opts: {
   readonly command: string;
+  readonly commandPidPath: string | null;
   readonly logPath: string;
   readonly serviceName: string;
 }): string {
   const logPath = shellSingleQuote(opts.logPath);
   const service = shellSingleQuote(opts.serviceName);
   const command = shellSingleQuote(opts.command);
+  const commandPidPath =
+    opts.commandPidPath === null ? null : shellSingleQuote(opts.commandPidPath);
   return [
     `HACK_LIFECYCLE_LOG=${logPath}`,
     `HACK_LIFECYCLE_SERVICE=${service}`,
     `HACK_LIFECYCLE_COMMAND=${command}`,
+    ...(commandPidPath
+      ? [`HACK_LIFECYCLE_COMMAND_PID_FILE=${commandPidPath}`]
+      : []),
     `fifo="$(mktemp -u "\${TMPDIR:-/tmp}/hack-lifecycle.XXXXXX")"`,
     'mkfifo "$fifo"',
     "cleanup_lifecycle() {",
@@ -2289,6 +2351,7 @@ export function wrapLifecyclePersistentCommand(opts: {
     `  if [ -n "\${reader_pid:-}" ]; then`,
     '    wait "$reader_pid" 2>/dev/null || true',
     "  fi",
+    ...(commandPidPath ? ['  rm -f "$HACK_LIFECYCLE_COMMAND_PID_FILE"'] : []),
     '  rm -f "$fifo"',
     "}",
     'trap "cleanup_lifecycle; exit 130" INT TERM HUP',
@@ -2299,11 +2362,21 @@ export function wrapLifecyclePersistentCommand(opts: {
     '  done < "$fifo" ) &',
     "reader_pid=$!",
     "if command -v python3 >/dev/null 2>&1; then",
-    '  python3 -c \'import os, sys; os.setsid(); os.execvp("sh", ["sh", "-c", sys.argv[1]])\' "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &',
+    ...(commandPidPath
+      ? [
+          '  python3 -c \'import os, sys; os.setsid(); pid_file = open(sys.argv[2], "w"); pid_file.write(str(os.getpid())); pid_file.close(); os.execvp("sh", ["sh", "-c", sys.argv[1]])\' "$HACK_LIFECYCLE_COMMAND" "$HACK_LIFECYCLE_COMMAND_PID_FILE" >"$fifo" 2>&1 &',
+        ]
+      : [
+          '  python3 -c \'import os, sys; os.setsid(); os.execvp("sh", ["sh", "-c", sys.argv[1]])\' "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &',
+        ]),
+    "  cmd_pid=$!",
     "else",
     '  sh -c "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &',
+    "  cmd_pid=$!",
+    ...(commandPidPath
+      ? ['  printf "%s\\n" "$cmd_pid" > "$HACK_LIFECYCLE_COMMAND_PID_FILE"']
+      : []),
     "fi",
-    "cmd_pid=$!",
     'wait "$cmd_pid"',
     "cmd_status=$?",
     'cmd_pid=""',
@@ -5237,7 +5310,7 @@ async function handleUp({
     return await runUpCommand({ ctx, args, json: true, startedAtMs });
   } catch (error: unknown) {
     return emitLifecycleResult({
-      result: errorResultFromUnknown({ error }),
+      result: buildLifecycleJsonErrorResult({ error }),
       exitCode: 1,
     });
   }
@@ -5562,7 +5635,7 @@ async function handleDown({
       });
     }
     return emitLifecycleResult({
-      result: errorResultFromUnknown({ error }),
+      result: buildLifecycleJsonErrorResult({ error }),
       exitCode: 1,
     });
   }
@@ -5960,7 +6033,7 @@ async function handleRestart({
       });
     }
     return emitLifecycleResult({
-      result: errorResultFromUnknown({ error }),
+      result: buildLifecycleJsonErrorResult({ error }),
       exitCode: 1,
     });
   }

@@ -1845,7 +1845,10 @@ async function checkProjectLifecycleHygiene({
   const inspection = await inspectProjectLifecycleHygiene({
     projectDir: ctx.projectDir,
   });
-  if (inspection.staleEntries.length === 0) {
+  if (
+    inspection.staleEntries.length === 0 &&
+    inspection.orphanedProcessGroups.length === 0
+  ) {
     return {
       name: "lifecycle hygiene",
       status: "ok",
@@ -1854,7 +1857,7 @@ async function checkProjectLifecycleHygiene({
     };
   }
 
-  const orphanedGroups = new Set<number>();
+  const orphanedGroups = new Set<number>(inspection.orphanedProcessGroups);
   for (const entry of inspection.staleEntries) {
     for (const group of entry.liveProcessGroups) {
       orphanedGroups.add(group);
@@ -1862,7 +1865,11 @@ async function checkProjectLifecycleHygiene({
   }
 
   const details = [
-    `${inspection.staleEntries.length} stale lifecycle state entr${inspection.staleEntries.length === 1 ? "y" : "ies"}`,
+    ...(inspection.staleEntries.length > 0
+      ? [
+          `${inspection.staleEntries.length} stale lifecycle state entr${inspection.staleEntries.length === 1 ? "y" : "ies"}`,
+        ]
+      : []),
     ...(orphanedGroups.size > 0
       ? [
           `${orphanedGroups.size} orphaned lifecycle process group${orphanedGroups.size === 1 ? "" : "s"}`,

@@ -103,10 +103,55 @@ export function resolveLifecycleProcessGroupIdsForTmuxState(opts: {
     }
   }
 
-  return collectDescendantProcessGroupIds({
+  const discoveredGroups = collectDescendantProcessGroupIds({
     snapshot: opts.snapshot,
     rootPids: [...rootPids],
   });
+  const leaderlessGroups = resolveLeaderlessPersistedLifecycleProcessGroupIds({
+    lifecycleEntry: opts.lifecycleEntry,
+    snapshot: opts.snapshot,
+  });
+  return [...new Set([...discoveredGroups, ...leaderlessGroups])].sort(
+    (left, right) => left - right
+  );
+}
+
+/** Recover persisted groups whose original leader is gone but members remain. */
+export function resolveLeaderlessPersistedLifecycleProcessGroupIds(opts: {
+  readonly lifecycleEntry: LifecycleStateEntry | null;
+  readonly snapshot: readonly ProcessSnapshotRow[];
+}): number[] {
+  const groups = new Set<number>();
+
+  for (const processInfo of opts.lifecycleEntry?.processes ?? []) {
+    const processGroupId = processInfo.processGroupId;
+    if (!(processGroupId && processGroupId > 1)) {
+      continue;
+    }
+    const persistedPaneStillExists =
+      processInfo.panePid !== undefined &&
+      opts.snapshot.some((row) => row.pid === processInfo.panePid);
+    const groupLeaderStillExists = opts.snapshot.some(
+      (row) => row.pid === processGroupId
+    );
+    const groupMemberPids = opts.snapshot
+      .filter((row) => row.processGroupId === processGroupId)
+      .map((row) => row.pid);
+    if (
+      !(persistedPaneStillExists || groupLeaderStillExists) &&
+      groupMemberPids.length > 0
+    ) {
+      const descendantGroups = collectDescendantProcessGroupIds({
+        snapshot: opts.snapshot,
+        rootPids: groupMemberPids,
+      });
+      for (const descendantGroup of descendantGroups) {
+        groups.add(descendantGroup);
+      }
+    }
+  }
+
+  return [...groups].sort((left, right) => left - right);
 }
 
 /** Recover live lifecycle process groups from persisted metadata when mux panes are gone. */
@@ -121,7 +166,7 @@ export function resolvePersistedLifecycleProcessGroupIds(opts: {
   });
 }
 
-/** Only trust persisted lifecycle pane metadata when a matching mux session was observed live. */
+/** Only trust persisted lifecycle metadata when a matching mux session was observed live. */
 export function resolveLifecycleStopProcessGroupIds(opts: {
   readonly matchedLiveSession: boolean;
   readonly lifecycleEntry: LifecycleStateEntry | null;

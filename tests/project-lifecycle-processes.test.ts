@@ -179,10 +179,43 @@ test("resolveLifecycleProcessGroupIdsForTmuxState ignores recycled process group
       ],
     },
     panePidsByWindow: new Map([["proxy", []]]),
-    snapshot: [{ pid: 700, ppid: 1, processGroupId: 500 }],
+    snapshot: [
+      { pid: 500, ppid: 1, processGroupId: 500 },
+      { pid: 700, ppid: 500, processGroupId: 500 },
+    ],
   });
 
   expect(groups).toEqual([]);
+});
+
+test("resolveLifecycleProcessGroupIdsForTmuxState recovers a persisted leaderless group and descendants", () => {
+  const groups = resolveLifecycleProcessGroupIdsForTmuxState({
+    lifecycleEntry: {
+      composeProject: "event-agent",
+      projectName: "event-agent",
+      branch: "feature-cleanup",
+      sessionName: "event-agent--lifecycle-feature-cleanup",
+      backend: "tmux",
+      updatedAt: "2026-04-01T14:00:00.000Z",
+      processes: [
+        {
+          name: "proxy",
+          windowName: "proxy",
+          logPath: "/tmp/event-agent.log",
+          panePid: 500,
+          processGroupId: 500,
+        },
+      ],
+    },
+    panePidsByWindow: new Map([["proxy", []]]),
+    snapshot: [
+      { pid: 501, ppid: 1, processGroupId: 500 },
+      { pid: 502, ppid: 501, processGroupId: 500 },
+      { pid: 503, ppid: 502, processGroupId: 503 },
+    ],
+  });
+
+  expect(groups).toEqual([500, 503]);
 });
 
 test("resolvePersistedLifecycleProcessGroupIds recovers live groups without a mux session", () => {
@@ -242,9 +275,71 @@ test("resolveLifecycleStopProcessGroupIds skips persisted cleanup without a live
   expect(groups).toEqual([]);
 });
 
+test("resolveLifecycleStopProcessGroupIds skips a leaderless persisted group without a mux session", () => {
+  const groups = resolveLifecycleStopProcessGroupIds({
+    matchedLiveSession: false,
+    lifecycleEntry: {
+      composeProject: "event-agent",
+      projectName: "event-agent",
+      branch: "feature-cleanup",
+      sessionName: "event-agent--lifecycle-feature-cleanup",
+      backend: "tmux",
+      updatedAt: "2026-04-01T14:00:00.000Z",
+      processes: [
+        {
+          name: "proxy",
+          windowName: "proxy",
+          logPath: "/tmp/event-agent.log",
+          panePid: 500,
+          processGroupId: 500,
+        },
+      ],
+    },
+    snapshot: [
+      { pid: 501, ppid: 1, processGroupId: 500 },
+      { pid: 502, ppid: 501, processGroupId: 500 },
+      { pid: 503, ppid: 502, processGroupId: 503 },
+    ],
+  });
+
+  expect(groups).toEqual([]);
+});
+
+test("resolveLifecycleStopProcessGroupIds recovers a leaderless persisted group and descendants with a live mux session", () => {
+  const groups = resolveLifecycleStopProcessGroupIds({
+    matchedLiveSession: true,
+    lifecycleEntry: {
+      composeProject: "event-agent",
+      projectName: "event-agent",
+      branch: "feature-cleanup",
+      sessionName: "event-agent--lifecycle-feature-cleanup",
+      backend: "tmux",
+      updatedAt: "2026-04-01T14:00:00.000Z",
+      processes: [
+        {
+          name: "proxy",
+          windowName: "proxy",
+          logPath: "/tmp/event-agent.log",
+          panePid: 500,
+          processGroupId: 500,
+        },
+      ],
+    },
+    snapshot: [
+      { pid: 501, ppid: 1, processGroupId: 500 },
+      { pid: 502, ppid: 501, processGroupId: 500 },
+      { pid: 503, ppid: 502, processGroupId: 503 },
+      { pid: 504, ppid: 503, processGroupId: 504 },
+    ],
+  });
+
+  expect(groups).toEqual([500, 503, 504]);
+});
+
 test("wrapLifecyclePersistentCommand uses external kill for process-group cleanup", () => {
   const script = wrapLifecyclePersistentCommand({
     command: "bun run proxy",
+    commandPidPath: "/tmp/event-agent.pid",
     logPath: "/tmp/event-agent.log",
     serviceName: "proxy",
   });
@@ -259,12 +354,18 @@ test("wrapLifecyclePersistentCommand uses external kill for process-group cleanu
 test("wrapLifecyclePersistentCommand avoids login-shell execution", () => {
   const script = wrapLifecyclePersistentCommand({
     command: "bun run proxy",
+    commandPidPath: "/tmp/event-agent.pid",
     logPath: "/tmp/event-agent.log",
     serviceName: "proxy",
   });
 
   expect(script).toContain('os.execvp("sh", ["sh", "-c", sys.argv[1]])');
   expect(script).toContain('sh -c "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &');
+  expect(script).toContain("os.setsid()");
+  expect(script).toContain("pid_file.write(str(os.getpid()))");
+  expect(script).toContain(
+    'printf "%s\\n" "$cmd_pid" > "$HACK_LIFECYCLE_COMMAND_PID_FILE"'
+  );
   expect(script).not.toContain('os.execvp("sh", ["sh", "-lc", sys.argv[1]])');
   expect(script).not.toContain(
     'sh -lc "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &'

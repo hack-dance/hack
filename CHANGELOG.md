@@ -1,3 +1,8 @@
+## <small>3.3.6 (2026-07-10)</small>
+
+* fix: harden runtime integrity and diagnostics ([498e9c3](https://github.com/hack-dance/hack/commit/498e9c3))
+* chore(deps): bump next from 16.1.5 to 16.2.6 in /examples/next-app (#53) ([ff866ba](https://github.com/hack-dance/hack/commit/ff866ba)), closes [#53](https://github.com/hack-dance/hack/issues/53)
+
 ## <small>3.3.5 (2026-07-09)</small>
 
 * fix(lifecycle): recover owned mux sessions ([c1da123](https://github.com/hack-dance/hack/commit/c1da123))

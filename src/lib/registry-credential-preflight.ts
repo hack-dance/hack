@@ -144,9 +144,25 @@ export async function discoverSuccessfulCompletionServices(opts: {
           })
       )
       .map(([service]) => service);
-    return [...new Set([...bootstrapServices, ...explicitOneShots])].sort(
-      (left, right) => left.localeCompare(right)
-    );
+    const completionDependencies = Object.values(services).flatMap((value) => {
+      if (!(isRecord(value) && isRecord(value.depends_on))) {
+        return [];
+      }
+      return Object.entries(value.depends_on)
+        .filter(
+          ([, dependency]) =>
+            isRecord(dependency) &&
+            dependency.condition === "service_completed_successfully"
+        )
+        .map(([service]) => service);
+    });
+    return [
+      ...new Set([
+        ...bootstrapServices,
+        ...explicitOneShots,
+        ...completionDependencies,
+      ]),
+    ].sort((left, right) => left.localeCompare(right));
   } catch {
     return bootstrapServices;
   }

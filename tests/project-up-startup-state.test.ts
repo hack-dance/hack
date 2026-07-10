@@ -159,7 +159,7 @@ test("up returns failure when compose reports no services after exit zero", asyn
   );
 });
 
-test("up accepts running and successfully completed one-shot services", async () => {
+test("up accepts running services and successful Compose completion gates", async () => {
   const projectRoot = await createProject();
   psRows.push(
     JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
@@ -370,10 +370,11 @@ async function createProject(opts?: {
       "services:",
       "  api:",
       "    image: alpine:3.20",
+      "    depends_on:",
+      "      migrate:",
+      "        condition: service_completed_successfully",
       "  migrate:",
       "    image: alpine:3.20",
-      "    labels:",
-      '      hack.service.one-shot: "true"',
       ...(opts?.registryTokenScope
         ? [
             "  deps:",

@@ -16,13 +16,21 @@ export type RegistryCredentialReference = {
 
 export class RegistryCredentialPreflightError extends Error {
   readonly missing: readonly RegistryCredentialReference[];
+  readonly service?: string;
 
   constructor(opts: {
     readonly missing: readonly RegistryCredentialReference[];
+    readonly service?: string;
   }) {
-    super(formatRegistryCredentialPreflightFailure({ missing: opts.missing }));
+    super(
+      formatRegistryCredentialPreflightFailure({
+        missing: opts.missing,
+        service: opts.service,
+      })
+    );
     this.name = "RegistryCredentialPreflightError";
     this.missing = opts.missing;
+    this.service = opts.service;
   }
 }
 
@@ -58,20 +66,21 @@ function serializeComposeCommand(value: unknown): string {
   return "";
 }
 
-function hasDependencyBootstrapLabel(value: unknown): boolean {
-  if (isRecord(value)) {
-    return (
-      value["hack.dependencies.bootstrap"] === true ||
-      value["hack.dependencies.bootstrap"] === "true"
-    );
+function hasComposeLabel(opts: {
+  readonly labels: unknown;
+  readonly name: string;
+}): boolean {
+  const { labels, name } = opts;
+  if (isRecord(labels)) {
+    return labels[name] === true || labels[name] === "true";
   }
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(labels)) {
     return false;
   }
-  return value.some(
+  return labels.some(
     (entry) =>
       typeof entry === "string" &&
-      entry.trim().toLowerCase() === "hack.dependencies.bootstrap=true"
+      entry.trim().toLowerCase() === `${name.toLowerCase()}=true`
   );
 }
 
@@ -96,14 +105,50 @@ export async function discoverDependencyBootstrapServices(opts: {
         }
         const command = `${serializeComposeCommand(value.entrypoint)} ${serializeComposeCommand(value.command)}`;
         return (
-          hasDependencyBootstrapLabel(value.labels) ||
-          DEPENDENCY_INSTALL_PATTERN.test(command)
+          hasComposeLabel({
+            labels: value.labels,
+            name: "hack.dependencies.bootstrap",
+          }) || DEPENDENCY_INSTALL_PATTERN.test(command)
         );
       })
       .map(([service]) => service)
       .sort((left, right) => left.localeCompare(right));
   } catch {
     return [];
+  }
+}
+
+/** Services that may legitimately exit zero after startup instead of staying running. */
+export async function discoverSuccessfulCompletionServices(opts: {
+  readonly composeFile: string;
+}): Promise<readonly string[]> {
+  const bootstrapServices = await discoverDependencyBootstrapServices(opts);
+  const text = await readTextFile(opts.composeFile);
+  if (!text) {
+    return bootstrapServices;
+  }
+  try {
+    const parsed: unknown = YAML.parse(text);
+    const services =
+      isRecord(parsed) && isRecord(parsed.services) ? parsed.services : null;
+    if (!services) {
+      return bootstrapServices;
+    }
+    const explicitOneShots = Object.entries(services)
+      .filter(
+        ([, value]) =>
+          isRecord(value) &&
+          hasComposeLabel({
+            labels: value.labels,
+            name: "hack.service.one-shot",
+          })
+      )
+      .map(([service]) => service);
+    return [...new Set([...bootstrapServices, ...explicitOneShots])].sort(
+      (left, right) => left.localeCompare(right)
+    );
+  } catch {
+    return bootstrapServices;
   }
 }
 
@@ -128,10 +173,12 @@ export async function preflightRegistryCredentials(opts: {
 
 export function formatRegistryCredentialPreflightFailure(opts: {
   readonly missing: readonly RegistryCredentialReference[];
+  readonly service?: string;
 }): string {
   const unique = [...new Set(opts.missing.map((reference) => reference.key))];
   const locations = opts.missing
     .map((reference) => `${reference.path}:${reference.line}`)
     .join(", ");
-  return `Missing package-registry credential${unique.length === 1 ? "" : "s"}: ${unique.join(", ")}. Referenced by ${locations}. Add the value to the selected Hack env overlay before startup.`;
+  const service = opts.service ? ` for service ${opts.service}` : "";
+  return `Missing package-registry credential${unique.length === 1 ? "" : "s"}${service}: ${unique.join(", ")}. Referenced by ${locations}. Add the value to that service's selected Hack env scope before startup.`;
 }

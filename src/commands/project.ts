@@ -195,6 +195,7 @@ import {
 } from "../lib/projects-registry.ts";
 import {
   discoverDependencyBootstrapServices,
+  discoverSuccessfulCompletionServices,
   preflightRegistryCredentials,
   RegistryCredentialPreflightError,
 } from "../lib/registry-credential-preflight.ts";
@@ -1266,7 +1267,9 @@ async function resolveModernComposeEnvOverrides(opts: {
   readonly composeFiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly lifecycleEnv: Readonly<Record<string, string>>;
-  readonly preflightEnv: Readonly<Record<string, string>>;
+  readonly preflightEnvByService: Readonly<
+    Record<string, Readonly<Record<string, string>>>
+  >;
   readonly effectiveEnvName: string | null;
 } | null> {
   const modern = await resolveProjectEnvConfig({
@@ -1283,12 +1286,11 @@ async function resolveModernComposeEnvOverrides(opts: {
     scopeName: "global",
     target: "host",
   });
-  const preflightEnv = Object.assign(
-    {},
-    modern.globalEnv,
-    ...opts.targetServices.map(
-      (service) => modern.serviceEnv[service] ?? modern.globalEnv
-    )
+  const preflightEnvByService = Object.fromEntries(
+    opts.targetServices.map((service) => [
+      service,
+      modern.serviceEnv[service] ?? modern.globalEnv,
+    ])
   );
 
   for (const scope of modern.unknownScopes) {
@@ -1311,7 +1313,7 @@ async function resolveModernComposeEnvOverrides(opts: {
       composeFiles: [],
       env: modern.globalEnv,
       lifecycleEnv,
-      preflightEnv,
+      preflightEnvByService,
       effectiveEnvName: modern.selection.effectiveEnv,
     };
   }
@@ -1328,7 +1330,7 @@ async function resolveModernComposeEnvOverrides(opts: {
     composeFiles: [overridePath],
     env: modern.globalEnv,
     lifecycleEnv,
-    preflightEnv,
+    preflightEnvByService,
     effectiveEnvName: modern.selection.effectiveEnv,
   };
 }
@@ -1383,7 +1385,9 @@ async function resolveComposeEnvOverrides(opts: {
   readonly composeFiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly lifecycleEnv: Readonly<Record<string, string>>;
-  readonly preflightEnv: Readonly<Record<string, string>>;
+  readonly preflightEnvByService: Readonly<
+    Record<string, Readonly<Record<string, string>>>
+  >;
   readonly effectiveEnvName: string | null;
 }> {
   await maybePromptLegacyProjectEnvMigration({
@@ -1405,13 +1409,30 @@ async function resolveComposeEnvOverrides(opts: {
     resolved,
     targetServices: opts.targetServices,
   });
+  const preflightEnvByService = Object.fromEntries(
+    opts.targetServices.map((service) => {
+      const env: Record<string, string> = {};
+      for (const value of resolved.values) {
+        if (
+          value.value !== null &&
+          isEnvVarRelevantToServices({
+            services: [service],
+            varServices: value.services,
+          })
+        ) {
+          env[value.key] = value.value;
+        }
+      }
+      return [service, env];
+    })
+  );
 
   if (resolved.contract.vars.length === 0) {
     return {
       composeFiles: [],
       env: {},
       lifecycleEnv: {},
-      preflightEnv: {},
+      preflightEnvByService,
       effectiveEnvName: resolved.envSelection.effectiveEnv,
     };
   }
@@ -1453,7 +1474,7 @@ async function resolveComposeEnvOverrides(opts: {
       composeFiles: [],
       env: resolved.envForCompose,
       lifecycleEnv: resolved.envForCompose,
-      preflightEnv: resolved.envForCompose,
+      preflightEnvByService,
       effectiveEnvName: resolved.envSelection.effectiveEnv,
     };
   }
@@ -1471,7 +1492,7 @@ async function resolveComposeEnvOverrides(opts: {
     composeFiles: [overridePath],
     env: resolved.envForCompose,
     lifecycleEnv: resolved.envForCompose,
-    preflightEnv: resolved.envForCompose,
+    preflightEnvByService,
     effectiveEnvName: resolved.envSelection.effectiveEnv,
   };
 }
@@ -1480,22 +1501,27 @@ async function assertRegistryCredentialsAvailable(opts: {
   readonly projectRoot: string;
   readonly composeFile: string;
   readonly targetServices: readonly string[];
-  readonly env: Readonly<Record<string, string>>;
+  readonly envByService: Readonly<
+    Record<string, Readonly<Record<string, string>>>
+  >;
 }): Promise<void> {
   const bootstrapServices = await discoverDependencyBootstrapServices({
     composeFile: opts.composeFile,
   });
-  if (
-    !bootstrapServices.some((service) => opts.targetServices.includes(service))
-  ) {
-    return;
-  }
-  const result = await preflightRegistryCredentials({
-    projectRoot: opts.projectRoot,
-    env: opts.env,
-  });
-  if (result.missing.length > 0) {
-    throw new RegistryCredentialPreflightError({ missing: result.missing });
+  for (const service of bootstrapServices) {
+    if (!opts.targetServices.includes(service)) {
+      continue;
+    }
+    const result = await preflightRegistryCredentials({
+      projectRoot: opts.projectRoot,
+      env: opts.envByService[service] ?? {},
+    });
+    if (result.missing.length > 0) {
+      throw new RegistryCredentialPreflightError({
+        missing: result.missing,
+        service,
+      });
+    }
   }
 }
 
@@ -5963,7 +5989,7 @@ async function runUpCommand({
     projectRoot: project.projectRoot,
     composeFile: project.composeFile,
     targetServices,
-    env: envOverrides.preflightEnv,
+    envByService: envOverrides.preflightEnvByService,
   });
 
   if (!serviceScoped) {
@@ -6089,7 +6115,14 @@ async function runUpCommand({
       profiles,
       services: targetServices,
     });
-    const startup = classifyComposeStartupState(states);
+    const successfulCompletionServices = new Set(
+      await discoverSuccessfulCompletionServices({
+        composeFile: project.composeFile,
+      })
+    );
+    const startup = classifyComposeStartupState(states, {
+      successfulCompletionServices,
+    });
     if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
       await lifecycleCleanup?.();
       await removeProjectRuntimeStateEntry({
@@ -6534,7 +6567,7 @@ async function runRestartUpPhase(opts: {
     projectRoot: opts.project.projectRoot,
     composeFile: opts.project.composeFile,
     targetServices,
-    env: envOverrides.preflightEnv,
+    envByService: envOverrides.preflightEnvByService,
   });
   const composeFilesWithEnv = [
     ...composeFilesWithRuntimeOverrides,
@@ -6711,7 +6744,7 @@ async function runTargetedServiceRestart(opts: {
     projectRoot: opts.project.projectRoot,
     composeFile: opts.project.composeFile,
     targetServices: opts.services,
-    env: envOverrides.preflightEnv,
+    envByService: envOverrides.preflightEnvByService,
   });
   const dependencyCache = await resolveDependencyCacheOverride({
     projectRoot: opts.project.projectRoot,
@@ -6754,7 +6787,14 @@ async function runTargetedServiceRestart(opts: {
     profiles: opts.profiles,
     services: opts.services,
   });
-  const startup = classifyComposeStartupState(states);
+  const successfulCompletionServices = new Set(
+    await discoverSuccessfulCompletionServices({
+      composeFile: opts.project.composeFile,
+    })
+  );
+  const startup = classifyComposeStartupState(states, {
+    successfulCompletionServices,
+  });
   if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
     return {
       ok: false,
@@ -6943,7 +6983,7 @@ async function runRestartCommand({
     projectRoot: project.projectRoot,
     composeFile: project.composeFile,
     targetServices: allServiceNames,
-    env: preflightEnv.preflightEnv,
+    envByService: preflightEnv.preflightEnvByService,
   });
 
   const downCode = await runRestartDownPhase({
@@ -7010,7 +7050,14 @@ async function runRestartCommand({
     composeProjectName,
     profiles,
   });
-  const startup = classifyComposeStartupState(states);
+  const successfulCompletionServices = new Set(
+    await discoverSuccessfulCompletionServices({
+      composeFile: project.composeFile,
+    })
+  );
+  const startup = classifyComposeStartupState(states, {
+    successfulCompletionServices,
+  });
   if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
     await stopLifecycleProcessesBestEffort({
       project,

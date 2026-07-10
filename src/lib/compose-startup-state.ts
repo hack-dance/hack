@@ -12,7 +12,10 @@ export type ComposeStartupState = {
 
 /** Classify Compose services without treating successful one-shot containers as failures. */
 export function classifyComposeStartupState(
-  states: readonly ComposeServiceState[]
+  states: readonly ComposeServiceState[],
+  opts: {
+    readonly successfulCompletionServices?: ReadonlySet<string>;
+  } = {}
 ): ComposeStartupState {
   const running: string[] = [];
   const completed: string[] = [];
@@ -23,7 +26,11 @@ export function classifyComposeStartupState(
       running.push(entry.service);
       continue;
     }
-    if (entry.state === "exited" && entry.exitCode === 0) {
+    if (
+      entry.state === "exited" &&
+      entry.exitCode === 0 &&
+      opts.successfulCompletionServices?.has(entry.service)
+    ) {
       completed.push(entry.service);
       continue;
     }

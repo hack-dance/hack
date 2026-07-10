@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import {
   discoverDependencyBootstrapServices,
   discoverRegistryCredentialReferences,
+  discoverSuccessfulCompletionServices,
   preflightRegistryCredentials,
 } from "../src/lib/registry-credential-preflight.ts";
 
@@ -62,5 +63,31 @@ test("dependency bootstrap detection is name agnostic", async () => {
   );
   expect(await discoverDependencyBootstrapServices({ composeFile })).toEqual([
     "arbitrary-installer",
+  ]);
+});
+
+test("successful completion requires installer semantics or an explicit one-shot label", async () => {
+  const projectRoot = await createTempProject();
+  const composeFile = resolve(projectRoot, "compose.yml");
+  await writeFile(
+    composeFile,
+    [
+      "services:",
+      "  installer:",
+      "    image: oven/bun",
+      "    command: bun install",
+      "  migrate:",
+      "    image: app",
+      "    labels:",
+      '      hack.service.one-shot: "true"',
+      "  api:",
+      "    image: app",
+      "",
+    ].join("\n")
+  );
+
+  expect(await discoverSuccessfulCompletionServices({ composeFile })).toEqual([
+    "installer",
+    "migrate",
   ]);
 });

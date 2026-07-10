@@ -126,6 +126,10 @@ function installSubprocessTimeout(opts: {
       clearTimeout(timer);
       if (forceKillTimer) {
         clearTimeout(forceKillTimer);
+        // The direct child may honor SIGTERM before its descendants do. Once
+        // the child exits, finish cleaning the detached process group instead
+        // of cancelling the only pending SIGKILL and orphaning descendants.
+        signalProcessGroup("SIGKILL");
       }
     },
     didTimeout: () => timedOut,

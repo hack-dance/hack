@@ -7,15 +7,28 @@ import {
 
 test("startup accepts running services and successful one-shot services", () => {
   expect(
-    classifyComposeStartupState([
-      { service: "api", state: "running", exitCode: 0 },
-      { service: "migrate", state: "exited", exitCode: 0 },
-    ])
+    classifyComposeStartupState(
+      [
+        { service: "api", state: "running", exitCode: 0 },
+        { service: "migrate", state: "exited", exitCode: 0 },
+      ],
+      {
+        successfulCompletionServices: new Set(["migrate"]),
+      }
+    )
   ).toEqual({
     running: ["api"],
     completed: ["migrate"],
     failed: [],
   });
+});
+
+test("startup rejects an unmarked long-running service that exited zero", () => {
+  expect(
+    classifyComposeStartupState([
+      { service: "api", state: "exited", exitCode: 0 },
+    ])
+  ).toEqual({ running: [], completed: [], failed: ["api"] });
 });
 
 test("startup rejects containers left created even when compose returned success", () => {

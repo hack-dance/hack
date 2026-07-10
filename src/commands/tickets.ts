@@ -46,12 +46,9 @@ async function handleTickets({
   readonly ctx: CliContext;
   readonly args: TicketsArgs;
 }): Promise<number> {
-  logger.warn({
-    message:
-      "Hack Tickets is deprecated and no longer part of agent guidance. Commands remain available only for compatibility and migration.",
-  });
   // Parse command early to check if it's setup (which bypasses enable check)
   const invocation = parseTicketsInvocation({ argv: args.raw.argv });
+  warnTicketsDeprecationUnlessJson({ invocation });
   const isSetupCommand = invocation.command === "setup";
 
   const loaded = await loadExtensionManagerForCli({ cwd: ctx.cwd });
@@ -160,6 +157,18 @@ async function handleTickets({
   return await resolved.command.handler({
     ctx: loaded.context,
     args: invocation.args,
+  });
+}
+
+function warnTicketsDeprecationUnlessJson(opts: {
+  readonly invocation: TicketsInvocation;
+}): void {
+  if (opts.invocation.args.includes("--json")) {
+    return;
+  }
+  logger.warn({
+    message:
+      "Hack Tickets is deprecated and no longer part of agent guidance. Commands remain available only for compatibility and migration.",
   });
 }
 

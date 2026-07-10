@@ -166,6 +166,15 @@ test("up accepts running and successfully completed one-shot services", async ()
   expect(errorMessages).toEqual([]);
 });
 
+test("registry credentials must exist in the bootstrap service scope", async () => {
+  const projectRoot = await createProject({ registryTokenScope: "api" });
+
+  await expect(runDetachedUp({ projectRoot })).rejects.toThrow(
+    "Missing package-registry credential for service deps: GITHUB_TOKEN"
+  );
+  expect(upEnvs).toEqual([]);
+});
+
 test("restart returns failure when compose reports a created service after exit zero", async () => {
   const projectRoot = await createProject();
   psRows.push(
@@ -338,6 +347,7 @@ async function runJsonUp(opts: {
 
 async function createProject(opts?: {
   readonly lifecycleMarkerFile?: string;
+  readonly registryTokenScope?: "api" | "deps";
 }): Promise<string> {
   const projectRoot = await mkdtemp(
     resolve(tmpdir(), "hack-up-startup-state-")
@@ -355,6 +365,15 @@ async function createProject(opts?: {
       "    image: alpine:3.20",
       "  migrate:",
       "    image: alpine:3.20",
+      "    labels:",
+      '      hack.service.one-shot: "true"',
+      ...(opts?.registryTokenScope
+        ? [
+            "  deps:",
+            "    image: oven/bun",
+            "    command: bun install --frozen-lockfile",
+          ]
+        : []),
       "",
     ].join("\n")
   );
@@ -398,8 +417,17 @@ async function createProject(opts?: {
       "  host:",
       '    SHARED_MODE: "host"',
       '    HOST_ONLY: "host-only"',
+      ...(opts?.registryTokenScope
+        ? [`  ${opts.registryTokenScope}:`, '    GITHUB_TOKEN: "scoped-token"']
+        : []),
       "",
     ].join("\n")
   );
+  if (opts?.registryTokenScope) {
+    await writeFile(
+      resolve(projectRoot, ".npmrc"),
+      "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}\n"
+    );
+  }
   return projectRoot;
 }

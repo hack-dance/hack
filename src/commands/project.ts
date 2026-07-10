@@ -90,6 +90,11 @@ import {
   reassignCollidingPorts,
   reportInitDiscoveryFindings,
 } from "../init/validation.ts";
+import {
+  applyBranchToHost,
+  applyBranchToHosts,
+  rewriteCaddyLabelForBranch,
+} from "../lib/branch-hosts.ts";
 import { resolveEffectiveBranch, touchBranchUsage } from "../lib/branches.ts";
 import {
   type CliResult,
@@ -199,6 +204,7 @@ import {
   preflightRegistryCredentials,
   RegistryCredentialPreflightError,
 } from "../lib/registry-credential-preflight.ts";
+import { buildRuntimeHostMetadataOverride } from "../lib/runtime-host-metadata.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import {
   formatSecretStoreDescriptor,
@@ -1051,90 +1057,6 @@ function parseLabelEntry(opts: {
   }
   const value = opts.item.slice(idx + 1).trim();
   return { key, value };
-}
-
-function rewriteCaddyLabelForBranch(opts: {
-  readonly value: string;
-  readonly branch: string;
-  readonly baseHosts: readonly string[];
-}): { readonly value: string; readonly changed: boolean } {
-  const parts = opts.value
-    .split(",")
-    .map((h) => h.trim())
-    .filter((h) => h.length > 0);
-
-  if (parts.length === 0) {
-    return { value: opts.value, changed: false };
-  }
-
-  const out: string[] = [];
-  const seen = new Set<string>();
-  let changed = false;
-
-  for (const host of parts) {
-    let next = host;
-    for (const baseHost of opts.baseHosts) {
-      const rewritten = rewriteHostForBranch({
-        host,
-        branch: opts.branch,
-        baseHost,
-      });
-      if (rewritten.changed) {
-        next = rewritten.host;
-        changed = true;
-        break;
-      }
-    }
-
-    if (seen.has(next)) {
-      continue;
-    }
-    seen.add(next);
-    out.push(next);
-  }
-
-  return { value: out.join(", "), changed };
-}
-
-function rewriteHostForBranch(opts: {
-  readonly host: string;
-  readonly branch: string;
-  readonly baseHost: string;
-}): { readonly host: string; readonly changed: boolean } {
-  if (opts.host === opts.baseHost) {
-    const next = `${opts.branch}.${opts.baseHost}`;
-    return { host: next, changed: next !== opts.host };
-  }
-
-  const suffix = `.${opts.baseHost}`;
-  if (!opts.host.endsWith(suffix)) {
-    return { host: opts.host, changed: false };
-  }
-
-  const prefix = opts.host.slice(0, opts.host.length - suffix.length);
-  if (prefix === opts.branch || prefix.endsWith(`.${opts.branch}`)) {
-    return { host: opts.host, changed: false };
-  }
-
-  return { host: `${prefix}.${opts.branch}.${opts.baseHost}`, changed: true };
-}
-
-function applyBranchToHost(opts: {
-  readonly host: string;
-  readonly branch: string;
-  readonly baseHosts: readonly string[];
-}): string {
-  for (const baseHost of opts.baseHosts) {
-    const rewritten = rewriteHostForBranch({
-      host: opts.host,
-      branch: opts.branch,
-      baseHost,
-    });
-    if (rewritten.changed) {
-      return rewritten.host;
-    }
-  }
-  return opts.host;
 }
 
 function cleanupYaml(yaml: string): string {
@@ -2941,6 +2863,62 @@ async function resolveBranchComposeFiles(opts: {
   return [opts.project.composeFile, overridePath];
 }
 
+async function resolveRuntimeHostMetadataOverride(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly composeFiles: readonly string[];
+  readonly branch: string | null;
+  readonly devHost: string;
+  readonly aliasHost: string | null;
+  readonly composeProject: string;
+}): Promise<string | null> {
+  const composeYamls = (
+    await Promise.all(
+      opts.composeFiles.map(async (path) => await readTextFile(path))
+    )
+  ).filter((text): text is string => typeof text === "string");
+  if (composeYamls.length === 0) {
+    return null;
+  }
+  const override = buildRuntimeHostMetadataOverride({
+    composeYamls,
+    branch: opts.branch,
+    devHost: opts.devHost,
+    aliasHost: opts.aliasHost,
+    composeProject: opts.composeProject,
+  });
+  if (!override) {
+    return null;
+  }
+
+  await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
+  const overrideDir = resolve(
+    opts.project.projectDir,
+    opts.branch ? ".branch" : ".internal"
+  );
+  await ensureDir(overrideDir);
+  const overridePath = resolve(
+    overrideDir,
+    opts.branch
+      ? `compose.${opts.branch}.runtime.override.yml`
+      : "compose.runtime.override.yml"
+  );
+  await writeTextFileIfChanged(overridePath, override);
+  return overridePath;
+}
+
+async function resolveRuntimeDevHost(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly branch: string | null;
+}): Promise<string> {
+  if (opts.branch) {
+    return await resolveBranchDevHost({ project: opts.project });
+  }
+  return (
+    (await readProjectDevHost(opts.project)) ??
+    `${defaultProjectSlugFromPath(opts.project.projectRoot)}.${DEFAULT_PROJECT_TLD}`
+  );
+}
+
 const INTERNAL_CA_CONTAINER_DIR = "/etc/hack/ca";
 const INTERNAL_CA_CONTAINER_PATH = `${INTERNAL_CA_CONTAINER_DIR}/caddy-local-authority.crt`;
 const INTERNAL_TRUST_BUNDLE_CONTAINER_PATH = `${INTERNAL_CA_CONTAINER_DIR}/trust-bundle.pem`;
@@ -3439,28 +3417,6 @@ function extractCaddyHosts(value: string): readonly string[] {
     }
 
     out.push(host);
-  }
-  return out;
-}
-
-function applyBranchToHosts(opts: {
-  readonly hosts: readonly string[];
-  readonly branch: string;
-  readonly baseHosts: readonly string[];
-}): readonly string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const host of opts.hosts) {
-    const next = applyBranchToHost({
-      host,
-      branch: opts.branch,
-      baseHosts: opts.baseHosts,
-    });
-    if (seen.has(next)) {
-      continue;
-    }
-    seen.add(next);
-    out.push(next);
   }
   return out;
 }
@@ -5939,9 +5895,8 @@ async function runUpCommand({
     projectName,
     branch,
   });
-  const devHost = branch ? await resolveBranchDevHost({ project }) : null;
-  const aliasHost =
-    branch && devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;
+  const devHost = await resolveRuntimeDevHost({ project, branch });
+  const aliasHost = resolveBranchAliasHost({ devHost, cfg });
   const internalSettings = resolveInternalSettings(cfg);
   await maybePromptToStartGlobal({ internal: internalSettings });
   const internalOverride = await resolveInternalComposeOverride({
@@ -5967,6 +5922,14 @@ async function runUpCommand({
   const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
     ? [...composeFilesWithInternal, dependencyCache.overridePath]
     : composeFilesWithInternal;
+  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
+    project,
+    composeFiles: composeFilesWithRuntimeOverrides,
+    branch,
+    devHost,
+    aliasHost,
+    composeProject: composeProjectName ?? baseProjectName,
+  });
 
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const requestedServices = resolveRequestedComposeServices({
@@ -5984,6 +5947,7 @@ async function runUpCommand({
   });
   const composeFilesWithEnv = [
     ...composeFilesWithRuntimeOverrides,
+    ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
     ...envOverrides.composeFiles,
   ];
 
@@ -6515,6 +6479,7 @@ async function runRestartDownPhase(opts: {
 async function runRestartUpPhase(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly baseProjectName: string;
   readonly projectName: string;
   readonly composeProjectName: string | null;
   readonly lifecycleComposeProject: string;
@@ -6526,13 +6491,11 @@ async function runRestartUpPhase(opts: {
 }): Promise<number> {
   await maybeSyncOauthAliasesInCompose({ project: opts.project });
 
-  const devHost = opts.branch
-    ? await resolveBranchDevHost({ project: opts.project })
-    : null;
-  const aliasHost =
-    opts.branch && devHost
-      ? resolveBranchAliasHost({ devHost, cfg: opts.cfg })
-      : null;
+  const devHost = await resolveRuntimeDevHost({
+    project: opts.project,
+    branch: opts.branch,
+  });
+  const aliasHost = resolveBranchAliasHost({ devHost, cfg: opts.cfg });
   const internalOverride = await resolveInternalComposeOverride({
     project: opts.project,
     cfg: opts.cfg,
@@ -6561,6 +6524,14 @@ async function runRestartUpPhase(opts: {
   const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
     ? [...composeFilesWithInternal, dependencyCache.overridePath]
     : composeFilesWithInternal;
+  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
+    project: opts.project,
+    composeFiles: composeFilesWithRuntimeOverrides,
+    branch: opts.branch,
+    devHost,
+    aliasHost,
+    composeProject: opts.composeProjectName ?? opts.baseProjectName,
+  });
 
   const targetServices = await readComposeServiceNames(
     opts.project.composeFile
@@ -6580,6 +6551,7 @@ async function runRestartUpPhase(opts: {
   });
   const composeFilesWithEnv = [
     ...composeFilesWithRuntimeOverrides,
+    ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
     ...envOverrides.composeFiles,
   ];
 
@@ -6709,6 +6681,7 @@ type TargetedServiceRestartResult =
 async function runTargetedServiceRestart(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly baseProjectName: string;
   readonly projectName: string;
   readonly composeProjectName: string | null;
   readonly profiles: readonly string[];
@@ -6719,13 +6692,11 @@ async function runTargetedServiceRestart(opts: {
   readonly routeStdoutToStderr: boolean;
 }): Promise<TargetedServiceRestartResult> {
   await maybeSyncOauthAliasesInCompose({ project: opts.project });
-  const devHost = opts.branch
-    ? await resolveBranchDevHost({ project: opts.project })
-    : null;
-  const aliasHost =
-    opts.branch && devHost
-      ? resolveBranchAliasHost({ devHost, cfg: opts.cfg })
-      : null;
+  const devHost = await resolveRuntimeDevHost({
+    project: opts.project,
+    branch: opts.branch,
+  });
+  const aliasHost = resolveBranchAliasHost({ devHost, cfg: opts.cfg });
   const internalOverride = await resolveInternalComposeOverride({
     project: opts.project,
     cfg: opts.cfg,
@@ -6761,11 +6732,23 @@ async function runTargetedServiceRestart(opts: {
     projectName: opts.projectName,
     composeFile: opts.project.composeFile,
   });
+  const composeFilesWithRuntimeOverrides = [
+    ...composeFiles,
+    ...(internalOverride ? [internalOverride] : []),
+    ...(dependencyCache.overridePath ? [dependencyCache.overridePath] : []),
+  ];
+  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
+    project: opts.project,
+    composeFiles: composeFilesWithRuntimeOverrides,
+    branch: opts.branch,
+    devHost,
+    aliasHost,
+    composeProject: opts.composeProjectName ?? opts.baseProjectName,
+  });
   const code = await composeRuntimeBackend.up({
     composeFiles: [
-      ...composeFiles,
-      ...(internalOverride ? [internalOverride] : []),
-      ...(dependencyCache.overridePath ? [dependencyCache.overridePath] : []),
+      ...composeFilesWithRuntimeOverrides,
+      ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
       ...envOverrides.composeFiles,
     ],
     composeProject: opts.composeProjectName,
@@ -6941,6 +6924,7 @@ async function runRestartCommand({
     const result = await runTargetedServiceRestart({
       project,
       cfg,
+      baseProjectName,
       projectName,
       composeProjectName,
       profiles,
@@ -7036,6 +7020,7 @@ async function runRestartCommand({
   const upCode = await runRestartUpPhase({
     project,
     cfg,
+    baseProjectName,
     projectName,
     composeProjectName,
     lifecycleComposeProject,
@@ -7416,9 +7401,8 @@ async function handleRun({
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
-  const devHost = branch ? await resolveBranchDevHost({ project }) : null;
-  const aliasHost =
-    branch && devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;
+  const devHost = await resolveRuntimeDevHost({ project, branch });
+  const aliasHost = resolveBranchAliasHost({ devHost, cfg });
   const internalOverride = await resolveInternalComposeOverride({
     project,
     cfg,
@@ -7426,9 +7410,20 @@ async function handleRun({
     devHost,
     aliasHost,
   });
-  const composeFiles = internalOverride
-    ? [project.composeFile, internalOverride]
+  const composeFiles = branch
+    ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
     : [project.composeFile];
+  const composeFilesWithInternal = internalOverride
+    ? [...composeFiles, internalOverride]
+    : composeFiles;
+  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
+    project,
+    composeFiles: composeFilesWithInternal,
+    branch,
+    devHost,
+    aliasHost,
+    composeProject: composeProjectName ?? baseProjectName,
+  });
 
   const projectName = sanitizeProjectSlug(baseProjectName);
   const allServiceNames = await readComposeServiceNames(project.composeFile);
@@ -7439,7 +7434,11 @@ async function handleRun({
     allServiceNames,
     envName,
   });
-  const composeFilesWithEnv = [...composeFiles, ...envOverrides.composeFiles];
+  const composeFilesWithEnv = [
+    ...composeFilesWithInternal,
+    ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
+    ...envOverrides.composeFiles,
+  ];
   const stackIsRunning = await resolveCanSkipRunDependencies({
     composeFiles: composeFilesWithEnv,
     composeProjectKey: composeProjectName ?? baseProjectName,
@@ -7508,9 +7507,8 @@ async function handleExec({
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
-  const devHost = branch ? await resolveBranchDevHost({ project }) : null;
-  const aliasHost =
-    branch && devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;
+  const devHost = await resolveRuntimeDevHost({ project, branch });
+  const aliasHost = resolveBranchAliasHost({ devHost, cfg });
   const internalOverride = await resolveInternalComposeOverride({
     project,
     cfg,
@@ -7518,9 +7516,20 @@ async function handleExec({
     devHost,
     aliasHost,
   });
-  const composeFiles = internalOverride
-    ? [project.composeFile, internalOverride]
+  const composeFiles = branch
+    ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
     : [project.composeFile];
+  const composeFilesWithInternal = internalOverride
+    ? [...composeFiles, internalOverride]
+    : composeFiles;
+  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
+    project,
+    composeFiles: composeFilesWithInternal,
+    branch,
+    devHost,
+    aliasHost,
+    composeProject: composeProjectName ?? baseProjectName,
+  });
 
   const projectName = sanitizeProjectSlug(baseProjectName);
   const lifecycleComposeProject = resolveLifecycleComposeProjectName({
@@ -7535,7 +7544,11 @@ async function handleExec({
     allServiceNames,
     envName,
   });
-  const composeFilesWithEnv = [...composeFiles, ...envOverrides.composeFiles];
+  const composeFilesWithEnv = [
+    ...composeFilesWithInternal,
+    ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
+    ...envOverrides.composeFiles,
+  ];
   const execReady = await resolveExecTargetReady({
     composeFiles: composeFilesWithEnv,
     composeProjectKey: lifecycleComposeProject,

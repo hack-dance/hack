@@ -9,6 +9,14 @@ import {
 import { downBestEffort, requireDockerPreconditions } from "./docker-shared.ts";
 
 type OpenPayload = { readonly url?: string };
+type RuntimeMetadataPayload = {
+  readonly branch?: string | null;
+  readonly composeProject?: string;
+  readonly hosts?: { readonly dev?: string; readonly alias?: string | null };
+  readonly services?: Readonly<
+    Record<string, { readonly urls?: readonly string[] }>
+  >;
+};
 
 const BRANCH = "e2e-parallel";
 const UP_TIMEOUT_MS = 420_000;
@@ -69,6 +77,36 @@ export const worktreeParallelUpScenario: Scenario = {
       expect({
         that: worktreeUrl.includes(BRANCH),
         message: `worktree route should carry the branch slug "${BRANCH}", got "${worktreeUrl}"`,
+      });
+
+      const primaryMetadata = await readRuntimeMetadata({
+        ctx,
+        cwd: fixture.root,
+      });
+      const branchMetadata = await readRuntimeMetadata({
+        ctx,
+        cwd: worktreePath,
+      });
+      expect({
+        that:
+          primaryMetadata?.branch === null &&
+          primaryMetadata.hosts?.dev === fixture.devHost &&
+          primaryMetadata.services?.api?.urls?.includes(
+            `https://api.${fixture.devHost}`
+          ) === true,
+        message: "primary containers should receive base-instance runtime URLs",
+      });
+      expect({
+        that:
+          branchMetadata?.branch === BRANCH &&
+          branchMetadata.composeProject === `${fixture.name}--${BRANCH}` &&
+          branchMetadata.hosts?.dev === `${BRANCH}.${fixture.devHost}` &&
+          branchMetadata.services?.web?.urls?.includes(worktreeUrl) === true &&
+          branchMetadata.services?.api?.urls?.includes(
+            `https://api.${BRANCH}.${fixture.devHost}`
+          ) === true,
+        message:
+          "branch containers should receive only branch-qualified public runtime URLs",
       });
 
       const composeLs = await runCommand({
@@ -132,6 +170,19 @@ export const worktreeParallelUpScenario: Scenario = {
         that: branchIdsAfter.join(",") === branchIdsBefore.join(","),
         message:
           "primary restart changed the linked-worktree branch containers",
+        result: restartPrimary,
+      });
+      const primaryMetadataAfterRestart = await readRuntimeMetadata({
+        ctx,
+        cwd: fixture.root,
+      });
+      expect({
+        that:
+          primaryMetadataAfterRestart?.composeProject === fixture.name &&
+          primaryMetadataAfterRestart.services?.api?.urls?.includes(
+            `https://api.${fixture.devHost}`
+          ) === true,
+        message: "primary restart should preserve base-instance runtime URLs",
         result: restartPrimary,
       });
 
@@ -200,4 +251,20 @@ async function resolveOpenUrl(opts: {
     message: `hack open --json failed in ${opts.cwd}`,
   });
   return extractJsonObject<OpenPayload>({ text: result.stdout })?.url ?? "";
+}
+
+async function readRuntimeMetadata(opts: {
+  readonly ctx: Parameters<Scenario["run"]>[0];
+  readonly cwd: string;
+}): Promise<RuntimeMetadataPayload | null> {
+  const result = await opts.ctx.cli({
+    args: ["exec", "web", "--", "printenv", "HACK_RUNTIME_METADATA"],
+    cwd: opts.cwd,
+  });
+  expectExit({
+    result,
+    codes: [0],
+    message: `hack exec should expose runtime metadata in ${opts.cwd}`,
+  });
+  return extractJsonObject<RuntimeMetadataPayload>({ text: result.stdout });
 }

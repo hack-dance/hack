@@ -158,6 +158,52 @@ Opt out:
 
 The primary checkout is unchanged: no `--branch` means the base instance.
 
+### Runtime host metadata
+
+Containers started by `hack up`, `hack restart`, and `hack run` receive the effective instance and
+public-route metadata. This keeps server-generated links, OAuth callbacks, webhooks, and other
+browser-facing URLs isolated when the same project runs in multiple worktrees.
+
+| Variable | Value |
+| --- | --- |
+| `HACK_BRANCH` | Effective branch slug, or an empty string for the base instance |
+| `HACK_COMPOSE_PROJECT` | Effective Compose project name |
+| `HACK_DEV_HOST` / `HACK_DEV_URL` | Effective root development host and HTTPS URL |
+| `HACK_ALIAS_HOST` / `HACK_ALIAS_URL` | Effective OAuth alias host and URL, when enabled |
+| `HACK_SERVICE_NAME` | Current Compose service name |
+| `HACK_SERVICE_URL` | Current service's first public URL, when routable |
+| `HACK_SERVICE_URLS` | JSON array of every public URL for the current service |
+| `HACK_RUNTIME_METADATA` | Versioned JSON document containing the instance hosts and every routable service's URL list |
+
+Example `HACK_RUNTIME_METADATA` for a branch instance:
+
+```json
+{
+  "version": 1,
+  "branch": "feature-x",
+  "composeProject": "demo--feature-x",
+  "hosts": {
+    "dev": "feature-x.demo.hack",
+    "alias": "feature-x.demo.hack.gy"
+  },
+  "services": {
+    "web": {
+      "urls": ["https://feature-x.demo.hack"]
+    },
+    "api": {
+      "urls": ["https://api.feature-x.demo.hack"]
+    }
+  }
+}
+```
+
+The service map is derived from effective Caddy routes; unroutable services are omitted. Use
+Compose DNS names such as `http://api:3000` for container-to-container traffic and runtime metadata
+only when a public/browser-reachable URL is required. Explicit project env values retain precedence
+over generated metadata for backward compatibility. Existing containers receive the contract after
+their next `hack up` or `hack restart`; `hack exec` observes the values already stored in the running
+container.
+
 Linked worktrees also inherit the project secret key automatically from the primary checkout
 through the shared git common dir, so you don't need to copy `.hack.secret.key` by hand. Set
 `HACK_ENV_SECRET_KEY` for CI or fully detached environments. `hack doctor` flags divergent secret

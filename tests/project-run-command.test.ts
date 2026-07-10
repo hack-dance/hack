@@ -147,6 +147,17 @@ test("run applies modern env overlays to service-specific compose overrides", as
   expect(call?.noDeps).toBe(false);
   expect(call?.composeFiles.length ?? 0).toBeGreaterThanOrEqual(2);
 
+  const runtimeOverridePath = call?.composeFiles.find((filePath) =>
+    filePath.endsWith("compose.runtime.override.yml")
+  );
+  expect(runtimeOverridePath).toBeDefined();
+  if (!runtimeOverridePath) {
+    throw new Error("Missing runtime metadata compose override.");
+  }
+  const runtimeOverrideText = await readFile(runtimeOverridePath, "utf8");
+  expect(runtimeOverrideText).toContain("HACK_RUNTIME_METADATA");
+  expect(runtimeOverrideText).toContain("https://project-run-env.hack");
+
   const overridePath = call?.composeFiles.find((filePath) =>
     filePath.endsWith("compose.env.override.yml")
   );

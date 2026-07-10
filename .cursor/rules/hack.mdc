@@ -11,7 +11,7 @@ Prefer `hack` when shell access is available. Use MCP only when shell access is 
 - At session start, audit project and global integrations with `hack setup sync --all-scopes --check`.
 - If anything is stale, missing, or deprecated, run `hack setup sync --all-scopes`, then reload the agent session so cached instructions are replaced.
 - Never copy or hand-edit generated Hack rules to refresh them; update the CLI and run the sync command.
-- Content revision: `eef2b0142b95` (version alone is not a freshness guarantee).
+- Content revision: `64098e5ae1ea` (version alone is not a freshness guarantee).
 
 ## Product boundary
 

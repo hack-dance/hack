@@ -1,3 +1,7 @@
+## <small>3.4.1 (2026-07-10)</small>
+
+* fix(daemon): prefer active CLI for launchd (#67) ([e3be66e](https://github.com/hack-dance/hack/commit/e3be66e)), closes [#67](https://github.com/hack-dance/hack/issues/67)
+
 ## 3.4.0 (2026-07-10)
 
 * feat(runtime): expose branch-safe host metadata (#66) ([0b0ec61](https://github.com/hack-dance/hack/commit/0b0ec61)), closes [#66](https://github.com/hack-dance/hack/issues/66) [#65](https://github.com/hack-dance/hack/issues/65)

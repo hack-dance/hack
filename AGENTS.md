@@ -214,7 +214,7 @@ Integration freshness:
 - At session start, audit project and global integrations with `hack setup sync --all-scopes --check`.
 - If anything is stale, missing, or deprecated, run `hack setup sync --all-scopes`, then reload the agent session so cached instructions are replaced.
 - Never copy or hand-edit generated Hack rules to refresh them; update the CLI and run the sync command.
-- Content revision: `eef2b0142b95` (version alone is not a freshness guarantee).
+- Content revision: `64098e5ae1ea` (version alone is not a freshness guarantee).
 
 Product boundary:
 - Supported v3 surface: project init, up/down/restart, open, logs, env, host exec/shell, sessions, doctor, and daemon.
@@ -336,6 +336,7 @@ Branch instances (parallel envs):
 - Use a branch instance when you need two versions running at once (PR review, experiments, migrations) or want to keep a stable environment while testing another branch.
 - Target one with `--branch <name>` on up/open/logs/down (for example: `hack up --branch <name> --detach`).
 - Linked worktrees pick a branch instance automatically (see Linked git worktrees).
+- Containers receive `HACK_RUNTIME_METADATA` plus `HACK_DEV_URL`, `HACK_ALIAS_URL`, and current-service URL fields derived from effective Caddy routes. Use Compose DNS for internal traffic and this metadata for browser-facing links, OAuth callbacks, and webhooks.
 
 Run commands inside services:
 - One-off: `hack run <service> <cmd...>` (uses `docker compose run --rm`)

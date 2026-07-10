@@ -1,6 +1,7 @@
 import { basename, dirname, resolve } from "node:path";
 import {
   DEFAULT_OAUTH_ALIAS_TLD,
+  DEFAULT_PROJECT_TLD,
   HACK_PROJECT_DIR_LEGACY,
   HACK_PROJECT_DIR_PRIMARY,
   PROJECT_COMPOSE_FILENAME,
@@ -11,6 +12,10 @@ import {
 import { parseDotEnv } from "./env.ts";
 import { pathExists, readTextFile } from "./fs.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
+import {
+  type OpenHostPreference,
+  parseOpenHostPreference,
+} from "./open-host.ts";
 import { findUpFile } from "./path.ts";
 
 export type ProjectDirName =
@@ -177,6 +182,7 @@ export interface ProjectConfig {
   };
   readonly logs?: ProjectLogsConfig;
   readonly oauth?: ProjectOauthConfig;
+  readonly open?: ProjectOpenConfig;
   readonly internal?: ProjectInternalConfig;
   readonly worktree?: ProjectWorktreeConfig;
   readonly sessions?: ProjectSessionsConfig;
@@ -184,6 +190,11 @@ export interface ProjectConfig {
   readonly ownership: ProjectOwnershipConfig;
   readonly configPath?: string;
   readonly parseError?: string;
+}
+
+export interface ProjectOpenConfig {
+  /** Browser host preference for `hack open` and `hack branch open`. */
+  readonly prefer?: OpenHostPreference;
 }
 
 export type ProjectOwnershipMode = "local" | "shared";
@@ -351,6 +362,22 @@ export function resolveProjectOauthTld(
   return tld && tld.length > 0 ? tld : DEFAULT_OAUTH_ALIAS_TLD;
 }
 
+/**
+ * Returns the OAuth alias only when Hack's generated Caddy routes can serve it.
+ * Custom development hosts outside the managed `.hack` namespace retain their
+ * primary host unless the project declares and routes an alias itself.
+ */
+export function resolveProjectOauthAliasHost(opts: {
+  readonly devHost: string;
+  readonly oauth: ProjectOauthConfig | undefined;
+}): string | null {
+  const tld = resolveProjectOauthTld(opts.oauth);
+  if (!(tld && opts.devHost.endsWith(`.${DEFAULT_PROJECT_TLD}`))) {
+    return null;
+  }
+  return `${opts.devHost}.${tld}`;
+}
+
 export async function readProjectConfig(
   ctx: ProjectContext
 ): Promise<ProjectConfig> {
@@ -428,6 +455,7 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     (envConfig ? getString(envConfig, "default_overlay") : undefined);
   const logs = parseLogsConfig(getRecord(value, "logs"));
   const oauth = parseOauthConfig(getRecord(value, "oauth"));
+  const parsedOpen = parseOpenConfig(getRecord(value, "open"));
   const internal = parseInternalConfig(getRecord(value, "internal"));
   const worktree = parseWorktreeConfig(getRecord(value, "worktree"));
   const sessions = parseSessionsConfig(getRecord(value, "sessions"));
@@ -458,6 +486,7 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
         ]
       : []),
     ...(parsedOwnership.parseError ? [parsedOwnership.parseError] : []),
+    ...(parsedOpen.parseError ? [parsedOpen.parseError] : []),
   ];
 
   return {
@@ -469,6 +498,7 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
       : {}),
     ...(logs ? { logs } : {}),
     ...(oauth ? { oauth } : {}),
+    ...(parsedOpen.config ? { open: parsedOpen.config } : {}),
     ...(internal ? { internal } : {}),
     ...(worktree ? { worktree } : {}),
     ...(sessions ? { sessions } : {}),
@@ -477,6 +507,22 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     ...(parseErrors.length > 0 ? { parseError: parseErrors.join(" ") } : {}),
     configPath: path,
   };
+}
+
+function parseOpenConfig(value: Record<string, unknown> | undefined): {
+  readonly config?: ProjectOpenConfig;
+  readonly parseError?: string;
+} {
+  if (!value || value.prefer === undefined) {
+    return {};
+  }
+  const prefer = parseOpenHostPreference(value.prefer);
+  if (!prefer) {
+    return {
+      parseError: "Project open.prefer must be 'auto', 'alias', or 'dev'.",
+    };
+  }
+  return { config: { prefer } };
 }
 
 export function defaultProjectOwnership(): ProjectOwnershipConfig {

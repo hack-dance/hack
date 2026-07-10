@@ -13,7 +13,8 @@ Notes:
 - `hack init` writes `.hack/` files (Compose + config).
 - `hack init` also scaffolds `.hack/hack.env.default.yaml`. See `docs/env.md`.
 - `hack up` starts the stack on an isolated network.
-- `hack open` resolves the routed URL via the global proxy.
+- `hack open` resolves the routed URL via the global proxy and prefers the OAuth alias when
+  `oauth.enabled` is true. Set `open.prefer` or pass `--prefer auto|alias|dev` to override.
 
 Optional:
 - `hack logs --pretty` for log tailing.

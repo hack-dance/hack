@@ -80,6 +80,20 @@ Agent-assisted alternative for a new repo: `hack init --with claude|codex|both`.
 project without `.hack/`, use `hack agent onboard`. See
 [Agent-first setup](guides/agent-first-setup.md).
 
+### Browser URL preference
+
+`hack open` keeps `dev_host` as the primary routing identity, but automatically opens the OAuth
+alias (for example, `myapp.hack.gy`) when `oauth.enabled` is true. Service shorthand and branch
+instances follow the same preference, so `hack open api --branch feature-x` resolves the
+branch-qualified alias URL.
+
+Set `open.prefer` in `.hack/hack.config.json` to `auto` (the default), `alias`, or `dev`. Override
+one invocation with `hack open --prefer <auto|alias|dev>`. Explicit URLs and fully qualified host
+targets are preserved. Selecting `alias` without an enabled OAuth alias fails with recovery
+guidance instead of silently opening the dev host. For a custom `dev_host` outside Hack's managed
+`.hack` namespace, `auto` keeps the development host because Hack does not synthesize a Caddy alias
+route for it.
+
 ## Running things (decision guide)
 
 - One-off command in a fresh service container (deps started as needed): `hack run <service> <cmd...>`.
@@ -87,8 +101,8 @@ project without `.hack/`, use `hack agent onboard`. See
 - Host script that needs hack-stored env: `hack host exec --env <overlay> --scope <service> -- <cmd...>`
   — this is the way to run repo scripts; never read `.env` files directly.
 - Interactive host shell with injected env: `hack host shell --env <overlay> --scope <service>`.
-- Call a service over HTTP (from the host or between containers): use its Caddy hostname
-  `https://<sub>.<dev_host>`; discover routable URLs with `hack open --json`.
+- Browser/host URL: use `hack open <service> --json`; OAuth aliases are preferred when enabled.
+- Container-to-container traffic: use Compose DNS rather than routing back through Caddy.
 
 Service-scoped runtime changes do not run project-wide lifecycle hooks and do not start Compose
 dependencies implicitly:
@@ -169,7 +183,7 @@ browser-facing URLs isolated when the same project runs in multiple worktrees.
 | `HACK_BRANCH` | Effective branch slug, or an empty string for the base instance |
 | `HACK_COMPOSE_PROJECT` | Effective Compose project name |
 | `HACK_DEV_HOST` / `HACK_DEV_URL` | Effective root development host and HTTPS URL |
-| `HACK_ALIAS_HOST` / `HACK_ALIAS_URL` | Effective OAuth alias host and URL, when enabled |
+| `HACK_ALIAS_HOST` / `HACK_ALIAS_URL` | Effective OAuth alias host and URL, when enabled and routed by Hack |
 | `HACK_SERVICE_NAME` | Current Compose service name |
 | `HACK_SERVICE_URL` | Current service's first public URL, when routable |
 | `HACK_SERVICE_URLS` | JSON array of every public URL for the current service |
@@ -204,6 +218,11 @@ over generated metadata for backward compatibility. Existing containers receive 
 their next `hack up` or `hack restart`; `hack exec` observes the values already stored in the running
 container.
 
+Hack materializes this contract in generated, machine-local Compose overrides. Do not edit or
+commit `.hack/.internal/compose.runtime.override.yml` or
+`.hack/.branch/compose.<branch>.runtime.override.yml`; runtime commands refresh them and Hack's
+managed `.hack/.gitignore` covers them.
+
 Linked worktrees also inherit the project secret key automatically from the primary checkout
 through the shared git common dir, so you don't need to copy `.hack.secret.key` by hand. Set
 `HACK_ENV_SECRET_KEY` for CI or fully detached environments. `hack doctor` flags divergent secret
@@ -234,7 +253,9 @@ Hack owns a committed `.hack/.gitignore` (self-healing on `init`/`up`) that igno
 generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`,
 `tickets/`). Keep
 it committed. If generated files ever leak into git, `hack doctor --fix` untracks them (the files
-stay on disk). See [Architecture](architecture.md) for the full file map.
+stay on disk). Runtime metadata is written to `.internal/compose.runtime.override.yml` for the base
+instance and `.branch/compose.<branch>.runtime.override.yml` for branch instances. See
+[Architecture](architecture.md) for the full file map.
 
 The global config root defaults to `~/.hack`; override it with `HACK_HOME`.
 

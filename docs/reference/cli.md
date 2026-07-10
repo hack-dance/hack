@@ -327,7 +327,7 @@ hack logs [service] [options]
 
 ## `hack open [target]`
 
-Open a URL for the project (default: https://<project>.hack)
+Open a project URL (OAuth alias by default when enabled; otherwise dev host)
 
 ### Usage
 
@@ -348,6 +348,7 @@ hack open [target] [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--prefer <auto|alias|dev>` | Browser host preference (auto uses the OAuth alias when enabled) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -476,6 +477,7 @@ hack branch open <name> [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--prefer <auto|alias|dev>` | Browser host preference (auto uses the OAuth alias when enabled) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

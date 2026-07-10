@@ -359,6 +359,9 @@ export function renderProjectConfigJson(opts: {
       enabled: oauthEnabled,
       ...(oauthTld ? { tld: oauthTld } : {}),
     },
+    open: {
+      prefer: "auto",
+    },
   };
 
   return `${JSON.stringify(config, null, 2)}\n`;
@@ -413,6 +416,13 @@ export function renderProjectConfigSchemaJson(): string {
         properties: {
           enabled: { type: "boolean" },
           tld: { type: "string" },
+        },
+      },
+      open: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          prefer: { type: "string", enum: ["auto", "alias", "dev"] },
         },
       },
       worktree: {

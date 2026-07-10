@@ -61,6 +61,7 @@ export async function createMonorepoFixture(opts: {
   readonly withHackConfig: boolean;
   readonly name?: string;
   readonly lifecycle?: LifecycleFixtureOptions;
+  readonly oauthEnabled?: boolean;
 }): Promise<MonorepoFixture> {
   const name = opts.name ?? randomProjectName();
   const devHost = `${name}.hack`;
@@ -88,6 +89,7 @@ export async function createMonorepoFixture(opts: {
       name,
       devHost,
       lifecycle: opts.lifecycle,
+      oauthEnabled: opts.oauthEnabled,
     });
   }
 
@@ -294,6 +296,7 @@ async function writeHackConfig(opts: {
   readonly name: string;
   readonly devHost: string;
   readonly lifecycle?: LifecycleFixtureOptions;
+  readonly oauthEnabled?: boolean;
 }): Promise<void> {
   await mkdir(opts.hackDir, { recursive: true });
 
@@ -312,8 +315,11 @@ async function writeHackConfig(opts: {
       tls: opts.lifecycle?.disableInternal !== true,
     },
     oauth: {
-      enabled: false,
+      enabled: opts.oauthEnabled === true,
       tld: "gy",
+    },
+    open: {
+      prefer: "auto",
     },
     ...(lifecycle ? { lifecycle } : {}),
   };

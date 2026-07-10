@@ -185,6 +185,16 @@ test("up rejects an exited service referenced only by an inactive profile", asyn
   );
 });
 
+test("up accepts completion gates from wildcard-enabled profiles", async () => {
+  const projectRoot = await createProject();
+  psRows.push(JSON.stringify({ Service: "api", State: "exited", ExitCode: 0 }));
+
+  const exitCode = await runDetachedUp({ projectRoot, profiles: ["*"] });
+
+  expect(exitCode).toBe(0);
+  expect(errorMessages).toEqual([]);
+});
+
 test("registry credentials must exist in the bootstrap service scope", async () => {
   const projectRoot = await createProject({ registryTokenScope: "api" });
 
@@ -274,7 +284,9 @@ test("up warns before an auto-derived branch retargets the same worktree", async
 
 async function runDetachedUp(opts: {
   readonly projectRoot: string;
+  readonly profiles?: readonly string[];
 }): Promise<number> {
+  const profile = opts.profiles?.join(",");
   const input = {
     ctx: { cwd: opts.projectRoot, cli: CLI_SPEC },
     args: {
@@ -284,13 +296,20 @@ async function runDetachedUp(opts: {
         env: "base",
         branch: undefined,
         detach: true,
-        profile: undefined,
+        profile,
         target: undefined,
         json: false,
       },
       positionals: {},
       raw: {
-        argv: ["--path", opts.projectRoot, "--env", "base", "--detach"],
+        argv: [
+          "--path",
+          opts.projectRoot,
+          "--env",
+          "base",
+          "--detach",
+          ...(profile ? ["--profile", profile] : []),
+        ],
         positionals: [],
       },
     },

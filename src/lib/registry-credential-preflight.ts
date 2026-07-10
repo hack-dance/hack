@@ -147,6 +147,7 @@ export async function discoverSuccessfulCompletionServices(opts: {
       )
       .map(([service]) => service);
     const activeProfiles = new Set(opts.activeProfiles ?? []);
+    const allProfilesActive = activeProfiles.has("*");
     const selectedServices = opts.selectedServices
       ? new Set(opts.selectedServices)
       : null;
@@ -161,6 +162,7 @@ export async function discoverSuccessfulCompletionServices(opts: {
           }
         } else if (
           Array.isArray(value.profiles) &&
+          !allProfilesActive &&
           !value.profiles.some(
             (profile) =>
               typeof profile === "string" && activeProfiles.has(profile)

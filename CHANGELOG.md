@@ -1,3 +1,8 @@
+## 3.5.0 (2026-07-10)
+
+* feat(cli): improve diagnostic output (#69) ([db47c68](https://github.com/hack-dance/hack/commit/db47c68)), closes [#69](https://github.com/hack-dance/hack/issues/69)
+* feat(open): prefer OAuth alias URLs ([0320eca](https://github.com/hack-dance/hack/commit/0320eca))
+
 ## <small>3.4.1 (2026-07-10)</small>
 
 * fix(daemon): prefer active CLI for launchd (#67) ([e3be66e](https://github.com/hack-dance/hack/commit/e3be66e)), closes [#67](https://github.com/hack-dance/hack/issues/67)

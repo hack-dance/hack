@@ -1,3 +1,7 @@
+## <small>3.3.7 (2026-07-10)</small>
+
+* fix(runtime): recognize Compose completion gates (#65) ([e85e223](https://github.com/hack-dance/hack/commit/e85e223)), closes [#65](https://github.com/hack-dance/hack/issues/65)
+
 ## <small>3.3.6 (2026-07-10)</small>
 
 * fix: harden runtime integrity and diagnostics ([498e9c3](https://github.com/hack-dance/hack/commit/498e9c3))

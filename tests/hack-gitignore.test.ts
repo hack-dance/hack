@@ -181,6 +181,7 @@ test("nested .hack/.gitignore makes git ignore generated files, including in lin
   for (const path of [
     ".hack/.internal/compose.override.yml",
     ".hack/.branch/compose.x.override.yml",
+    ".hack/.branch/compose.0b88.override.yml",
     ".hack/.env",
     ".hack/.env.state.json",
     ".hack/hack.env.local.yaml",
@@ -199,6 +200,7 @@ test("nested .hack/.gitignore makes git ignore generated files, including in lin
   for (const path of [
     ".hack/.internal/compose.override.yml",
     ".hack/.branch/compose.x.override.yml",
+    ".hack/.branch/compose.0b88.override.yml",
     ".hack/.env.state.json",
     ".hack/hack.env.qa.local.yaml",
     ".hack/tickets/git/bare.git",

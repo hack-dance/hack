@@ -2902,6 +2902,7 @@ async function resolveBranchComposeFiles(opts: {
     return [opts.project.composeFile];
   }
 
+  await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
   const overrideDir = resolve(opts.project.projectDir, ".branch");
   await ensureDir(overrideDir);
   const overridePath = resolve(

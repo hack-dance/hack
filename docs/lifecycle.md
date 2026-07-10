@@ -220,6 +220,9 @@ its isolated derived branch instance, and `--branch <name>` targets only that ex
 `E_COMPOSE_FAILED`. If Compose exits successfully but one or more containers remain `created`, exit
 non-zero, or enter another failed runtime state, Hack returns `E_STARTUP_INCOMPLETE`. Successful
 one-shot services (`exited` with code 0) are reported under `services.completed` and do not fail startup.
+Hack recognizes dependency installers, services labeled `hack.service.one-shot=true`, and services
+referenced by another service with Compose `condition: service_completed_successfully`. An unrelated
+service that merely exits zero is still treated as incomplete startup.
 Lifecycle failures are one of the primary consumers of the `--json` error envelope,
 since hook and process startup are common failure points around `hack up`.
 

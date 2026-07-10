@@ -121,6 +121,8 @@ export async function discoverDependencyBootstrapServices(opts: {
 /** Services that may legitimately exit zero after startup instead of staying running. */
 export async function discoverSuccessfulCompletionServices(opts: {
   readonly composeFile: string;
+  readonly activeProfiles?: readonly string[];
+  readonly selectedServices?: readonly string[];
 }): Promise<readonly string[]> {
   const bootstrapServices = await discoverDependencyBootstrapServices(opts);
   const text = await readTextFile(opts.composeFile);
@@ -144,9 +146,41 @@ export async function discoverSuccessfulCompletionServices(opts: {
           })
       )
       .map(([service]) => service);
-    return [...new Set([...bootstrapServices, ...explicitOneShots])].sort(
-      (left, right) => left.localeCompare(right)
+    const activeProfiles = new Set(opts.activeProfiles ?? []);
+    const allProfilesActive = activeProfiles.has("*");
+    const selectedServices = opts.selectedServices
+      ? new Set(opts.selectedServices)
+      : null;
+    const completionDependencies = Object.entries(services).flatMap(
+      ([service, value]) => {
+        if (!(isRecord(value) && isRecord(value.depends_on))) {
+          return [];
+        }
+        const dependentIsActive = selectedServices
+          ? selectedServices.has(service)
+          : !Array.isArray(value.profiles) ||
+            allProfilesActive ||
+            value.profiles.some(
+              (profile) =>
+                typeof profile === "string" && activeProfiles.has(profile)
+            );
+        return Object.entries(value.depends_on)
+          .filter(
+            ([dependencyService, dependency]) =>
+              isRecord(dependency) &&
+              dependency.condition === "service_completed_successfully" &&
+              (dependentIsActive || selectedServices?.has(dependencyService))
+          )
+          .map(([service]) => service);
+      }
     );
+    return [
+      ...new Set([
+        ...bootstrapServices,
+        ...explicitOneShots,
+        ...completionDependencies,
+      ]),
+    ].sort((left, right) => left.localeCompare(right));
   } catch {
     return bootstrapServices;
   }

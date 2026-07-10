@@ -14,9 +14,11 @@ const psRows: string[] = [];
 const errorMessages: string[] = [];
 const warnMessages: string[] = [];
 const upEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
+const psEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
 const upServiceSelections: Array<readonly string[] | undefined> = [];
 const tempDirs = new Set<string>();
 const originalHackHome = process.env.HACK_HOME;
+const originalComposeProfiles = process.env.COMPOSE_PROFILES;
 let autoBranch: string | null = null;
 let runtimeProjects: readonly Record<string, unknown>[] = [];
 
@@ -59,11 +61,16 @@ const runtimeBackendMock = await registerScopedModuleMock({
         return 0;
       },
       down: async () => 0,
-      psJson: async () => ({
-        exitCode: 0,
-        stdout: psRows.join("\n"),
-        stderr: "",
-      }),
+      psJson: async (opts: {
+        readonly env?: Readonly<Record<string, string>>;
+      }) => {
+        psEnvs.push(opts.env);
+        return {
+          exitCode: 0,
+          stdout: psRows.join("\n"),
+          stderr: "",
+        };
+      },
       ps: async () => 0,
       run: async () => 0,
       exec: async () => 0,
@@ -116,6 +123,7 @@ afterEach(async () => {
   errorMessages.length = 0;
   warnMessages.length = 0;
   upEnvs.length = 0;
+  psEnvs.length = 0;
   upServiceSelections.length = 0;
   autoBranch = null;
   runtimeProjects = [];
@@ -124,6 +132,11 @@ afterEach(async () => {
   }
   tempDirs.clear();
   process.env.HACK_HOME = originalHackHome;
+  if (originalComposeProfiles === undefined) {
+    Reflect.deleteProperty(process.env, "COMPOSE_PROFILES");
+  } else {
+    process.env.COMPOSE_PROFILES = originalComposeProfiles;
+  }
 });
 
 afterAll(() => {
@@ -159,7 +172,7 @@ test("up returns failure when compose reports no services after exit zero", asyn
   );
 });
 
-test("up accepts running and successfully completed one-shot services", async () => {
+test("up accepts running services and successful Compose completion gates", async () => {
   const projectRoot = await createProject();
   psRows.push(
     JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
@@ -171,6 +184,99 @@ test("up accepts running and successfully completed one-shot services", async ()
   expect(exitCode).toBe(0);
   expect(errorMessages).toEqual([]);
   expect(upServiceSelections).toEqual([undefined]);
+});
+
+test("up rejects an exited service referenced only by an inactive profile", async () => {
+  const projectRoot = await createProject();
+  psRows.push(JSON.stringify({ Service: "api", State: "exited", ExitCode: 0 }));
+
+  const exitCode = await runDetachedUp({ projectRoot });
+
+  expect(exitCode).toBe(1);
+  expect(errorMessages).toContain(
+    "Startup incomplete for startup-state-test: api did not reach running or successful completion"
+  );
+});
+
+test("up accepts completion gates from wildcard-enabled profiles", async () => {
+  const projectRoot = await createProject();
+  psRows.push(JSON.stringify({ Service: "api", State: "exited", ExitCode: 0 }));
+
+  const exitCode = await runDetachedUp({ projectRoot, profiles: ["*"] });
+
+  expect(exitCode).toBe(0);
+  expect(errorMessages).toEqual([]);
+});
+
+test("up accepts profiles delivered through COMPOSE_PROFILES", async () => {
+  process.env.COMPOSE_PROFILES = "other";
+  const projectRoot = await createProject({
+    composeProfiles: "benchmark,diagnostics",
+  });
+  psRows.push(JSON.stringify({ Service: "api", State: "exited", ExitCode: 0 }));
+
+  const exitCode = await runDetachedUp({ projectRoot });
+
+  expect(exitCode).toBe(0);
+  expect(errorMessages).toEqual([]);
+  expect(upEnvs).toEqual([
+    { COMPOSE_PROFILES: "benchmark,diagnostics", SHARED_MODE: "compose" },
+  ]);
+  expect(psEnvs).toEqual(upEnvs);
+});
+
+test("up accepts wildcard COMPOSE_PROFILES", async () => {
+  const projectRoot = await createProject({ composeProfiles: "*" });
+  psRows.push(JSON.stringify({ Service: "api", State: "exited", ExitCode: 0 }));
+
+  const exitCode = await runDetachedUp({ projectRoot });
+
+  expect(exitCode).toBe(0);
+  expect(errorMessages).toEqual([]);
+});
+
+test("up gives CLI profiles precedence over COMPOSE_PROFILES", async () => {
+  const projectRoot = await createProject({ composeProfiles: "benchmark" });
+  psRows.push(JSON.stringify({ Service: "api", State: "exited", ExitCode: 0 }));
+
+  const exitCode = await runDetachedUp({
+    projectRoot,
+    profiles: ["diagnostics"],
+  });
+
+  expect(exitCode).toBe(1);
+  expect(errorMessages).toContain(
+    "Startup incomplete for startup-state-test: api did not reach running or successful completion"
+  );
+});
+
+test("up combines multiple CLI profiles", async () => {
+  const projectRoot = await createProject({ composeProfiles: "diagnostics" });
+  psRows.push(JSON.stringify({ Service: "api", State: "exited", ExitCode: 0 }));
+
+  const exitCode = await runDetachedUp({
+    projectRoot,
+    profiles: ["diagnostics", "benchmark"],
+  });
+
+  expect(exitCode).toBe(0);
+  expect(errorMessages).toEqual([]);
+});
+
+test("up accepts a directly targeted completion dependency", async () => {
+  const projectRoot = await createProject();
+  psRows.push(
+    JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+  );
+
+  const exitCode = await runDetachedUp({
+    projectRoot,
+    services: ["migrate"],
+  });
+
+  expect(exitCode).toBe(0);
+  expect(errorMessages).toEqual([]);
+  expect(upServiceSelections).toEqual([["migrate"]]);
 });
 
 test("registry credentials must exist in the bootstrap service scope", async () => {
@@ -194,6 +300,36 @@ test("restart returns failure when compose reports a created service after exit 
   expect(errorMessages).toContain(
     "Startup incomplete for startup-state-test: api did not reach running or successful completion"
   );
+});
+
+test("restart accepts completion gates from inherited COMPOSE_PROFILES", async () => {
+  process.env.COMPOSE_PROFILES = "benchmark";
+  const projectRoot = await createProject();
+  psRows.push(JSON.stringify({ Service: "api", State: "exited", ExitCode: 0 }));
+
+  const exitCode = await runRestart({ projectRoot });
+
+  expect(exitCode).toBe(0);
+  expect(errorMessages).toEqual([]);
+});
+
+test("targeted restart preserves delivered Compose environment", async () => {
+  const projectRoot = await createProject({ composeProfiles: "benchmark" });
+  psRows.push(
+    JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+  );
+
+  const exitCode = await runRestart({
+    projectRoot,
+    services: ["migrate"],
+  });
+
+  expect(exitCode).toBe(0);
+  expect(errorMessages).toEqual([]);
+  expect(upServiceSelections).toEqual([["migrate"]]);
+  expect(psEnvs).toEqual([
+    { COMPOSE_PROFILES: "benchmark", SHARED_MODE: "compose" },
+  ]);
 });
 
 test("up --json emits E_STARTUP_INCOMPLETE for a created service", async () => {
@@ -262,7 +398,10 @@ test("up warns before an auto-derived branch retargets the same worktree", async
 
 async function runDetachedUp(opts: {
   readonly projectRoot: string;
+  readonly profiles?: readonly string[];
+  readonly services?: readonly string[];
 }): Promise<number> {
+  const profile = opts.profiles?.join(",");
   const input = {
     ctx: { cwd: opts.projectRoot, cli: CLI_SPEC },
     args: {
@@ -272,14 +411,22 @@ async function runDetachedUp(opts: {
         env: "base",
         branch: undefined,
         detach: true,
-        profile: undefined,
+        profile,
         target: undefined,
         json: false,
       },
-      positionals: {},
+      positionals: { services: opts.services ?? [] },
       raw: {
-        argv: ["--path", opts.projectRoot, "--env", "base", "--detach"],
-        positionals: [],
+        argv: [
+          "--path",
+          opts.projectRoot,
+          "--env",
+          "base",
+          "--detach",
+          ...(profile ? ["--profile", profile] : []),
+          ...(opts.services ?? []),
+        ],
+        positionals: opts.services ?? [],
       },
     },
   } as unknown as Parameters<typeof upCommand.handler>[0];
@@ -289,7 +436,10 @@ async function runDetachedUp(opts: {
 
 async function runRestart(opts: {
   readonly projectRoot: string;
+  readonly profiles?: readonly string[];
+  readonly services?: readonly string[];
 }): Promise<number> {
+  const profile = opts.profiles?.join(",");
   const input = {
     ctx: { cwd: opts.projectRoot, cli: CLI_SPEC },
     args: {
@@ -298,14 +448,21 @@ async function runRestart(opts: {
         project: undefined,
         env: "base",
         branch: undefined,
-        profile: undefined,
+        profile,
         target: undefined,
         json: false,
       },
-      positionals: {},
+      positionals: { services: opts.services ?? [] },
       raw: {
-        argv: ["--path", opts.projectRoot, "--env", "base"],
-        positionals: [],
+        argv: [
+          "--path",
+          opts.projectRoot,
+          "--env",
+          "base",
+          ...(profile ? ["--profile", profile] : []),
+          ...(opts.services ?? []),
+        ],
+        positionals: opts.services ?? [],
       },
     },
   } as unknown as Parameters<typeof restartCommand.handler>[0];
@@ -353,6 +510,7 @@ async function runJsonUp(opts: {
 }
 
 async function createProject(opts?: {
+  readonly composeProfiles?: string;
   readonly lifecycleMarkerFile?: string;
   readonly registryTokenScope?: "api" | "deps";
 }): Promise<string> {
@@ -370,10 +528,17 @@ async function createProject(opts?: {
       "services:",
       "  api:",
       "    image: alpine:3.20",
+      "    depends_on:",
+      "      migrate:",
+      "        condition: service_completed_successfully",
       "  migrate:",
       "    image: alpine:3.20",
-      "    labels:",
-      '      hack.service.one-shot: "true"',
+      "  profiled-worker:",
+      "    image: alpine:3.20",
+      "    profiles: [benchmark]",
+      "    depends_on:",
+      "      api:",
+      "        condition: service_completed_successfully",
       ...(opts?.registryTokenScope
         ? [
             "  deps:",
@@ -421,6 +586,9 @@ async function createProject(opts?: {
       "values:",
       "  global:",
       '    SHARED_MODE: "compose"',
+      ...(opts?.composeProfiles !== undefined
+        ? [`    COMPOSE_PROFILES: ${JSON.stringify(opts.composeProfiles)}`]
+        : []),
       "  host:",
       '    SHARED_MODE: "host"',
       '    HOST_ONLY: "host-only"',

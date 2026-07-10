@@ -66,7 +66,7 @@ test("dependency bootstrap detection is name agnostic", async () => {
   ]);
 });
 
-test("successful completion requires installer semantics or an explicit one-shot label", async () => {
+test("successful completion recognizes installers, labels, and Compose completion gates", async () => {
   const projectRoot = await createTempProject();
   const composeFile = resolve(projectRoot, "compose.yml");
   await writeFile(
@@ -80,14 +80,47 @@ test("successful completion requires installer semantics or an explicit one-shot
       "    image: app",
       "    labels:",
       '      hack.service.one-shot: "true"',
+      "  database-init:",
+      "    image: app",
       "  api:",
       "    image: app",
+      "    depends_on:",
+      "      database-init:",
+      "        condition: service_completed_successfully",
+      "  exited-api:",
+      "    image: app",
+      "  profiled-worker:",
+      "    image: app",
+      "    profiles: [benchmark]",
+      "    depends_on:",
+      "      exited-api:",
+      "        condition: service_completed_successfully",
       "",
     ].join("\n")
   );
 
   expect(await discoverSuccessfulCompletionServices({ composeFile })).toEqual([
+    "database-init",
     "installer",
     "migrate",
   ]);
+  expect(
+    await discoverSuccessfulCompletionServices({
+      composeFile,
+      activeProfiles: ["benchmark"],
+    })
+  ).toEqual(["database-init", "exited-api", "installer", "migrate"]);
+  expect(
+    await discoverSuccessfulCompletionServices({
+      composeFile,
+      activeProfiles: ["benchmark"],
+      selectedServices: ["api"],
+    })
+  ).toEqual(["database-init", "installer", "migrate"]);
+  expect(
+    await discoverSuccessfulCompletionServices({
+      composeFile,
+      selectedServices: ["database-init"],
+    })
+  ).toEqual(["database-init", "installer", "migrate"]);
 });

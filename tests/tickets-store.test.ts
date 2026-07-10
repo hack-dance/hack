@@ -1404,6 +1404,8 @@ async function runAllowFail(opts: {
     env: {
       ...process.env,
       HOME: process.env.HOME ?? homedir(),
+      HACK_SETUP_SYNC_MODE: "off",
+      NO_COLOR: "1",
     },
   });
 

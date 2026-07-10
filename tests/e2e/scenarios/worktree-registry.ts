@@ -41,7 +41,7 @@ export const worktreeRegistryScenario: Scenario = {
     });
 
     const fromPrimary = await ctx.cli({
-      args: ["config", "get", "name"],
+      args: ["projects", "--json"],
       cwd: fixture.root,
     });
     expectExit({
@@ -55,7 +55,7 @@ export const worktreeRegistryScenario: Scenario = {
       branch: "e2e-registry",
     });
     const fromWorktree = await ctx.cli({
-      args: ["config", "get", "name"],
+      args: ["projects", "--json"],
       cwd: worktreePath,
     });
     expectExit({
@@ -110,7 +110,8 @@ export const worktreeRegistryScenario: Scenario = {
     const realWorktreePath = await realpath(worktreePath);
     const worktrees = entries[0]?.worktrees ?? null;
     expect({
-      that: worktrees?.some((entry) => entry.path === realWorktreePath) === true,
+      that:
+        worktrees?.some((entry) => entry.path === realWorktreePath) === true,
       message:
         "worktree checkout should be recorded on the registration (worktrees array)",
       result: projects,

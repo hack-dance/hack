@@ -266,8 +266,9 @@ export const agentDocsSyncScenario: Scenario = {
     });
     expect({
       that:
-        autoRepair.stderr.includes("Detected stale Hack agent integrations") &&
-        autoRepair.stderr.includes("Reload the agent session"),
+        autoRepair.combined.includes(
+          "Detected stale Hack agent integrations"
+        ) && autoRepair.combined.includes("Reload the agent session"),
       message:
         "auto-repair must announce stale guidance and reload requirement",
       result: autoRepair,

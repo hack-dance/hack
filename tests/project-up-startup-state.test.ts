@@ -66,6 +66,15 @@ const runtimeBackendMock = await registerScopedModuleMock({
   },
 });
 
+const shellMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/shell.ts",
+  overrides: {
+    findExecutableInPath: (executableName: string) =>
+      executableName === "docker" ? "/usr/bin/docker" : null,
+  },
+});
+
 const loggerMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "../src/ui/logger.ts",
@@ -93,6 +102,7 @@ beforeAll(() => {
   branchesMock.activate();
   runtimeBackendMock.activate();
   runtimeProjectsMock.activate();
+  shellMock.activate();
   loggerMock.activate();
 });
 
@@ -114,6 +124,7 @@ afterAll(() => {
   branchesMock.deactivate();
   runtimeBackendMock.deactivate();
   runtimeProjectsMock.deactivate();
+  shellMock.deactivate();
   loggerMock.deactivate();
 });
 

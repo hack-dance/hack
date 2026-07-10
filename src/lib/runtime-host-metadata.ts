@@ -68,8 +68,6 @@ export function buildRuntimeHostMetadataOverride(opts: {
   for (const [serviceName, service] of effectiveServices) {
     const urls = resolveServiceUrls({
       caddy: service.caddy,
-      branch: opts.branch,
-      baseHosts,
     });
     if (urls.length > 0) {
       publicServices[serviceName] = { urls };
@@ -191,8 +189,6 @@ function applyBranchIfNeeded(opts: {
 
 function resolveServiceUrls(opts: {
   readonly caddy: string | null;
-  readonly branch: string | null;
-  readonly baseHosts: readonly string[];
 }): readonly string[] {
   if (!opts.caddy) {
     return [];
@@ -201,12 +197,7 @@ function resolveServiceUrls(opts: {
   const urls: string[] = [];
   const seen = new Set<string>();
   for (const host of extractCaddyHosts({ value: opts.caddy })) {
-    const effectiveHost = applyBranchIfNeeded({
-      host,
-      branch: opts.branch,
-      baseHosts: opts.baseHosts,
-    });
-    const url = `https://${effectiveHost}`;
+    const url = `https://${host}`;
     if (!seen.has(url)) {
       seen.add(url);
       urls.push(url);

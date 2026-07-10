@@ -8,7 +8,7 @@ import {
 
 const BASE_HOSTS = ["demo.hack", "demo.hack.gy"];
 
-test("branch host rewriting handles root, service, alias, and foreign hosts", () => {
+test("branch host rewriting handles root, matching service, alias, and foreign hosts", () => {
   expect(
     applyBranchToHost({
       host: "demo.hack",
@@ -25,11 +25,11 @@ test("branch host rewriting handles root, service, alias, and foreign hosts", ()
   ).toBe("api.feature-x.demo.hack.gy");
   expect(
     applyBranchToHost({
-      host: "api.feature-x.demo.hack",
-      branch: "feature-x",
+      host: "api.demo.hack",
+      branch: "api",
       baseHosts: BASE_HOSTS,
     })
-  ).toBe("api.feature-x.demo.hack");
+  ).toBe("api.api.demo.hack");
   expect(
     applyBranchToHost({
       host: "external.example.com",
@@ -42,7 +42,7 @@ test("branch host rewriting handles root, service, alias, and foreign hosts", ()
 test("branch host collections preserve order and remove duplicates", () => {
   expect(
     applyBranchToHosts({
-      hosts: ["demo.hack", "feature-x.demo.hack", "api.demo.hack"],
+      hosts: ["demo.hack", "demo.hack", "api.demo.hack"],
       branch: "feature-x",
       baseHosts: BASE_HOSTS,
     })
@@ -50,7 +50,7 @@ test("branch host collections preserve order and remove duplicates", () => {
 
   expect(
     rewriteCaddyLabelForBranch({
-      value: "demo.hack, feature-x.demo.hack, api.demo.hack",
+      value: "demo.hack, demo.hack, api.demo.hack",
       branch: "feature-x",
       baseHosts: BASE_HOSTS,
     })

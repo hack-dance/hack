@@ -30,6 +30,17 @@ const ROUTING_OVERRIDE = [
   "",
 ].join("\n");
 
+const BRANCH_ROUTING_OVERRIDE = [
+  "services:",
+  "  web:",
+  "    labels:",
+  '      caddy: "feature-x.demo.hack, feature-x.demo.hack.gy"',
+  "  api:",
+  "    labels:",
+  '      caddy: "api.feature-x.demo.hack, api.feature-x.demo.hack.gy"',
+  "",
+].join("\n");
+
 test("runtime metadata exposes the effective public service map to every service", () => {
   const override = buildRuntimeHostMetadataOverride({
     composeYamls: [BASE_COMPOSE, ROUTING_OVERRIDE],
@@ -68,9 +79,9 @@ test("runtime metadata exposes the effective public service map to every service
   expect(worker.HACK_SERVICE_URLS).toBe("[]");
 });
 
-test("runtime metadata rewrites every public URL for a branch instance", () => {
+test("runtime metadata uses every effective public URL for a branch instance", () => {
   const override = buildRuntimeHostMetadataOverride({
-    composeYamls: [BASE_COMPOSE, ROUTING_OVERRIDE],
+    composeYamls: [BASE_COMPOSE, BRANCH_ROUTING_OVERRIDE],
     branch: "feature-x",
     devHost: "demo.hack",
     aliasHost: "demo.hack.gy",

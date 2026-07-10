@@ -161,22 +161,30 @@ export async function installLaunchdService({
  * launchd should execute `hack` directly; writing `bun` here can break daemon
  * startup when Bun is unavailable in non-interactive PATH contexts.
  */
-async function resolveLaunchdHackBinPath(opts: {
+export async function resolveLaunchdHackBinPath(opts: {
   readonly invocation: {
     readonly bin: string;
     readonly args: readonly string[];
   };
+  readonly findExecutable?: typeof findExecutableInPath;
+  readonly exists?: typeof pathExists;
+  readonly globalHackBinPath?: string;
+  readonly argvPath?: string | null;
 }): Promise<string | null> {
-  // Stable locations first: versioned paths (homebrew Cellar) rot on
-  // upgrade, and argv paths inside a compiled Bun binary report the
-  // virtual /$bunfs mount, which only exists inside that process —
-  // launchd exec'ing it fails forever with status 78.
+  const findExecutable = opts.findExecutable ?? findExecutableInPath;
+  const exists = opts.exists ?? pathExists;
+
+  // Prefer the executable selected for this invocation. A valid
+  // ~/.hack/bin/hack may be an older local-development shim alongside a
+  // newer Homebrew install; choosing that fallback first makes every daemon
+  // restart downgrade hackd. Keep stable PATH/invocation locations ahead of
+  // the global fallback, while still rejecting compiled Bun virtual paths.
   const candidates = [
-    resolve(resolveGlobalHackDir(), "bin", "hack"),
-    await findExecutableInPath("hack"),
     opts.invocation.args[0] ?? null,
     opts.invocation.bin,
-    process.argv[1] ?? null,
+    await findExecutable("hack"),
+    opts.globalHackBinPath ?? resolve(resolveGlobalHackDir(), "bin", "hack"),
+    opts.argvPath === undefined ? (process.argv[1] ?? null) : opts.argvPath,
   ];
 
   for (const raw of candidates) {
@@ -184,7 +192,7 @@ async function resolveLaunchdHackBinPath(opts: {
     if (!path) {
       continue;
     }
-    if (await pathExists(path)) {
+    if (await exists(path)) {
       return path;
     }
   }

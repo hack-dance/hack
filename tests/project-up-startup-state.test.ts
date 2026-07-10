@@ -173,6 +173,18 @@ test("up accepts running services and successful Compose completion gates", asyn
   expect(upServiceSelections).toEqual([undefined]);
 });
 
+test("up rejects an exited service referenced only by an inactive profile", async () => {
+  const projectRoot = await createProject();
+  psRows.push(JSON.stringify({ Service: "api", State: "exited", ExitCode: 0 }));
+
+  const exitCode = await runDetachedUp({ projectRoot });
+
+  expect(exitCode).toBe(1);
+  expect(errorMessages).toContain(
+    "Startup incomplete for startup-state-test: api did not reach running or successful completion"
+  );
+});
+
 test("registry credentials must exist in the bootstrap service scope", async () => {
   const projectRoot = await createProject({ registryTokenScope: "api" });
 
@@ -375,6 +387,12 @@ async function createProject(opts?: {
       "        condition: service_completed_successfully",
       "  migrate:",
       "    image: alpine:3.20",
+      "  profiled-worker:",
+      "    image: alpine:3.20",
+      "    profiles: [benchmark]",
+      "    depends_on:",
+      "      api:",
+      "        condition: service_completed_successfully",
       ...(opts?.registryTokenScope
         ? [
             "  deps:",

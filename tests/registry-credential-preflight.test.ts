@@ -89,6 +89,12 @@ test("successful completion recognizes installers, labels, and Compose completio
       "        condition: service_completed_successfully",
       "  exited-api:",
       "    image: app",
+      "  profiled-worker:",
+      "    image: app",
+      "    profiles: [benchmark]",
+      "    depends_on:",
+      "      exited-api:",
+      "        condition: service_completed_successfully",
       "",
     ].join("\n")
   );
@@ -98,4 +104,17 @@ test("successful completion recognizes installers, labels, and Compose completio
     "installer",
     "migrate",
   ]);
+  expect(
+    await discoverSuccessfulCompletionServices({
+      composeFile,
+      activeProfiles: ["benchmark"],
+    })
+  ).toEqual(["database-init", "exited-api", "installer", "migrate"]);
+  expect(
+    await discoverSuccessfulCompletionServices({
+      composeFile,
+      activeProfiles: ["benchmark"],
+      selectedServices: ["api"],
+    })
+  ).toEqual(["database-init", "installer", "migrate"]);
 });

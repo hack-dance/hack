@@ -121,6 +121,8 @@ export async function discoverDependencyBootstrapServices(opts: {
 /** Services that may legitimately exit zero after startup instead of staying running. */
 export async function discoverSuccessfulCompletionServices(opts: {
   readonly composeFile: string;
+  readonly activeProfiles?: readonly string[];
+  readonly selectedServices?: readonly string[];
 }): Promise<readonly string[]> {
   const bootstrapServices = await discoverDependencyBootstrapServices(opts);
   const text = await readTextFile(opts.composeFile);
@@ -144,18 +146,37 @@ export async function discoverSuccessfulCompletionServices(opts: {
           })
       )
       .map(([service]) => service);
-    const completionDependencies = Object.values(services).flatMap((value) => {
-      if (!(isRecord(value) && isRecord(value.depends_on))) {
-        return [];
+    const activeProfiles = new Set(opts.activeProfiles ?? []);
+    const selectedServices = opts.selectedServices
+      ? new Set(opts.selectedServices)
+      : null;
+    const completionDependencies = Object.entries(services).flatMap(
+      ([service, value]) => {
+        if (!(isRecord(value) && isRecord(value.depends_on))) {
+          return [];
+        }
+        if (selectedServices) {
+          if (!selectedServices.has(service)) {
+            return [];
+          }
+        } else if (
+          Array.isArray(value.profiles) &&
+          !value.profiles.some(
+            (profile) =>
+              typeof profile === "string" && activeProfiles.has(profile)
+          )
+        ) {
+          return [];
+        }
+        return Object.entries(value.depends_on)
+          .filter(
+            ([, dependency]) =>
+              isRecord(dependency) &&
+              dependency.condition === "service_completed_successfully"
+          )
+          .map(([service]) => service);
       }
-      return Object.entries(value.depends_on)
-        .filter(
-          ([, dependency]) =>
-            isRecord(dependency) &&
-            dependency.condition === "service_completed_successfully"
-        )
-        .map(([service]) => service);
-    });
+    );
     return [
       ...new Set([
         ...bootstrapServices,

@@ -6118,6 +6118,8 @@ async function runUpCommand({
     const successfulCompletionServices = new Set(
       await discoverSuccessfulCompletionServices({
         composeFile: project.composeFile,
+        activeProfiles: profiles,
+        selectedServices: serviceScoped ? targetServices : undefined,
       })
     );
     const startup = classifyComposeStartupState(states, {
@@ -6790,6 +6792,8 @@ async function runTargetedServiceRestart(opts: {
   const successfulCompletionServices = new Set(
     await discoverSuccessfulCompletionServices({
       composeFile: opts.project.composeFile,
+      activeProfiles: opts.profiles,
+      selectedServices: opts.services,
     })
   );
   const startup = classifyComposeStartupState(states, {
@@ -7053,6 +7057,7 @@ async function runRestartCommand({
   const successfulCompletionServices = new Set(
     await discoverSuccessfulCompletionServices({
       composeFile: project.composeFile,
+      activeProfiles: profiles,
     })
   );
   const startup = classifyComposeStartupState(states, {

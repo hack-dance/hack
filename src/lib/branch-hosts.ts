@@ -91,5 +91,8 @@ function rewriteHostForBranch(opts: {
   }
 
   const prefix = opts.host.slice(0, opts.host.length - suffix.length);
+  if (prefix.endsWith(`.${opts.branch}`)) {
+    return { host: opts.host, changed: false };
+  }
   return { host: `${prefix}.${opts.branch}.${opts.baseHost}`, changed: true };
 }

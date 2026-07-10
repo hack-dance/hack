@@ -32,6 +32,13 @@ test("branch host rewriting handles root, matching service, alias, and foreign h
   ).toBe("api.api.demo.hack");
   expect(
     applyBranchToHost({
+      host: "api.feature-x.demo.hack",
+      branch: "feature-x",
+      baseHosts: BASE_HOSTS,
+    })
+  ).toBe("api.feature-x.demo.hack");
+  expect(
+    applyBranchToHost({
       host: "external.example.com",
       branch: "feature-x",
       baseHosts: BASE_HOSTS,

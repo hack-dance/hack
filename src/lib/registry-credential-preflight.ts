@@ -156,25 +156,20 @@ export async function discoverSuccessfulCompletionServices(opts: {
         if (!(isRecord(value) && isRecord(value.depends_on))) {
           return [];
         }
-        if (selectedServices) {
-          if (!selectedServices.has(service)) {
-            return [];
-          }
-        } else if (
-          Array.isArray(value.profiles) &&
-          !allProfilesActive &&
-          !value.profiles.some(
-            (profile) =>
-              typeof profile === "string" && activeProfiles.has(profile)
-          )
-        ) {
-          return [];
-        }
+        const dependentIsActive = selectedServices
+          ? selectedServices.has(service)
+          : !Array.isArray(value.profiles) ||
+            allProfilesActive ||
+            value.profiles.some(
+              (profile) =>
+                typeof profile === "string" && activeProfiles.has(profile)
+            );
         return Object.entries(value.depends_on)
           .filter(
-            ([, dependency]) =>
+            ([dependencyService, dependency]) =>
               isRecord(dependency) &&
-              dependency.condition === "service_completed_successfully"
+              dependency.condition === "service_completed_successfully" &&
+              (dependentIsActive || selectedServices?.has(dependencyService))
           )
           .map(([service]) => service);
       }

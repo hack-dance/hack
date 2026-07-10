@@ -195,6 +195,22 @@ test("up accepts completion gates from wildcard-enabled profiles", async () => {
   expect(errorMessages).toEqual([]);
 });
 
+test("up accepts a directly targeted completion dependency", async () => {
+  const projectRoot = await createProject();
+  psRows.push(
+    JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+  );
+
+  const exitCode = await runDetachedUp({
+    projectRoot,
+    services: ["migrate"],
+  });
+
+  expect(exitCode).toBe(0);
+  expect(errorMessages).toEqual([]);
+  expect(upServiceSelections).toEqual([["migrate"]]);
+});
+
 test("registry credentials must exist in the bootstrap service scope", async () => {
   const projectRoot = await createProject({ registryTokenScope: "api" });
 
@@ -285,6 +301,7 @@ test("up warns before an auto-derived branch retargets the same worktree", async
 async function runDetachedUp(opts: {
   readonly projectRoot: string;
   readonly profiles?: readonly string[];
+  readonly services?: readonly string[];
 }): Promise<number> {
   const profile = opts.profiles?.join(",");
   const input = {
@@ -300,7 +317,7 @@ async function runDetachedUp(opts: {
         target: undefined,
         json: false,
       },
-      positionals: {},
+      positionals: { services: opts.services ?? [] },
       raw: {
         argv: [
           "--path",
@@ -309,8 +326,9 @@ async function runDetachedUp(opts: {
           "base",
           "--detach",
           ...(profile ? ["--profile", profile] : []),
+          ...(opts.services ?? []),
         ],
-        positionals: [],
+        positionals: opts.services ?? [],
       },
     },
   } as unknown as Parameters<typeof upCommand.handler>[0];

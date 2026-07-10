@@ -117,4 +117,10 @@ test("successful completion recognizes installers, labels, and Compose completio
       selectedServices: ["api"],
     })
   ).toEqual(["database-init", "installer", "migrate"]);
+  expect(
+    await discoverSuccessfulCompletionServices({
+      composeFile,
+      selectedServices: ["database-init"],
+    })
+  ).toEqual(["database-init", "installer", "migrate"]);
 });

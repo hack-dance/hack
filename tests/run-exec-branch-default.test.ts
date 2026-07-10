@@ -89,7 +89,21 @@ async function createWorktreeFixture(): Promise<{
   );
   await writeFile(
     join(hackDir, "docker-compose.yml"),
-    ["services:", "  api:", "    image: alpine:3.20", ""].join("\n")
+    [
+      "services:",
+      "  api:",
+      "    image: alpine:3.20",
+      "    labels:",
+      '      caddy: "api.runbranch.hack"',
+      '      caddy.reverse_proxy: "{{upstreams 3000}}"',
+      "      caddy.tls: internal",
+      "    networks:",
+      "      - hack-dev",
+      "networks:",
+      "  hack-dev:",
+      "    external: true",
+      "",
+    ].join("\n")
   );
   await writeFile(join(primaryRoot, "README.md"), "# fixture\n");
 
@@ -137,6 +151,21 @@ test("hack run in a linked worktree targets the branch compose project by defaul
   expect(result.exitCode).toBe(0);
   const log = await readFile(fixture.dockerLogPath, "utf8");
   expect(log).toContain("-p runbranch--feature-run-default");
+  expect(log).toContain("compose.feature-run-default.override.yml");
+  expect(log).toContain("compose.feature-run-default.runtime.override.yml");
+  const runtimeOverride = await readFile(
+    join(
+      fixture.worktreeRoot,
+      ".hack",
+      ".branch",
+      "compose.feature-run-default.runtime.override.yml"
+    ),
+    "utf8"
+  );
+  expect(runtimeOverride).toContain("HACK_RUNTIME_METADATA");
+  expect(runtimeOverride).toContain(
+    "https://feature-run-default.runbranch.hack"
+  );
   expect(result.stderr).toContain('branch instance "feature-run-default"');
 });
 
@@ -178,6 +207,8 @@ test("hack exec in a linked worktree targets the branch compose project by defau
   const log = await readFile(fixture.dockerLogPath, "utf8").catch(() => "");
   const combined = `${log}\n${result.stdout}\n${result.stderr}`;
   expect(combined).toContain('branch instance "feature-run-default"');
+  expect(log).toContain("compose.feature-run-default.override.yml");
+  expect(log).toContain("compose.feature-run-default.runtime.override.yml");
 });
 
 test("hack run in a detached linked worktree refuses to target the base compose project", async () => {

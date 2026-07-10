@@ -1,6 +1,6 @@
 import { isRecord, isStringArray } from "../lib/guards.ts";
 
-import { PLANET_ANIMATIONS_DATA } from "./planet-animations.data.ts";
+import type { PLANET_ANIMATIONS_DATA } from "./planet-animations.data.ts";
 
 export type PlanetAnimationName =
   (typeof PLANET_ANIMATIONS_DATA)[number]["name"];
@@ -11,10 +11,22 @@ export interface PlanetAnimation {
   readonly frames: readonly string[];
 }
 
-export function getPlanetAnimation(opts: {
+/**
+ * Load a planet animation by variant.
+ *
+ * The generated frame data (`planet-animations.data.ts`, ~1.5MB of gzip
+ * base64) is pulled in via a lazy `import()` so it stays out of the main
+ * module graph: normal CLI startup never parses/evaluates it, only
+ * `hack the planet` does. Dynamic import keeps the data embedded in the
+ * compiled binary (unlike an external asset file, which is optional at
+ * install time), so the animation always renders.
+ */
+export async function getPlanetAnimation(opts: {
   readonly variant: PlanetAnimationName | "random";
-}): PlanetAnimation {
-  const entries = PLANET_ANIMATIONS_DATA;
+}): Promise<PlanetAnimation> {
+  const { PLANET_ANIMATIONS_DATA: entries } = await import(
+    "./planet-animations.data.ts"
+  );
 
   const chosen =
     opts.variant === "random"

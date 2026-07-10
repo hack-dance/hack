@@ -9,6 +9,7 @@ import {
   GLOBAL_DAEMON_SOCKET_FILENAME,
   GLOBAL_HACK_DIR_NAME,
 } from "../constants.ts";
+import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 
 export interface DaemonPaths {
   readonly root: string;
@@ -26,7 +27,10 @@ export function resolveDaemonPaths({
   readonly home?: string;
 }): DaemonPaths {
   const baseHome = (home ?? process.env.HOME ?? homedir()).trim();
-  const root = resolve(baseHome, GLOBAL_HACK_DIR_NAME, GLOBAL_DAEMON_DIR_NAME);
+  const hackDir = home
+    ? resolve(baseHome, GLOBAL_HACK_DIR_NAME)
+    : resolveGlobalHackDir();
+  const root = resolve(hackDir, GLOBAL_DAEMON_DIR_NAME);
   const launchAgentsDir = resolve(baseHome, "Library", "LaunchAgents");
   return {
     root,

@@ -2,10 +2,10 @@ import { createHash, randomInt, randomUUID } from "node:crypto";
 import { open, rename, stat, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
-  GLOBAL_HACK_DIR_NAME,
   GLOBAL_NODE_PAIRINGS_REGISTRY_FILENAME,
   GLOBAL_REGISTRY_DIR_NAME,
 } from "../constants.ts";
+import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
 
@@ -44,11 +44,7 @@ function resolveGlobalRoot(): string {
   if (configPath.length > 0) {
     return dirname(configPath);
   }
-  const home = (process.env.HOME ?? "").trim();
-  if (home.length === 0) {
-    throw new Error("HOME is not set");
-  }
-  return resolve(home, GLOBAL_HACK_DIR_NAME);
+  return resolveGlobalHackDir();
 }
 
 function getPairingsPath(): string {

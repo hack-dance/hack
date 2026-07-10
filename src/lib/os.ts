@@ -4,6 +4,10 @@ export function isMac(): boolean {
   return process.platform === "darwin";
 }
 
+export function isLinux(): boolean {
+  return process.platform === "linux";
+}
+
 export async function openUrl(url: string): Promise<number> {
   const cmd = buildOpenUrlCommand(url);
   const res = await exec(cmd, { stdin: "ignore" });

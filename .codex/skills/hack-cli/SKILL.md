@@ -1,7 +1,7 @@
 ---
 name: hack-cli
 description: >
-  Use the hack CLI for local runtime orchestration (compose, DNS/TLS, logs, persistent project workspaces, tickets) and agent setup.
+  Use the hack CLI for local runtime orchestration (compose, DNS/TLS, logs, env, persistent project workspaces) and agent setup.
   Trigger when asked to run/start/stop services, inspect logs, manage lifecycle/workspace workflows, or update
   agent integrations. Prefer CLI over MCP when shell access is available.
 ---
@@ -10,128 +10,120 @@ description: >
 
 Use `hack` as the primary interface for local-first development.
 
-## Product Boundary
+## Product boundary
 
-- Supported v3 surface: project init, up/down/restart, open, logs, env, host exec/shell, sessions, doctor, daemon, and optional local tickets.
+- Supported v3 surface: project init, up/down/restart, open, logs, env, host exec/shell, sessions, doctor, and daemon.
 - Removed surfaces: hosted auth/account/org/team flows, web dashboard, built-in GitHub workflows, and built-in Linear sync.
-- Remote/gateway/node/dispatch code is unsupported experimental. Do not put it on the critical path for local dev unless explicitly requested.
+- Experimental and unsupported: remote/gateway/node/dispatch commands. They are hidden from default help (list with `hack help --all`) and warn on use; do not use them unless explicitly requested.
 
-## Operating Rules
+## Operating rules
 
-- Prefer `hack` over raw `docker` / `docker compose`.
-- Do not start/stop project services from Docker Desktop UI for `hack`-managed repos.
-- Treat `.hack/.internal` and `.hack/.branch` as hack-managed artifacts; avoid hand-editing generated files.
+- Prefer `hack` over raw `docker` / `docker compose` for project workflows.
+- Do not start/stop services from Docker Desktop UI for `hack`-managed projects.
+- Treat `.hack/.internal` and `.hack/.branch` as hack-managed artifacts; do not hand-edit generated files there.
+- Use `--json` for machine-readable output when available; `hack up/down/restart/doctor --json` emit an `{ok, data | error: {code, message}}` envelope with stable E_* error codes.
+- Scripted/agent runs: pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) so commands never block on prompts — they apply documented defaults or fail fast with E_INTERACTIVE_REQUIRED.
 - Use MCP only when shell access is unavailable.
-- Run `hack doctor` (and `hack doctor --fix`) before manual runtime/network repair.
+- If runtime state looks wrong, run `hack doctor`, then `hack doctor --fix` before manual repair.
 
-## Config + Schema
+## Core objects
+
+- Project: a repo with `.hack/` config + compose file.
+- Service: a compose service (e.g. api, web, worker).
+- Instance: a running project; branch instances are separate copies started with `--branch`.
+
+## Config + schema
 
 - Project config: `.hack/hack.config.json`
 - Global config: `~/.hack/hack.config.json`
 - Schema URL: `https://schemas.hack/hack.config.schema.json`
-- Prefer CLI config edits via `hack config get/set`.
+- Prefer CLI writes: `hack config get <path>`, `hack config set <path> <value>`, `hack config set --global <path> <value>`
 
-## Hostname Routing
+## Hostname routing + Caddy labels
 
-- Primary host is `dev_host` (default: `<project>.hack`).
-- Subdomains use `<sub>.<dev_host>` (for example: `api.myapp.hack`).
-- OAuth alias can add `<dev_host>.<tld>` and `<sub>.<dev_host>.<tld>` (default: `gy`).
-- Only HTTP services with Caddy labels and `hack-dev` network attachment are routable.
-- Required labels: `caddy`, `caddy.reverse_proxy`, `caddy.tls=internal`.
+- Primary host comes from `dev_host` (default: `<project>.hack`).
+- Subdomain pattern is `<sub>.<dev_host>` (for example: `api.myapp.hack`).
+- OAuth alias (when enabled) also routes `<dev_host>.<tld>` and `<sub>.<dev_host>.<tld>` (default tld: `gy`).
+- Not every compose service is routable: only services with Caddy labels and on `hack-dev` are exposed.
+- Required labels for HTTP services: `caddy`, `caddy.reverse_proxy`, `caddy.tls=internal`.
 - Quick checks: `hack open`, `hack open <sub>`, `hack open --json`.
 
-## TLS + OAuth Host Rules
+## TLS + valid-hostname constraints
 
-- Caddy internal PKI provides HTTPS for routed hosts; trust CA with `hack global trust`.
-- `.hack` is local-first and not a public suffix.
-- Use alias hosts like `*.hack.gy` when provider callback validation rejects non-public-suffix hosts.
-- Alias hosts are local routes unless you explicitly add remote ingress/tunnel plumbing.
+- `hack` uses Caddy internal PKI for HTTPS on routed hosts; trust CA with `hack global trust`.
+- Containers get a combined public+local trust bundle (SSL_CERT_FILE etc.) once `hack global trust` has run; public TLS (package registries, external APIs) keeps working alongside `*.hack` trust.
+- If the combined bundle is missing, only Node gets `*.hack` trust (NODE_EXTRA_CA_CERTS); OpenSSL-based tools keep public roots — run `hack global trust` to enable both.
+- `.hack` is local-first and great for dev, but it is not a public suffix.
+- Use OAuth alias hosts (for example `*.hack.gy`) when providers require public-suffix-style callback domains.
+- Alias hosts are still local-dev routes unless you add an external tunnel/remote ingress path.
 
-## Managed Files
+## Project files (managed vs generated)
 
 - Source-of-truth files: `.hack/docker-compose.yml`, `.hack/hack.config.json`, `.hack/hack.env.default.yaml`, and optional `.hack/hack.env.<overlay>.yaml`.
-- Worktree-local override files: `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`.
-- Local-only files: `.hack.secret.key`, optional `.hack/.env` compatibility output, `.hack/.env.state.json`, and `.hack/.internal/` (gitignored; machine-specific state).
-- Generated by hack: `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.
-- Managed via CLI: `.hack/.internal/extra-hosts.json` using `hack internal extra-hosts ...` commands.
+- Worktree-local env override files: `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`.
+- Local-only files: `.hack.secret.key`, optional `.hack/.env` compatibility output, `.hack/.env.state.json`, and `.hack/.internal/` (runtime/local machine state; keep gitignored).
+- Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.
+- Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).
 - Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.
+- Ignore rules: hack owns a committed `.hack/.gitignore` (self-healing on init/up) covering machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`, `tickets/`); keep it committed, and if generated files leaked into git, `hack doctor --fix` untracks them (files stay on disk).
 
-## Advanced Networking
+## Linked git worktrees
+
+- Secret key inherits from the primary checkout automatically through the shared git common dir; set `HACK_ENV_SECRET_KEY` for CI or detached environments.
+- `hack up` in a linked worktree defaults to a branch instance named after the worktree's git branch; a detached linked worktree requires an explicit `--branch`, unless config `worktree.auto_branch=false` explicitly opts into the base instance.
+- `hack doctor` flags divergent secret keys and dev_host collisions across checkouts.
+
+## Advanced networking (extra_hosts + local proxies/tunnels)
 
 - Static host mappings: set `internal.extra_hosts` in `.hack/hack.config.json`.
-- Dynamic mappings for local proxies/tunnels: `hack internal extra-hosts set <hostname> <target>`.
-- List/remove mappings: `hack internal extra-hosts list` / `hack internal extra-hosts unset <hostname>`.
-- Prefer `host-gateway` for host-local proxy targets when possible.
-- Apply changes with `hack restart`; verify with `hack doctor`.
+- Dynamic host mappings: `hack internal extra-hosts set <hostname> <target>` / `unset` / `list`.
+- For host-local proxies/tunnels, prefer `host-gateway` as target when possible.
+- After mapping changes or proxy IP churn: `hack restart` and then `hack doctor`.
 
-## Quick Start
+## Standard workflow
 
-- Bootstrap project config: `hack init`
-- Start services: `hack up --detach`
-- Alternate shorthand: `hack up -d`
-- Restart services: `hack restart`
-- Open app: `hack open --json`
-- Tail logs (compose): `hack logs --pretty`
-- Per-service logs: `hack logs <service>`
-- Snapshot logs: `hack logs --json --no-follow`
-- Loki history/query: `hack logs --loki --since 2h --pretty`
-- Run commands: `hack run <service> <cmd...>`
+- If `.hack/` is missing: `hack init`
+- Start services: `hack up --detach` (or `hack up -d`)
+- Check status: `hack ps` or `hack status`
+- Open app URL: `hack open --json`
+- Restart: `hack restart`
 - Stop services: `hack down`
 
-## Global Infra
+## Running things (decision guide)
 
-- Install once: `hack global install`
-- Start/stop/status: `hack global up`, `hack global down`, `hack global status`
-- Global logs: `hack global logs <service> --no-follow --tail 200`
+- One-off command in a fresh service container (deps started as needed): `hack run <service> <cmd...>`.
+- Command inside an already-running service container: `hack exec <service> -- <cmd...>`.
+- Host script that needs hack-stored env: `hack host exec --env <overlay> --scope <service> -- <cmd...>` — this is THE way to run repo scripts; never read .env files directly.
+- Interactive host shell with injected env: `hack host shell --env <overlay> --scope <service>`.
+- Call a service over HTTP (from the host or between containers): use its Caddy hostname `https://<sub>.<dev_host>`; discover routable URLs with `hack open --json`.
 
-## Unsupported Experimental Remote
+## Logs (default is compose)
 
-These commands are source-available but outside the supported v3 product contract:
+- Fast tail: `hack logs --pretty`
+- Per-service tail: `hack logs <service>`
+- Machine snapshot: `hack logs --json --no-follow`
+- Loki history/query: `hack logs --loki --since 2h --pretty` or `hack logs --loki --query '{project="<name>"}'`
+- Force compose backend: `hack logs --compose`
+- Global infra logs: `hack global logs caddy --no-follow --tail 200`
 
-- Pair/register a node: `hack node pair ...`, then verify via `hack node list` and `hack node status --watch`.
-- Repair SSH access for remote Git/mutagen: `hack node ssh setup --node <id>`.
-- Inspect node workspace map on the node host: `ssh <user@host> 'hack node workspace list --json'`.
-- Inspect/repair controller route bridge: `hack node routes status`, `hack node routes repair`.
-- Dispatch command to remote workspace: `hack dispatch run --project <name|id> --node default --branch <branch> --runner generic -- "pwd"`.
+## Lifecycle + startup
 
-## Lifecycle + Startup
-
-- Put host setup in `.hack/hack.config.json` under `startup` / `lifecycle`.
-- Use lifecycle processes for long-running host tasks, not ad-hoc terminals.
+- Put host setup in `.hack/hack.config.json` under `startup`/`lifecycle` (not ad-hoc terminal tabs).
+- Use `lifecycle.up.before` for pre-start hooks and `lifecycle.processes` for long-running host tasks.
 - For fixed-port host helpers such as SSM tunnels or local proxies, set `singleton.ports` and usually `onConflict: "adopt"` so Hack reuses a healthy existing listener instead of starting duplicate tunnel stacks.
 - `singleton` is a listener guard, not process ownership transfer; adopted external processes are left running on `hack down`.
-- Inspect via `hack projects --details` and `hack logs <service-or-process>`.
+- Inspect lifecycle status via `hack projects --details` and stream via `hack logs <service-or-process>`.
+- Lifecycle session recovery is ownership-proven: Hack adopts healthy token-, definition-, and environment-matched sessions, replaces owned stale sessions, and refuses to kill same-name sessions without deterministic ownership proof.
+- `hack doctor --fix` reaps an orphan lifecycle session only when mux ownership is proven and its Compose instance is absent; unverified same-name sessions are never modified.
 
-## Verification Loops
-
-- For `hack run` / `hack exec` / env-resolution changes, verify the effective env transition matrix in
-  `tests/project-run-command.test.ts`.
-- Cover omitted env, explicit overlay, explicit `base`, default-overlay resolution, cached runtime-state env,
-  target-service running/not-running, worktree-local overrides, and host-vs-compose target mode.
-- For lifecycle or startup-process changes, verify `tests/project-lifecycle-processes.test.ts` and
-  `tests/project-lifecycle-singleton.test.ts`.
-- Preserve `sh -c` semantics, process-group cleanup, stale pane-metadata reconciliation, singleton listener
-  behavior, and interactive stdin behavior.
-- When semantics change, update `docs/env.md` or `docs/lifecycle.md` in the same patch so future agent work starts
-  from the current contract.
-
-## Branch Instances
-
-Use branch instances to run parallel environments:
-
-- `hack up --branch <name> --detach`
-- `hack open --branch <name>`
-- `hack logs --branch <name>`
-- `hack down --branch <name>`
-
-## Workspaces
+## Workspaces (mux-managed, tmux-first by default)
 
 - Picker: `hack session` for persistent project workspaces.
 - Reuse/create: `hack session start <project>`
 - Env-scoped workspace: `hack session start <project> --env qa --service api --detach`
-- Isolated agent workspace: `hack session start <project> --new --name agent-1` (`<project>--agent-1`).
-- Exec in workspace: `hack session exec <workspace> "<command>"`
-- Exec in workspace with injected env: `hack session exec <workspace> --env qa --service api "bun db:migrate"`
+- Force isolated agent workspace: `hack session start <project> --new --name agent-1` (`<project>--agent-1`).
+- Execute in workspace: `hack session exec <workspace> "<command>"`
+- Execute in workspace with injected env: `hack session exec <workspace> --env qa --service api "bun db:migrate"`
 - Stop workspace: `hack session stop <workspace>`
 
 ## Host-side env helpers
@@ -142,34 +134,63 @@ Use branch instances to run parallel environments:
 - Interactive host shell with injected env: `hack host shell --env qa --scope api`
 - Run inside an already-running service container: `hack exec api -- bun test`
 
-## Tickets
+## Branch instances (parallel envs)
 
-- Create: `hack tickets create --title "..." --body-stdin`
-- List/show: `hack tickets list`, `hack tickets show T-AB12CD34EF`
-- Status/sync: `hack tickets status T-AB12CD34EF in_progress`, `hack tickets sync`
+- Use a branch instance when you need two versions running at once (PR review, experiments, migrations) or want to keep a stable environment while testing another branch.
+- Target one with `--branch <name>` on up/open/logs/down (for example: `hack up --branch <name> --detach`).
+- Linked worktrees pick a branch instance automatically (see Linked git worktrees).
 
-## Project Targeting
+## Run commands inside services
 
-- Run from repo root when possible.
-- Otherwise use `--project <name>` or `--path <repo-root>`.
-- List projects: `hack projects --json`.
+- One-off: `hack run <service> <cmd...>` (uses `docker compose run --rm`)
+- Example: `hack run api bun test`
+- Use `--workdir <path>` to change working dir inside the container.
+- Use `hack ps --json` to list services and status.
 
-## Agent Maintenance
+## Project targeting
 
-- Project-level hack commands auto-check integration drift and attempt auto-sync.
-- Set `HACK_SETUP_SYNC_MODE=warn` to warn-only, or `HACK_SETUP_SYNC_MODE=off` to disable.
-- Refresh project + global integrations: `hack setup sync --all-scopes`
-- Check generated integrations: `hack setup sync --all-scopes --check`
-- Remove generated integrations: `hack setup sync --all-scopes --remove`
-- After self-update: `hack update` then `hack setup sync --all-scopes`
+- From repo root, commands use that project automatically.
+- Else use `--project <name>` (registry) or `--path <repo-root>`.
+- List projects: `hack projects --json`
 
-## Agent Setup
+## Global infra
+
+- Bootstrap once: `hack global install`
+- Start/stop/status: `hack global up`, `hack global down`, `hack global status`
+- Use `hack global up` before Loki/Grafana queries if global logging is offline.
+
+## Daemon (optional)
+
+- Start for faster JSON status/ps: `hack daemon start`
+- Check status: `hack daemon status`
+
+## Docker compose notes
+
+- Prefer `hack` commands; they include the right files/networks.
+- Use `docker compose -f .hack/docker-compose.yml exec <service> <cmd>` only if you need exec into a running container.
+
+## Agent integration maintenance
+
+- Project-level hack commands auto-check integration drift and attempt auto-sync (docs/skills/MCP).
+- Set `HACK_SETUP_SYNC_MODE=warn` to only warn, or `HACK_SETUP_SYNC_MODE=off` to disable.
+- Refresh project + user integrations: `hack setup sync --all-scopes`
+- Audit integration state only: `hack setup sync --all-scopes --check`
+- Remove generated integration artifacts: `hack setup sync --all-scopes --remove`
+- After upgrading CLI: `hack update` then `hack setup sync --all-scopes`
+- When changing hack itself: interface or behavior changes must update docs/ in the same change (regenerate the CLI reference with `bun run docs:cli-reference`).
+
+## Agent setup (CLI-first)
 
 - Cursor rules: `hack setup cursor`
 - Claude hooks: `hack setup claude`
 - Codex skill: `hack setup codex`
-- Tickets skill: `hack setup tickets`
+- Refresh all local agent integrations: `hack setup sync --all-scopes`
+- Agent-assisted onboarding: `hack init --with claude|codex|both` (new repos) or `hack agent onboard` (existing projects) print/hand off the full setup prompt; the `/hack-init` skill and the `hack-init` MCP prompt return the same content.
 - Init prompt: `hack agent init` (use --client cursor|claude|codex to open)
 - Init patterns: `hack agent patterns`
-- MCP (no shell only): `hack setup mcp`
+- MCP (no-shell only): `hack setup mcp`
 - MCP install (explicit): `hack mcp install --all --scope project`
+
+## Optional extensions
+
+- A local git-backed tickets extension exists (`hack tickets`) — only use it when the project explicitly uses it.

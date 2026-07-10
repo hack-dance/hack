@@ -69,6 +69,9 @@ jobs:
           - os: blacksmith-6vcpu-macos-15
             upload_install: false
             skip_tests: true
+          - os: macos-15-intel
+            upload_install: false
+            skip_tests: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4

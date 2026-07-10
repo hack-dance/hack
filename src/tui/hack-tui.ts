@@ -1,5 +1,4 @@
 // biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: The terminal dashboard is intentionally event-driven and keeps renderer state and keybindings colocated.
-import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import {
   BoxRenderable,
@@ -24,6 +23,7 @@ import {
   readInternalExtraHostsIp,
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
+import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { ensureDir, writeTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { renderHackBanner } from "../lib/hack-banner.ts";
@@ -152,7 +152,7 @@ class PausableScrollBoxRenderable extends ScrollBoxRenderable {
 
 export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   let renderer: Awaited<ReturnType<typeof createCliRenderer>> | null = null;
-  const errorLogPath = resolve(homedir(), ".hack", "tui-error.log");
+  const errorLogPath = resolve(resolveGlobalHackDir(), "tui-error.log");
   let errorHandled = false;
   let shutdown: (() => void) | null = null;
   let logsHasSelection = false;

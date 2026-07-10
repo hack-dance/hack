@@ -296,6 +296,32 @@ export function renderGlobalGrafanaLogsDashboardJson(): string {
 }
 
 /**
+ * Begin marker of the hack-managed block in the committed `.hack/.gitignore`.
+ * The block covers machine-local generated files so linked worktrees and
+ * fresh clones inherit the ignore rules automatically.
+ */
+export const HACK_DIR_GITIGNORE_BEGIN_MARKER =
+  "# managed by hack — machine-local generated files (do not edit between markers)" as const;
+
+/** End marker of the hack-managed block in the committed `.hack/.gitignore`. */
+export const HACK_DIR_GITIGNORE_END_MARKER = "# end managed by hack" as const;
+
+/**
+ * Canonical ignore entries for the committed `.hack/.gitignore`, relative to
+ * the `.hack/` directory. Root-level `.hack.secret.key` stays in the root
+ * `.gitignore` (see `ensureProjectEnvSecretKey`).
+ */
+export const HACK_DIR_GITIGNORE_ENTRIES = [
+  ".internal/",
+  ".branch/",
+  ".env",
+  ".env.state.json",
+  "hack.env.local.yaml",
+  "hack.env.*.local.yaml",
+  "tickets/",
+] as const;
+
+/**
  * Built-in (non-discovery) compose templates.
  *
  * We intentionally keep this minimal and generic; multi-service setups should
@@ -387,6 +413,13 @@ export function renderProjectConfigSchemaJson(): string {
         properties: {
           enabled: { type: "boolean" },
           tld: { type: "string" },
+        },
+      },
+      worktree: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          auto_branch: { type: "boolean" },
         },
       },
       sessions: {

@@ -23,7 +23,24 @@ export interface Logger {
 
 type LoggerBackend = "gum" | "clack" | "console";
 
+let backendOverride: LoggerBackend | null = null;
+
+/**
+ * Force a specific logger backend for the rest of this invocation.
+ *
+ * Used by `--json` code paths to route human log lines through the plain
+ * `console` backend (stderr, no styling) so stdout stays pure JSON.
+ */
+export function setLoggerBackendOverride(opts: {
+  readonly backend: LoggerBackend | null;
+}): void {
+  backendOverride = opts.backend;
+}
+
 function resolveBackend(): LoggerBackend {
+  if (backendOverride) {
+    return backendOverride;
+  }
   const raw = (process.env.HACK_LOGGER ?? "").trim().toLowerCase();
   if (raw === "gum") {
     return "gum";

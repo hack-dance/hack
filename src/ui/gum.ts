@@ -1,8 +1,34 @@
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { ensureDir } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { execOrThrow } from "../lib/shell.ts";
+import { isColorDisabledByEnv } from "./terminal.ts";
+
+/**
+ * Environment for non-interactive gum renderers (log/style/format/table/join).
+ *
+ * When color is disabled (NO_COLOR / HACK_NO_COLOR) or stdout is not a TTY,
+ * force-plain output by clearing force-color variables and setting NO_COLOR,
+ * so piped output never carries ANSI escapes.
+ */
+export function buildGumRenderEnv(): Record<string, string> {
+  const forcePlain = isColorDisabledByEnv() || process.stdout.isTTY !== true;
+  const skipKeys = new Set(forcePlain ? ["CLICOLOR_FORCE", "FORCE_COLOR"] : []);
+
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string" && !skipKeys.has(key)) {
+      env[key] = value;
+    }
+  }
+
+  if (forcePlain) {
+    env.NO_COLOR = "1";
+  }
+  return env;
+}
 
 export type GumLogLevel = "debug" | "info" | "warn" | "error" | "fatal";
 
@@ -145,7 +171,7 @@ export function tryGumLog({ level, message, fields }: GumLogInput): boolean {
 
   const res = Bun.spawnSync({
     cmd,
-    env: process.env,
+    env: buildGumRenderEnv(),
     stdin: "ignore",
     stdout: "inherit",
     stderr: "inherit",
@@ -154,12 +180,8 @@ export function tryGumLog({ level, message, fields }: GumLogInput): boolean {
   return res.exitCode === 0;
 }
 
-function getBundledGumInstallPath(): string | null {
-  const home = process.env.HOME;
-  if (!home) {
-    return null;
-  }
-  return `${home}/.hack/bin/gum`;
+function getBundledGumInstallPath(): string {
+  return resolve(resolveGlobalHackDir(), "bin", "gum");
 }
 
 type BundledGumArtifact = {
@@ -197,12 +219,9 @@ function bundledGumTarballCandidates(filename: string): readonly string[] {
     out.push(resolve(envDir, "binaries", "gum", filename));
   }
 
-  const home = process.env.HOME;
-  if (home) {
-    const defaultAssets = resolve(home, ".hack", "assets");
-    out.push(resolve(defaultAssets, filename));
-    out.push(resolve(defaultAssets, "binaries", "gum", filename));
-  }
+  const defaultAssets = resolve(resolveGlobalHackDir(), "assets");
+  out.push(resolve(defaultAssets, filename));
+  out.push(resolve(defaultAssets, "binaries", "gum", filename));
 
   // Dev/source layout: <repo>/src/ui/gum.ts → <repo>/binaries/gum/<tarball>
   out.push(resolve(import.meta.dir, "../../binaries/gum", filename));
@@ -846,7 +865,7 @@ export async function gumStyle({
   ];
 
   const proc = Bun.spawn(cmd, {
-    env: process.env,
+    env: buildGumRenderEnv(),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "inherit",
@@ -890,7 +909,7 @@ export async function gumJoin({
   ];
 
   const proc = Bun.spawn(cmd, {
-    env: process.env,
+    env: buildGumRenderEnv(),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "inherit",
@@ -940,7 +959,7 @@ export async function gumFormat({
 
   const stdin = input !== undefined ? streamFromText(input) : "inherit";
   const proc = Bun.spawn(cmd, {
-    env: process.env,
+    env: buildGumRenderEnv(),
     stdin,
     stdout: "pipe",
     stderr: "inherit",
@@ -1021,7 +1040,7 @@ export async function gumTable({
 
   const stdin = input !== undefined ? streamFromText(input) : "inherit";
   const proc = Bun.spawn(cmd, {
-    env: process.env,
+    env: buildGumRenderEnv(),
     stdin,
     stdout: "pipe",
     stderr: "inherit",

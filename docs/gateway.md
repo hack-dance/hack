@@ -1,5 +1,7 @@
 # Gateway (remote control plane)
 
+> **Status: unsupported experimental.** These surfaces are source-available but outside the supported v3 product contract. They are hidden from default `hack --help` (see `hack help --all`) and print a warning when invoked.
+
 The gateway exposes a small HTTP/WS surface on top of `hackd` so you can orchestrate jobs, stream
 logs, and open shells remotely. It is disabled by default and binds to `127.0.0.1` unless you
 explicitly expose it through SSH, Cloudflare, or Tailscale.

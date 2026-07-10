@@ -1,4 +1,4 @@
-import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -11,6 +11,7 @@ import {
 } from "../src/constants.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import type { MuxBackend } from "../src/mux/mux-backend.ts";
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const createSessionCalls: Array<{
   readonly name: string;
@@ -87,40 +88,68 @@ const fakeBackend: MuxBackend = {
   }),
 };
 
-mock.module("../src/lib/projects-registry.ts", () => ({
-  readProjectsRegistry: async () => ({
-    version: 1,
-    projects: registeredProject ? [registeredProject] : [],
-  }),
-}));
+const projectsRegistryMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/projects-registry.ts",
+  overrides: {
+    readProjectsRegistry: async () => ({
+      version: 1,
+      projects: registeredProject ? [registeredProject] : [],
+    }),
+  },
+});
 
-mock.module("../src/mux/mux-resolver.ts", () => ({
-  listMuxSessions: async () => listedSessions,
-  resolveDefaultBackendName: () => "tmux",
-  resolveMux: async () => ({
-    mode: "tmux",
-    backends: new Map([["tmux", fakeBackend]]),
-  }),
-}));
+const muxResolverMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/mux/mux-resolver.ts",
+  overrides: {
+    listMuxSessions: async () => listedSessions,
+    resolveDefaultBackendName: () => "tmux",
+    resolveMux: async () => ({
+      mode: "tmux",
+      backends: new Map([["tmux", fakeBackend]]),
+    }),
+  },
+});
 
-mock.module("../src/mux/tmux-backend.ts", () => ({
-  attachTmuxSession: async () => 0,
-}));
+const tmuxBackendMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/mux/tmux-backend.ts",
+  overrides: {
+    attachTmuxSession: async () => 0,
+  },
+});
 
-mock.module("../src/mux/zellij-backend.ts", () => ({
-  attachZellijSession: async () => 0,
-}));
+const zellijBackendMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/mux/zellij-backend.ts",
+  overrides: {
+    attachZellijSession: async () => 0,
+  },
+});
 
-mock.module("../src/lib/shell.ts", () => ({
-  exec: async () => ({
-    exitCode: 0,
-    stdout: "",
-    stderr: "",
-  }),
-  run: async () => 0,
-}));
+const shellMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/shell.ts",
+  overrides: {
+    exec: async () => ({
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    }),
+    run: async () => 0,
+  },
+});
 
 const { sessionCommand } = await import("../src/commands/session.ts");
+
+beforeAll(() => {
+  projectsRegistryMock.activate();
+  muxResolverMock.activate();
+  tmuxBackendMock.activate();
+  zellijBackendMock.activate();
+  shellMock.activate();
+});
 
 afterEach(async () => {
   createSessionCalls.length = 0;
@@ -135,7 +164,11 @@ afterEach(async () => {
 });
 
 afterAll(() => {
-  mock.restore();
+  projectsRegistryMock.deactivate();
+  muxResolverMock.deactivate();
+  tmuxBackendMock.deactivate();
+  zellijBackendMock.deactivate();
+  shellMock.deactivate();
 });
 
 test("session start creates an env-scoped workspace with injected env", async () => {

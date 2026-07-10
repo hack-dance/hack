@@ -1,5 +1,9 @@
 import { resolve } from "node:path";
 
+import {
+  normalizeInstructionText,
+  renderInstructionSections,
+} from "../agents/instruction-source.ts";
 import { pathExists, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
 
 export type AgentDocTarget = "agents" | "claude";
@@ -13,7 +17,7 @@ export type AgentDocUpdateResult = {
 
 export type AgentDocCheckResult = {
   readonly target: AgentDocTarget;
-  readonly status: "present" | "missing" | "error";
+  readonly status: "present" | "stale" | "missing" | "error";
   readonly path: string;
   readonly message?: string;
 };
@@ -84,13 +88,20 @@ export async function getExistingAgentDocs(opts: {
 }
 
 /**
- * Check whether agent docs include the hack snippet.
+ * Check whether agent docs include the current hack snippet.
+ *
+ * Reports `stale` when the markers exist but the wrapped content no longer
+ * matches the current render (normalized comparison), so `setup sync --check`
+ * can flag content drift and auto-sync can repair it.
  */
 export async function checkAgentDocs(opts: {
   readonly projectRoot: string;
   readonly targets: readonly AgentDocTarget[];
 }): Promise<AgentDocCheckResult[]> {
   const results: AgentDocCheckResult[] = [];
+  const expected = normalizeInstructionText({
+    text: renderAgentDocsSnippet(),
+  });
 
   for (const target of opts.targets) {
     const path = resolveAgentDocPath({ projectRoot: opts.projectRoot, target });
@@ -107,6 +118,28 @@ export async function checkAgentDocs(opts: {
           status: "error",
           path,
           message: "Missing hack agent-docs markers.",
+        });
+        continue;
+      }
+
+      const region = extractSnippetRegion({ content: existing });
+      if (region === null) {
+        results.push({
+          target,
+          status: "error",
+          path,
+          message: "Malformed hack agent-docs markers.",
+        });
+        continue;
+      }
+
+      if (normalizeInstructionText({ text: region }) !== expected) {
+        results.push({
+          target,
+          status: "stale",
+          path,
+          message:
+            "hack agent-docs content is out of date. Run: hack setup sync",
         });
         continue;
       }
@@ -160,165 +193,18 @@ export async function removeAgentDocs(opts: {
 
 /**
  * Render the hack usage snippet for agent-facing docs.
+ *
+ * Content comes from the shared instruction source so AGENTS.md/CLAUDE.md
+ * cannot drift from the other generated surfaces.
  */
 export function renderAgentDocsSnippet(): string {
   const lines = [
     DOC_MARKER_START,
     "## hack CLI (local dev + MCP)",
     "",
-    "Use `hack` as the single interface for local-first runtime orchestration (compose, DNS/TLS, logs, env, persistent project workspaces, and optional local tickets).",
+    "Use `hack` as the single interface for local-first runtime orchestration (compose, DNS/TLS, logs, env, and persistent project workspaces).",
     "",
-    "Product boundary:",
-    "- Supported v3 surface: project init, up/down/restart, open, logs, env, host exec/shell, sessions, doctor, daemon, and optional local tickets.",
-    "- Removed surfaces: hosted auth/account/org/team flows, web dashboard, built-in GitHub workflows, and built-in Linear sync.",
-    "- Unsupported experimental: remote/gateway/node/dispatch. Do not use these as the default path unless explicitly requested.",
-    "",
-    "Operating rules:",
-    "- Prefer `hack` over raw `docker` / `docker compose` for project workflows.",
-    "- Do not start/stop services from Docker Desktop UI for `hack`-managed projects.",
-    "- Treat `.hack/.internal` and `.hack/.branch` as hack-managed artifacts; do not hand-edit generated files there.",
-    "- Use MCP only when shell access is unavailable.",
-    "- If runtime state looks wrong, run `hack doctor`, then `hack doctor --fix` before manual repair.",
-    "",
-    "Core objects:",
-    "- Project: a repo with `.hack/` config + compose file.",
-    "- Service: a compose service (e.g. api, web, worker).",
-    "- Instance: a running project; branch instances are separate copies started with `--branch`.",
-    "",
-    "Config + schema:",
-    "- Project config: `.hack/hack.config.json`",
-    "- Global config: `~/.hack/hack.config.json`",
-    "- Schema URL: `https://schemas.hack/hack.config.schema.json`",
-    "- Prefer CLI writes: `hack config get <path>`, `hack config set <path> <value>`, `hack config set --global <path> <value>`",
-    "",
-    "Hostname routing + Caddy labels:",
-    "- Primary host comes from `dev_host` (default: `<project>.hack`).",
-    "- Subdomain pattern is `<sub>.<dev_host>` (for example: `api.myapp.hack`).",
-    "- OAuth alias (when enabled) also routes `<dev_host>.<tld>` and `<sub>.<dev_host>.<tld>` (default tld: `gy`).",
-    "- Not every compose service is routable: only services with Caddy labels and on `hack-dev` are exposed.",
-    "- Required labels for HTTP services: `caddy`, `caddy.reverse_proxy`, `caddy.tls=internal`.",
-    "- Quick checks: `hack open`, `hack open <sub>`, `hack open --json`.",
-    "",
-    "TLS + valid-hostname constraints:",
-    "- `hack` uses Caddy internal PKI for HTTPS on routed hosts; trust CA with `hack global trust`.",
-    "- `.hack` is local-first and great for dev, but it is not a public suffix.",
-    "- Use OAuth alias hosts (for example `*.hack.gy`) when providers require public-suffix-style callback domains.",
-    "- Alias hosts are still local-dev routes unless you add an external tunnel/remote ingress path.",
-    "",
-    "Project files (managed vs generated):",
-    "- Source-of-truth files: `.hack/docker-compose.yml`, `.hack/hack.config.json`, `.hack/hack.env.default.yaml`, and optional `.hack/hack.env.<overlay>.yaml`.",
-    "- Worktree-local env override files: `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`.",
-    "- Local-only files: `.hack.secret.key`, optional `.hack/.env` compatibility output, `.hack/.env.state.json`, and `.hack/.internal/` (runtime/local machine state; keep gitignored).",
-    "- Linked worktrees can inherit secret decryption through the git common dir; use `HACK_ENV_SECRET_KEY` in CI/managed containers.",
-    "- Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.",
-    "- Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).",
-    "- Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.",
-    "",
-    "Advanced networking (extra_hosts + local proxies/tunnels):",
-    "- Static host mappings: set `internal.extra_hosts` in `.hack/hack.config.json`.",
-    "- Dynamic host mappings: `hack internal extra-hosts set <hostname> <target>` / `unset` / `list`.",
-    "- For host-local proxies/tunnels, prefer `host-gateway` as target when possible.",
-    "- After mapping changes or proxy IP churn: `hack restart` and then `hack doctor`.",
-    "",
-    "Standard workflow:",
-    "- If `.hack/` is missing: `hack init`",
-    "- Start services: `hack up --detach` (or `hack up -d`)",
-    "- Check status: `hack ps` or `hack status`",
-    "- Open app URL: `hack open --json`",
-    "- Restart: `hack restart`",
-    "- Stop services: `hack down`",
-    "",
-    "Logs (default is compose):",
-    "- Fast tail: `hack logs --pretty`",
-    "- Per-service tail: `hack logs <service>`",
-    "- Machine snapshot: `hack logs --json --no-follow`",
-    "- Loki history/query: `hack logs --loki --since 2h --pretty` or `hack logs --loki --query '{project=\"<name>\"}'`",
-    "- Force compose backend: `hack logs --compose`",
-    "- Global infra logs: `hack global logs caddy --no-follow --tail 200`",
-    "",
-    "Lifecycle + startup:",
-    "- Put host setup in `.hack/hack.config.json` under `startup`/`lifecycle` (not ad-hoc terminal tabs).",
-    "- Use `lifecycle.up.before` for pre-start hooks and `lifecycle.processes` for long-running host tasks.",
-    '- For fixed-port host helpers such as SSM tunnels or local proxies, set `singleton.ports` and usually `onConflict: "adopt"` so Hack reuses a healthy existing listener instead of starting duplicate tunnel stacks.',
-    "- `singleton` is a listener guard, not process ownership transfer; adopted external processes are left running on `hack down`.",
-    "- Inspect lifecycle status via `hack projects --details` and stream via `hack logs <service-or-process>`.",
-    "",
-    "Workspaces (mux-managed, tmux-first by default):",
-    "- Picker: `hack session` for persistent project workspaces.",
-    "- Reuse/create: `hack session start <project>`",
-    "- Env-scoped workspace: `hack session start <project> --env qa --service api --detach`",
-    "- Force isolated agent workspace: `hack session start <project> --new --name agent-1` (`<project>--agent-1`).",
-    '- Execute in workspace: `hack session exec <workspace> "<command>"`',
-    '- Execute in workspace with injected env: `hack session exec <workspace> --env qa --service api "bun db:migrate"`',
-    "- Stop workspace: `hack session stop <workspace>`",
-    "",
-    "Host-side env helpers:",
-    "- One-off host command with injected env: `hack host exec --env qa --scope api -- bun db:migrate`",
-    "- Host commands default to a host-local env view; use `--target compose` when you explicitly want container-oriented addresses.",
-    "- `--scope` selects which env scope to inject; it does not move execution into that service container.",
-    "- Interactive host shell with injected env: `hack host shell --env qa --scope api`",
-    "- Run inside an already-running service container: `hack exec api -- bun test`",
-    "",
-    "Tickets (git-backed):",
-    '- Create: `hack tickets create --title "..." --body-stdin`',
-    "- List/show: `hack tickets list`, `hack tickets show T-AB12CD34EF`",
-    "- Status/sync: `hack tickets status T-AB12CD34EF in_progress`, `hack tickets sync`",
-    "",
-    "Global infra:",
-    "- Bootstrap once: `hack global install`",
-    "- Start/stop/status: `hack global up`, `hack global down`, `hack global status`",
-    "- Use `hack global up` before Loki/Grafana queries if global logging is offline.",
-    "",
-    "Unsupported experimental remote nodes + dispatch:",
-    "- These commands are source-available but outside the supported v3 product contract.",
-    "- Pair/register nodes: `hack node pair ...`, then verify with `hack node list` and `hack node status --watch`.",
-    "- Repair SSH for remote Git/mutagen: `hack node ssh setup --node <id>`.",
-    "- On node host, inspect workspace map via `hack node workspace list|resolve|attach|remove`.",
-    "- Inspect/repair controller-side route bridge with `hack node routes status` and `hack node routes repair`.",
-    '- Dispatch remote commands: `hack dispatch run --project <name|id> --node default --branch <branch> --runner generic -- "<command>"`.',
-    "",
-    "When to use a branch instance:",
-    "- You need two versions running at once (PR review, experiments, migrations).",
-    "- You want to keep a stable environment while testing another branch.",
-    "- Use `--branch <name>` on `hack up/open/logs/down` to target it.",
-    "",
-    "Run commands inside services:",
-    "- One-off: `hack run <service> <cmd...>` (uses `docker compose run --rm`)",
-    "- Example: `hack run api bun test`",
-    "- Use `--workdir <path>` to change working dir inside the container.",
-    "- Use `hack ps --json` to list services and status.",
-    "",
-    "Project targeting:",
-    "- From repo root, commands use that project automatically.",
-    "- Else use `--project <name>` (registry) or `--path <repo-root>`.",
-    "- List projects: `hack projects --json`",
-    "",
-    "Daemon (optional):",
-    "- Start for faster JSON status/ps: `hack daemon start`",
-    "- Check status: `hack daemon status`",
-    "",
-    "Docker compose notes:",
-    "- Prefer `hack` commands; they include the right files/networks.",
-    "- Use `docker compose -f .hack/docker-compose.yml exec <service> <cmd>` only if you need exec into a running container.",
-    "",
-    "Agent integration maintenance:",
-    "- Project-level hack commands auto-check integration drift and attempt auto-sync (docs/skills/MCP).",
-    "- Set `HACK_SETUP_SYNC_MODE=warn` to only warn, or `HACK_SETUP_SYNC_MODE=off` to disable.",
-    "- Refresh project + user integrations: `hack setup sync --all-scopes`",
-    "- Audit integration state only: `hack setup sync --all-scopes --check`",
-    "- Remove generated integration artifacts: `hack setup sync --all-scopes --remove`",
-    "- After upgrading CLI: `hack update` then `hack setup sync --all-scopes`",
-    "",
-    "Agent setup (CLI-first):",
-    "- Cursor rules: `hack setup cursor`",
-    "- Claude hooks: `hack setup claude`",
-    "- Codex skill: `hack setup codex`",
-    "- Tickets skill: `hack setup tickets`",
-    "- Refresh all local agent integrations: `hack setup sync --all-scopes`",
-    "- Init prompt: `hack agent init` (use --client cursor|claude|codex to open)",
-    "- Init patterns: `hack agent patterns`",
-    "- MCP (no-shell only): `hack setup mcp`",
-    "- MCP install (explicit): `hack mcp install --all --scope project`",
+    renderInstructionSections({ surface: "docs", headingStyle: "plain" }),
     DOC_MARKER_END,
     "",
   ];
@@ -389,6 +275,16 @@ function removeSnippet(opts: { readonly existing: string }): string {
     return "";
   }
   return ensureTrailingNewline({ text: replaced.replace(/\n{3,}/g, "\n\n") });
+}
+
+function extractSnippetRegion(opts: {
+  readonly content: string;
+}): string | null {
+  const pattern = new RegExp(
+    `${escapeRegex({ value: DOC_MARKER_START })}[\\s\\S]*?${escapeRegex({ value: DOC_MARKER_END })}`
+  );
+  const match = opts.content.match(pattern);
+  return match ? match[0] : null;
 }
 
 function hasAgentDocSnippet(opts: { readonly content: string }): boolean {

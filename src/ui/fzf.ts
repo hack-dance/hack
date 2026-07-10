@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { ensureDir } from "../lib/fs.ts";
 import { execOrThrow } from "../lib/shell.ts";
 
@@ -247,14 +248,10 @@ export async function fzfFilterOne(
 /**
  * Get the path where bundled fzf should be installed.
  *
- * @returns Installation path, or null if HOME is not set
+ * @returns Installation path under the global hack dir
  */
-function getBundledFzfInstallPath(): string | null {
-  const home = process.env.HOME;
-  if (!home) {
-    return null;
-  }
-  return `${home}/.hack/bin/fzf`;
+function getBundledFzfInstallPath(): string {
+  return resolve(resolveGlobalHackDir(), "bin", "fzf");
 }
 
 type BundledFzfArtifact = {
@@ -299,12 +296,9 @@ function bundledFzfTarballCandidates(filename: string): readonly string[] {
     out.push(resolve(envDir, "binaries", "fzf", filename));
   }
 
-  const home = process.env.HOME;
-  if (home) {
-    const defaultAssets = resolve(home, ".hack", "assets");
-    out.push(resolve(defaultAssets, filename));
-    out.push(resolve(defaultAssets, "binaries", "fzf", filename));
-  }
+  const defaultAssets = resolve(resolveGlobalHackDir(), "assets");
+  out.push(resolve(defaultAssets, filename));
+  out.push(resolve(defaultAssets, "binaries", "fzf", filename));
 
   // Dev/source layout: <repo>/src/ui/fzf.ts → <repo>/binaries/fzf/<tarball>
   out.push(resolve(import.meta.dir, "../../binaries/fzf", filename));

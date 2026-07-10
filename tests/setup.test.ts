@@ -72,8 +72,10 @@ test("installCodexSkill writes SKILL.md with hack-cli frontmatter", async () => 
   const content = await Bun.file(skillPath).text();
   expect(content).toContain("name: hack-cli");
   expect(content).toContain("hack setup cursor");
-  expect(content).toContain("## Product Boundary");
-  expect(content).toContain("Unsupported Experimental Remote");
+  expect(content).toContain("## Product boundary");
+  expect(content).toContain(
+    "Experimental and unsupported: remote/gateway/node/dispatch"
+  );
   expect(content).toContain("singleton.ports");
   expect(content).not.toContain(".hack/hack.env.json");
 });

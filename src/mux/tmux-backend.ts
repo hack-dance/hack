@@ -7,6 +7,8 @@ import type {
   MuxSessionCreateResult,
 } from "./mux-backend.ts";
 
+const LIFECYCLE_OWNER_OPTION = "@hack_lifecycle_owner";
+
 function parseIntOrNull(value: string | undefined): number | null {
   const n = Number.parseInt(value ?? "", 10);
   return Number.isFinite(n) ? n : null;
@@ -87,6 +89,7 @@ export function createTmuxBackend(): MuxBackend {
     readonly name: string;
     readonly cwd?: string;
     readonly env?: Readonly<Record<string, string>>;
+    readonly lifecycleOwnerToken?: string;
   }): Promise<MuxSessionCreateResult> => {
     if (!available) {
       return { ok: false, error: "tmux_unavailable" };
@@ -113,6 +116,30 @@ export function createTmuxBackend(): MuxBackend {
       };
     }
 
+    if (opts.lifecycleOwnerToken) {
+      const ownerResult = await exec(
+        [
+          "tmux",
+          "set-option",
+          "-t",
+          opts.name,
+          LIFECYCLE_OWNER_OPTION,
+          opts.lifecycleOwnerToken,
+        ],
+        { stdin: "ignore" }
+      );
+      if (ownerResult.exitCode !== 0) {
+        await exec(["tmux", "kill-session", "-t", opts.name], {
+          stdin: "ignore",
+        });
+        return {
+          ok: false,
+          error: "owner_metadata_failed",
+          stderr: ownerResult.stderr.trim(),
+        };
+      }
+    }
+
     const sessions = await listSessions();
     const session = sessions.find((s) => s.name === opts.name) ?? null;
     return { ok: true, session };
@@ -124,6 +151,38 @@ export function createTmuxBackend(): MuxBackend {
     return await exec(["tmux", "kill-session", "-t", opts.name], {
       stdin: "ignore",
     });
+  };
+
+  const readLifecycleOwnerToken = async (opts: {
+    readonly name: string;
+  }): Promise<string | null> => {
+    const result = await exec(
+      ["tmux", "show-options", "-v", "-t", opts.name, LIFECYCLE_OWNER_OPTION],
+      { stdin: "ignore" }
+    );
+    if (result.exitCode !== 0) {
+      return null;
+    }
+    const token = result.stdout.trim();
+    return token.length > 0 ? token : null;
+  };
+
+  const listSessionWindowNames = async (opts: {
+    readonly name: string;
+  }): Promise<ReadonlySet<string> | null> => {
+    const result = await exec(
+      ["tmux", "list-windows", "-t", opts.name, "-F", "#{window_name}"],
+      { stdin: "ignore" }
+    );
+    if (result.exitCode !== 0) {
+      return null;
+    }
+    return new Set(
+      result.stdout
+        .split("\n")
+        .map((name) => name.trim())
+        .filter((name) => name.length > 0)
+    );
   };
 
   const execInSession = async (opts: {
@@ -164,6 +223,8 @@ export function createTmuxBackend(): MuxBackend {
     listSessions,
     createSession,
     killSession,
+    readLifecycleOwnerToken,
+    listSessionWindowNames,
     execInSession,
     sendInput,
   };

@@ -1,9 +1,10 @@
 import { lookup } from "node:dns/promises";
 import { dirname, resolve } from "node:path";
-import { confirm, isCancel, note, spinner } from "@clack/prompts";
+import { note, spinner } from "@clack/prompts";
+import { YAML } from "bun";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
-import { optPath } from "../cli/options.ts";
+import { optJson, optPath } from "../cli/options.ts";
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_GRAFANA_HOST,
@@ -17,14 +18,15 @@ import {
   GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_CADDY_DIR_NAME,
   GLOBAL_COREDNS_FILENAME,
-  GLOBAL_HACK_DIR_NAME,
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
   HACK_PROJECT_DIR_PRIMARY,
   PROJECT_ENV_CONTRACT_FILENAME,
+  PROJECT_ENV_KEY_FILENAME,
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
+import { resolveTicketsIntegrationEnablement } from "../control-plane/extensions/tickets/enablement.ts";
 import { createGitTicketsChannel } from "../control-plane/extensions/tickets/tickets-git-channel.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { probeDaemonApi } from "../daemon/client.ts";
@@ -34,17 +36,35 @@ import {
   readInternalExtraHostsIp,
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
-import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import { emitCliResult, okResult } from "../lib/cli-result.ts";
+import {
+  resolveGlobalConfigPath,
+  resolveGlobalHackDir,
+} from "../lib/config-paths.ts";
+import {
+  inspectTrackedGeneratedFiles,
+  untrackGeneratedFiles,
+} from "../lib/doctor-generated-files.ts";
 import { checkMacHostTlsTrust } from "../lib/doctor-host-tls.ts";
+import {
+  findCrossCheckoutInstances,
+  inspectWorktreeSecretKeys,
+} from "../lib/doctor-worktree.ts";
 import { parseDotEnv } from "../lib/env.ts";
 import {
   ensureDir,
+  ensureGitignoreEntry,
   pathExists,
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
+import {
+  confirmSafe,
+  isExplicitlyNonInteractive,
+} from "../lib/interactivity.ts";
 import {
   ensureBundledMutagenInstalled,
   getManagedMutagenAgentBundlePath,
@@ -53,12 +73,14 @@ import {
 } from "../lib/mutagen.ts";
 import { isMac } from "../lib/os.ts";
 import {
+  defaultProjectSlugFromPath,
   findProjectContext,
   readProjectConfig,
   readProjectDevHost,
 } from "../lib/project.ts";
 import {
   discoverComposeServiceNames,
+  ensureHackDirGitignore,
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
   type LegacyComposeEnvFileReference,
@@ -68,7 +90,10 @@ import {
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
 } from "../lib/project-env-config.ts";
-import { inspectProjectLifecycleHygiene } from "../lib/project-lifecycle-hygiene.ts";
+import {
+  inspectProjectLifecycleHygiene,
+  repairProjectLifecycleSessions,
+} from "../lib/project-lifecycle-hygiene.ts";
 import {
   findMissingRegistryEntries,
   findOrphanRuntimeProjects,
@@ -133,7 +158,7 @@ const optMigrateEnvConfig = defineOption({
     "Migrate legacy hack.env.json/.env state to the new env config files",
 } as const);
 
-const doctorOptions = [optPath, optFix, optMigrateEnvConfig] as const;
+const doctorOptions = [optPath, optFix, optMigrateEnvConfig, optJson] as const;
 const doctorPositionals = [] as const;
 
 const doctorSpec = defineCommand({
@@ -208,6 +233,9 @@ const DOCTOR_SUMMARY_GROUPS = [
       "env mode",
       "env materialization",
       "env overlay warnings",
+      "worktree keys",
+      "worktree instances",
+      "generated files",
     ]),
   },
   {
@@ -219,8 +247,9 @@ const DOCTOR_SUMMARY_GROUPS = [
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
+  const json = args.options.json === true;
   const results: TimedCheckResult[] = [];
-  const s = spinner();
+  const s = createDoctorProgress({ json });
   s.start("Running doctor checks...");
 
   // Tools
@@ -491,6 +520,42 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     results.push(
       await runCheck(
         s,
+        "worktree keys",
+        () => checkWorktreeSecretKeys({ startDir }),
+        {
+          timeoutMs: 5000,
+        }
+      )
+    );
+    results.push(
+      await runCheck(
+        s,
+        "generated files",
+        () => checkTrackedGeneratedFiles({ startDir }),
+        {
+          timeoutMs: 5000,
+        }
+      )
+    );
+    if (
+      results.some(
+        (result) => result.name === "docker daemon" && result.status === "ok"
+      )
+    ) {
+      results.push(
+        await runCheck(
+          s,
+          "worktree instances",
+          () => checkWorktreeInstanceCollisions({ startDir }),
+          {
+            timeoutMs: 5000,
+          }
+        )
+      );
+    }
+    results.push(
+      await runCheck(
+        s,
         "caddy hosts",
         () => checkCaddyHostMapping({ startDir }),
         {
@@ -525,6 +590,18 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   }
 
   s.stop(`Doctor checks complete (${results.length} checks)`);
+
+  const hasError = results.some((r) => r.status === "error");
+
+  if (json) {
+    return finishDoctorJson({
+      results,
+      hasError,
+      fixRequested:
+        args.options.fix === true || args.options.migrateEnvConfig === true,
+    });
+  }
+
   await renderDoctorSummary(results);
   emitSlowChecksNote(results);
   renderMacNote();
@@ -535,12 +612,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   if (args.options.fix || args.options.migrateEnvConfig) {
     await runDoctorFix({
       startDir,
-      migrateEnvConfig: args.options.fix || args.options.migrateEnvConfig,
+      migrateEnvConfig: args.options.migrateEnvConfig === true,
     });
     note("Re-run: hack doctor", "doctor");
   }
 
-  const hasError = results.some((r) => r.status === "error");
   if (hasError) {
     note("Fix the errors above, then rerun: hack doctor", "doctor");
     return 1;
@@ -548,6 +624,98 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 
   return 0;
 };
+
+export type DoctorJsonCheck = {
+  readonly id: string;
+  readonly status: CheckStatus;
+  readonly detail: string;
+  readonly durationMs: number;
+};
+
+export type DoctorJsonData = {
+  readonly checks: readonly DoctorJsonCheck[];
+  readonly summary: readonly string[];
+  readonly counts: {
+    readonly ok: number;
+    readonly warn: number;
+    readonly error: number;
+  };
+};
+
+/**
+ * Shape the doctor check results for the `--json` envelope.
+ */
+export function buildDoctorJsonData(opts: {
+  readonly results: readonly TimedCheckResult[];
+}): DoctorJsonData {
+  const counts = { ok: 0, warn: 0, error: 0 };
+  for (const result of opts.results) {
+    counts[result.status] += 1;
+  }
+  return {
+    checks: opts.results.map((result) => ({
+      id: result.name,
+      status: result.status,
+      detail: result.message,
+      durationMs: result.durationMs,
+    })),
+    summary: buildDoctorSummaryLines({ results: opts.results }),
+    counts,
+  };
+}
+
+/**
+ * JSON tail for `hack doctor --json`: emits the envelope and maps error
+ * checks to exit 1. `--fix` is intentionally not combined with `--json`.
+ */
+function finishDoctorJson(opts: {
+  readonly results: readonly TimedCheckResult[];
+  readonly hasError: boolean;
+  readonly fixRequested: boolean;
+}): number {
+  if (opts.fixRequested) {
+    process.stderr.write(
+      "--fix/--migrate-env-config are ignored with --json; run them separately.\n"
+    );
+  }
+  emitCliResult({
+    result: okResult({ data: buildDoctorJsonData({ results: opts.results }) }),
+  });
+  return opts.hasError ? 1 : 0;
+}
+
+type DoctorProgress = {
+  start(message?: string): void;
+  stop(message?: string): void;
+};
+
+/**
+ * Spinner wrapper that stays silent on non-TTY stdout (piped/automation) so
+ * cursor-control ANSI sequences never leak into machine-read output, and
+ * emits nothing at all in `--json` mode.
+ */
+function createDoctorProgress(opts: {
+  readonly json: boolean;
+}): DoctorProgress {
+  const interactive =
+    !opts.json &&
+    process.stdout.isTTY === true &&
+    (process.env.NO_COLOR ?? "").trim().length === 0;
+  if (interactive) {
+    return spinner();
+  }
+
+  return {
+    start: (_message?: string) => {
+      // Quiet in non-TTY/JSON mode.
+    },
+    stop: (message?: string) => {
+      if (!opts.json && message) {
+        process.stdout.write(`${message}\n`);
+      }
+    },
+  };
+}
 
 export const doctorCommand = withHandler(doctorSpec, handleDoctor);
 
@@ -769,16 +937,7 @@ async function checkIngressSubnet(): Promise<CheckResult> {
 }
 
 async function checkGlobalFiles(): Promise<CheckResult> {
-  const home = getHomeDir();
-  if (!home) {
-    return {
-      name: "global files",
-      status: "error",
-      message: "HOME is not set",
-    };
-  }
-
-  const root = resolve(home, GLOBAL_HACK_DIR_NAME);
+  const root = resolveGlobalHackDir();
   const caddyCompose = resolve(
     root,
     GLOBAL_CADDY_DIR_NAME,
@@ -1540,6 +1699,17 @@ async function checkProjectTicketsGitHealth({
     };
   }
 
+  const ticketsEnablement = await resolveTicketsIntegrationEnablement({
+    projectRoot: project.projectRoot,
+  });
+  if (!ticketsEnablement.project) {
+    return {
+      name: "tickets git",
+      status: "ok",
+      message: "Disabled",
+    };
+  }
+
   const controlPlane = await readControlPlaneConfig({
     projectDir: project.projectDir,
   });
@@ -1677,8 +1847,14 @@ async function checkProjectLifecycleHygiene({
 
   const inspection = await inspectProjectLifecycleHygiene({
     projectDir: ctx.projectDir,
+    projectRoot: ctx.projectRoot,
   });
-  if (inspection.staleEntries.length === 0) {
+  if (
+    inspection.staleEntries.length === 0 &&
+    inspection.orphanedProcessGroups.length === 0 &&
+    inspection.orphanedSessions.length === 0 &&
+    inspection.unverifiedSessions.length === 0
+  ) {
     return {
       name: "lifecycle hygiene",
       status: "ok",
@@ -1687,7 +1863,7 @@ async function checkProjectLifecycleHygiene({
     };
   }
 
-  const orphanedGroups = new Set<number>();
+  const orphanedGroups = new Set<number>(inspection.orphanedProcessGroups);
   for (const entry of inspection.staleEntries) {
     for (const group of entry.liveProcessGroups) {
       orphanedGroups.add(group);
@@ -1695,18 +1871,39 @@ async function checkProjectLifecycleHygiene({
   }
 
   const details = [
-    `${inspection.staleEntries.length} stale lifecycle state entr${inspection.staleEntries.length === 1 ? "y" : "ies"}`,
+    ...(inspection.staleEntries.length > 0
+      ? [
+          `${inspection.staleEntries.length} stale lifecycle state entr${inspection.staleEntries.length === 1 ? "y" : "ies"}`,
+        ]
+      : []),
     ...(orphanedGroups.size > 0
       ? [
           `${orphanedGroups.size} orphaned lifecycle process group${orphanedGroups.size === 1 ? "" : "s"}`,
         ]
       : []),
+    ...(inspection.orphanedSessions.length > 0
+      ? [
+          `${inspection.orphanedSessions.length} owned lifecycle session${inspection.orphanedSessions.length === 1 ? "" : "s"} without a running instance`,
+        ]
+      : []),
+    ...(inspection.unverifiedSessions.length > 0
+      ? [
+          `${inspection.unverifiedSessions.length} same-name lifecycle session collision${inspection.unverifiedSessions.length === 1 ? "" : "s"} with unverified ownership`,
+        ]
+      : []),
   ];
+
+  let nextStep = "run: hack down";
+  if (inspection.orphanedSessions.length > 0) {
+    nextStep = "run: hack doctor --fix";
+  } else if (inspection.unverifiedSessions.length > 0) {
+    nextStep = "manual review required; no session was modified";
+  }
 
   return {
     name: "lifecycle hygiene",
     status: "warn",
-    message: `${details.join("; ")} (run: hack down)`,
+    message: `${details.join("; ")} (${nextStep})`,
   };
 }
 
@@ -1890,6 +2087,206 @@ async function checkProjectEnvMaterialization({
   };
 }
 
+async function checkWorktreeSecretKeys({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const name = "worktree keys";
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+
+  const inspection = await inspectWorktreeSecretKeys({
+    projectRoot: ctx.projectRoot,
+  });
+  if (!inspection) {
+    return {
+      name,
+      status: "ok",
+      message: "Skipped (not a git checkout)",
+    };
+  }
+  if (inspection.checkouts.length <= 1) {
+    return {
+      name,
+      status: "ok",
+      message: "Single checkout (no linked worktrees)",
+    };
+  }
+  if (inspection.divergent) {
+    const shared = inspection.sharedKeyPath ?? "unavailable";
+    return {
+      name,
+      status: "warn",
+      message: `Divergent .hack.secret.key contents across checkouts: ${inspection.divergentKeyPaths.join(
+        ", "
+      )}. Secrets encrypted in one checkout will not decrypt in another. Keep one key (shared location: ${shared}) and remove the divergent copies.`,
+    };
+  }
+
+  return {
+    name,
+    status: "ok",
+    message: `Env key consistent across ${inspection.checkouts.length} checkouts`,
+  };
+}
+
+/**
+ * Warns when hack-generated machine-local files (`.hack/.internal/`,
+ * `.hack/.branch/`, `.hack/.env`, `.hack/.env.state.json`,
+ * `.hack/hack.env.*.local.yaml`, `.hack.secret.key`) are tracked in git.
+ * A tracked secret key is reported as an error because it is a committed
+ * secret. `hack doctor --fix` untracks the offenders (files stay on disk) and
+ * ensures the committed `.hack/.gitignore`.
+ */
+async function checkTrackedGeneratedFiles({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const name = "generated files";
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+
+  const inspection = await inspectTrackedGeneratedFiles({
+    projectRoot: ctx.projectRoot,
+    projectDirName: ctx.projectDirName,
+  });
+  if (!inspection) {
+    return {
+      name,
+      status: "ok",
+      message: "Skipped (not a git checkout)",
+    };
+  }
+  if (inspection.trackedPaths.length === 0) {
+    return {
+      name,
+      status: "ok",
+      message: "No generated files tracked in git",
+    };
+  }
+
+  const offenders = inspection.trackedPaths.join(", ");
+  if (inspection.secretKeyTracked) {
+    return {
+      name,
+      status: "error",
+      message: `${PROJECT_ENV_KEY_FILENAME} is committed to git — it is a secret. Run 'hack doctor --fix' to untrack it (file stays on disk), rewrite or rotate the key ('hack env' secrets encrypted with it should be re-encrypted), and commit the removal. Tracked generated files: ${offenders}`,
+    };
+  }
+  return {
+    name,
+    status: "warn",
+    message: `Machine-local generated files are tracked in git: ${offenders}. Run 'hack doctor --fix' to untrack them (files stay on disk) and ensure the committed ${ctx.projectDirName}/.gitignore.`,
+  };
+}
+
+async function checkWorktreeInstanceCollisions({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const name = "worktree instances";
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+
+  const baseProjectName = await resolveDoctorBaseProjectName(ctx);
+  const runtime = await readRuntimeProjects({ includeGlobal: false });
+  if (!runtime.ok) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (${runtime.error})`,
+    };
+  }
+
+  const instances = findCrossCheckoutInstances({
+    baseProjectName,
+    currentProjectDir: ctx.projectDir,
+    runtime: runtime.runtime,
+  });
+  const runningBase = instances.filter(
+    (instance) => instance.running && instance.branch === null
+  );
+  if (runningBase.length > 0) {
+    const dirs = runningBase
+      .map((instance) => instance.workingDir ?? "unknown path")
+      .join(", ");
+    return {
+      name,
+      status: "warn",
+      message: `Base instance "${baseProjectName}" is running from another checkout (${dirs}) and claims this project's dev_host. Use --branch here (linked worktrees default to a branch instance) or run 'hack down' in that checkout.`,
+    };
+  }
+
+  const runningBranches = instances.filter(
+    (instance) => instance.running && instance.branch !== null
+  );
+  if (runningBranches.length > 0) {
+    const summary = runningBranches
+      .map(
+        (instance) =>
+          `${instance.composeProject} (${instance.workingDir ?? "unknown path"})`
+      )
+      .join(", ");
+    return {
+      name,
+      status: "ok",
+      message: `Branch instances running from other checkouts: ${summary}`,
+    };
+  }
+
+  return {
+    name,
+    status: "ok",
+    message: "No cross-checkout instances running",
+  };
+}
+
+async function resolveDoctorBaseProjectName(
+  ctx: NonNullable<Awaited<ReturnType<typeof findProjectContext>>>
+): Promise<string> {
+  const text = await readTextFile(ctx.composeFile);
+  if (text) {
+    let parsed: unknown = null;
+    try {
+      parsed = YAML.parse(text);
+    } catch {
+      parsed = null;
+    }
+    if (isRecord(parsed)) {
+      const composeName = getString(parsed, "name")?.trim();
+      if (composeName && composeName.length > 0) {
+        return composeName;
+      }
+    }
+  }
+
+  const cfg = await readProjectConfig(ctx);
+  const derived = defaultProjectSlugFromPath(ctx.projectRoot);
+  const cfgName = (cfg.name ?? derived).trim();
+  return cfgName.length > 0 ? cfgName : derived;
+}
+
 async function checkCaddyHostMapping({
   startDir,
 }: {
@@ -2008,8 +2405,9 @@ async function runDoctorFix(opts: {
     migrateEnvConfig: opts.migrateEnvConfig,
   });
   note(remediationPlan.join("\n"), "doctor plan");
+  skippedDoctorFixSteps.length = 0;
 
-  const ok = await confirmOrThrow({
+  const ok = await doctorConfirm({
     message: opts.migrateEnvConfig
       ? "Start guided remediation steps now? (includes env migration when applicable)"
       : "Start guided remediation steps now?",
@@ -2020,6 +2418,7 @@ async function runDoctorFix(opts: {
   }
 
   await maybeInstallMutagenForDoctorFix();
+  await maybeUntrackGeneratedFiles({ startDir: opts.startDir });
 
   const dockerOk = await dockerInfoOk();
   if (!dockerOk) {
@@ -2027,6 +2426,7 @@ async function runDoctorFix(opts: {
     return;
   }
 
+  await maybeRepairProjectLifecycleSessions({ startDir: opts.startDir });
   await maybeRepairHackd();
 
   const paths = getGlobalPaths();
@@ -2056,6 +2456,27 @@ async function runDoctorFix(opts: {
   if (opts.migrateEnvConfig) {
     await maybeMigrateProjectEnvConfig({ startDir: opts.startDir });
   }
+
+  renderSkippedDoctorFixSteps();
+}
+
+/**
+ * Prints a single summary of destructive/system-level `--fix` steps that
+ * were skipped because the run was non-interactive (no TTY, `--no-interactive`,
+ * or `HACK_NO_INTERACTIVE`), with the command to run them interactively.
+ */
+function renderSkippedDoctorFixSteps(): void {
+  if (skippedDoctorFixSteps.length === 0) {
+    return;
+  }
+  note(
+    [
+      "Skipped (non-interactive; involve sudo/system-level changes):",
+      ...skippedDoctorFixSteps.map((what) => `- ${what}`),
+      "Run interactively (without --no-interactive/HACK_NO_INTERACTIVE) to apply them: hack doctor --fix",
+    ].join("\n"),
+    "doctor fix"
+  );
 }
 
 async function maybeMigrateProjectEnvConfig(opts: {
@@ -2105,7 +2526,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
     ].join("\n"),
     "env migration"
   );
-  const shouldMigrate = await confirmOrThrow({
+  const shouldMigrate = await doctorConfirm({
     message:
       "Migrate project env from .hack/hack.env.json/.hack/.env to hack.env.*.yaml now?",
     initialValue: true,
@@ -2141,7 +2562,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
       }),
       "compose env repair"
     );
-    const shouldRepairCompose = await confirmOrThrow({
+    const shouldRepairCompose = await doctorConfirm({
       message:
         "Remove legacy .hack/.env* env_file references from compose now?",
       initialValue: true,
@@ -2192,7 +2613,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
     ].join("\n"),
     "env cleanup"
   );
-  const shouldCleanup = await confirmOrThrow({
+  const shouldCleanup = await doctorConfirm({
     message:
       "Remove legacy env files and obsolete project env config entries now?",
     initialValue: true,
@@ -2240,7 +2661,7 @@ async function maybeRepairModernProjectComposeEnvReferences(opts: {
     }),
     "compose env repair"
   );
-  const shouldRepairCompose = await confirmOrThrow({
+  const shouldRepairCompose = await doctorConfirm({
     message: "Remove legacy .hack/.env* env_file references from compose now?",
     initialValue: true,
   });
@@ -2277,48 +2698,123 @@ export async function buildDoctorRemediationPlanLines(opts: {
   readonly startDir: string;
   readonly migrateEnvConfig: boolean;
 }): Promise<string[]> {
-  const lines = [
-    "1. Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
-    "2. Repair tickets refs if the project repo needs it.",
+  const steps = [
+    "Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
+    "Repair tickets refs if the project repo needs it.",
   ];
-  if (!opts.migrateEnvConfig) {
-    return lines;
-  }
 
   const project = await findProjectContext(opts.startDir);
-  if (!project) {
-    lines.push(
-      "3. Skip env migration because no project was detected from this path."
+  if (project) {
+    steps.push(
+      "Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent."
     );
-    return lines;
+  }
+  const trackedGenerated = project
+    ? await inspectTrackedGeneratedFiles({
+        projectRoot: project.projectRoot,
+        projectDirName: project.projectDirName,
+      })
+    : null;
+  if (trackedGenerated && trackedGenerated.trackedPaths.length > 0) {
+    steps.push(
+      `Untrack machine-local generated files from git (git rm --cached; files stay on disk) and ensure the committed ${project?.projectDirName}/.gitignore: ${trackedGenerated.trackedPaths.join(", ")}`
+    );
+  }
+
+  if (opts.migrateEnvConfig) {
+    steps.push(await buildEnvMigrationPlanStep({ project }));
+  }
+
+  return steps.map((step, index) => `${index + 1}. ${step}`);
+}
+
+async function buildEnvMigrationPlanStep(opts: {
+  readonly project: Awaited<ReturnType<typeof findProjectContext>>;
+}): Promise<string> {
+  if (!opts.project) {
+    return "Skip env migration because no project was detected from this path.";
   }
 
   if (
     await projectEnvConfigExists({
-      projectDir: project.projectDir,
+      projectDir: opts.project.projectDir,
     })
   ) {
-    lines.push(
-      "3. Skip env migration because this project already uses hack.env.*.yaml."
-    );
-    return lines;
+    return "Skip env migration because this project already uses hack.env.*.yaml.";
   }
 
   const contractPath = resolve(
-    project.projectDir,
+    opts.project.projectDir,
     PROJECT_ENV_CONTRACT_FILENAME
   );
   if (await pathExists(contractPath)) {
-    lines.push(
-      "3. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml."
-    );
-    return lines;
+    return "Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.";
   }
 
-  lines.push(
-    "3. Skip env migration because no legacy project env config was found."
+  return "Skip env migration because no legacy project env config was found.";
+}
+
+/**
+ * `hack doctor --fix` step: untracks hack-generated machine-local files from
+ * the git index (`git rm --cached`; working-tree files are untouched) and
+ * ensures the committed `.hack/.gitignore` so they cannot leak back in.
+ */
+async function maybeUntrackGeneratedFiles(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findProjectContext(opts.startDir);
+  if (!project) {
+    return;
+  }
+
+  const inspection = await inspectTrackedGeneratedFiles({
+    projectRoot: project.projectRoot,
+    projectDirName: project.projectDirName,
+  });
+  if (!inspection || inspection.trackedPaths.length === 0) {
+    return;
+  }
+
+  note(
+    [
+      "Untracking machine-local generated files from git (files stay on disk):",
+      ...inspection.trackedPaths.map((path) => `- ${path}`),
+    ].join("\n"),
+    "generated files"
   );
-  return lines;
+
+  const untracked = await untrackGeneratedFiles({
+    projectRoot: project.projectRoot,
+    paths: inspection.trackedPaths,
+  });
+  if (!untracked.ok) {
+    note(
+      `Failed to untrack generated files: ${untracked.error ?? "unknown error"}`,
+      "generated files"
+    );
+    return;
+  }
+
+  await ensureHackDirGitignore({ projectDir: project.projectDir });
+  const notes = [
+    `Removed ${inspection.trackedPaths.length} path(s) from the git index and ensured ${project.projectDirName}/.gitignore.`,
+    "Commit the removal to stop sharing these files.",
+  ];
+  if (inspection.secretKeyTracked) {
+    // The nested .hack/.gitignore cannot cover the repo-root key file; without
+    // the root entry the just-untracked key shows up as untracked and gets
+    // re-committed.
+    await ensureGitignoreEntry({
+      gitignorePath: resolve(project.projectRoot, ".gitignore"),
+      entry: PROJECT_ENV_KEY_FILENAME,
+      comment: "# project env key",
+    });
+    notes.push(
+      `Ensured ${PROJECT_ENV_KEY_FILENAME} is ignored in the root .gitignore.`,
+      `${PROJECT_ENV_KEY_FILENAME} was committed — treat it as leaked: rotate the key and re-encrypt secrets, and consider rewriting git history if the repo is shared.`
+    );
+  }
+  note(notes.join("\n"), "generated files");
 }
 
 async function maybeRepairProjectTicketsGitHealth(opts: {
@@ -2326,6 +2822,13 @@ async function maybeRepairProjectTicketsGitHealth(opts: {
 }): Promise<void> {
   const project = await findProjectContext(opts.startDir);
   if (!project) {
+    return;
+  }
+
+  const ticketsEnablement = await resolveTicketsIntegrationEnablement({
+    projectRoot: project.projectRoot,
+  });
+  if (!ticketsEnablement.project) {
     return;
   }
 
@@ -2372,7 +2875,7 @@ async function maybeRepairProjectTicketsGitHealth(opts: {
     reasons.push("non-ticket files present");
   }
 
-  const okRepair = await confirmOrThrow({
+  const okRepair = await doctorConfirm({
     message: `Repair tickets git storage now? (${reasons.join("; ")})`,
     initialValue: true,
   });
@@ -2382,7 +2885,7 @@ async function maybeRepairProjectTicketsGitHealth(opts: {
 
   const pruneLegacyRef =
     health.hasLegacyRef &&
-    (await confirmOrThrow({
+    (await doctorConfirm({
       message: `Prune legacy tickets ref ${health.legacyRef ?? "refs/heads/hack/tickets"} after repair?`,
       initialValue: true,
     }));
@@ -2423,12 +2926,43 @@ function describeLegacyRepairStatus(input: {
   return input.didPruneLegacy ? "pruned" : "prune failed";
 }
 
+async function maybeRepairProjectLifecycleSessions(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findProjectContext(opts.startDir);
+  if (!project) {
+    return;
+  }
+  const repaired = await repairProjectLifecycleSessions({
+    projectDir: project.projectDir,
+    projectRoot: project.projectRoot,
+  });
+  if (repaired.repairedSessions.length > 0) {
+    note(
+      [
+        `Removed ${repaired.repairedSessions.length} ownership-proven orphan lifecycle session${repaired.repairedSessions.length === 1 ? "" : "s"}:`,
+        ...repaired.repairedSessions.map((sessionName) => `- ${sessionName}`),
+      ].join("\n"),
+      "lifecycle repair"
+    );
+  }
+  if (repaired.failures.length > 0) {
+    note(
+      [
+        "Lifecycle sessions left unchanged because safe repair could not be re-proven:",
+        ...repaired.failures.map((failure) => `- ${failure}`),
+      ].join("\n"),
+      "lifecycle repair"
+    );
+  }
+}
+
 async function maybeInstallMutagenForDoctorFix(): Promise<void> {
   if (getMutagenPath()) {
     return;
   }
 
-  const okMutagen = await confirmOrThrow({
+  const okMutagen = await doctorConfirm({
     message: "Install managed mutagen at ~/.hack/bin/mutagen?",
     initialValue: true,
   });
@@ -2451,18 +2985,48 @@ async function maybeInstallMutagenForDoctorFix(): Promise<void> {
   note(`Mutagen install failed (${installed.reason}${detail})`, "doctor");
 }
 
-async function confirmOrThrow(opts: {
+/**
+ * `hack doctor --fix` confirmation helper.
+ *
+ * Wraps {@link confirmSafe} with the doctor-specific non-interactive
+ * defaults: safe remediations (network/CoreDNS/CA/daemon restarts, generated
+ * file writes, tickets git repair) proceed automatically
+ * (`nonInteractive: "accept-default"`); destructive/system-level steps
+ * (anything invoking `sudo`, touching the macOS keychain, or writing outside
+ * the project) decline automatically and print a note via
+ * {@link noteSkippedDoctorFixStep} so the run stays non-blocking and
+ * auditable.
+ */
+async function doctorConfirm(opts: {
   readonly message: string;
   readonly initialValue: boolean;
+  readonly destructive?: boolean;
 }): Promise<boolean> {
-  const ok = await confirm({
+  const ok = await confirmSafe({
     message: opts.message,
     initialValue: opts.initialValue,
+    nonInteractive: opts.destructive ? "decline" : "accept-default",
   });
-  if (isCancel(ok)) {
-    throw new Error("Canceled");
+  if (!ok && opts.destructive && isExplicitlyNonInteractive()) {
+    noteSkippedDoctorFixStep({ what: firstLine(opts.message) });
   }
   return ok;
+}
+
+function firstLine(text: string): string {
+  return text.split("\n")[0] ?? text;
+}
+
+const skippedDoctorFixSteps: string[] = [];
+
+/**
+ * Records a destructive/system-level `--fix` step skipped under
+ * non-interactive mode so {@link runDoctorFix} can print a single summary
+ * note (with the interactive command to run them) instead of scattering the
+ * detail across the remediation log.
+ */
+function noteSkippedDoctorFixStep(opts: { readonly what: string }): void {
+  skippedDoctorFixSteps.push(opts.what);
 }
 
 async function dockerInfoOk(): Promise<boolean> {
@@ -2477,7 +3041,7 @@ async function maybeRepairHackd(): Promise<void> {
   }
 
   if (report.status === "incompatible") {
-    const okRestart = await confirmOrThrow({
+    const okRestart = await doctorConfirm({
       message: "Restart incompatible hackd now?",
       initialValue: true,
     });
@@ -2488,7 +3052,7 @@ async function maybeRepairHackd(): Promise<void> {
   }
 
   if (report.status === "stale") {
-    const okClear = await confirmOrThrow({
+    const okClear = await doctorConfirm({
       message: "Clear stale hackd pid/socket files?",
       initialValue: true,
     });
@@ -2497,7 +3061,7 @@ async function maybeRepairHackd(): Promise<void> {
     }
   }
 
-  const okStart = await confirmOrThrow({
+  const okStart = await doctorConfirm({
     message: "Start hackd now?",
     initialValue: true,
   });
@@ -2547,7 +3111,7 @@ async function ensureIngressNetwork(): Promise<{
   }
 
   const action = ingress.exists ? "Recreate" : "Create";
-  const okNetwork = await confirmOrThrow({
+  const okNetwork = await doctorConfirm({
     message: `${action} ${DEFAULT_INGRESS_NETWORK} with subnet ${DEFAULT_INGRESS_SUBNET}?`,
     initialValue: true,
   });
@@ -2619,7 +3183,7 @@ async function maybeExportCaddyCaCert(opts: {
     return;
   }
 
-  const okCa = await confirmOrThrow({
+  const okCa = await doctorConfirm({
     message: "Export Caddy Local CA cert for container trust?",
     initialValue: true,
   });
@@ -2641,9 +3205,12 @@ async function maybeRepairMacHostTlsTrust(): Promise<void> {
   }
 
   note(hostTlsTrust.message, "doctor");
-  const okRepair = await confirmOrThrow({
+  // Not classified destructive: `hack global trust` is itself
+  // non-interactive-safe — it preflights sudo and skips only the System
+  // keychain step, while the safe host trust env/bundle writes always run.
+  const okRepair = await doctorConfirm({
     message:
-      "Repair macOS host TLS trust now? (Bun/Node/curl/git trust for https://*.hack)",
+      "Repair macOS host TLS trust now? (Bun/Node/curl/git trust for https://*.hack; the sudo System-keychain step is skipped automatically when it would prompt)",
     initialValue: true,
   });
   if (!okRepair) {
@@ -2709,13 +3276,11 @@ async function migrateDnsmasqToContainerIpIfNeeded(): Promise<
     return "not-needed";
   }
 
-  const okMigrate = await confirm({
-    message: `Update dnsmasq to use ${targetIp} for host routing?`,
+  const okMigrate = await doctorConfirm({
+    message: `Update dnsmasq to use ${targetIp} for host routing? (requires sudo to restart dnsmasq and flush the DNS cache)`,
     initialValue: true,
+    destructive: true,
   });
-  if (isCancel(okMigrate)) {
-    throw new Error("Canceled");
-  }
   if (!okMigrate) {
     return "skipped";
   }
@@ -2878,11 +3443,7 @@ type GlobalPaths = {
 };
 
 function getGlobalPaths(): GlobalPaths {
-  const home = getHomeDir();
-  if (!home) {
-    throw new Error("HOME is not set");
-  }
-  const root = resolve(home, GLOBAL_HACK_DIR_NAME);
+  const root = resolveGlobalHackDir();
   const caddyDir = resolve(root, GLOBAL_CADDY_DIR_NAME);
   const caddyCompose = resolve(caddyDir, GLOBAL_CADDY_COMPOSE_FILENAME);
   const coreDnsConfig = resolve(caddyDir, GLOBAL_COREDNS_FILENAME);
@@ -2912,13 +3473,10 @@ async function writeWithPromptIfDifferent(
   }
 
   if (existing !== null) {
-    const ok = await confirm({
+    const ok = await doctorConfirm({
       message: `Overwrite existing file?\n${absolutePath}`,
       initialValue: true,
     });
-    if (isCancel(ok)) {
-      throw new Error("Canceled");
-    }
     if (!ok) {
       return;
     }
@@ -3155,7 +3713,7 @@ async function canConnectTcp(opts: {
 // Keep macOS guidance at the end so it doesn't push other output off-screen.
 // (Called from the command handler.)
 async function runCheck(
-  _s: ReturnType<typeof spinner>,
+  _s: DoctorProgress,
   name: string,
   fn: () => CheckResult | Promise<CheckResult>,
   opts?: { readonly timeoutMs?: number }
@@ -3181,8 +3739,4 @@ async function runCheck(
     const res: CheckResult = { name, status: "error", message };
     return { ...res, durationMs };
   }
-}
-
-function getHomeDir(): string | null {
-  return process.env.HOME ?? null;
 }

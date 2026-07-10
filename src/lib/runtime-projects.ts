@@ -1,10 +1,10 @@
 import { resolve } from "node:path";
 import {
-  GLOBAL_HACK_DIR_NAME,
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
+import { resolveGlobalHackDir } from "./config-paths.ts";
 import { pathExists } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
 import { parseJsonLines } from "./json-lines.ts";
@@ -154,8 +154,7 @@ export async function readRuntimeProjects(opts: {
     .filter((id) => id.length > 0);
   const inspectById = await readContainerInspectData({ ids });
 
-  const home = process.env.HOME ?? "";
-  const globalRoot = home ? resolve(home, GLOBAL_HACK_DIR_NAME) : "";
+  const globalRoot = resolveGlobalHackDir();
 
   const containers: RuntimeContainer[] = [];
   for (const row of baseRows) {

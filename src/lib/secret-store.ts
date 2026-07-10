@@ -13,6 +13,7 @@ import type {
   SecretsConfig,
 } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
 
 const ENCRYPTED_FILE_KEY_ENV = "HACK_SECRETS_FILE_KEY";
@@ -420,6 +421,14 @@ function resolveConfiguredPath(input: {
   const home = (process.env.HOME ?? "").trim();
   if (raw === "~") {
     return home;
+  }
+  if (raw === "~/.hack" || raw.startsWith("~/.hack/")) {
+    // "~/.hack" is the canonical global hack dir; route it through the seam so
+    // HACK_HOME-isolated environments keep secrets under the override dir.
+    const rest = raw.slice("~/.hack/".length);
+    return rest.length > 0
+      ? resolve(resolveGlobalHackDir(), rest)
+      : resolveGlobalHackDir();
   }
   if (raw.startsWith("~/")) {
     return resolve(home, raw.slice(2));

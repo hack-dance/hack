@@ -1,24 +1,35 @@
-import { afterAll, beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
+
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: string[][] = [];
+const runOpts: { stdout?: string }[] = [];
 const execCalls: string[][] = [];
 
-mock.module("../src/lib/shell.ts", () => ({
-  exec: async (cmd: readonly string[]) => {
-    execCalls.push([...cmd]);
-    return { exitCode: 0, stdout: "", stderr: "" };
+const shellMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/shell.ts",
+  overrides: {
+    exec: async (cmd: readonly string[]) => {
+      execCalls.push([...cmd]);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    execOrThrow: async (cmd: readonly string[]) => {
+      execCalls.push([...cmd]);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    run: async (
+      cmd: readonly string[],
+      opts: { readonly stdout?: string } = {}
+    ) => {
+      runCalls.push([...cmd]);
+      runOpts.push({ stdout: opts.stdout });
+      return 0;
+    },
+    findExecutableInPath: () => "/usr/bin/docker",
+    CommandError: class CommandError extends Error {},
   },
-  execOrThrow: async (cmd: readonly string[]) => {
-    execCalls.push([...cmd]);
-    return { exitCode: 0, stdout: "", stderr: "" };
-  },
-  run: async (cmd: readonly string[]) => {
-    runCalls.push([...cmd]);
-    return 0;
-  },
-  findExecutableInPath: () => "/usr/bin/docker",
-  CommandError: class CommandError extends Error {},
-}));
+});
 
 async function loadComposeRuntimeBackend() {
   return (
@@ -28,13 +39,34 @@ async function loadComposeRuntimeBackend() {
   ).composeRuntimeBackend;
 }
 
+/**
+ * Restores a stubbed isTTY property. When the stream had no own isTTY
+ * descriptor before the stub, the stubbed own property must be deleted
+ * (skipping the restore would leak the stubbed value into other test files).
+ */
+function restoreIsTty(opts: {
+  readonly stream: NodeJS.ReadStream | NodeJS.WriteStream;
+  readonly descriptor: PropertyDescriptor | undefined;
+}): void {
+  if (opts.descriptor) {
+    Object.defineProperty(opts.stream, "isTTY", opts.descriptor);
+    return;
+  }
+  Reflect.deleteProperty(opts.stream, "isTTY");
+}
+
+beforeAll(() => {
+  shellMock.activate();
+});
+
 beforeEach(() => {
   runCalls.length = 0;
+  runOpts.length = 0;
   execCalls.length = 0;
 });
 
 afterAll(() => {
-  mock.restore();
+  shellMock.deactivate();
 });
 
 test("composeRuntimeBackend.up builds compose args with profiles and detach", async () => {
@@ -193,12 +225,8 @@ test("composeRuntimeBackend.exec supports workdir and args", async () => {
       cwd: "/tmp",
     });
   } finally {
-    if (stdinDescriptor) {
-      Object.defineProperty(process.stdin, "isTTY", stdinDescriptor);
-    }
-    if (stdoutDescriptor) {
-      Object.defineProperty(process.stdout, "isTTY", stdoutDescriptor);
-    }
+    restoreIsTty({ stream: process.stdin, descriptor: stdinDescriptor });
+    restoreIsTty({ stream: process.stdout, descriptor: stdoutDescriptor });
   }
 
   expect(runCalls[0]).toEqual([
@@ -247,12 +275,8 @@ test("composeRuntimeBackend.exec disables TTY for non-interactive sessions", asy
       cwd: "/tmp",
     });
   } finally {
-    if (stdinDescriptor) {
-      Object.defineProperty(process.stdin, "isTTY", stdinDescriptor);
-    }
-    if (stdoutDescriptor) {
-      Object.defineProperty(process.stdout, "isTTY", stdoutDescriptor);
-    }
+    restoreIsTty({ stream: process.stdin, descriptor: stdinDescriptor });
+    restoreIsTty({ stream: process.stdout, descriptor: stdoutDescriptor });
   }
 
   expect(runCalls[0]).toEqual([
@@ -268,4 +292,38 @@ test("composeRuntimeBackend.exec disables TTY for non-interactive sessions", asy
     "bun",
     "dev",
   ]);
+});
+
+test("detached up routes stdout to stderr when requested (--json purity)", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
+  await composeRuntimeBackend.up({
+    composeFiles: ["/tmp/compose.yml"],
+    composeProject: "demo",
+    detach: true,
+    cwd: "/tmp",
+    routeStdoutToStderr: true,
+  });
+  expect(runOpts[0]?.stdout).toBe("stderr");
+});
+
+test("detached up inherits stdout by default", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
+  await composeRuntimeBackend.up({
+    composeFiles: ["/tmp/compose.yml"],
+    composeProject: "demo",
+    detach: true,
+    cwd: "/tmp",
+  });
+  expect(runOpts[0]?.stdout).toBe("inherit");
+});
+
+test("down routes stdout to stderr when requested (--json purity)", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
+  await composeRuntimeBackend.down({
+    composeFiles: ["/tmp/compose.yml"],
+    composeProject: "demo",
+    cwd: "/tmp",
+    routeStdoutToStderr: true,
+  });
+  expect(runOpts[0]?.stdout).toBe("stderr");
 });

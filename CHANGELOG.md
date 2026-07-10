@@ -1,3 +1,95 @@
+## <small>3.3.5 (2026-07-09)</small>
+
+* fix(lifecycle): recover owned mux sessions ([c1da123](https://github.com/hack-dance/hack/commit/c1da123))
+
+## <small>3.3.4 (2026-07-09)</small>
+
+* Merge pull request #62 from hack-dance/codex/homebrew-bin-link-repair ([30841be](https://github.com/hack-dance/hack/commit/30841be)), closes [#62](https://github.com/hack-dance/hack/issues/62)
+* fix(release): install Homebrew executable path ([3c6e0d9](https://github.com/hack-dance/hack/commit/3c6e0d9))
+
+## <small>3.3.3 (2026-07-09)</small>
+
+* Merge pull request #61 from hack-dance/codex/event-agent-runtime-repair ([f1de71e](https://github.com/hack-dance/hack/commit/f1de71e)), closes [#61](https://github.com/hack-dance/hack/issues/61)
+* fix(cli): preserve usage code for lifecycle json ([f50f408](https://github.com/hack-dance/hack/commit/f50f408))
+* fix(runtime): clean descendant lifecycle groups ([57f2358](https://github.com/hack-dance/hack/commit/57f2358))
+* fix(runtime): isolate detached worktrees and recover orphan groups ([80a8dd2](https://github.com/hack-dance/hack/commit/80a8dd2))
+* fix(runtime): persist wrapped command process group ([2f4a4be](https://github.com/hack-dance/hack/commit/2f4a4be))
+* fix(runtime): retain session proof for lifecycle cleanup ([f87e5cf](https://github.com/hack-dance/hack/commit/f87e5cf))
+* docs(cli): explain detached worktree targeting ([966b863](https://github.com/hack-dance/hack/commit/966b863))
+
+## <small>3.3.2 (2026-07-08)</small>
+
+* Merge pull request #60 from hack-dance/fix/field-findings-round3 ([69f6caa](https://github.com/hack-dance/hack/commit/69f6caa)), closes [#60](https://github.com/hack-dance/hack/issues/60)
+* docs: tickets/ in every durable ignore-block listing ([103575a](https://github.com/hack-dance/hack/commit/103575a))
+* fix: gate tickets git cache on extension enablement, cover it in ignores ([fc56b74](https://github.com/hack-dance/hack/commit/fc56b74))
+* fix: support non-interactive hack global trust and hack doctor --fix ([78e068b](https://github.com/hack-dance/hack/commit/78e068b))
+* fix(daemon): address PR review — strict orphan match, stale-path repair, docs sync ([61ac7f6](https://github.com/hack-dance/hack/commit/61ac7f6))
+* fix(daemon): repair virtual plist paths, sweep orphans, launchd-exclusive start ([c3958bb](https://github.com/hack-dance/hack/commit/c3958bb))
+* fix(doctor): host TLS repair runs under --no-interactive ([71c3601](https://github.com/hack-dance/hack/commit/71c3601))
+* fix(global): install prepares host trust env independent of keychain step ([a0bcde4](https://github.com/hack-dance/hack/commit/a0bcde4))
+* style(daemon): hoist regexes to module scope for the repo lint profile ([90d1514](https://github.com/hack-dance/hack/commit/90d1514))
+
+## <small>3.3.1 (2026-07-08)</small>
+
+* Merge pull request #59 from hack-dance/fix/review-comments-round2 ([e941ca3](https://github.com/hack-dance/hack/commit/e941ca3)), closes [#59](https://github.com/hack-dance/hack/issues/59)
+* fix: address post-merge review findings across PRs 54 and 58 ([11f5788](https://github.com/hack-dance/hack/commit/11f5788))
+
+## 3.3.0 (2026-07-08)
+
+* Merge branch 'docs/partial-adoption' into feat/init-discovery-validation ([064db0e](https://github.com/hack-dance/hack/commit/064db0e))
+* Merge pull request #58 from hack-dance/feat/init-discovery-validation ([9dd469f](https://github.com/hack-dance/hack/commit/9dd469f)), closes [#58](https://github.com/hack-dance/hack/issues/58)
+* feat(init): add post-discovery validation pass for hack init ([6b50b76](https://github.com/hack-dance/hack/commit/6b50b76))
+* feat(init): surface the hack global install requirement in init output ([739a581](https://github.com/hack-dance/hack/commit/739a581))
+* docs: document partial adoption (backing-services-only) as a valid hack setup ([871a247](https://github.com/hack-dance/hack/commit/871a247))
+
+## 3.2.0 (2026-07-08)
+
+* Merge branch 'main' into fix/container-trust-bundle ([8338b58](https://github.com/hack-dance/hack/commit/8338b58))
+* Merge pull request #56 from hack-dance/fix/container-trust-bundle ([9cb82c1](https://github.com/hack-dance/hack/commit/9cb82c1)), closes [#56](https://github.com/hack-dance/hack/issues/56)
+* Merge pull request #57 from hack-dance/fix/global-trust-platform-order ([e3c6da0](https://github.com/hack-dance/hack/commit/e3c6da0)), closes [#57](https://github.com/hack-dance/hack/issues/57)
+* fix(tls): check isMac before isLinux in globalTrust; pin platform in mac suite ([4d35428](https://github.com/hack-dance/hack/commit/4d35428))
+* fix(tls): containers get combined public+local trust, never a stripped bundle ([651f234](https://github.com/hack-dance/hack/commit/651f234))
+* fix(tls): generate the combined trust bundle on Linux hosts ([e339920](https://github.com/hack-dance/hack/commit/e339920))
+* test(tls): neutral fixture paths for the privacy check ([c4be004](https://github.com/hack-dance/hack/commit/c4be004))
+* feat(agents): onboarding lessons from first field hack init --with run ([2190dd8](https://github.com/hack-dance/hack/commit/2190dd8))
+
+## <small>3.1.1 (2026-07-07)</small>
+
+* Merge pull request #55 from hack-dance/fix/release-intel-macos-build ([e5f7646](https://github.com/hack-dance/hack/commit/e5f7646)), closes [#55](https://github.com/hack-dance/hack/issues/55)
+* fix(ci): restore Intel macOS build in the release matrix ([52bcb28](https://github.com/hack-dance/hack/commit/52bcb28))
+
+## 3.1.0 (2026-07-07)
+
+* Merge pull request #52 from hack-dance/blacksmith-migration-6707f0f ([6774244](https://github.com/hack-dance/hack/commit/6774244)), closes [#52](https://github.com/hack-dance/hack/issues/52)
+* Merge pull request #54 from hack-dance/feat/worktree-ax-overhaul ([1fc0715](https://github.com/hack-dance/hack/commit/1fc0715)), closes [#54](https://github.com/hack-dance/hack/issues/54)
+* Migrate workflows to Blacksmith ([fa30afb](https://github.com/hack-dance/hack/commit/fa30afb))
+* Rewrite README for the v3 local-first product ([7da1cc2](https://github.com/hack-dance/hack/commit/7da1cc2))
+* fix: spawn resolves runtime PATH; doctor --fix root-ignores the secret key ([fd7eb27](https://github.com/hack-dance/hack/commit/fd7eb27))
+* fix(cli): usage errors emit the JSON envelope under --json ([7da751e](https://github.com/hack-dance/hack/commit/7da751e))
+* fix(cli): usage-error JSON envelope emits without logger output ([ed08dc0](https://github.com/hack-dance/hack/commit/ed08dc0))
+* docs: carry the positioning line into the docs index ([99a4b96](https://github.com/hack-dance/hack/commit/99a4b96))
+* docs: extend overhaul plan (run/exec defaulting, onboarding surfaces, docs phase) ([edf7de9](https://github.com/hack-dance/hack/commit/edf7de9))
+* docs: full accuracy pass against the v3 surface ([93ae8c0](https://github.com/hack-dance/hack/commit/93ae8c0))
+* docs: non-negotiable docs-currency rule across instruction surfaces ([e9e013e](https://github.com/hack-dance/hack/commit/e9e013e))
+* docs: plan for worktree DX + agent experience overhaul ([d32e743](https://github.com/hack-dance/hack/commit/d32e743))
+* docs(cli): generated command reference with drift enforcement ([4709d89](https://github.com/hack-dance/hack/commit/4709d89))
+* docs(env): deprecation marker on legacy v2 env migrator ([aa1d305](https://github.com/hack-dance/hack/commit/aa1d305))
+* docs(guides): refresh managed-environments guide for the v3 surface ([47ca25a](https://github.com/hack-dance/hack/commit/47ca25a))
+* docs(readme): differentiate the environment, not the port ([3c3f502](https://github.com/hack-dance/hack/commit/3c3f502))
+* docs(readme): lead with the whole-environment claim ([d82ae58](https://github.com/hack-dance/hack/commit/d82ae58))
+* docs(readme): rewrite around the core value proposition ([a83c0fb](https://github.com/hack-dance/hack/commit/a83c0fb))
+* docs(readme): sharpen differentiation and add the portability story ([99e08fd](https://github.com/hack-dance/hack/commit/99e08fd))
+* feat(agents): agent-assisted onboarding across CLI, skills, and MCP ([644f818](https://github.com/hack-dance/hack/commit/644f818))
+* feat(agents): single instruction source with drift detection ([3660c27](https://github.com/hack-dance/hack/commit/3660c27))
+* feat(cli): machine-first surface — JSON envelope, non-interactive, gating ([346b2c8](https://github.com/hack-dance/hack/commit/346b2c8))
+* feat(core): add HACK_HOME override for the global hack directory ([58a023c](https://github.com/hack-dance/hack/commit/58a023c))
+* feat(project): committed .hack/.gitignore + doctor untracking for generated files ([b575b78](https://github.com/hack-dance/hack/commit/b575b78))
+* feat(worktree): first-class linked-worktree development ([abc695d](https://github.com/hack-dance/hack/commit/abc695d))
+* chore: refresh agent docs and de-register tickets for this repo ([9c150b6](https://github.com/hack-dance/hack/commit/9c150b6))
+* chore: tickets opt-in by default, registry prune, CI + perf cleanup ([1dd2b2f](https://github.com/hack-dance/hack/commit/1dd2b2f))
+* test: make suite order-independent via scoped module mocks ([b36a312](https://github.com/hack-dance/hack/commit/b36a312))
+* test(e2e): real CLI harness with turborepo fixture + worktree scenarios ([83f3e17](https://github.com/hack-dance/hack/commit/83f3e17))
+
 ## 3.0.0 (2026-04-23)
 
 * feat!: simplify hack to a local-first core ([ced8d07](https://github.com/hack-dance/hack/commit/ced8d07))

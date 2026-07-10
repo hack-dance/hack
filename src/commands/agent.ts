@@ -7,6 +7,7 @@ import {
   renderInitAssistantPrompt,
 } from "../agents/init-assistant.ts";
 import { renderAgentInitPatterns } from "../agents/init-patterns.ts";
+import { renderOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { renderAgentPrimer } from "../agents/primer.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
@@ -17,12 +18,21 @@ import {
 } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
 import { openUrl } from "../lib/os.ts";
-import { findProjectContext, findRepoRootForInit } from "../lib/project.ts";
+import {
+  findProjectContext,
+  findRepoRootForInit,
+  readProjectConfig,
+  readProjectDevHost,
+} from "../lib/project.ts";
 import { findExecutableInPath, run } from "../lib/shell.ts";
 import { logger } from "../ui/logger.ts";
 
 type PrimeArgs = CommandArgs<readonly [], readonly []>;
 type PatternsArgs = CommandArgs<readonly [], readonly []>;
+
+const onboardOptions = [optPath] as const;
+
+type OnboardArgs = CommandArgs<typeof onboardOptions, readonly []>;
 
 const optClient = defineOption({
   name: "client",
@@ -64,6 +74,15 @@ const initSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const onboardSpec = defineCommand({
+  name: "onboard",
+  summary: "Print the project onboarding prompt (agent-assisted setup)",
+  group: "Agents",
+  options: onboardOptions,
+  positionals: [],
+  subcommands: [],
+} as const);
+
 export const agentCommand = defineCommand({
   name: "agent",
   summary: "Agent utilities",
@@ -74,6 +93,7 @@ export const agentCommand = defineCommand({
     withHandler(primeSpec, handleAgentPrime),
     withHandler(patternsSpec, handleAgentPatterns),
     withHandler(initSpec, handleAgentInit),
+    withHandler(onboardSpec, handleAgentOnboard),
   ],
 } as const);
 
@@ -131,6 +151,42 @@ async function handleAgentInit({
     command: selection,
     prompt,
   });
+}
+
+/**
+ * `hack agent onboard` — print the canonical onboarding prompt.
+ *
+ * Uses `existing-project` mode (with project name/dev_host from config) when
+ * a `.hack/` project is found; falls back to `new-project` mode otherwise.
+ * The same content backs `hack init --with`, the `/hack-init` skill, and the
+ * `hack-init` MCP prompt.
+ */
+async function handleAgentOnboard({
+  ctx,
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: OnboardArgs;
+}): Promise<number> {
+  const startDir = resolveStartDir(ctx, args.options.path);
+  const projectContext = await findProjectContext(startDir);
+
+  if (!projectContext) {
+    process.stdout.write(renderOnboardingPrompt({ mode: "new-project" }));
+    return 0;
+  }
+
+  const config = await readProjectConfig(projectContext);
+  const devHost = await readProjectDevHost(projectContext);
+
+  process.stdout.write(
+    renderOnboardingPrompt({
+      mode: "existing-project",
+      projectName: config.name,
+      devHost: devHost ?? undefined,
+    })
+  );
+  return 0;
 }
 
 function resolveStartDir(ctx: CliContext, pathOpt: string | undefined): string {

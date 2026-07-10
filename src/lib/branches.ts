@@ -4,7 +4,13 @@ import {
   PROJECT_BRANCHES_FILENAME,
 } from "../constants.ts";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "./fs.ts";
+import {
+  isLinkedGitWorktree,
+  listGitWorktrees,
+  resolveGitCurrentBranch,
+} from "./git-worktree.ts";
 import { getString, isRecord } from "./guards.ts";
+import { sanitizeBranchSlug } from "./project.ts";
 
 export const BRANCHES_VERSION = 1 as const;
 export const BRANCHES_SCHEMA_URL = `https://${DEFAULT_SCHEMAS_HOST}/hack.branches.schema.json`;
@@ -152,6 +158,112 @@ export async function touchBranchUsage(opts: {
     file: { ...read.file, branches: nextBranches },
   });
   return { updated: true, created, path: read.path };
+}
+
+export type EffectiveBranchSource =
+  | "explicit"
+  | "worktree"
+  | "detached-worktree"
+  | "none";
+
+export type EffectiveBranchResolution = {
+  /** Branch instance slug to target, or null for the base instance. */
+  readonly branch: string | null;
+  readonly source: EffectiveBranchSource;
+  /** Raw git branch name the default was derived from (worktree source only). */
+  readonly gitBranch: string | null;
+};
+
+/**
+ * Resolves the branch instance a project command should target.
+ *
+ * Rules:
+ * - an explicit `--branch` slug always wins (`source: "explicit"`)
+ * - otherwise, in a LINKED git worktree with `autoBranchEnabled` (config
+ *   `worktree.auto_branch`, default true), default to the sanitized current
+ *   git branch name (`source: "worktree"`)
+ * - a detached linked worktree is reported separately so callers can refuse
+ *   an implicit base instance instead of colliding with the primary checkout
+ * - primary checkouts, non-git paths, and opted-out projects resolve to the
+ *   base instance (`branch: null`, `source: "none"`)
+ */
+export async function resolveEffectiveBranch(opts: {
+  readonly explicitBranch: string | null;
+  readonly projectRoot: string;
+  readonly autoBranchEnabled: boolean;
+}): Promise<EffectiveBranchResolution> {
+  if (opts.explicitBranch !== null && opts.explicitBranch.length > 0) {
+    return {
+      branch: opts.explicitBranch,
+      source: "explicit",
+      gitBranch: null,
+    };
+  }
+  if (!opts.autoBranchEnabled) {
+    return { branch: null, source: "none", gitBranch: null };
+  }
+
+  const linked = await isLinkedGitWorktree({ repoRoot: opts.projectRoot });
+  if (linked !== true) {
+    return { branch: null, source: "none", gitBranch: null };
+  }
+
+  const gitBranch = await resolveGitCurrentBranch({
+    repoRoot: opts.projectRoot,
+  });
+  if (!gitBranch) {
+    return {
+      branch: null,
+      source: "detached-worktree",
+      gitBranch: null,
+    };
+  }
+
+  const slug = sanitizeBranchSlug(gitBranch);
+  if (slug.length === 0) {
+    return { branch: null, source: "none", gitBranch };
+  }
+
+  const branch = await resolveCollisionFreeBranchSlug({
+    slug,
+    gitBranch,
+    projectRoot: opts.projectRoot,
+  });
+  return { branch, source: "worktree", gitBranch };
+}
+
+/**
+ * Guards the auto-derived branch slug against sanitization collisions:
+ * `feature/api` and `feature-api` both sanitize to `feature-api`, which
+ * would silently share one branch instance between two worktrees (and let
+ * either stop the other's containers). When another linked worktree's
+ * branch sanitizes to the same slug from a DIFFERENT raw name, both sides
+ * deterministically get a short raw-name hash suffix, keeping every
+ * worktree's derived instance distinct and stable across invocations.
+ */
+async function resolveCollisionFreeBranchSlug(opts: {
+  readonly slug: string;
+  readonly gitBranch: string;
+  readonly projectRoot: string;
+}): Promise<string> {
+  const worktrees = await listGitWorktrees({ repoRoot: opts.projectRoot });
+  if (worktrees === null) {
+    return opts.slug;
+  }
+  const colliding = worktrees.some(
+    (entry) =>
+      entry.branch !== null &&
+      entry.branch !== opts.gitBranch &&
+      sanitizeBranchSlug(entry.branch) === opts.slug
+  );
+  if (!colliding) {
+    return opts.slug;
+  }
+  const hash = new Bun.CryptoHasher("sha1")
+    .update(opts.gitBranch)
+    .digest("hex")
+    .slice(0, 4);
+  return `${opts.slug}-${hash}`;
 }
 
 function defaultBranchesFile(): BranchesFile {

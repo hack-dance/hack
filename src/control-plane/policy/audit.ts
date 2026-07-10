@@ -2,10 +2,8 @@ import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-import {
-  GLOBAL_HACK_DIR_NAME,
-  GLOBAL_REGISTRY_DIR_NAME,
-} from "../../constants.ts";
+import { GLOBAL_REGISTRY_DIR_NAME } from "../../constants.ts";
+import { resolveGlobalHackDir } from "../../lib/config-paths.ts";
 import { ensureDir } from "../../lib/fs.ts";
 import type { RiskLevel } from "./risk.ts";
 
@@ -34,11 +32,7 @@ function resolveGlobalRoot(): string {
   if (configPath.length > 0) {
     return dirname(configPath);
   }
-  const home = (process.env.HOME ?? "").trim();
-  if (home.length === 0) {
-    throw new Error("HOME is not set");
-  }
-  return resolve(home, GLOBAL_HACK_DIR_NAME);
+  return resolveGlobalHackDir();
 }
 
 function getPolicyAuditPath(): string {

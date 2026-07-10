@@ -77,3 +77,116 @@ export async function resolveGitPrimaryWorktreeRoot(opts: {
 
   return commonDir.endsWith("/.git") ? dirname(commonDir) : null;
 }
+
+/**
+ * Detects whether the checkout at `repoRoot` is a linked git worktree
+ * (its per-worktree git dir differs from the shared common dir).
+ * Returns null when git is unavailable or the path is not a git checkout.
+ */
+export async function isLinkedGitWorktree(opts: {
+  readonly repoRoot: string;
+}): Promise<boolean | null> {
+  const [commonDir, worktreeDir] = await Promise.all([
+    resolveGitRepositoryIdentity({ repoRoot: opts.repoRoot }),
+    resolveGitWorktreeDir({ repoRoot: opts.repoRoot }),
+  ]);
+  if (!(commonDir && worktreeDir)) {
+    return null;
+  }
+  return commonDir !== worktreeDir;
+}
+
+/**
+ * Resolves the currently checked-out branch name for the checkout at `repoRoot`.
+ * Returns null for detached HEAD, non-git paths, or when git is unavailable.
+ */
+export async function resolveGitCurrentBranch(opts: {
+  readonly repoRoot: string;
+}): Promise<string | null> {
+  let result: Awaited<ReturnType<typeof exec>>;
+  try {
+    result = await exec(
+      ["git", "-C", opts.repoRoot, "branch", "--show-current"],
+      { stdin: "ignore" }
+    );
+  } catch {
+    return null;
+  }
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  const branch = result.stdout.trim();
+  return branch.length > 0 ? branch : null;
+}
+
+export type GitWorktreeListEntry = {
+  readonly path: string;
+  readonly branch: string | null;
+  readonly detached: boolean;
+};
+
+/**
+ * Lists all checkouts (primary + linked worktrees) of the repo family that
+ * contains `repoRoot` via `git worktree list --porcelain`.
+ * Returns null when git is unavailable or the path is not a git checkout.
+ */
+export async function listGitWorktrees(opts: {
+  readonly repoRoot: string;
+}): Promise<readonly GitWorktreeListEntry[] | null> {
+  let result: Awaited<ReturnType<typeof exec>>;
+  try {
+    result = await exec(
+      ["git", "-C", opts.repoRoot, "worktree", "list", "--porcelain"],
+      { stdin: "ignore" }
+    );
+  } catch {
+    return null;
+  }
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  return parseGitWorktreeListPorcelain(result.stdout);
+}
+
+function parseGitWorktreeListPorcelain(
+  stdout: string
+): readonly GitWorktreeListEntry[] {
+  const entries: GitWorktreeListEntry[] = [];
+  let path: string | null = null;
+  let branch: string | null = null;
+  let detached = false;
+
+  const flush = () => {
+    if (path) {
+      entries.push({ path, branch, detached });
+    }
+    path = null;
+    branch = null;
+    detached = false;
+  };
+
+  for (const rawLine of stdout.split("\n")) {
+    const line = rawLine.trim();
+    if (line.length === 0) {
+      flush();
+      continue;
+    }
+    if (line.startsWith("worktree ")) {
+      flush();
+      path = line.slice("worktree ".length).trim();
+      continue;
+    }
+    if (line.startsWith("branch ")) {
+      const ref = line.slice("branch ".length).trim();
+      const prefix = "refs/heads/";
+      branch = ref.startsWith(prefix) ? ref.slice(prefix.length) : ref;
+      continue;
+    }
+    if (line === "detached") {
+      detached = true;
+    }
+  }
+  flush();
+
+  return entries;
+}

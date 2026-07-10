@@ -1,10 +1,11 @@
-import { afterAll, beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 
 import { HACK_PROJECT_DIR_PRIMARY } from "../src/constants.ts";
 import type { ProjectMeta } from "../src/lib/project-meta.ts";
 import type { ProjectView } from "../src/lib/project-views.ts";
 import type { RegisteredProject } from "../src/lib/projects-registry.ts";
 import type { RuntimeProject } from "../src/lib/runtime-projects.ts";
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runtimeQueue: Array<{
   readonly ok: boolean;
@@ -28,47 +29,60 @@ const identityQueue: Array<
 > = [];
 const autoRegisterCalls: RuntimeProject[][] = [];
 
-mock.module("../src/lib/runtime-projects.ts", () => ({
-  readRuntimeProjects: async () =>
-    runtimeQueue.shift() ?? {
-      ok: true,
-      runtime: [],
-      error: null,
-      checkedAtMs: Date.now(),
-    },
-  autoRegisterRuntimeHackProjects: async (opts: {
-    readonly runtime: RuntimeProject[];
-  }) => {
-    autoRegisterCalls.push(opts.runtime);
-  },
-  filterRuntimeProjects: (opts: {
-    readonly runtime: readonly RuntimeProject[];
-    readonly includeGlobal: boolean;
-  }) =>
-    opts.includeGlobal
-      ? opts.runtime
-      : opts.runtime.filter((project) => !project.isGlobal),
-}));
-
-mock.module("../src/daemon/runtime-health.ts", () => ({
-  readRuntimeIdentity: async () =>
-    identityQueue.shift() ?? {
-      ok: true,
-      identity: {
-        dockerHost: null,
-        socketPath: null,
-        socketInode: null,
-        engineId: "default",
-        engineName: null,
-        engineVersion: null,
+const runtimeProjectsMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/runtime-projects.ts",
+  overrides: {
+    readRuntimeProjects: async () =>
+      runtimeQueue.shift() ?? {
+        ok: true,
+        runtime: [],
+        error: null,
+        checkedAtMs: Date.now(),
       },
+    autoRegisterRuntimeHackProjects: async (opts: {
+      readonly runtime: RuntimeProject[];
+    }) => {
+      autoRegisterCalls.push(opts.runtime);
     },
-  buildRuntimeFingerprint: (opts: {
-    readonly identity: { readonly engineId: string | null };
-  }) => opts.identity.engineId ?? "unknown",
-}));
+    filterRuntimeProjects: (opts: {
+      readonly runtime: readonly RuntimeProject[];
+      readonly includeGlobal: boolean;
+    }) =>
+      opts.includeGlobal
+        ? opts.runtime
+        : opts.runtime.filter((project) => !project.isGlobal),
+  },
+});
 
-import { createRuntimeCache } from "../src/daemon/runtime-cache.ts";
+const runtimeHealthMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/daemon/runtime-health.ts",
+  overrides: {
+    readRuntimeIdentity: async () =>
+      identityQueue.shift() ?? {
+        ok: true,
+        identity: {
+          dockerHost: null,
+          socketPath: null,
+          socketInode: null,
+          engineId: "default",
+          engineName: null,
+          engineVersion: null,
+        },
+      },
+    buildRuntimeFingerprint: (opts: {
+      readonly identity: { readonly engineId: string | null };
+    }) => opts.identity.engineId ?? "unknown",
+  },
+});
+
+const { createRuntimeCache } = await import("../src/daemon/runtime-cache.ts");
+
+beforeAll(() => {
+  runtimeProjectsMock.activate();
+  runtimeHealthMock.activate();
+});
 
 beforeEach(() => {
   runtimeQueue.length = 0;
@@ -77,7 +91,8 @@ beforeEach(() => {
 });
 
 afterAll(() => {
-  mock.restore();
+  runtimeProjectsMock.deactivate();
+  runtimeHealthMock.deactivate();
 });
 
 test("runtime cache refresh records healthy snapshot", async () => {
@@ -178,6 +193,7 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
     sessions: [],
     lifecycle: null,
     ownership: null,
+    worktrees: null,
     kind: "registered",
     status: "unknown",
   });

@@ -1,37 +1,51 @@
-import { afterAll, beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
+
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const dockerJsonCalls: Record<string, unknown>[] = [];
 const dockerPlainCalls: Record<string, unknown>[] = [];
 const dockerPrettyCalls: Record<string, unknown>[] = [];
 const lokiCalls: Record<string, unknown>[] = [];
 
-mock.module("../src/ui/docker-logs.ts", () => ({
-  dockerComposeLogsJson: async (opts: Record<string, unknown>) => {
-    dockerJsonCalls.push(opts);
-    return 0;
+const dockerLogsMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/ui/docker-logs.ts",
+  overrides: {
+    dockerComposeLogsJson: async (opts: Record<string, unknown>) => {
+      dockerJsonCalls.push(opts);
+      return 0;
+    },
+    dockerComposeLogsPlain: async (opts: Record<string, unknown>) => {
+      dockerPlainCalls.push(opts);
+      return 0;
+    },
+    dockerComposeLogsPretty: async (opts: Record<string, unknown>) => {
+      dockerPrettyCalls.push(opts);
+      return 0;
+    },
   },
-  dockerComposeLogsPlain: async (opts: Record<string, unknown>) => {
-    dockerPlainCalls.push(opts);
-    return 0;
-  },
-  dockerComposeLogsPretty: async (opts: Record<string, unknown>) => {
-    dockerPrettyCalls.push(opts);
-    return 0;
-  },
-}));
+});
 
-mock.module("../src/ui/loki-logs.ts", () => ({
-  canReachLoki: async () => true,
-  lokiLogs: async (opts: Record<string, unknown>) => {
-    lokiCalls.push(opts);
-    return 0;
+const lokiLogsMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/ui/loki-logs.ts",
+  overrides: {
+    canReachLoki: async () => true,
+    lokiLogs: async (opts: Record<string, unknown>) => {
+      lokiCalls.push(opts);
+      return 0;
+    },
   },
-}));
+});
 
-import {
-  composeLogBackend,
-  lokiLogBackend,
-} from "../src/backends/log-backend.ts";
+const { composeLogBackend, lokiLogBackend } = await import(
+  "../src/backends/log-backend.ts"
+);
+
+beforeAll(() => {
+  dockerLogsMock.activate();
+  lokiLogsMock.activate();
+});
 
 beforeEach(() => {
   dockerJsonCalls.length = 0;
@@ -41,7 +55,8 @@ beforeEach(() => {
 });
 
 afterAll(() => {
-  mock.restore();
+  dockerLogsMock.deactivate();
+  lokiLogsMock.deactivate();
 });
 
 test("composeLogBackend routes json output to dockerComposeLogsJson", async () => {

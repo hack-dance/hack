@@ -38,6 +38,46 @@ Encryption key material is local-only by default:
 
 `hack init` now scaffolds `.hack/hack.env.default.yaml` by default.
 
+## Ignore rules (committed `.hack/.gitignore`)
+
+Hack owns a committed `.hack/.gitignore` that keeps machine-local generated
+files out of git. Because the file is committed, fresh clones and linked git
+worktrees inherit the rules with zero setup. It covers (patterns relative to
+`.hack/`):
+
+- `.internal/`
+- `.branch/`
+- `.env`
+- `.env.state.json`
+- `hack.env.local.yaml`
+- `hack.env.*.local.yaml`
+- `tickets/` (local tickets-extension cache)
+
+How it is maintained:
+
+- written by `hack init`, and self-healed by `hack up` and whenever hack
+  writes `.hack/.internal/` overrides or `--local` env overrides
+- the entries live inside a marked, hack-managed block; anything you add
+  outside the markers is preserved on every rewrite
+- the root `.gitignore` still gets a `.hack.secret.key` entry when the secret
+  key is first generated (the key lives at the repo root, not under `.hack/`)
+- older repos that added `.hack/.internal/` to the root `.gitignore` keep
+  working; the entries are equivalent and nothing is removed
+
+Leak detection and repair:
+
+- `hack doctor` runs a "generated files" check: it lists any of the paths
+  above (plus `.hack.secret.key`) that are tracked in git, except a tracked
+  `.hack/hack.env.local.yaml`, which is never flagged because older repos may
+  intentionally track it as the shared `--env local` overlay (see the legacy
+  compatibility note above)
+- a tracked `.hack.secret.key` is reported as an error — it is a committed
+  secret; rotate it after untracking
+- `hack doctor --fix` untracks the offenders with `git rm --cached` (files
+  stay on disk) and re-ensures `.hack/.gitignore`; commit the removal
+- `--fix` and `--migrate-env-config` are ignored when `--json` is passed;
+  run them separately from a JSON-mode invocation
+
 ## File format
 
 Each env file is YAML with:
@@ -142,7 +182,10 @@ hack env list
 hack env list --env qa
 hack env list --env qa --service api
 hack env list --json
+hack env list --show-secrets
 ```
+
+`--show-secrets` prints secret values in plaintext instead of the masked default; use it deliberately.
 
 Add or update values:
 
@@ -150,15 +193,27 @@ Add or update values:
 hack env add API_BASE_URL https://api.example.com
 hack env add SERVICE_TOKEN abc123 --service api --secret
 hack env add --env qa API_BASE_URL https://qa.example.com
+hack env add API_BASE_URL https://api.example.com --local
 ```
 
 `hack env set` still works as a compatibility alias for `hack env add`, but `add` is the primary UX now.
+
+`--local` writes to the worktree-local override file (`.hack/hack.env.local.yaml` or
+`.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
+per-checkout values you don't want to commit.
+
+If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
+Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the
+command applies documented defaults or fails fast with `E_INTERACTIVE_REQUIRED` instead of
+blocking on a prompt. `hack env unset` and `hack env set` accept `--local` and
+`--no-interactive` too.
 
 Remove a value:
 
 ```bash
 hack env unset API_BASE_URL
 hack env unset SERVICE_TOKEN --service api --env qa
+hack env unset API_BASE_URL --local
 ```
 
 Materialize a compatibility `.hack/.env`:
@@ -241,6 +296,25 @@ Linked worktree behavior:
 - when a repo uses linked git worktrees, Hack prefers a shared key under the git common dir
 - sibling worktrees can decrypt the same committed secrets without manually copying gitignored files
 - if a checkout-local `.hack.secret.key` exists, it still wins for that checkout
+- `hack up` in a linked worktree auto-selects a branch instance (`worktree.auto_branch`); that
+  selection determines which instance's resolved env is the one actually injected, so keep the
+  key readable from every checkout that runs `hack up`
+
+Full read order for decrypting secrets (first match wins):
+
+1. checkout-local `.hack.secret.key`
+2. shared key under the git common dir
+3. the primary checkout's key, inherited automatically for a linked worktree that has neither of the above
+4. `HACK_ENV_SECRET_KEY`
+
+Write-path guarantees in a linked worktree (first secret added from any checkout):
+
+- an existing checkout-local key is reused as-is
+- otherwise an existing shared key (git common dir) is reused
+- otherwise the primary checkout's key is adopted by copying it to the shared location, so sibling checkouts converge on one key
+- only then is a new key generated, and it is written to the shared location — never silently to the checkout
+- if the shared location cannot be resolved (git unavailable) or written, Hack falls back to a checkout-local key and prints a loud divergence warning
+- `hack doctor` flags divergent `.hack.secret.key` contents across checkouts with the exact paths
 
 CI and managed container fallback:
 
@@ -250,8 +324,10 @@ That makes this model usable in CI and portable container images without committ
 
 Published container paths:
 
-- full remote runtime: `hackdance/hack:latest`
-- slim managed-container base: `hackdance/hack:slim`
+- slim managed-container base: `hackdance/hack:slim` — the supported CI / managed-container story
+- full remote runtime: `hackdance/hack:latest` — serves the remote/node surface, which is
+  experimental and unsupported (hidden behind `hack help --all`); only relevant if you have
+  explicitly opted into that surface
 
 In both cases, inject `HACK_ENV_SECRET_KEY` from the runtime or secret manager instead of copying
 `.hack.secret.key` into the image.
@@ -288,8 +364,9 @@ The modern YAML env model is the canonical repo format today.
 Some older surfaces are still compatibility-oriented:
 
 - `hack env backend ...` remains relevant for legacy repos and older secret-store configurations
-- daemon/UI mutation routes are still catching up to the modern YAML write path
-- browser/app read surfaces already understand the new `hack env list --json` payload
+- the daemon's env HTTP route (used by the macOS app) reads and writes the legacy dotenv-shaped
+  contract (`source: 'plain_env'|'keychain'`, `resolvedFrom: 'dotenv'/'process'/'keychain'/'portable_backend'`),
+  not the modern YAML `hack env list --json` shape; there is no web dashboard surface anymore
 
 If you are writing new docs or new project setup flows, document the YAML overlay model first and treat `.hack/hack.env.json` as legacy migration context.
 

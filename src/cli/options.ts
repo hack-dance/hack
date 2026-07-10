@@ -91,6 +91,14 @@ export const optJson = defineOption({
   description: "Output JSON (machine-readable)",
 } as const);
 
+export const optNoInteractive = defineOption({
+  name: "noInteractive",
+  type: "boolean",
+  long: "--no-interactive",
+  description:
+    "Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1)",
+} as const);
+
 export const optSince = defineOption({
   name: "since",
   type: "string",

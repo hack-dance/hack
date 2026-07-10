@@ -1,7 +1,7 @@
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import { GLOBAL_CADDY_DIR_NAME, GLOBAL_HACK_DIR_NAME } from "../constants.ts";
+import { resolveGlobalHackDir } from "./config-paths.ts";
 import { pathExists } from "./fs.ts";
 
 export const HACK_HOST_TRUST_BUNDLE_FILENAME =
@@ -18,13 +18,25 @@ interface HackHostTrustEnvironment {
   readonly HACK_HOST_TRUST_BUNDLE?: string;
 }
 
+/**
+ * Resolve the hack dir to base pki paths on: an explicit home override wins,
+ * otherwise the global hack dir seam ({@link resolveGlobalHackDir}) applies.
+ */
+function resolveHackDirForPki(input?: {
+  readonly home?: string | null;
+}): string {
+  const explicitHome = input?.home?.trim();
+  if (explicitHome) {
+    return resolve(explicitHome, GLOBAL_HACK_DIR_NAME);
+  }
+  return resolveGlobalHackDir();
+}
+
 export function resolveHackLocalCaCertPath(input?: {
   readonly home?: string | null;
 }): string {
-  const home = input?.home?.trim() || process.env.HOME?.trim() || homedir();
   return resolve(
-    home,
-    GLOBAL_HACK_DIR_NAME,
+    resolveHackDirForPki(input),
     GLOBAL_CADDY_DIR_NAME,
     "pki",
     "caddy-local-authority.crt"
@@ -41,10 +53,8 @@ export async function findHackLocalCaCertPath(input?: {
 export function resolveHackHostTrustBundlePath(input?: {
   readonly home?: string | null;
 }): string {
-  const home = input?.home?.trim() || process.env.HOME?.trim() || homedir();
   return resolve(
-    home,
-    GLOBAL_HACK_DIR_NAME,
+    resolveHackDirForPki(input),
     GLOBAL_CADDY_DIR_NAME,
     "pki",
     HACK_HOST_TRUST_BUNDLE_FILENAME
@@ -61,10 +71,8 @@ export async function findHackHostTrustBundlePath(input?: {
 export function resolveHackHostTrustEnvScriptPath(input?: {
   readonly home?: string | null;
 }): string {
-  const home = input?.home?.trim() || process.env.HOME?.trim() || homedir();
   return resolve(
-    home,
-    GLOBAL_HACK_DIR_NAME,
+    resolveHackDirForPki(input),
     GLOBAL_CADDY_DIR_NAME,
     "pki",
     HACK_HOST_TRUST_ENV_FILENAME

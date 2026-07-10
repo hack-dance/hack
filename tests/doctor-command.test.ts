@@ -80,7 +80,8 @@ test("doctor remediation plan mentions env migration when requested for a legacy
     expect(lines).toEqual([
       "1. Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
       "2. Repair tickets refs if the project repo needs it.",
-      "3. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.",
+      "3. Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent.",
+      "4. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.",
     ]);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -98,7 +99,8 @@ test("doctor remediation plan skips env migration when modern env files already 
     expect(lines).toEqual([
       "1. Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
       "2. Repair tickets refs if the project repo needs it.",
-      "3. Skip env migration because this project already uses hack.env.*.yaml.",
+      "3. Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent.",
+      "4. Skip env migration because this project already uses hack.env.*.yaml.",
     ]);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -187,6 +189,23 @@ test("doctor guidance routes stale lifecycle state to hack down", () => {
 
   expect(guidance.temporaryBreakage).toEqual(["hack down"]);
   expect(guidance.configurationRepair).toEqual([]);
+  expect(guidance.followUp).toEqual([]);
+});
+
+test("doctor guidance routes owned orphan lifecycle sessions to doctor fix", () => {
+  const guidance = buildDoctorRecoveryGuidance({
+    results: [
+      {
+        name: "lifecycle hygiene",
+        status: "warn",
+        message:
+          "1 owned lifecycle session without a running instance (run: hack doctor --fix)",
+      },
+    ],
+  });
+
+  expect(guidance.temporaryBreakage).toEqual([]);
+  expect(guidance.configurationRepair).toEqual(["hack doctor --fix"]);
   expect(guidance.followUp).toEqual([]);
 });
 

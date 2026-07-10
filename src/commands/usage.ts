@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { CommandArgs, CommandHandlerFor } from "../cli/command.ts";
 import {
@@ -8,13 +7,11 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { optJson, optProject } from "../cli/options.ts";
-import {
-  GLOBAL_CLOUDFLARE_DIR_NAME,
-  GLOBAL_HACK_DIR_NAME,
-} from "../constants.ts";
+import { GLOBAL_CLOUDFLARE_DIR_NAME } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { readDaemonPid } from "../daemon/process.ts";
+import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { sanitizeProjectSlug } from "../lib/project.ts";
 import type { RuntimeProject } from "../lib/runtime-projects.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
@@ -468,8 +465,7 @@ async function resolveTrackedPids(): Promise<Map<number, string>> {
   }
   const cloudflaredPid = await readPidFile({
     path: resolve(
-      homedir(),
-      GLOBAL_HACK_DIR_NAME,
+      resolveGlobalHackDir(),
       GLOBAL_CLOUDFLARE_DIR_NAME,
       "cloudflared.pid"
     ),

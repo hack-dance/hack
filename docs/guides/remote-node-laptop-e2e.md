@@ -1,5 +1,7 @@
 # Run laptop-to-laptop node pairing e2e (Beta)
 
+> **Status: unsupported experimental.** These surfaces are source-available but outside the supported v3 product contract. They are hidden from default `hack --help` (see `hack help --all`) and print a warning when invoked.
+
 This is a beta workflow.
 Start with [Core docs](../core.md) if you are new to `hack`, and use [Beta workflows](../beta.md)
 for the rest of the remote path.

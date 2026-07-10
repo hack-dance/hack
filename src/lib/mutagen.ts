@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 
+import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir } from "./fs.ts";
 import { execOrThrow } from "./shell.ts";
 
@@ -73,12 +74,12 @@ export function resetMutagenPathCacheForTests(): void {
 /**
  * Resolve the managed Mutagen agent bundle path used for remote platform sync.
  */
-export function getManagedMutagenAgentBundlePath(): string | null {
-  const home = process.env.HOME;
-  if (!home) {
-    return null;
-  }
-  return `${home}/.hack/libexec/${MUTAGEN_AGENT_BUNDLE_FILENAME}`;
+export function getManagedMutagenAgentBundlePath(): string {
+  return resolve(
+    resolveGlobalHackDir(),
+    "libexec",
+    MUTAGEN_AGENT_BUNDLE_FILENAME
+  );
 }
 
 /**
@@ -156,12 +157,8 @@ export async function ensureBundledMutagenInstalled(): Promise<BundledMutagenIns
   }
 }
 
-export function getManagedMutagenInstallPath(): string | null {
-  const home = process.env.HOME;
-  if (!home) {
-    return null;
-  }
-  return `${home}/.hack/bin/mutagen`;
+export function getManagedMutagenInstallPath(): string {
+  return resolve(resolveGlobalHackDir(), "bin", "mutagen");
 }
 
 function resolveMutagenVersion(): string {
@@ -228,12 +225,9 @@ function bundledMutagenTarballCandidates(input: {
     out.push(resolve(envDir, "binaries", "mutagen", input.filename));
   }
 
-  const home = process.env.HOME;
-  if (home) {
-    const defaultAssets = resolve(home, ".hack", "assets");
-    out.push(resolve(defaultAssets, input.filename));
-    out.push(resolve(defaultAssets, "binaries", "mutagen", input.filename));
-  }
+  const defaultAssets = resolve(resolveGlobalHackDir(), "assets");
+  out.push(resolve(defaultAssets, input.filename));
+  out.push(resolve(defaultAssets, "binaries", "mutagen", input.filename));
 
   // Dev/source layout: <repo>/src/lib/mutagen.ts -> <repo>/binaries/mutagen/<tarball>
   out.push(resolve(import.meta.dir, "../../binaries/mutagen", input.filename));

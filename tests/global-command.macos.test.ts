@@ -1,4 +1,11 @@
-import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  test,
+} from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -12,6 +19,9 @@ import {
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
 } from "../src/constants.ts";
+import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
+import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: string[][] = [];
 const execCalls: string[][] = [];
@@ -26,6 +36,7 @@ let tempDir: string | null = null;
 let originalHome: string | undefined;
 let originalLogger: string | undefined;
 let originalUser: string | undefined;
+let originalNoInteractive: string | undefined;
 let reachabilityByHost: Record<string, boolean> = {};
 let idUser = "mock-user";
 let pathExistsOverrides = new Map<string, boolean>();
@@ -33,156 +44,186 @@ let statMetadataByPath = new Map<string, string>();
 let brewExecutablePath = "/opt/homebrew/bin/brew";
 let confirmResponder: (() => boolean) | null = null;
 
-mock.module("@clack/prompts", () => ({
-  access: async () => true,
-  autocompleteMultiselect: async () => [],
-  cancel: () => {},
-  confirm: async () => confirmResponder?.() ?? true,
-  multiselect: async () => [],
-  isCancel: () => false,
-  log: {
-    error: () => {},
-    info: () => {},
-    message: () => {},
-    success: () => {},
-    step: () => {},
-    warn: () => {},
+const clackMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "@clack/prompts",
+  overrides: {
+    access: async () => true,
+    autocompleteMultiselect: async () => [],
+    cancel: () => {},
+    confirm: async () => confirmResponder?.() ?? true,
+    multiselect: async () => [],
+    isCancel: () => false,
+    log: {
+      error: () => {},
+      info: () => {},
+      message: () => {},
+      success: () => {},
+      step: () => {},
+      warn: () => {},
+    },
+    note: () => {},
+    password: async () => "",
+    select: async () => "",
+    spinner: () => ({
+      start: () => {},
+      stop: () => {},
+    }),
+    text: async () => "",
   },
-  note: () => {},
-  password: async () => "",
-  select: async () => "",
-  spinner: () => ({
-    start: () => {},
-    stop: () => {},
-  }),
-  text: async () => "",
-}));
+});
 
-mock.module("node:net", () => ({
-  createConnection: (opts: { host: string }) => {
-    const handlers = new Map<string, () => void>();
-    const reachable = reachabilityByHost[opts.host] ?? false;
+const netMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "node:net",
+  overrides: {
+    createConnection: (opts: { host: string }) => {
+      const handlers = new Map<string, () => void>();
+      const reachable = reachabilityByHost[opts.host] ?? false;
 
-    queueMicrotask(() => {
-      const event = reachable ? "connect" : "error";
-      handlers.get(event)?.();
-    });
+      queueMicrotask(() => {
+        const event = reachable ? "connect" : "error";
+        handlers.get(event)?.();
+      });
 
-    return {
-      destroy: () => {},
-      on: (event: string, handler: () => void) => {
-        handlers.set(event, handler);
-      },
-    };
-  },
-  createServer: () => ({
-    close: () => {},
-    listen: () => {},
-    on: () => {},
-  }),
-}));
-
-mock.module("../src/lib/fs.ts", () => ({
-  ensureDir: async (absoluteDir: string) => {
-    await mkdir(absoluteDir, { recursive: true });
-  },
-  ensureGitignoreEntry: async () => ({ changed: false }),
-  pathExists: async (absolutePath: string) => {
-    const override = pathExistsOverrides.get(absolutePath);
-    if (override !== undefined) {
-      return override;
-    }
-    try {
-      await Bun.file(absolutePath).stat();
-      return true;
-    } catch {
-      return false;
-    }
-  },
-  readTextFile: async (absolutePath: string) => {
-    try {
-      return await Bun.file(absolutePath).text();
-    } catch {
-      return null;
-    }
-  },
-  writeTextFile: async (absolutePath: string, content: string) => {
-    await Bun.write(absolutePath, content);
-  },
-  writeTextFileIfChanged: async (absolutePath: string, content: string) => {
-    const existing = await Bun.file(absolutePath)
-      .text()
-      .catch(() => null);
-    if (existing === content) {
-      return { changed: false };
-    }
-    await Bun.write(absolutePath, content);
-    return { changed: true };
-  },
-}));
-
-mock.module("../src/lib/shell.ts", () => ({
-  exec: async (cmd: readonly string[]) => {
-    execCalls.push([...cmd]);
-    const custom = execMockResponder?.(cmd) ?? null;
-    if (custom) {
-      return custom;
-    }
-    if (cmd[0] === "docker" && cmd[1] === "info") {
-      return { exitCode: 0, stdout: "", stderr: "" };
-    }
-    if (cmd[0] === "brew" && cmd[1] === "--prefix") {
       return {
-        exitCode: 0,
-        stdout: resolve(tempDir ?? "/tmp", "brew-prefix"),
-        stderr: "",
+        destroy: () => {},
+        on: (event: string, handler: () => void) => {
+          handlers.set(event, handler);
+        },
       };
-    }
-    if (cmd[0] === "brew" && cmd[1] === "list" && cmd[2] === "dnsmasq") {
-      return { exitCode: 0, stdout: "", stderr: "" };
-    }
-    if (cmd[0] === "docker" && cmd[1] === "network" && cmd[2] === "inspect") {
-      return { exitCode: 0, stdout: "[]", stderr: "" };
-    }
-    if (cmd[0] === "id" && cmd[1] === "-un") {
-      return { exitCode: 0, stdout: `${idUser}\n`, stderr: "" };
-    }
-    if (cmd[0] === "/usr/bin/stat" && cmd[1] === "-f") {
-      const metadata = statMetadataByPath.get(cmd[3] ?? "");
-      if (!metadata) {
-        return { exitCode: 1, stdout: "", stderr: "missing" };
+    },
+    createServer: () => ({
+      close: () => {},
+      listen: () => {},
+      on: () => {},
+    }),
+  },
+});
+
+const fsMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/fs.ts",
+  overrides: {
+    ensureDir: async (absoluteDir: string) => {
+      await mkdir(absoluteDir, { recursive: true });
+    },
+    ensureGitignoreEntry: async () => ({ changed: false }),
+    pathExists: async (absolutePath: string) => {
+      const override = pathExistsOverrides.get(absolutePath);
+      if (override !== undefined) {
+        return override;
       }
-      return { exitCode: 0, stdout: `${metadata}\n`, stderr: "" };
-    }
+      try {
+        await Bun.file(absolutePath).stat();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    readTextFile: async (absolutePath: string) => {
+      try {
+        return await Bun.file(absolutePath).text();
+      } catch {
+        return null;
+      }
+    },
+    writeTextFile: async (absolutePath: string, content: string) => {
+      await Bun.write(absolutePath, content);
+    },
+    writeTextFileIfChanged: async (absolutePath: string, content: string) => {
+      const existing = await Bun.file(absolutePath)
+        .text()
+        .catch(() => null);
+      if (existing === content) {
+        return { changed: false };
+      }
+      await Bun.write(absolutePath, content);
+      return { changed: true };
+    },
+  },
+});
 
-    return { exitCode: 0, stdout: "", stderr: "" };
-  },
-  execOrThrow: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-  run: async (cmd: readonly string[]) => {
-    runCalls.push([...cmd]);
-    return runResponder?.(cmd) ?? 0;
-  },
-  findExecutableInPath: (name?: string) => {
-    if (name === "hack") {
-      return "/usr/local/bin/hack";
-    }
-    if (name === "brew") {
-      return brewExecutablePath;
-    }
-    return "/usr/bin/mock-bin";
-  },
-  CommandError: class CommandError extends Error {},
-}));
+const shellMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/shell.ts",
+  overrides: {
+    exec: async (cmd: readonly string[]) => {
+      execCalls.push([...cmd]);
+      const custom = execMockResponder?.(cmd) ?? null;
+      if (custom) {
+        return custom;
+      }
+      if (cmd[0] === "docker" && cmd[1] === "info") {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (cmd[0] === "brew" && cmd[1] === "--prefix") {
+        return {
+          exitCode: 0,
+          stdout: resolve(tempDir ?? "/tmp", "brew-prefix"),
+          stderr: "",
+        };
+      }
+      if (cmd[0] === "brew" && cmd[1] === "list" && cmd[2] === "dnsmasq") {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (cmd[0] === "docker" && cmd[1] === "network" && cmd[2] === "inspect") {
+        return { exitCode: 0, stdout: "[]", stderr: "" };
+      }
+      if (cmd[0] === "id" && cmd[1] === "-un") {
+        return { exitCode: 0, stdout: `${idUser}\n`, stderr: "" };
+      }
+      if (cmd[0] === "/usr/bin/stat" && cmd[1] === "-f") {
+        const metadata = statMetadataByPath.get(cmd[3] ?? "");
+        if (!metadata) {
+          return { exitCode: 1, stdout: "", stderr: "missing" };
+        }
+        return { exitCode: 0, stdout: `${metadata}\n`, stderr: "" };
+      }
 
-mock.module("../src/lib/os.ts", () => ({
-  isMac: () => true,
-  openUrl: async () => 0,
-}));
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    execOrThrow: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    run: async (cmd: readonly string[]) => {
+      runCalls.push([...cmd]);
+      return runResponder?.(cmd) ?? 0;
+    },
+    findExecutableInPath: (name?: string) => {
+      if (name === "hack") {
+        return "/usr/local/bin/hack";
+      }
+      if (name === "brew") {
+        return brewExecutablePath;
+      }
+      return "/usr/bin/mock-bin";
+    },
+    CommandError: class CommandError extends Error {},
+  },
+});
+
+const osMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/os.ts",
+  overrides: {
+    isMac: () => true,
+    isLinux: () => false,
+    openUrl: async () => 0,
+  },
+});
+
+beforeAll(() => {
+  clackMock.activate();
+  netMock.activate();
+  fsMock.activate();
+  shellMock.activate();
+  osMock.activate();
+});
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
   originalLogger = process.env.HACK_LOGGER;
   originalUser = process.env.USER;
+  originalNoInteractive = process.env.HACK_NO_INTERACTIVE;
   tempDir = await mkdtemp(join(tmpdir(), "hack-global-macos-"));
   process.env.HOME = tempDir;
   process.env.USER = "env-user";
@@ -208,6 +249,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  resetNoInteractiveFlagForTests();
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
@@ -215,10 +257,20 @@ afterEach(async () => {
   process.env.HOME = originalHome;
   process.env.USER = originalUser;
   process.env.HACK_LOGGER = originalLogger;
+  if (originalNoInteractive === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_NO_INTERACTIVE");
+  } else {
+    process.env.HACK_NO_INTERACTIVE = originalNoInteractive;
+  }
+  resetGumPathCacheForTests();
 });
 
 afterAll(() => {
-  mock.restore();
+  clackMock.deactivate();
+  netMock.deactivate();
+  fsMock.deactivate();
+  shellMock.deactivate();
+  osMock.deactivate();
 });
 
 async function writeExecutable(path: string): Promise<void> {
@@ -820,14 +872,26 @@ test("global up falls back to interactive sudo when stdin is tty but stdout is r
       ])
     );
   } finally {
-    if (stdinDescriptor) {
-      Object.defineProperty(process.stdin, "isTTY", stdinDescriptor);
-    }
-    if (stdoutDescriptor) {
-      Object.defineProperty(process.stdout, "isTTY", stdoutDescriptor);
-    }
+    restoreIsTty({ stream: process.stdin, descriptor: stdinDescriptor });
+    restoreIsTty({ stream: process.stdout, descriptor: stdoutDescriptor });
   }
 });
+
+/**
+ * Restores a stubbed isTTY property. When the stream had no own isTTY
+ * descriptor before the stub, the stubbed own property must be deleted
+ * (skipping the restore would leak the stubbed value into other test files).
+ */
+function restoreIsTty(opts: {
+  readonly stream: NodeJS.ReadStream | NodeJS.WriteStream;
+  readonly descriptor: PropertyDescriptor | undefined;
+}): void {
+  if (opts.descriptor) {
+    Object.defineProperty(opts.stream, "isTTY", opts.descriptor);
+    return;
+  }
+  Reflect.deleteProperty(opts.stream, "isTTY");
+}
 
 test("global down falls back to brew stop when the dns recovery helper is missing", async () => {
   const { runCli } = await import("../src/cli/run.ts");
@@ -988,7 +1052,7 @@ test("global trust prepares host runtime trust env for future shells", async () 
   );
 });
 
-test("global trust leaves host TLS env unchanged when keychain trust is declined", async () => {
+test("global trust still prepares host TLS env when keychain trust is declined", async () => {
   const caddyCompose = join(
     tempDir!,
     GLOBAL_HACK_DIR_NAME,
@@ -1020,6 +1084,19 @@ test("global trust leaves host TLS env unchanged when keychain trust is declined
     ) {
       return { exitCode: 0, stdout: "caddy-123\n", stderr: "" };
     }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-a" &&
+      cmd[3] === "-p"
+    ) {
+      return {
+        exitCode: 0,
+        stdout:
+          "-----BEGIN CERTIFICATE-----\nSYSTEM\n-----END CERTIFICATE-----\n",
+        stderr: "",
+      };
+    }
     return null;
   };
 
@@ -1042,8 +1119,10 @@ test("global trust leaves host TLS env unchanged when keychain trust is declined
   );
 
   expect(code).toBe(0);
-  expect(await fileExists(bundlePath)).toBe(false);
-  expect(await fileExists(envScriptPath)).toBe(false);
+  // Declining the System keychain step (browser trust) no longer blocks
+  // Bun/Node/curl/git trust env, which is independent of the keychain.
+  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+  expect(await fileExists(envScriptPath)).toBe(true);
   expect(runCalls).toEqual(
     expect.arrayContaining([
       [
@@ -1052,11 +1131,12 @@ test("global trust leaves host TLS env unchanged when keychain trust is declined
         "caddy-123:/data/caddy/pki/authorities/local/root.crt",
         localCaPath,
       ],
+      ["launchctl", "setenv", "NODE_EXTRA_CA_CERTS", localCaPath],
     ])
   );
   expect(runCalls).not.toEqual(
     expect.arrayContaining([
-      ["launchctl", "setenv", "NODE_EXTRA_CA_CERTS", localCaPath],
+      expect.arrayContaining(["sudo", "security", "add-trusted-cert"]),
     ])
   );
 });
@@ -1141,4 +1221,265 @@ test("global trust falls back to an existing exported CA when Caddy is unavailab
   expect(runCalls).not.toEqual(
     expect.arrayContaining([expect.arrayContaining(["docker", "cp"])])
   );
+});
+
+test("global trust proceeds under --no-interactive when sudo is passwordless", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+
+  const localCaPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-local-authority.crt"
+  );
+  await mkdir(dirname(localCaPath), { recursive: true });
+  await writeFile(
+    localCaPath,
+    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
+  );
+
+  execMockResponder = (cmd) => {
+    if (
+      cmd[0] === "docker" &&
+      cmd[1] === "compose" &&
+      cmd[2] === "-f" &&
+      cmd[4] === "ps"
+    ) {
+      return { exitCode: 0, stdout: "caddy-123\n", stderr: "" };
+    }
+    if (cmd[0] === "sudo" && cmd[1] === "-n" && cmd[2] === "true") {
+      return { exitCode: 0, stdout: "", stderr: "" };
+    }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-c"
+    ) {
+      // Not yet trusted: fast-path lookup misses so the confirmed flow
+      // proceeds to the `sudo security add-trusted-cert` install.
+      return { exitCode: 1, stdout: "", stderr: "" };
+    }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-a" &&
+      cmd[3] === "-p"
+    ) {
+      return {
+        exitCode: 0,
+        stdout:
+          "-----BEGIN CERTIFICATE-----\nSYSTEM\n-----END CERTIFICATE-----\n",
+        stderr: "",
+      };
+    }
+    return null;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "trust", "--no-interactive"]);
+
+  const bundlePath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-bundle.pem"
+  );
+
+  expect(code).toBe(0);
+  // Non-interactive proceeds with the documented default (trust): the sudo
+  // keychain install runs without ever calling clack's confirm prompt.
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      [
+        "sudo",
+        "security",
+        "add-trusted-cert",
+        "-d",
+        "-r",
+        "trustRoot",
+        "-k",
+        "/Library/Keychains/System.keychain",
+        localCaPath,
+      ],
+    ])
+  );
+  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+});
+
+test("global trust skips the keychain step under --no-interactive when sudo needs a password, but still writes host trust env", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+
+  const localCaPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-local-authority.crt"
+  );
+  await mkdir(dirname(localCaPath), { recursive: true });
+  await writeFile(
+    localCaPath,
+    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
+  );
+
+  execMockResponder = (cmd) => {
+    if (
+      cmd[0] === "docker" &&
+      cmd[1] === "compose" &&
+      cmd[2] === "-f" &&
+      cmd[4] === "ps"
+    ) {
+      return { exitCode: 0, stdout: "caddy-123\n", stderr: "" };
+    }
+    if (cmd[0] === "sudo" && cmd[1] === "-n" && cmd[2] === "true") {
+      // sudo would prompt for a password; there is no TTY to answer it.
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: "sudo: a password is required",
+      };
+    }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-c"
+    ) {
+      return { exitCode: 1, stdout: "", stderr: "" };
+    }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-a" &&
+      cmd[3] === "-p"
+    ) {
+      return {
+        exitCode: 0,
+        stdout:
+          "-----BEGIN CERTIFICATE-----\nSYSTEM\n-----END CERTIFICATE-----\n",
+        stderr: "",
+      };
+    }
+    return null;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "trust", "--no-interactive"]);
+
+  const bundlePath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-bundle.pem"
+  );
+  const envScriptPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-env.sh"
+  );
+
+  expect(code).toBe(0);
+  // The sudo-gated keychain install never runs (would have blocked on a
+  // password prompt), but host trust env (Bun/Node/curl/git) is still
+  // prepared so non-interactive runs get CLI-tool trust.
+  expect(runCalls).not.toEqual(
+    expect.arrayContaining([
+      expect.arrayContaining(["sudo", "security", "add-trusted-cert"]),
+    ])
+  );
+  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+  expect(await Bun.file(bundlePath).text()).toContain("SYSTEM");
+  expect(await Bun.file(envScriptPath).text()).toContain("NODE_EXTRA_CA_CERTS");
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      ["launchctl", "setenv", "NODE_EXTRA_CA_CERTS", localCaPath],
+    ])
+  );
+});
+
+test("global install still prepares host TLS env when keychain trust is declined", async () => {
+  await prepareManagedTools(tempDir!);
+  reachabilityByHost = {
+    [DEFAULT_CADDY_IP]: true,
+    [DEFAULT_HOST_DNS_IP]: true,
+  };
+  confirmResponder = () => false;
+
+  const localCaPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-local-authority.crt"
+  );
+  await mkdir(dirname(localCaPath), { recursive: true });
+  await writeFile(
+    localCaPath,
+    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
+  );
+
+  execMockResponder = (cmd) => {
+    if (
+      cmd[0] === "docker" &&
+      cmd[1] === "compose" &&
+      cmd[2] === "-f" &&
+      cmd[4] === "ps"
+    ) {
+      return { exitCode: 0, stdout: "caddy-123\n", stderr: "" };
+    }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-a" &&
+      cmd[3] === "-p"
+    ) {
+      return {
+        exitCode: 0,
+        stdout:
+          "-----BEGIN CERTIFICATE-----\nSYSTEM\n-----END CERTIFICATE-----\n",
+        stderr: "",
+      };
+    }
+    return null;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "install"]);
+
+  const bundlePath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-bundle.pem"
+  );
+  const envScriptPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-env.sh"
+  );
+
+  expect(code).toBe(0);
+  // Same contract as `global trust`: declining the System keychain step
+  // (browser trust) must not block the Bun/Node/curl/git host trust env.
+  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+  expect(await fileExists(envScriptPath)).toBe(true);
 });

@@ -6,9 +6,13 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
-import { optPath, optProject } from "../cli/options.ts";
+import { optOpenPreference, optPath, optProject } from "../cli/options.ts";
 import { DEFAULT_PROJECT_TLD, HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
 import { readBranchesFile, writeBranchesFile } from "../lib/branches.ts";
+import {
+  parseOpenHostPreference,
+  resolvePreferredOpenHost,
+} from "../lib/open-host.ts";
 import { openUrl } from "../lib/os.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import {
@@ -40,7 +44,7 @@ const branchAddPositionals = [{ name: "name", required: true }] as const;
 const branchListOptions = [optPath, optProject] as const;
 const branchRemoveOptions = [optPath, optProject] as const;
 const branchRemovePositionals = [{ name: "name", required: true }] as const;
-const branchOpenOptions = [optPath, optProject] as const;
+const branchOpenOptions = [optPath, optProject, optOpenPreference] as const;
 const branchOpenPositionals = [{ name: "name", required: true }] as const;
 
 const branchSpec = defineCommand({
@@ -298,7 +302,27 @@ const handleBranchOpen: CommandHandlerFor<typeof branchOpenSpec> = async ({
     (host): host is string => typeof host === "string" && host.length > 0
   );
 
-  const resolvedHost = applyBranchToHost({ host: devHost, branch, baseHosts });
+  const preferenceRaw = args.options.prefer;
+  const optionPreference = parseOpenHostPreference(preferenceRaw);
+  if (preferenceRaw !== undefined && !optionPreference) {
+    throw new CliUsageError("--prefer must be 'auto', 'alias', or 'dev'");
+  }
+  const preferred = resolvePreferredOpenHost({
+    devHost,
+    aliasHost,
+    configPreference: cfg.open?.prefer,
+    ...(optionPreference ? { optionPreference } : {}),
+  });
+  if (!preferred.ok) {
+    throw new CliUsageError(
+      "OAuth alias host is unavailable. Enable oauth.enabled or use --prefer dev."
+    );
+  }
+  const resolvedHost = applyBranchToHost({
+    host: preferred.host,
+    branch,
+    baseHosts,
+  });
   const url = `https://${resolvedHost}`;
 
   logger.step({ message: `Opening ${url}` });

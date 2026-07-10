@@ -77,6 +77,7 @@ test("readProjectConfig parses json config fields", async () => {
           clear_on_down: true,
         },
         oauth: { enabled: true, tld: "gy" },
+        open: { prefer: "alias" },
         internal: {
           dns: true,
           tls: true,
@@ -104,6 +105,7 @@ test("readProjectConfig parses json config fields", async () => {
   expect(cfg.logs?.clearOnDown).toBe(true);
   expect(cfg.oauth?.enabled).toBe(true);
   expect(cfg.oauth?.tld).toBe("gy");
+  expect(cfg.open?.prefer).toBe("alias");
   expect(cfg.internal?.dns).toBe(true);
   expect(cfg.internal?.tls).toBe(true);
   expect(cfg.internal?.extraHosts).toEqual({
@@ -116,6 +118,23 @@ test("readProjectConfig parses json config fields", async () => {
     ownerId: "team_123",
     managedBy: "broker",
   });
+});
+
+test("readProjectConfig rejects an invalid open preference", async () => {
+  const ctx = await createProjectDir();
+  await writeFile(
+    ctx.configFile,
+    JSON.stringify({
+      open: { prefer: "primary" },
+    })
+  );
+
+  const cfg = await readProjectConfig(ctx);
+
+  expect(cfg.open).toBeUndefined();
+  expect(cfg.parseError).toBe(
+    "Project open.prefer must be 'auto', 'alias', or 'dev'."
+  );
 });
 
 test("readProjectConfig captures parse errors", async () => {

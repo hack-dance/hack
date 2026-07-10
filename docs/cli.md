@@ -80,6 +80,18 @@ Agent-assisted alternative for a new repo: `hack init --with claude|codex|both`.
 project without `.hack/`, use `hack agent onboard`. See
 [Agent-first setup](guides/agent-first-setup.md).
 
+### Browser URL preference
+
+`hack open` keeps `dev_host` as the primary routing identity, but automatically opens the OAuth
+alias (for example, `myapp.hack.gy`) when `oauth.enabled` is true. Service shorthand and branch
+instances follow the same preference, so `hack open api --branch feature-x` resolves the
+branch-qualified alias URL.
+
+Set `open.prefer` in `.hack/hack.config.json` to `auto` (the default), `alias`, or `dev`. Override
+one invocation with `hack open --prefer <auto|alias|dev>`. Explicit URLs and fully qualified host
+targets are preserved. Selecting `alias` without an enabled OAuth alias fails with recovery
+guidance instead of silently opening the dev host.
+
 ## Running things (decision guide)
 
 - One-off command in a fresh service container (deps started as needed): `hack run <service> <cmd...>`.
@@ -87,8 +99,8 @@ project without `.hack/`, use `hack agent onboard`. See
 - Host script that needs hack-stored env: `hack host exec --env <overlay> --scope <service> -- <cmd...>`
   — this is the way to run repo scripts; never read `.env` files directly.
 - Interactive host shell with injected env: `hack host shell --env <overlay> --scope <service>`.
-- Call a service over HTTP (from the host or between containers): use its Caddy hostname
-  `https://<sub>.<dev_host>`; discover routable URLs with `hack open --json`.
+- Browser/host URL: use `hack open <service> --json`; OAuth aliases are preferred when enabled.
+- Container-to-container traffic: use Compose DNS rather than routing back through Caddy.
 
 Service-scoped runtime changes do not run project-wide lifecycle hooks and do not start Compose
 dependencies implicitly:

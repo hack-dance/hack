@@ -62,7 +62,8 @@ graph LR
 
 - Project scope (`.hack`)
   - `docker-compose.yml` defines services + Caddy labels
-  - `hack.config.json` stores project name, dev host, log preferences, OAuth alias
+  - `hack.config.json` stores project name, dev host, log preferences, OAuth alias, and browser
+    launch preference (`open.prefer`)
   - `controlPlane.gateway.enabled` marks the project as gateway-capable
   - Optional overrides:
     - `.internal/compose.override.yml` (generated internal DNS/TLS injection)

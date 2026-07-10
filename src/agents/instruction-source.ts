@@ -101,6 +101,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Primary host comes from `dev_host` (default: `<project>.hack`).",
       "Subdomain pattern is `<sub>.<dev_host>` (for example: `api.myapp.hack`).",
       "OAuth alias (when enabled) also routes `<dev_host>.<tld>` and `<sub>.<dev_host>.<tld>` (default tld: `gy`).",
+      "Browser launches automatically prefer the OAuth alias when enabled; set `open.prefer` or pass `hack open --prefer <auto|alias|dev>` to override.",
       "Not every compose service is routable: only services with Caddy labels and on `hack-dev` are exposed.",
       "Required labels for HTTP services: `caddy`, `caddy.reverse_proxy`, `caddy.tls=internal`.",
       "Quick checks: `hack open`, `hack open <sub>`, `hack open --json`.",
@@ -177,7 +178,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Command inside an already-running service container: `hack exec <service> -- <cmd...>`.",
       "Host script that needs hack-stored env: `hack host exec --env <overlay> --scope <service> -- <cmd...>` — this is THE way to run repo scripts; never read .env files directly.",
       "Interactive host shell with injected env: `hack host shell --env <overlay> --scope <service>`.",
-      "Call a service over HTTP (from the host or between containers): use its Caddy hostname `https://<sub>.<dev_host>`; discover routable URLs with `hack open --json`.",
+      "Browser/host URL: use `hack open <service> --json` (OAuth aliases are preferred when enabled). Container-to-container traffic should use Compose DNS.",
     ],
   },
   {

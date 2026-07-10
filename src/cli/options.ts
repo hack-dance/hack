@@ -91,6 +91,15 @@ export const optJson = defineOption({
   description: "Output JSON (machine-readable)",
 } as const);
 
+export const optOpenPreference = defineOption({
+  name: "prefer",
+  type: "string",
+  long: "--prefer",
+  valueHint: "<auto|alias|dev>",
+  description:
+    "Browser host preference (auto uses the OAuth alias when enabled)",
+} as const);
+
 export const optNoInteractive = defineOption({
   name: "noInteractive",
   type: "boolean",

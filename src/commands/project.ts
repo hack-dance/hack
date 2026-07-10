@@ -39,6 +39,7 @@ import {
   optFollow,
   optJson,
   optNoFollow,
+  optOpenPreference,
   optPath,
   optPretty,
   optProfile,
@@ -146,6 +147,10 @@ import {
   resolveUseLoki,
 } from "../lib/logs.ts";
 import { readNodesRegistry } from "../lib/nodes-registry.ts";
+import {
+  parseOpenHostPreference,
+  resolvePreferredOpenHost,
+} from "../lib/open-host.ts";
 import { openUrl } from "../lib/os.ts";
 import {
   defaultProjectSlugFromPath,
@@ -439,7 +444,13 @@ const logsOptions = [
   optUntil,
 ] as const;
 const logsPositionals = [{ name: "service", required: false }] as const;
-const openOptions = [optPath, optProject, optBranch, optJson] as const;
+const openOptions = [
+  optPath,
+  optProject,
+  optBranch,
+  optOpenPreference,
+  optJson,
+] as const;
 const openPositionals = [{ name: "target", required: false }] as const;
 const serviceLifecyclePositionals = [
   { name: "services", required: false, multiple: true },
@@ -551,7 +562,8 @@ export const logsCommand = withHandler(logsSpec, handleLogs);
 
 const openSpec = defineCommand({
   name: "open",
-  summary: "Open a URL for the project (default: https://<project>.hack)",
+  summary:
+    "Open a project URL (OAuth alias by default when enabled; otherwise dev host)",
   group: "Project",
   options: openOptions,
   positionals: openPositionals,
@@ -8198,10 +8210,35 @@ async function handleOpen({
   );
 
   const targetRaw = (args.positionals.target ?? "").trim();
-  const rawHost = resolveRawHost({ targetRaw, devHost });
-  const resolvedHost = branch
-    ? applyBranchToHost({ host: rawHost, branch, baseHosts })
-    : rawHost;
+  const preferenceRaw = args.options.prefer;
+  const optionPreference = parseOpenHostPreference(preferenceRaw);
+  if (preferenceRaw !== undefined && !optionPreference) {
+    throw new CliUsageError("--prefer must be 'auto', 'alias', or 'dev'");
+  }
+  const usesProjectBaseHost =
+    targetRaw === "" ||
+    targetRaw === "www" ||
+    (targetRaw !== "logs" &&
+      !hasUrlScheme(targetRaw) &&
+      !targetRaw.includes("."));
+  const preferred = resolvePreferredOpenHost({
+    devHost,
+    aliasHost,
+    configPreference: cfg.open?.prefer,
+    ...(optionPreference ? { optionPreference } : {}),
+  });
+  if (usesProjectBaseHost && !preferred.ok) {
+    throw new CliUsageError(
+      "OAuth alias host is unavailable. Enable oauth.enabled or use --prefer dev."
+    );
+  }
+  const baseHost =
+    usesProjectBaseHost && preferred.ok ? preferred.host : devHost;
+  const rawHost = resolveRawHost({ targetRaw, devHost: baseHost });
+  const resolvedHost =
+    branch && usesProjectBaseHost
+      ? applyBranchToHost({ host: rawHost, branch, baseHosts })
+      : rawHost;
   const url = resolveOpenUrl({ targetRaw, resolvedHost });
 
   if (json) {

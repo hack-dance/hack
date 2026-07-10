@@ -112,7 +112,7 @@ import {
   renderGlobalCaddyCompose,
   renderGlobalCoreDnsConfig,
 } from "../templates.ts";
-import { display } from "../ui/display.ts";
+import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { getFzfPath } from "../ui/fzf.ts";
 import { getGumPath } from "../ui/gum.ts";
 import {
@@ -609,7 +609,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 
   await renderDoctorSummary(results);
   emitSlowChecksNote(results);
-  renderMacNote(results);
+  await renderMacNote(results);
   if (!args.options.fix) {
     await renderRecoveryGuidance(results);
   }
@@ -3104,11 +3104,18 @@ async function ensureIngressNetwork(): Promise<{
   }
 
   if (ingress.exists) {
-    await run(["docker", "network", "rm", DEFAULT_INGRESS_NETWORK], {
-      stdin: "inherit",
-    });
+    const removed = await exec(
+      ["docker", "network", "rm", DEFAULT_INGRESS_NETWORK],
+      {
+        stdin: "ignore",
+      }
+    );
+    if (removed.exitCode !== 0) {
+      note(commandFailureDetail({ result: removed }), "runtime repair");
+      return ingress;
+    }
   }
-  await run(
+  const created = await exec(
     [
       "docker",
       "network",
@@ -3119,8 +3126,11 @@ async function ensureIngressNetwork(): Promise<{
       "--gateway",
       DEFAULT_INGRESS_GATEWAY,
     ],
-    { stdin: "inherit" }
+    { stdin: "ignore" }
   );
+  if (created.exitCode !== 0) {
+    note(commandFailureDetail({ result: created }), "runtime repair");
+  }
 
   return await inspectDockerNetwork(DEFAULT_INGRESS_NETWORK);
 }
@@ -3131,9 +3141,15 @@ async function ensureLoggingNetwork(): Promise<void> {
     return;
   }
 
-  await run(["docker", "network", "create", DEFAULT_LOGGING_NETWORK], {
-    stdin: "inherit",
-  });
+  const created = await exec(
+    ["docker", "network", "create", DEFAULT_LOGGING_NETWORK],
+    {
+      stdin: "ignore",
+    }
+  );
+  if (created.exitCode !== 0) {
+    note(commandFailureDetail({ result: created }), "runtime repair");
+  }
 }
 
 async function maybeStartGlobalCaddyCompose(opts: {
@@ -3143,7 +3159,7 @@ async function maybeStartGlobalCaddyCompose(opts: {
     return;
   }
 
-  await run(
+  const started = await exec(
     [
       "docker",
       "compose",
@@ -3155,9 +3171,27 @@ async function maybeStartGlobalCaddyCompose(opts: {
     ],
     {
       cwd: dirname(opts.paths.caddyCompose),
-      stdin: "inherit",
+      stdin: "ignore",
     }
   );
+  if (started.exitCode !== 0) {
+    note(commandFailureDetail({ result: started }), "runtime repair");
+    return;
+  }
+  note("CoreDNS and Caddy are ready.", "runtime repair");
+}
+
+function commandFailureDetail(input: {
+  readonly result: {
+    readonly exitCode: number;
+    readonly stdout: string;
+    readonly stderr: string;
+  };
+}): string {
+  const detail = input.result.stderr.trim() || input.result.stdout.trim();
+  return detail.length > 0
+    ? `Repair command failed: ${detail}`
+    : `Repair command failed (exit ${input.result.exitCode}).`;
 }
 
 async function maybeExportCaddyCaCert(opts: {
@@ -3562,26 +3596,85 @@ function isHiddenDoctorCheck(result: RecoveryCheckResult): boolean {
   return result.name === "tickets git";
 }
 
+export function buildDoctorSummaryStatusItems(input: {
+  readonly results: readonly RecoveryCheckResult[];
+}): readonly DisplayStatusItem[] {
+  const items: DisplayStatusItem[] = [];
+
+  for (const group of DOCTOR_SUMMARY_GROUPS) {
+    const members = input.results.filter((result) =>
+      group.checks.has(result.name)
+    );
+    if (members.length === 0) {
+      continue;
+    }
+    items.push(buildDoctorSummaryStatusItem({ title: group.title, members }));
+  }
+
+  const ungrouped = input.results.filter(
+    (result) =>
+      !(
+        isHiddenDoctorCheck(result) ||
+        DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
+      )
+  );
+  if (ungrouped.length > 0) {
+    items.push(
+      buildDoctorSummaryStatusItem({
+        title: "Other checks",
+        members: ungrouped,
+      })
+    );
+  }
+
+  return items;
+}
+
+function buildDoctorSummaryStatusItem(input: {
+  readonly title: string;
+  readonly members: readonly RecoveryCheckResult[];
+}): DisplayStatusItem {
+  const issues = input.members.filter(
+    (result) => result.status !== "ok" && !isIgnorableDoctorSummaryIssue(result)
+  );
+  const errorCount = issues.filter(
+    (result) => result.status === "error"
+  ).length;
+  const warningCount = issues.length - errorCount;
+  let status: DisplayStatusItem["status"] = "ok";
+  if (errorCount > 0) {
+    status = "error";
+  } else if (warningCount > 0) {
+    status = "warn";
+  }
+
+  const issueCounts = [
+    errorCount > 0 ? `${errorCount} error${errorCount === 1 ? "" : "s"}` : null,
+    warningCount > 0
+      ? `${warningCount} warning${warningCount === 1 ? "" : "s"}`
+      : null,
+  ].filter((part): part is string => part !== null);
+
+  return {
+    label: input.title,
+    status,
+    meta:
+      issueCounts.length > 0
+        ? issueCounts.join(", ")
+        : `${input.members.length} checks`,
+    detail:
+      issues.length > 0
+        ? summarizeDoctorGroupIssues({ title: input.title, issues })
+        : undefined,
+  };
+}
+
 async function renderDoctorSummary(
   results: readonly TimedCheckResult[]
 ): Promise<void> {
-  const summaryLines = buildDoctorSummaryLines({ results });
-  let tone: "error" | "warn" | "info" = "info";
-  if (results.some((result) => result.status === "error")) {
-    tone = "error";
-  } else if (
-    results.some(
-      (result) =>
-        result.status === "warn" && !isIgnorableDoctorSummaryIssue(result)
-    )
-  ) {
-    tone = "warn";
-  }
-
-  await display.panel({
+  await display.statusList({
     title: "Doctor summary",
-    tone,
-    lines: summaryLines,
+    items: buildDoctorSummaryStatusItems({ results }),
   });
 }
 
@@ -3649,23 +3742,34 @@ function summarizeDoctorIssue(issue: RecoveryCheckResult): string {
   return `${issue.name}: ${issue.message}`;
 }
 
-function renderMacNote(results: readonly RecoveryCheckResult[]): void {
-  const dnsNeedsSetup = results.some(
+async function renderMacNote(
+  results: readonly TimedCheckResult[]
+): Promise<void> {
+  const hasResolverIssue = results.some(
     (result) =>
-      DOCTOR_SUMMARY_GROUPS.find(
-        (group) => group.title === "Resolver & DNS"
-      )?.checks.has(result.name) && result.status !== "ok"
+      result.status !== "ok" &&
+      (result.name.startsWith("resolver:") ||
+        result.name.startsWith("dnsmasq.conf:"))
   );
-  if (isMac() && dnsNeedsSetup) {
-    note(
-      [
-        "macOS tip:",
-        `- wildcard DNS: /etc/resolver/${DEFAULT_PROJECT_TLD} + dnsmasq address=/.${DEFAULT_PROJECT_TLD}/<reachable-ingress-target>`,
-        `- OAuth alias DNS: /etc/resolver/${DEFAULT_OAUTH_ALIAS_ROOT} + dnsmasq address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/<reachable-ingress-target>`,
-      ].join("\n"),
-      "doctor"
-    );
+  if (!(isMac() && hasResolverIssue)) {
+    return;
   }
+
+  await display.statusList({
+    title: "macOS resolver setup",
+    items: [
+      {
+        label: `*.${DEFAULT_PROJECT_TLD}`,
+        status: "info",
+        detail: `/etc/resolver/${DEFAULT_PROJECT_TLD} with dnsmasq address=/.${DEFAULT_PROJECT_TLD}/<reachable-ingress-target>`,
+      },
+      {
+        label: `*.${DEFAULT_OAUTH_ALIAS_ROOT}`,
+        status: "info",
+        detail: `/etc/resolver/${DEFAULT_OAUTH_ALIAS_ROOT} with dnsmasq address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/<reachable-ingress-target>`,
+      },
+    ],
+  });
 }
 
 async function resolvePreferredMacHostDnsTarget(): Promise<string> {

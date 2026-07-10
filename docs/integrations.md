@@ -9,6 +9,11 @@ What remains:
 - optional coding-agent setup helpers: `hack init --with claude|codex|both`, `hack agent onboard` /
   `hack agent init` / `hack agent prime`, and `hack setup sync --all-scopes`
 
+`hack setup sync` keeps interactive output compact: it summarizes each scope and only expands the
+path and reason for stale, missing, or failed artifacts. Exit status remains the automation contract,
+and the individual `hack setup cursor|claude|codex|agents|mcp --check` commands remain available when
+you need per-artifact detail.
+
 What was removed:
 
 - Hack Tickets agent integration; legacy commands remain compatibility-only and are deprecated

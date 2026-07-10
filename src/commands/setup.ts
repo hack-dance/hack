@@ -61,6 +61,7 @@ import {
   installMcpConfig,
   removeMcpConfig,
 } from "../mcp/install.ts";
+import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
 
 const optCheck = defineOption({
@@ -708,6 +709,80 @@ async function handleSetupAgents({
 
 type SetupSyncAction = "install" | "check" | "remove";
 
+type SetupSyncGroup = {
+  readonly label: string;
+  readonly results: readonly SetupMultiLogResult[];
+};
+
+type SetupSyncScopeResult = {
+  readonly exitCode: number;
+  readonly item: DisplayStatusItem;
+};
+
+export function buildSetupSyncScopeResult(input: {
+  readonly action: SetupSyncAction;
+  readonly scope: "Project" | "Global";
+  readonly groups: readonly SetupSyncGroup[];
+}): SetupSyncScopeResult {
+  const entries = input.groups.flatMap((group) =>
+    group.results.map((result) => ({ ...result, label: group.label }))
+  );
+  const failures = entries.filter((entry) => {
+    if (entry.status === "error") {
+      return true;
+    }
+    return (
+      input.action === "check" &&
+      ["missing", "stale", "deprecated"].includes(entry.status)
+    );
+  });
+  const errorCount = failures.filter(
+    (entry) => entry.status === "error"
+  ).length;
+  let status: DisplayStatusItem["status"] = "ok";
+  if (errorCount > 0) {
+    status = "error";
+  } else if (failures.length > 0) {
+    status = "warn";
+  }
+  const meta = (() => {
+    if (input.action === "check") {
+      return failures.length === 0
+        ? `${entries.length} current`
+        : `${entries.length - failures.length}/${entries.length} current`;
+    }
+    if (input.action === "remove") {
+      const removed = entries.filter(
+        (entry) => entry.status === "removed"
+      ).length;
+      return `${removed} removed`;
+    }
+    const changed = entries.filter((entry) =>
+      ["created", "updated", "removed"].includes(entry.status)
+    ).length;
+    return changed === 0 ? "already current" : `${changed} updated`;
+  })();
+  const detail = failures
+    .map((entry) => {
+      if (entry.message) {
+        return `${entry.label}: ${entry.message}`;
+      }
+      const location = entry.path ? ` at ${entry.path}` : "";
+      return `${entry.label}: ${entry.status}${location}`;
+    })
+    .join("\n");
+
+  return {
+    exitCode: failures.length > 0 ? 1 : 0,
+    item: {
+      label: input.scope,
+      status,
+      meta,
+      detail: detail.length > 0 ? detail : undefined,
+    },
+  };
+}
+
 async function handleSetupSync({
   ctx,
   args,
@@ -725,11 +800,10 @@ async function handleSetupSync({
   const projectRoot = includesProject
     ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
     : undefined;
-  let exitCode = 0;
+  const scopeResults: SetupSyncScopeResult[] = [];
 
   if (includesProject && projectRoot) {
-    exitCode = Math.max(
-      exitCode,
+    scopeResults.push(
       await runProjectScopeSync({
         action,
         projectRoot,
@@ -738,10 +812,19 @@ async function handleSetupSync({
   }
 
   if (includesUser) {
-    exitCode = Math.max(exitCode, await runUserScopeSync({ action }));
+    scopeResults.push(await runUserScopeSync({ action }));
   }
 
-  return exitCode;
+  const titles: Readonly<Record<SetupSyncAction, string>> = {
+    check: "Agent integrations",
+    install: "Agent integrations updated",
+    remove: "Agent integrations removed",
+  };
+  await display.statusList({
+    title: titles[action],
+    items: scopeResults.map((result) => result.item),
+  });
+  return Math.max(0, ...scopeResults.map((result) => result.exitCode));
 }
 
 /**
@@ -751,7 +834,7 @@ async function handleSetupSync({
 async function runProjectScopeSync(opts: {
   readonly action: SetupSyncAction;
   readonly projectRoot: string;
-}): Promise<number> {
+}): Promise<SetupSyncScopeResult> {
   const { action, projectRoot } = opts;
   let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
   let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
@@ -820,56 +903,19 @@ async function runProjectScopeSync(opts: {
     });
   }
 
-  const singleResults: readonly (readonly [
-    SetupMultiLogResult & { readonly path: string },
-    string,
-  ])[] = [
-    [cursorResult, "Cursor integration (project)"],
-    [claudeResult, "Claude integration (project)"],
-    [codexResult, "Codex integration (project)"],
-  ];
-
-  let exitCode = 0;
-  for (const [result, okMessage] of singleResults) {
-    exitCode = Math.max(
-      exitCode,
-      logSingleResult({ action, okMessage, result })
-    );
-  }
-  const cleanupAction = action === "check" ? "check" : "remove";
-  exitCode = Math.max(
-    exitCode,
-    logSingleResult({
-      action: cleanupAction,
-      okMessage: "Deprecated Tickets skill (project)",
-      result: ticketsResult,
-    })
-  );
-  exitCode = Math.max(
-    exitCode,
-    logMultiResults({
-      action: cleanupAction,
-      okMessage: "Deprecated Tickets instructions",
-      results: ticketsDocsResults,
-    })
-  );
-  exitCode = Math.max(
-    exitCode,
-    logMultiResults({
-      action,
-      okMessage: "MCP config (project)",
-      results: mcpResults,
-    })
-  );
-  exitCode = Math.max(
-    exitCode,
-    logMultiResults({
-      action,
-      okMessage: "Agent docs",
-      results: docsResults,
-    })
-  );
-  return exitCode;
+  return buildSetupSyncScopeResult({
+    action,
+    scope: "Project",
+    groups: [
+      { label: "Cursor", results: [cursorResult] },
+      { label: "Claude", results: [claudeResult] },
+      { label: "Codex", results: [codexResult] },
+      { label: "Deprecated Tickets skill", results: [ticketsResult] },
+      { label: "Deprecated Tickets instructions", results: ticketsDocsResults },
+      { label: "MCP config", results: mcpResults },
+      { label: "Agent docs", results: docsResults },
+    ],
+  });
 }
 
 /**
@@ -879,7 +925,7 @@ async function runProjectScopeSync(opts: {
  */
 async function runUserScopeSync(opts: {
   readonly action: SetupSyncAction;
-}): Promise<number> {
+}): Promise<SetupSyncScopeResult> {
   const { action } = opts;
   let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
   let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
@@ -924,49 +970,19 @@ async function runUserScopeSync(opts: {
     });
   }
 
-  const singleResults: readonly (readonly [
-    SetupMultiLogResult & { readonly path: string },
-    string,
-  ])[] = [
-    [cursorResult, "Cursor integration (global)"],
-    [claudeResult, "Claude integration (global)"],
-    [codexResult, "Codex integration (global)"],
-    [sharedSkillResult, "Shared Hack skill (global)"],
-  ];
-
-  let exitCode = 0;
-  for (const [result, okMessage] of singleResults) {
-    exitCode = Math.max(
-      exitCode,
-      logSingleResult({ action, okMessage, result })
-    );
-  }
-  const cleanupAction = action === "check" ? "check" : "remove";
-  exitCode = Math.max(
-    exitCode,
-    logSingleResult({
-      action: cleanupAction,
-      okMessage: "Deprecated Tickets skill (global)",
-      result: ticketsResult,
-    })
-  );
-  exitCode = Math.max(
-    exitCode,
-    logMultiResults({
-      action: cleanupAction,
-      okMessage: "Deprecated shared Hack skills",
-      results: legacySharedResults,
-    })
-  );
-  exitCode = Math.max(
-    exitCode,
-    logMultiResults({
-      action,
-      okMessage: "MCP config (global)",
-      results: mcpResults,
-    })
-  );
-  return exitCode;
+  return buildSetupSyncScopeResult({
+    action,
+    scope: "Global",
+    groups: [
+      { label: "Cursor", results: [cursorResult] },
+      { label: "Claude", results: [claudeResult] },
+      { label: "Codex", results: [codexResult] },
+      { label: "Shared Hack skill", results: [sharedSkillResult] },
+      { label: "Deprecated Tickets skill", results: [ticketsResult] },
+      { label: "Deprecated shared Hack skills", results: legacySharedResults },
+      { label: "MCP config", results: mcpResults },
+    ],
+  });
 }
 
 async function handleSetupMcp({

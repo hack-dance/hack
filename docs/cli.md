@@ -26,6 +26,11 @@ terminal).
 - `hack setup` — install/refresh agent integrations (Cursor rules, Claude hooks, Codex skill, MCP)
 - `hack tickets` — deprecated compatibility surface for existing Tickets data
 
+Interactive diagnostics use compact status rows: healthy groups stay on one line, while warnings
+and errors expand with wrapped detail and recovery guidance. `hack doctor --json` remains the stable,
+fully detailed automation surface. Generic macOS resolver setup is shown only when those resolver
+checks need attention.
+
 Run `hack help` for the full command list, or `hack help --all` to include hidden unsupported
 experimental commands. Every command and flag on this page is also in the generated
 [CLI reference](reference/cli.md).

@@ -11,6 +11,7 @@ import {
 } from "../src/agents/init-assistant.ts";
 import { renderAgentInitPatterns } from "../src/agents/init-patterns.ts";
 import { renderAgentPrimer } from "../src/agents/primer.ts";
+import { buildSetupSyncScopeResult } from "../src/commands/setup.ts";
 import { renderAgentDocsSnippet } from "../src/mcp/agent-docs.ts";
 
 let tempDir: string | null = null;
@@ -107,6 +108,92 @@ test("renderAgentInitPatterns includes dependency signals", () => {
   expect(patterns).toContain("Postgres");
   expect(patterns).toContain("DATABASE_URL");
   expect(patterns).toContain("docker-compose.yml");
+});
+
+test("setup sync collapses healthy artifacts into one scope row", () => {
+  const result = buildSetupSyncScopeResult({
+    action: "check",
+    scope: "Project",
+    groups: [
+      {
+        label: "Cursor",
+        results: [{ status: "noop", path: "/repo/.cursor/rules/hack.mdc" }],
+      },
+      {
+        label: "MCP config",
+        results: [
+          { status: "present", path: "/repo/.cursor/mcp.json" },
+          { status: "present", path: "/repo/.codex/config.toml" },
+        ],
+      },
+    ],
+  });
+
+  expect(result).toEqual({
+    exitCode: 0,
+    item: {
+      label: "Project",
+      status: "ok",
+      meta: "3 current",
+      detail: undefined,
+    },
+  });
+});
+
+test("setup sync keeps failing artifact paths visible", () => {
+  const result = buildSetupSyncScopeResult({
+    action: "check",
+    scope: "Global",
+    groups: [
+      {
+        label: "Codex",
+        results: [{ status: "stale", path: "<home>/.codex/skill.md" }],
+      },
+      {
+        label: "Claude",
+        results: [{ status: "noop", path: "<home>/.claude/settings.json" }],
+      },
+    ],
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.item).toEqual({
+    label: "Global",
+    status: "warn",
+    meta: "1/2 current",
+    detail: "Codex: stale at <home>/.codex/skill.md",
+  });
+});
+
+test("setup sync treats installed deprecated artifacts as actionable", () => {
+  const result = buildSetupSyncScopeResult({
+    action: "check",
+    scope: "Global",
+    groups: [
+      {
+        label: "Deprecated shared Hack skills",
+        results: [
+          {
+            status: "deprecated",
+            path: "<home>/.ai/skills/hack/SKILL.md",
+            message: "Deprecated Hack skill is still installed",
+          },
+          { status: "absent", path: "<home>/.ai/skills/hack-tickets/SKILL.md" },
+        ],
+      },
+    ],
+  });
+
+  expect(result).toEqual({
+    exitCode: 1,
+    item: {
+      label: "Global",
+      status: "warn",
+      meta: "1/2 current",
+      detail:
+        "Deprecated shared Hack skills: Deprecated Hack skill is still installed",
+    },
+  });
 });
 
 test("buildInitAssistantReport captures repo signals", async () => {

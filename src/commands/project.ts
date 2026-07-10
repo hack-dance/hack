@@ -98,7 +98,13 @@ import {
   errorResultFromUnknown,
   okResult,
 } from "../lib/cli-result.ts";
+import {
+  buildStartupIncompleteMessage,
+  type ComposeServiceState,
+  classifyComposeStartupState,
+} from "../lib/compose-startup-state.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
+import { resolveDependencyCacheOverride } from "../lib/dependency-cache.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
   isSlimExecutionMode,
@@ -156,6 +162,7 @@ import {
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
+  selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
 import { resolveProjectExecutionTarget } from "../lib/project-execution.ts";
 import {
@@ -187,11 +194,21 @@ import {
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
 import {
+  discoverDependencyBootstrapServices,
+  preflightRegistryCredentials,
+  RegistryCredentialPreflightError,
+} from "../lib/registry-credential-preflight.ts";
+import { readRuntimeProjects } from "../lib/runtime-projects.ts";
+import {
   formatSecretStoreDescriptor,
   resolveSecretStore,
 } from "../lib/secret-store.ts";
 import { exec, findExecutableInPath, run as runShell } from "../lib/shell.ts";
 import { parseTimeInput } from "../lib/time.ts";
+import {
+  buildWorktreeRetargetWarning,
+  findSameCheckoutRetargetConflicts,
+} from "../lib/worktree-runtime-target.ts";
 import { upsertAgentDocs } from "../mcp/agent-docs.ts";
 import type { McpTarget } from "../mcp/install.ts";
 import { installMcpConfig } from "../mcp/install.ts";
@@ -417,11 +434,17 @@ const logsOptions = [
 const logsPositionals = [{ name: "service", required: false }] as const;
 const openOptions = [optPath, optProject, optBranch, optJson] as const;
 const openPositionals = [{ name: "target", required: false }] as const;
+const serviceLifecyclePositionals = [
+  { name: "services", required: false, multiple: true },
+] as const;
 
 type InitArgs = CommandArgs<typeof initOptions, readonly []>;
-type UpArgs = CommandArgs<typeof upOptions, readonly []>;
+type UpArgs = CommandArgs<typeof upOptions, typeof serviceLifecyclePositionals>;
 type DownArgs = CommandArgs<typeof downOptions, readonly []>;
-type RestartArgs = CommandArgs<typeof restartOptions, readonly []>;
+type RestartArgs = CommandArgs<
+  typeof restartOptions,
+  typeof serviceLifecyclePositionals
+>;
 type PsArgs = CommandArgs<typeof psOptions, readonly []>;
 type RunArgs = CommandArgs<typeof runOptions, typeof runPositionals>;
 type ExecArgs = CommandArgs<typeof runOptions, typeof runPositionals>;
@@ -444,7 +467,7 @@ const upSpec = defineCommand({
   summary: "Start project services (docker compose up)",
   group: "Project",
   options: upOptions,
-  positionals: [],
+  positionals: serviceLifecyclePositionals,
   subcommands: [],
 } as const);
 
@@ -463,10 +486,10 @@ export const downCommand = withHandler(downSpec, handleDown);
 
 const restartSpec = defineCommand({
   name: "restart",
-  summary: "Restart project services (down then up)",
+  summary: "Restart the project or selected services",
   group: "Project",
   options: restartOptions,
-  positionals: [],
+  positionals: serviceLifecyclePositionals,
   subcommands: [],
 } as const);
 
@@ -544,10 +567,34 @@ function resolveRequestedEnvName(input: {
   return envName;
 }
 
+export function resolveRequestedComposeServices(opts: {
+  readonly requested: readonly string[] | undefined;
+  readonly available: readonly string[];
+}): readonly string[] {
+  const requested = [
+    ...new Set(
+      (opts.requested ?? []).map((service) => service.trim()).filter(Boolean)
+    ),
+  ];
+  if (requested.length === 0) {
+    return [];
+  }
+
+  const available = new Set(opts.available);
+  const unknown = requested.filter((service) => !available.has(service));
+  if (unknown.length > 0) {
+    throw new CliUsageError(
+      `Unknown compose service${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`
+    );
+  }
+  return requested;
+}
+
 async function resolveProjectForArgs(opts: {
   readonly ctx: CliContext;
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
+  readonly touchRegistration?: boolean;
 }) {
   if (opts.pathOpt && opts.projectOpt) {
     throw new CliUsageError("Use either --path or --project (not both).");
@@ -564,13 +611,17 @@ async function resolveProjectForArgs(opts: {
         `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
       );
     }
-    await touchProjectRegistration(fromRegistry);
+    if (opts.touchRegistration !== false) {
+      await touchProjectRegistration(fromRegistry);
+    }
     return fromRegistry;
   }
 
   const startDir = resolveStartDir(opts.ctx, opts.pathOpt);
   const project = await requireProjectContext(startDir);
-  await touchProjectRegistration(project);
+  if (opts.touchRegistration !== false) {
+    await touchProjectRegistration(project);
+  }
   return project;
 }
 
@@ -596,6 +647,7 @@ async function resolveEffectiveBranchForCommand(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly branchOption: string | undefined;
   readonly noticeToStderr?: boolean;
+  readonly warnOnRetarget?: boolean;
 }): Promise<string | null> {
   const explicit = resolveBranchSlug(opts.branchOption);
   if (explicit) {
@@ -620,6 +672,31 @@ async function resolveEffectiveBranchForCommand(opts: {
     } else {
       logger.info({ message });
     }
+    if (opts.warnOnRetarget === true) {
+      const baseProjectName = await resolveComposeProjectName({
+        project: opts.project,
+        cfg,
+      });
+      const targetComposeProject = `${baseProjectName}--${resolved.branch}`;
+      const runtime = await readRuntimeProjects({ includeGlobal: false });
+      const warning = runtime.ok
+        ? buildWorktreeRetargetWarning({
+            targetComposeProject,
+            conflicts: findSameCheckoutRetargetConflicts({
+              currentProjectDir: opts.project.projectDir,
+              targetComposeProject,
+              runtime: runtime.runtime,
+            }),
+          })
+        : null;
+      if (warning) {
+        if (opts.noticeToStderr === true) {
+          process.stderr.write(`WARNING: ${warning}\n`);
+        } else {
+          logger.warn({ message: warning });
+        }
+      }
+    }
   }
   return resolved.branch;
 }
@@ -633,6 +710,7 @@ export type LifecycleJsonData = {
   readonly composeProject: string;
   readonly services: {
     readonly started: readonly string[];
+    readonly completed: readonly string[];
     readonly stopped: readonly string[];
     readonly failed: readonly string[];
   };
@@ -648,6 +726,7 @@ export function buildLifecycleJsonData(opts: {
   readonly branch: string | null;
   readonly composeProject: string;
   readonly started?: readonly string[];
+  readonly completed?: readonly string[];
   readonly stopped?: readonly string[];
   readonly failed?: readonly string[];
   readonly durationMs: number;
@@ -659,17 +738,13 @@ export function buildLifecycleJsonData(opts: {
     composeProject: opts.composeProject,
     services: {
       started: [...(opts.started ?? [])].sort(),
+      completed: [...(opts.completed ?? [])].sort(),
       stopped: [...(opts.stopped ?? [])].sort(),
       failed: [...(opts.failed ?? [])].sort(),
     },
     durationMs: opts.durationMs,
   };
 }
-
-type ComposeServiceState = {
-  readonly service: string;
-  readonly state: string;
-};
 
 /**
  * Snapshot compose service states (best-effort) for `--json` payloads.
@@ -678,35 +753,66 @@ async function readComposeServiceStates(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly composeProjectName: string | null;
   readonly profiles: readonly string[];
+  readonly services?: readonly string[];
 }): Promise<readonly ComposeServiceState[]> {
   const res = await composeRuntimeBackend.psJson({
     composeFiles: [opts.project.composeFile],
     composeProject: opts.composeProjectName,
     profiles: opts.profiles,
     cwd: dirname(opts.project.composeFile),
+    all: true,
   });
   if (res.exitCode !== 0) {
     return [];
   }
+  const serviceFilter = opts.services ? new Set(opts.services) : null;
   return parseJsonLines(res.stdout)
     .map((entry) => ({
       service: getString(entry, "Service") ?? "",
-      state: getString(entry, "State") ?? "",
+      state: (getString(entry, "State") ?? "").toLowerCase(),
+      exitCode: parseComposeExitCode(entry.ExitCode),
     }))
-    .filter((entry) => entry.service.length > 0);
+    .filter(
+      (entry) =>
+        entry.service.length > 0 &&
+        (serviceFilter === null || serviceFilter.has(entry.service))
+    );
 }
 
-function splitServiceStates(states: readonly ComposeServiceState[]): {
-  readonly running: readonly string[];
-  readonly notRunning: readonly string[];
+function parseComposeExitCode(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value)) {
+    return value;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+function startupSnapshotIsIncomplete(opts: {
+  readonly states: readonly ComposeServiceState[];
+  readonly failed: readonly string[];
+}): boolean {
+  return opts.states.length === 0 || opts.failed.length > 0;
+}
+
+function composeStartupFailure(
+  code: number,
+  action: string
+): {
+  readonly code: "E_COMPOSE_FAILED" | "E_STARTUP_TIMEOUT";
+  readonly message: string;
 } {
-  const running = states
-    .filter((entry) => entry.state === "running")
-    .map((entry) => entry.service);
-  const notRunning = states
-    .filter((entry) => entry.state !== "running")
-    .map((entry) => entry.service);
-  return { running, notRunning };
+  return code === 124
+    ? {
+        code: "E_STARTUP_TIMEOUT",
+        message: `${action} timed out; the Compose process group was terminated and the runtime may require repair.`,
+      }
+    : {
+        code: "E_COMPOSE_FAILED",
+        message: `${action} failed (exit ${code})`,
+      };
 }
 
 /**
@@ -724,6 +830,15 @@ function emitLifecycleResult(opts: {
 function buildLifecycleJsonErrorResult(opts: { readonly error: unknown }) {
   if (opts.error instanceof CliUsageError) {
     return errorResult({ code: "E_USAGE", message: opts.error.message });
+  }
+  if (opts.error instanceof RegistryCredentialPreflightError) {
+    return errorResult({
+      code: "E_ENV_KEY_MISSING",
+      message: opts.error.message,
+      detail: {
+        keys: [...new Set(opts.error.missing.map((entry) => entry.key))],
+      },
+    });
   }
   return errorResultFromUnknown({ error: opts.error });
 }
@@ -1150,6 +1265,8 @@ async function resolveModernComposeEnvOverrides(opts: {
 }): Promise<{
   readonly composeFiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
+  readonly lifecycleEnv: Readonly<Record<string, string>>;
+  readonly preflightEnv: Readonly<Record<string, string>>;
   readonly effectiveEnvName: string | null;
 } | null> {
   const modern = await resolveProjectEnvConfig({
@@ -1161,6 +1278,18 @@ async function resolveModernComposeEnvOverrides(opts: {
   if (!modern) {
     return null;
   }
+  const lifecycleEnv = selectProjectEnvValuesForExecutionTarget({
+    resolved: modern,
+    scopeName: "global",
+    target: "host",
+  });
+  const preflightEnv = Object.assign(
+    {},
+    modern.globalEnv,
+    ...opts.targetServices.map(
+      (service) => modern.serviceEnv[service] ?? modern.globalEnv
+    )
+  );
 
   for (const scope of modern.unknownScopes) {
     logger.warn({
@@ -1181,6 +1310,8 @@ async function resolveModernComposeEnvOverrides(opts: {
     return {
       composeFiles: [],
       env: modern.globalEnv,
+      lifecycleEnv,
+      preflightEnv,
       effectiveEnvName: modern.selection.effectiveEnv,
     };
   }
@@ -1196,11 +1327,13 @@ async function resolveModernComposeEnvOverrides(opts: {
   return {
     composeFiles: [overridePath],
     env: modern.globalEnv,
+    lifecycleEnv,
+    preflightEnv,
     effectiveEnvName: modern.selection.effectiveEnv,
   };
 }
 
-async function resolveLifecycleEnvForProject(opts: {
+export async function resolveLifecycleEnvForProject(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectName: string;
   readonly envName?: string | null;
@@ -1220,7 +1353,11 @@ async function resolveLifecycleEnvForProject(opts: {
     serviceNames,
   });
   if (modern) {
-    return modern.globalEnv;
+    return selectProjectEnvValuesForExecutionTarget({
+      resolved: modern,
+      scopeName: "global",
+      target: "host",
+    });
   }
 
   const envResolved = await resolveHackEnv({
@@ -1245,6 +1382,8 @@ async function resolveComposeEnvOverrides(opts: {
 }): Promise<{
   readonly composeFiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
+  readonly lifecycleEnv: Readonly<Record<string, string>>;
+  readonly preflightEnv: Readonly<Record<string, string>>;
   readonly effectiveEnvName: string | null;
 }> {
   await maybePromptLegacyProjectEnvMigration({
@@ -1271,6 +1410,8 @@ async function resolveComposeEnvOverrides(opts: {
     return {
       composeFiles: [],
       env: {},
+      lifecycleEnv: {},
+      preflightEnv: {},
       effectiveEnvName: resolved.envSelection.effectiveEnv,
     };
   }
@@ -1311,6 +1452,8 @@ async function resolveComposeEnvOverrides(opts: {
     return {
       composeFiles: [],
       env: resolved.envForCompose,
+      lifecycleEnv: resolved.envForCompose,
+      preflightEnv: resolved.envForCompose,
       effectiveEnvName: resolved.envSelection.effectiveEnv,
     };
   }
@@ -1327,8 +1470,33 @@ async function resolveComposeEnvOverrides(opts: {
   return {
     composeFiles: [overridePath],
     env: resolved.envForCompose,
+    lifecycleEnv: resolved.envForCompose,
+    preflightEnv: resolved.envForCompose,
     effectiveEnvName: resolved.envSelection.effectiveEnv,
   };
+}
+
+async function assertRegistryCredentialsAvailable(opts: {
+  readonly projectRoot: string;
+  readonly composeFile: string;
+  readonly targetServices: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+}): Promise<void> {
+  const bootstrapServices = await discoverDependencyBootstrapServices({
+    composeFile: opts.composeFile,
+  });
+  if (
+    !bootstrapServices.some((service) => opts.targetServices.includes(service))
+  ) {
+    return;
+  }
+  const result = await preflightRegistryCredentials({
+    projectRoot: opts.projectRoot,
+    env: opts.env,
+  });
+  if (result.missing.length > 0) {
+    throw new RegistryCredentialPreflightError({ missing: result.missing });
+  }
 }
 
 function logRelevantLegacyEnvWarnings(opts: {
@@ -1983,7 +2151,26 @@ function createLifecycleProcessStarter(opts: {
     operationSignalCleanup = installLifecycleSignalCleanup({
       cleanup: starterAbort,
     });
+    const pendingEntry: LifecycleStateEntry = {
+      composeProject: opts.composeProject,
+      projectName: opts.projectName,
+      branch: opts.branch,
+      sessionName,
+      backend: backendName,
+      ownershipToken,
+      definitionHash: opts.definitionHash,
+      processes: [],
+      updatedAt: new Date().toISOString(),
+    };
+    createdOwnershipToken = ownershipToken;
     try {
+      // Persist ownership before creating the mux session. If the CLI is
+      // SIGKILLed after session creation, the next up can still prove that
+      // the empty session belongs to this Compose instance and replace it.
+      await upsertLifecycleStateEntry({
+        projectDir: opts.project.projectDir,
+        entry: pendingEntry,
+      });
       const created = await backend.createSession({
         name: sessionName,
         cwd: opts.project.projectRoot,
@@ -1992,21 +2179,6 @@ function createLifecycleProcessStarter(opts: {
       if (!created.ok) {
         throw new Error(`Failed to create lifecycle session: ${sessionName}`);
       }
-      createdOwnershipToken = ownershipToken;
-      await upsertLifecycleStateEntry({
-        projectDir: opts.project.projectDir,
-        entry: {
-          composeProject: opts.composeProject,
-          projectName: opts.projectName,
-          branch: opts.branch,
-          sessionName,
-          backend: backendName,
-          ownershipToken,
-          definitionHash: opts.definitionHash,
-          processes: [],
-          updatedAt: new Date().toISOString(),
-        },
-      });
       if (backendName === "tmux") {
         for (const [key, value] of Object.entries(opts.env)) {
           await exec(
@@ -2017,6 +2189,14 @@ function createLifecycleProcessStarter(opts: {
           );
         }
       }
+    } catch (error: unknown) {
+      await removeLifecycleStateEntryIfOwned({
+        projectDir: opts.project.projectDir,
+        composeProject: opts.composeProject,
+        ownershipToken,
+      });
+      createdOwnershipToken = null;
+      throw error;
     } finally {
       settleSessionCreation();
     }
@@ -5533,6 +5713,7 @@ function buildRemoteLifecycleCommand(opts: {
   readonly profiles: readonly string[];
   readonly envName?: string | null;
   readonly detach?: boolean;
+  readonly services?: readonly string[];
 }): readonly string[] {
   const args = [opts.action, "--target", "local"] as string[];
   if (opts.envName) {
@@ -5547,6 +5728,7 @@ function buildRemoteLifecycleCommand(opts: {
   if (opts.action === "up" && opts.detach === true) {
     args.push("--detach");
   }
+  args.push(...(opts.services ?? []));
   return args;
 }
 
@@ -5561,6 +5743,7 @@ async function runRemoteLifecycleCommand(opts: {
   readonly envName?: string | null;
   readonly requestedTarget: string | undefined;
   readonly detach?: boolean;
+  readonly services?: readonly string[];
 }): Promise<number | null> {
   const target = await resolveProjectLifecycleTarget({
     project: opts.project,
@@ -5580,6 +5763,7 @@ async function runRemoteLifecycleCommand(opts: {
     profiles: opts.profiles,
     envName: opts.envName,
     detach: opts.detach,
+    services: opts.services,
   });
   const invocation = await resolveHackInvocation();
   const dispatchArgs = [...invocation.args, "dispatch", "run"] as string[];
@@ -5669,6 +5853,7 @@ async function runUpCommand({
     project,
     branchOption: args.options.branch,
     noticeToStderr: json,
+    warnOnRetarget: true,
   });
   const profiles = parseCsvList(args.options.profile);
 
@@ -5691,6 +5876,7 @@ async function runUpCommand({
     envName,
     requestedTarget: args.options.target,
     detach,
+    services: args.positionals.services,
   });
   if (remoteUpCode !== null) {
     if (json) {
@@ -5743,39 +5929,65 @@ async function runUpCommand({
   const composeFilesWithInternal = internalOverride
     ? [...composeFiles, internalOverride]
     : composeFiles;
+  const dependencyCache = await resolveDependencyCacheOverride({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    projectName,
+    composeFile: project.composeFile,
+  });
+  const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
+    ? [...composeFilesWithInternal, dependencyCache.overridePath]
+    : composeFilesWithInternal;
 
-  const targetServices = await readComposeServiceNames(project.composeFile);
+  const allServiceNames = await readComposeServiceNames(project.composeFile);
+  const requestedServices = resolveRequestedComposeServices({
+    requested: args.positionals.services,
+    available: allServiceNames,
+  });
+  const serviceScoped = requestedServices.length > 0;
+  const targetServices = serviceScoped ? requestedServices : allServiceNames;
   const envOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
     targetServices,
-    allServiceNames: targetServices,
+    allServiceNames,
     envName,
   });
   const composeFilesWithEnv = [
-    ...composeFilesWithInternal,
+    ...composeFilesWithRuntimeOverrides,
     ...envOverrides.composeFiles,
   ];
 
-  await persistProjectRuntimeEnvSelection({
-    projectDir: project.projectDir,
-    composeProject: lifecycleComposeProject,
-    envName: envOverrides.effectiveEnvName,
+  await assertRegistryCredentialsAvailable({
+    projectRoot: project.projectRoot,
+    composeFile: project.composeFile,
+    targetServices,
+    env: envOverrides.preflightEnv,
   });
+
+  if (!serviceScoped) {
+    await persistProjectRuntimeEnvSelection({
+      projectDir: project.projectDir,
+      composeProject: lifecycleComposeProject,
+      envName: envOverrides.effectiveEnvName,
+    });
+  }
 
   let lifecycleCleanup: LifecycleOperationCleanup | null = null;
   let lifecycleSignalCleanup: { readonly dispose: () => void } | null = null;
   try {
-    const lifecycleUp = await runLifecycleUpBeforeAndProcesses({
-      title: "Lifecycle (up before)",
-      project,
-      cfg,
-      projectName,
-      branch,
-      env: envOverrides.env,
-      effectiveEnvName: envOverrides.effectiveEnvName,
-      composeProject: lifecycleComposeProject,
-    });
+    const lifecycleUp = serviceScoped
+      ? { code: 0, cleanup: null, signalCleanup: null, sessionName: null }
+      : await runLifecycleUpBeforeAndProcesses({
+          title: "Lifecycle (up before)",
+          project,
+          cfg,
+          projectName,
+          branch,
+          env: envOverrides.lifecycleEnv,
+          effectiveEnvName: envOverrides.effectiveEnvName,
+          composeProject: lifecycleComposeProject,
+        });
     if (lifecycleUp.code !== 0) {
       if (json) {
         return emitLifecycleResult({
@@ -5822,6 +6034,8 @@ async function runUpCommand({
       cwd: dirname(project.composeFile),
       env: envOverrides.env,
       routeStdoutToStderr: json,
+      services: targetServices,
+      noDeps: serviceScoped,
     });
     if (upCode !== 0) {
       await lifecycleCleanup?.();
@@ -5830,10 +6044,11 @@ async function runUpCommand({
         composeProject: lifecycleComposeProject,
       });
       if (json) {
+        const failure = composeStartupFailure(upCode, "docker compose up");
         return emitLifecycleResult({
           result: errorResult({
-            code: "E_COMPOSE_FAILED",
-            message: `docker compose up failed (exit ${upCode})`,
+            code: failure.code,
+            message: failure.message,
             detail: { exitCode: upCode },
           }),
           exitCode: upCode,
@@ -5842,24 +6057,22 @@ async function runUpCommand({
       return upCode;
     }
 
-    const afterCode = await runLifecycleCommands({
-      title: "Lifecycle (up after)",
-      commands: cfg.lifecycle?.up?.after,
-      projectRoot: project.projectRoot,
-      env: envOverrides.env,
-      projectDir: project.projectDir,
-      composeProject: lifecycleComposeProject,
-    });
-
-    if (!json) {
-      if (afterCode !== 0) {
-        await lifecycleCleanup?.();
-      }
-      return afterCode;
-    }
+    const afterCode = serviceScoped
+      ? 0
+      : await runLifecycleCommands({
+          title: "Lifecycle (up after)",
+          commands: cfg.lifecycle?.up?.after,
+          projectRoot: project.projectRoot,
+          env: envOverrides.lifecycleEnv,
+          projectDir: project.projectDir,
+          composeProject: lifecycleComposeProject,
+        });
 
     if (afterCode !== 0) {
       await lifecycleCleanup?.();
+      if (!json) {
+        return afterCode;
+      }
       return emitLifecycleResult({
         result: errorResult({
           code: "E_LIFECYCLE_FAILED",
@@ -5873,8 +6086,42 @@ async function runUpCommand({
       project,
       composeProjectName,
       profiles,
+      services: targetServices,
     });
-    const { running, notRunning } = splitServiceStates(states);
+    const startup = classifyComposeStartupState(states);
+    if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
+      await lifecycleCleanup?.();
+      await removeProjectRuntimeStateEntry({
+        projectDir: project.projectDir,
+        composeProject: lifecycleComposeProject,
+      });
+      const message = buildStartupIncompleteMessage({
+        composeProject: composeProjectName ?? baseProjectName,
+        failed: startup.failed,
+      });
+      if (!json) {
+        logger.error({ message });
+        return 1;
+      }
+      return emitLifecycleResult({
+        result: errorResult({
+          code: "E_STARTUP_INCOMPLETE",
+          message,
+          detail: {
+            running: startup.running,
+            completed: startup.completed,
+            failed: startup.failed,
+            ...(states.length === 0
+              ? { inspection: "no_services_reported" }
+              : {}),
+          },
+        }),
+        exitCode: 1,
+      });
+    }
+    if (!json) {
+      return 0;
+    }
     return emitLifecycleResult({
       result: okResult({
         data: buildLifecycleJsonData({
@@ -5882,8 +6129,8 @@ async function runUpCommand({
           project: baseProjectName,
           branch,
           composeProject: composeProjectName ?? baseProjectName,
-          started: running,
-          failed: notRunning,
+          started: startup.running,
+          completed: startup.completed,
           durationMs: Date.now() - (startedAtMs ?? Date.now()),
         }),
       }),
@@ -6141,7 +6388,7 @@ async function runDownCommand({
         project: baseProjectName,
         branch,
         composeProject: composeProjectName ?? baseProjectName,
-        stopped: splitServiceStates(statesBeforeDown).running,
+        stopped: classifyComposeStartupState(statesBeforeDown).running,
         durationMs: Date.now() - (startedAtMs ?? Date.now()),
       }),
     }),
@@ -6159,6 +6406,7 @@ async function runRestartDownPhase(opts: {
   readonly branch: string | null;
   readonly routeStdoutToStderr?: boolean;
   readonly envForCompose: Readonly<Record<string, string>>;
+  readonly preserveComposeRuntime?: boolean;
 }): Promise<number> {
   const lifecycleDownCleanup = async (): Promise<void> => {
     await stopLifecycleProcessesBestEffort({
@@ -6186,13 +6434,15 @@ async function runRestartDownPhase(opts: {
       return downBefore;
     }
 
-    downCode = await composeRuntimeBackend.down({
-      composeFiles: [opts.project.composeFile],
-      composeProject: opts.composeProjectName,
-      profiles: opts.profiles,
-      cwd: dirname(opts.project.composeFile),
-      routeStdoutToStderr: opts.routeStdoutToStderr === true,
-    });
+    downCode = opts.preserveComposeRuntime
+      ? 0
+      : await composeRuntimeBackend.down({
+          composeFiles: [opts.project.composeFile],
+          composeProject: opts.composeProjectName,
+          profiles: opts.profiles,
+          cwd: dirname(opts.project.composeFile),
+          routeStdoutToStderr: opts.routeStdoutToStderr === true,
+        });
     await lifecycleDownCleanup();
   } finally {
     signalCleanup.dispose();
@@ -6201,10 +6451,12 @@ async function runRestartDownPhase(opts: {
     return downCode;
   }
 
-  await maybeManageProjectLogsAfterDown({
-    project: opts.project,
-    branch: opts.branch,
-  });
+  if (!opts.preserveComposeRuntime) {
+    await maybeManageProjectLogsAfterDown({
+      project: opts.project,
+      branch: opts.branch,
+    });
+  }
 
   const downAfter = await runLifecycleCommands({
     title: "Lifecycle (restart down after)",
@@ -6257,6 +6509,15 @@ async function runRestartUpPhase(opts: {
   const composeFilesWithInternal = internalOverride
     ? [...composeFiles, internalOverride]
     : composeFiles;
+  const dependencyCache = await resolveDependencyCacheOverride({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    projectName: opts.projectName,
+    composeFile: opts.project.composeFile,
+  });
+  const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
+    ? [...composeFilesWithInternal, dependencyCache.overridePath]
+    : composeFilesWithInternal;
 
   const targetServices = await readComposeServiceNames(
     opts.project.composeFile
@@ -6268,8 +6529,14 @@ async function runRestartUpPhase(opts: {
     allServiceNames: targetServices,
     envName: opts.envName,
   });
+  await assertRegistryCredentialsAvailable({
+    projectRoot: opts.project.projectRoot,
+    composeFile: opts.project.composeFile,
+    targetServices,
+    env: envOverrides.preflightEnv,
+  });
   const composeFilesWithEnv = [
-    ...composeFilesWithInternal,
+    ...composeFilesWithRuntimeOverrides,
     ...envOverrides.composeFiles,
   ];
 
@@ -6288,7 +6555,7 @@ async function runRestartUpPhase(opts: {
       cfg: opts.cfg,
       projectName: opts.projectName,
       branch: opts.branch,
-      env: envOverrides.env,
+      env: envOverrides.lifecycleEnv,
       effectiveEnvName: envOverrides.effectiveEnvName,
       composeProject: opts.lifecycleComposeProject,
     });
@@ -6323,13 +6590,35 @@ async function runRestartUpPhase(opts: {
       cwd: dirname(opts.project.composeFile),
       env: envOverrides.env,
       routeStdoutToStderr: opts.routeStdoutToStderr === true,
+      forceRecreate: true,
     });
     if (upCode !== 0) {
-      await lifecycleCleanup?.();
-      await removeProjectRuntimeStateEntry({
-        projectDir: opts.project.projectDir,
-        composeProject: opts.lifecycleComposeProject,
+      const repairCode = await composeRuntimeBackend.up({
+        composeFiles: composeFilesWithEnv,
+        composeProject: opts.composeProjectName,
+        profiles: opts.profiles,
+        detach: true,
+        cwd: dirname(opts.project.composeFile),
+        env: envOverrides.env,
+        routeStdoutToStderr: opts.routeStdoutToStderr === true,
       });
+      if (repairCode === 0) {
+        logger.warn({
+          message:
+            "Restart failed, but Hack repaired the Compose runtime to a startable state.",
+        });
+      } else {
+        logger.error({
+          message: `Restart failed and automatic runtime repair also failed (exit ${repairCode}). Run 'hack doctor --fix'.`,
+        });
+      }
+      if (repairCode !== 0) {
+        await lifecycleCleanup?.();
+        await removeProjectRuntimeStateEntry({
+          projectDir: opts.project.projectDir,
+          composeProject: opts.lifecycleComposeProject,
+        });
+      }
       return upCode;
     }
 
@@ -6337,7 +6626,7 @@ async function runRestartUpPhase(opts: {
       title: "Lifecycle (restart up after)",
       commands: opts.cfg.lifecycle?.up?.after,
       projectRoot: opts.project.projectRoot,
-      env: envOverrides.env,
+      env: envOverrides.lifecycleEnv,
       projectDir: opts.project.projectDir,
       composeProject: opts.lifecycleComposeProject,
     });
@@ -6348,6 +6637,144 @@ async function runRestartUpPhase(opts: {
   } finally {
     signalCleanup.dispose();
   }
+}
+
+type TargetedServiceRestartResult =
+  | {
+      readonly ok: true;
+      readonly code: 0;
+      readonly running: readonly string[];
+      readonly completed: readonly string[];
+    }
+  | {
+      readonly ok: false;
+      readonly code: number;
+      readonly errorCode:
+        | "E_COMPOSE_FAILED"
+        | "E_STARTUP_INCOMPLETE"
+        | "E_STARTUP_TIMEOUT";
+      readonly message: string;
+      readonly running: readonly string[];
+      readonly completed: readonly string[];
+    };
+
+/**
+ * Recreate only the explicitly selected services. Project lifecycle hooks are
+ * intentionally not run because their scope is the whole runtime, not an
+ * individual Compose service.
+ */
+async function runTargetedServiceRestart(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly projectName: string;
+  readonly composeProjectName: string | null;
+  readonly profiles: readonly string[];
+  readonly branch: string | null;
+  readonly envName?: string | null;
+  readonly services: readonly string[];
+  readonly allServiceNames: readonly string[];
+  readonly routeStdoutToStderr: boolean;
+}): Promise<TargetedServiceRestartResult> {
+  await maybeSyncOauthAliasesInCompose({ project: opts.project });
+  const devHost = opts.branch
+    ? await resolveBranchDevHost({ project: opts.project })
+    : null;
+  const aliasHost =
+    opts.branch && devHost
+      ? resolveBranchAliasHost({ devHost, cfg: opts.cfg })
+      : null;
+  const internalOverride = await resolveInternalComposeOverride({
+    project: opts.project,
+    cfg: opts.cfg,
+    branch: opts.branch,
+    devHost,
+    aliasHost,
+  });
+  const composeFiles =
+    opts.branch && devHost
+      ? await resolveBranchComposeFiles({
+          project: opts.project,
+          branch: opts.branch,
+          devHost,
+          aliasHost,
+        })
+      : [opts.project.composeFile];
+  const envOverrides = await resolveComposeEnvOverrides({
+    project: opts.project,
+    projectName: opts.projectName,
+    targetServices: opts.services,
+    allServiceNames: opts.allServiceNames,
+    envName: opts.envName,
+  });
+  await assertRegistryCredentialsAvailable({
+    projectRoot: opts.project.projectRoot,
+    composeFile: opts.project.composeFile,
+    targetServices: opts.services,
+    env: envOverrides.preflightEnv,
+  });
+  const dependencyCache = await resolveDependencyCacheOverride({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    projectName: opts.projectName,
+    composeFile: opts.project.composeFile,
+  });
+  const code = await composeRuntimeBackend.up({
+    composeFiles: [
+      ...composeFiles,
+      ...(internalOverride ? [internalOverride] : []),
+      ...(dependencyCache.overridePath ? [dependencyCache.overridePath] : []),
+      ...envOverrides.composeFiles,
+    ],
+    composeProject: opts.composeProjectName,
+    profiles: opts.profiles,
+    detach: true,
+    noDeps: true,
+    forceRecreate: true,
+    services: opts.services,
+    cwd: dirname(opts.project.composeFile),
+    env: envOverrides.env,
+    routeStdoutToStderr: opts.routeStdoutToStderr,
+  });
+  if (code !== 0) {
+    const failure = composeStartupFailure(code, "Targeted service restart");
+    return {
+      ok: false,
+      code,
+      errorCode: failure.code,
+      message: failure.message,
+      running: [],
+      completed: [],
+    };
+  }
+
+  const states = await readComposeServiceStates({
+    project: opts.project,
+    composeProjectName: opts.composeProjectName,
+    profiles: opts.profiles,
+    services: opts.services,
+  });
+  const startup = classifyComposeStartupState(states);
+  if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
+    return {
+      ok: false,
+      code: 1,
+      errorCode: "E_STARTUP_INCOMPLETE",
+      message: buildStartupIncompleteMessage({
+        composeProject:
+          opts.composeProjectName ??
+          defaultProjectSlugFromPath(opts.project.projectRoot),
+        failed: startup.failed,
+      }),
+      running: startup.running,
+      completed: startup.completed,
+    };
+  }
+  return {
+    ok: true,
+    code: 0,
+    running: startup.running,
+    completed: startup.completed,
+  };
 }
 
 async function handleRestart({
@@ -6384,6 +6811,7 @@ async function handleRestart({
   }
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: restart coordinates preflight, scoped recreation, lifecycle preparation, repair, and JSON reporting in one transaction.
 async function runRestartCommand({
   ctx,
   args,
@@ -6407,6 +6835,7 @@ async function runRestartCommand({
     project,
     branchOption: args.options.branch,
     noticeToStderr: json,
+    warnOnRetarget: true,
   });
   const profiles = parseCsvList(args.options.profile);
 
@@ -6418,6 +6847,7 @@ async function runRestartCommand({
     profiles,
     envName,
     requestedTarget: args.options.target,
+    services: args.positionals.services,
   });
   if (remoteRestartCode !== null) {
     if (json) {
@@ -6445,6 +6875,52 @@ async function runRestartCommand({
     branch,
   });
   const projectName = sanitizeProjectSlug(baseProjectName);
+  const allServiceNames = await readComposeServiceNames(project.composeFile);
+  const requestedServices = resolveRequestedComposeServices({
+    requested: args.positionals.services,
+    available: allServiceNames,
+  });
+  if (requestedServices.length > 0) {
+    const result = await runTargetedServiceRestart({
+      project,
+      cfg,
+      projectName,
+      composeProjectName,
+      profiles,
+      branch,
+      envName,
+      services: requestedServices,
+      allServiceNames,
+      routeStdoutToStderr: json,
+    });
+    if (!json) {
+      return result.code;
+    }
+    if (!result.ok) {
+      return emitLifecycleResult({
+        result: errorResult({
+          code: result.errorCode,
+          message: result.message,
+          detail: { services: requestedServices },
+        }),
+        exitCode: result.code,
+      });
+    }
+    return emitLifecycleResult({
+      result: okResult({
+        data: buildLifecycleJsonData({
+          action: "restart",
+          project: baseProjectName,
+          branch,
+          composeProject: composeProjectName ?? baseProjectName,
+          started: result.running,
+          completed: result.completed,
+          durationMs: Date.now() - (startedAtMs ?? Date.now()),
+        }),
+      }),
+      exitCode: 0,
+    });
+  }
   const effectiveEnvName = await resolveStoredRuntimeEnvName({
     requestedEnvName: envName,
     projectDir: project.projectDir,
@@ -6454,6 +6930,19 @@ async function runRestartCommand({
     project,
     projectName,
     envName: effectiveEnvName,
+  });
+  const preflightEnv = await resolveComposeEnvOverrides({
+    project,
+    projectName,
+    targetServices: allServiceNames,
+    allServiceNames,
+    envName: effectiveEnvName,
+  });
+  await assertRegistryCredentialsAvailable({
+    projectRoot: project.projectRoot,
+    composeFile: project.composeFile,
+    targetServices: allServiceNames,
+    env: preflightEnv.preflightEnv,
   });
 
   const downCode = await runRestartDownPhase({
@@ -6466,6 +6955,7 @@ async function runRestartCommand({
     branch,
     envForCompose: lifecycleEnv,
     routeStdoutToStderr: json,
+    preserveComposeRuntime: true,
   });
   if (downCode !== 0) {
     if (json) {
@@ -6495,20 +6985,19 @@ async function runRestartCommand({
     profiles,
     branch,
     envName: effectiveEnvName,
-    // `--json` implies detach so the command terminates with a result.
-    detach: json,
+    detach: true,
     routeStdoutToStderr: json,
   });
 
-  if (!json) {
-    return upCode;
-  }
-
   if (upCode !== 0) {
+    if (!json) {
+      return upCode;
+    }
+    const failure = composeStartupFailure(upCode, "Restart up phase");
     return emitLifecycleResult({
       result: errorResult({
-        code: "E_COMPOSE_FAILED",
-        message: `Restart up phase failed (exit ${upCode})`,
+        code: failure.code,
+        message: failure.message,
         detail: { exitCode: upCode, phase: "up" },
       }),
       exitCode: upCode,
@@ -6520,7 +7009,46 @@ async function runRestartCommand({
     composeProjectName,
     profiles,
   });
-  const { running, notRunning } = splitServiceStates(states);
+  const startup = classifyComposeStartupState(states);
+  if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
+    await stopLifecycleProcessesBestEffort({
+      project,
+      cfg,
+      projectName,
+      branch,
+      composeProject: lifecycleComposeProject,
+    });
+    await removeProjectRuntimeStateEntry({
+      projectDir: project.projectDir,
+      composeProject: lifecycleComposeProject,
+    });
+    const message = buildStartupIncompleteMessage({
+      composeProject: composeProjectName ?? baseProjectName,
+      failed: startup.failed,
+    });
+    if (!json) {
+      logger.error({ message });
+      return 1;
+    }
+    return emitLifecycleResult({
+      result: errorResult({
+        code: "E_STARTUP_INCOMPLETE",
+        message,
+        detail: {
+          running: startup.running,
+          completed: startup.completed,
+          failed: startup.failed,
+          ...(states.length === 0
+            ? { inspection: "no_services_reported" }
+            : {}),
+        },
+      }),
+      exitCode: 1,
+    });
+  }
+  if (!json) {
+    return 0;
+  }
   return emitLifecycleResult({
     result: okResult({
       data: buildLifecycleJsonData({
@@ -6528,8 +7056,8 @@ async function runRestartCommand({
         project: baseProjectName,
         branch,
         composeProject: composeProjectName ?? baseProjectName,
-        started: running,
-        failed: notRunning,
+        started: startup.running,
+        completed: startup.completed,
         durationMs: Date.now() - (startedAtMs ?? Date.now()),
       }),
     }),
@@ -6691,6 +7219,7 @@ async function handlePs({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
+    touchRegistration: false,
   });
   const json = args.options.json === true;
   const branch = await resolveEffectiveBranchForCommand({
@@ -6700,7 +7229,6 @@ async function handlePs({
   });
   const profiles = parseCsvList(args.options.profile);
 
-  await touchBranchUsageIfNeeded({ project, branch });
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile;
@@ -7366,6 +7894,7 @@ async function handleLogs({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
+    touchRegistration: false,
   });
   const json = args.options.json === true;
   const branch = await resolveEffectiveBranchForCommand({
@@ -7383,7 +7912,6 @@ async function handleLogs({
     until: args.options.until,
   });
 
-  await touchBranchUsageIfNeeded({ project, branch });
   const wantsLokiExplicit = computeWantsLokiExplicit({ options: args.options });
   const validation = validateLogsArgs({
     forceCompose: args.options.compose === true,
@@ -7544,6 +8072,7 @@ async function handleOpen({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
+    touchRegistration: false,
   });
   const json = args.options.json === true;
   const branch = await resolveEffectiveBranchForCommand({
@@ -7553,7 +8082,6 @@ async function handleOpen({
   });
   const derivedHost = `${defaultProjectSlugFromPath(project.projectRoot)}.${DEFAULT_PROJECT_TLD}`;
   const devHost = (await readProjectDevHost(project)) ?? derivedHost;
-  await touchBranchUsageIfNeeded({ project, branch });
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile;

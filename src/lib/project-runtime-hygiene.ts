@@ -16,6 +16,13 @@ export type OrphanedRuntimeProject = {
   readonly containerIds: readonly string[];
 };
 
+export type IncompleteRuntimeProject = {
+  readonly project: string;
+  readonly workingDir: string | null;
+  readonly createdServices: readonly string[];
+  readonly containerIds: readonly string[];
+};
+
 export function scopeRuntimeHygieneToProject(input: {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -95,6 +102,49 @@ export async function findOrphanRuntimeProjects(input: {
     }
   }
   return out;
+}
+
+/** Find Compose projects with regular service containers left in the pre-start Created state. */
+export function findIncompleteRuntimeProjects(input: {
+  readonly runtime: readonly RuntimeProject[];
+}): IncompleteRuntimeProject[] {
+  const incomplete: IncompleteRuntimeProject[] = [];
+  for (const project of input.runtime) {
+    const createdServices = [...project.services.values()]
+      .filter((service) =>
+        service.containers.some(
+          (container) =>
+            container.state.trim().toLowerCase() === "created" &&
+            container.labels?.["hack.lifecycle.process"] !== "true"
+        )
+      )
+      .map((service) => service.service)
+      .sort((left, right) => left.localeCompare(right));
+    const containerIds = [...project.services.values()]
+      .flatMap((service) =>
+        service.containers
+          .filter(
+            (container) =>
+              container.state.trim().toLowerCase() === "created" &&
+              container.labels?.["hack.lifecycle.process"] !== "true"
+          )
+          .map((container) => container.id)
+      )
+      .filter((id) => id.length > 0)
+      .sort((left, right) => left.localeCompare(right));
+    if (createdServices.length === 0) {
+      continue;
+    }
+    incomplete.push({
+      project: project.project,
+      workingDir: project.workingDir,
+      createdServices,
+      containerIds,
+    });
+  }
+  return incomplete.sort((left, right) =>
+    left.project.localeCompare(right.project)
+  );
 }
 
 function collectContainerIds(project: RuntimeProject): readonly string[] {

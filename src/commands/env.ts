@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { confirm, isCancel, password, select, text } from "@clack/prompts";
+import { YAML } from "bun";
 
 import type { CliContext, CommandHandlerFor } from "../cli/command.ts";
 import {
@@ -13,7 +14,9 @@ import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import { readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
+import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import type {
   HackEnvStorageSummary,
   HackEnvValueState,
@@ -168,6 +171,24 @@ const listSpec = defineCommand({
   summary: "List resolved env values for the selected overlay",
   group: "Project",
   options: [optPath, optProject, optEnv, optJson, optShowSecrets, optService],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const explainSpec = defineCommand({
+  name: "explain",
+  summary: "Explain a resolved env value without revealing it",
+  group: "Diagnostics",
+  options: [optPath, optProject, optEnv, optJson, optService, optTarget],
+  positionals: [{ name: "key", required: true }],
+  subcommands: [],
+} as const);
+
+const applySpec = defineCommand({
+  name: "apply",
+  summary: "Recreate one service with its resolved env",
+  group: "Project",
+  options: [optPath, optProject, optEnv, optJson, optService],
   positionals: [],
   subcommands: [],
 } as const);
@@ -1039,6 +1060,233 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     projectDir: project.projectDir,
     showSecrets,
   });
+};
+
+type EnvExplainPayload = {
+  readonly key: string;
+  readonly available: boolean;
+  readonly secret: boolean;
+  readonly format: "project_env_config_v1" | "legacy_env_contract";
+  readonly environment: string | null;
+  readonly requested_scope: string;
+  readonly effective_scope: string | null;
+  readonly target: "host" | "compose";
+  readonly delivered_to: readonly string[];
+  readonly source: string | null;
+  readonly precedence: readonly string[];
+};
+
+function renderEnvExplain(payload: EnvExplainPayload, json: boolean): void {
+  if (json) {
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(
+    `${[
+      `key\t${payload.key}`,
+      `available\t${payload.available ? "yes" : "no"}`,
+      `secret\t${payload.secret ? "yes" : "no"}`,
+      `environment\t${payload.environment ?? "base"}`,
+      `requested_scope\t${payload.requested_scope}`,
+      `effective_scope\t${payload.effective_scope ?? "none"}`,
+      `target\t${payload.target}`,
+      `delivered_to\t${payload.delivered_to.join(",") || "none"}`,
+      `source\t${payload.source ?? "none"}`,
+      `precedence\t${payload.precedence.join(" -> ") || "none"}`,
+    ].join("\n")}\n`
+  );
+}
+
+function resolveEnvExplainDelivery(opts: {
+  readonly available: boolean;
+  readonly target: "host" | "compose";
+}): readonly string[] {
+  if (!opts.available) {
+    return [];
+  }
+  return opts.target === "host" ? ["host", "lifecycle"] : ["compose"];
+}
+
+async function findModernEnvSourceFile(opts: {
+  readonly files: readonly string[];
+  readonly scope: string;
+  readonly key: string;
+}): Promise<string | null> {
+  for (const file of [...opts.files].reverse()) {
+    const text = await readTextFile(file);
+    if (!text) {
+      continue;
+    }
+    try {
+      const parsed: unknown = YAML.parse(text);
+      const values = isRecord(parsed) ? parsed.values : undefined;
+      const scopes = isRecord(values) ? values : undefined;
+      const scope =
+        scopes && isRecord(scopes[opts.scope]) ? scopes[opts.scope] : null;
+      if (scope && Object.hasOwn(scope, opts.key)) {
+        return file;
+      }
+    } catch {
+      // The resolver already reports malformed env files; explanation stays redacted and best-effort.
+    }
+  }
+  return null;
+}
+
+async function resolveModernEnvExplain(opts: {
+  readonly modern: NonNullable<
+    Awaited<ReturnType<typeof loadModernProjectEnv>>
+  >;
+  readonly key: string;
+  readonly scope: string;
+  readonly target: "host" | "compose";
+}): Promise<EnvExplainPayload> {
+  const hostValue = opts.modern.merged.values.host?.[opts.key];
+  const scopedValue =
+    opts.scope === "global"
+      ? undefined
+      : opts.modern.merged.values[opts.scope]?.[opts.key];
+  const globalValue = opts.modern.merged.values.global?.[opts.key];
+  const usesHost = opts.target === "host" && hostValue !== undefined;
+  let effectiveScope: string | null = null;
+  let storedValue: unknown;
+  if (usesHost) {
+    effectiveScope = "host";
+    storedValue = hostValue;
+  } else if (scopedValue !== undefined) {
+    effectiveScope = opts.scope;
+    storedValue = scopedValue;
+  } else if (globalValue !== undefined) {
+    effectiveScope = "global";
+    storedValue = globalValue;
+  }
+  const sourceFile =
+    effectiveScope === null
+      ? null
+      : await findModernEnvSourceFile({
+          files: opts.modern.files,
+          scope: effectiveScope,
+          key: opts.key,
+        });
+  return {
+    key: opts.key,
+    available: storedValue !== undefined,
+    secret: storedValue !== undefined && isModernSecretStoredValue(storedValue),
+    format: "project_env_config_v1",
+    environment: opts.modern.selection.effectiveEnv,
+    requested_scope: opts.scope,
+    effective_scope: effectiveScope,
+    target: opts.target,
+    delivered_to: resolveEnvExplainDelivery({
+      available: storedValue !== undefined,
+      target: opts.target,
+    }),
+    source:
+      effectiveScope === null
+        ? null
+        : `${effectiveScope}:${sourceFile ?? "project env"}`,
+    precedence: opts.modern.files,
+  };
+}
+
+const handleEnvExplain: CommandHandlerFor<typeof explainSpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const projectName = await resolveProjectName(project);
+  const envName = resolveRequestedEnvName({ envOption: args.options.env });
+  const parsed = parseProjectEnvTarget({
+    keyOrPath: args.positionals.key,
+    scopeOverride: args.options.service,
+  });
+  const target = resolveHostEnvTarget({ targetOption: args.options.target });
+  const modern = await loadModernProjectEnv({ project, envName });
+  if (modern) {
+    renderEnvExplain(
+      await resolveModernEnvExplain({
+        modern,
+        key: parsed.key,
+        scope: parsed.scope,
+        target,
+      }),
+      args.options.json === true
+    );
+    return 0;
+  }
+
+  const resolved = await loadResolvedEnvState({
+    projectDir: project.projectDir,
+    projectName,
+    envName,
+  });
+  if (!resolved) {
+    return 1;
+  }
+  const state = resolved.values.find((value) => value.key === parsed.key);
+  const relevant =
+    state !== undefined &&
+    (state.services === null || state.services.includes(parsed.scope));
+  renderEnvExplain(
+    {
+      key: parsed.key,
+      available: relevant && state?.value !== null,
+      secret: state?.source === "keychain",
+      format: "legacy_env_contract",
+      environment: resolved.envSelection.effectiveEnv,
+      requested_scope: parsed.scope,
+      effective_scope: relevant ? parsed.scope : null,
+      target,
+      delivered_to: resolveEnvExplainDelivery({
+        available: relevant && state?.value !== null,
+        target,
+      }),
+      source: relevant ? (state?.resolvedFrom ?? state?.source ?? null) : null,
+      precedence: [
+        resolved.contractPath,
+        resolved.envPath,
+        "process environment",
+        "secret backend",
+      ],
+    },
+    args.options.json === true
+  );
+  return 0;
+};
+
+const handleEnvApply: CommandHandlerFor<typeof applySpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  const service = args.options.service?.trim() ?? "";
+  if (service.length === 0 || service === "global") {
+    throw new CliUsageError("--service <compose-service> is required.");
+  }
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const invocation = await resolveHackInvocation();
+  const command = [
+    invocation.bin,
+    ...invocation.args,
+    "restart",
+    service,
+    "--path",
+    project.projectRoot,
+  ];
+  if (args.options.env) {
+    command.push("--env", args.options.env);
+  }
+  if (args.options.json) {
+    command.push("--json");
+  }
+  return await run(command, { cwd: project.projectRoot });
 };
 
 function maskModernEnvValue(input: {
@@ -2123,6 +2371,8 @@ export const envCommand = defineCommand({
   positionals: [],
   subcommands: [
     withHandler(listSpec, handleEnvList),
+    withHandler(explainSpec, handleEnvExplain),
+    withHandler(applySpec, handleEnvApply),
     withHandler(addSpec, handleEnvAdd),
     withHandler(setSpec, handleEnvSet),
     withHandler(materializeSpec, handleEnvMaterialize),

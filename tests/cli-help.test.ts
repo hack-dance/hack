@@ -15,7 +15,7 @@ test("root help leads with the local-first offer and new command grouping", () =
   expect(help).toContain("Unsupported experimental:");
   expect(help).toContain("Extension commands:");
   expect(help).toMatch(
-    /hack tickets(?: \[args\.\.\.\])?\s+Track repo-local work without leaving git/
+    /hack tickets(?: \[args\.\.\.\])?\s+Deprecated: legacy repo-local Tickets compatibility commands/
   );
   expect(help).toMatch(
     /hack auth(?: \[args\.\.\.\])?\s+Removed: Hack account sign-in no longer ships with the local-first CLI/
@@ -39,6 +39,9 @@ test("markdown help preserves the local-first grouping", () => {
   expect(help).toContain("### Local helpers");
   expect(help).toContain("### Unsupported experimental");
   expect(help).toContain("`hack tickets [args...]`");
+  expect(help).toContain(
+    "Deprecated: legacy repo-local Tickets compatibility commands"
+  );
   expect(help).toContain("`hack auth [args...]`");
   expect(help).toContain("`hack linear [args...]`");
 });

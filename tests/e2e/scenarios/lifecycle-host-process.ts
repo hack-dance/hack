@@ -22,12 +22,14 @@ export const lifecycleHostProcessScenario: Scenario = {
     await requireDockerPreconditions({ ctx });
 
     const markerFile = join(ctx.tempRoot, "lifecycle-marker.txt");
+    const envMarkerFile = join(ctx.tempRoot, "lifecycle-env-marker.txt");
     const fixture = await createMonorepoFixture({
       parentDir: ctx.tempRoot,
       withHackConfig: true,
       lifecycle: {
         persistentProcess: true,
         upBeforeMarkerFile: markerFile,
+        upBeforeEnvMarkerFile: envMarkerFile,
         standaloneContainers: true,
       },
     });
@@ -53,6 +55,18 @@ export const lifecycleHostProcessScenario: Scenario = {
       expect({
         that: (await marker.text()).includes("up-before-ran"),
         message: "lifecycle marker file has unexpected content",
+        result: up,
+      });
+      const envMarker = Bun.file(envMarkerFile);
+      expect({
+        that: await envMarker.exists(),
+        message: `lifecycle env hook did not run (missing marker ${envMarkerFile})`,
+        result: up,
+      });
+      expect({
+        that: (await envMarker.text()) === "host-value|host-only",
+        message:
+          "lifecycle hooks did not receive global values with host overrides",
         result: up,
       });
 

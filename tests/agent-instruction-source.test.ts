@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,7 @@ import {
   INSTRUCTION_SECTIONS,
   type InstructionSurface,
 } from "../src/agents/instruction-source.ts";
+import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../src/agents/integration-revision.ts";
 import { renderAgentPrimer } from "../src/agents/primer.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import {
@@ -99,23 +101,40 @@ test("no stale command patterns in any surface", () => {
   }
 });
 
-test("tickets appear at most once, only as an optional extension", () => {
+test("deprecated tickets do not appear in generated agent guidance", () => {
   for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
-    const ticketLines = rendered
-      .split("\n")
-      // The gitignore pattern literal `tickets/` (managed-files section) is
-      // a filename, not tickets promotion — the thing this test guards.
-      .map((line) => line.replaceAll("`tickets/`", ""))
-      .filter((line) => /ticket/i.test(line));
     expect(
-      ticketLines.length,
-      `surface "${surface}" mentions tickets more than once`
-    ).toBeLessThanOrEqual(1);
-    const only = ticketLines[0];
-    if (only !== undefined) {
-      expect(only).toContain("hack tickets");
-      expect(only).toContain("only use it when the project explicitly uses it");
-    }
+      rendered,
+      `surface "${surface}" mentions deprecated Tickets`
+    ).not.toMatch(/hack[ -]?tickets|dance\.hack\.tickets/i);
+  }
+});
+
+test("all generated surfaces expose integration freshness and repair upfront", () => {
+  for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
+    expect(rendered, `surface "${surface}" lacks freshness status`).toContain(
+      "Integration freshness"
+    );
+    expect(rendered).toContain("hack setup sync --all-scopes --check");
+    expect(rendered).toContain("hack setup sync --all-scopes");
+    expect(rendered).toContain("reload the agent session");
+  }
+});
+
+test("agent integration content revision changes with canonical guidance", () => {
+  const revision = createHash("sha256")
+    .update(
+      JSON.stringify(
+        INSTRUCTION_SECTIONS.filter((section) => section.id !== "freshness")
+      )
+    )
+    .digest("hex")
+    .slice(0, 12);
+  expect(HACK_AGENT_INTEGRATION_CONTENT_REVISION).toBe(revision);
+  for (const rendered of Object.values(RENDERED_SURFACES)) {
+    expect(rendered).toContain(
+      `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``
+    );
   }
 });
 

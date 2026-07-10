@@ -417,7 +417,7 @@ test("crash capture readme groups inferred restart actions into sections", () =>
     failedCommands: ["hack_global_status", "hack_daemon_status"],
   });
 
-  expect(text).toContain("Temporary breakage:");
+  expect(text).toContain("Fix now:");
   expect(text).toContain("- `hack global up`");
   expect(text).toContain("- `hack daemon start`");
   expect(text).toContain("Verify:");

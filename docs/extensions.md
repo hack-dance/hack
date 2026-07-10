@@ -11,8 +11,8 @@ built-in GitHub integration, or built-in Linear integration.
 
 ## Scope
 
-- Supported local helpers:
-  - Tickets: `hack x tickets ...` (opt-in — see [Built-in Extensions](#built-in-extensions))
+- Deprecated compatibility helpers:
+  - Tickets: `hack x tickets ...` (existing data migration only)
 - Unsupported experimental workflows:
   - Gateway: `hack x gateway ...`
   - Supervisor: `hack x supervisor ...`
@@ -37,11 +37,13 @@ built-in GitHub integration, or built-in Linear integration.
 
 ## Built-in Extensions
 
-- Tickets (opt-in; disabled unless `controlPlane.extensions["dance.hack.tickets"].enabled` is
-  `true` — running `hack x tickets setup` auto-enables it in the project config):
+- Tickets (deprecated; disabled unless `controlPlane.extensions["dance.hack.tickets"].enabled` is
+  explicitly set to `true`; no agent skills or instructions are installed):
   - `hack x tickets setup|create|update|comment|review-note|document|list|show|status|resolve-conflict|sync|tui`
   - Also available as the top-level alias `hack tickets <command>` (see
     [docs/guides/tickets.md](guides/tickets.md)).
+  - `setup` removes legacy Tickets guidance and repairs storage hygiene; it no longer enables the
+    extension or installs agent integrations.
 - Unsupported experimental:
   - `hack x gateway token-create|token-list|token-revoke`
   - `hack x supervisor job-create|job-list|job-show|job-tail|job-attach|job-cancel|shell`

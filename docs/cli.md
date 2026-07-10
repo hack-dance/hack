@@ -13,7 +13,7 @@ terminal).
 - `hack open` — open/print the project URL
 - `hack logs` — tail logs (compose by default; Loki via `--loki`/`--query`)
 - `hack ps` / `hack status` — project status
-- `hack projects` — registry + running instances; `hack projects prune` removes stale registry
+- `hack projects` — registry + running instances; `hack projects prune --project <name>` safely scopes stale registry/container cleanup to one project family (omit `--project` only for an intentional machine-wide prune)
   entries and stops orphaned containers
 - `hack env` — env values and local secrets
 - `hack host exec` / `hack host shell` — host commands/shells with Hack-resolved env injected
@@ -24,7 +24,7 @@ terminal).
 - `hack daemon` — optional local daemon for faster JSON status/ps
 - `hack agent onboard` — agent-assisted onboarding for existing projects
 - `hack setup` — install/refresh agent integrations (Cursor rules, Claude hooks, Codex skill, MCP)
-- `hack tickets` — optional, opt-in local tickets extension (see [Tickets](#tickets) below)
+- `hack tickets` — deprecated compatibility surface for existing Tickets data
 
 Run `hack help` for the full command list, or `hack help --all` to include hidden unsupported
 experimental commands. Every command and flag on this page is also in the generated
@@ -61,6 +61,12 @@ See [Beta workflows](beta.md) for guides on this surface.
   apply documented defaults or fail fast with `E_INTERACTIVE_REQUIRED`.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
 
+Generated agent docs, Cursor rules, Codex skills, and the shared `~/.ai/skills/hack-cli` skill carry
+the Hack CLI version that generated them. Audit both project and global surfaces with
+`hack setup sync --all-scopes --check`; repair them with `hack setup sync --all-scopes`, then reload
+the agent session so it stops using cached guidance. Interactive project commands also report drift
+before auto-repair instead of repairing silently.
+
 ## First-run path
 
 ```bash
@@ -84,6 +90,48 @@ project without `.hack/`, use `hack agent onboard`. See
 - Call a service over HTTP (from the host or between containers): use its Caddy hostname
   `https://<sub>.<dev_host>`; discover routable URLs with `hack open --json`.
 
+Service-scoped runtime changes do not run project-wide lifecycle hooks and do not start Compose
+dependencies implicitly:
+
+```bash
+hack up api worker --env qa --detach
+hack restart api --env qa
+hack env apply --service api --env qa
+```
+
+Full detached startup and inspection are bounded. A timeout returns `E_STARTUP_TIMEOUT`, terminates
+the Compose process group, and leaves an explicit repair path instead of hanging indefinitely.
+`hack doctor --fix` starts exact project containers left in `Created`; it never removes those
+containers as part of this repair.
+
+## Dependency bootstrap integrity
+
+Hack detects package-manager install services by their command or by the explicit
+`hack.dependencies.bootstrap=true` Compose label. Before such a service can mutate the runtime,
+Hack scans `.npmrc`, `.yarnrc.yml`, and `bunfig.toml` for `${VAR}` credential references and fails
+with `E_ENV_KEY_MISSING` when the selected Hack overlay cannot supply them. Values are never
+printed.
+
+To share dependency data only across worktrees with the same lockfile/runtime fingerprint, label
+the bootstrap service with a logical top-level Compose volume:
+
+```yaml
+services:
+  install-workspace:
+    command: bun install --frozen-lockfile
+    labels:
+      hack.dependencies.bootstrap: "true"
+      hack.dependencies.cache-volume: workspace-dependencies
+      hack.dependencies.lockfiles: bun.lock,package.json
+      hack.dependencies.runtime-files: .mise.toml
+    volumes:
+      - workspace-dependencies:/app/node_modules
+```
+
+Hack generates a content-addressed volume name from the declared inputs. Branch instances adopt an
+existing compatible volume automatically; a lockfile or runtime change selects a new volume. No
+service name such as `deps` is special.
+
 ## Branch instances and linked worktrees
 
 `--branch <name>` on `hack up/down/restart/ps/logs/open/run/exec` targets a separate branch
@@ -93,6 +141,11 @@ In a linked git worktree, these commands default the branch instance to the sani
 branch when no `--branch` is passed (`worktree.auto_branch`), so two checkouts never fight over the
 same hostnames. A one-line notice is printed to stderr when the default kicks in, so captured
 stdout stays clean.
+
+Before `up` or `restart`, Hack also checks for a non-terminal instance previously started from the
+same worktree. If the worktree's current branch would auto-target a different Compose project, Hack
+prints a warning naming both the existing and new targets. Pass `--branch <name>` to make the target
+explicit.
 
 A detached linked worktree has no branch name to derive, so these commands fail instead of silently
 targeting the base instance. Pass `--branch <name>` to select an isolated instance, or set
@@ -141,19 +194,19 @@ The global config root defaults to `~/.hack`; override it with `HACK_HOME`.
 
 ## Tickets
 
-Tickets is an **optional, opt-in** extension — disabled by default and not part of default agent
-instructions. Enable it before using the commands below:
+Hack Tickets is deprecated. It is no longer installed into agent instructions or skills, and
+`hack setup sync --all-scopes` removes legacy Tickets agent artifacts. Existing commands remain
+available only for compatibility and migration when the extension is explicitly enabled.
 
 ```bash
-hack tickets setup            # auto-enables the extension and installs the skill
 hack tickets create --title "Investigate flaky lifecycle cleanup"
 hack tickets list
 hack tickets show T-00001
-hack tickets status T-00001 in_progress
+hack tickets sync
 ```
 
-`hack tickets <command>` is an alias for `hack x tickets <command>`; every subcommand except
-`setup` requires the extension to already be enabled. See the full guide:
+`hack tickets setup` now removes deprecated agent skills/instruction blocks and performs compatible
+storage hygiene; it does not enable Tickets or reinstall guidance. See the migration reference:
 [Tickets](guides/tickets.md).
 
 ## Lifecycle

@@ -31,6 +31,7 @@ import {
 } from "../lib/projects-registry.ts";
 import type {
   RuntimeContainer,
+  RuntimeProject,
   RuntimeService,
 } from "../lib/runtime-projects.ts";
 import {
@@ -98,7 +99,7 @@ const statusSpec = defineCommand({
   expandInRootHelp: true,
 } as const);
 
-const pruneOptions = [optIncludeGlobal, optJson] as const;
+const pruneOptions = [optProject, optIncludeGlobal, optJson] as const;
 const pruneSpec = defineCommand({
   name: "prune",
   summary: "Remove stale registry entries and stop orphaned containers",
@@ -122,10 +123,11 @@ const handleProjects: CommandHandlerFor<typeof spec> = async ({
   ctx,
   args,
 }): Promise<number> => {
-  const filter =
+  const requestedProject =
     typeof args.options.project === "string"
       ? sanitizeName(args.options.project)
-      : null;
+      : "";
+  const filter = requestedProject.length > 0 ? requestedProject : null;
   await touchCwdProjectRegistration({ cwd: ctx.cwd });
   return await runProjects({
     filter,
@@ -206,16 +208,28 @@ async function applyPrune(opts: {
 const handlePrune: CommandHandlerFor<typeof pruneSpec> = async ({
   args,
 }): Promise<number> => {
+  const filter =
+    typeof args.options.project === "string"
+      ? sanitizeName(args.options.project)
+      : null;
   const includeGlobal = args.options.includeGlobal === true;
   const json = args.options.json === true;
   const registry = await readProjectsRegistry();
   const candidates = await collectPruneRegistryCandidates({
-    projects: registry.projects,
+    projects: filterPruneRegistryProjects({
+      projects: registry.projects,
+      filter,
+    }),
   });
 
   const runtimeResult = await readRuntimeProjects({ includeGlobal });
   const orphaned = runtimeResult.ok
-    ? await findOrphanRuntimeProjects({ runtime: runtimeResult.runtime })
+    ? await findOrphanRuntimeProjects({
+        runtime: filterPruneRuntimeProjects({
+          runtime: runtimeResult.runtime,
+          filter,
+        }),
+      })
     : [];
   const orphanedContainerCount = orphaned.reduce(
     (sum, entry) => sum + entry.containerIds.length,
@@ -1074,6 +1088,31 @@ function sanitizeName(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function filterPruneRegistryProjects(opts: {
+  readonly projects: readonly RegisteredProject[];
+  readonly filter: string | null;
+}): readonly RegisteredProject[] {
+  if (!opts.filter) {
+    return opts.projects;
+  }
+  return opts.projects.filter(
+    (project) => sanitizeName(project.name) === opts.filter
+  );
+}
+
+function filterPruneRuntimeProjects(opts: {
+  readonly runtime: readonly RuntimeProject[];
+  readonly filter: string | null;
+}): readonly RuntimeProject[] {
+  if (!opts.filter) {
+    return opts.runtime;
+  }
+  return opts.runtime.filter((project) => {
+    const name = sanitizeName(project.project);
+    return name === opts.filter || name.startsWith(`${opts.filter}--`);
+  });
+}
+
 function readNumberField(opts: {
   readonly json: Record<string, unknown>;
   readonly key: string;
@@ -1105,6 +1144,8 @@ function readRepairOutcomeField(opts: {
 
 export const __testOnlyProjectsCommand = {
   buildRuntimeRecoveryNotice,
+  filterPruneRegistryProjects,
+  filterPruneRuntimeProjects,
   parseDaemonRuntimeRecoveryMeta,
 };
 

@@ -7,7 +7,7 @@ export const TICKETS_EXTENSION: ExtensionDefinition = {
     version: "0.1.0",
     scopes: ["project"],
     cliNamespace: "tickets",
-    summary: "Git-backed tickets and runs",
+    summary: "Deprecated git-backed Tickets compatibility surface",
   },
   commands: TICKETS_COMMANDS,
 };

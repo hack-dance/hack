@@ -70,7 +70,6 @@ export function renderAgentInitPatterns(): string {
     "- Use `hack run <service> <cmd...>` for one-off tasks.",
     "- Verify with `hack ps`, `hack open --json`, `hack logs --pretty`.",
     "- For long-lived agent work, run in managed mux sessions (`hack session start <project> --new --name agent-1`).",
-    "- Track follow-up work in git-backed tickets (`hack tickets ...`).",
     "",
     "Patterns to consider:",
     "- Deps service: run `bun install` inside a container and share node_modules via a volume.",

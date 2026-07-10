@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  findIncompleteRuntimeProjects,
   findMissingRegistryEntries,
   findOrphanRuntimeProjects,
   scopeRuntimeHygieneToProject,
@@ -117,6 +118,53 @@ test("findOrphanRuntimeProjects reports missing working dirs and compose files",
       containerIds: ["missing-dir-1"],
     },
   ]);
+});
+
+test("findIncompleteRuntimeProjects reports regular services stuck in Created", () => {
+  const runtime = buildRuntimeProject({
+    project: "interrupted",
+    workingDir: "/tmp/interrupted/.hack",
+    containerIds: ["api-1", "worker-1"],
+  });
+  runtime.services.get("app")?.containers.forEach((container) => {
+    Object.assign(container, { state: "created", status: "Created" });
+  });
+
+  expect(findIncompleteRuntimeProjects({ runtime: [runtime] })).toEqual([
+    {
+      project: "interrupted",
+      workingDir: "/tmp/interrupted/.hack",
+      createdServices: ["app"],
+      containerIds: ["api-1", "worker-1"],
+    },
+  ]);
+});
+
+test("findIncompleteRuntimeProjects ignores terminal services and lifecycle pseudo-services", () => {
+  const terminal = buildRuntimeProject({
+    project: "terminal",
+    workingDir: "/tmp/terminal/.hack",
+    containerIds: ["terminal-1"],
+  });
+  terminal.services.get("app")?.containers.forEach((container) => {
+    Object.assign(container, { state: "exited", status: "Exited (0)" });
+  });
+  const lifecycle = buildRuntimeProject({
+    project: "lifecycle",
+    workingDir: "/tmp/lifecycle/.hack",
+    containerIds: ["lifecycle-1"],
+  });
+  lifecycle.services.get("app")?.containers.forEach((container) => {
+    Object.assign(container, {
+      state: "created",
+      status: "Created",
+      labels: { "hack.lifecycle.process": "true" },
+    });
+  });
+
+  expect(
+    findIncompleteRuntimeProjects({ runtime: [terminal, lifecycle] })
+  ).toEqual([]);
 });
 
 test("scopeRuntimeHygieneToProject excludes unrelated registered and runtime projects", () => {

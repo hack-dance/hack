@@ -18,6 +18,8 @@ export type TicketsSkillResult = {
     | "created"
     | "updated"
     | "noop"
+    | "absent"
+    | "deprecated"
     | "removed"
     | "missing"
     | "error";
@@ -81,6 +83,25 @@ export async function checkTicketsSkill(opts: {
 
   const hasMarker = HACK_TICKETS_NAME_PATTERN.test(content);
   return { scope: opts.scope, status: hasMarker ? "noop" : "error", path };
+}
+
+/** Check that the deprecated tickets skill is absent from an agent scope. */
+export async function checkDeprecatedTicketsSkill(opts: {
+  readonly scope: TicketsSkillScope;
+  readonly projectRoot?: string;
+}): Promise<TicketsSkillResult> {
+  const result = await checkTicketsSkill(opts);
+  if (result.status === "missing") {
+    return { ...result, status: "absent" };
+  }
+  if (result.status === "noop") {
+    return {
+      ...result,
+      status: "deprecated",
+      message: `Deprecated hack-tickets skill is still installed at ${result.path}. Run: hack setup sync --all-scopes`,
+    };
+  }
+  return result;
 }
 
 export async function removeTicketsSkill(opts: {

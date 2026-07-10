@@ -95,6 +95,35 @@ test("composeRuntimeBackend.up builds compose args with profiles and detach", as
   ]);
 });
 
+test("composeRuntimeBackend.up targets services without dependencies", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
+  await composeRuntimeBackend.up({
+    composeFiles: ["docker-compose.yml"],
+    composeProject: "myproj",
+    profiles: [],
+    detach: true,
+    noDeps: true,
+    forceRecreate: true,
+    services: ["chat-q", "sim-runner"],
+    cwd: "/tmp",
+  });
+
+  expect(runCalls[0]).toEqual([
+    "docker",
+    "compose",
+    "-p",
+    "myproj",
+    "-f",
+    "docker-compose.yml",
+    "up",
+    "-d",
+    "--no-deps",
+    "--force-recreate",
+    "chat-q",
+    "sim-runner",
+  ]);
+});
+
 test("composeRuntimeBackend.down builds compose args", async () => {
   const composeRuntimeBackend = await loadComposeRuntimeBackend();
   await composeRuntimeBackend.down({
@@ -132,6 +161,30 @@ test("composeRuntimeBackend.psJson uses exec with json format", async () => {
     "--profile",
     "ops",
     "ps",
+    "--format",
+    "json",
+  ]);
+});
+
+test("composeRuntimeBackend.psJson can include non-running containers", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
+  await composeRuntimeBackend.psJson({
+    composeFiles: ["docker-compose.yml"],
+    composeProject: "proj",
+    profiles: [],
+    cwd: "/tmp",
+    all: true,
+  });
+
+  expect(execCalls[0]).toEqual([
+    "docker",
+    "compose",
+    "-p",
+    "proj",
+    "-f",
+    "docker-compose.yml",
+    "ps",
+    "--all",
     "--format",
     "json",
   ]);

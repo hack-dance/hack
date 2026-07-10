@@ -14,7 +14,7 @@ import { logger } from "../ui/logger.ts";
  */
 const ticketsSpec = defineCommand({
   name: "tickets",
-  summary: "Track repo-local work without leaving git",
+  summary: "Deprecated: legacy repo-local Tickets compatibility commands",
   description: [
     "Usage:",
     "  hack tickets list",
@@ -26,6 +26,7 @@ const ticketsSpec = defineCommand({
     "  hack tickets setup",
     "  hack tickets tui",
     "",
+    "Deprecated compatibility surface. It is no longer installed into agent instructions or skills.",
     "Alias for `hack x tickets <command>`. Requires extension enabled.",
   ].join("\n"),
   group: "Integrations",
@@ -45,6 +46,10 @@ async function handleTickets({
   readonly ctx: CliContext;
   readonly args: TicketsArgs;
 }): Promise<number> {
+  logger.warn({
+    message:
+      "Hack Tickets is deprecated and no longer part of agent guidance. Commands remain available only for compatibility and migration.",
+  });
   // Parse command early to check if it's setup (which bypasses enable check)
   const invocation = parseTicketsInvocation({ argv: args.raw.argv });
   const isSetupCommand = invocation.command === "setup";

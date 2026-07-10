@@ -2,13 +2,14 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-
+import { __testOnlyProjectsCommand } from "../src/commands/projects.ts";
 import {
   findDeadProjectRegistrations,
   type RegisteredProject,
   readProjectsRegistry,
   removeProjectsById,
 } from "../src/lib/projects-registry.ts";
+import type { RuntimeProject } from "../src/lib/runtime-projects.ts";
 
 let tempDir: string | null = null;
 let originalHackHome: string | undefined;
@@ -134,3 +135,41 @@ test("prune removes dead entries from the registry and keeps live ones", async (
   const after = await readProjectsRegistry();
   expect(after.projects.map((entry) => entry.id)).toEqual(["live00000001"]);
 });
+
+test("project-scoped prune selects only one project family", () => {
+  const alpha = buildRegistration({
+    id: "alpha0000001",
+    name: "alpha",
+    repoRoot: "/missing/alpha",
+  });
+  const beta = buildRegistration({
+    id: "beta00000001",
+    name: "beta",
+    repoRoot: "/missing/beta",
+  });
+  const runtime = [
+    runtimeProject("alpha"),
+    runtimeProject("alpha--feature-one"),
+    runtimeProject("beta--feature-two"),
+  ];
+
+  expect(
+    __testOnlyProjectsCommand
+      .filterPruneRegistryProjects({ projects: [alpha, beta], filter: "alpha" })
+      .map((project) => project.name)
+  ).toEqual(["alpha"]);
+  expect(
+    __testOnlyProjectsCommand
+      .filterPruneRuntimeProjects({ runtime, filter: "alpha" })
+      .map((project) => project.project)
+  ).toEqual(["alpha", "alpha--feature-one"]);
+});
+
+function runtimeProject(project: string): RuntimeProject {
+  return {
+    project,
+    workingDir: `/missing/${project}`,
+    services: new Map(),
+    isGlobal: false,
+  };
+}

@@ -85,15 +85,21 @@ hack init [options]
 | `--version, -v` | Show version |
 
 
-## `hack up`
+## `hack up [services...]`
 
 Start project services (docker compose up)
 
 ### Usage
 
 ```bash
-hack up [options]
+hack up [services...] [options]
 ```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `services` |  |
 
 ### Options
 
@@ -138,15 +144,21 @@ hack down [options]
 | `--version, -v` | Show version |
 
 
-## `hack restart`
+## `hack restart [services...]`
 
-Restart project services (down then up)
+Restart the project or selected services
 
 ### Usage
 
 ```bash
-hack restart [options]
+hack restart [services...] [options]
 ```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `services` |  |
 
 ### Options
 
@@ -1160,6 +1172,7 @@ hack projects prune [options]
 
 | Option | Description |
 | --- | --- |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--include-global` | Include global infra projects under ~/.hack (e.g. logging stack) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
@@ -1628,9 +1641,9 @@ hack setup <subcommand> [options]
 | `hack setup cursor` | Install Cursor rules for hack CLI usage |
 | `hack setup claude` | Install Claude Code hooks for hack CLI usage |
 | `hack setup codex` | Install Codex skill for hack CLI usage |
-| `hack setup tickets` | Install Codex skill for hack tickets usage |
+| `hack setup tickets` | Remove or audit the deprecated Hack Tickets skill |
 | `hack setup agents` | Install AGENTS.md / CLAUDE.md snippets for hack CLI usage |
-| `hack setup sync` | Refresh agent docs, skills, and MCP configs |
+| `hack setup sync` | Refresh project/global agent guidance and remove deprecated artifacts |
 | `hack setup mcp` | Install MCP configs for hack CLI usage (no-shell only) |
 
 ### Options
@@ -1729,7 +1742,7 @@ hack setup codex [options]
 
 ## `hack setup tickets`
 
-Install Codex skill for hack tickets usage
+Remove or audit the deprecated Hack Tickets skill
 
 ### Usage
 
@@ -1775,7 +1788,7 @@ hack setup agents [options]
 
 ## `hack setup sync`
 
-Refresh agent docs, skills, and MCP configs
+Refresh project/global agent guidance and remove deprecated artifacts
 
 ### Usage
 
@@ -2164,6 +2177,8 @@ hack env <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack env list` | List resolved env values for the selected overlay |
+| `hack env explain <key>` | Explain a resolved env value without revealing it |
+| `hack env apply` | Recreate one service with its resolved env |
 | `hack env add [key] [value]` | Add or update an env value |
 | `hack env set [key] [value]` | Alias for env add |
 | `hack env materialize` | Write a compatibility .env file from the selected overlay |
@@ -2199,6 +2214,59 @@ hack env list [options]
 | `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
 | `--json` | Output JSON (machine-readable) |
 | `--show-secrets` | Print secret values (keychain) in plaintext |
+| `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack env explain <key>`
+
+Explain a resolved env value without revealing it
+
+### Usage
+
+```bash
+hack env explain <key> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `key` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--json` | Output JSON (machine-readable) |
+| `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack env apply`
+
+Recreate one service with its resolved env
+
+### Usage
+
+```bash
+hack env apply [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--json` | Output JSON (machine-readable) |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -2487,7 +2555,7 @@ Start an interactive host shell with the selected Hack env overlay injected. Use
 
 ## `hack tickets [args...]`
 
-Track repo-local work without leaving git
+Deprecated: legacy repo-local Tickets compatibility commands
 
 ### Usage
 
@@ -2505,6 +2573,7 @@ Usage:
   hack tickets setup
   hack tickets tui
 
+Deprecated compatibility surface. It is no longer installed into agent instructions or skills.
 Alias for `hack x tickets <command>`. Requires extension enabled.
 
 ### Arguments

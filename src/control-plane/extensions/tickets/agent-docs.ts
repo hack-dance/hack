@@ -17,7 +17,13 @@ export type TicketsAgentDocUpdateResult = {
 
 export type TicketsAgentDocCheckResult = {
   readonly target: TicketsAgentDocTarget;
-  readonly status: "present" | "missing" | "error";
+  readonly status:
+    | "present"
+    | "missing"
+    | "noop"
+    | "absent"
+    | "deprecated"
+    | "error";
   readonly path: string;
   readonly message?: string;
 };
@@ -58,6 +64,52 @@ export async function upsertTicketsAgentDocs(opts: {
     }
   }
 
+  return results;
+}
+
+/** Check that deprecated tickets-only instruction blocks are absent. */
+export async function checkDeprecatedTicketsAgentDocs(opts: {
+  readonly projectRoot: string;
+  readonly targets: readonly TicketsAgentDocTarget[];
+}): Promise<TicketsAgentDocCheckResult[]> {
+  const results: TicketsAgentDocCheckResult[] = [];
+  for (const target of opts.targets) {
+    const path = resolveTicketsAgentDocPath({
+      projectRoot: opts.projectRoot,
+      target,
+    });
+    try {
+      const existing = await readTextFile(path);
+      const hasStart = existing?.includes(DOC_MARKER_START) === true;
+      const hasEnd = existing?.includes(DOC_MARKER_END) === true;
+      if (!(hasStart || hasEnd)) {
+        results.push({ target, status: "absent", path });
+        continue;
+      }
+      if (!(hasStart && hasEnd)) {
+        results.push({
+          target,
+          status: "error",
+          path,
+          message: "Malformed deprecated Hack Tickets markers.",
+        });
+        continue;
+      }
+      results.push({
+        target,
+        status: "deprecated",
+        path,
+        message: `Deprecated Hack Tickets instructions remain at ${path}. Run: hack setup sync --all-scopes`,
+      });
+    } catch (error: unknown) {
+      results.push({
+        target,
+        status: "error",
+        path,
+        message: error instanceof Error ? error.message : "Failed to read file",
+      });
+    }
+  }
   return results;
 }
 

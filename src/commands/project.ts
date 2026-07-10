@@ -161,7 +161,7 @@ import {
   parseEnvConfigSelection,
   readProjectConfig,
   readProjectDevHost,
-  resolveProjectOauthTld,
+  resolveProjectOauthAliasHost,
   resolveWorktreeAutoBranch,
   sanitizeBranchSlug,
   sanitizeProjectSlug,
@@ -3580,8 +3580,10 @@ function resolveBranchAliasHost(opts: {
   readonly devHost: string;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
 }): string | null {
-  const tld = resolveProjectOauthTld(opts.cfg.oauth);
-  return tld ? `${opts.devHost}.${tld}` : null;
+  return resolveProjectOauthAliasHost({
+    devHost: opts.devHost,
+    oauth: opts.cfg.oauth,
+  });
 }
 
 async function touchBranchUsageIfNeeded(opts: {

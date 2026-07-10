@@ -322,9 +322,11 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
   - `.env` (optional, only when explicitly materialized)
   - `.internal/compose.override.yml`
   - `.internal/compose.env.override.yml`
+  - `.internal/compose.runtime.override.yml`
   - `.internal/extra-hosts.json`
   - `.internal/lifecycle/state.json` and `.internal/lifecycle/*.log`
   - `.branch/compose.<branch>.override.yml`
+  - `.branch/compose.<branch>.runtime.override.yml`
 
 ## Key design choices
 

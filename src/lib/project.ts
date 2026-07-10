@@ -1,6 +1,7 @@
 import { basename, dirname, resolve } from "node:path";
 import {
   DEFAULT_OAUTH_ALIAS_TLD,
+  DEFAULT_PROJECT_TLD,
   HACK_PROJECT_DIR_LEGACY,
   HACK_PROJECT_DIR_PRIMARY,
   PROJECT_COMPOSE_FILENAME,
@@ -359,6 +360,22 @@ export function resolveProjectOauthTld(
   }
   const tld = cfg.tld?.trim().toLowerCase();
   return tld && tld.length > 0 ? tld : DEFAULT_OAUTH_ALIAS_TLD;
+}
+
+/**
+ * Returns the OAuth alias only when Hack's generated Caddy routes can serve it.
+ * Custom development hosts outside the managed `.hack` namespace retain their
+ * primary host unless the project declares and routes an alias itself.
+ */
+export function resolveProjectOauthAliasHost(opts: {
+  readonly devHost: string;
+  readonly oauth: ProjectOauthConfig | undefined;
+}): string | null {
+  const tld = resolveProjectOauthTld(opts.oauth);
+  if (!(tld && opts.devHost.endsWith(`.${DEFAULT_PROJECT_TLD}`))) {
+    return null;
+  }
+  return `${opts.devHost}.${tld}`;
 }
 
 export async function readProjectConfig(

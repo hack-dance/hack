@@ -20,7 +20,7 @@ import {
   findProjectContext,
   readProjectConfig,
   readProjectDevHost,
-  resolveProjectOauthTld,
+  resolveProjectOauthAliasHost,
   sanitizeBranchSlug,
   sanitizeProjectSlug,
 } from "../lib/project.ts";
@@ -413,8 +413,10 @@ function resolveBranchAliasHost(opts: {
   readonly devHost: string;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
 }): string | null {
-  const tld = resolveProjectOauthTld(opts.cfg.oauth);
-  return tld ? `${opts.devHost}.${tld}` : null;
+  return resolveProjectOauthAliasHost({
+    devHost: opts.devHost,
+    oauth: opts.cfg.oauth,
+  });
 }
 
 function applyBranchToHost(opts: {

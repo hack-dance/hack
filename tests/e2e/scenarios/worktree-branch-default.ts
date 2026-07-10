@@ -238,6 +238,57 @@ export const worktreeBranchDefaultScenario: Scenario = {
       result: explicitHost,
     });
 
+    for (const [key, value] of [
+      ["oauth.enabled", "true"],
+      ["open.prefer", "auto"],
+      ["dev_host", "demo.test"],
+    ] as const) {
+      const configured = await ctx.cli({
+        args: ["config", "set", key, value],
+        cwd: fixture.root,
+      });
+      expectExit({
+        result: configured,
+        codes: [0],
+        message: `hack config set ${key} should succeed`,
+      });
+    }
+    const customHostOpen = await ctx.cli({
+      args: ["open", "--json"],
+      cwd: fixture.root,
+    });
+    expectExit({
+      result: customHostOpen,
+      codes: [0],
+      message: "automatic preference should support a custom dev host",
+    });
+    const customHostUrl =
+      extractJsonObject<OpenPayload>({ text: customHostOpen.stdout })?.url ??
+      "";
+    expect({
+      that: customHostUrl === "https://demo.test",
+      message: `auto should retain a custom host without a generated alias route, got "${customHostUrl}"`,
+      result: customHostOpen,
+    });
+    const customAliasOpen = await ctx.cli({
+      args: ["open", "--json", "--prefer", "alias"],
+      cwd: fixture.root,
+    });
+    expectExit({
+      result: customAliasOpen,
+      codes: [1],
+      message:
+        "explicit alias should fail when Hack did not generate its route",
+    });
+    expect({
+      that: customAliasOpen.combined.includes(
+        "OAuth alias host is unavailable"
+      ),
+      message:
+        "custom host alias failure should explain that it is unavailable",
+      result: customAliasOpen,
+    });
+
     const optOut = await ctx.cli({
       args: ["open", "--json", "--branch", "main-instance"],
       cwd: worktreePath,

@@ -16,7 +16,7 @@ Use `hack` as the primary interface for local-first development.
 - At session start, audit project and global integrations with `hack setup sync --all-scopes --check`.
 - If anything is stale, missing, or deprecated, run `hack setup sync --all-scopes`, then reload the agent session so cached instructions are replaced.
 - Never copy or hand-edit generated Hack rules to refresh them; update the CLI and run the sync command.
-- Content revision: `7a637a92221f` (version alone is not a freshness guarantee).
+- Content revision: `902b04fe1469` (version alone is not a freshness guarantee).
 
 ## Product boundary
 
@@ -52,7 +52,7 @@ Use `hack` as the primary interface for local-first development.
 - Primary host comes from `dev_host` (default: `<project>.hack`).
 - Subdomain pattern is `<sub>.<dev_host>` (for example: `api.myapp.hack`).
 - OAuth alias (when enabled) also routes `<dev_host>.<tld>` and `<sub>.<dev_host>.<tld>` (default tld: `gy`).
-- Browser launches automatically prefer the OAuth alias when enabled; set `open.prefer` or pass `hack open --prefer <auto|alias|dev>` to override.
+- Browser launches automatically prefer a routed OAuth alias when enabled; custom development hosts outside `.hack` stay on the primary host. Set `open.prefer` or pass `hack open --prefer <auto|alias|dev>` to override.
 - Not every compose service is routable: only services with Caddy labels and on `hack-dev` are exposed.
 - Required labels for HTTP services: `caddy`, `caddy.reverse_proxy`, `caddy.tls=internal`.
 - Quick checks: `hack open`, `hack open <sub>`, `hack open --json`.
@@ -71,7 +71,7 @@ Use `hack` as the primary interface for local-first development.
 - Source-of-truth files: `.hack/docker-compose.yml`, `.hack/hack.config.json`, `.hack/hack.env.default.yaml`, and optional `.hack/hack.env.<overlay>.yaml`.
 - Worktree-local env override files: `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`.
 - Local-only files: `.hack.secret.key`, optional `.hack/.env` compatibility output, `.hack/.env.state.json`, and `.hack/.internal/` (runtime/local machine state; keep gitignored).
-- Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.
+- Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.internal/compose.runtime.override.yml`, `.hack/.branch/compose.<branch>.override.yml`, `.hack/.branch/compose.<branch>.runtime.override.yml`.
 - Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).
 - Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.
 - Ignore rules: hack owns a committed `.hack/.gitignore` (self-healing on init/up) covering machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`); keep it committed, and if generated files leaked into git, `hack doctor --fix` untracks them (files stay on disk).

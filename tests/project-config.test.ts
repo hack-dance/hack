@@ -9,6 +9,7 @@ import {
 } from "../src/constants.ts";
 import {
   readProjectConfig,
+  resolveProjectOauthAliasHost,
   resolveProjectOauthTld,
 } from "../src/lib/project.ts";
 
@@ -242,6 +243,27 @@ test("readProjectConfig defaults ownership to local user scope", async () => {
 test("resolveProjectOauthTld falls back to default when enabled", () => {
   expect(resolveProjectOauthTld({ enabled: true, tld: "" })).toBe("gy");
   expect(resolveProjectOauthTld({ enabled: false })).toBeNull();
+});
+
+test("resolveProjectOauthAliasHost only returns aliases Hack routes", () => {
+  expect(
+    resolveProjectOauthAliasHost({
+      devHost: "demo.hack",
+      oauth: { enabled: true, tld: "gy" },
+    })
+  ).toBe("demo.hack.gy");
+  expect(
+    resolveProjectOauthAliasHost({
+      devHost: "demo.test",
+      oauth: { enabled: true, tld: "gy" },
+    })
+  ).toBeNull();
+  expect(
+    resolveProjectOauthAliasHost({
+      devHost: "demo.hack",
+      oauth: { enabled: false, tld: "gy" },
+    })
+  ).toBeNull();
 });
 
 test("readProjectConfig maps startup shorthand into lifecycle", async () => {

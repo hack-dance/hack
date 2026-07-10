@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { DAEMON_LAUNCHD_LABEL } from "../src/constants.ts";
-import { renderLaunchdPlist } from "../src/daemon/launchd.ts";
+import {
+  renderLaunchdPlist,
+  resolveLaunchdHackBinPath,
+} from "../src/daemon/launchd.ts";
 
 describe("launchd plist generation", () => {
   test("renders plist with RunAtLoad false", () => {
@@ -116,5 +119,33 @@ describe("daemon constants", () => {
   test("launchd label follows reverse-DNS convention", () => {
     expect(DAEMON_LAUNCHD_LABEL).toBe("dance.hack.hackd");
     expect(DAEMON_LAUNCHD_LABEL).toMatch(/^[a-z]+\.[a-z]+\.[a-z]+$/);
+  });
+});
+
+describe("launchd executable resolution", () => {
+  test("prefers the active CLI over an older global development shim", async () => {
+    const resolved = await resolveLaunchdHackBinPath({
+      invocation: { bin: "/opt/homebrew/bin/hack", args: [] },
+      findExecutable: () => "/opt/homebrew/bin/hack",
+      exists: async (path) =>
+        path === "/opt/homebrew/bin/hack" ||
+        path === "/Users/testuser/.hack/bin/hack",
+      globalHackBinPath: "/Users/testuser/.hack/bin/hack",
+      argvPath: null,
+    });
+
+    expect(resolved).toBe("/opt/homebrew/bin/hack");
+  });
+
+  test("retains the global binary as a fallback", async () => {
+    const resolved = await resolveLaunchdHackBinPath({
+      invocation: { bin: "bun", args: ["/$bunfs/root/hack"] },
+      findExecutable: () => null,
+      exists: async (path) => path === "/Users/testuser/.hack/bin/hack",
+      globalHackBinPath: "/Users/testuser/.hack/bin/hack",
+      argvPath: "/$bunfs/root/hack",
+    });
+
+    expect(resolved).toBe("/Users/testuser/.hack/bin/hack");
   });
 });

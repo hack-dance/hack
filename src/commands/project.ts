@@ -6061,7 +6061,7 @@ async function runUpCommand({
       cwd: dirname(project.composeFile),
       env: envOverrides.env,
       routeStdoutToStderr: json,
-      services: targetServices,
+      services: serviceScoped ? targetServices : undefined,
       noDeps: serviceScoped,
     });
     if (upCode !== 0) {

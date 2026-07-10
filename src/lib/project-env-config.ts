@@ -922,22 +922,19 @@ function resolveLayeredProjectEnvValuesForScopes(opts: {
   readonly scopeNames: readonly string[];
   readonly keyText: string | null;
 }): Record<string, string> {
-  const out: Record<string, string> = {};
+  const storedValues: Record<string, ProjectEnvStoredValue> = {};
   for (const layer of opts.layers) {
     if (!layer) {
       continue;
     }
     for (const scopeName of opts.scopeNames) {
-      Object.assign(
-        out,
-        resolveProjectEnvScopeValues({
-          values: layer.values[scopeName] ?? {},
-          keyText: opts.keyText,
-        })
-      );
+      Object.assign(storedValues, layer.values[scopeName] ?? {});
     }
   }
-  return out;
+  return resolveProjectEnvScopeValues({
+    values: storedValues,
+    keyText: opts.keyText,
+  });
 }
 
 function hasSecretEntries(opts: {

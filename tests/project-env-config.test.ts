@@ -427,6 +427,41 @@ test("resolveProjectEnvConfig falls back to HACK_ENV_SECRET_KEY when the key fil
   expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe("super-secret-token");
 });
 
+test("resolveProjectEnvConfig decrypts only effective values after overlays", async () => {
+  const repo = await createRepo();
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "api",
+    key: "SERVICE_TOKEN",
+    value: "stale-secret",
+    secret: true,
+  });
+  await unlink(resolve(repo.projectRoot, PROJECT_ENV_KEY_FILENAME));
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.qa.yaml"),
+    [
+      "version: 1",
+      "environment: qa",
+      "secretsprovider: project_key",
+      "values:",
+      "  api:",
+      "    SERVICE_TOKEN: overlay-plain",
+      "",
+    ].join("\n")
+  );
+
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: "qa",
+    serviceNames: ["api", "web"],
+  });
+
+  expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe("overlay-plain");
+});
+
 test("resolveProjectEnvConfig merges shared and worktree-local overlays in order", async () => {
   const repo = await createRepo();
 

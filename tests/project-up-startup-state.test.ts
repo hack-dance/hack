@@ -14,6 +14,7 @@ const psRows: string[] = [];
 const errorMessages: string[] = [];
 const warnMessages: string[] = [];
 const upEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
+const upServiceSelections: Array<readonly string[] | undefined> = [];
 const tempDirs = new Set<string>();
 const originalHackHome = process.env.HACK_HOME;
 let autoBranch: string | null = null;
@@ -49,8 +50,12 @@ const runtimeBackendMock = await registerScopedModuleMock({
   overrides: {
     composeRuntimeBackend: {
       name: "compose",
-      up: async (opts: { readonly env?: Readonly<Record<string, string>> }) => {
+      up: async (opts: {
+        readonly env?: Readonly<Record<string, string>>;
+        readonly services?: readonly string[];
+      }) => {
         upEnvs.push(opts.env);
+        upServiceSelections.push(opts.services);
         return 0;
       },
       down: async () => 0,
@@ -111,6 +116,7 @@ afterEach(async () => {
   errorMessages.length = 0;
   warnMessages.length = 0;
   upEnvs.length = 0;
+  upServiceSelections.length = 0;
   autoBranch = null;
   runtimeProjects = [];
   for (const tempDir of tempDirs) {
@@ -164,6 +170,7 @@ test("up accepts running and successfully completed one-shot services", async ()
 
   expect(exitCode).toBe(0);
   expect(errorMessages).toEqual([]);
+  expect(upServiceSelections).toEqual([undefined]);
 });
 
 test("registry credentials must exist in the bootstrap service scope", async () => {

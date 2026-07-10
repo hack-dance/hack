@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -7,15 +14,18 @@ let tempDir: string | null = null;
 let originalHome: string | undefined;
 let originalLogger: string | undefined;
 let originalGlobalConfigPath: string | undefined;
+let originalSetupSyncMode: string | undefined;
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
   originalLogger = process.env.HACK_LOGGER;
   originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
+  originalSetupSyncMode = process.env.HACK_SETUP_SYNC_MODE;
   tempDir = await mkdtemp(join(tmpdir(), "hack-config-command-"));
   process.env.HOME = tempDir;
   process.env.HACK_LOGGER = "console";
   process.env.HACK_GLOBAL_CONFIG_PATH = join(tempDir, "hack.config.json");
+  process.env.HACK_SETUP_SYNC_MODE = "off";
 });
 
 afterEach(async () => {
@@ -26,6 +36,7 @@ afterEach(async () => {
   process.env.HOME = originalHome;
   process.env.HACK_LOGGER = originalLogger;
   process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
+  process.env.HACK_SETUP_SYNC_MODE = originalSetupSyncMode;
 });
 
 test("config set --global updates extension enabled using bracket path", async () => {
@@ -103,6 +114,41 @@ test("config set --global cleans stale legacy cloudflare mirror on canonical upd
   ).toBe("gateway.cleaned.test");
   expect(parsed.controlPlane["dance.hack.cloudflare"]).toBeUndefined();
 });
+
+test("config get does not create or lock the global project registry", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp directory");
+  }
+  const projectRoot = join(tempDir, "repo");
+  const projectDir = join(projectRoot, ".hack");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    join(projectDir, "hack.config.json"),
+    '{"name":"read-only-project","dev_host":"read-only.hack"}\n'
+  );
+  await writeFile(
+    join(projectDir, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine\n"
+  );
+
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(await runCli(["config", "get", "--path", projectRoot, "name"])).toBe(
+    0
+  );
+  const lockPath = join(tempDir, ".hack", "projects.json.lock");
+  const registryPath = join(tempDir, ".hack", "projects.json");
+  expect(await exists(lockPath)).toBe(false);
+  expect(await exists(registryPath)).toBe(false);
+});
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function writeBaseGlobalConfig(): Promise<string> {
   const configPath = globalConfigPathForTest();

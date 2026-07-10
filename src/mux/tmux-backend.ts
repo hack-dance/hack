@@ -8,6 +8,7 @@ import type {
 } from "./mux-backend.ts";
 
 const LIFECYCLE_OWNER_OPTION = "@hack_lifecycle_owner";
+const LIFECYCLE_OWNER_ENV = "HACK_LIFECYCLE_OWNER_TOKEN";
 
 function parseIntOrNull(value: string | undefined): number | null {
   const n = Number.parseInt(value ?? "", 10);
@@ -106,6 +107,9 @@ export function createTmuxBackend(): MuxBackend {
         args.push("-e", `${key}=${value}`);
       }
     }
+    if (opts.lifecycleOwnerToken) {
+      args.push("-e", `${LIFECYCLE_OWNER_ENV}=${opts.lifecycleOwnerToken}`);
+    }
 
     const result = await exec(args, { stdin: "ignore" });
     if (result.exitCode !== 0) {
@@ -160,11 +164,24 @@ export function createTmuxBackend(): MuxBackend {
       ["tmux", "show-options", "-v", "-t", opts.name, LIFECYCLE_OWNER_OPTION],
       { stdin: "ignore" }
     );
-    if (result.exitCode !== 0) {
+    if (result.exitCode === 0) {
+      const token = result.stdout.trim();
+      if (token.length > 0) {
+        return token;
+      }
+    }
+    const environment = await exec(
+      ["tmux", "show-environment", "-t", opts.name, LIFECYCLE_OWNER_ENV],
+      { stdin: "ignore" }
+    );
+    if (environment.exitCode !== 0) {
       return null;
     }
-    const token = result.stdout.trim();
-    return token.length > 0 ? token : null;
+    const assignment = environment.stdout.trim();
+    const prefix = `${LIFECYCLE_OWNER_ENV}=`;
+    return assignment.startsWith(prefix)
+      ? assignment.slice(prefix.length)
+      : null;
   };
 
   const listSessionWindowNames = async (opts: {

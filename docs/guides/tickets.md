@@ -3,10 +3,9 @@
 This page is part of [Extensions & reference](../reference.md).
 If you are learning the core local product flow, start with [Core docs](../core.md).
 
-> Tickets is an optional, opt-in extension. Enable `dance.hack.tickets` in config (or run
-> `hack x tickets setup`, which enables it for you) before it does anything, and any
-> agent/integration syncing only happens once it's enabled. Tickets is no longer part of default
-> agent instructions — only use it when the project explicitly opts into it.
+> **Deprecated.** Hack Tickets remains available only for compatibility and migration of existing
+> data. It is no longer installed into agent instructions or skills. New projects should use the
+> tracker selected by the project instead.
 
 The tickets extension is a lightweight, git-backed ticket log intended for small teams and solo dev.
 It stores events in a dedicated git ref (`refs/hack/tickets` by default, hidden from branch lists) so
@@ -16,30 +15,29 @@ ticket history is versioned and syncable without requiring an external service.
 - Extension id: `dance.hack.tickets`
 - Storage: `.hack/tickets/` (local working state) + a git ref for syncing
 
-## Enable
+## Compatibility enablement
 
-The primary path is `hack x tickets setup` (or the top-level alias `hack tickets setup`) — it
-enables the extension in the project's `.hack/hack.config.json` as its first step, then installs
-the skill and agent-doc snippets. `setup` is special-cased to run even when the extension is
-disabled, so this is the only command that works before tickets is turned on.
+Existing repositories must explicitly enable the extension in `.hack/hack.config.json` or global
+config. `hack x tickets setup` no longer enables it and no longer installs skills or agent-doc
+snippets. The setup command now removes those deprecated artifacts and keeps storage hygiene usable
+for migration.
 
-From inside the repo you want to enable tickets for:
+From inside an existing Tickets repo, clean up deprecated agent integrations:
 
 ```bash
 hack x tickets setup
 ```
 
 Options:
-- `--global` installs the Codex skill into `~/.codex/skills/hack-tickets/` instead of the repo. The
-  default (project) scope installs to `<repo>/.codex/skills/hack-tickets/SKILL.md`.
-- `--agents` / `--claude` / `--all` control which agent-doc files get a tickets snippet.
-- `--check` and `--remove` work as expected.
+- `--global` audits or removes the deprecated user-scoped Tickets skill.
+- `--agents` / `--claude` / `--all` select legacy agent-doc blocks to audit or remove.
+- `--check` exits non-zero when deprecated Tickets guidance is still installed.
+- `--remove` is accepted explicitly; the default setup action also removes agent guidance.
 - `--json` prints a machine-readable result shaped like
   `{ skill, docs, repo: { gitignore, tracking } }` instead of the human-readable summary.
 
 Notes:
-- Most tickets commands prompt to run setup if `.hack/tickets/` is tracked, missing from `.gitignore`,
-  or if agent docs/skills are missing (TTY + gum only).
+- Tickets commands may prompt for repository storage hygiene, but never install agent docs or skills.
 - Setup also prompts to repair legacy tickets branches or stray files in the tickets ref.
 - In `--json` mode this setup-health check is skipped entirely and silently — no warning is
   printed. In non-interactive terminals (no TTY, or `gum` unavailable) the CLI instead prints a
@@ -83,8 +81,8 @@ default for both is on.
 ## Basic usage
 
 Every `hack x tickets <command>` below also works as the top-level alias `hack tickets <command>`
-(for example `hack tickets list`). The alias requires the extension to already be enabled, except
-for `setup`, which can enable it for you.
+(for example `hack tickets list`). The alias requires the extension to already be enabled. `setup`
+can run while disabled, but it does not enable the extension.
 
 Create a ticket:
 

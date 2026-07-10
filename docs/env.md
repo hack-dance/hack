@@ -51,7 +51,7 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `.env.state.json`
 - `hack.env.local.yaml`
 - `hack.env.*.local.yaml`
-- `tickets/` (local tickets-extension cache)
+- `tickets/` (deprecated Tickets compatibility cache)
 
 How it is maintained:
 
@@ -75,7 +75,7 @@ Leak detection and repair:
   secret; rotate it after untracking
 - `hack doctor --fix` untracks the offenders with `git rm --cached` (files
   stay on disk) and re-ensures `.hack/.gitignore`; commit the removal
-- `--fix` and `--migrate-env-config` are ignored when `--json` is passed;
+- `--fix` and `--migrate-env-config` cannot be combined with `--json`; run the repair and JSON audit separately so a mutating request is never silently ignored.
   run them separately from a JSON-mode invocation
 
 ## File format
@@ -91,7 +91,7 @@ Each env file is YAML with:
 
 - `global`: values applied everywhere
 - `<service>`: values applied only for that compose service
-- `host`: optional overrides applied only to host-command injection (`hack host exec` / `hack host shell`)
+- `host`: optional overrides applied to host execution (`hack host exec`, `hack host shell`, and lifecycle hooks/processes)
 
 Example:
 
@@ -123,7 +123,8 @@ Hack resolves env in this order:
 6. if a service scope is requested, merge `values.<service>` on top
 
 Worktree-local overrides win over shared repo overlays. Service values override global values.
-Host-command injection applies `host` values last when the execution target is `host`.
+Host execution applies `host` values last. This includes `hack host exec`, `hack host shell`,
+and lifecycle hooks/processes, which all run on the host rather than in Compose.
 
 Projects can set a default overlay in `.hack/hack.config.json`:
 
@@ -156,7 +157,7 @@ That means `.hack/.env` is no longer the primary runtime source of truth.
 
 `hack env materialize` is manual by design. Use it only when you need a compatibility file for an external tool that expects `.env` on disk.
 
-For host commands, `hack host exec` and `hack host shell` default to a host-local view.
+For host execution, `hack host exec`, `hack host shell`, and lifecycle hooks/processes use a host-local view.
 That means Hack prefers host-usable values when it can:
 
 - explicit `host` scope values override the normal `global` + `<service>` merge
@@ -183,6 +184,15 @@ hack env list --env qa
 hack env list --env qa --service api
 hack env list --json
 hack env list --show-secrets
+hack env explain GITHUB_TOKEN --env runner --service installer --target compose
+```
+
+`hack env explain` never prints the value. It reports availability, secret classification,
+selected/effective scope, source file and precedence, and whether the value is delivered to host
+lifecycle code or Compose. Recreate just one service after an env change with:
+
+```bash
+hack env apply --service api --env qa
 ```
 
 `--show-secrets` prints secret values in plaintext instead of the masked default; use it deliberately.

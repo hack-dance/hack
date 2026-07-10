@@ -16,6 +16,10 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
+import {
+  inspectAgentIntegrationFreshness,
+  renderAgentIntegrationFreshnessNotice,
+} from "../cli/integration-sync.ts";
 import { optPath } from "../cli/options.ts";
 import { openUrl } from "../lib/os.ts";
 import {
@@ -97,14 +101,32 @@ export const agentCommand = defineCommand({
   ],
 } as const);
 
-function handleAgentPrime({
+async function handleAgentPrime({
+  ctx,
   args: _args,
 }: {
   readonly ctx: CliContext;
   readonly args: PrimeArgs;
 }): Promise<number> {
-  process.stdout.write(renderAgentPrimer());
-  return Promise.resolve(0);
+  const project = await findProjectContext(ctx.cwd);
+  if (!project) {
+    process.stdout.write(
+      [
+        "Hack agent integration freshness: not checked outside a Hack project.",
+        "From a project, run: hack setup sync --all-scopes --check",
+        "",
+        renderAgentPrimer(),
+      ].join("\n")
+    );
+    return 0;
+  }
+  const report = await inspectAgentIntegrationFreshness({
+    projectRoot: project.projectRoot,
+  });
+  process.stdout.write(
+    `${renderAgentIntegrationFreshnessNotice({ report })}\n\n${renderAgentPrimer()}`
+  );
+  return 0;
 }
 
 function handleAgentPatterns({

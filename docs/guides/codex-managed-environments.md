@@ -186,8 +186,6 @@ bash scripts/maintain-codex-slim.sh
 - `hack host shell`
 - repo-local docs, specs, and agent setup
 - command and config surfaces that do not require the machine-wide runtime stack
-- `hack tickets`, if the project opts in — the extension is disabled by default; run
-  `hack tickets setup` once (it works even while the extension is disabled and enables it)
 
 If the repo uses the modern env overlay model, provide secret decryption material with
 `HACK_ENV_SECRET_KEY` instead of relying on a local `.hack.secret.key` file. (On a developer

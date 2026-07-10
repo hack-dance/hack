@@ -34,6 +34,8 @@ export type MonorepoFixture = {
 export type LifecycleFixtureOptions = {
   /** Adds a lifecycle.up.before hook that writes this marker file. */
   readonly upBeforeMarkerFile?: string;
+  /** Adds a lifecycle.up.before hook that records resolved global/host env. */
+  readonly upBeforeEnvMarkerFile?: string;
   /** Adds a long-running lifecycle host process (bun sleep loop). */
   readonly persistentProcess?: boolean;
   /** Makes docker compose reject the fixture after lifecycle startup. */
@@ -339,6 +341,9 @@ async function writeHackConfig(opts: {
       "values:",
       "  global:",
       "    E2E_PLAIN: plain-value",
+      "  host:",
+      "    E2E_PLAIN: host-value",
+      "    E2E_HOST_ONLY: host-only",
       "",
     ].join("\n")
   );
@@ -361,10 +366,18 @@ function buildLifecycleConfig(opts: {
       cwd: ".",
     });
   }
+  if (opts.lifecycle.upBeforeEnvMarkerFile) {
+    upBefore.push({
+      name: "e2e-env-marker",
+      command: `printf "%s|%s" "$E2E_PLAIN" "$E2E_HOST_ONLY" > "${opts.lifecycle.upBeforeEnvMarkerFile}"`,
+      cwd: ".",
+    });
+  }
   if (opts.lifecycle.persistentProcess === true) {
     processes.push({
       name: "e2e-sleeper",
-      command: "bun -e 'setInterval(() => {}, 60000)'",
+      command:
+        'test "$E2E_PLAIN" = host-value && test "$E2E_HOST_ONLY" = host-only && bun -e \'setInterval(() => {}, 60000)\'',
       cwd: ".",
     });
   }

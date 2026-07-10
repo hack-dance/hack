@@ -186,7 +186,7 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
         .filter((line) => line.length > 0);
       expect({
         that:
-          restartCalls.length >= 3 &&
+          restartCalls.length >= 2 &&
           restartCalls.every(
             (line) =>
               !(
@@ -328,6 +328,46 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
       expect({
         that: (await readState({ statePath })).entries.length === 0,
         message: "SIGTERM left lifecycle state behind",
+      });
+
+      const hardKillResult = await runSignalProbe({
+        cwd: fixture.root,
+        hackHome: ctx.hackHome,
+        path,
+        sessionName,
+        signal: "SIGKILL",
+      });
+      expect({
+        that: hardKillResult.exitCode === 137,
+        message: `SIGKILLed up should exit 137, got ${hardKillResult.exitCode}\n${hardKillResult.stderr}`,
+      });
+      expect({
+        that: Boolean(
+          (await readState({ statePath })).entries[0]?.ownershipToken
+        ),
+        message:
+          "SIGKILL between lifecycle startup and Compose lost ownership state",
+      });
+      const recoveredAfterHardKill = await ctx.cli({
+        args: ["up", "--detach", "--json"],
+        cwd: fixture.root,
+        env: cliEnv,
+      });
+      expectExit({
+        result: recoveredAfterHardKill,
+        codes: [0],
+        message:
+          "up should adopt or replace an ownership-proven lifecycle session after SIGKILL",
+      });
+      const downAfterHardKill = await ctx.cli({
+        args: ["down", "--json"],
+        cwd: fixture.root,
+        env: cliEnv,
+      });
+      expectExit({
+        result: downAfterHardKill,
+        codes: [0],
+        message: "down should clean the recovered SIGKILL lifecycle session",
       });
 
       const downFailureFixture = await createMonorepoFixture({
@@ -528,6 +568,10 @@ async function writeFakeDocker(opts: {
       'if [ -n "${E2E_DOCKER_LOG:-}" ]; then printf "%s\\n" "$*" >> "$E2E_DOCKER_LOG"; fi',
       'if [ "$1" = "compose" ]; then',
       '  case " $* " in',
+      '    *" ps "*)',
+      '      printf \'%s\\n\' \'{"Service":"api","State":"running","ExitCode":0}\'',
+      "      exit 0",
+      "      ;;",
       '    *" up "*)',
       '      if [ "${E2E_DOCKER_BLOCK_UP:-}" = "1" ]; then',
       '        parent_pid="$PPID"',
@@ -611,6 +655,7 @@ async function runSignalProbe(opts: {
   readonly hackHome: string;
   readonly path: string;
   readonly sessionName: string;
+  readonly signal?: "SIGTERM" | "SIGKILL";
 }): Promise<{ readonly exitCode: number; readonly stderr: string }> {
   const proc = Bun.spawn(resolveCliSpawnArgs(["up", "--detach", "--json"]), {
     cwd: opts.cwd,
@@ -635,7 +680,7 @@ async function runSignalProbe(opts: {
     await proc.exited;
     throw new Error("timed out waiting for lifecycle session before SIGTERM");
   }
-  proc.kill("SIGTERM");
+  proc.kill(opts.signal ?? "SIGTERM");
   const [exitCode, stderr] = await Promise.all([
     proc.exited,
     new Response(proc.stderr).text(),

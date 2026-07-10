@@ -4,12 +4,11 @@ import { gumConfirm, isGumAvailable } from "../../../ui/gum.ts";
 import { isTty } from "../../../ui/terminal.ts";
 import type { ExtensionCommand, ExtensionCommandContext } from "../types.ts";
 import {
-  checkTicketsAgentDocs,
+  checkDeprecatedTicketsAgentDocs,
   removeTicketsAgentDocs,
   type TicketsAgentDocCheckResult,
   type TicketsAgentDocRemoveResult,
   type TicketsAgentDocUpdateResult,
-  upsertTicketsAgentDocs,
 } from "./agent-docs.ts";
 import {
   isTicketDocumentKind,
@@ -32,8 +31,7 @@ import {
 } from "./store.ts";
 import { createGitTicketsChannel } from "./tickets-git-channel.ts";
 import {
-  checkTicketsSkill,
-  installTicketsSkill,
+  checkDeprecatedTicketsSkill,
   removeTicketsSkill,
 } from "./tickets-skill.ts";
 import { normalizeTicketRef, normalizeTicketRefs } from "./util.ts";
@@ -41,11 +39,12 @@ import { normalizeTicketRef, normalizeTicketRefs } from "./util.ts";
 const TICKET_REF_SEPARATOR_PATTERN = /[,\s]+/;
 
 let didPromptTicketsGitHealth = false;
+let didWarnTicketsDeprecation = false;
 
 export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
   {
     name: "setup",
-    summary: "Install tickets integrations (skill + agent docs)",
+    summary: "Deprecated: remove Tickets agent integrations and repair storage",
     scope: "project",
     // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Tickets setup intentionally coordinates repo, skill, and docs repair in one CLI flow.
     handler: async ({ ctx, args }) => {
@@ -53,12 +52,6 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         ctx.logger.error({ message: "No project found. Run inside a repo." });
         return 1;
       }
-
-      // Enable the extension in project config if not already enabled
-      await ensureTicketsExtensionEnabled({
-        projectDir: ctx.project.projectDir,
-        logger: ctx.logger,
-      });
 
       const parsed = parseTicketsSetupArgs({ args });
       if (!parsed.ok) {
@@ -138,20 +131,15 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         }
       }
 
-      let skill: Awaited<ReturnType<typeof checkTicketsSkill>>;
+      let skill: Awaited<ReturnType<typeof checkDeprecatedTicketsSkill>>;
       const skillProjectRoot = scope === "project" ? projectRoot : undefined;
       if (action === "check") {
-        skill = await checkTicketsSkill({
-          scope,
-          projectRoot: skillProjectRoot,
-        });
-      } else if (action === "remove") {
-        skill = await removeTicketsSkill({
+        skill = await checkDeprecatedTicketsSkill({
           scope,
           projectRoot: skillProjectRoot,
         });
       } else {
-        skill = await installTicketsSkill({
+        skill = await removeTicketsSkill({
           scope,
           projectRoot: skillProjectRoot,
         });
@@ -162,17 +150,12 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         | TicketsAgentDocRemoveResult[]
         | TicketsAgentDocUpdateResult[];
       if (action === "check") {
-        docs = await checkTicketsAgentDocs({
-          projectRoot,
-          targets: resolvedTargets,
-        });
-      } else if (action === "remove") {
-        docs = await removeTicketsAgentDocs({
+        docs = await checkDeprecatedTicketsAgentDocs({
           projectRoot,
           targets: resolvedTargets,
         });
       } else {
-        docs = await upsertTicketsAgentDocs({
+        docs = await removeTicketsAgentDocs({
           projectRoot,
           targets: resolvedTargets,
         });
@@ -186,9 +169,10 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
       }
 
       await display.panel({
-        title: "Tickets setup",
-        tone: "success",
+        title: "Tickets deprecated",
+        tone: "warn",
         lines: [
+          "Agent skills and instruction blocks are no longer installed.",
           `skill: ${skill.status} (${skill.path})`,
           ...docs.map((r) => `${r.target}: ${r.status} (${r.path})`),
           `repo.gitignore: ${repoGitignore.status} (${repoGitignore.path})`,
@@ -202,7 +186,13 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         await maybeEnsureTicketsGitHealth({ ctx, json: parsed.value.json });
       }
 
-      return docs.some((r) => r.status === "error") || skill.status === "error"
+      const deprecatedFound =
+        action === "check" &&
+        (skill.status === "deprecated" ||
+          docs.some((result) => result.status === "deprecated"));
+      return docs.some((r) => r.status === "error") ||
+        skill.status === "error" ||
+        deprecatedFound
         ? 1
         : 0;
     },
@@ -1237,8 +1227,6 @@ type MutableTicketsSetupArgs = {
 type TicketsSetupNeeds = {
   readonly needsGitignore: boolean;
   readonly needsUntrack: boolean;
-  readonly needsSkill: boolean;
-  readonly needsDocs: boolean;
 };
 
 type TicketDetailResult = Awaited<
@@ -2093,16 +2081,17 @@ async function maybeEnsureTicketsSetup(opts: {
     return;
   }
 
+  if (!didWarnTicketsDeprecation) {
+    didWarnTicketsDeprecation = true;
+    opts.ctx.logger.warn({
+      message:
+        "Hack Tickets is deprecated. Agent skills and instruction blocks are no longer installed; use this command only for compatibility or migration.",
+    });
+  }
+
   const projectRoot = opts.ctx.project.projectRoot;
   const repoState = await checkTicketsRepoState({ projectRoot });
-
-  const skill = await checkTicketsSkill({ scope: "project", projectRoot });
-  const docs = await checkTicketsAgentDocs({
-    projectRoot,
-    targets: ["agents", "claude"],
-  });
-
-  const needs = getTicketsSetupNeeds({ repoState, skill, docs });
+  const needs = getTicketsSetupNeeds({ repoState });
   if (!hasIncompleteTicketsSetup({ needs })) {
     return;
   }
@@ -2227,29 +2216,17 @@ async function maybeEnsureTicketsGitHealth(opts: {
 
 function getTicketsSetupNeeds(opts: {
   readonly repoState: Awaited<ReturnType<typeof checkTicketsRepoState>>;
-  readonly skill: Awaited<ReturnType<typeof checkTicketsSkill>>;
-  readonly docs: readonly TicketsAgentDocCheckResult[];
 }): TicketsSetupNeeds {
   return {
     needsGitignore: opts.repoState.gitignore.status === "missing",
     needsUntrack: opts.repoState.tracked.status === "tracked",
-    needsSkill:
-      opts.skill.status === "missing" || opts.skill.status === "error",
-    needsDocs: opts.docs.some(
-      (doc) => doc.status === "missing" || doc.status === "error"
-    ),
   };
 }
 
 function hasIncompleteTicketsSetup(opts: {
   readonly needs: TicketsSetupNeeds;
 }): boolean {
-  return (
-    opts.needs.needsGitignore ||
-    opts.needs.needsUntrack ||
-    opts.needs.needsSkill ||
-    opts.needs.needsDocs
-  );
+  return opts.needs.needsGitignore || opts.needs.needsUntrack;
 }
 
 function buildTicketsSetupNotices(opts: {
@@ -2261,9 +2238,6 @@ function buildTicketsSetupNotices(opts: {
   }
   if (opts.needs.needsUntrack) {
     notices.push("untrack .hack/tickets from main branch");
-  }
-  if (opts.needs.needsSkill || opts.needs.needsDocs) {
-    notices.push("run tickets setup");
   }
   return notices;
 }
@@ -2285,24 +2259,6 @@ async function repairTicketsSetup(opts: {
     const untrack = await untrackTicketsRepo({ projectRoot: opts.projectRoot });
     lines.push(
       `repo.tracking: ${untrack.status}${untrack.message ? ` (${untrack.message})` : ""}`
-    );
-  }
-
-  if (opts.needs.needsSkill) {
-    const installed = await installTicketsSkill({
-      scope: "project",
-      projectRoot: opts.projectRoot,
-    });
-    lines.push(`skill: ${installed.status} (${installed.path})`);
-  }
-
-  if (opts.needs.needsDocs) {
-    const updatedDocs = await upsertTicketsAgentDocs({
-      projectRoot: opts.projectRoot,
-      targets: ["agents", "claude"],
-    });
-    lines.push(
-      ...updatedDocs.map((doc) => `${doc.target}: ${doc.status} (${doc.path})`)
     );
   }
 
@@ -2455,63 +2411,4 @@ function applyTicketsSetupToken(opts: {
   }
 
   return { ok: false, error: `Unknown option: ${opts.token}` };
-}
-
-/**
- * Ensures the tickets extension is enabled in the project config.
- * Reads the project's hack.config.json and adds the extension enabled flag if missing.
- */
-async function ensureTicketsExtensionEnabled(opts: {
-  readonly projectDir: string;
-  readonly logger: ExtensionCommandContext["logger"];
-}): Promise<void> {
-  const { resolve } = await import("node:path");
-  const { readTextFile, writeTextFileIfChanged } = await import(
-    "../../../lib/fs.ts"
-  );
-  const { isRecord } = await import("../../../lib/guards.ts");
-
-  const configPath = resolve(opts.projectDir, "hack.config.json");
-  const text = await readTextFile(configPath);
-  if (text === null) {
-    return;
-  }
-
-  let config: Record<string, unknown>;
-  try {
-    const parsed = JSON.parse(text);
-    if (!isRecord(parsed)) {
-      return;
-    }
-    config = parsed;
-  } catch {
-    return;
-  }
-
-  const controlPlane = isRecord(config.controlPlane)
-    ? config.controlPlane
-    : ({} as Record<string, unknown>);
-  const extensions = isRecord(controlPlane.extensions)
-    ? controlPlane.extensions
-    : ({} as Record<string, unknown>);
-  const ticketsConfig = isRecord(extensions["dance.hack.tickets"])
-    ? extensions["dance.hack.tickets"]
-    : ({} as Record<string, unknown>);
-
-  if (ticketsConfig.enabled === true) {
-    return;
-  }
-
-  ticketsConfig.enabled = true;
-  extensions["dance.hack.tickets"] = ticketsConfig;
-  controlPlane.extensions = extensions;
-  config.controlPlane = controlPlane;
-
-  const nextText = `${JSON.stringify(config, null, 2)}\n`;
-  const result = await writeTextFileIfChanged(configPath, nextText);
-  if (result.changed) {
-    opts.logger.success({
-      message: `Enabled dance.hack.tickets in ${configPath}`,
-    });
-  }
 }

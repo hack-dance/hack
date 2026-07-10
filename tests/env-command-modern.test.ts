@@ -99,6 +99,35 @@ test("modern env list rejects unknown service scopes", async () => {
   expect(result.stderr).toContain("Unknown env scope: typo_service");
 });
 
+test("env explain reports precedence and delivery without revealing values", async () => {
+  const projectRoot = await createProject();
+  const result = await runCliWithCapturedOutput([
+    "env",
+    "explain",
+    "SERVICE_TOKEN",
+    "--path",
+    projectRoot,
+    "--service",
+    "api",
+    "--target",
+    "compose",
+    "--json",
+  ]);
+
+  expect(result.exitCode).toBe(0);
+  const payload = JSON.parse(result.stdout) as Record<string, unknown>;
+  expect(payload).toMatchObject({
+    key: "SERVICE_TOKEN",
+    available: true,
+    secret: true,
+    requested_scope: "api",
+    effective_scope: "api",
+    target: "compose",
+    delivered_to: ["compose"],
+  });
+  expect(result.stdout).not.toContain("super-secret-token");
+});
+
 async function createProject(): Promise<string> {
   if (!tempDir) {
     throw new Error("Missing temp directory");

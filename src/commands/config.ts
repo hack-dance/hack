@@ -84,6 +84,7 @@ const handleConfigGet: CommandHandlerFor<typeof configGetSpec> = async ({
     pathOpt: args.options.path,
     projectOpt: args.options.project,
     globalOpt: args.options.global === true,
+    touchRegistration: false,
   });
 
   const key = (args.positionals.key ?? "").trim();
@@ -128,6 +129,7 @@ const handleConfigSet: CommandHandlerFor<typeof configSetSpec> = async ({
     pathOpt: args.options.path,
     projectOpt: args.options.project,
     globalOpt: args.options.global === true,
+    touchRegistration: false,
   });
 
   const key = (args.positionals.key ?? "").trim();
@@ -204,6 +206,7 @@ async function resolveProjectForArgs(opts: {
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
   readonly globalOpt: boolean;
+  readonly touchRegistration: boolean;
 }): Promise<ConfigTarget> {
   if (opts.globalOpt) {
     if (opts.pathOpt || opts.projectOpt) {
@@ -227,7 +230,9 @@ async function resolveProjectForArgs(opts: {
         `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
       );
     }
-    await touchProjectRegistration(fromRegistry);
+    if (opts.touchRegistration) {
+      await touchProjectRegistration(fromRegistry);
+    }
     return { scope: "project", project: fromRegistry };
   }
 
@@ -235,7 +240,9 @@ async function resolveProjectForArgs(opts: {
     ? resolve(opts.ctx.cwd, opts.pathOpt)
     : opts.ctx.cwd;
   const project = await requireProjectContext(startDir);
-  await touchProjectRegistration(project);
+  if (opts.touchRegistration) {
+    await touchProjectRegistration(project);
+  }
   return { scope: "project", project };
 }
 

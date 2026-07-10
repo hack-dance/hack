@@ -16,6 +16,8 @@ export type DoctorRecoveryGuidance = {
 
 const FIX_CHECKS = new Set(["caddy local ca", "dns:hack", "dns:hack.gy"]);
 const SAFE_SHELL_ARG_PATTERN = /^[A-Za-z0-9_./:-]+$/u;
+const PROJECTS_PRUNE_COMMAND_PATTERN =
+  /hack projects prune(?: --project [A-Za-z0-9_.-]+)?/u;
 
 function pushUnique(target: string[], value: string): void {
   if (!target.includes(value)) {
@@ -82,7 +84,8 @@ export function buildDoctorRecoveryGuidance(input: {
     }
 
     if (result.message.includes("hack projects prune")) {
-      pushUnique(temporaryBreakage, "hack projects prune");
+      const command = result.message.match(PROJECTS_PRUNE_COMMAND_PATTERN)?.[0];
+      pushUnique(temporaryBreakage, command ?? "hack projects prune");
       continue;
     }
 
@@ -97,8 +100,23 @@ export function buildDoctorRecoveryGuidance(input: {
       continue;
     }
 
+    if (result.message.includes("hack daemon restart")) {
+      pushUnique(temporaryBreakage, "hack daemon restart");
+      continue;
+    }
+
     if (result.message.includes("hack daemon start")) {
       pushUnique(temporaryBreakage, "hack daemon start");
+      continue;
+    }
+
+    if (result.message.includes("hack setup sync --all-scopes")) {
+      pushUnique(configurationRepair, "hack setup sync --all-scopes");
+      continue;
+    }
+
+    if (result.message.includes("hack setup sync --global")) {
+      pushUnique(configurationRepair, "hack setup sync --global");
       continue;
     }
 
@@ -217,7 +235,7 @@ export function buildRecoveryWorkflowLines(input: {
   }
 
   if (scoped.temporaryBreakage.length > 0) {
-    lines.push(`${stepNumber}. Temporary breakage:`);
+    lines.push(`${stepNumber}. Fix now:`);
     for (const command of scoped.temporaryBreakage) {
       lines.push(`   - \`${command}\``);
     }
@@ -225,7 +243,7 @@ export function buildRecoveryWorkflowLines(input: {
   }
 
   if (scoped.configurationRepair.length > 0) {
-    lines.push(`${stepNumber}. Configuration repair:`);
+    lines.push(`${stepNumber}. Repair configuration:`);
     for (const command of scoped.configurationRepair) {
       lines.push(`   - \`${command}\``);
     }
@@ -233,7 +251,7 @@ export function buildRecoveryWorkflowLines(input: {
   }
 
   if (scoped.followUp.length > 0) {
-    lines.push(`${stepNumber}. Manual follow-up:`);
+    lines.push(`${stepNumber}. Investigate:`);
     for (const item of scoped.followUp) {
       lines.push(`   - ${item}`);
     }

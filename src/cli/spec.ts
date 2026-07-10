@@ -59,7 +59,7 @@ export const CLI_SPEC = defineCli({
   highlights: [
     "Run multiple repos or branches at the same time without port conflicts.",
     "Give every project a stable HTTPS URL like https://myapp.hack.",
-    "Keep env, sessions, diagnostics, and optional tickets close to the repo.",
+    "Keep env, sessions, and diagnostics close to the repo.",
   ] as const,
   globalOptions: [optNoInteractive],
   commands: [

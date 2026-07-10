@@ -4,10 +4,6 @@ Hack v3 no longer ships hosted or broker-backed integrations.
 
 What remains:
 
-- local tickets stored with the repo — optional and opt-in: the `dance.hack.tickets` extension is
-  disabled by default and must be enabled via `controlPlane.extensions["dance.hack.tickets"].enabled`
-  (or auto-enabled by running `hack x tickets setup`); it is no longer part of default agent
-  instructions
 - local env management and host/container injection
 - local sessions and runtime orchestration
 - optional coding-agent setup helpers: `hack init --with claude|codex|both`, `hack agent onboard` /
@@ -15,6 +11,7 @@ What remains:
 
 What was removed:
 
+- Hack Tickets agent integration; legacy commands remain compatibility-only and are deprecated
 - built-in GitHub integration
 - built-in Linear integration
 - hosted auth/account/org/team surfaces
@@ -27,4 +24,16 @@ instead of failing hard.
 Recommended replacements:
 
 - GitHub: native `git` and `gh`
-- planning systems: keep them outside Hack, or use repo-local tickets when you want the workflow to stay self-contained
+- planning systems: keep them outside Hack and use the tracker selected by the project
+
+## Agent integration freshness
+
+Hack maintains project instructions plus global Cursor, Claude, Codex, and shared `~/.ai/skills`
+surfaces. Generated guidance identifies the CLI version that rendered it.
+
+- Audit without writing: `hack setup sync --all-scopes --check`
+- Repair project and global integrations: `hack setup sync --all-scopes`
+- After repair: reload the agent session so cached rules are discarded
+
+Interactive project commands announce detected drift before auto-repair. `hack agent prime` performs
+the same read-only audit at session start and prints a warning before any Hack operating guidance.

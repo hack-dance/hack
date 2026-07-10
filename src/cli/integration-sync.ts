@@ -1,16 +1,24 @@
 import { checkClaudeHooks, installClaudeHooks } from "../agents/claude.ts";
 import { checkCodexSkill, installCodexSkill } from "../agents/codex-skill.ts";
 import { checkCursorRules, installCursorRules } from "../agents/cursor.ts";
-import { resolveTicketsIntegrationEnablement } from "../control-plane/extensions/tickets/enablement.ts";
+import { HACK_AGENT_INTEGRATION_CLI_VERSION } from "../agents/instruction-source.ts";
 import {
-  checkTicketsSkill,
-  installTicketsSkill,
-  type TicketsSkillResult,
+  checkDeprecatedSharedHackSkills,
+  checkSharedHackSkill,
+  installSharedHackSkill,
+  removeDeprecatedSharedHackSkills,
+} from "../agents/shared-skill.ts";
+import {
+  checkDeprecatedTicketsAgentDocs,
+  removeTicketsAgentDocs,
+} from "../control-plane/extensions/tickets/agent-docs.ts";
+import {
+  checkDeprecatedTicketsSkill,
+  removeTicketsSkill,
 } from "../control-plane/extensions/tickets/tickets-skill.ts";
 import { findProjectContext } from "../lib/project.ts";
 import {
   type AgentDocCheckResult,
-  type AgentDocUpdateResult,
   checkAgentDocs,
   upsertAgentDocs,
 } from "../mcp/agent-docs.ts";
@@ -24,8 +32,16 @@ import { logger } from "../ui/logger.ts";
 
 type IntegrationSyncMode = "auto" | "warn" | "off";
 
+export type AgentIntegrationFreshnessReport = {
+  readonly status: "current" | "stale";
+  readonly cliVersion: string;
+  readonly fixCommand: string;
+  readonly verifyCommand: string;
+};
+
 const SYNC_COMMAND = "hack setup sync --all-scopes";
 const INTEGRATION_SYNC_MODE_ENV = "HACK_SETUP_SYNC_MODE";
+const VERIFY_COMMAND = "hack setup sync --all-scopes --check";
 const SKIP_TOP_LEVEL = new Set([
   "setup",
   "mcp",
@@ -67,10 +83,18 @@ export async function maybeEnsureAgentIntegrations(opts: {
   }
 
   if (mode === "auto") {
+    logger.warn({
+      message:
+        "Detected stale Hack agent integrations. Refreshing project and global rules before this command continues.",
+    });
     const autoSync = await autoSyncIntegrations({
       projectRoot: project.projectRoot,
     });
     if (autoSync.ok) {
+      logger.warn({
+        message:
+          "Refreshed Hack agent integrations. Reload the agent session before relying on cached Hack rules; verify with: hack setup sync --all-scopes --check",
+      });
       return;
     }
     logger.warn({
@@ -80,14 +104,44 @@ export async function maybeEnsureAgentIntegrations(opts: {
   }
 
   logger.warn({
-    message: `Agent integrations are out of sync (docs/skills/MCP). Run: ${SYNC_COMMAND}`,
+    message: `Hack agent integrations are stale (project/global docs, skills, or MCP). Do not rely on cached rules. Run: ${SYNC_COMMAND}, then reload the agent session.`,
   });
+}
+
+/** Inspect project and global generated guidance without mutating it. */
+export async function inspectAgentIntegrationFreshness(opts: {
+  readonly projectRoot: string;
+}): Promise<AgentIntegrationFreshnessReport> {
+  const drift = await detectIntegrationDrift(opts);
+  return {
+    status: drift.hasDrift ? "stale" : "current",
+    cliVersion: HACK_AGENT_INTEGRATION_CLI_VERSION,
+    fixCommand: SYNC_COMMAND,
+    verifyCommand: VERIFY_COMMAND,
+  };
+}
+
+/** Render an upfront status block suitable for SessionStart hooks and agents. */
+export function renderAgentIntegrationFreshnessNotice(opts: {
+  readonly report: AgentIntegrationFreshnessReport;
+}): string {
+  if (opts.report.status === "current") {
+    return `Hack agent integration freshness: current (CLI v${opts.report.cliVersion}).`;
+  }
+  return [
+    `WARNING: Hack agent integrations are stale for CLI v${opts.report.cliVersion}.`,
+    "Do not rely on cached Hack rules or skills until they are refreshed.",
+    `Fix project + global integrations: ${opts.report.fixCommand}`,
+    `Verify: ${opts.report.verifyCommand}`,
+    "Then reload the agent session so it reads the updated rules.",
+  ].join("\n");
 }
 
 function shouldRunIntegrationGuard(opts: {
   readonly commandPath: readonly string[];
 }): boolean {
-  if (!(process.stdout.isTTY || process.stderr.isTTY)) {
+  const explicitMode = (process.env[INTEGRATION_SYNC_MODE_ENV] ?? "").trim();
+  if (!(process.stdout.isTTY || process.stderr.isTTY || explicitMode)) {
     return false;
   }
 
@@ -114,10 +168,6 @@ function resolveIntegrationSyncMode(): IntegrationSyncMode {
 async function detectIntegrationDrift(opts: {
   readonly projectRoot: string;
 }): Promise<{ readonly hasDrift: boolean }> {
-  const ticketsEnablement = await resolveTicketsIntegrationEnablement({
-    projectRoot: opts.projectRoot,
-  });
-
   const [
     cursorProject,
     cursorUser,
@@ -127,6 +177,9 @@ async function detectIntegrationDrift(opts: {
     codexUser,
     ticketsProject,
     ticketsUser,
+    ticketsDocs,
+    sharedSkill,
+    deprecatedSharedSkills,
     mcpProject,
     mcpUser,
     docs,
@@ -137,12 +190,17 @@ async function detectIntegrationDrift(opts: {
     checkClaudeHooks({ scope: "user" }),
     checkCodexSkill({ scope: "project", projectRoot: opts.projectRoot }),
     checkCodexSkill({ scope: "user" }),
-    ticketsEnablement.project
-      ? checkTicketsSkill({ scope: "project", projectRoot: opts.projectRoot })
-      : skippedTicketsResult({ scope: "project" }),
-    ticketsEnablement.global
-      ? checkTicketsSkill({ scope: "user" })
-      : skippedTicketsResult({ scope: "user" }),
+    checkDeprecatedTicketsSkill({
+      scope: "project",
+      projectRoot: opts.projectRoot,
+    }),
+    checkDeprecatedTicketsSkill({ scope: "user" }),
+    checkDeprecatedTicketsAgentDocs({
+      projectRoot: opts.projectRoot,
+      targets: ["agents", "claude"],
+    }),
+    checkSharedHackSkill(),
+    checkDeprecatedSharedHackSkills(),
     checkMcpConfig({
       scope: "project",
       projectRoot: opts.projectRoot,
@@ -167,6 +225,7 @@ async function detectIntegrationDrift(opts: {
     codexUser.status,
     ticketsProject.status,
     ticketsUser.status,
+    sharedSkill.status,
   ] as const;
 
   const singleDrift = singleChecks.some((status) =>
@@ -174,27 +233,25 @@ async function detectIntegrationDrift(opts: {
   );
   const mcpDrift = hasMcpDrift({ checks: [...mcpProject, ...mcpUser] });
   const docsDrift = hasDocDrift({ checks: docs });
+  const deprecatedDocsDrift = ticketsDocs.some(
+    (check) => check.status !== "noop" && check.status !== "absent"
+  );
+  const deprecatedSharedDrift = deprecatedSharedSkills.some(
+    (check) => check.status !== "noop" && check.status !== "absent"
+  );
 
-  return { hasDrift: singleDrift || mcpDrift || docsDrift };
+  return {
+    hasDrift:
+      singleDrift ||
+      mcpDrift ||
+      docsDrift ||
+      deprecatedDocsDrift ||
+      deprecatedSharedDrift,
+  };
 }
 
 function hasSingleCheckDrift(status: string): boolean {
-  return status !== "noop";
-}
-
-/**
- * Placeholder result for tickets integrations when the tickets extension is
- * disabled for the checked scope. Tickets is optional/legacy: its skill must
- * never count as drift (or get auto-installed) unless explicitly enabled.
- */
-function skippedTicketsResult(opts: {
-  readonly scope: "project" | "user";
-}): TicketsSkillResult {
-  return {
-    scope: opts.scope,
-    status: "noop",
-    path: "(tickets extension disabled)",
-  };
+  return status !== "noop" && status !== "absent";
 }
 
 function hasMcpDrift(opts: {
@@ -212,10 +269,6 @@ function hasDocDrift(opts: {
 async function autoSyncIntegrations(opts: {
   readonly projectRoot: string;
 }): Promise<{ readonly ok: boolean }> {
-  const ticketsEnablement = await resolveTicketsIntegrationEnablement({
-    projectRoot: opts.projectRoot,
-  });
-
   const [
     cursorProject,
     cursorUser,
@@ -225,6 +278,9 @@ async function autoSyncIntegrations(opts: {
     codexUser,
     ticketsProject,
     ticketsUser,
+    ticketsDocs,
+    sharedSkill,
+    deprecatedSharedSkills,
     mcpProject,
     mcpUser,
     docs,
@@ -235,12 +291,14 @@ async function autoSyncIntegrations(opts: {
     installClaudeHooks({ scope: "user" }),
     installCodexSkill({ scope: "project", projectRoot: opts.projectRoot }),
     installCodexSkill({ scope: "user" }),
-    ticketsEnablement.project
-      ? installTicketsSkill({ scope: "project", projectRoot: opts.projectRoot })
-      : skippedTicketsResult({ scope: "project" }),
-    ticketsEnablement.global
-      ? installTicketsSkill({ scope: "user" })
-      : skippedTicketsResult({ scope: "user" }),
+    removeTicketsSkill({ scope: "project", projectRoot: opts.projectRoot }),
+    removeTicketsSkill({ scope: "user" }),
+    removeTicketsAgentDocs({
+      projectRoot: opts.projectRoot,
+      targets: ["agents", "claude"],
+    }),
+    installSharedHackSkill(),
+    removeDeprecatedSharedHackSkills(),
     installMcpConfig({
       scope: "project",
       projectRoot: opts.projectRoot,
@@ -265,6 +323,7 @@ async function autoSyncIntegrations(opts: {
     codexUser.status,
     ticketsProject.status,
     ticketsUser.status,
+    sharedSkill.status,
   ] as const;
   const singleErrors = singleStatuses.some((status) =>
     hasSingleInstallError(status)
@@ -273,8 +332,20 @@ async function autoSyncIntegrations(opts: {
     results: [...mcpProject, ...mcpUser],
   });
   const docsErrors = hasDocInstallErrors({ results: docs });
+  const ticketsDocsErrors = hasDocInstallErrors({ results: ticketsDocs });
+  const deprecatedSharedErrors = deprecatedSharedSkills.some(
+    (result) => result.status === "error"
+  );
 
-  return { ok: !(singleErrors || mcpErrors || docsErrors) };
+  return {
+    ok: !(
+      singleErrors ||
+      mcpErrors ||
+      docsErrors ||
+      ticketsDocsErrors ||
+      deprecatedSharedErrors
+    ),
+  };
 }
 
 function hasSingleInstallError(status: string): boolean {
@@ -288,7 +359,7 @@ function hasMcpInstallErrors(opts: {
 }
 
 function hasDocInstallErrors(opts: {
-  readonly results: readonly AgentDocUpdateResult[];
+  readonly results: readonly { readonly status: string }[];
 }): boolean {
   return opts.results.some((result) => result.status === "error");
 }

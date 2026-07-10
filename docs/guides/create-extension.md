@@ -48,21 +48,6 @@ export const extension: ExtensionDefinition = {
 }
 ```
 
-This mirrors the real tickets extension (`src/control-plane/extensions/tickets/extension.ts`):
-
-```ts
-export const TICKETS_EXTENSION: ExtensionDefinition = {
-  manifest: {
-    id: "dance.hack.tickets",
-    version: "0.1.0",
-    scopes: ["project"],
-    cliNamespace: "tickets",
-    summary: "Git-backed tickets and runs",
-  },
-  commands: TICKETS_COMMANDS,
-};
-```
-
 `scopes` is a list of `"global" | "project"` and drives what the CLI suggests when the extension is
 disabled: a `global`-only extension gets a `hack config set --global ...` enable hint, otherwise the
 hint targets the project config (`hack config set ...`).
@@ -98,8 +83,8 @@ hack x myext help
 ### Advanced: commands that must run before the extension is enabled
 
 Set `allowWhenDisabled: true` on a command (for example a `setup` command) to let it run even while
-the extension itself is disabled — this is how tickets' `hack x tickets setup` can enable the
-extension as its first step. See `src/commands/tickets.ts` for the pattern.
+the extension itself is disabled. Use this only for explicit enablement or migration commands; do
+not make normal operations bypass extension enablement.
 
 ## Planned improvements
 

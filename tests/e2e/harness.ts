@@ -407,7 +407,7 @@ export type IsolationCanaryResult =
  * ever having written anything outside the temp dirs.
  *
  * Probe B (write, only after A passes): register a throwaway canary project
- * via `hack config get name` and assert (1) the canary name does NOT appear
+ * via `hack projects --json` and assert (1) the canary name does NOT appear
  * in the real ~/.hack/projects.json (targeted removal + abort if it does)
  * and (2) a projects.json containing the canary appeared under HACK_HOME.
  */
@@ -467,7 +467,7 @@ async function runRegistryWriteProbe(opts: {
 
   const probeB = await runCli({
     hackHome: opts.hackHome,
-    invocation: { args: ["config", "get", "name"], cwd: projectRoot },
+    invocation: { args: ["projects", "--json"], cwd: projectRoot },
   });
 
   // Precise leak check: the canary name appearing in the REAL registry is

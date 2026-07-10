@@ -2,10 +2,12 @@ import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
+import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../src/agents/integration-revision.ts";
 import {
+  assertDoctorOptionCompatibility,
   buildDoctorRemediationPlanLines,
   buildDoctorSummaryLines,
+  inspectDoctorAgentIntegrations,
 } from "../src/commands/doctor.ts";
 import {
   buildDoctorRecoveryGuidance,
@@ -69,6 +71,23 @@ test("doctor guidance distinguishes restartable proxy drift from deeper repair",
   expect(guidance.capture).toEqual(["hack crash-capture --path <repo>"]);
 });
 
+test("doctor rejects mutating repair flags combined with json", () => {
+  expect(() =>
+    assertDoctorOptionCompatibility({
+      json: true,
+      fix: true,
+      migrateEnvConfig: false,
+    })
+  ).toThrow("--json cannot be combined with --fix");
+  expect(() =>
+    assertDoctorOptionCompatibility({
+      json: true,
+      fix: false,
+      migrateEnvConfig: false,
+    })
+  ).not.toThrow();
+});
+
 test("doctor remediation plan mentions env migration when requested for a legacy project", async () => {
   const root = await createDoctorTestProject({ legacy: true });
   try {
@@ -78,10 +97,9 @@ test("doctor remediation plan mentions env migration when requested for a legacy
     });
 
     expect(lines).toEqual([
-      "1. Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
-      "2. Repair tickets refs if the project repo needs it.",
-      "3. Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent.",
-      "4. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.",
+      "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, daemon drift, and agent integration freshness where needed.",
+      "2. Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent.",
+      "3. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.",
     ]);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -97,10 +115,9 @@ test("doctor remediation plan skips env migration when modern env files already 
     });
 
     expect(lines).toEqual([
-      "1. Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
-      "2. Repair tickets refs if the project repo needs it.",
-      "3. Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent.",
-      "4. Skip env migration because this project already uses hack.env.*.yaml.",
+      "1. Review and repair global Docker networks, CoreDNS, CA, host TLS env, daemon drift, and agent integration freshness where needed.",
+      "2. Reconcile lifecycle sessions and remove only ownership-proven sessions whose Compose instance is absent.",
+      "3. Skip env migration because this project already uses hack.env.*.yaml.",
     ]);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -158,6 +175,48 @@ test("doctor guidance includes daemon recovery for stale local api state", () =>
   expect(guidance.configurationRepair).toEqual([]);
 });
 
+test("doctor guidance routes global agent drift to global sync", () => {
+  const guidance = buildDoctorRecoveryGuidance({
+    results: [
+      {
+        name: "agent integrations",
+        status: "warn",
+        message:
+          "Global guidance is stale (run: hack setup sync --global, reload the agent session)",
+      },
+    ],
+  });
+
+  expect(guidance.configurationRepair).toEqual(["hack setup sync --global"]);
+});
+
+test("doctor audits global agent guidance without a project", async () => {
+  const home = await mkdtemp(join(tmpdir(), "hack-doctor-global-agents-"));
+  const marker = `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``;
+  const paths = [
+    join(home, ".cursor", "rules", "hack.mdc"),
+    join(home, ".codex", "skills", "hack-cli", "SKILL.md"),
+    join(home, ".ai", "skills", "hack-cli", "SKILL.md"),
+  ];
+  try {
+    for (const path of paths) {
+      await mkdir(join(path, ".."), { recursive: true });
+      await writeFile(path, `${marker}\n`);
+    }
+
+    await expect(
+      inspectDoctorAgentIntegrations({ projectRoot: null, homeDir: home })
+    ).resolves.toEqual({ status: "current" });
+
+    await writeFile(paths[0] ?? "", "stale\n");
+    await expect(
+      inspectDoctorAgentIntegrations({ projectRoot: null, homeDir: home })
+    ).resolves.toEqual({ status: "stale" });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("doctor guidance routes runtime hygiene drift to projects prune", () => {
   const guidance = buildDoctorRecoveryGuidance({
     results: [
@@ -173,6 +232,23 @@ test("doctor guidance routes runtime hygiene drift to projects prune", () => {
   expect(guidance.temporaryBreakage).toEqual(["hack projects prune"]);
   expect(guidance.configurationRepair).toEqual([]);
   expect(guidance.followUp).toEqual([]);
+});
+
+test("doctor guidance preserves project-scoped prune commands", () => {
+  const guidance = buildDoctorRecoveryGuidance({
+    results: [
+      {
+        name: "runtime hygiene",
+        status: "warn",
+        message:
+          "1 orphaned runtime project: msp--old (run: hack projects prune --project msp)",
+      },
+    ],
+  });
+
+  expect(guidance.temporaryBreakage).toEqual([
+    "hack projects prune --project msp",
+  ]);
 });
 
 test("doctor guidance routes stale lifecycle state to hack down", () => {
@@ -334,11 +410,10 @@ test("doctor summary groups detailed checks into concise sections", () => {
   });
 
   expect(lines).toEqual([
-    "Dependencies: warn - optional missing: caddy",
-    "Runtime: ok",
+    "Dependencies: ok",
+    "Global runtime & agents: ok",
     "Resolver & DNS: ok",
     "Project & env: warn - runtime hygiene: 1 missing registry entry; 1 orphaned runtime project (run: hack projects prune); lifecycle hygiene: 1 stale lifecycle state entry; 2 orphaned lifecycle process groups (run: hack down); +2 more",
-    "Sessions & tickets: ok",
   ]);
 });
 
@@ -364,10 +439,10 @@ test("recovery next steps quote repo paths for copy-paste safety", () => {
   ]);
 });
 
-test("recovery next steps leave projects prune unscoped", () => {
+test("recovery next steps preserve already scoped projects prune", () => {
   const nextSteps = buildRecoveryNextSteps({
     guidance: {
-      temporaryBreakage: ["hack projects prune", "hack down"],
+      temporaryBreakage: ["hack projects prune --project msp", "hack down"],
       configurationRepair: ["hack doctor --fix", "hack env materialize"],
       followUp: [],
       verify: ["hack doctor"],
@@ -379,7 +454,7 @@ test("recovery next steps leave projects prune unscoped", () => {
 
   expect(nextSteps).toEqual([
     "Run `hack doctor --path '/tmp/work repo'` to classify restart versus repair work.",
-    "Temporary breakage: `hack projects prune`.",
+    "Temporary breakage: `hack projects prune --project msp`.",
     "Temporary breakage: `hack down --path '/tmp/work repo'`.",
     "Configuration repair: `hack doctor --fix --path '/tmp/work repo'`.",
     "Configuration repair: `hack env materialize --path '/tmp/work repo'`.",
@@ -404,11 +479,11 @@ test("recovery workflow lines scope repo-specific commands for doctor output", (
   expect(lines).toEqual([
     "1. Classify:",
     "   - `hack doctor --path '/tmp/work repo'`",
-    "2. Temporary breakage:",
+    "2. Fix now:",
     "   - `hack restart --path '/tmp/work repo'`",
-    "3. Configuration repair:",
+    "3. Repair configuration:",
     "   - `hack doctor --fix --path '/tmp/work repo'`",
-    "4. Manual follow-up:",
+    "4. Investigate:",
     "   - gateway tokens: No active tokens",
     "5. Verify:",
     "   - `hack doctor --path '/tmp/work repo'`",

@@ -1,3 +1,4 @@
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
 import { createMonorepoFixture } from "../fixture.ts";
@@ -24,6 +25,7 @@ export const agentDocsSyncScenario: Scenario = {
       withHackConfig: true,
     });
     const agentsPath = join(fixture.root, "AGENTS.md");
+    const isolatedUserEnv = { HOME: ctx.hackHome };
 
     const upsert = await ctx.cli({
       args: ["setup", "agents", "--agents-md"],
@@ -79,6 +81,28 @@ export const agentDocsSyncScenario: Scenario = {
       result: staleCheck,
     });
 
+    const stalePrime = await ctx.cli({
+      args: ["agent", "prime"],
+      cwd: fixture.root,
+      env: isolatedUserEnv,
+    });
+    expectExit({
+      result: stalePrime,
+      codes: [0],
+      message: "agent primer should still render while integrations are stale",
+    });
+    expect({
+      that:
+        stalePrime.stdout.includes(
+          "WARNING: Hack agent integrations are stale"
+        ) &&
+        stalePrime.stdout.includes("hack setup sync --all-scopes") &&
+        stalePrime.stdout.includes("reload the agent session"),
+      message:
+        "agent primer should expose stale project/global guidance upfront",
+      result: stalePrime,
+    });
+
     const repair = await ctx.cli({
       args: ["setup", "agents", "--agents-md"],
       cwd: fixture.root,
@@ -105,9 +129,69 @@ export const agentDocsSyncScenario: Scenario = {
       message: "check after repair should report clean (exit 0)",
     });
 
-    const fullSync = await ctx.cli({
-      args: ["setup", "sync"],
+    const projectTicketsSkill = join(
+      fixture.root,
+      ".codex",
+      "skills",
+      "hack-tickets",
+      "SKILL.md"
+    );
+    const globalTicketsSkill = join(
+      ctx.hackHome,
+      ".codex",
+      "skills",
+      "hack-tickets",
+      "SKILL.md"
+    );
+    const sharedLegacyHackSkill = join(
+      ctx.hackHome,
+      ".ai",
+      "skills",
+      "hack",
+      "SKILL.md"
+    );
+    const sharedTicketsSkill = join(
+      ctx.hackHome,
+      ".ai",
+      "skills",
+      "hack-tickets",
+      "SKILL.md"
+    );
+    for (const path of [
+      projectTicketsSkill,
+      globalTicketsSkill,
+      sharedLegacyHackSkill,
+      sharedTicketsSkill,
+    ]) {
+      await mkdir(join(path, ".."), { recursive: true });
+    }
+    await Bun.write(projectTicketsSkill, "---\nname: hack-tickets\n---\n");
+    await Bun.write(globalTicketsSkill, "---\nname: hack-tickets\n---\n");
+    await Bun.write(
+      sharedLegacyHackSkill,
+      "---\nname: hack\nhomepage: https://github.com/hack-dance/hack-cli\n---\n"
+    );
+    await Bun.write(sharedTicketsSkill, "---\nname: hack-tickets\n---\n");
+    const agentDocsWithTickets = `${await Bun.file(agentsPath).text()}\n<!-- hack:tickets:start -->\nlegacy tickets guidance\n<!-- hack:tickets:end -->\n`;
+    await Bun.write(agentsPath, agentDocsWithTickets);
+
+    const deprecatedCheck = await ctx.cli({
+      args: ["setup", "sync", "--all-scopes", "--check"],
       cwd: fixture.root,
+      env: isolatedUserEnv,
+    });
+    expect({
+      that:
+        deprecatedCheck.exitCode !== 0 &&
+        deprecatedCheck.combined.toLowerCase().includes("deprecated"),
+      message: "sync check should expose legacy Tickets guidance as deprecated",
+      result: deprecatedCheck,
+    });
+
+    const fullSync = await ctx.cli({
+      args: ["setup", "sync", "--all-scopes"],
+      cwd: fixture.root,
+      env: isolatedUserEnv,
     });
     expectExit({
       result: fullSync,
@@ -115,14 +199,86 @@ export const agentDocsSyncScenario: Scenario = {
       message: "hack setup sync (project scope) should succeed",
     });
     const fullSyncCheck = await ctx.cli({
-      args: ["setup", "sync", "--check"],
+      args: ["setup", "sync", "--all-scopes", "--check"],
       cwd: fixture.root,
+      env: isolatedUserEnv,
     });
     expectExit({
       result: fullSyncCheck,
       codes: [0],
       message:
         "hack setup sync --check right after hack setup sync should be clean",
+    });
+
+    const currentPrime = await ctx.cli({
+      args: ["agent", "prime"],
+      cwd: fixture.root,
+      env: isolatedUserEnv,
+    });
+    expectExit({
+      result: currentPrime,
+      codes: [0],
+      message: "agent primer should render after project/global repair",
+    });
+    expect({
+      that: currentPrime.stdout.includes(
+        "Hack agent integration freshness: current"
+      ),
+      message: "agent primer should report current guidance after repair",
+      result: currentPrime,
+    });
+
+    const syncedAgents = await Bun.file(agentsPath).text();
+    expect({
+      that:
+        syncedAgents.includes("Integration freshness") &&
+        !/hack[ -]?tickets|dance\.hack\.tickets/i.test(syncedAgents),
+      message: "synced agent docs should be freshness-stamped and ticket-free",
+    });
+    for (const path of [
+      projectTicketsSkill,
+      globalTicketsSkill,
+      sharedLegacyHackSkill,
+      sharedTicketsSkill,
+    ]) {
+      expect({
+        that: !(await Bun.file(path).exists()),
+        message: `sync should remove deprecated skill at ${path}`,
+      });
+    }
+
+    await Bun.write(
+      agentsPath,
+      syncedAgents.replace(
+        MARKER_START,
+        `${MARKER_START}\nSTALE-AUTO-SYNC-PROBE`
+      )
+    );
+    const autoRepair = await ctx.cli({
+      args: ["config", "get", "name"],
+      cwd: fixture.root,
+      env: { ...isolatedUserEnv, HACK_SETUP_SYNC_MODE: "auto" },
+    });
+    expectExit({
+      result: autoRepair,
+      codes: [0],
+      message: "a normal project command should auto-repair integration drift",
+    });
+    expect({
+      that:
+        autoRepair.combined.includes(
+          "Detected stale Hack agent integrations"
+        ) && autoRepair.combined.includes("Reload the agent session"),
+      message:
+        "auto-repair must announce stale guidance and reload requirement",
+      result: autoRepair,
+    });
+    expect({
+      that: !(await Bun.file(agentsPath).text()).includes(
+        "STALE-AUTO-SYNC-PROBE"
+      ),
+      message: "auto-sync should repair the stale managed instruction block",
+      result: autoRepair,
     });
   },
 };

@@ -45,6 +45,7 @@ test("buildLifecycleJsonData shapes the envelope payload with sorted services", 
     branch: "feat-x",
     composeProject: "demo--feat-x",
     started: ["web", "api"],
+    completed: ["migrate"],
     failed: ["worker"],
     durationMs: 1234,
   });
@@ -56,6 +57,7 @@ test("buildLifecycleJsonData shapes the envelope payload with sorted services", 
     composeProject: "demo--feat-x",
     services: {
       started: ["api", "web"],
+      completed: ["migrate"],
       stopped: [],
       failed: ["worker"],
     },
@@ -72,7 +74,12 @@ test("buildLifecycleJsonData defaults omitted service lists to empty", () => {
     stopped: ["api"],
     durationMs: 10,
   });
-  expect(data.services).toEqual({ started: [], stopped: ["api"], failed: [] });
+  expect(data.services).toEqual({
+    started: [],
+    completed: [],
+    stopped: ["api"],
+    failed: [],
+  });
 });
 
 for (const action of ["up", "down", "restart"] as const) {

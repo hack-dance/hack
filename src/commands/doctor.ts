@@ -1,9 +1,16 @@
 import { lookup } from "node:dns/promises";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
 import { YAML } from "bun";
+import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../agents/integration-revision.ts";
 import type { CommandHandlerFor } from "../cli/command.ts";
-import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
+import {
+  CliUsageError,
+  defineCommand,
+  defineOption,
+  withHandler,
+} from "../cli/command.ts";
 import { optJson, optPath } from "../cli/options.ts";
 import {
   DEFAULT_CADDY_IP,
@@ -26,9 +33,6 @@ import {
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
-import { resolveTicketsIntegrationEnablement } from "../control-plane/extensions/tickets/enablement.ts";
-import { createGitTicketsChannel } from "../control-plane/extensions/tickets/tickets-git-channel.ts";
-import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { probeDaemonApi } from "../daemon/client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
@@ -95,6 +99,7 @@ import {
   repairProjectLifecycleSessions,
 } from "../lib/project-lifecycle-hygiene.ts";
 import {
+  findIncompleteRuntimeProjects,
   findMissingRegistryEntries,
   findOrphanRuntimeProjects,
   scopeRuntimeHygieneToProject,
@@ -133,15 +138,6 @@ interface CheckResult {
 interface TimedCheckResult extends CheckResult {
   readonly durationMs: number;
 }
-
-const noopLogger = {
-  info: (_input: { readonly message: string }) => {
-    // Intentionally quiet during read-only health checks.
-  },
-  warn: (_input: { readonly message: string }) => {
-    // Intentionally quiet during read-only health checks.
-  },
-} as const;
 
 const optFix = defineOption({
   name: "fix",
@@ -192,7 +188,7 @@ const DOCTOR_SUMMARY_GROUPS = [
     ]),
   },
   {
-    title: "Runtime",
+    title: "Global runtime & agents",
     checks: new Set([
       "docker daemon",
       `network:${DEFAULT_INGRESS_NETWORK}`,
@@ -206,6 +202,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       "proxy ports",
       "caddy local ca",
       "host tls trust",
+      "agent integrations",
     ]),
   },
   {
@@ -239,8 +236,8 @@ const DOCTOR_SUMMARY_GROUPS = [
     ]),
   },
   {
-    title: "Sessions & tickets",
-    checks: new Set(["sessions mux", "tickets git"]),
+    title: "Sessions",
+    checks: new Set(["sessions mux"]),
   },
 ] as const;
 
@@ -248,6 +245,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
   const json = args.options.json === true;
+  assertDoctorOptionCompatibility({
+    json,
+    fix: args.options.fix === true,
+    migrateEnvConfig: args.options.migrateEnvConfig === true,
+  });
   const results: TimedCheckResult[] = [];
   const s = createDoctorProgress({ json });
   s.start("Running doctor checks...");
@@ -473,6 +475,22 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     checkProject({ startDir })
   );
   results.push(projectCtx);
+  const agentIntegrationCheck = await runCheck(
+    s,
+    "agent integrations",
+    () => checkAgentIntegrations({ startDir }),
+    { timeoutMs: 5000 }
+  );
+  results.push(
+    agentIntegrationCheck.status === "error"
+      ? {
+          ...agentIntegrationCheck,
+          status: "warn",
+          message:
+            "Freshness audit unavailable (verify: hack setup sync --all-scopes --check)",
+        }
+      : agentIntegrationCheck
+  );
   results.push(
     await runCheck(s, "sessions mux", () =>
       checkSessionsMuxConfig({ startDir })
@@ -563,11 +581,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
         }
       )
     );
-    results.push(
-      await runCheck(s, "tickets git", () =>
-        checkProjectTicketsGitHealth({ startDir })
-      )
-    );
   } else {
     results.push({
       name: "DEV_HOST",
@@ -577,12 +590,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     });
     results.push({
       name: "env mode",
-      status: "warn",
-      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
-      durationMs: 0,
-    });
-    results.push({
-      name: "tickets git",
       status: "warn",
       message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
       durationMs: 0,
@@ -597,14 +604,12 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     return finishDoctorJson({
       results,
       hasError,
-      fixRequested:
-        args.options.fix === true || args.options.migrateEnvConfig === true,
     });
   }
 
   await renderDoctorSummary(results);
   emitSlowChecksNote(results);
-  renderMacNote();
+  renderMacNote(results);
   if (!args.options.fix) {
     await renderRecoveryGuidance(results);
   }
@@ -671,17 +676,23 @@ export function buildDoctorJsonData(opts: {
 function finishDoctorJson(opts: {
   readonly results: readonly TimedCheckResult[];
   readonly hasError: boolean;
-  readonly fixRequested: boolean;
 }): number {
-  if (opts.fixRequested) {
-    process.stderr.write(
-      "--fix/--migrate-env-config are ignored with --json; run them separately.\n"
-    );
-  }
   emitCliResult({
     result: okResult({ data: buildDoctorJsonData({ results: opts.results }) }),
   });
   return opts.hasError ? 1 : 0;
+}
+
+export function assertDoctorOptionCompatibility(opts: {
+  readonly json: boolean;
+  readonly fix: boolean;
+  readonly migrateEnvConfig: boolean;
+}): void {
+  if (opts.json && (opts.fix || opts.migrateEnvConfig)) {
+    throw new CliUsageError(
+      "--json cannot be combined with --fix or --migrate-env-config because repair commands mutate state. Run the repair and JSON audit separately."
+    );
+  }
 }
 
 type DoctorProgress = {
@@ -1013,6 +1024,45 @@ async function checkDaemonStatus(): Promise<CheckResult> {
     status: "warn",
     message: "hackd not running (run: hack daemon start)",
   };
+}
+
+async function checkAgentIntegrations(opts: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  try {
+    return await checkAgentIntegrationsUnsafe(opts);
+  } catch {
+    return {
+      name: "agent integrations",
+      status: "warn",
+      message:
+        "Freshness audit unavailable (verify: hack setup sync --all-scopes --check)",
+    };
+  }
+}
+
+async function checkAgentIntegrationsUnsafe(opts: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const project = await findProjectContext(opts.startDir);
+  const report = await inspectDoctorAgentIntegrations({
+    projectRoot: project?.projectRoot ?? null,
+  });
+  return report.status === "current"
+    ? {
+        name: "agent integrations",
+        status: "ok",
+        message: project
+          ? "Project and global guidance current"
+          : "Global guidance current",
+      }
+    : {
+        name: "agent integrations",
+        status: "warn",
+        message: project
+          ? "Project or global guidance is stale (run: hack setup sync --all-scopes, reload the agent session, verify: hack setup sync --all-scopes --check)"
+          : "Global guidance is stale (run: hack setup sync --global, reload the agent session, verify: hack setup sync --global --check)",
+      };
 }
 
 async function checkGatewayConfig(): Promise<CheckResult> {
@@ -1685,87 +1735,6 @@ async function checkDevHost({
   };
 }
 
-async function checkProjectTicketsGitHealth({
-  startDir,
-}: {
-  readonly startDir: string;
-}): Promise<CheckResult> {
-  const project = await findProjectContext(startDir);
-  if (!project) {
-    return {
-      name: "tickets git",
-      status: "warn",
-      message: `Missing ${HACK_PROJECT_DIR_PRIMARY}/ (run 'hack init' in a repo)`,
-    };
-  }
-
-  const ticketsEnablement = await resolveTicketsIntegrationEnablement({
-    projectRoot: project.projectRoot,
-  });
-  if (!ticketsEnablement.project) {
-    return {
-      name: "tickets git",
-      status: "ok",
-      message: "Disabled",
-    };
-  }
-
-  const controlPlane = await readControlPlaneConfig({
-    projectDir: project.projectDir,
-  });
-  const gitConfig = controlPlane.config.tickets.git;
-  if (!gitConfig.enabled) {
-    return {
-      name: "tickets git",
-      status: "ok",
-      message: "Disabled",
-    };
-  }
-
-  const channel = createGitTicketsChannel({
-    projectRoot: project.projectRoot,
-    config: gitConfig,
-    logger: noopLogger,
-  });
-  const inspected = await channel.inspect();
-  if (!inspected.ok) {
-    return {
-      name: "tickets git",
-      status: "warn",
-      message: inspected.error,
-    };
-  }
-
-  const health = inspected.health;
-  const problems: string[] = [];
-  if (health.hasRefDivergence) {
-    const remoteOid = health.remoteRefOid?.slice(0, 8) ?? "missing";
-    const legacyOid = health.legacyRefOid?.slice(0, 8) ?? "missing";
-    problems.push(
-      `hidden ref diverges from legacy branch (${remoteOid} vs ${legacyOid})`
-    );
-  } else if (health.hasLegacyRef && health.legacyRef) {
-    problems.push(`legacy ref ${health.legacyRef} still exists`);
-  }
-  if (health.hasNonTicketFiles) {
-    problems.push("non-ticket files present");
-  }
-
-  if (problems.length === 0) {
-    return {
-      name: "tickets git",
-      status: "ok",
-      message: `Healthy (${health.remoteRef})`,
-    };
-  }
-
-  return {
-    name: "tickets git",
-    status: "warn",
-    message: `${problems.join("; ")} (run: hack doctor --fix)`,
-  };
-}
-
 async function checkProjectRuntimeHygiene({
   startDir,
 }: {
@@ -1798,13 +1767,19 @@ async function checkProjectRuntimeHygiene({
     projects: registry.projects,
     runtime: runtimeResult.runtime,
   });
+  const baseProjectName = await resolveDoctorBaseProjectName(ctx);
 
   const [missing, orphaned] = await Promise.all([
     findMissingRegistryEntries({ projects: scoped.projects }),
     findOrphanRuntimeProjects({ runtime: scoped.runtime }),
   ]);
+  const incomplete = findIncompleteRuntimeProjects({ runtime: scoped.runtime });
 
-  if (missing.length === 0 && orphaned.length === 0) {
+  if (
+    missing.length === 0 &&
+    orphaned.length === 0 &&
+    incomplete.length === 0
+  ) {
     return {
       name: "runtime hygiene",
       status: "ok",
@@ -1814,20 +1789,37 @@ async function checkProjectRuntimeHygiene({
 
   const details: string[] = [];
   if (missing.length > 0) {
+    const names = missing.map((entry) => entry.project.name).join(", ");
     details.push(
-      `${missing.length} missing registry entr${missing.length === 1 ? "y" : "ies"}`
+      `${missing.length} missing registry entr${missing.length === 1 ? "y" : "ies"}: ${names}`
     );
   }
   if (orphaned.length > 0) {
+    const names = orphaned.map((entry) => entry.project).join(", ");
     details.push(
-      `${orphaned.length} orphaned runtime project${orphaned.length === 1 ? "" : "s"}`
+      `${orphaned.length} orphaned runtime project${orphaned.length === 1 ? "" : "s"}: ${names}`
     );
   }
+  if (incomplete.length > 0) {
+    const names = incomplete
+      .map((entry) => `${entry.project} [${entry.createdServices.join(", ")}]`)
+      .join("; ");
+    details.push(
+      `${incomplete.length} incomplete runtime project${incomplete.length === 1 ? "" : "s"} with containers stuck in Created: ${names}`
+    );
+  }
+
+  const guidance = [
+    ...(missing.length > 0 || orphaned.length > 0
+      ? [`run: hack projects prune --project ${baseProjectName}`]
+      : []),
+    ...(incomplete.length > 0 ? ["repair: hack doctor --fix"] : []),
+  ];
 
   return {
     name: "runtime hygiene",
     status: "warn",
-    message: `${details.join("; ")} (run: hack projects prune)`,
+    message: `${details.join("; ")} (${guidance.join("; ")})`,
   };
 }
 
@@ -2419,15 +2411,20 @@ async function runDoctorFix(opts: {
 
   await maybeInstallMutagenForDoctorFix();
   await maybeUntrackGeneratedFiles({ startDir: opts.startDir });
+  await maybeRepairHackd();
+  await maybeRepairAgentIntegrations({ startDir: opts.startDir });
 
   const dockerOk = await dockerInfoOk();
   if (!dockerOk) {
-    note("Docker is not reachable; cannot apply fixes.", "doctor");
+    note(
+      "Docker is not reachable; daemon and agent repairs were still applied, but Docker-backed fixes were skipped.",
+      "doctor"
+    );
     return;
   }
 
   await maybeRepairProjectLifecycleSessions({ startDir: opts.startDir });
-  await maybeRepairHackd();
+  await maybeRepairIncompleteRuntime({ startDir: opts.startDir });
 
   const paths = getGlobalPaths();
   await ensureDir(paths.caddyDir);
@@ -2452,12 +2449,53 @@ async function runDoctorFix(opts: {
   await maybeExportCaddyCaCert({ paths });
   await maybeRepairMacHostTlsTrust();
   await maybeMigrateDnsmasq();
-  await maybeRepairProjectTicketsGitHealth({ startDir: opts.startDir });
   if (opts.migrateEnvConfig) {
     await maybeMigrateProjectEnvConfig({ startDir: opts.startDir });
   }
 
   renderSkippedDoctorFixSteps();
+}
+
+async function maybeRepairIncompleteRuntime(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findProjectContext(opts.startDir);
+  if (!project) {
+    return;
+  }
+  const [registry, runtimeResult] = await Promise.all([
+    readProjectsRegistry(),
+    readRuntimeProjects({ includeGlobal: false }),
+  ]);
+  if (!runtimeResult.ok) {
+    return;
+  }
+  const scoped = scopeRuntimeHygieneToProject({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    projects: registry.projects,
+    runtime: runtimeResult.runtime,
+  });
+  const incomplete = findIncompleteRuntimeProjects({ runtime: scoped.runtime });
+  for (const entry of incomplete) {
+    if (entry.containerIds.length === 0) {
+      note(
+        `Could not identify Created containers for ${entry.project}; left unchanged.`,
+        "runtime repair"
+      );
+      continue;
+    }
+    const code = await run(["docker", "start", ...entry.containerIds], {
+      stdin: "ignore",
+      timeoutMs: 30_000,
+    });
+    note(
+      code === 0
+        ? `Started Created services for ${entry.project}: ${entry.createdServices.join(", ")}`
+        : `Failed to start Created services for ${entry.project} (exit ${code}); no containers were removed.`,
+      "runtime repair"
+    );
+  }
 }
 
 /**
@@ -2699,8 +2737,7 @@ export async function buildDoctorRemediationPlanLines(opts: {
   readonly migrateEnvConfig: boolean;
 }): Promise<string[]> {
   const steps = [
-    "Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
-    "Repair tickets refs if the project repo needs it.",
+    "Review and repair global Docker networks, CoreDNS, CA, host TLS env, daemon drift, and agent integration freshness where needed.",
   ];
 
   const project = await findProjectContext(opts.startDir);
@@ -2815,115 +2852,6 @@ async function maybeUntrackGeneratedFiles(opts: {
     );
   }
   note(notes.join("\n"), "generated files");
-}
-
-async function maybeRepairProjectTicketsGitHealth(opts: {
-  readonly startDir: string;
-}): Promise<void> {
-  const project = await findProjectContext(opts.startDir);
-  if (!project) {
-    return;
-  }
-
-  const ticketsEnablement = await resolveTicketsIntegrationEnablement({
-    projectRoot: project.projectRoot,
-  });
-  if (!ticketsEnablement.project) {
-    return;
-  }
-
-  const controlPlane = await readControlPlaneConfig({
-    projectDir: project.projectDir,
-  });
-  const gitConfig = controlPlane.config.tickets.git;
-  if (!gitConfig.enabled) {
-    return;
-  }
-
-  const channel = createGitTicketsChannel({
-    projectRoot: project.projectRoot,
-    config: gitConfig,
-    logger: {
-      info: ({ message }) => note(message, "tickets"),
-      warn: ({ message }) => note(message, "tickets"),
-    },
-  });
-  const inspected = await channel.inspect();
-  if (!inspected.ok) {
-    note(`Unable to inspect tickets git health: ${inspected.error}`, "doctor");
-    return;
-  }
-
-  const health = inspected.health;
-  if (
-    !(
-      health.hasRefDivergence ||
-      health.hasLegacyRef ||
-      health.hasNonTicketFiles
-    )
-  ) {
-    return;
-  }
-
-  const reasons: string[] = [];
-  if (health.hasRefDivergence) {
-    reasons.push("hidden ref diverges from legacy branch");
-  } else if (health.hasLegacyRef) {
-    reasons.push("legacy branch still exists");
-  }
-  if (health.hasNonTicketFiles) {
-    reasons.push("non-ticket files present");
-  }
-
-  const okRepair = await doctorConfirm({
-    message: `Repair tickets git storage now? (${reasons.join("; ")})`,
-    initialValue: true,
-  });
-  if (!okRepair) {
-    return;
-  }
-
-  const pruneLegacyRef =
-    health.hasLegacyRef &&
-    (await doctorConfirm({
-      message: `Prune legacy tickets ref ${health.legacyRef ?? "refs/heads/hack/tickets"} after repair?`,
-      initialValue: true,
-    }));
-
-  const repaired = await channel.repair({ pruneLegacyRef });
-  if (!repaired.ok) {
-    note(`Tickets repair failed: ${repaired.error}`, "doctor");
-    return;
-  }
-
-  const legacyRepairStatus = describeLegacyRepairStatus({
-    hadLegacyRef: health.hasLegacyRef,
-    pruneLegacyRef,
-    didPruneLegacy: repaired.didPruneLegacy,
-  });
-  const lines = [
-    `commit: ${repaired.didCommit ? "created" : "noop"}`,
-    `push: ${repaired.didPush ? "pushed" : "skipped"}`,
-    `legacy ref: ${legacyRepairStatus}`,
-  ];
-  if (repaired.pruneError) {
-    lines.push(`legacy prune error: ${repaired.pruneError}`);
-  }
-  note(lines.join("\n"), "tickets repair");
-}
-
-function describeLegacyRepairStatus(input: {
-  readonly hadLegacyRef: boolean;
-  readonly pruneLegacyRef: boolean;
-  readonly didPruneLegacy: boolean;
-}): string {
-  if (!input.hadLegacyRef) {
-    return "not present";
-  }
-  if (!input.pruneLegacyRef) {
-    return "left intact";
-  }
-  return input.didPruneLegacy ? "pruned" : "prune failed";
 }
 
 async function maybeRepairProjectLifecycleSessions(opts: {
@@ -3068,6 +2996,62 @@ async function maybeRepairHackd(): Promise<void> {
   if (okStart) {
     await runHackSubcommand({ args: ["daemon", "start"] });
   }
+}
+
+async function maybeRepairAgentIntegrations(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findProjectContext(opts.startDir);
+  const report = await inspectDoctorAgentIntegrations({
+    projectRoot: project?.projectRoot ?? null,
+  });
+  if (report.status !== "stale") {
+    return;
+  }
+  const ok = await doctorConfirm({
+    message: project
+      ? "Refresh stale project and global agent integrations now?"
+      : "Refresh stale global agent integrations now?",
+    initialValue: true,
+  });
+  if (ok) {
+    await runHackSubcommand({
+      args: project
+        ? ["setup", "sync", "--all-scopes"]
+        : ["setup", "sync", "--global"],
+    });
+    note(
+      "Agent integrations refreshed. Reload active agent sessions so cached rules are replaced.",
+      "agent integrations"
+    );
+  }
+}
+
+export async function inspectDoctorAgentIntegrations(opts: {
+  readonly projectRoot: string | null;
+  readonly homeDir?: string;
+}): Promise<{ readonly status: "current" | "stale" }> {
+  const home = (opts.homeDir ?? process.env.HOME ?? homedir()).trim();
+  const paths = [
+    ...(opts.projectRoot
+      ? [
+          resolve(opts.projectRoot, ".cursor", "rules", "hack.mdc"),
+          resolve(opts.projectRoot, ".codex", "skills", "hack-cli", "SKILL.md"),
+          resolve(opts.projectRoot, "AGENTS.md"),
+          resolve(opts.projectRoot, "CLAUDE.md"),
+        ]
+      : []),
+    resolve(home, ".cursor", "rules", "hack.mdc"),
+    resolve(home, ".codex", "skills", "hack-cli", "SKILL.md"),
+    resolve(home, ".ai", "skills", "hack-cli", "SKILL.md"),
+  ];
+  const marker = `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``;
+  const contents = await Promise.all(paths.map((path) => readTextFile(path)));
+  return {
+    status: contents.every((content) => content?.includes(marker))
+      ? "current"
+      : "stale",
+  };
 }
 
 async function resolveDaemonReportForDoctorFix(): Promise<
@@ -3554,7 +3538,10 @@ export function buildDoctorSummaryLines(input: {
 
   const ungrouped = input.results.filter(
     (result) =>
-      !DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
+      !(
+        isHiddenDoctorCheck(result) ||
+        DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
+      )
   );
   if (ungrouped.length > 0) {
     const issues = ungrouped.filter(
@@ -3569,6 +3556,10 @@ export function buildDoctorSummaryLines(input: {
   }
 
   return lines;
+}
+
+function isHiddenDoctorCheck(result: RecoveryCheckResult): boolean {
+  return result.name === "tickets git";
 }
 
 async function renderDoctorSummary(
@@ -3621,8 +3612,9 @@ function summarizeDoctorGroupIssues(input: {
 
 function isIgnorableDoctorSummaryIssue(issue: RecoveryCheckResult): boolean {
   return (
-    issue.name === "gateway tokens" &&
-    issue.message.includes("No active tokens")
+    issue.message === "Not found (optional)" ||
+    (issue.name === "gateway tokens" &&
+      issue.message.includes("No active tokens"))
   );
 }
 
@@ -3657,8 +3649,14 @@ function summarizeDoctorIssue(issue: RecoveryCheckResult): string {
   return `${issue.name}: ${issue.message}`;
 }
 
-function renderMacNote(): void {
-  if (isMac()) {
+function renderMacNote(results: readonly RecoveryCheckResult[]): void {
+  const dnsNeedsSetup = results.some(
+    (result) =>
+      DOCTOR_SUMMARY_GROUPS.find(
+        (group) => group.title === "Resolver & DNS"
+      )?.checks.has(result.name) && result.status !== "ok"
+  );
+  if (isMac() && dnsNeedsSetup) {
     note(
       [
         "macOS tip:",

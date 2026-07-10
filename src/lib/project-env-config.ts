@@ -98,6 +98,9 @@ export type ProjectEnvResolvedConfig = {
   readonly files: readonly string[];
   readonly globalEnv: Readonly<Record<string, string>>;
   readonly hostEnv: Readonly<Record<string, string>>;
+  readonly hostTargetEnv: Readonly<
+    Record<string, Readonly<Record<string, string>>>
+  >;
   readonly serviceEnv: Readonly<
     Record<string, Readonly<Record<string, string>>>
   >;
@@ -136,15 +139,10 @@ export function selectProjectEnvValuesForExecutionTarget(opts: {
   if (opts.target !== "host") {
     return selected;
   }
-
-  const hostOverrides = opts.resolved.hostEnv;
-  if (!hostOverrides) {
-    return selected;
-  }
-  return {
-    ...selected,
-    ...hostOverrides,
-  };
+  const scopeName = normalizeProjectEnvScopeName({
+    scopeName: opts.scopeName,
+  });
+  return { ...(opts.resolved.hostTargetEnv[scopeName] ?? selected) };
 }
 
 export function isValidProjectEnvScopeName(opts: {
@@ -780,21 +778,23 @@ export async function resolveProjectEnvConfig(opts: {
     );
   }
 
+  const envLayers = [
+    defaultRead.exists ? defaultRead.config : null,
+    overlayRead?.exists ? overlayRead.config : null,
+    localDefaultRead.exists ? localDefaultRead.config : null,
+    localOverlayRead?.exists ? localOverlayRead.config : null,
+  ];
   const merged = mergeProjectEnvConfigLayers({
-    layers: [
-      defaultRead.exists ? defaultRead.config : null,
-      overlayRead?.exists ? overlayRead.config : null,
-      localDefaultRead.exists ? localDefaultRead.config : null,
-      localOverlayRead?.exists ? localOverlayRead.config : null,
-    ],
+    layers: envLayers,
     environment: selection.effectiveEnv ?? "default",
   });
   const keyText = await resolveProjectEnvKey({
     projectRoot: opts.projectRoot,
     required: hasSecretEntries({ config: merged }),
   });
-  const globalEnv = resolveProjectEnvScopeValues({
-    values: merged.values.global ?? {},
+  const globalEnv = resolveLayeredProjectEnvValuesForScopes({
+    layers: envLayers,
+    scopeNames: ["global"],
     keyText,
   });
 
@@ -807,8 +807,9 @@ export async function resolveProjectEnvConfig(opts: {
   );
   const hostEnv = hostScopeConflictsWithService
     ? {}
-    : resolveProjectEnvScopeValues({
-        values: merged.values[PROJECT_ENV_HOST_SCOPE] ?? {},
+    : resolveLayeredProjectEnvValuesForScopes({
+        layers: envLayers,
+        scopeNames: [PROJECT_ENV_HOST_SCOPE],
         keyText,
       });
   const unknownScopes = declaredScopes
@@ -821,16 +822,30 @@ export async function resolveProjectEnvConfig(opts: {
     ...declaredScopes.filter((scope) => scope !== "global"),
   ]);
   const serviceEnv: Record<string, Record<string, string>> = {};
+  const hostTargetEnv: Record<string, Record<string, string>> = {};
   for (const serviceName of serviceSet) {
-    const scopedValues = resolveProjectEnvScopeValues({
-      values: merged.values[serviceName] ?? {},
+    const composeScopeNames =
+      serviceName === "global" ? ["global"] : ["global", serviceName];
+    serviceEnv[serviceName] = resolveLayeredProjectEnvValuesForScopes({
+      layers: envLayers,
+      scopeNames: composeScopeNames,
       keyText,
     });
-    serviceEnv[serviceName] = {
-      ...globalEnv,
-      ...scopedValues,
-    };
+    hostTargetEnv[serviceName] = resolveLayeredProjectEnvValuesForScopes({
+      layers: envLayers,
+      scopeNames: hostScopeConflictsWithService
+        ? composeScopeNames
+        : [...composeScopeNames, PROJECT_ENV_HOST_SCOPE],
+      keyText,
+    });
   }
+  hostTargetEnv.global = resolveLayeredProjectEnvValuesForScopes({
+    layers: envLayers,
+    scopeNames: hostScopeConflictsWithService
+      ? ["global"]
+      : ["global", PROJECT_ENV_HOST_SCOPE],
+    keyText,
+  });
 
   const files = [selection.defaultPath];
   if (selection.overlayPath && overlayRead?.exists) {
@@ -849,6 +864,7 @@ export async function resolveProjectEnvConfig(opts: {
     files,
     globalEnv,
     hostEnv,
+    hostTargetEnv,
     serviceEnv,
     declaredScopes,
     unknownScopes,
@@ -893,6 +909,32 @@ function resolveProjectEnvScopeValues(opts: {
     });
   }
   return out;
+}
+
+/**
+ * Resolve env precedence by source layer first, then target specificity within
+ * each layer. A named overlay's global value therefore overrides a base-file
+ * host/service value, while an overlay host/service value still overrides the
+ * overlay global value.
+ */
+function resolveLayeredProjectEnvValuesForScopes(opts: {
+  readonly layers: readonly (ProjectEnvConfig | null)[];
+  readonly scopeNames: readonly string[];
+  readonly keyText: string | null;
+}): Record<string, string> {
+  const storedValues: Record<string, ProjectEnvStoredValue> = {};
+  for (const layer of opts.layers) {
+    if (!layer) {
+      continue;
+    }
+    for (const scopeName of opts.scopeNames) {
+      Object.assign(storedValues, layer.values[scopeName] ?? {});
+    }
+  }
+  return resolveProjectEnvScopeValues({
+    values: storedValues,
+    keyText: opts.keyText,
+  });
 }
 
 function hasSecretEntries(opts: {

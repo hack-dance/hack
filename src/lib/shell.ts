@@ -8,6 +8,7 @@ export interface ExecOptions {
   readonly cwd?: string;
   readonly env?: Record<string, string>;
   readonly stdin?: "inherit" | "pipe" | "ignore";
+  readonly timeoutMs?: number;
 }
 
 /**
@@ -41,14 +42,21 @@ export async function exec(
     stdin: opts.stdin ?? "inherit",
     stdout: "pipe",
     stderr: "pipe",
+    detached: opts.timeoutMs !== undefined,
+  });
+
+  const timeout = installSubprocessTimeout({
+    pid: proc.pid,
+    timeoutMs: opts.timeoutMs,
   });
 
   const stdoutText = await streamToText(proc.stdout);
   const stderrText = await streamToText(proc.stderr);
   const exitCode = await proc.exited;
+  timeout.dispose();
 
   return {
-    exitCode,
+    exitCode: timeout.didTimeout() ? 124 : exitCode,
     stdout: stdoutText,
     stderr: stderrText,
   };
@@ -64,6 +72,7 @@ export interface RunOptions {
    * envelope while subprocess output remains visible to humans.
    */
   readonly stdout?: "inherit" | "stderr";
+  readonly timeoutMs?: number;
 }
 
 export async function run(
@@ -76,9 +85,55 @@ export async function run(
     stdin: opts.stdin ?? "inherit",
     stdout: opts.stdout === "stderr" ? 2 : "inherit",
     stderr: "inherit",
+    detached: opts.timeoutMs !== undefined,
   });
+  const timeout = installSubprocessTimeout({
+    pid: proc.pid,
+    timeoutMs: opts.timeoutMs,
+  });
+  const exitCode = await proc.exited;
+  timeout.dispose();
+  return timeout.didTimeout() ? 124 : exitCode;
+}
 
-  return await proc.exited;
+function installSubprocessTimeout(opts: {
+  readonly pid: number;
+  readonly timeoutMs: number | undefined;
+}): { readonly dispose: () => void; readonly didTimeout: () => boolean } {
+  let timedOut = false;
+  if (opts.timeoutMs === undefined) {
+    return { dispose: () => undefined, didTimeout: () => false };
+  }
+  let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+  const signalProcessGroup = (signal: NodeJS.Signals): void => {
+    try {
+      process.kill(-opts.pid, signal);
+    } catch {
+      try {
+        process.kill(opts.pid, signal);
+      } catch {
+        return;
+      }
+    }
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    signalProcessGroup("SIGTERM");
+    forceKillTimer = setTimeout(() => signalProcessGroup("SIGKILL"), 2000);
+  }, opts.timeoutMs);
+  return {
+    dispose: () => {
+      clearTimeout(timer);
+      if (forceKillTimer) {
+        clearTimeout(forceKillTimer);
+        // The direct child may honor SIGTERM before its descendants do. Once
+        // the child exits, finish cleaning the detached process group instead
+        // of cancelling the only pending SIGKILL and orphaning descendants.
+        signalProcessGroup("SIGKILL");
+      }
+    },
+    didTimeout: () => timedOut,
+  };
 }
 
 async function streamToText(

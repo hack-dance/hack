@@ -21,7 +21,6 @@ remote/control-plane features.
 - `docs/guides/global-settings.md` — global config
 - `docs/guides/agent-first-setup.md` — agent-assisted onboarding (`hack init --with`, `hack agent onboard`)
 - `docs/guides/prerequisite-detection-matrix.md` — environment prerequisite checks
-- `docs/guides/tickets.md` — optional, opt-in local ticket workflow (see note below)
 - Generated agent-facing guidance: `AGENTS.md`/`CLAUDE.md` snippets, `.codex/skills/hack-cli/SKILL.md`,
   and `hack-init` skill/MCP prompt content, all rendered from `src/agents/instruction-source.ts`
   (canonical source) via `src/agents/*` and `src/mcp/agent-docs.ts`.
@@ -29,10 +28,6 @@ remote/control-plane features.
 New docs belong here when they describe supported v3 CLI surface a user hits without opting into
 remote/gateway/node/dispatch: project lifecycle, env, sessions, worktrees, diagnostics (`hack doctor`),
 JSON/`--no-interactive` agent ergonomics, and onboarding.
-
-Tickets note: the tickets extension is optional and opt-in (disabled by default; enable
-`dance.hack.tickets` in config). It stays in the core bucket because it is a supported local-first
-workflow, not because it ships enabled by default.
 
 ### 2. Beta (`docs/beta.md` index)
 
@@ -68,7 +63,7 @@ control-plane SDK, and API-level detail for the beta surface.
 - `docs/extensions.md` — extension model, dispatch (`hack x <namespace> <command>`), built-in extensions
 - `docs/integrations.md` — what shipped, what was removed, optional agent-setup helpers
 - `docs/guides/create-extension.md` — how to author a new extension
-- `docs/guides/tickets.md` — also cross-linked here for the full tickets command surface
+- `docs/guides/tickets.md` — deprecated compatibility and migration reference
 - `docs/gateway-api.md` — gateway HTTP/WS API surface (unsupported experimental)
 - `docs/sdk.md` — control-plane SDK
 

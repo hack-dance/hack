@@ -163,19 +163,6 @@ async function runGit(args: readonly string[], cwd: string): Promise<string> {
   return stdout.trim();
 }
 
-async function gitCheckIgnore(opts: {
-  readonly repoRoot: string;
-  readonly path: string;
-}): Promise<boolean> {
-  const proc = Bun.spawn({
-    cmd: ["git", "check-ignore", "-q", "--", opts.path],
-    cwd: opts.repoRoot,
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-  return (await proc.exited) === 0;
-}
-
 async function createFixtureRepo(opts: {
   readonly ticketsEnabled: boolean;
 }): Promise<string> {
@@ -241,15 +228,12 @@ test("hack doctor --fix does not create .hack/tickets/ when the extension is dis
   expect(await dirExists(resolve(repoRoot, ".hack", "tickets"))).toBe(false);
 });
 
-test("hack doctor creates .hack/tickets/ when the extension is enabled, and it is gitignored", async () => {
+test("hack doctor does not initialize deprecated Tickets storage when legacy enablement remains", async () => {
   const repoRoot = await createFixtureRepo({ ticketsEnabled: true });
 
   await runDoctor({ repoRoot });
 
-  expect(await dirExists(resolve(repoRoot, ".hack", "tickets"))).toBe(true);
-  expect(
-    await gitCheckIgnore({ repoRoot, path: ".hack/tickets/git/bare.git" })
-  ).toBe(true);
+  expect(await dirExists(resolve(repoRoot, ".hack", "tickets"))).toBe(false);
 
   const status = await runGit(["status", "--porcelain"], repoRoot);
   expect(status).toBe("");

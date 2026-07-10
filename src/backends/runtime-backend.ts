@@ -3,6 +3,8 @@ import { readLinesFromStream } from "../ui/lines.ts";
 import { createStructuredLogGrouper } from "../ui/log-group.ts";
 
 export type RuntimeBackendName = "compose";
+const DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS = 90_000;
+const DEFAULT_COMPOSE_INSPECTION_TIMEOUT_MS = 15_000;
 
 export interface RuntimeBackend {
   readonly name: RuntimeBackendName;
@@ -29,11 +31,16 @@ export interface RuntimeBaseOptions {
 
 export interface RuntimeUpOptions extends RuntimeBaseOptions {
   readonly detach: boolean;
+  readonly services?: readonly string[];
+  readonly noDeps?: boolean;
+  readonly forceRecreate?: boolean;
 }
 
 export interface RuntimeDownOptions extends RuntimeBaseOptions {}
 
-export interface RuntimePsOptions extends RuntimeBaseOptions {}
+export interface RuntimePsOptions extends RuntimeBaseOptions {
+  readonly all?: boolean;
+}
 
 export interface RuntimeRunOptions extends RuntimeBaseOptions {
   readonly service: string;
@@ -71,12 +78,16 @@ export const composeRuntimeBackend: RuntimeBackend = {
       ...buildComposeArgs(opts),
       "up",
       ...(opts.detach ? ["-d"] : []),
+      ...(opts.noDeps ? ["--no-deps"] : []),
+      ...(opts.forceRecreate ? ["--force-recreate"] : []),
+      ...(opts.services ?? []),
     ];
     if (opts.detach) {
       return await run(cmd, {
         cwd: opts.cwd,
         env: opts.env,
         stdout: opts.routeStdoutToStderr ? "stderr" : "inherit",
+        timeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
       });
     }
 
@@ -123,11 +134,23 @@ export const composeRuntimeBackend: RuntimeBackend = {
       cwd: opts.cwd,
       env: opts.env,
       stdout: opts.routeStdoutToStderr ? "stderr" : "inherit",
+      timeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
     });
   },
   async psJson(opts) {
-    const cmd = [...buildComposeArgs(opts), "ps", "--format", "json"];
-    return await exec(cmd, { cwd: opts.cwd, stdin: "ignore", env: opts.env });
+    const cmd = [
+      ...buildComposeArgs(opts),
+      "ps",
+      ...(opts.all ? ["--all"] : []),
+      "--format",
+      "json",
+    ];
+    return await exec(cmd, {
+      cwd: opts.cwd,
+      stdin: "ignore",
+      env: opts.env,
+      timeoutMs: DEFAULT_COMPOSE_INSPECTION_TIMEOUT_MS,
+    });
   },
   async ps(opts) {
     const cmd = [...buildComposeArgs(opts), "ps"];

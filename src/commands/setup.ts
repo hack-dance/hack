@@ -21,6 +21,13 @@ import {
   installCursorRules,
   removeCursorRules,
 } from "../agents/cursor.ts";
+import {
+  checkDeprecatedSharedHackSkills,
+  checkSharedHackSkill,
+  installSharedHackSkill,
+  removeDeprecatedSharedHackSkills,
+  removeSharedHackSkill,
+} from "../agents/shared-skill.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -29,10 +36,12 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
-import { resolveTicketsIntegrationEnablement } from "../control-plane/extensions/tickets/enablement.ts";
 import {
-  checkTicketsSkill,
-  installTicketsSkill,
+  checkDeprecatedTicketsAgentDocs,
+  removeTicketsAgentDocs,
+} from "../control-plane/extensions/tickets/agent-docs.ts";
+import {
+  checkDeprecatedTicketsSkill,
   removeTicketsSkill,
   type TicketsSkillResult,
 } from "../control-plane/extensions/tickets/tickets-skill.ts";
@@ -208,7 +217,7 @@ const codexSpec = defineCommand({
 
 const ticketsSpec = defineCommand({
   name: "tickets",
-  summary: "Install Codex skill for hack tickets usage",
+  summary: "Remove or audit the deprecated Hack Tickets skill",
   group: "Agents",
   options: setupTicketsOptions,
   positionals: [],
@@ -226,7 +235,8 @@ const agentsSpec = defineCommand({
 
 const syncSpec = defineCommand({
   name: "sync",
-  summary: "Refresh agent docs, skills, and MCP configs",
+  summary:
+    "Refresh project/global agent guidance and remove deprecated artifacts",
   group: "Agents",
   options: setupSyncOptions,
   positionals: [],
@@ -623,21 +633,19 @@ async function handleSetupTickets({
 
   logger.info({
     message:
-      'Note: tickets is an optional/legacy extension — it is no longer part of default agent instructions (enable via controlPlane.extensions["dance.hack.tickets"].enabled).',
+      "Hack Tickets agent integrations are deprecated. This command now audits or removes the legacy skill; it never installs it.",
   });
 
-  let result: Awaited<ReturnType<typeof checkTicketsSkill>>;
+  let result: TicketsSkillResult;
   if (action === "check") {
-    result = await checkTicketsSkill({ scope, projectRoot });
-  } else if (action === "remove") {
-    result = await removeTicketsSkill({ scope, projectRoot });
+    result = await checkDeprecatedTicketsSkill({ scope, projectRoot });
   } else {
-    result = await installTicketsSkill({ scope, projectRoot });
+    result = await removeTicketsSkill({ scope, projectRoot });
   }
 
   return logSingleResult({
     action,
-    okMessage: "Tickets skill",
+    okMessage: "Deprecated Tickets skill",
     result,
   });
 }
@@ -717,10 +725,6 @@ async function handleSetupSync({
   const projectRoot = includesProject
     ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
     : undefined;
-  const ticketsEnablement = await resolveTicketsIntegrationEnablement({
-    projectRoot,
-  });
-
   let exitCode = 0;
 
   if (includesProject && projectRoot) {
@@ -729,19 +733,12 @@ async function handleSetupSync({
       await runProjectScopeSync({
         action,
         projectRoot,
-        ticketsEnabled: ticketsEnablement.project,
       })
     );
   }
 
   if (includesUser) {
-    exitCode = Math.max(
-      exitCode,
-      await runUserScopeSync({
-        action,
-        ticketsEnabled: ticketsEnablement.global,
-      })
-    );
+    exitCode = Math.max(exitCode, await runUserScopeSync({ action }));
   }
 
   return exitCode;
@@ -749,20 +746,18 @@ async function handleSetupSync({
 
 /**
  * Run one sync action across all project-scope integrations and log results.
- * Tickets is optional/legacy: its skill is only checked/installed when the
- * extension is enabled for the project; removal always runs so leftover
- * artifacts get cleaned up even after the extension was disabled.
+ * Deprecated Tickets agent artifacts are always audited and removed by sync.
  */
 async function runProjectScopeSync(opts: {
   readonly action: SetupSyncAction;
   readonly projectRoot: string;
-  readonly ticketsEnabled: boolean;
 }): Promise<number> {
-  const { action, projectRoot, ticketsEnabled } = opts;
+  const { action, projectRoot } = opts;
   let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
   let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
   let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
-  let ticketsResult: TicketsSkillResult | null;
+  let ticketsResult: TicketsSkillResult;
+  let ticketsDocsResults: SetupMultiLogResult[];
   let mcpResults: SetupMultiLogResult[];
   let docsResults: SetupMultiLogResult[];
 
@@ -770,9 +765,14 @@ async function runProjectScopeSync(opts: {
     cursorResult = await checkCursorRules({ scope: "project", projectRoot });
     claudeResult = await checkClaudeHooks({ scope: "project", projectRoot });
     codexResult = await checkCodexSkill({ scope: "project", projectRoot });
-    ticketsResult = ticketsEnabled
-      ? await checkTicketsSkill({ scope: "project", projectRoot })
-      : null;
+    ticketsResult = await checkDeprecatedTicketsSkill({
+      scope: "project",
+      projectRoot,
+    });
+    ticketsDocsResults = await checkDeprecatedTicketsAgentDocs({
+      projectRoot,
+      targets: ["agents", "claude"],
+    });
     mcpResults = await checkMcpConfig({
       scope: "project",
       targets: ["cursor", "claude", "codex"],
@@ -787,6 +787,10 @@ async function runProjectScopeSync(opts: {
     claudeResult = await removeClaudeHooks({ scope: "project", projectRoot });
     codexResult = await removeCodexSkill({ scope: "project", projectRoot });
     ticketsResult = await removeTicketsSkill({ scope: "project", projectRoot });
+    ticketsDocsResults = await removeTicketsAgentDocs({
+      projectRoot,
+      targets: ["agents", "claude"],
+    });
     mcpResults = await removeMcpConfig({
       scope: "project",
       targets: ["cursor", "claude", "codex"],
@@ -800,9 +804,11 @@ async function runProjectScopeSync(opts: {
     cursorResult = await installCursorRules({ scope: "project", projectRoot });
     claudeResult = await installClaudeHooks({ scope: "project", projectRoot });
     codexResult = await installCodexSkill({ scope: "project", projectRoot });
-    ticketsResult = ticketsEnabled
-      ? await installTicketsSkill({ scope: "project", projectRoot })
-      : null;
+    ticketsResult = await removeTicketsSkill({ scope: "project", projectRoot });
+    ticketsDocsResults = await removeTicketsAgentDocs({
+      projectRoot,
+      targets: ["agents", "claude"],
+    });
     mcpResults = await installMcpConfig({
       scope: "project",
       targets: ["cursor", "claude", "codex"],
@@ -821,9 +827,6 @@ async function runProjectScopeSync(opts: {
     [cursorResult, "Cursor integration (project)"],
     [claudeResult, "Claude integration (project)"],
     [codexResult, "Codex integration (project)"],
-    ...(ticketsResult
-      ? ([[ticketsResult, "Tickets skill (project)"]] as const)
-      : []),
   ];
 
   let exitCode = 0;
@@ -833,6 +836,23 @@ async function runProjectScopeSync(opts: {
       logSingleResult({ action, okMessage, result })
     );
   }
+  const cleanupAction = action === "check" ? "check" : "remove";
+  exitCode = Math.max(
+    exitCode,
+    logSingleResult({
+      action: cleanupAction,
+      okMessage: "Deprecated Tickets skill (project)",
+      result: ticketsResult,
+    })
+  );
+  exitCode = Math.max(
+    exitCode,
+    logMultiResults({
+      action: cleanupAction,
+      okMessage: "Deprecated Tickets instructions",
+      results: ticketsDocsResults,
+    })
+  );
   exitCode = Math.max(
     exitCode,
     logMultiResults({
@@ -854,27 +874,28 @@ async function runProjectScopeSync(opts: {
 
 /**
  * Run one sync action across all global (user) scope integrations and log
- * results. The tickets skill follows the global-config enablement only;
- * removal always runs (cleanup of leftovers is always safe).
+ * results. Shared `~/.ai/skills` guidance is managed alongside client-specific
+ * integrations, and known legacy Hack skills are cleaned up safely.
  */
 async function runUserScopeSync(opts: {
   readonly action: SetupSyncAction;
-  readonly ticketsEnabled: boolean;
 }): Promise<number> {
-  const { action, ticketsEnabled } = opts;
+  const { action } = opts;
   let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
   let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
   let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
-  let ticketsResult: TicketsSkillResult | null;
+  let ticketsResult: TicketsSkillResult;
+  let sharedSkillResult: SetupMultiLogResult & { readonly path: string };
+  let legacySharedResults: SetupMultiLogResult[];
   let mcpResults: SetupMultiLogResult[];
 
   if (action === "check") {
     cursorResult = await checkCursorRules({ scope: "user" });
     claudeResult = await checkClaudeHooks({ scope: "user" });
     codexResult = await checkCodexSkill({ scope: "user" });
-    ticketsResult = ticketsEnabled
-      ? await checkTicketsSkill({ scope: "user" })
-      : null;
+    ticketsResult = await checkDeprecatedTicketsSkill({ scope: "user" });
+    sharedSkillResult = await checkSharedHackSkill();
+    legacySharedResults = await checkDeprecatedSharedHackSkills();
     mcpResults = await checkMcpConfig({
       scope: "user",
       targets: ["cursor", "claude", "codex"],
@@ -884,6 +905,8 @@ async function runUserScopeSync(opts: {
     claudeResult = await removeClaudeHooks({ scope: "user" });
     codexResult = await removeCodexSkill({ scope: "user" });
     ticketsResult = await removeTicketsSkill({ scope: "user" });
+    sharedSkillResult = await removeSharedHackSkill();
+    legacySharedResults = await removeDeprecatedSharedHackSkills();
     mcpResults = await removeMcpConfig({
       scope: "user",
       targets: ["cursor", "claude", "codex"],
@@ -892,9 +915,9 @@ async function runUserScopeSync(opts: {
     cursorResult = await installCursorRules({ scope: "user" });
     claudeResult = await installClaudeHooks({ scope: "user" });
     codexResult = await installCodexSkill({ scope: "user" });
-    ticketsResult = ticketsEnabled
-      ? await installTicketsSkill({ scope: "user" })
-      : null;
+    ticketsResult = await removeTicketsSkill({ scope: "user" });
+    sharedSkillResult = await installSharedHackSkill();
+    legacySharedResults = await removeDeprecatedSharedHackSkills();
     mcpResults = await installMcpConfig({
       scope: "user",
       targets: ["cursor", "claude", "codex"],
@@ -908,9 +931,7 @@ async function runUserScopeSync(opts: {
     [cursorResult, "Cursor integration (global)"],
     [claudeResult, "Claude integration (global)"],
     [codexResult, "Codex integration (global)"],
-    ...(ticketsResult
-      ? ([[ticketsResult, "Tickets skill (global)"]] as const)
-      : []),
+    [sharedSkillResult, "Shared Hack skill (global)"],
   ];
 
   let exitCode = 0;
@@ -920,6 +941,23 @@ async function runUserScopeSync(opts: {
       logSingleResult({ action, okMessage, result })
     );
   }
+  const cleanupAction = action === "check" ? "check" : "remove";
+  exitCode = Math.max(
+    exitCode,
+    logSingleResult({
+      action: cleanupAction,
+      okMessage: "Deprecated Tickets skill (global)",
+      result: ticketsResult,
+    })
+  );
+  exitCode = Math.max(
+    exitCode,
+    logMultiResults({
+      action: cleanupAction,
+      okMessage: "Deprecated shared Hack skills",
+      results: legacySharedResults,
+    })
+  );
   exitCode = Math.max(
     exitCode,
     logMultiResults({
@@ -1134,6 +1172,12 @@ function logCheckResult(opts: {
     readonly message?: string;
   };
 }): number {
+  if (opts.result.status === "absent") {
+    logger.success({
+      message: `${opts.okMessage} not installed at ${opts.path}`,
+    });
+    return 0;
+  }
   if (opts.result.status === "missing") {
     logger.warn({
       message: `${opts.okMessage} not installed at ${opts.path}`,
@@ -1145,6 +1189,14 @@ function logCheckResult(opts: {
       message:
         opts.result.message ??
         `${opts.okMessage} content is stale at ${opts.path}`,
+    });
+    return 1;
+  }
+  if (opts.result.status === "deprecated") {
+    logger.warn({
+      message:
+        opts.result.message ??
+        `${opts.okMessage} is deprecated at ${opts.path}`,
     });
     return 1;
   }

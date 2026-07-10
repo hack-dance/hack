@@ -205,7 +205,11 @@ stopped. `hack restart` preserves the same guard semantics during its down phase
 
 ### `hack restart`
 
-`hack restart` performs the same lifecycle steps as `hack down` followed by `hack up`.
+`hack restart` runs the down lifecycle hooks and stops owned host processes, but preserves the
+current Compose runtime until preflight succeeds. It then force-recreates services and attempts a
+repair start if recreation fails. This avoids destroying a healthy stack before env and registry
+checks have passed. `hack restart <service...>` is service-scoped: it skips project-wide lifecycle
+hooks, uses `--no-deps`, and verifies only the selected services.
 From the primary checkout, it targets only the base Compose/lifecycle instance. A linked worktree uses
 its isolated derived branch instance, and `--branch <name>` targets only that explicit branch.
 
@@ -213,7 +217,10 @@ its isolated derived branch instance, and `--branch <name>` targets only that ex
 
 `hack up`, `hack down`, and `hack restart` accept `--json`. A lifecycle hook failure surfaces as
 `{ok: false, error: {code: 'E_LIFECYCLE_FAILED', message}}`; a `docker compose` failure surfaces as
-`E_COMPOSE_FAILED`. Lifecycle failures are one of the primary consumers of the `--json` error envelope,
+`E_COMPOSE_FAILED`. If Compose exits successfully but one or more containers remain `created`, exit
+non-zero, or enter another failed runtime state, Hack returns `E_STARTUP_INCOMPLETE`. Successful
+one-shot services (`exited` with code 0) are reported under `services.completed` and do not fail startup.
+Lifecycle failures are one of the primary consumers of the `--json` error envelope,
 since hook and process startup are common failure points around `hack up`.
 
 ## Sessions backend
@@ -227,6 +234,10 @@ Config:
 Lifecycle session name:
 - No branch: `<project>--lifecycle`
 - With `--branch <name>`: `<project>--lifecycle-<branch>`
+
+Lifecycle hooks and processes run on the host. They receive the selected overlay's `global` values
+plus `host` overrides, with `host` taking precedence. Service-scoped values remain container-specific
+unless a host command explicitly selects that scope with `hack host exec --scope <service>`.
 
 Notes:
 - If no mux backend is available, lifecycle process startup fails with an actionable error.
@@ -244,6 +255,9 @@ Notes:
   as possible in-flight startups for five minutes and stay untouched. `hack doctor --fix` reaps only
   established orphans after rechecking runtime liveness and mux ownership; unverified same-name
   sessions stay untouched.
+- Runtime hygiene also warns when regular Compose services are stuck in `Created`, including stacks
+  left behind by an interrupted startup. This check is diagnostic only; inspect the explicit target
+  with `hack ps --json` before deciding whether to retry or tear it down.
 
 ## Tips
 

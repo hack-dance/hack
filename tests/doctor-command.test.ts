@@ -7,6 +7,7 @@ import {
   assertDoctorOptionCompatibility,
   buildDoctorRemediationPlanLines,
   buildDoctorSummaryLines,
+  buildDoctorSummaryStatusItems,
   inspectDoctorAgentIntegrations,
 } from "../src/commands/doctor.ts";
 import {
@@ -414,6 +415,48 @@ test("doctor summary groups detailed checks into concise sections", () => {
     "Global runtime & agents: ok",
     "Resolver & DNS: ok",
     "Project & env: warn - runtime hygiene: 1 missing registry entry; 1 orphaned runtime project (run: hack projects prune); lifecycle hygiene: 1 stale lifecycle state entry; 2 orphaned lifecycle process groups (run: hack down); +2 more",
+  ]);
+});
+
+test("doctor status summary separates health, counts, and wrapped detail", () => {
+  const items = buildDoctorSummaryStatusItems({
+    results: [
+      { name: "bun", status: "ok", message: "/usr/local/bin/bun" },
+      { name: "docker daemon", status: "ok", message: "Docker is running" },
+      {
+        name: "runtime hygiene",
+        status: "warn",
+        message:
+          "3 projects have services stuck in Created (run: hack doctor --fix)",
+      },
+      {
+        name: "lifecycle hygiene",
+        status: "warn",
+        message: "1 stale state entry; 1 session collision",
+      },
+    ],
+  });
+
+  expect(items).toEqual([
+    {
+      label: "Dependencies",
+      status: "ok",
+      meta: "1 checks",
+      detail: undefined,
+    },
+    {
+      label: "Global runtime & agents",
+      status: "ok",
+      meta: "1 checks",
+      detail: undefined,
+    },
+    {
+      label: "Project & env",
+      status: "warn",
+      meta: "2 warnings",
+      detail:
+        "runtime hygiene: 3 projects have services stuck in Created (run: hack doctor --fix); lifecycle hygiene: 1 stale state entry; 1 session collision",
+    },
   ]);
 });
 

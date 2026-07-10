@@ -3,6 +3,15 @@ import { isColorEnabled, isTty } from "./terminal.ts";
 
 export type DisplayCell = string | number | boolean | null | undefined;
 
+export type DisplayStatus = "ok" | "warn" | "error" | "info";
+
+export type DisplayStatusItem = {
+  readonly label: string;
+  readonly status: DisplayStatus;
+  readonly detail?: string;
+  readonly meta?: string;
+};
+
 export interface Display {
   /**
    * Render a section heading. This is for UI output, not structured logs.
@@ -35,6 +44,15 @@ export interface Display {
   }): Promise<void>;
 
   /**
+   * Render compact diagnostic rows with optional indented detail.
+   * Healthy rows stay terse while warnings and errors can explain themselves.
+   */
+  statusList(input: {
+    readonly title?: string;
+    readonly items: readonly DisplayStatusItem[];
+  }): Promise<void>;
+
+  /**
    * Render blocks side-by-side when possible.
    */
   columns(input: { readonly blocks: readonly string[] }): Promise<void>;
@@ -42,6 +60,149 @@ export interface Display {
 
 function writeLine(text: string): void {
   process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
+}
+
+const DEFAULT_TERMINAL_WIDTH = 80;
+const MAX_READING_WIDTH = 100;
+const LEADING_WHITESPACE_PATTERN = /^\s*/;
+const LIST_PREFIX_PATTERN = /^(?:[-*]|\d+\.)\s+/;
+const WHITESPACE_PATTERN = /\s+/;
+
+function resolveReadingWidth(): number {
+  const terminalWidth =
+    typeof process.stdout.columns === "number" && process.stdout.columns > 0
+      ? process.stdout.columns
+      : DEFAULT_TERMINAL_WIDTH;
+  return Math.max(40, Math.min(MAX_READING_WIDTH, terminalWidth - 2));
+}
+
+function wrapLine(input: {
+  readonly text: string;
+  readonly width: number;
+}): string[] {
+  if (input.text.length <= input.width) {
+    return [input.text];
+  }
+
+  const words = input.text.trim().split(WHITESPACE_PATTERN);
+  const lines: string[] = [];
+  let current = "";
+  for (const word of words) {
+    if (current.length === 0) {
+      current = word;
+      continue;
+    }
+    if (current.length + word.length + 1 <= input.width) {
+      current = `${current} ${word}`;
+      continue;
+    }
+    lines.push(current);
+    current = word;
+  }
+  if (current.length > 0) {
+    lines.push(current);
+  }
+  return lines;
+}
+
+export function buildStatusListLines(input: {
+  readonly items: readonly DisplayStatusItem[];
+  readonly width: number;
+}): readonly string[] {
+  const symbols: Readonly<Record<DisplayStatus, string>> = {
+    ok: "✓",
+    warn: "!",
+    error: "×",
+    info: "•",
+  };
+  const labelWidth = Math.max(
+    0,
+    ...input.items.map((item) => item.label.length)
+  );
+  const lines: string[] = [];
+
+  for (const item of input.items) {
+    const paddedLabel = item.label.padEnd(labelWidth);
+    const meta = item.meta ? `  ${item.meta}` : "";
+    lines.push(`${symbols[item.status]}  ${paddedLabel}${meta}`.trimEnd());
+    if (!item.detail) {
+      continue;
+    }
+    const detailIndent = "   ";
+    const detailWidth = Math.max(20, input.width - detailIndent.length);
+    for (const paragraph of item.detail.split("\n")) {
+      for (const detailLine of wrapLine({
+        text: paragraph,
+        width: detailWidth,
+      })) {
+        lines.push(`${detailIndent}${detailLine}`);
+      }
+    }
+  }
+
+  return lines;
+}
+
+export function buildPanelLines(input: {
+  readonly lines: readonly string[];
+  readonly width: number;
+}): readonly string[] {
+  return input.lines.flatMap((line) => {
+    if (line.length <= input.width) {
+      return [line];
+    }
+    const leadingWhitespace = line.match(LEADING_WHITESPACE_PATTERN)?.[0] ?? "";
+    const body = line.slice(leadingWhitespace.length);
+    const bullet = body.match(LIST_PREFIX_PATTERN)?.[0] ?? "";
+    const firstPrefix = `${leadingWhitespace}${bullet}`;
+    const continuationPrefix = " ".repeat(firstPrefix.length);
+    const content = body.slice(bullet.length);
+    const contentWidth = Math.max(20, input.width - firstPrefix.length);
+    return wrapLine({ text: content, width: contentWidth }).map(
+      (part, index) =>
+        `${index === 0 ? firstPrefix : continuationPrefix}${part}`
+    );
+  });
+}
+
+function statusListWithAnsi(input: {
+  readonly title?: string;
+  readonly items: readonly DisplayStatusItem[];
+}): void {
+  const enableColor = isColorEnabled();
+  const RESET = "\x1b[0m";
+  const BOLD = "\x1b[1m";
+  const FAINT = "\x1b[2m";
+  const colors: Readonly<Record<DisplayStatus, string>> = {
+    ok: "\x1b[32m",
+    warn: "\x1b[33m",
+    error: "\x1b[31m",
+    info: "\x1b[36m",
+  };
+  const lines = buildStatusListLines({
+    items: input.items,
+    width: resolveReadingWidth(),
+  });
+
+  writeLine("");
+  if (input.title) {
+    writeLine(enableColor ? `${BOLD}${input.title}${RESET}` : input.title);
+  }
+  let itemIndex = 0;
+  for (const line of lines) {
+    const isDetail = line.startsWith("   ");
+    if (isDetail) {
+      writeLine(enableColor ? `${FAINT}${line}${RESET}` : line);
+      continue;
+    }
+    const status = input.items[itemIndex]?.status ?? "info";
+    const symbol = line.slice(0, 1);
+    const remainder = line.slice(1);
+    writeLine(
+      enableColor ? `${colors[status]}${symbol}${RESET}${remainder}` : line
+    );
+    itemIndex += 1;
+  }
 }
 
 function sanitizeCell(value: string): string {
@@ -175,14 +336,24 @@ async function panelWithGum(input: {
       error: "196",
     }[tone] ?? "212";
 
+  const readingWidth = resolveReadingWidth();
+  const contentWidth = readingWidth - 4;
+  const panelLines = buildPanelLines({
+    lines: input.lines,
+    width: contentWidth,
+  });
   const text =
-    titleRaw.length > 0 ? [titleRaw, ...input.lines] : [...input.lines];
+    titleRaw.length > 0 ? [titleRaw, ...panelLines] : [...panelLines];
+  const needsWidthConstraint = input.lines.some(
+    (line) => line.length > contentWidth
+  );
   const res = await gumStyle({
     text,
     border: "rounded",
     borderForeground,
     padding: "0 1",
     margin: "1 0 0 0",
+    width: needsWidthConstraint ? readingWidth : undefined,
   });
   if (!res.ok) {
     return false;
@@ -200,7 +371,10 @@ function panelWithAnsi(input: {
   if (titleRaw.length > 0) {
     writeLine(titleRaw);
   }
-  for (const line of input.lines) {
+  for (const line of buildPanelLines({
+    lines: input.lines,
+    width: resolveReadingWidth() - 2,
+  })) {
     writeLine(`  ${line}`);
   }
 }
@@ -306,6 +480,10 @@ export const display: Display = {
       return;
     }
     panelWithAnsi(input);
+  },
+  statusList: (input) => {
+    statusListWithAnsi(input);
+    return Promise.resolve();
   },
   columns: async (input) => {
     if (await columnsWithGum(input)) {

@@ -755,6 +755,7 @@ async function readComposeServiceStates(opts: {
   readonly composeProjectName: string | null;
   readonly profiles: readonly string[];
   readonly services?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
 }): Promise<readonly ComposeServiceState[]> {
   const res = await composeRuntimeBackend.psJson({
     composeFiles: [opts.project.composeFile],
@@ -762,6 +763,7 @@ async function readComposeServiceStates(opts: {
     profiles: opts.profiles,
     cwd: dirname(opts.project.composeFile),
     all: true,
+    env: opts.env,
   });
   if (res.exitCode !== 0) {
     return [];
@@ -6114,11 +6116,16 @@ async function runUpCommand({
       composeProjectName,
       profiles,
       services: targetServices,
+      env: envOverrides.env,
+    });
+    const effectiveProfiles = resolveEffectiveComposeProfiles({
+      cliProfiles: profiles,
+      composeEnv: envOverrides.env,
     });
     const successfulCompletionServices = new Set(
       await discoverSuccessfulCompletionServices({
         composeFile: project.composeFile,
-        activeProfiles: profiles,
+        activeProfiles: effectiveProfiles,
         selectedServices: serviceScoped ? targetServices : undefined,
       })
     );
@@ -6788,11 +6795,16 @@ async function runTargetedServiceRestart(opts: {
     composeProjectName: opts.composeProjectName,
     profiles: opts.profiles,
     services: opts.services,
+    env: envOverrides.env,
+  });
+  const effectiveProfiles = resolveEffectiveComposeProfiles({
+    cliProfiles: opts.profiles,
+    composeEnv: envOverrides.env,
   });
   const successfulCompletionServices = new Set(
     await discoverSuccessfulCompletionServices({
       composeFile: opts.project.composeFile,
-      activeProfiles: opts.profiles,
+      activeProfiles: effectiveProfiles,
       selectedServices: opts.services,
     })
   );
@@ -7053,11 +7065,16 @@ async function runRestartCommand({
     project,
     composeProjectName,
     profiles,
+    env: preflightEnv.env,
+  });
+  const effectiveProfiles = resolveEffectiveComposeProfiles({
+    cliProfiles: profiles,
+    composeEnv: preflightEnv.env,
   });
   const successfulCompletionServices = new Set(
     await discoverSuccessfulCompletionServices({
       composeFile: project.composeFile,
-      activeProfiles: profiles,
+      activeProfiles: effectiveProfiles,
     })
   );
   const startup = classifyComposeStartupState(states, {
@@ -8067,6 +8084,20 @@ function parseCsvList(value: string | undefined): string[] {
     out.push(p);
   }
   return out;
+}
+
+/** Resolve the profiles Compose activates after CLI-over-environment precedence. */
+function resolveEffectiveComposeProfiles(opts: {
+  readonly cliProfiles: readonly string[];
+  readonly composeEnv: Readonly<Record<string, string>>;
+}): string[] {
+  if (opts.cliProfiles.length > 0) {
+    return [...opts.cliProfiles];
+  }
+  const composeProfiles = Object.hasOwn(opts.composeEnv, "COMPOSE_PROFILES")
+    ? opts.composeEnv.COMPOSE_PROFILES
+    : process.env.COMPOSE_PROFILES;
+  return parseCsvList(composeProfiles);
 }
 
 function parseLogTimeRange(opts: {

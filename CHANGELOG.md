@@ -1,3 +1,7 @@
+## <small>3.5.1 (2026-07-30)</small>
+
+* fix(runtime): prevent polling and stale worktree cache buildup (#71) ([1ba67d1](https://github.com/hack-dance/hack/commit/1ba67d1)), closes [#71](https://github.com/hack-dance/hack/issues/71)
+
 ## 3.5.0 (2026-07-10)
 
 * feat(cli): improve diagnostic output (#69) ([db47c68](https://github.com/hack-dance/hack/commit/db47c68)), closes [#69](https://github.com/hack-dance/hack/issues/69)

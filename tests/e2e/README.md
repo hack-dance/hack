@@ -56,11 +56,11 @@ any e2e result.
   mandatory (as it is in the dedicated Docker/tmux CI job).
 - **Tier 2 (`docker`)** — opt-in via `HACK_E2E_DOCKER=1`; requires a running
   docker daemon, the machine's global `hack-dev` network (`hack global
-  install`), and pulls `oven/bun:1`: `up-down`, `lifecycle-host-process`,
-  `worktree-parallel-up`. When docker or the network is missing these SKIP
-  with a reason instead of failing. Lifecycle host processes only start via
-  `hack up` (no standalone lifecycle command), which is why that scenario is
-  tier 2.
+  install`), and pulls `oven/bun:1`: `cache-prune`, `up-down`,
+  `lifecycle-host-process`, `worktree-parallel-up`. When docker or the network
+  is missing these SKIP with a reason instead of failing. Lifecycle host
+  processes only start via `hack up` (no standalone lifecycle command), which
+  is why that scenario is tier 2.
 
 ## Fixture
 

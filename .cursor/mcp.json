@@ -2,10 +2,7 @@
   "mcpServers": {
     "hack": {
       "command": "hack",
-      "args": [
-        "mcp",
-        "serve"
-      ]
+      "args": ["mcp", "serve"]
     }
   }
 }

@@ -376,7 +376,12 @@ test("buildDiscoveredComposeAuto on the polyglot fixture: one service per packag
   ) as {
     services: Record<
       string,
-      { image: string; command: string; labels?: Record<string, string> }
+      {
+        image: string;
+        command: string;
+        environment?: Record<string, string>;
+        labels?: Record<string, string>;
+      }
     >;
   };
 
@@ -384,6 +389,11 @@ test("buildDiscoveredComposeAuto on the polyglot fixture: one service per packag
   // web, api, backend — no web-2/backend-2 duplicates and no separate
   // dev:web/dev:backend aggregator services.
   expect(serviceNames).toEqual(["api", "backend", "web"]);
+
+  for (const service of Object.values(parsed.services)) {
+    expect(service.environment?.CHOKIDAR_USEPOLLING).toBeUndefined();
+    expect(service.environment?.WATCHPACK_POLLING).toBeUndefined();
+  }
 
   const ports = new Set<string>();
   for (const name of serviceNames) {

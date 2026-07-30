@@ -29,6 +29,7 @@ export type RuntimeContainer = {
 
 export type RuntimeContainerMount = {
   readonly type: string;
+  readonly name?: string | null;
   readonly source: string;
   readonly destination: string;
   readonly mode: string;
@@ -509,6 +510,7 @@ export function serializeRuntimeProject(
         labels: container.labels,
         mounts: container.mounts.map((mount) => ({
           type: mount.type,
+          name: mount.name ?? null,
           source: mount.source,
           destination: mount.destination,
           mode: mount.mode,
@@ -645,6 +647,7 @@ function parseInspectMounts(raw: unknown): RuntimeContainerMount[] {
     const rwValue = value.RW;
     mounts.push({
       type: getString(value, "Type") ?? "",
+      name: getString(value, "Name") ?? null,
       source,
       destination,
       mode: getString(value, "Mode") ?? "",

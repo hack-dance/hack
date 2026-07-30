@@ -10,10 +10,118 @@ const RELEVANT_RUNTIME_STATES = new Set([
   "running",
 ]);
 
+export type SameCheckoutRuntimeTarget = {
+  readonly branch: string | null;
+  readonly composeProject: string;
+  readonly states: readonly string[];
+};
+
 export type SameCheckoutRetargetConflict = {
   readonly composeProject: string;
   readonly states: readonly string[];
 };
+
+export type ImplicitDownTargetResolution =
+  | {
+      readonly kind: "inferred";
+      readonly branch: string;
+      readonly composeProject: string;
+    }
+  | {
+      readonly kind: "retargeted";
+      readonly branch: string | null;
+      readonly composeProject: string;
+      readonly states: readonly string[];
+    }
+  | {
+      readonly kind: "ambiguous";
+      readonly targets: readonly SameCheckoutRuntimeTarget[];
+    };
+
+/** Find every Compose instance in one project family that belongs to this exact checkout. */
+export function findSameCheckoutRuntimeTargets(opts: {
+  readonly baseComposeProject: string;
+  readonly currentProjectDir: string;
+  readonly runtime: readonly RuntimeProject[];
+}): readonly SameCheckoutRuntimeTarget[] {
+  const currentProjectDir = canonicalPath(opts.currentProjectDir);
+  const branchPrefix = `${opts.baseComposeProject}--`;
+  const targets: SameCheckoutRuntimeTarget[] = [];
+
+  for (const project of opts.runtime) {
+    if (
+      project.workingDir === null ||
+      canonicalPath(project.workingDir) !== currentProjectDir
+    ) {
+      continue;
+    }
+
+    let branch: string | null | undefined;
+    if (project.project === opts.baseComposeProject) {
+      branch = null;
+    } else if (project.project.startsWith(branchPrefix)) {
+      branch = project.project.slice(branchPrefix.length);
+    }
+    if (branch === undefined || (branch !== null && branch.length === 0)) {
+      continue;
+    }
+
+    targets.push({
+      branch,
+      composeProject: project.project,
+      states: collectAllStates({ project }),
+    });
+  }
+
+  return targets.sort((left, right) =>
+    left.composeProject.localeCompare(right.composeProject)
+  );
+}
+
+/**
+ * Resolve an implicit linked-worktree down target without silently abandoning
+ * an instance after the Git branch is renamed.
+ */
+export function resolveImplicitDownTarget(opts: {
+  readonly baseComposeProject: string;
+  readonly currentProjectDir: string;
+  readonly inferredBranch: string;
+  readonly runtime: readonly RuntimeProject[];
+}): ImplicitDownTargetResolution {
+  const targets = findSameCheckoutRuntimeTargets({
+    baseComposeProject: opts.baseComposeProject,
+    currentProjectDir: opts.currentProjectDir,
+    runtime: opts.runtime,
+  });
+
+  if (targets.length === 0) {
+    return {
+      kind: "inferred",
+      branch: opts.inferredBranch,
+      composeProject: `${opts.baseComposeProject}--${opts.inferredBranch}`,
+    };
+  }
+
+  const onlyTarget = targets[0];
+  if (targets.length === 1 && onlyTarget) {
+    const inferredComposeProject = `${opts.baseComposeProject}--${opts.inferredBranch}`;
+    if (onlyTarget.composeProject === inferredComposeProject) {
+      return {
+        kind: "inferred",
+        branch: opts.inferredBranch,
+        composeProject: inferredComposeProject,
+      };
+    }
+    return {
+      kind: "retargeted",
+      branch: onlyTarget.branch,
+      composeProject: onlyTarget.composeProject,
+      states: onlyTarget.states,
+    };
+  }
+
+  return { kind: "ambiguous", targets };
+}
 
 /** Find non-terminal instances from the same checkout that differ from an auto-derived target. */
 export function findSameCheckoutRetargetConflicts(opts: {
@@ -64,11 +172,19 @@ export function buildWorktreeRetargetWarning(opts: {
 function collectRelevantStates(opts: {
   readonly project: RuntimeProject;
 }): readonly string[] {
+  return collectAllStates({ project: opts.project }).filter((state) =>
+    RELEVANT_RUNTIME_STATES.has(state)
+  );
+}
+
+function collectAllStates(opts: {
+  readonly project: RuntimeProject;
+}): readonly string[] {
   const states = new Set<string>();
   for (const service of opts.project.services.values()) {
     for (const container of service.containers) {
       const state = container.state.trim().toLowerCase();
-      if (RELEVANT_RUNTIME_STATES.has(state)) {
+      if (state.length > 0) {
         states.add(state);
       }
     }

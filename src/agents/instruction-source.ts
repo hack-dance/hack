@@ -142,6 +142,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Secret key inherits from the primary checkout automatically through the shared git common dir; set `HACK_ENV_SECRET_KEY` for CI or detached environments.",
       "`hack up` in a linked worktree defaults to a branch instance named after the worktree's git branch; a detached linked worktree requires an explicit `--branch`, unless config `worktree.auto_branch=false` explicitly opts into the base instance.",
       "Before `hack up` or `hack restart` auto-targets a new branch instance, Hack warns when the same worktree already owns a non-terminal instance; pass `--branch <name>` to make the target explicit.",
+      "Implicit `hack down` retargets a uniquely owned same-checkout runtime after a Git branch rename, including Created and stopped containers; when multiple runtimes belong to the checkout, pass `--branch <name>` explicitly.",
       "`hack doctor` flags divergent secret keys and dev_host collisions across checkouts.",
     ],
   },
@@ -212,6 +213,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Target only affected services with `hack up <service...> --detach`, `hack restart <service...>`, or `hack env apply --service <service>`; scoped operations skip project lifecycle hooks and implicit dependency startup.",
       "Use `hack env explain <KEY> --env <overlay> --service <service> --target <host|compose>` for redacted source, precedence, availability, and delivery diagnostics.",
       "Dependency installer services are detected generically by command or `hack.dependencies.bootstrap=true`; registry env references are preflighted before container mutation. Optional `hack.dependencies.cache-volume`, `hack.dependencies.lockfiles`, and `hack.dependencies.runtime-files` labels enable lockfile/runtime-keyed volumes shared across compatible worktrees.",
+      "`hack down --prune-caches` can remove only confirmed Compose-owned named volumes mounted exclusively at `.next` destinations or explicitly labeled `hack.cache.disposable=true`; it is confirmation-gated, requires `--yes` for JSON/scripted runs, and never performs broad volume pruning.",
     ],
   },
   {

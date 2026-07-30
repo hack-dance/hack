@@ -5408,10 +5408,7 @@ function buildServicesFromDrafts(opts: {
   readonly oauth: { readonly enabled: boolean; readonly tld: string };
 }) {
   return opts.drafts.map((d) => {
-    const env = new Map<string, string>([
-      ["CHOKIDAR_USEPOLLING", "true"],
-      ["WATCHPACK_POLLING", "true"],
-    ]);
+    const env = new Map<string, string>();
 
     const labels = new Map<string, string>();
     const networks = d.role === "http" ? ["hack-dev", "default"] : [];

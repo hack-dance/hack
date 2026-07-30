@@ -52,6 +52,11 @@ reviewing the generated compose file:
   obviously-wrong placeholder image (`alpine:3`) plus a `TODO(hack-init): ...`
   comment above the service in the compose file — instead of silently getting the
   default Bun/Node image. You must replace the image and command by hand.
+- **Native file watching**: generated services use the container runtime's native
+  file notifications. Hack does not force Chokidar or Watchpack polling because
+  polling a bind-mounted monorepo can consume substantial CPU and disk I/O. Add
+  `CHOKIDAR_USEPOLLING` or `WATCHPACK_POLLING` to an individual service only when
+  its runtime has a demonstrated file-notification problem.
 - **Backing-service warnings**: dependencies (`pg`, `ioredis`, `@temporalio/*`,
   `kafkajs`, `amqplib`, `mongodb`/`mongoose`, `prisma`, ...) and `.env`/`.env.example`
   key names (never values) are scanned for signals of postgres, mysql, redis,

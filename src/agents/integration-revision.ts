@@ -3,4 +3,4 @@
  * source test recomputes this value and fails whenever guidance changes
  * without a revision update.
  */
-export const HACK_AGENT_INTEGRATION_CONTENT_REVISION = "902b04fe1469";
+export const HACK_AGENT_INTEGRATION_CONTENT_REVISION = "581a1e870600";

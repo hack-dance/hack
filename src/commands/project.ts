@@ -102,6 +102,7 @@ import {
   emitCliResult,
   errorResult,
   errorResultFromUnknown,
+  HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
 import {
@@ -111,6 +112,7 @@ import {
 } from "../lib/compose-startup-state.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { resolveDependencyCacheOverride } from "../lib/dependency-cache.ts";
+import { removeDisposableCacheVolumes } from "../lib/disposable-cache-volumes.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
   isSlimExecutionMode,
@@ -210,7 +212,10 @@ import {
   RegistryCredentialPreflightError,
 } from "../lib/registry-credential-preflight.ts";
 import { buildRuntimeHostMetadataOverride } from "../lib/runtime-host-metadata.ts";
-import { readRuntimeProjects } from "../lib/runtime-projects.ts";
+import {
+  type RuntimeProject,
+  readRuntimeProjects,
+} from "../lib/runtime-projects.ts";
 import {
   formatSecretStoreDescriptor,
   resolveSecretStore,
@@ -240,6 +245,10 @@ import { readLinesFromStream } from "../ui/lines.ts";
 import type { LogStreamContext } from "../ui/log-stream.ts";
 import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
+import {
+  prepareDisposableCachePrune,
+  reconcileImplicitDownBranch,
+} from "./project-down-safety.ts";
 
 /** Regex for valid TLD/service/subdomain labels (lowercase alphanumeric with hyphens). */
 const SLUG_LABEL_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
@@ -330,6 +339,21 @@ const optTarget = defineOption({
     "Execution target routing (auto routes to remote when project execution mode requires it)",
 } as const);
 
+const optPruneCaches = defineOption({
+  name: "pruneCaches",
+  type: "boolean",
+  long: "--prune-caches",
+  description:
+    "After down, remove confirmed Compose-owned volumes mounted exactly at a .next directory",
+} as const);
+
+const optYes = defineOption({
+  name: "yes",
+  type: "boolean",
+  long: "--yes",
+  description: "Confirm --prune-caches without prompting",
+} as const);
+
 const initOptions = [
   optPath,
   optManual,
@@ -358,6 +382,8 @@ const downOptions = [
   optBranch,
   optProfile,
   optTarget,
+  optPruneCaches,
+  optYes,
   optJson,
 ] as const;
 const restartOptions = [
@@ -733,6 +759,7 @@ export type LifecycleJsonData = {
     readonly stopped: readonly string[];
     readonly failed: readonly string[];
   };
+  readonly cacheVolumesRemoved?: readonly string[];
   readonly durationMs: number;
 };
 
@@ -748,6 +775,7 @@ export function buildLifecycleJsonData(opts: {
   readonly completed?: readonly string[];
   readonly stopped?: readonly string[];
   readonly failed?: readonly string[];
+  readonly cacheVolumesRemoved?: readonly string[];
   readonly durationMs: number;
 }): LifecycleJsonData {
   return {
@@ -761,6 +789,9 @@ export function buildLifecycleJsonData(opts: {
       stopped: [...(opts.stopped ?? [])].sort(),
       failed: [...(opts.failed ?? [])].sort(),
     },
+    ...(opts.cacheVolumesRemoved
+      ? { cacheVolumesRemoved: [...opts.cacheVolumesRemoved].sort() }
+      : {}),
     durationMs: opts.durationMs,
   };
 }
@@ -6197,6 +6228,24 @@ async function maybePromptToStartGlobal(opts: {
   }
 }
 
+function writeDownNotice(opts: {
+  readonly json: boolean;
+  readonly level: "info" | "warn";
+  readonly message: string;
+}): void {
+  if (opts.json) {
+    process.stderr.write(
+      `${opts.level === "warn" ? "WARNING: " : ""}${opts.message}\n`
+    );
+    return;
+  }
+  if (opts.level === "warn") {
+    logger.warn({ message: opts.message });
+  } else {
+    logger.info({ message: opts.message });
+  }
+}
+
 async function handleDown({
   ctx,
   args,
@@ -6231,6 +6280,7 @@ async function handleDown({
   }
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Down coordinates remote routing, ownership reconciliation, lifecycle hooks, Compose teardown, optional cache cleanup, and JSON reporting in one ordered transaction.
 async function runDownCommand({
   ctx,
   args,
@@ -6250,14 +6300,29 @@ async function runDownCommand({
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
-  const branch = await resolveEffectiveBranchForCommand({
+  let branch = await resolveEffectiveBranchForCommand({
     project,
     branchOption: args.options.branch,
     noticeToStderr: json,
   });
   const profiles = parseCsvList(args.options.profile);
+  const pruneCaches = args.options.pruneCaches === true;
+  const confirmCachePrune = args.options.yes === true;
+  if (confirmCachePrune && !pruneCaches) {
+    throw new CliUsageError("--yes is only valid with --prune-caches.");
+  }
+  if (pruneCaches) {
+    const target = await resolveProjectLifecycleTarget({
+      project,
+      requestedTarget: args.options.target,
+    });
+    if (target.resolvedTarget !== "local") {
+      throw new CliUsageError(
+        "--prune-caches is local-only; run the cleanup on the machine that owns the Docker volumes."
+      );
+    }
+  }
 
-  await touchBranchUsageIfNeeded({ project, branch });
   const remoteDownCode = await runRemoteLifecycleCommand({
     project,
     action: "down",
@@ -6267,6 +6332,7 @@ async function runDownCommand({
     requestedTarget: args.options.target,
   });
   if (remoteDownCode !== null) {
+    await touchBranchUsageIfNeeded({ project, branch });
     if (json) {
       return emitRemoteLifecycleJson({
         action: "down",
@@ -6287,7 +6353,45 @@ async function runDownCommand({
   }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
+  let runtime: readonly RuntimeProject[] | null = null;
+  const implicitLinkedWorktreeTarget =
+    resolveBranchSlug(args.options.branch) === null && branch !== null;
+  if (implicitLinkedWorktreeTarget || pruneCaches) {
+    const runtimeResult = await readRuntimeProjects({ includeGlobal: false });
+    if (!runtimeResult.ok) {
+      throw new HackCliError({
+        code: "E_DOCKER_UNAVAILABLE",
+        message: `Cannot inspect runtime ownership before down: ${runtimeResult.error}`,
+      });
+    }
+    runtime = runtimeResult.runtime;
+  }
+  if (implicitLinkedWorktreeTarget && branch !== null && runtime) {
+    branch = reconcileImplicitDownBranch({
+      baseProjectName,
+      branch,
+      projectDir: project.projectDir,
+      runtime,
+      writeNotice: ({ level, message }) => {
+        writeDownNotice({ json, level, message });
+      },
+    });
+  }
+  await touchBranchUsageIfNeeded({ project, branch });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
+  const cachePruneCandidates =
+    pruneCaches && runtime
+      ? await prepareDisposableCachePrune({
+          composeProject: composeProjectName ?? baseProjectName,
+          json,
+          projectDir: project.projectDir,
+          runtime,
+          writeNotice: ({ level, message }) => {
+            writeDownNotice({ json, level, message });
+          },
+          yes: confirmCachePrune,
+        })
+      : [];
   const projectName = sanitizeProjectSlug(baseProjectName);
   const lifecycleComposeProject = resolveLifecycleComposeProjectName({
     projectName,
@@ -6370,6 +6474,9 @@ async function runDownCommand({
     }
     return code;
   }
+  const cacheRemoval = await removeDisposableCacheVolumes({
+    candidates: cachePruneCandidates,
+  });
   await removeProjectRuntimeStateEntry({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
@@ -6386,6 +6493,17 @@ async function runDownCommand({
   });
 
   if (!json) {
+    if (cacheRemoval.removed.length > 0) {
+      logger.success({
+        message: `Removed disposable .next cache volumes: ${cacheRemoval.removed.join(", ")}`,
+      });
+    }
+    if (cacheRemoval.failed.length > 0) {
+      logger.error({
+        message: `Project stopped, but cache volume removal failed: ${cacheRemoval.failed.map((failure) => `${failure.name} (${failure.error})`).join(", ")}`,
+      });
+      return 1;
+    }
     return afterCode;
   }
 
@@ -6398,6 +6516,20 @@ async function runDownCommand({
       exitCode: afterCode,
     });
   }
+  if (cacheRemoval.failed.length > 0) {
+    return emitLifecycleResult({
+      result: errorResult({
+        code: "E_COMPOSE_FAILED",
+        message:
+          "Project stopped, but one or more disposable cache volumes could not be removed.",
+        detail: {
+          removed: cacheRemoval.removed,
+          failed: cacheRemoval.failed,
+        },
+      }),
+      exitCode: 1,
+    });
+  }
 
   return emitLifecycleResult({
     result: okResult({
@@ -6407,6 +6539,7 @@ async function runDownCommand({
         branch,
         composeProject: composeProjectName ?? baseProjectName,
         stopped: classifyComposeStartupState(statesBeforeDown).running,
+        cacheVolumesRemoved: cacheRemoval.removed,
         durationMs: Date.now() - (startedAtMs ?? Date.now()),
       }),
     }),

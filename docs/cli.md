@@ -166,6 +166,13 @@ same worktree. If the worktree's current branch would auto-target a different Co
 prints a warning naming both the existing and new targets. Pass `--branch <name>` to make the target
 explicit.
 
+`hack down` applies a stricter ownership rule. When a linked worktree's Git branch was renamed and
+that exact checkout owns one differently named Compose runtime, implicit down targets the existing
+runtime instead of succeeding against an empty newly derived name. Running, Created, and stopped
+containers all count as ownership evidence. If the checkout owns multiple runtimes, implicit down
+fails and lists them; pass `--branch <name>` to select one. Exact checkout paths and Compose project
+families are required, so Hack never retargets to a sibling checkout.
+
 A detached linked worktree has no branch name to derive, so these commands fail instead of silently
 targeting the base instance. Pass `--branch <name>` to select an isolated instance, or set
 `worktree.auto_branch` to `false` only when intentionally opting into the base instance.
@@ -176,6 +183,32 @@ Opt out:
 - set `worktree.auto_branch` to `false` in `.hack/hack.config.json` to target the base instance.
 
 The primary checkout is unchanged: no `--branch` means the base instance.
+
+### Disposable Next cache volumes
+
+Compose preserves named volumes on ordinary `down`, which is correct for application data but can
+leave branch-specific `.next` build caches behind. Use the explicit cleanup path when those caches
+are disposable:
+
+```bash
+hack down --prune-caches
+# scripted:
+hack down --prune-caches --yes --json
+```
+
+Hack snapshots mounts before stopping the target and considers a volume removable only when all of
+these are true:
+
+- the container belongs to the exact targeted Compose project and checkout;
+- the mount type is a named volume and its destination's final path segment is `.next`;
+- `docker volume inspect` independently reports both the exact
+  `com.docker.compose.project` label and a `com.docker.compose.volume` label.
+
+Interactive cleanup shows the exact volumes, services, and destinations and defaults to “no.”
+`--json` and other scripted use must add `--yes`; otherwise the command fails before down with
+`E_INTERACTIVE_REQUIRED`. Postgres, Redis, dependency, bind, external, unlabeled, differently
+mounted, and sibling-checkout volumes do not satisfy the removal contract. Hack deliberately does
+not run broad `docker volume prune` or `docker compose down -v`.
 
 ### Runtime host metadata
 

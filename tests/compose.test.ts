@@ -36,3 +36,34 @@ test("renderCompose emits ingress network and service fields", () => {
   expect(api.labels).toEqual({ caddy: "api.myapp.hack" });
   expect(api.networks).toEqual([DEFAULT_INGRESS_NETWORK, "default"]);
 });
+
+test("renderCompose preserves explicit service-level file watching configuration", () => {
+  const yaml = renderCompose({
+    name: "polling-opt-in",
+    services: [
+      {
+        name: "web",
+        role: "http",
+        image: "imbios/bun-node:latest",
+        workingDir: "/app",
+        command: "bun run dev",
+        env: new Map([
+          ["CHOKIDAR_USEPOLLING", "true"],
+          ["WATCHPACK_POLLING", "750"],
+        ]),
+        labels: new Map(),
+        networks: [],
+      },
+    ],
+  });
+
+  const parsed = YAML.parse(yaml) as {
+    services: {
+      web: { environment?: Record<string, string> };
+    };
+  };
+  expect(parsed.services.web.environment).toEqual({
+    CHOKIDAR_USEPOLLING: "true",
+    WATCHPACK_POLLING: "750",
+  });
+});

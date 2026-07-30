@@ -48,7 +48,7 @@ This section is easy to find, but it does not lead the product story.
 
 - New to `hack`: [Core docs](core.md)
 - Setting up with a coding agent: [Agent-first setup](guides/agent-first-setup.md)
-- Reviewing watcher, worktree-down, or `.next` cache behavior:
+- Reviewing watcher, worktree-down, or disposable cache behavior:
   [Development runtime safety](guides/development-runtime-safety.md)
 - Looking for command or API details: [Extensions & reference](reference.md), including the generated [CLI reference](reference/cli.md)
 - Need unsupported experimental remote workflows: [Beta workflows](beta.md)

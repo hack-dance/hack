@@ -62,12 +62,28 @@ An implicit `hack down` in a linked worktree uses Docker's Compose labels and ex
 
 Canonical checkout paths prevent one worktree from stopping a sibling's runtime.
 
-## Disposable `.next` cleanup contract
+## Disposable cache cleanup contract
 
 Ordinary `hack down` preserves every named volume. `hack down --prune-caches` is a narrow,
-confirmation-gated addition for Next build caches. It removes only exact volume names observed on
-the target containers at a mount whose final path segment is `.next`, then independently verifies
-the volume's Compose project and logical-volume labels.
+confirmation-gated addition for build caches. It removes only exact volume names observed on the
+target containers, then independently verifies the volume's Compose project and logical-volume
+labels. A named volume is eligible when every observed destination ends in `.next`, or when the
+top-level Compose volume explicitly declares `hack.cache.disposable: "true"`.
+
+The explicit label makes cleanup framework-agnostic without guessing whether destinations such as
+`.turbo`, `target`, `.gradle`, or a generic `cache` directory contain disposable output:
+
+```yaml
+services:
+  worker:
+    volumes:
+      - build-cache:/app/target
+
+volumes:
+  build-cache:
+    labels:
+      hack.cache.disposable: "true"
+```
 
 Runtime inventory mount records now expose the Docker volume `name` separately from `source`
 (the engine storage path), so callers can inspect the same removal identity without guessing.
@@ -75,14 +91,14 @@ Runtime inventory mount records now expose the Docker volume `name` separately f
 The cleanup intentionally excludes:
 
 - bind mounts;
-- database, Redis, application-upload, and dependency destinations;
-- external or unlabeled volumes;
+- database, Redis, application-upload, and dependency volumes unless explicitly marked disposable;
+- external or unlabeled non-Next volumes;
 - volumes owned by another Compose project or checkout;
 - loose volume-name matches.
 
-Use `--yes` only after reviewing the same project-scoped evidence. Hack does not provide a broad
-cache-prune command in this change because Docker volume names alone cannot distinguish disposable
-build output from durable application data.
+Use `--yes` only after reviewing the same project-scoped evidence. Hack does not infer disposability
+from arbitrary volume names or mount paths because those signals cannot distinguish generated build
+output from durable application data.
 
 ## Doctor boundary
 

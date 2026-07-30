@@ -138,7 +138,7 @@ hack down [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
-| `--prune-caches` | After down, remove confirmed Compose-owned volumes mounted exactly at a .next directory |
+| `--prune-caches` | After down, remove confirmed Compose-owned disposable cache volumes |
 | `--yes` | Confirm --prune-caches without prompting |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |

@@ -8,11 +8,16 @@ import { exec } from "./shell.ts";
 const COMPOSE_PROJECT_LABEL = "com.docker.compose.project";
 const COMPOSE_SERVICE_LABEL = "com.docker.compose.service";
 const COMPOSE_VOLUME_LABEL = "com.docker.compose.volume";
+const DISPOSABLE_CACHE_LABEL = "hack.cache.disposable";
 
-export type DisposableCacheVolumeCandidate = {
+export type MountedNamedVolumeCandidate = {
   readonly name: string;
   readonly destinations: readonly string[];
   readonly services: readonly string[];
+};
+
+export type DisposableCacheVolumeCandidate = MountedNamedVolumeCandidate & {
+  readonly reason: "explicit-label" | "next-destination";
 };
 
 export type DisposableCacheVolumeRemoval = {
@@ -21,14 +26,14 @@ export type DisposableCacheVolumeRemoval = {
 };
 
 /**
- * Find named volumes mounted as a Next build cache by containers owned by one
- * exact Compose project and checkout.
+ * Find named volumes mounted by containers owned by one exact Compose project
+ * and checkout. Disposable status is verified independently from the volume.
  */
-export function findDisposableNextCacheVolumes(opts: {
+export function findMountedNamedVolumeCandidates(opts: {
   readonly composeProject: string;
   readonly currentProjectDir: string;
   readonly runtime: readonly RuntimeProject[];
-}): readonly DisposableCacheVolumeCandidate[] {
+}): readonly MountedNamedVolumeCandidate[] {
   const currentProjectDir = canonicalPath(opts.currentProjectDir);
   const byName = new Map<
     string,
@@ -82,11 +87,7 @@ function collectProjectCacheVolumes(opts: {
 
       for (const mount of container.mounts) {
         const volumeName = mount.name?.trim() || mount.source.trim();
-        if (
-          mount.type.toLowerCase() !== "volume" ||
-          volumeName.length === 0 ||
-          !isNextCacheDestination(mount.destination)
-        ) {
+        if (mount.type.toLowerCase() !== "volume" || volumeName.length === 0) {
           continue;
         }
         const current = opts.byName.get(volumeName) ?? {
@@ -102,12 +103,12 @@ function collectProjectCacheVolumes(opts: {
 }
 
 /**
- * Independently verify that candidate volumes carry Docker Compose ownership
- * labels for the exact target project before allowing removal.
+ * Independently verify exact Docker Compose ownership, then require either a
+ * built-in .next destination or an explicit disposable-cache volume label.
  */
-export async function verifyComposeOwnedCacheVolumes(opts: {
+export async function verifyDisposableCacheVolumes(opts: {
   readonly composeProject: string;
-  readonly candidates: readonly DisposableCacheVolumeCandidate[];
+  readonly candidates: readonly MountedNamedVolumeCandidate[];
 }): Promise<readonly DisposableCacheVolumeCandidate[]> {
   const verified: DisposableCacheVolumeCandidate[] = [];
 
@@ -126,7 +127,18 @@ export async function verifyComposeOwnedCacheVolumes(opts: {
     ) {
       continue;
     }
-    verified.push(candidate);
+    const explicitlyDisposable =
+      labels[DISPOSABLE_CACHE_LABEL]?.trim().toLowerCase() === "true";
+    const nextDestinationOnly =
+      candidate.destinations.length > 0 &&
+      candidate.destinations.every(isNextCacheDestination);
+    if (!(explicitlyDisposable || nextDestinationOnly)) {
+      continue;
+    }
+    verified.push({
+      ...candidate,
+      reason: explicitlyDisposable ? "explicit-label" : "next-destination",
+    });
   }
 
   return verified;
@@ -179,7 +191,11 @@ function parseVolumeLabels(stdout: string): Record<string, string> | null {
     return null;
   }
   const out: Record<string, string> = {};
-  for (const key of [COMPOSE_PROJECT_LABEL, COMPOSE_VOLUME_LABEL]) {
+  for (const key of [
+    COMPOSE_PROJECT_LABEL,
+    COMPOSE_VOLUME_LABEL,
+    DISPOSABLE_CACHE_LABEL,
+  ]) {
     const value = getString(labels, key);
     if (value) {
       out[key] = value;

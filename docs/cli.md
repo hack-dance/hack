@@ -184,11 +184,11 @@ Opt out:
 
 The primary checkout is unchanged: no `--branch` means the base instance.
 
-### Disposable Next cache volumes
+### Disposable cache volumes
 
 Compose preserves named volumes on ordinary `down`, which is correct for application data but can
-leave branch-specific `.next` build caches behind. Use the explicit cleanup path when those caches
-are disposable:
+leave branch-specific build caches behind. Use the explicit cleanup path when those caches are
+disposable:
 
 ```bash
 hack down --prune-caches
@@ -196,19 +196,40 @@ hack down --prune-caches
 hack down --prune-caches --yes --json
 ```
 
+Hack recognizes named volumes mounted only at `.next` destinations as disposable Next build
+caches. For any other framework, library, or language, mark the top-level Compose volume explicitly:
+
+```yaml
+services:
+  web:
+    volumes:
+      - turbo-cache:/app/.turbo
+
+volumes:
+  turbo-cache:
+    labels:
+      hack.cache.disposable: "true"
+```
+
+The label applies to the exact volume, so the same contract works for Rust `target`, Gradle, Go,
+Python, or other generated caches without relying on names or destination guesses.
+
 Hack snapshots mounts before stopping the target and considers a volume removable only when all of
 these are true:
 
 - the container belongs to the exact targeted Compose project and checkout;
-- the mount type is a named volume and its destination's final path segment is `.next`;
+- the mount type is a named volume;
 - `docker volume inspect` independently reports both the exact
-  `com.docker.compose.project` label and a `com.docker.compose.volume` label.
+  `com.docker.compose.project` label and a `com.docker.compose.volume` label;
+- every observed destination's final path segment is `.next`, or the volume itself has
+  `hack.cache.disposable=true`.
 
 Interactive cleanup shows the exact volumes, services, and destinations and defaults to “no.”
 `--json` and other scripted use must add `--yes`; otherwise the command fails before down with
-`E_INTERACTIVE_REQUIRED`. Postgres, Redis, dependency, bind, external, unlabeled, differently
-mounted, and sibling-checkout volumes do not satisfy the removal contract. Hack deliberately does
-not run broad `docker volume prune` or `docker compose down -v`.
+`E_INTERACTIVE_REQUIRED`. Postgres, Redis, dependency, application-data, bind, external, unlabeled
+non-Next, and sibling-checkout volumes do not satisfy the removal contract unless a project author
+deliberately marks that exact Compose volume disposable. Hack deliberately does not run broad
+`docker volume prune` or `docker compose down -v`.
 
 ### Runtime host metadata
 

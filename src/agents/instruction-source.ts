@@ -213,7 +213,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Target only affected services with `hack up <service...> --detach`, `hack restart <service...>`, or `hack env apply --service <service>`; scoped operations skip project lifecycle hooks and implicit dependency startup.",
       "Use `hack env explain <KEY> --env <overlay> --service <service> --target <host|compose>` for redacted source, precedence, availability, and delivery diagnostics.",
       "Dependency installer services are detected generically by command or `hack.dependencies.bootstrap=true`; registry env references are preflighted before container mutation. Optional `hack.dependencies.cache-volume`, `hack.dependencies.lockfiles`, and `hack.dependencies.runtime-files` labels enable lockfile/runtime-keyed volumes shared across compatible worktrees.",
-      "`hack down --prune-caches` can remove only confirmed Compose-owned named volumes mounted exactly at a `.next` directory; it is confirmation-gated, requires `--yes` for JSON/scripted runs, and never performs broad volume pruning.",
+      "`hack down --prune-caches` can remove only confirmed Compose-owned named volumes mounted exclusively at `.next` destinations or explicitly labeled `hack.cache.disposable=true`; it is confirmation-gated, requires `--yes` for JSON/scripted runs, and never performs broad volume pruning.",
     ],
   },
   {

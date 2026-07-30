@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  findDisposableNextCacheVolumes,
+  findMountedNamedVolumeCandidates,
   removeDisposableCacheVolumes,
-  verifyComposeOwnedCacheVolumes,
+  verifyDisposableCacheVolumes,
 } from "../src/lib/disposable-cache-volumes.ts";
 import type {
   RuntimeContainer,
@@ -30,7 +30,7 @@ afterEach(async () => {
   }
 });
 
-test("cache discovery requires exact checkout, project, Compose labels, and .next destination", () => {
+test("mounted-volume discovery requires exact checkout, project, and Compose labels", () => {
   const owned = buildRuntimeProject({
     project: "demo--feature",
     workingDir: "/repo/.hack",
@@ -105,12 +105,17 @@ test("cache discovery requires exact checkout, project, Compose labels, and .nex
   });
 
   expect(
-    findDisposableNextCacheVolumes({
+    findMountedNamedVolumeCandidates({
       composeProject: "demo--feature",
       currentProjectDir: "/repo/.hack",
       runtime: [owned, otherCheckout, otherProject],
     })
   ).toEqual([
+    {
+      name: "demo-feature-db",
+      destinations: ["/var/lib/postgresql/data"],
+      services: ["web"],
+    },
     {
       name: "demo-feature-web-next",
       destinations: ["/app/apps/web/.next"],
@@ -130,7 +135,7 @@ test("cache discovery requires exact checkout, project, Compose labels, and .nex
   });
 });
 
-test("cache discovery rejects a .next mount without matching container ownership labels", () => {
+test("mounted-volume discovery rejects a mount without matching container ownership labels", () => {
   const runtime = buildRuntimeProject({
     project: "demo--feature",
     workingDir: "/repo/.hack",
@@ -155,7 +160,7 @@ test("cache discovery rejects a .next mount without matching container ownership
   });
 
   expect(
-    findDisposableNextCacheVolumes({
+    findMountedNamedVolumeCandidates({
       composeProject: "demo--feature",
       currentProjectDir: "/repo/.hack",
       runtime: [runtime],
@@ -163,26 +168,61 @@ test("cache discovery rejects a .next mount without matching container ownership
   ).toEqual([]);
 });
 
-test("volume verification and removal require independent Compose volume labels", async () => {
+test("verification accepts .next or explicit disposable labels and protects data volumes", async () => {
   const dockerLogPath = await installDockerStub();
   const candidates = [
     { name: "owned-next", destinations: ["/app/.next"], services: ["web"] },
+    {
+      name: "owned-turbo",
+      destinations: ["/app/.turbo"],
+      services: ["web"],
+    },
+    {
+      name: "owned-rust-target",
+      destinations: ["/app/target"],
+      services: ["worker"],
+    },
+    {
+      name: "owned-database",
+      destinations: ["/var/lib/postgresql/data"],
+      services: ["database"],
+    },
+    {
+      name: "unlabeled-turbo",
+      destinations: ["/app/.turbo"],
+      services: ["web"],
+    },
     { name: "foreign-next", destinations: ["/app/.next"], services: ["web"] },
   ];
 
-  const verified = await verifyComposeOwnedCacheVolumes({
+  const verified = await verifyDisposableCacheVolumes({
     composeProject: "demo--feature",
     candidates,
   });
-  expect(verified.map((candidate) => candidate.name)).toEqual(["owned-next"]);
+  expect(
+    verified.map((candidate) => ({
+      name: candidate.name,
+      reason: candidate.reason,
+    }))
+  ).toEqual([
+    { name: "owned-next", reason: "next-destination" },
+    { name: "owned-turbo", reason: "explicit-label" },
+    { name: "owned-rust-target", reason: "explicit-label" },
+  ]);
 
   const removal = await removeDisposableCacheVolumes({
     candidates: verified,
   });
-  expect(removal).toEqual({ removed: ["owned-next"], failed: [] });
-  expect(await Bun.file(dockerLogPath).text()).toContain(
-    "volume rm owned-next"
-  );
+  expect(removal).toEqual({
+    removed: ["owned-next", "owned-turbo", "owned-rust-target"],
+    failed: [],
+  });
+  const dockerLog = await Bun.file(dockerLogPath).text();
+  expect(dockerLog).toContain("volume rm owned-next");
+  expect(dockerLog).toContain("volume rm owned-turbo");
+  expect(dockerLog).toContain("volume rm owned-rust-target");
+  expect(dockerLog).not.toContain("volume rm owned-database");
+  expect(dockerLog).not.toContain("volume rm unlabeled-turbo");
 });
 
 async function installDockerStub(): Promise<string> {
@@ -202,11 +242,33 @@ async function installDockerStub(): Promise<string> {
       '  printf \'[{"Name":"owned-next","Labels":{"com.docker.compose.project":"demo--feature","com.docker.compose.volume":"next"}}]\\n\'',
       "  exit 0",
       "fi",
+      'if [ "$1 $2 $3" = "volume inspect owned-turbo" ]; then',
+      '  printf \'[{"Name":"owned-turbo","Labels":{"com.docker.compose.project":"demo--feature","com.docker.compose.volume":"turbo","hack.cache.disposable":"true"}}]\\n\'',
+      "  exit 0",
+      "fi",
+      'if [ "$1 $2 $3" = "volume inspect owned-rust-target" ]; then',
+      '  printf \'[{"Name":"owned-rust-target","Labels":{"com.docker.compose.project":"demo--feature","com.docker.compose.volume":"rust-target","hack.cache.disposable":"true"}}]\\n\'',
+      "  exit 0",
+      "fi",
+      'if [ "$1 $2 $3" = "volume inspect owned-database" ]; then',
+      '  printf \'[{"Name":"owned-database","Labels":{"com.docker.compose.project":"demo--feature","com.docker.compose.volume":"database"}}]\\n\'',
+      "  exit 0",
+      "fi",
+      'if [ "$1 $2 $3" = "volume inspect unlabeled-turbo" ]; then',
+      '  printf \'[{"Name":"unlabeled-turbo","Labels":{"com.docker.compose.project":"demo--feature","com.docker.compose.volume":"turbo"}}]\\n\'',
+      "  exit 0",
+      "fi",
       'if [ "$1 $2 $3" = "volume inspect foreign-next" ]; then',
       '  printf \'[{"Name":"foreign-next","Labels":{"com.docker.compose.project":"other","com.docker.compose.volume":"next"}}]\\n\'',
       "  exit 0",
       "fi",
       'if [ "$1 $2 $3" = "volume rm owned-next" ]; then',
+      "  exit 0",
+      "fi",
+      'if [ "$1 $2 $3" = "volume rm owned-turbo" ]; then',
+      "  exit 0",
+      "fi",
+      'if [ "$1 $2 $3" = "volume rm owned-rust-target" ]; then',
       "  exit 0",
       "fi",
       "exit 1",

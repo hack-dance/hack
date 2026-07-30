@@ -2,8 +2,8 @@ import { CliUsageError } from "../cli/command.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import {
   type DisposableCacheVolumeCandidate,
-  findDisposableNextCacheVolumes,
-  verifyComposeOwnedCacheVolumes,
+  findMountedNamedVolumeCandidates,
+  verifyDisposableCacheVolumes,
 } from "../lib/disposable-cache-volumes.ts";
 import { confirmSafe } from "../lib/interactivity.ts";
 import type { RuntimeProject } from "../lib/runtime-projects.ts";
@@ -58,25 +58,19 @@ export async function prepareDisposableCachePrune(opts: {
   readonly writeNotice: (notice: DownSafetyNotice) => void;
   readonly yes: boolean;
 }): Promise<readonly DisposableCacheVolumeCandidate[]> {
-  const observed = findDisposableNextCacheVolumes({
+  const observed = findMountedNamedVolumeCandidates({
     composeProject: opts.composeProject,
     currentProjectDir: opts.projectDir,
     runtime: opts.runtime,
   });
-  const verified = await verifyComposeOwnedCacheVolumes({
+  const verified = await verifyDisposableCacheVolumes({
     composeProject: opts.composeProject,
     candidates: observed,
   });
-  if (verified.length !== observed.length) {
-    opts.writeNotice({
-      level: "warn",
-      message: `Skipped ${observed.length - verified.length} .next volume candidate(s) without exact Docker Compose ownership labels for "${opts.composeProject}".`,
-    });
-  }
   if (verified.length === 0) {
     opts.writeNotice({
       level: "info",
-      message: `No removable Compose-owned .next cache volumes found for "${opts.composeProject}".`,
+      message: `No removable Compose-owned disposable cache volumes found for "${opts.composeProject}".`,
     });
     return [];
   }
@@ -86,7 +80,7 @@ export async function prepareDisposableCachePrune(opts: {
   if (opts.json) {
     throw new HackCliError({
       code: "E_INTERACTIVE_REQUIRED",
-      message: `Removing ${verified.length} .next cache volume(s) requires confirmation. Re-run with --prune-caches --yes.`,
+      message: `Removing ${verified.length} disposable cache volume(s) requires confirmation. Re-run with --prune-caches --yes.`,
       detail: {
         composeProject: opts.composeProject,
         volumes: verified.map((candidate) => candidate.name),
@@ -94,17 +88,20 @@ export async function prepareDisposableCachePrune(opts: {
     });
   }
 
-  await display.section("Disposable Next cache volumes");
+  await display.section("Disposable cache volumes");
   await display.table({
-    columns: ["Volume", "Services", "Mount destinations"],
+    columns: ["Volume", "Selection", "Services", "Mount destinations"],
     rows: verified.map((candidate) => [
       candidate.name,
+      candidate.reason === "explicit-label"
+        ? "hack.cache.disposable=true"
+        : ".next destination",
       candidate.services.join(", "),
       candidate.destinations.join(", "),
     ]),
   });
   const confirmed = await confirmSafe({
-    message: `Remove these ${verified.length} Compose-owned .next cache volume(s) after the project stops?`,
+    message: `Remove these ${verified.length} Compose-owned disposable cache volume(s) after the project stops?`,
     initialValue: false,
     nonInteractive: "fail",
     hint: "Re-run with --prune-caches --yes to confirm non-interactively.",

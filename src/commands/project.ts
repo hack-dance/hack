@@ -344,7 +344,7 @@ const optPruneCaches = defineOption({
   type: "boolean",
   long: "--prune-caches",
   description:
-    "After down, remove confirmed Compose-owned volumes mounted exactly at a .next directory",
+    "After down, remove confirmed Compose-owned disposable cache volumes",
 } as const);
 
 const optYes = defineOption({
@@ -6495,7 +6495,7 @@ async function runDownCommand({
   if (!json) {
     if (cacheRemoval.removed.length > 0) {
       logger.success({
-        message: `Removed disposable .next cache volumes: ${cacheRemoval.removed.join(", ")}`,
+        message: `Removed disposable cache volumes: ${cacheRemoval.removed.join(", ")}`,
       });
     }
     if (cacheRemoval.failed.length > 0) {

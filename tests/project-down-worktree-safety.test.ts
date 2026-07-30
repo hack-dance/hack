@@ -249,6 +249,11 @@ test("cache pruning is confirmation-gated and never selects application data mou
           },
           {
             type: "volume",
+            source: "owned-turbo",
+            destination: "/app/.turbo",
+          },
+          {
+            type: "volume",
             source: "database-data",
             destination: "/var/lib/postgresql/data",
           },
@@ -269,7 +274,7 @@ test("cache pruning is confirmation-gated and never selects application data mou
     ok: false,
     error: {
       code: "E_INTERACTIVE_REQUIRED",
-      detail: { volumes: ["owned-next"] },
+      detail: { volumes: ["owned-next", "owned-turbo"] },
     },
   });
   let log = await readFile(fixture.dockerLogPath, "utf8");
@@ -287,10 +292,11 @@ test("cache pruning is confirmation-gated and never selects application data mou
   expect(confirmed.exitCode).toBe(0);
   expect(JSON.parse(confirmed.stdout)).toMatchObject({
     ok: true,
-    data: { cacheVolumesRemoved: ["owned-next"] },
+    data: { cacheVolumesRemoved: ["owned-next", "owned-turbo"] },
   });
   log = await readFile(fixture.dockerLogPath, "utf8");
   expect(log).toContain("volume rm owned-next");
+  expect(log).toContain("volume rm owned-turbo");
   expect(log).not.toContain("volume rm database-data");
 });
 
@@ -362,7 +368,14 @@ async function createWorktreeFixture(): Promise<{
       '  printf \'[{"Name":"owned-next","Labels":{"com.docker.compose.project":"downsafe--feature-current","com.docker.compose.volume":"next"}}]\\n\'',
       "  exit 0",
       "fi",
+      'if [ "$1 $2 $3" = "volume inspect owned-turbo" ]; then',
+      '  printf \'[{"Name":"owned-turbo","Labels":{"com.docker.compose.project":"downsafe--feature-current","com.docker.compose.volume":"turbo","hack.cache.disposable":"true"}}]\\n\'',
+      "  exit 0",
+      "fi",
       'if [ "$1 $2 $3" = "volume rm owned-next" ]; then',
+      "  exit 0",
+      "fi",
+      'if [ "$1 $2 $3" = "volume rm owned-turbo" ]; then',
       "  exit 0",
       "fi",
       "exit 0",

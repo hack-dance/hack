@@ -3,11 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  checkCodexSkill,
-  installCodexSkill,
-  renderCodexSkill,
-} from "../src/agents/codex-skill.ts";
+import { renderCodexSkill } from "../src/agents/codex-skill.ts";
 import {
   checkCursorRules,
   installCursorRules,
@@ -226,25 +222,15 @@ test("checkCursorRules detects content drift as stale", async () => {
   expect(stale.status).toBe("stale");
 });
 
-test("checkCodexSkill detects content drift as stale", async () => {
-  const repoRoot = await setupTempRepo();
-  await installCodexSkill({ scope: "project", projectRoot: repoRoot });
-
-  const fresh = await checkCodexSkill({
-    scope: "project",
-    projectRoot: repoRoot,
-  });
-  expect(fresh.status).toBe("noop");
-
-  const skillPath = join(repoRoot, ".codex", "skills", "hack-cli", "SKILL.md");
-  const content = await Bun.file(skillPath).text();
-  await Bun.write(
-    skillPath,
-    content.replace("## Standard workflow", "## Old workflow")
+test("bundled Codex skill matches the canonical renderer", async () => {
+  const skillPath = join(
+    import.meta.dir,
+    "..",
+    "plugins",
+    "hack",
+    "skills",
+    "hack-cli",
+    "SKILL.md"
   );
-  const stale = await checkCodexSkill({
-    scope: "project",
-    projectRoot: repoRoot,
-  });
-  expect(stale.status).toBe("stale");
+  expect(await Bun.file(skillPath).text()).toBe(renderCodexSkill());
 });

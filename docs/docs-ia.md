@@ -21,8 +21,9 @@ remote/control-plane features.
 - `docs/guides/global-settings.md` — global config
 - `docs/guides/agent-first-setup.md` — agent-assisted onboarding (`hack init --with`, `hack agent onboard`)
 - `docs/guides/prerequisite-detection-matrix.md` — environment prerequisite checks
-- Generated agent-facing guidance: `AGENTS.md`/`CLAUDE.md` snippets, `.codex/skills/hack-cli/SKILL.md`,
-  and `hack-init` skill/MCP prompt content, all rendered from `src/agents/instruction-source.ts`
+- Generated agent-facing guidance: `AGENTS.md`/`CLAUDE.md` snippets, the Hack plugin's bundled
+  `hack-cli` skill, and `hack-init` skill/MCP prompt content, all rendered from
+  `src/agents/instruction-source.ts`
   (canonical source) via `src/agents/*` and `src/mcp/agent-docs.ts`.
 
 New docs belong here when they describe supported v3 CLI surface a user hits without opting into
@@ -92,7 +93,7 @@ extend `hack` (authoring extensions, SDK usage) rather than how to use it.
 
 `docs/reference/cli.md` is generated from the command specs (`bun run docs:cli-reference`) and
 must not be hand-edited. Agent-facing instruction surfaces (`AGENTS.md`/`CLAUDE.md` snippets, the
-Codex skill, Cursor rules, the session primer) are all rendered from the canonical section list in
+native plugin skills/rules, the session primer) are all rendered from the canonical section list in
 `src/agents/instruction-source.ts`; update that file, not the individual renderers, when agent
 guidance needs to change, then regenerate.
 

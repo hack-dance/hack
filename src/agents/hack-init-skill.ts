@@ -15,11 +15,11 @@ import { normalizeInstructionText } from "./instruction-source.ts";
  * `hack-init` MCP prompt and follow it. The onboarding content itself lives in
  * `src/agents/onboarding-prompt.ts` — never in the installed skill file.
  *
- * Installed for both Claude Code (`.claude/skills/hack-init/SKILL.md`) and
- * Codex (`.codex/skills/hack-init/SKILL.md`) at project or user scope.
+ * Bundled in the native Hack plugins. The standalone Claude installer remains
+ * only for recognizing and safely migrating artifacts from older releases.
  */
 
-export type HackInitSkillClient = "claude" | "codex";
+export type HackInitSkillClient = "claude";
 
 export type HackInitSkillScope = "project" | "user";
 
@@ -43,12 +43,10 @@ const SKILL_FILENAME = "SKILL.md";
 
 const SKILL_DIRS: Readonly<Record<HackInitSkillClient, string>> = {
   claude: ".claude/skills",
-  codex: ".codex/skills",
 };
 
 const SETUP_COMMANDS: Readonly<Record<HackInitSkillClient, string>> = {
   claude: "hack setup claude",
-  codex: "hack setup codex",
 };
 
 /**

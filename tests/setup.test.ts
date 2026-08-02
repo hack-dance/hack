@@ -3,7 +3,6 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installClaudeHooks } from "../src/agents/claude.ts";
-import { installCodexSkill } from "../src/agents/codex-skill.ts";
 import { installCursorRules } from "../src/agents/cursor.ts";
 import {
   buildInitAssistantReport,
@@ -59,26 +58,6 @@ test("installClaudeHooks writes settings.local.json hooks", async () => {
 
   expect(containsCommand(sessionHooks, "hack agent prime")).toBe(true);
   expect(containsCommand(preCompactHooks, "hack agent prime")).toBe(true);
-});
-
-test("installCodexSkill writes SKILL.md with hack-cli frontmatter", async () => {
-  const repoRoot = await setupTempRepo();
-  const result = await installCodexSkill({
-    scope: "project",
-    projectRoot: repoRoot,
-  });
-
-  expect(result.status).toBe("created");
-  const skillPath = join(repoRoot, ".codex", "skills", "hack-cli", "SKILL.md");
-  const content = await Bun.file(skillPath).text();
-  expect(content).toContain("name: hack-cli");
-  expect(content).toContain("hack setup cursor");
-  expect(content).toContain("## Product boundary");
-  expect(content).toContain(
-    "Experimental and unsupported: remote/gateway/node/dispatch"
-  );
-  expect(content).toContain("singleton.ports");
-  expect(content).not.toContain(".hack/hack.env.json");
 });
 
 test("renderAgentPrimer is CLI-first and mentions MCP", () => {

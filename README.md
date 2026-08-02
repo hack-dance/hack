@@ -46,7 +46,8 @@ the branch — review a PR while your main checkout keeps running.
 **Built for agents.** `hack init --with claude|codex` hands setup to an agent.
 Machine surfaces are first-class: `--json` envelopes with stable error codes,
 `--no-interactive`, and agent instructions that sync themselves into
-AGENTS.md/CLAUDE.md, Cursor rules, and Codex skills.
+AGENTS.md/CLAUDE.md. Cursor, Claude Code, and Codex support ship as native,
+user-installed Hack plugins from this repository's marketplaces.
 
 ## More than ports
 

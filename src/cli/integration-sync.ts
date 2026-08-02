@@ -1,6 +1,15 @@
-import { checkClaudeHooks, installClaudeHooks } from "../agents/claude.ts";
-import { checkCodexSkill, installCodexSkill } from "../agents/codex-skill.ts";
-import { checkCursorRules, installCursorRules } from "../agents/cursor.ts";
+import {
+  checkDeprecatedHackClaudeIntegration,
+  removeDeprecatedHackClaudeIntegration,
+} from "../agents/claude-plugin.ts";
+import {
+  checkDeprecatedHackCodexIntegration,
+  removeDeprecatedHackCodexIntegration,
+} from "../agents/codex-plugin.ts";
+import {
+  checkDeprecatedHackCursorIntegration,
+  removeDeprecatedHackCursorIntegration,
+} from "../agents/cursor-plugin.ts";
 import { HACK_AGENT_INTEGRATION_CLI_VERSION } from "../agents/instruction-source.ts";
 import {
   checkDeprecatedSharedHackSkills,
@@ -22,12 +31,6 @@ import {
   checkAgentDocs,
   upsertAgentDocs,
 } from "../mcp/agent-docs.ts";
-import {
-  checkMcpConfig,
-  installMcpConfig,
-  type McpCheckResult,
-  type McpInstallResult,
-} from "../mcp/install.ts";
 import { logger } from "../ui/logger.ts";
 
 type IntegrationSyncMode = "auto" | "warn" | "off";
@@ -180,16 +183,23 @@ async function detectIntegrationDrift(opts: {
     ticketsDocs,
     sharedSkill,
     deprecatedSharedSkills,
-    mcpProject,
-    mcpUser,
     docs,
   ] = await Promise.all([
-    checkCursorRules({ scope: "project", projectRoot: opts.projectRoot }),
-    checkCursorRules({ scope: "user" }),
-    checkClaudeHooks({ scope: "project", projectRoot: opts.projectRoot }),
-    checkClaudeHooks({ scope: "user" }),
-    checkCodexSkill({ scope: "project", projectRoot: opts.projectRoot }),
-    checkCodexSkill({ scope: "user" }),
+    checkDeprecatedHackCursorIntegration({
+      scope: "project",
+      projectRoot: opts.projectRoot,
+    }),
+    checkDeprecatedHackCursorIntegration({ scope: "user" }),
+    checkDeprecatedHackClaudeIntegration({
+      scope: "project",
+      projectRoot: opts.projectRoot,
+    }),
+    checkDeprecatedHackClaudeIntegration({ scope: "user" }),
+    checkDeprecatedHackCodexIntegration({
+      scope: "project",
+      projectRoot: opts.projectRoot,
+    }),
+    checkDeprecatedHackCodexIntegration({ scope: "user" }),
     checkDeprecatedTicketsSkill({
       scope: "project",
       projectRoot: opts.projectRoot,
@@ -201,15 +211,6 @@ async function detectIntegrationDrift(opts: {
     }),
     checkSharedHackSkill(),
     checkDeprecatedSharedHackSkills(),
-    checkMcpConfig({
-      scope: "project",
-      projectRoot: opts.projectRoot,
-      targets: ["cursor", "claude", "codex"],
-    }),
-    checkMcpConfig({
-      scope: "user",
-      targets: ["cursor", "claude", "codex"],
-    }),
     checkAgentDocs({
       projectRoot: opts.projectRoot,
       targets: ["agents", "claude"],
@@ -231,7 +232,6 @@ async function detectIntegrationDrift(opts: {
   const singleDrift = singleChecks.some((status) =>
     hasSingleCheckDrift(status)
   );
-  const mcpDrift = hasMcpDrift({ checks: [...mcpProject, ...mcpUser] });
   const docsDrift = hasDocDrift({ checks: docs });
   const deprecatedDocsDrift = ticketsDocs.some(
     (check) => check.status !== "noop" && check.status !== "absent"
@@ -242,22 +242,12 @@ async function detectIntegrationDrift(opts: {
 
   return {
     hasDrift:
-      singleDrift ||
-      mcpDrift ||
-      docsDrift ||
-      deprecatedDocsDrift ||
-      deprecatedSharedDrift,
+      singleDrift || docsDrift || deprecatedDocsDrift || deprecatedSharedDrift,
   };
 }
 
 function hasSingleCheckDrift(status: string): boolean {
   return status !== "noop" && status !== "absent";
-}
-
-function hasMcpDrift(opts: {
-  readonly checks: readonly McpCheckResult[];
-}): boolean {
-  return opts.checks.some((check) => check.status !== "present");
 }
 
 function hasDocDrift(opts: {
@@ -281,16 +271,23 @@ async function autoSyncIntegrations(opts: {
     ticketsDocs,
     sharedSkill,
     deprecatedSharedSkills,
-    mcpProject,
-    mcpUser,
     docs,
   ] = await Promise.all([
-    installCursorRules({ scope: "project", projectRoot: opts.projectRoot }),
-    installCursorRules({ scope: "user" }),
-    installClaudeHooks({ scope: "project", projectRoot: opts.projectRoot }),
-    installClaudeHooks({ scope: "user" }),
-    installCodexSkill({ scope: "project", projectRoot: opts.projectRoot }),
-    installCodexSkill({ scope: "user" }),
+    removeDeprecatedHackCursorIntegration({
+      scope: "project",
+      projectRoot: opts.projectRoot,
+    }),
+    removeDeprecatedHackCursorIntegration({ scope: "user" }),
+    removeDeprecatedHackClaudeIntegration({
+      scope: "project",
+      projectRoot: opts.projectRoot,
+    }),
+    removeDeprecatedHackClaudeIntegration({ scope: "user" }),
+    removeDeprecatedHackCodexIntegration({
+      scope: "project",
+      projectRoot: opts.projectRoot,
+    }),
+    removeDeprecatedHackCodexIntegration({ scope: "user" }),
     removeTicketsSkill({ scope: "project", projectRoot: opts.projectRoot }),
     removeTicketsSkill({ scope: "user" }),
     removeTicketsAgentDocs({
@@ -299,15 +296,6 @@ async function autoSyncIntegrations(opts: {
     }),
     installSharedHackSkill(),
     removeDeprecatedSharedHackSkills(),
-    installMcpConfig({
-      scope: "project",
-      projectRoot: opts.projectRoot,
-      targets: ["cursor", "claude", "codex"],
-    }),
-    installMcpConfig({
-      scope: "user",
-      targets: ["cursor", "claude", "codex"],
-    }),
     upsertAgentDocs({
       projectRoot: opts.projectRoot,
       targets: ["agents", "claude"],
@@ -328,9 +316,6 @@ async function autoSyncIntegrations(opts: {
   const singleErrors = singleStatuses.some((status) =>
     hasSingleInstallError(status)
   );
-  const mcpErrors = hasMcpInstallErrors({
-    results: [...mcpProject, ...mcpUser],
-  });
   const docsErrors = hasDocInstallErrors({ results: docs });
   const ticketsDocsErrors = hasDocInstallErrors({ results: ticketsDocs });
   const deprecatedSharedErrors = deprecatedSharedSkills.some(
@@ -340,7 +325,6 @@ async function autoSyncIntegrations(opts: {
   return {
     ok: !(
       singleErrors ||
-      mcpErrors ||
       docsErrors ||
       ticketsDocsErrors ||
       deprecatedSharedErrors
@@ -350,12 +334,6 @@ async function autoSyncIntegrations(opts: {
 
 function hasSingleInstallError(status: string): boolean {
   return status === "error";
-}
-
-function hasMcpInstallErrors(opts: {
-  readonly results: readonly McpInstallResult[];
-}): boolean {
-  return opts.results.some((result) => result.status === "error");
 }
 
 function hasDocInstallErrors(opts: {

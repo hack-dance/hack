@@ -23,7 +23,8 @@ terminal).
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
 - `hack daemon` — optional local daemon for faster JSON status/ps
 - `hack agent onboard` — agent-assisted onboarding for existing projects
-- `hack setup` — install/refresh agent integrations (Cursor rules, Claude hooks, Codex skill, MCP)
+- `hack setup` — check/prepare native Cursor, Claude Code, and Codex plugins; refresh project
+  instructions; or explicitly configure standalone MCP
 - `hack tickets` — deprecated compatibility surface for existing Tickets data
 
 Interactive diagnostics use compact status rows: healthy groups stay on one line, while warnings
@@ -66,8 +67,9 @@ See [Beta workflows](beta.md) for guides on this surface.
   apply documented defaults or fail fast with `E_INTERACTIVE_REQUIRED`.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
 
-Generated agent docs, Cursor rules, Codex skills, and the shared `~/.ai/skills/hack-cli` skill carry
-the Hack CLI version that generated them. Audit both project and global surfaces with
+Generated agent docs, native plugin content, and the shared `~/.ai/skills/hack-cli` skill carry the Hack CLI
+version that generated them. Native agent plugins are versioned with the Hack release and installed once
+from the `hack-dance/hack` marketplace. Audit project and global generated surfaces with
 `hack setup sync --all-scopes --check`; repair them with `hack setup sync --all-scopes`, then reload
 the agent session so it stops using cached guidance. Interactive project commands also report drift
 before auto-repair instead of repairing silently.

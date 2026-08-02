@@ -157,6 +157,18 @@ export function renderCursorRules(): string {
   return lines.join("\n");
 }
 
+/** Render the native Cursor plugin rule with required marketplace metadata. */
+export function renderCursorPluginRule(): string {
+  return [
+    "---",
+    "description: Operate Hack-managed local development environments through the hack CLI.",
+    "alwaysApply: true",
+    "---",
+    "",
+    renderCursorRules(),
+  ].join("\n");
+}
+
 function resolveCursorRulesPath(opts: {
   readonly scope: CursorScope;
   readonly projectRoot?: string;

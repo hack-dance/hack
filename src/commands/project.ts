@@ -11,9 +11,9 @@ import {
   text,
 } from "@clack/prompts";
 import { YAML } from "bun";
-import { installClaudeHooks } from "../agents/claude.ts";
-import { installCodexSkill } from "../agents/codex-skill.ts";
-import { installCursorRules } from "../agents/cursor.ts";
+import { prepareHackClaudePlugin } from "../agents/claude-plugin.ts";
+import { prepareHackCodexPlugin } from "../agents/codex-plugin.ts";
+import { prepareHackCursorPlugin } from "../agents/cursor-plugin.ts";
 import {
   type OnboardingWith,
   parseOnboardingWith,
@@ -4334,14 +4334,11 @@ async function maybeSetupAgentIntegrations(opts: {
     message: "Select integrations to install:",
     required: true,
     options: [
-      { value: "cursor", label: "Cursor rules (.cursor/rules/hack.mdc)" },
-      {
-        value: "claude",
-        label: "Claude Code hooks (.claude/settings.local.json)",
-      },
-      { value: "codex", label: "Codex skill (.codex/skills/hack-cli)" },
+      { value: "cursor", label: "Hack Cursor plugin (user-installed)" },
+      { value: "claude", label: "Hack Claude Code plugin (user-installed)" },
+      { value: "codex", label: "Hack Codex plugin (user-installed)" },
       { value: "agents", label: "AGENTS.md / CLAUDE.md snippets" },
-      { value: "mcp", label: "MCP config (no-shell clients)" },
+      { value: "mcp", label: "Standalone MCP config (advanced)" },
     ],
     initialValues: ["cursor", "claude", "codex"],
   });
@@ -4352,12 +4349,12 @@ async function maybeSetupAgentIntegrations(opts: {
   const selection = new Set(selected);
 
   if (selection.has("cursor")) {
-    const result = await installCursorRules({
+    const result = await prepareHackCursorPlugin({
       scope: "project",
       projectRoot: opts.repoRoot,
     });
     logInstallResult({
-      label: "Cursor rules",
+      label: "Hack Cursor plugin",
       status: result.status,
       path: result.path,
       message: result.message,
@@ -4365,12 +4362,12 @@ async function maybeSetupAgentIntegrations(opts: {
   }
 
   if (selection.has("claude")) {
-    const result = await installClaudeHooks({
+    const result = await prepareHackClaudePlugin({
       scope: "project",
       projectRoot: opts.repoRoot,
     });
     logInstallResult({
-      label: "Claude hooks",
+      label: "Hack Claude Code plugin",
       status: result.status,
       path: result.path,
       message: result.message,
@@ -4378,12 +4375,12 @@ async function maybeSetupAgentIntegrations(opts: {
   }
 
   if (selection.has("codex")) {
-    const result = await installCodexSkill({
+    const result = await prepareHackCodexPlugin({
       scope: "project",
       projectRoot: opts.repoRoot,
     });
     logInstallResult({
-      label: "Codex skill",
+      label: "Hack Codex plugin",
       status: result.status,
       path: result.path,
       message: result.message,
@@ -4407,10 +4404,10 @@ async function maybeSetupAgentIntegrations(opts: {
 
   if (selection.has("mcp")) {
     const targetHints = selected.filter(
-      (value) => value === "cursor" || value === "claude" || value === "codex"
+      (value) => value === "cursor" || value === "claude"
     );
     const targets = (
-      targetHints.length > 0 ? targetHints : ["cursor", "claude", "codex"]
+      targetHints.length > 0 ? targetHints : ["cursor", "claude"]
     ) as McpTarget[];
 
     const results = await installMcpConfig({
@@ -4441,12 +4438,16 @@ function logInstallResult(opts: {
     return;
   }
 
-  if (opts.status === "noop") {
-    logger.info({ message: `No changes for ${opts.label} (${opts.path})` });
+  if (["noop", "preserved"].includes(opts.status)) {
+    logger.info({
+      message: opts.message ?? `No changes for ${opts.label} (${opts.path})`,
+    });
     return;
   }
 
-  logger.success({ message: `Updated ${opts.label} at ${opts.path}` });
+  logger.success({
+    message: opts.message ?? `Updated ${opts.label} at ${opts.path}`,
+  });
 }
 
 // Exported for direct unit-testing of the auto (non-interactive) discovery

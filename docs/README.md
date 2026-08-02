@@ -59,7 +59,7 @@ This section is easy to find, but it does not lead the product story.
 - Working notes and historical design docs live in `docs/plans/`; they are not the supported product contract
 - Root scripts orchestrate workspace tasks through Turbo
 - Package-local commands remain available via `bun run --cwd <workspace> <script>`
-- Agent-facing docs and setup output are generated from `src/agents/instruction-source.ts` via `src/agents/*` and `src/mcp/agent-docs.ts`; update the canonical source (not the rendered surfaces) when changing AGENTS/Codex/MCP guidance.
+- Agent-facing docs, bundled Codex/Claude/Cursor plugin content, and setup output are generated from `src/agents/instruction-source.ts` via `src/agents/*` and `src/mcp/agent-docs.ts`; update the canonical source (not the rendered surfaces) when changing agent guidance.
 - The generated [CLI reference](reference/cli.md) is rendered from the command spec (`bun run docs:cli-reference`); a drift test fails when it is stale.
 - End-to-end coverage that backs docs claims lives in `tests/e2e/` (`bun run test:e2e:local`).
 - `.factory/validation/` contains historical evidence from retired hosted/web/integration work and is not the current product contract.

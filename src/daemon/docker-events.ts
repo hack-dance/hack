@@ -7,6 +7,36 @@ export interface DockerEventWatcher {
   stop(): void;
 }
 
+const ignoredContainerActions = new Set([
+  "attach",
+  "commit",
+  "copy",
+  "detach",
+  "exec_create",
+  "exec_detach",
+  "exec_die",
+  "exec_start",
+  "export",
+  "resize",
+  "top",
+]);
+
+/**
+ * Returns false only for known container actions that cannot change Hack's
+ * cached topology, state, ports, labels, mounts, or networks. Unknown actions
+ * fail open so the periodic reconciliation is not the only freshness path for
+ * new Docker event types.
+ */
+export function shouldRefreshForDockerEvent(opts: {
+  readonly event: DockerEvent;
+}): boolean {
+  const action = readDockerEventAction({ event: opts.event });
+  if (!action) {
+    return true;
+  }
+  return !ignoredContainerActions.has(action);
+}
+
 export function startDockerEventWatcher(opts: {
   readonly onEvent: (event: DockerEvent) => void;
   readonly onError: (message: string) => void;
@@ -92,6 +122,17 @@ function parseDockerEvent(opts: { readonly line: string }): DockerEvent | null {
   } catch {
     return null;
   }
+}
+
+function readDockerEventAction(opts: {
+  readonly event: DockerEvent;
+}): string | null {
+  const rawAction = opts.event.Action ?? opts.event.status;
+  if (typeof rawAction !== "string") {
+    return null;
+  }
+  const action = rawAction.split(":", 1)[0]?.trim().toLowerCase() ?? "";
+  return action.length > 0 ? action : null;
 }
 
 function sleep(opts: { readonly ms: number }): Promise<void> {

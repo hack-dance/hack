@@ -9,7 +9,9 @@ import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import type { RuntimeProject } from "../lib/runtime-projects.ts";
 import {
   autoRegisterRuntimeHackProjects,
+  createRuntimeInspectCache,
   filterRuntimeProjects,
+  getRuntimeInspectCacheDiagnostics,
   readRuntimeProjects,
 } from "../lib/runtime-projects.ts";
 import {
@@ -98,7 +100,10 @@ export type PsPayload = {
 };
 
 export interface RuntimeCache {
-  refresh(opts: { readonly reason: string }): Promise<void>;
+  refresh(opts: {
+    readonly reason: string;
+    readonly forceInspect?: boolean;
+  }): Promise<void>;
   getProjectsPayload(opts: {
     readonly filter: string | null;
     readonly includeGlobal: boolean;
@@ -111,7 +116,19 @@ export interface RuntimeCache {
     readonly branch: string | null;
   }): PsPayload;
   getSnapshot(): RuntimeSnapshot | null;
+  getDiagnostics(): RuntimeCacheDiagnostics;
 }
+
+export type RuntimeCacheDiagnostics = {
+  readonly refreshInFlight: boolean;
+  readonly lastRefreshDurationMs: number | null;
+  readonly maxRefreshDurationMs: number | null;
+  readonly inspectCalls: number;
+  readonly inspectIds: number;
+  readonly inspectCacheHits: number;
+  readonly inspectCacheMisses: number;
+  readonly inspectFullRefreshes: number;
+};
 
 export function createRuntimeCache(opts: {
   readonly onRefresh?: (snapshot: RuntimeSnapshot) => void;
@@ -133,7 +150,13 @@ export function createRuntimeCache(opts: {
 
   let snapshot: RuntimeSnapshot | null = null;
   let refreshTask: Promise<void> | null = null;
-  let pendingReason: string | null = null;
+  let pendingRefresh: {
+    readonly reason: string;
+    readonly forceInspect: boolean;
+  } | null = null;
+  let lastRefreshDurationMs: number | null = null;
+  let maxRefreshDurationMs: number | null = null;
+  const inspectCache = createRuntimeInspectCache();
   let health: RuntimeHealth = {
     ok: false,
     error: "runtime_not_checked",
@@ -154,19 +177,30 @@ export function createRuntimeCache(opts: {
 
   const refresh = async ({
     reason,
+    forceInspect = true,
   }: {
     readonly reason: string;
+    readonly forceInspect?: boolean;
   }): Promise<void> => {
     if (refreshTask) {
-      queueRefresh({ reason: `pending:${reason}`, priority: "normal" });
+      queueRefresh({
+        forceInspect,
+        reason: `pending:${reason}`,
+        priority: "normal",
+      });
       await refreshTask;
       return;
     }
 
+    const startedAtMs = Date.now();
     refreshTask = (async () => {
       const checkedAtMs = Date.now();
       const previousSnapshot = snapshot;
-      const runtimeResult = await readRuntimeProjects({ includeGlobal: true });
+      const runtimeResult = await readRuntimeProjects({
+        includeGlobal: true,
+        inspectCache,
+        forceInspect,
+      });
       const refreshed = await resolveRefreshResult({
         checkedAtMs,
         currentHealth: health,
@@ -174,41 +208,53 @@ export function createRuntimeCache(opts: {
         reason,
         runtimeResult,
       });
-      health = refreshed.health;
       if (refreshed.repairReason) {
         queueRefresh({
+          forceInspect: true,
           reason: refreshed.repairReason,
           priority: "repair",
         });
       }
 
+      let nextSnapshot: RuntimeSnapshot;
       if (runtimeResult.ok) {
         await autoRegisterRuntimeHackProjects({
           runtime: runtimeResult.runtime,
         });
-        snapshot = {
+        nextSnapshot = {
           runtime: runtimeResult.runtime,
           updatedAtMs: checkedAtMs,
-          health,
+          health: refreshed.health,
         };
       } else {
-        snapshot = {
+        nextSnapshot = {
           runtime: snapshot?.runtime ?? [],
           updatedAtMs: snapshot?.updatedAtMs ?? null,
-          health,
+          health: refreshed.health,
         };
       }
 
-      opts.onRefresh?.(snapshot);
+      health = refreshed.health;
+      snapshot = nextSnapshot;
+      opts.onRefresh?.(nextSnapshot);
     })();
 
-    await refreshTask;
-    refreshTask = null;
+    try {
+      await refreshTask;
+    } catch (error: unknown) {
+      pendingRefresh = null;
+      throw error;
+    } finally {
+      const durationMs = Math.max(0, Date.now() - startedAtMs);
+      lastRefreshDurationMs = durationMs;
+      maxRefreshDurationMs = Math.max(maxRefreshDurationMs ?? 0, durationMs);
+      refreshTask = null;
+    }
 
-    if (pendingReason) {
-      const queuedReason = pendingReason;
-      pendingReason = null;
-      await refresh({ reason: queuedReason });
+    if (pendingRefresh) {
+      const queuedRefresh = pendingRefresh;
+      pendingRefresh = null;
+      await refresh(queuedRefresh);
     }
   };
 
@@ -329,14 +375,30 @@ export function createRuntimeCache(opts: {
   };
 
   function queueRefresh(opts: {
+    readonly forceInspect: boolean;
     readonly reason: string;
     readonly priority: "normal" | "repair";
   }): void {
     if (opts.priority === "repair") {
-      pendingReason = opts.reason;
+      pendingRefresh = {
+        forceInspect: true,
+        reason: opts.reason,
+      };
       return;
     }
-    pendingReason ??= opts.reason;
+    if (!pendingRefresh) {
+      pendingRefresh = {
+        forceInspect: opts.forceInspect,
+        reason: opts.reason,
+      };
+      return;
+    }
+    if (opts.forceInspect && !pendingRefresh.forceInspect) {
+      pendingRefresh = {
+        forceInspect: true,
+        reason: opts.reason,
+      };
+    }
   }
 
   return {
@@ -344,6 +406,21 @@ export function createRuntimeCache(opts: {
     getProjectsPayload,
     getPsPayload,
     getSnapshot: () => snapshot,
+    getDiagnostics: () => {
+      const inspect = getRuntimeInspectCacheDiagnostics({
+        cache: inspectCache,
+      });
+      return {
+        refreshInFlight: refreshTask !== null,
+        lastRefreshDurationMs,
+        maxRefreshDurationMs,
+        inspectCalls: inspect.inspectCalls,
+        inspectIds: inspect.inspectIds,
+        inspectCacheHits: inspect.cacheHits,
+        inspectCacheMisses: inspect.cacheMisses,
+        inspectFullRefreshes: inspect.fullRefreshes,
+      };
+    },
   };
 }
 

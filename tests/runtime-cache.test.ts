@@ -28,21 +28,60 @@ const identityQueue: Array<
   | { readonly ok: false; readonly error: string }
 > = [];
 const autoRegisterCalls: RuntimeProject[][] = [];
+const runtimeReadCalls: Array<{
+  readonly forceInspect?: boolean;
+  readonly includeGlobal: boolean;
+}> = [];
+let runtimeReadOverride: (() => Promise<(typeof runtimeQueue)[number]>) | null =
+  null;
+let autoRegisterError: Error | null = null;
 
 const runtimeProjectsMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "../src/lib/runtime-projects.ts",
   overrides: {
-    readRuntimeProjects: async () =>
-      runtimeQueue.shift() ?? {
-        ok: true,
-        runtime: [],
-        error: null,
-        checkedAtMs: Date.now(),
+    readRuntimeProjects: async (opts: {
+      readonly forceInspect?: boolean;
+      readonly includeGlobal: boolean;
+    }) => {
+      runtimeReadCalls.push(opts);
+      if (runtimeReadOverride) {
+        return await runtimeReadOverride();
+      }
+      return (
+        runtimeQueue.shift() ?? {
+          ok: true,
+          runtime: [],
+          error: null,
+          checkedAtMs: Date.now(),
+        }
+      );
+    },
+    createRuntimeInspectCache: () => ({
+      entries: new Map(),
+      diagnostics: {
+        inspectCalls: 0,
+        inspectIds: 0,
+        cacheHits: 0,
+        cacheMisses: 0,
+        fullRefreshes: 0,
       },
+    }),
+    getRuntimeInspectCacheDiagnostics: () => ({
+      inspectCalls: 0,
+      inspectIds: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
+      fullRefreshes: 0,
+    }),
     autoRegisterRuntimeHackProjects: async (opts: {
       readonly runtime: RuntimeProject[];
     }) => {
+      if (autoRegisterError) {
+        const error = autoRegisterError;
+        autoRegisterError = null;
+        throw error;
+      }
       autoRegisterCalls.push(opts.runtime);
     },
     filterRuntimeProjects: (opts: {
@@ -88,6 +127,9 @@ beforeEach(() => {
   runtimeQueue.length = 0;
   identityQueue.length = 0;
   autoRegisterCalls.length = 0;
+  runtimeReadCalls.length = 0;
+  runtimeReadOverride = null;
+  autoRegisterError = null;
 });
 
 afterAll(() => {
@@ -556,3 +598,67 @@ test("getPsPayload matches normalized compose project names", async () => {
     },
   ]);
 });
+
+test("runtime cache coalesces concurrent refreshes and preserves forced reconciliation", async () => {
+  let releaseFirstRead = (): void => {};
+  const firstReadGate = new Promise<void>((resolve) => {
+    releaseFirstRead = resolve;
+  });
+  let readCount = 0;
+  runtimeReadOverride = async () => {
+    readCount += 1;
+    if (readCount === 1) {
+      await firstReadGate;
+    }
+    return {
+      ok: true,
+      runtime: [],
+      error: null,
+      checkedAtMs: Date.now(),
+    };
+  };
+
+  const cache = createRuntimeCache({});
+  const first = cache.refresh({ reason: "event", forceInspect: false });
+  await waitFor({ predicate: () => readCount === 1 });
+  const followers = Array.from({ length: 100 }, () =>
+    cache.refresh({ reason: "event", forceInspect: false })
+  );
+  followers.push(cache.refresh({ reason: "interval", forceInspect: true }));
+  releaseFirstRead();
+  await Promise.all([first, ...followers]);
+
+  expect(readCount).toBe(2);
+  expect(runtimeReadCalls.map((call) => call.forceInspect)).toEqual([
+    false,
+    true,
+  ]);
+});
+
+test("runtime cache clears an unsuccessful refresh task", async () => {
+  autoRegisterError = new Error("registration failed");
+  const cache = createRuntimeCache({});
+
+  await expect(cache.refresh({ reason: "first" })).rejects.toThrow(
+    "registration failed"
+  );
+  expect(cache.getDiagnostics().refreshInFlight).toBe(false);
+  await cache.refresh({ reason: "retry" });
+
+  expect(runtimeReadCalls).toHaveLength(2);
+  expect(cache.getSnapshot()?.health.ok).toBe(true);
+});
+
+async function waitFor(opts: {
+  readonly predicate: () => boolean;
+  readonly timeoutMs?: number;
+}): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 500;
+  const startedAtMs = Date.now();
+  while (!opts.predicate()) {
+    if (Date.now() - startedAtMs > timeoutMs) {
+      throw new Error(`Timed out after ${timeoutMs}ms`);
+    }
+    await Bun.sleep(1);
+  }
+}

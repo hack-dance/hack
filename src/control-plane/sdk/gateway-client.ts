@@ -45,9 +45,21 @@ export type GatewayMetrics = {
   readonly cache_age_ms: number | null;
   readonly last_refresh_at: string | null;
   readonly refresh_count: number;
+  readonly refresh_requests: number;
+  readonly refresh_requests_coalesced: number;
   readonly refresh_failures: number;
+  readonly refresh_in_flight: boolean;
+  readonly last_refresh_duration_ms: number | null;
+  readonly max_refresh_duration_ms: number | null;
   readonly last_event_at: string | null;
   readonly events_seen: number;
+  readonly events_relevant: number;
+  readonly events_ignored: number;
+  readonly inspect_calls: number;
+  readonly inspect_ids: number;
+  readonly inspect_cache_hits: number;
+  readonly inspect_cache_misses: number;
+  readonly inspect_full_refreshes: number;
   readonly streams_active: number;
 };
 

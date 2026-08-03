@@ -13,7 +13,9 @@ import { renderCursorRules } from "./cursor.ts";
 import { normalizeInstructionText } from "./instruction-source.ts";
 import {
   type AgentPluginResult,
-  mergePluginPreparation,
+  checkNativeAgentPlugin,
+  mergeLegacyCleanupResults,
+  prepareNativeAgentPlugin,
 } from "./plugin-lifecycle.ts";
 
 export type CursorPluginScope = "project" | "user";
@@ -31,6 +33,7 @@ const PLUGIN_GUIDANCE = [
   "Start a new Cursor session after installation.",
 ].join(" ");
 const LEGACY_RULE_FINGERPRINTS = new Set([
+  "1b2d92dbd4ef71c9a4a96d270cf4aaf38059ee907b5ccb38db8457ec031862a4",
   "f5b8078be4d7aec0df32f8334ad5a45acc4632541527dcae4e1f6e5144f05922",
   "c79b88aacda891f9cfe76c7addfce704129dd5bc72415dc3aa5fd262a6e46396",
 ]);
@@ -41,56 +44,19 @@ export async function checkHackCursorPlugin(opts: {
   readonly runCursorCommand?: CursorCommand;
 }): Promise<CursorPluginResult> {
   const executable = findCursorExecutable();
-  if (!(opts.runCursorCommand || executable)) {
-    return {
-      scope: opts.scope,
-      status: "missing",
-      path: PLUGIN_ID,
-      message: `Cursor Agent CLI is not installed. ${PLUGIN_GUIDANCE}`,
-    };
-  }
-  const runCursorCommand =
-    opts.runCursorCommand ??
-    createCursorCommand({ executable: executable ?? "cursor-agent" });
-  const commandResult = await runCursorCommand(["plugin", "list", "--json"]);
-  if (commandResult.exitCode !== 0) {
-    return {
-      scope: opts.scope,
-      status: "error",
-      path: PLUGIN_ID,
-      message:
-        commandResult.stderr.trim() ||
-        "Could not inspect installed Cursor plugins.",
-    };
-  }
-  const parsed = parsePluginList({ json: commandResult.stdout });
-  if (!parsed.ok) {
-    return {
-      scope: opts.scope,
-      status: "error",
-      path: PLUGIN_ID,
-      message: parsed.message,
-    };
-  }
-  const plugin = parsed.plugins.find((entry) => entry.id === PLUGIN_ID);
-  if (!plugin) {
-    return {
-      scope: opts.scope,
-      status: "missing",
-      path: PLUGIN_ID,
-      message: `The Hack Cursor plugin is not installed. ${PLUGIN_GUIDANCE}`,
-    };
-  }
-  if (!plugin.enabled) {
-    return {
-      scope: opts.scope,
-      status: "stale",
-      path: PLUGIN_ID,
-      message:
-        "The Hack Cursor plugin is installed but disabled. Enable it from /plugin, then start a new session.",
-    };
-  }
-  return { scope: opts.scope, status: "noop", path: PLUGIN_ID };
+  return await checkNativeAgentPlugin({
+    scope: opts.scope,
+    pluginId: PLUGIN_ID,
+    runCommand:
+      opts.runCursorCommand ??
+      (executable ? createCursorCommand({ executable }) : null),
+    missingExecutableMessage: `Cursor Agent CLI is not installed. ${PLUGIN_GUIDANCE}`,
+    inspectErrorMessage: "Could not inspect installed Cursor plugins.",
+    missingPluginMessage: `The Hack Cursor plugin is not installed. ${PLUGIN_GUIDANCE}`,
+    disabledPluginMessage:
+      "The Hack Cursor plugin is installed but disabled. Enable it from /plugin, then start a new session.",
+    parseState: parseCursorPluginState,
+  });
 }
 
 /** Remove generated standalone Cursor artifacts and report plugin state. */
@@ -99,15 +65,10 @@ export async function prepareHackCursorPlugin(opts: {
   readonly projectRoot?: string;
   readonly runCursorCommand?: CursorCommand;
 }): Promise<CursorPluginResult> {
-  const cleanup = await removeDeprecatedHackCursorIntegration(opts);
-  if (cleanup.status === "error") {
-    return cleanup;
-  }
-  const plugin = await checkHackCursorPlugin(opts);
-  if (plugin.status === "error") {
-    return plugin;
-  }
-  return mergePluginPreparation({ cleanup, plugin });
+  return await prepareNativeAgentPlugin({
+    cleanup: async () => await removeDeprecatedHackCursorIntegration(opts),
+    check: async () => await checkHackCursorPlugin(opts),
+  });
 }
 
 /** Report generated standalone Cursor rules or MCP config superseded by the plugin. */
@@ -180,31 +141,14 @@ export async function removeDeprecatedHackCursorIntegration(opts: {
     target: "cursor",
     ...opts,
   });
-  if (mcp.status === "error") {
-    return {
-      scope: opts.scope,
-      status: "error",
-      path: mcp.path ?? resolved.path,
-      message: mcp.message,
-    };
-  }
-  const messages = [ruleMessage, mcp.message].filter(
-    (message): message is string => typeof message === "string"
-  );
-  const removed = ruleStatus === "removed" || mcp.status === "removed";
-  const preserved = ruleStatus === "preserved" || mcp.status === "preserved";
-  let status: CursorPluginResult["status"] = "absent";
-  if (removed) {
-    status = "removed";
-  } else if (preserved) {
-    status = "preserved";
-  }
-  return {
+  return mergeLegacyCleanupResults({
     scope: opts.scope,
-    status,
-    path: resolved.path,
-    message: messages.length > 0 ? messages.join(" ") : undefined,
-  };
+    fallbackPath: resolved.path,
+    results: [
+      { status: ruleStatus, path: resolved.path, message: ruleMessage },
+      mcp,
+    ],
+  });
 }
 
 function findCursorExecutable(): string | null {
@@ -267,6 +211,19 @@ function parsePluginList(opts: { readonly json: string }):
       message: "Cursor returned invalid JSON while listing plugins.",
     };
   }
+}
+
+function parseCursorPluginState(opts: { readonly json: string }) {
+  const parsed = parsePluginList(opts);
+  if (!parsed.ok) {
+    return parsed;
+  }
+  const plugin = parsed.plugins.find((entry) => entry.id === PLUGIN_ID);
+  return {
+    ok: true as const,
+    installed: Boolean(plugin),
+    enabled: plugin?.enabled === true,
+  };
 }
 
 function resolveLegacyRule(opts: {

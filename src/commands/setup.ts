@@ -24,6 +24,7 @@ import {
   prepareHackCursorPlugin,
   removeDeprecatedHackCursorIntegration,
 } from "../agents/cursor-plugin.ts";
+import type { AgentPluginResult } from "../agents/plugin-lifecycle.ts";
 import {
   checkDeprecatedSharedHackSkills,
   checkSharedHackSkill,
@@ -538,29 +539,13 @@ async function handleSetupCursor({
   readonly ctx: CliContext;
   readonly args: SetupCursorArgs;
 }): Promise<number> {
-  const action = resolveAction(args.options);
-  const scope = resolveScope({ global: args.options.global === true });
-  const projectRoot =
-    scope === "project"
-      ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
-      : undefined;
-
-  let result: Awaited<ReturnType<typeof checkHackCursorPlugin>>;
-  if (action === "check") {
-    result = await checkHackCursorPlugin({ scope });
-  } else if (action === "remove") {
-    result = await removeDeprecatedHackCursorIntegration({
-      scope,
-      projectRoot,
-    });
-  } else {
-    result = await prepareHackCursorPlugin({ scope, projectRoot });
-  }
-
-  return logSingleResult({
-    action,
+  return await handleNativePluginSetup({
+    ctx,
+    options: args.options,
     okMessage: "Hack Cursor plugin",
-    result,
+    check: checkHackCursorPlugin,
+    prepare: prepareHackCursorPlugin,
+    remove: removeDeprecatedHackCursorIntegration,
   });
 }
 
@@ -571,29 +556,13 @@ async function handleSetupClaude({
   readonly ctx: CliContext;
   readonly args: SetupClaudeArgs;
 }): Promise<number> {
-  const action = resolveAction(args.options);
-  const scope = resolveScope({ global: args.options.global === true });
-  const projectRoot =
-    scope === "project"
-      ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
-      : undefined;
-
-  let result: Awaited<ReturnType<typeof checkHackClaudePlugin>>;
-  if (action === "check") {
-    result = await checkHackClaudePlugin({ scope });
-  } else if (action === "remove") {
-    result = await removeDeprecatedHackClaudeIntegration({
-      scope,
-      projectRoot,
-    });
-  } else {
-    result = await prepareHackClaudePlugin({ scope, projectRoot });
-  }
-
-  return logSingleResult({
-    action,
+  return await handleNativePluginSetup({
+    ctx,
+    options: args.options,
     okMessage: "Hack Claude Code plugin",
-    result,
+    check: checkHackClaudePlugin,
+    prepare: prepareHackClaudePlugin,
+    remove: removeDeprecatedHackClaudeIntegration,
   });
 }
 
@@ -604,30 +573,60 @@ async function handleSetupCodex({
   readonly ctx: CliContext;
   readonly args: SetupCodexArgs;
 }): Promise<number> {
-  const action = resolveAction(args.options);
-  const scope = resolveScope({ global: args.options.global === true });
+  return await handleNativePluginSetup({
+    ctx,
+    options: args.options,
+    okMessage: "Hack Codex plugin",
+    check: checkHackCodexPlugin,
+    prepare: prepareHackCodexPlugin,
+    remove: removeDeprecatedHackCodexIntegration,
+  });
+}
+
+async function handleNativePluginSetup({
+  ctx,
+  options,
+  okMessage,
+  check,
+  prepare,
+  remove,
+}: {
+  readonly ctx: CliContext;
+  readonly options: {
+    readonly check: boolean;
+    readonly remove: boolean;
+    readonly global: boolean;
+    readonly path: string | undefined;
+  };
+  readonly okMessage: string;
+  readonly check: (opts: {
+    readonly scope: "project" | "user";
+  }) => Promise<AgentPluginResult<"project" | "user">>;
+  readonly prepare: (opts: {
+    readonly scope: "project" | "user";
+    readonly projectRoot?: string;
+  }) => Promise<AgentPluginResult<"project" | "user">>;
+  readonly remove: (opts: {
+    readonly scope: "project" | "user";
+    readonly projectRoot?: string;
+  }) => Promise<AgentPluginResult<"project" | "user">>;
+}): Promise<number> {
+  const action = resolveAction(options);
+  const scope = resolveScope({ global: options.global });
   const projectRoot =
     scope === "project"
-      ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
+      ? await resolveSetupRoot({ ctx, pathOpt: options.path })
       : undefined;
 
-  let result: Awaited<ReturnType<typeof checkHackCodexPlugin>>;
+  let result: AgentPluginResult<"project" | "user">;
   if (action === "check") {
-    result = await checkHackCodexPlugin({ scope });
+    result = await check({ scope });
   } else if (action === "remove") {
-    result = await removeDeprecatedHackCodexIntegration({
-      scope,
-      projectRoot,
-    });
+    result = await remove({ scope, projectRoot });
   } else {
-    result = await prepareHackCodexPlugin({ scope, projectRoot });
+    result = await prepare({ scope, projectRoot });
   }
-
-  return logSingleResult({
-    action,
-    okMessage: "Hack Codex plugin",
-    result,
-  });
+  return logSingleResult({ action, okMessage, result });
 }
 
 async function handleSetupTickets({

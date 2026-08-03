@@ -13,7 +13,9 @@ import { renderHackInitSkill } from "./hack-init-skill.ts";
 import { normalizeInstructionText } from "./instruction-source.ts";
 import {
   type AgentPluginResult,
-  mergePluginPreparation,
+  checkNativeAgentPlugin,
+  mergeLegacyCleanupResults,
+  prepareNativeAgentPlugin,
 } from "./plugin-lifecycle.ts";
 
 export type ClaudePluginScope = "project" | "user";
@@ -36,55 +38,20 @@ export async function checkHackClaudePlugin(opts: {
   readonly scope: ClaudePluginScope;
   readonly runClaudeCommand?: ClaudeCommand;
 }): Promise<ClaudePluginResult> {
-  const runClaudeCommand = opts.runClaudeCommand ?? runClaudePluginList;
-  if (!(opts.runClaudeCommand || findExecutableInPath("claude"))) {
-    return {
-      scope: opts.scope,
-      status: "missing",
-      path: PLUGIN_ID,
-      message: `Claude Code is not installed. After installing it, ${PLUGIN_GUIDANCE}`,
-    };
-  }
-
-  const commandResult = await runClaudeCommand(["plugin", "list", "--json"]);
-  if (commandResult.exitCode !== 0) {
-    return {
-      scope: opts.scope,
-      status: "error",
-      path: PLUGIN_ID,
-      message:
-        commandResult.stderr.trim() ||
-        "Could not inspect installed Claude Code plugins.",
-    };
-  }
-  const parsed = parsePluginList({ json: commandResult.stdout });
-  if (!parsed.ok) {
-    return {
-      scope: opts.scope,
-      status: "error",
-      path: PLUGIN_ID,
-      message: parsed.message,
-    };
-  }
-  const plugin = parsed.plugins.find((entry) => entry.id === PLUGIN_ID);
-  if (!plugin) {
-    return {
-      scope: opts.scope,
-      status: "missing",
-      path: PLUGIN_ID,
-      message: `The Hack Claude Code plugin is not installed. ${PLUGIN_GUIDANCE}`,
-    };
-  }
-  if (!plugin.enabled) {
-    return {
-      scope: opts.scope,
-      status: "stale",
-      path: PLUGIN_ID,
-      message:
-        "The Hack Claude Code plugin is installed but disabled. Enable it with claude plugin enable hack@hack-dance, then start a new session.",
-    };
-  }
-  return { scope: opts.scope, status: "noop", path: PLUGIN_ID };
+  const hasClaude = opts.runClaudeCommand || findExecutableInPath("claude");
+  return await checkNativeAgentPlugin({
+    scope: opts.scope,
+    pluginId: PLUGIN_ID,
+    runCommand: hasClaude
+      ? (opts.runClaudeCommand ?? runClaudePluginList)
+      : null,
+    missingExecutableMessage: `Claude Code is not installed. After installing it, ${PLUGIN_GUIDANCE}`,
+    inspectErrorMessage: "Could not inspect installed Claude Code plugins.",
+    missingPluginMessage: `The Hack Claude Code plugin is not installed. ${PLUGIN_GUIDANCE}`,
+    disabledPluginMessage:
+      "The Hack Claude Code plugin is installed but disabled. Enable it with claude plugin enable hack@hack-dance, then start a new session.",
+    parseState: parseClaudePluginState,
+  });
 }
 
 /** Remove generated standalone Claude integration artifacts and report plugin state. */
@@ -93,15 +60,10 @@ export async function prepareHackClaudePlugin(opts: {
   readonly projectRoot?: string;
   readonly runClaudeCommand?: ClaudeCommand;
 }): Promise<ClaudePluginResult> {
-  const cleanup = await removeDeprecatedHackClaudeIntegration(opts);
-  if (cleanup.status === "error") {
-    return cleanup;
-  }
-  const plugin = await checkHackClaudePlugin(opts);
-  if (plugin.status === "error") {
-    return plugin;
-  }
-  return mergePluginPreparation({ cleanup, plugin });
+  return await prepareNativeAgentPlugin({
+    cleanup: async () => await removeDeprecatedHackClaudeIntegration(opts),
+    check: async () => await checkHackClaudePlugin(opts),
+  });
 }
 
 /** Report generated standalone Claude artifacts superseded by the plugin. */
@@ -174,33 +136,25 @@ export async function removeDeprecatedHackClaudeIntegration(opts: {
     target: "claude",
     ...opts,
   });
-  if (mcp.status === "error") {
-    return {
-      scope: opts.scope,
-      status: "error",
-      path: mcp.path ?? PLUGIN_ID,
-      message: mcp.message,
-    };
+  let skillStatus: "absent" | "removed" | "preserved" = "absent";
+  if (skill.removed) {
+    skillStatus = "removed";
+  } else if (skill.preserved) {
+    skillStatus = "preserved";
   }
-
-  const messages = [skill.message, mcp.message].filter(
-    (message): message is string => typeof message === "string"
-  );
-  const removed =
-    hooks.status === "removed" || skill.removed || mcp.status === "removed";
-  const preserved = skill.preserved || mcp.status === "preserved";
-  let status: ClaudePluginResult["status"] = "absent";
-  if (removed) {
-    status = "removed";
-  } else if (preserved) {
-    status = "preserved";
-  }
-  return {
+  return mergeLegacyCleanupResults({
     scope: opts.scope,
-    status,
-    path: skill.path,
-    message: messages.length > 0 ? messages.join(" ") : undefined,
-  };
+    fallbackPath: skill.path,
+    results: [
+      hooks,
+      {
+        status: skillStatus,
+        path: skill.path,
+        message: skill.message,
+      },
+      mcp,
+    ],
+  });
 }
 
 async function runClaudePluginList(
@@ -242,6 +196,19 @@ function parsePluginList(opts: { readonly json: string }):
       message: "Claude Code returned invalid JSON while listing plugins.",
     };
   }
+}
+
+function parseClaudePluginState(opts: { readonly json: string }) {
+  const parsed = parsePluginList(opts);
+  if (!parsed.ok) {
+    return parsed;
+  }
+  const plugin = parsed.plugins.find((entry) => entry.id === PLUGIN_ID);
+  return {
+    ok: true as const,
+    installed: Boolean(plugin),
+    enabled: plugin?.enabled === true,
+  };
 }
 
 function resolveLegacySkill(opts: {

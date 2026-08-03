@@ -130,6 +130,11 @@ export type RuntimeCacheDiagnostics = {
   readonly inspectFullRefreshes: number;
 };
 
+type QueuedRefresh = {
+  readonly reason: string;
+  readonly forceInspect: boolean;
+};
+
 export function createRuntimeCache(opts: {
   readonly onRefresh?: (snapshot: RuntimeSnapshot) => void;
   readonly deps?: {
@@ -150,10 +155,7 @@ export function createRuntimeCache(opts: {
 
   let snapshot: RuntimeSnapshot | null = null;
   let refreshTask: Promise<void> | null = null;
-  let pendingRefresh: {
-    readonly reason: string;
-    readonly forceInspect: boolean;
-  } | null = null;
+  let pendingRefresh: QueuedRefresh | null = null;
   let lastRefreshDurationMs: number | null = null;
   let maxRefreshDurationMs: number | null = null;
   const inspectCache = createRuntimeInspectCache();
@@ -192,8 +194,36 @@ export function createRuntimeCache(opts: {
       return;
     }
 
+    refreshTask = drainRefreshes({
+      initialRefresh: { reason, forceInspect },
+    });
+    await refreshTask;
+  };
+
+  async function drainRefreshes(opts: {
+    readonly initialRefresh: QueuedRefresh;
+  }): Promise<void> {
+    let nextRefresh: QueuedRefresh | null = opts.initialRefresh;
+    try {
+      while (nextRefresh) {
+        await runRefresh(nextRefresh);
+        nextRefresh = pendingRefresh;
+        pendingRefresh = null;
+      }
+    } catch (error: unknown) {
+      pendingRefresh = null;
+      throw error;
+    } finally {
+      refreshTask = null;
+    }
+  }
+
+  async function runRefresh({
+    reason,
+    forceInspect,
+  }: QueuedRefresh): Promise<void> {
     const startedAtMs = Date.now();
-    refreshTask = (async () => {
+    try {
       const checkedAtMs = Date.now();
       const previousSnapshot = snapshot;
       const runtimeResult = await readRuntimeProjects({
@@ -237,26 +267,12 @@ export function createRuntimeCache(opts: {
       health = refreshed.health;
       snapshot = nextSnapshot;
       opts.onRefresh?.(nextSnapshot);
-    })();
-
-    try {
-      await refreshTask;
-    } catch (error: unknown) {
-      pendingRefresh = null;
-      throw error;
     } finally {
       const durationMs = Math.max(0, Date.now() - startedAtMs);
       lastRefreshDurationMs = durationMs;
       maxRefreshDurationMs = Math.max(maxRefreshDurationMs ?? 0, durationMs);
-      refreshTask = null;
     }
-
-    if (pendingRefresh) {
-      const queuedRefresh = pendingRefresh;
-      pendingRefresh = null;
-      await refresh(queuedRefresh);
-    }
-  };
+  }
 
   const getProjectsPayload = async ({
     filter,

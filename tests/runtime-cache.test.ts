@@ -604,11 +604,17 @@ test("runtime cache coalesces concurrent refreshes and preserves forced reconcil
   const firstReadGate = new Promise<void>((resolve) => {
     releaseFirstRead = resolve;
   });
+  let releaseSecondRead = (): void => {};
+  const secondReadGate = new Promise<void>((resolve) => {
+    releaseSecondRead = resolve;
+  });
   let readCount = 0;
   runtimeReadOverride = async () => {
     readCount += 1;
     if (readCount === 1) {
       await firstReadGate;
+    } else if (readCount === 2) {
+      await secondReadGate;
     }
     return {
       ok: true,
@@ -624,11 +630,73 @@ test("runtime cache coalesces concurrent refreshes and preserves forced reconcil
   const followers = Array.from({ length: 100 }, () =>
     cache.refresh({ reason: "event", forceInspect: false })
   );
-  followers.push(cache.refresh({ reason: "interval", forceInspect: true }));
+  const forcedFollower = cache.refresh({
+    reason: "interval",
+    forceInspect: true,
+  });
+  let forcedFollowerSettled = false;
+  void forcedFollower.finally(() => {
+    forcedFollowerSettled = true;
+  });
   releaseFirstRead();
+  await waitFor({ predicate: () => readCount === 2 });
+  await Bun.sleep(0);
+
+  expect(forcedFollowerSettled).toBe(false);
+  releaseSecondRead();
+  await forcedFollower;
   await Promise.all([first, ...followers]);
 
   expect(readCount).toBe(2);
+  expect(runtimeReadCalls.map((call) => call.forceInspect)).toEqual([
+    false,
+    true,
+  ]);
+});
+
+test("runtime cache reports queued refresh failures to coalesced callers", async () => {
+  let releaseFirstRead = (): void => {};
+  const firstReadGate = new Promise<void>((resolve) => {
+    releaseFirstRead = resolve;
+  });
+  let readCount = 0;
+  runtimeReadOverride = async () => {
+    readCount += 1;
+    if (readCount === 1) {
+      await firstReadGate;
+      return {
+        ok: true,
+        runtime: [],
+        error: null,
+        checkedAtMs: Date.now(),
+      };
+    }
+    throw new Error("forced refresh failed");
+  };
+
+  const cache = createRuntimeCache({});
+  const first = cache.refresh({ reason: "event", forceInspect: false });
+  await waitFor({ predicate: () => readCount === 1 });
+  const forcedFollower = cache.refresh({
+    reason: "interval",
+    forceInspect: true,
+  });
+  releaseFirstRead();
+  const [firstResult, followerResult] = await Promise.allSettled([
+    first,
+    forcedFollower,
+  ]);
+
+  expect(firstResult.status).toBe("rejected");
+  if (
+    followerResult.status !== "rejected" ||
+    !(followerResult.reason instanceof Error)
+  ) {
+    throw new Error(
+      "Expected the coalesced caller to receive the refresh error"
+    );
+  }
+  expect(followerResult.reason.message).toBe("forced refresh failed");
   expect(runtimeReadCalls.map((call) => call.forceInspect)).toEqual([
     false,
     true,

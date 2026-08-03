@@ -320,9 +320,21 @@ Response:
 | `cache_age_ms` | number or null | Cache age in milliseconds |
 | `last_refresh_at` | string or null | Last refresh attempt |
 | `refresh_count` | number | Refresh count |
+| `refresh_requests` | number | Scheduled refresh requests after event filtering |
+| `refresh_requests_coalesced` | number | Refresh requests merged into pending work |
 | `refresh_failures` | number | Refresh failures |
+| `refresh_in_flight` | boolean | Whether the runtime cache is currently refreshing |
+| `last_refresh_duration_ms` | number or null | Duration of the latest completed refresh |
+| `max_refresh_duration_ms` | number or null | Longest refresh duration since daemon startup |
 | `last_event_at` | string or null | Last docker event timestamp |
 | `events_seen` | number | Docker events seen |
+| `events_relevant` | number | Docker events classified as runtime-affecting |
+| `events_ignored` | number | Known non-state-changing Docker events ignored |
+| `inspect_calls` | number | Docker inspect invocations by the daemon cache |
+| `inspect_ids` | number | Container IDs requested across inspect invocations |
+| `inspect_cache_hits` | number | Container IDs served from the inspect cache |
+| `inspect_cache_misses` | number | Container IDs absent from the inspect cache |
+| `inspect_full_refreshes` | number | Forced full inspect reconciliations |
 | `streams_active` | number | Active WS streams |
 | `runtime_ok` | boolean | Docker runtime availability |
 | `runtime_error` | string or null | Runtime error details (when unavailable) |

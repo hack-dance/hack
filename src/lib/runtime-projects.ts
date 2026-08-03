@@ -69,12 +69,50 @@ export type RuntimeProjectsResult =
       readonly checkedAtMs: number;
     };
 
-type ContainerInspectData = {
+export type ContainerInspectData = {
   readonly labels: Record<string, string>;
   readonly image: string | null;
   readonly mounts: readonly RuntimeContainerMount[];
   readonly networks: readonly RuntimeContainerNetwork[];
 };
+
+export type RuntimeInspectCacheDiagnostics = {
+  readonly inspectCalls: number;
+  readonly inspectIds: number;
+  readonly cacheHits: number;
+  readonly cacheMisses: number;
+  readonly fullRefreshes: number;
+};
+
+export interface RuntimeInspectCache {
+  readonly entries: Map<string, ContainerInspectData>;
+  readonly diagnostics: {
+    inspectCalls: number;
+    inspectIds: number;
+    cacheHits: number;
+    cacheMisses: number;
+    fullRefreshes: number;
+  };
+}
+
+export function createRuntimeInspectCache(): RuntimeInspectCache {
+  return {
+    entries: new Map(),
+    diagnostics: {
+      inspectCalls: 0,
+      inspectIds: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
+      fullRefreshes: 0,
+    },
+  };
+}
+
+export function getRuntimeInspectCacheDiagnostics(opts: {
+  readonly cache: RuntimeInspectCache;
+}): RuntimeInspectCacheDiagnostics {
+  return { ...opts.cache.diagnostics };
+}
 
 export function countRunningServices(runtime: RuntimeProject | null): number {
   if (!runtime) {
@@ -103,6 +141,8 @@ export function filterRuntimeProjects(opts: {
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Runtime project discovery merges compose state, daemon state, and lifecycle state in one read path.
 export async function readRuntimeProjects(opts: {
   readonly includeGlobal: boolean;
+  readonly inspectCache?: RuntimeInspectCache;
+  readonly forceInspect?: boolean;
 }): Promise<RuntimeProjectsResult> {
   const checkedAtMs = Date.now();
   if (!findExecutableInPath("docker")) {
@@ -153,7 +193,13 @@ export async function readRuntimeProjects(opts: {
   const ids = baseRows
     .map((row) => getString(row, "ID") ?? getString(row, "Id") ?? "")
     .filter((id) => id.length > 0);
-  const inspectById = await readContainerInspectData({ ids });
+  const inspectById = opts.inspectCache
+    ? await readCachedContainerInspectData({
+        cache: opts.inspectCache,
+        forceInspect: opts.forceInspect ?? true,
+        ids,
+      })
+    : await readContainerInspectData({ ids });
 
   const globalRoot = resolveGlobalHackDir();
 
@@ -548,9 +594,6 @@ async function readContainerInspectData(opts: {
   const res = await exec(["docker", "inspect", ...opts.ids], {
     stdin: "ignore",
   });
-  if (res.exitCode !== 0) {
-    return new Map();
-  }
 
   let parsed: unknown;
   try {
@@ -591,6 +634,50 @@ async function readContainerInspectData(opts: {
     }
   }
 
+  return out;
+}
+
+async function readCachedContainerInspectData(opts: {
+  readonly cache: RuntimeInspectCache;
+  readonly forceInspect: boolean;
+  readonly ids: readonly string[];
+}): Promise<Map<string, ContainerInspectData>> {
+  const currentIds = new Set(opts.ids);
+  for (const cachedId of opts.cache.entries.keys()) {
+    if (!currentIds.has(cachedId)) {
+      opts.cache.entries.delete(cachedId);
+    }
+  }
+
+  if (opts.forceInspect) {
+    opts.cache.diagnostics.fullRefreshes += 1;
+  }
+  const missingIds = opts.ids.filter((id) => !opts.cache.entries.has(id));
+  const idsToInspect = opts.forceInspect ? opts.ids : missingIds;
+  opts.cache.diagnostics.cacheHits += opts.forceInspect
+    ? 0
+    : opts.ids.length - missingIds.length;
+  opts.cache.diagnostics.cacheMisses += missingIds.length;
+
+  if (idsToInspect.length > 0) {
+    opts.cache.diagnostics.inspectCalls += 1;
+    opts.cache.diagnostics.inspectIds += idsToInspect.length;
+    const inspected = await readContainerInspectData({ ids: idsToInspect });
+    for (const id of idsToInspect) {
+      const detail = inspected.get(id);
+      if (detail) {
+        opts.cache.entries.set(id, detail);
+      }
+    }
+  }
+
+  const out = new Map<string, ContainerInspectData>();
+  for (const id of opts.ids) {
+    const detail = opts.cache.entries.get(id);
+    if (detail) {
+      out.set(id, detail);
+    }
+  }
   return out;
 }
 

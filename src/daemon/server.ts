@@ -26,11 +26,13 @@ import {
 } from "./control-plane-route-validation.ts";
 import {
   type DockerEventWatcher,
+  shouldRefreshForDockerEvent,
   startDockerEventWatcher,
 } from "./docker-events.ts";
 import { createDaemonLogger } from "./logger.ts";
 import type { DaemonPaths } from "./paths.ts";
 import { removeFileIfExists, writeDaemonPid } from "./process.ts";
+import { createRefreshScheduler } from "./refresh-scheduler.ts";
 import {
   type RequestTargetProxy,
   startRequestTargetProxy,
@@ -52,9 +54,13 @@ type DaemonMetrics = {
   readonly startedAtMs: number;
   lastEventAtMs: number | null;
   eventsSeen: number;
+  eventsIgnored: number;
+  eventsRelevant: number;
   streamsActive: number;
   lastRefreshAtMs: number | null;
   refreshCount: number;
+  refreshRequests: number;
+  refreshRequestsCoalesced: number;
   refreshFailures: number;
 };
 
@@ -87,9 +93,13 @@ export async function runDaemon({
     startedAtMs: Date.now(),
     lastEventAtMs: null,
     eventsSeen: 0,
+    eventsIgnored: 0,
+    eventsRelevant: 0,
     streamsActive: 0,
     lastRefreshAtMs: null,
     refreshCount: 0,
+    refreshRequests: 0,
+    refreshRequestsCoalesced: 0,
     refreshFailures: 0,
   };
 
@@ -111,20 +121,22 @@ export async function runDaemon({
     logger.warn({ message: warning });
   }
 
-  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-  const scheduleRefresh = ({ reason }: { readonly reason: string }) => {
-    if (refreshTimer) {
-      return;
-    }
-    refreshTimer = setTimeout(async () => {
-      refreshTimer = null;
-      try {
-        await cache.refresh({ reason });
-      } catch {
+  const refreshScheduler = createRefreshScheduler({
+    refresh: async ({ reason, forceInspect }) => {
+      await cache.refresh({ reason, forceInspect });
+    },
+    onRequest: ({ coalesced }) => {
+      metrics.refreshRequests += 1;
+      if (coalesced) {
+        metrics.refreshRequestsCoalesced += 1;
+      }
+    },
+    onRefreshFinish: ({ error }) => {
+      if (error) {
         metrics.refreshFailures += 1;
       }
-    }, 250);
-  };
+    },
+  });
 
   const dockerEventsDisabled = parseBoolean({
     value: process.env.HACK_DAEMON_DISABLE_DOCKER_EVENTS ?? null,
@@ -132,16 +144,27 @@ export async function runDaemon({
   const watcher: DockerEventWatcher = dockerEventsDisabled
     ? createNoopDockerEventWatcher()
     : startDockerEventWatcher({
-        onEvent: () => {
+        onEvent: (event) => {
           metrics.eventsSeen += 1;
           metrics.lastEventAtMs = Date.now();
-          scheduleRefresh({ reason: "event" });
+          if (!shouldRefreshForDockerEvent({ event })) {
+            metrics.eventsIgnored += 1;
+            return;
+          }
+          metrics.eventsRelevant += 1;
+          refreshScheduler.request({
+            reason: "event",
+            urgency: "debounced",
+          });
         },
         onError: (message) =>
           logger.warn({ message: `docker events: ${message}` }),
         onExit: (exitCode) => {
           logger.warn({ message: `docker events exited (${exitCode})` });
-          scheduleRefresh({ reason: "events-exit" });
+          refreshScheduler.request({
+            reason: "events-exit",
+            urgency: "immediate",
+          });
         },
       });
   if (dockerEventsDisabled) {
@@ -153,7 +176,7 @@ export async function runDaemon({
 
   const refreshIntervalMs = 30_000;
   setInterval(() => {
-    void cache.refresh({ reason: "interval" });
+    refreshScheduler.request({ reason: "interval", urgency: "immediate" });
   }, refreshIntervalMs);
 
   const requestContext = {
@@ -303,6 +326,7 @@ export async function runDaemon({
 
   const shutdown = async ({ reason }: { readonly reason: string }) => {
     logger.warn({ message: `Shutting down hackd (${reason})` });
+    refreshScheduler.stop();
     watcher.stop();
     await daemonProxy?.close();
     await gatewayProxy?.close();
@@ -374,6 +398,7 @@ async function handleRequest({
 
   if (url.pathname === "/v1/metrics") {
     const snapshot = cache.getSnapshot();
+    const diagnostics = cache.getDiagnostics();
     const cacheUpdatedAtMs = snapshot?.updatedAtMs ?? null;
     const runtimeHealth = formatRuntimeHealth({
       health: snapshot?.health ?? null,
@@ -390,11 +415,23 @@ async function handleRequest({
         ? new Date(metrics.lastRefreshAtMs).toISOString()
         : null,
       refresh_count: metrics.refreshCount,
+      refresh_requests: metrics.refreshRequests,
+      refresh_requests_coalesced: metrics.refreshRequestsCoalesced,
       refresh_failures: metrics.refreshFailures,
+      refresh_in_flight: diagnostics.refreshInFlight,
+      last_refresh_duration_ms: diagnostics.lastRefreshDurationMs,
+      max_refresh_duration_ms: diagnostics.maxRefreshDurationMs,
       last_event_at: metrics.lastEventAtMs
         ? new Date(metrics.lastEventAtMs).toISOString()
         : null,
       events_seen: metrics.eventsSeen,
+      events_relevant: metrics.eventsRelevant,
+      events_ignored: metrics.eventsIgnored,
+      inspect_calls: diagnostics.inspectCalls,
+      inspect_ids: diagnostics.inspectIds,
+      inspect_cache_hits: diagnostics.inspectCacheHits,
+      inspect_cache_misses: diagnostics.inspectCacheMisses,
+      inspect_full_refreshes: diagnostics.inspectFullRefreshes,
       streams_active: metrics.streamsActive,
       runtime_ok: runtimeHealth.ok,
       runtime_error: runtimeHealth.error,

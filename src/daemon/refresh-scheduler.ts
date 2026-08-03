@@ -65,9 +65,12 @@ export function createRefreshScheduler(opts: {
     const dueAtMs =
       pending.urgency === "immediate"
         ? currentTimeMs
-        : Math.min(
-            pending.requestedAtMs + maxWaitMs,
-            Math.max(currentTimeMs + debounceMs, earliestByIntervalMs)
+        : Math.max(
+            earliestByIntervalMs,
+            Math.min(
+              pending.requestedAtMs + maxWaitMs,
+              currentTimeMs + debounceMs
+            )
           );
     const delayMs = Math.max(0, dueAtMs - currentTimeMs);
     timer = setTimeout(() => {

@@ -38,6 +38,44 @@ test("refresh scheduler coalesces an event storm into one bounded follow-up", as
   scheduler.stop();
 });
 
+test("refresh scheduler enforces the minimum interval after a slow refresh", async () => {
+  const minimumIntervalMs = 30;
+  let releaseFirstRefresh = (): void => {};
+  const firstRefresh = new Promise<void>((resolve) => {
+    releaseFirstRefresh = resolve;
+  });
+  const startedAtMs: number[] = [];
+  let firstCompletedAtMs = 0;
+  const scheduler = createRefreshScheduler({
+    debounceMs: 1,
+    minIntervalMs: minimumIntervalMs,
+    maxWaitMs: 5,
+    refresh: async () => {
+      startedAtMs.push(Date.now());
+      if (startedAtMs.length === 1) {
+        await firstRefresh;
+        firstCompletedAtMs = Date.now();
+      }
+    },
+  });
+
+  scheduler.request({ reason: "event", urgency: "debounced" });
+  await waitFor({ predicate: () => startedAtMs.length === 1 });
+  scheduler.request({ reason: "event", urgency: "debounced" });
+  await Bun.sleep(10);
+  releaseFirstRefresh();
+  await waitFor({ predicate: () => startedAtMs.length === 2 });
+
+  const secondStartedAtMs = startedAtMs[1];
+  if (secondStartedAtMs === undefined) {
+    throw new Error("Expected the pending refresh to start");
+  }
+  expect(secondStartedAtMs - firstCompletedAtMs).toBeGreaterThanOrEqual(
+    minimumIntervalMs - 2
+  );
+  scheduler.stop();
+});
+
 test("immediate refresh upgrades pending event work and forces inspection", async () => {
   const calls: Array<{ reason: string; forceInspect: boolean }> = [];
   const scheduler = createRefreshScheduler({

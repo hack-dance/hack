@@ -140,7 +140,7 @@ test("Codex legacy check covers skills and MCP as one integration", async () => 
   expect(result.message).toContain("skills or MCP config");
 });
 
-test("Codex preparation preserves missing plugin readiness after cleanup", async () => {
+test("Codex preparation preserves legacy skills when the plugin is missing", async () => {
   tempDir = await mkdtemp(join(tmpdir(), "hack-codex-plugin-"));
   const skillPath = join(tempDir, ".codex", "skills", "hack-cli", "SKILL.md");
   await Bun.write(skillPath, renderCodexSkill());
@@ -155,7 +155,8 @@ test("Codex preparation preserves missing plugin readiness after cleanup", async
     }),
   });
   expect(result.status).toBe("missing");
-  expect(result.cleanupStatus).toBe("removed");
+  expect(result.cleanupStatus).toBeUndefined();
+  expect(await Bun.file(skillPath).exists()).toBe(true);
 });
 
 test("plugin manifest version matches the CLI package", async () => {

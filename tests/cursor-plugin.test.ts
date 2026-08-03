@@ -72,7 +72,7 @@ test("Cursor plugin migration removes generated rules and MCP", async () => {
   );
 });
 
-test("Cursor preparation preserves missing plugin readiness after cleanup", async () => {
+test("Cursor preparation preserves legacy rules when the plugin is missing", async () => {
   tempDir = await mkdtemp(join(tmpdir(), "hack-cursor-plugin-"));
   await installCursorRules({ scope: "project", projectRoot: tempDir });
 
@@ -82,7 +82,10 @@ test("Cursor preparation preserves missing plugin readiness after cleanup", asyn
     runCursorCommand: async () => ({ exitCode: 0, stdout: "[]", stderr: "" }),
   });
   expect(result.status).toBe("missing");
-  expect(result.cleanupStatus).toBe("removed");
+  expect(result.cleanupStatus).toBeUndefined();
+  expect(
+    await Bun.file(join(tempDir, ".cursor", "rules", "hack.mdc")).exists()
+  ).toBe(true);
 });
 
 test("Cursor plugin manifests match the CLI package version", async () => {

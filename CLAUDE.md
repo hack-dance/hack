@@ -84,7 +84,7 @@ Integration freshness:
 - At session start, audit project and global integrations with `hack setup sync --all-scopes --check`.
 - If anything is stale, missing, or deprecated, run `hack setup sync --all-scopes`, then reload the agent session so cached instructions are replaced.
 - Never copy or hand-edit generated Hack rules to refresh them; update the CLI and run the sync command.
-- Content revision: `2e6336eb37dd` (version alone is not a freshness guarantee).
+- Content revision: `6ef36575c6e7` (version alone is not a freshness guarantee).
 
 Product boundary:
 - Supported v3 surface: project init, up/down/restart, open, logs, env, host exec/shell, sessions, doctor, and daemon.
@@ -246,7 +246,7 @@ Agent integration maintenance:
 - When changing hack itself: interface or behavior changes must update docs/ in the same change (regenerate the CLI reference with `bun run docs:cli-reference`).
 
 Agent setup (CLI-first):
-- Cursor plugin: run `hack setup cursor`, then install or enable Hack from `/plugin` as directed.
+- Cursor plugin: run `hack setup cursor`, then install Hack with `/add-plugin` or enable it from Settings > Plugins as directed.
 - Claude Code plugin: run `hack setup claude`, then install or enable `hack@hack-dance` as directed.
 - Codex plugin: run `hack setup codex`, then install or enable Hack from `/plugins` as directed.
 - Refresh all local agent integrations: `hack setup sync --all-scopes`

@@ -175,6 +175,77 @@ test("setup sync treats installed deprecated artifacts as actionable", () => {
   });
 });
 
+test("setup sync reports unavailable native plugins as non-success", () => {
+  const result = buildSetupSyncScopeResult({
+    action: "install",
+    scope: "Project",
+    groups: [
+      {
+        label: "Hack Cursor plugin",
+        requiresReadyPlugin: true,
+        results: [
+          {
+            status: "missing",
+            path: "hack@hack-dance",
+            message: "Install Hack with /add-plugin before migration.",
+          },
+        ],
+      },
+    ],
+  });
+
+  expect(result).toEqual({
+    exitCode: 1,
+    item: {
+      label: "Project",
+      status: "warn",
+      meta: "0/1 current",
+      detail:
+        "Hack Cursor plugin: Install Hack with /add-plugin before migration.",
+    },
+  });
+});
+
+test("setup sync does not treat absent deprecated artifacts as plugin failures", () => {
+  const result = buildSetupSyncScopeResult({
+    action: "install",
+    scope: "Global",
+    groups: [
+      {
+        label: "Deprecated Tickets skill",
+        results: [{ status: "missing", path: "<home>/hack-tickets" }],
+      },
+    ],
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(result.item.status).toBe("ok");
+  expect(result.item.meta).toBe("already current");
+});
+
+test("setup sync counts plugin-gated legacy cleanup as an update", () => {
+  const result = buildSetupSyncScopeResult({
+    action: "install",
+    scope: "Project",
+    groups: [
+      {
+        label: "Hack Codex plugin",
+        requiresReadyPlugin: true,
+        results: [
+          {
+            status: "noop",
+            cleanupStatus: "removed",
+            path: "hack@hack-dance",
+          },
+        ],
+      },
+    ],
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(result.item.meta).toBe("1 updated");
+});
+
 test("buildInitAssistantReport captures repo signals", async () => {
   const repoRoot = await setupTempRepo();
   await Bun.write(

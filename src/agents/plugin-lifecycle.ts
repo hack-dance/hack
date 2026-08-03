@@ -30,6 +30,30 @@ export type ParsedAgentPluginState =
     }
   | { readonly ok: false; readonly message: string };
 
+export type AgentPluginInstallOutcome =
+  | "error"
+  | "warning"
+  | "unchanged"
+  | "updated";
+
+/** Map lifecycle states to honest setup/onboarding presentation semantics. */
+export function resolveAgentPluginInstallOutcome({
+  status,
+}: {
+  readonly status: string;
+}): AgentPluginInstallOutcome {
+  if (status === "error") {
+    return "error";
+  }
+  if (["missing", "stale", "deprecated"].includes(status)) {
+    return "warning";
+  }
+  if (["noop", "preserved", "absent"].includes(status)) {
+    return "unchanged";
+  }
+  return "updated";
+}
+
 /** Apply the common native-plugin state machine to client-specific CLI output. */
 export async function checkNativeAgentPlugin<TScope extends string>({
   scope,
@@ -107,18 +131,33 @@ export async function prepareNativeAgentPlugin<TScope extends string>({
   readonly cleanup: () => Promise<AgentPluginResult<TScope>>;
   readonly check: () => Promise<AgentPluginResult<TScope>>;
 }): Promise<AgentPluginResult<TScope>> {
+  const pluginResult = await check();
+  if (pluginResult.status !== "noop") {
+    return pluginResult;
+  }
   const cleanupResult = await cleanup();
   if (cleanupResult.status === "error") {
     return cleanupResult;
-  }
-  const pluginResult = await check();
-  if (pluginResult.status === "error") {
-    return pluginResult;
   }
   return mergePluginPreparation({
     cleanup: cleanupResult,
     plugin: pluginResult,
   });
+}
+
+/** Report plugin readiness first, then any legacy artifacts blocking cutover. */
+export async function checkNativeAgentPluginCutover<TScope extends string>({
+  check,
+  checkLegacy,
+}: {
+  readonly check: () => Promise<AgentPluginResult<TScope>>;
+  readonly checkLegacy: () => Promise<AgentPluginResult<TScope>>;
+}): Promise<AgentPluginResult<TScope>> {
+  const pluginResult = await check();
+  if (pluginResult.status !== "noop") {
+    return pluginResult;
+  }
+  return await checkLegacy();
 }
 
 /** Collapse independent legacy cleanup outcomes using consistent precedence. */

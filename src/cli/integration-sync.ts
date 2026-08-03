@@ -1,13 +1,16 @@
 import {
   checkDeprecatedHackClaudeIntegration,
+  checkHackClaudePlugin,
   removeDeprecatedHackClaudeIntegration,
 } from "../agents/claude-plugin.ts";
 import {
   checkDeprecatedHackCodexIntegration,
+  checkHackCodexPlugin,
   removeDeprecatedHackCodexIntegration,
 } from "../agents/codex-plugin.ts";
 import {
   checkDeprecatedHackCursorIntegration,
+  checkHackCursorPlugin,
   removeDeprecatedHackCursorIntegration,
 } from "../agents/cursor-plugin.ts";
 import { HACK_AGENT_INTEGRATION_CLI_VERSION } from "../agents/instruction-source.ts";
@@ -260,12 +263,9 @@ async function autoSyncIntegrations(opts: {
   readonly projectRoot: string;
 }): Promise<{ readonly ok: boolean }> {
   const [
-    cursorProject,
-    cursorUser,
-    claudeProject,
-    claudeUser,
-    codexProject,
-    codexUser,
+    cursorStatuses,
+    claudeStatuses,
+    codexStatuses,
     ticketsProject,
     ticketsUser,
     ticketsDocs,
@@ -273,21 +273,42 @@ async function autoSyncIntegrations(opts: {
     deprecatedSharedSkills,
     docs,
   ] = await Promise.all([
-    removeDeprecatedHackCursorIntegration({
-      scope: "project",
-      projectRoot: opts.projectRoot,
+    syncLegacyScopesWhenPluginReady({
+      check: async () => await checkHackCursorPlugin({ scope: "user" }),
+      cleanups: [
+        async () =>
+          await removeDeprecatedHackCursorIntegration({
+            scope: "project",
+            projectRoot: opts.projectRoot,
+          }),
+        async () =>
+          await removeDeprecatedHackCursorIntegration({ scope: "user" }),
+      ],
     }),
-    removeDeprecatedHackCursorIntegration({ scope: "user" }),
-    removeDeprecatedHackClaudeIntegration({
-      scope: "project",
-      projectRoot: opts.projectRoot,
+    syncLegacyScopesWhenPluginReady({
+      check: async () => await checkHackClaudePlugin({ scope: "user" }),
+      cleanups: [
+        async () =>
+          await removeDeprecatedHackClaudeIntegration({
+            scope: "project",
+            projectRoot: opts.projectRoot,
+          }),
+        async () =>
+          await removeDeprecatedHackClaudeIntegration({ scope: "user" }),
+      ],
     }),
-    removeDeprecatedHackClaudeIntegration({ scope: "user" }),
-    removeDeprecatedHackCodexIntegration({
-      scope: "project",
-      projectRoot: opts.projectRoot,
+    syncLegacyScopesWhenPluginReady({
+      check: async () => await checkHackCodexPlugin({ scope: "user" }),
+      cleanups: [
+        async () =>
+          await removeDeprecatedHackCodexIntegration({
+            scope: "project",
+            projectRoot: opts.projectRoot,
+          }),
+        async () =>
+          await removeDeprecatedHackCodexIntegration({ scope: "user" }),
+      ],
     }),
-    removeDeprecatedHackCodexIntegration({ scope: "user" }),
     removeTicketsSkill({ scope: "project", projectRoot: opts.projectRoot }),
     removeTicketsSkill({ scope: "user" }),
     removeTicketsAgentDocs({
@@ -302,17 +323,19 @@ async function autoSyncIntegrations(opts: {
     }),
   ]);
 
+  const nativeStatuses = [
+    ...cursorStatuses,
+    ...claudeStatuses,
+    ...codexStatuses,
+  ] as const;
   const singleStatuses = [
-    cursorProject.status,
-    cursorUser.status,
-    claudeProject.status,
-    claudeUser.status,
-    codexProject.status,
-    codexUser.status,
     ticketsProject.status,
     ticketsUser.status,
     sharedSkill.status,
   ] as const;
+  const nativeErrors = nativeStatuses.some((status) =>
+    hasNativeSyncFailure(status)
+  );
   const singleErrors = singleStatuses.some((status) =>
     hasSingleInstallError(status)
   );
@@ -325,6 +348,7 @@ async function autoSyncIntegrations(opts: {
   return {
     ok: !(
       singleErrors ||
+      nativeErrors ||
       docsErrors ||
       ticketsDocsErrors ||
       deprecatedSharedErrors
@@ -334,6 +358,30 @@ async function autoSyncIntegrations(opts: {
 
 function hasSingleInstallError(status: string): boolean {
   return status === "error";
+}
+
+function hasNativeSyncFailure(status: string): boolean {
+  return ["error", "missing", "stale", "deprecated", "preserved"].includes(
+    status
+  );
+}
+
+/** Gate automatic project/user cleanup behind one native-plugin readiness check. */
+export async function syncLegacyScopesWhenPluginReady({
+  check,
+  cleanups,
+}: {
+  readonly check: () => Promise<{ readonly status: string }>;
+  readonly cleanups: readonly (() => Promise<{ readonly status: string }>)[];
+}): Promise<readonly string[]> {
+  const plugin = await check();
+  if (plugin.status !== "noop") {
+    return [plugin.status];
+  }
+  const results = await Promise.all(
+    cleanups.map(async (cleanup) => await cleanup())
+  );
+  return results.map((result) => result.status);
 }
 
 function hasDocInstallErrors(opts: {

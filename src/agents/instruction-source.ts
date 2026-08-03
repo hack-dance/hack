@@ -322,7 +322,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     title: "Agent setup (CLI-first)",
     surfaces: ["docs", "skill", "primer"],
     bullets: [
-      "Cursor plugin: run `hack setup cursor`, then install or enable Hack from `/plugin` as directed.",
+      "Cursor plugin: run `hack setup cursor`, then install Hack with `/add-plugin` or enable it from Settings > Plugins as directed.",
       "Claude Code plugin: run `hack setup claude`, then install or enable `hack@hack-dance` as directed.",
       "Codex plugin: run `hack setup codex`, then install or enable Hack from `/plugins` as directed.",
       "Refresh all local agent integrations: `hack setup sync --all-scopes`",

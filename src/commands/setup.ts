@@ -24,7 +24,11 @@ import {
   prepareHackCursorPlugin,
   removeDeprecatedHackCursorIntegration,
 } from "../agents/cursor-plugin.ts";
-import type { AgentPluginResult } from "../agents/plugin-lifecycle.ts";
+import {
+  type AgentPluginResult,
+  checkNativeAgentPluginCutover,
+  resolveAgentPluginInstallOutcome,
+} from "../agents/plugin-lifecycle.ts";
 import {
   checkDeprecatedSharedHackSkills,
   checkSharedHackSkill,
@@ -180,6 +184,7 @@ type SetupMcpArgs = CommandArgs<typeof setupMcpOptions, readonly []>;
 
 type SetupMultiLogResult = {
   readonly status: string;
+  readonly cleanupStatus?: string;
   readonly path?: string;
   readonly message?: string;
 };
@@ -723,6 +728,7 @@ type SetupSyncAction = "install" | "check" | "remove";
 type SetupSyncGroup = {
   readonly label: string;
   readonly results: readonly SetupMultiLogResult[];
+  readonly requiresReadyPlugin?: boolean;
 };
 
 type SetupSyncScopeResult = {
@@ -736,16 +742,38 @@ export function buildSetupSyncScopeResult(input: {
   readonly groups: readonly SetupSyncGroup[];
 }): SetupSyncScopeResult {
   const entries = input.groups.flatMap((group) =>
-    group.results.map((result) => ({ ...result, label: group.label }))
+    group.results.map((result) => {
+      const status =
+        input.action === "install" &&
+        result.status === "noop" &&
+        ["removed", "preserved"].includes(result.cleanupStatus ?? "")
+          ? (result.cleanupStatus ?? result.status)
+          : result.status;
+      return {
+        ...result,
+        status,
+        label: group.label,
+        requiresReadyPlugin: group.requiresReadyPlugin === true,
+      };
+    })
   );
   const failures = entries.filter((entry) => {
     if (entry.status === "error") {
       return true;
     }
-    return (
-      input.action === "check" &&
-      ["missing", "stale", "deprecated"].includes(entry.status)
-    );
+    if (input.action === "check") {
+      return ["missing", "stale", "deprecated"].includes(entry.status);
+    }
+    if (input.action === "install") {
+      if (entry.status === "preserved") {
+        return true;
+      }
+      return (
+        entry.requiresReadyPlugin &&
+        ["missing", "stale", "deprecated"].includes(entry.status)
+      );
+    }
+    return entry.status === "preserved";
   });
   const errorCount = failures.filter(
     (entry) => entry.status === "error"
@@ -771,6 +799,9 @@ export function buildSetupSyncScopeResult(input: {
     const changed = entries.filter((entry) =>
       ["created", "updated", "removed"].includes(entry.status)
     ).length;
+    if (failures.length > 0) {
+      return `${entries.length - failures.length}/${entries.length} current`;
+    }
     return changed === 0 ? "already current" : `${changed} updated`;
   })();
   const detail = failures
@@ -861,17 +892,29 @@ async function runProjectScopeSync(opts: {
   let docsResults: SetupMultiLogResult[];
 
   if (action === "check") {
-    cursorResult = await checkDeprecatedHackCursorIntegration({
-      scope: "project",
-      projectRoot,
+    cursorResult = await checkNativeAgentPluginCutover({
+      check: async () => await checkHackCursorPlugin({ scope: "project" }),
+      checkLegacy: async () =>
+        await checkDeprecatedHackCursorIntegration({
+          scope: "project",
+          projectRoot,
+        }),
     });
-    claudeResult = await checkDeprecatedHackClaudeIntegration({
-      scope: "project",
-      projectRoot,
+    claudeResult = await checkNativeAgentPluginCutover({
+      check: async () => await checkHackClaudePlugin({ scope: "project" }),
+      checkLegacy: async () =>
+        await checkDeprecatedHackClaudeIntegration({
+          scope: "project",
+          projectRoot,
+        }),
     });
-    codexResult = await checkDeprecatedHackCodexIntegration({
-      scope: "project",
-      projectRoot,
+    codexResult = await checkNativeAgentPluginCutover({
+      check: async () => await checkHackCodexPlugin({ scope: "project" }),
+      checkLegacy: async () =>
+        await checkDeprecatedHackCodexIntegration({
+          scope: "project",
+          projectRoot,
+        }),
     });
     ticketsResult = await checkDeprecatedTicketsSkill({
       scope: "project",
@@ -908,15 +951,15 @@ async function runProjectScopeSync(opts: {
       targets: ["agents", "claude"],
     });
   } else {
-    cursorResult = await removeDeprecatedHackCursorIntegration({
+    cursorResult = await prepareHackCursorPlugin({
       scope: "project",
       projectRoot,
     });
-    claudeResult = await removeDeprecatedHackClaudeIntegration({
+    claudeResult = await prepareHackClaudePlugin({
       scope: "project",
       projectRoot,
     });
-    codexResult = await removeDeprecatedHackCodexIntegration({
+    codexResult = await prepareHackCodexPlugin({
       scope: "project",
       projectRoot,
     });
@@ -935,9 +978,30 @@ async function runProjectScopeSync(opts: {
     action,
     scope: "Project",
     groups: [
-      { label: "Deprecated Cursor integration", results: [cursorResult] },
-      { label: "Deprecated Claude integration", results: [claudeResult] },
-      { label: "Deprecated Codex integration", results: [codexResult] },
+      {
+        label:
+          action !== "remove"
+            ? "Hack Cursor plugin"
+            : "Deprecated Cursor integration",
+        results: [cursorResult],
+        requiresReadyPlugin: true,
+      },
+      {
+        label:
+          action !== "remove"
+            ? "Hack Claude Code plugin"
+            : "Deprecated Claude integration",
+        results: [claudeResult],
+        requiresReadyPlugin: true,
+      },
+      {
+        label:
+          action !== "remove"
+            ? "Hack Codex plugin"
+            : "Deprecated Codex integration",
+        results: [codexResult],
+        requiresReadyPlugin: true,
+      },
       { label: "Deprecated Tickets skill", results: [ticketsResult] },
       { label: "Deprecated Tickets instructions", results: ticketsDocsResults },
       { label: "Agent docs", results: docsResults },
@@ -968,13 +1032,21 @@ async function runUserScopeSync(opts: {
   let legacySharedResults: SetupMultiLogResult[];
 
   if (action === "check") {
-    cursorResult = await checkDeprecatedHackCursorIntegration({
-      scope: "user",
+    cursorResult = await checkNativeAgentPluginCutover({
+      check: async () => await checkHackCursorPlugin({ scope: "user" }),
+      checkLegacy: async () =>
+        await checkDeprecatedHackCursorIntegration({ scope: "user" }),
     });
-    claudeResult = await checkDeprecatedHackClaudeIntegration({
-      scope: "user",
+    claudeResult = await checkNativeAgentPluginCutover({
+      check: async () => await checkHackClaudePlugin({ scope: "user" }),
+      checkLegacy: async () =>
+        await checkDeprecatedHackClaudeIntegration({ scope: "user" }),
     });
-    codexResult = await checkDeprecatedHackCodexIntegration({ scope: "user" });
+    codexResult = await checkNativeAgentPluginCutover({
+      check: async () => await checkHackCodexPlugin({ scope: "user" }),
+      checkLegacy: async () =>
+        await checkDeprecatedHackCodexIntegration({ scope: "user" }),
+    });
     ticketsResult = await checkDeprecatedTicketsSkill({ scope: "user" });
     sharedSkillResult = await checkSharedHackSkill();
     legacySharedResults = await checkDeprecatedSharedHackSkills();
@@ -990,13 +1062,9 @@ async function runUserScopeSync(opts: {
     sharedSkillResult = await removeSharedHackSkill();
     legacySharedResults = await removeDeprecatedSharedHackSkills();
   } else {
-    cursorResult = await removeDeprecatedHackCursorIntegration({
-      scope: "user",
-    });
-    claudeResult = await removeDeprecatedHackClaudeIntegration({
-      scope: "user",
-    });
-    codexResult = await removeDeprecatedHackCodexIntegration({ scope: "user" });
+    cursorResult = await prepareHackCursorPlugin({ scope: "user" });
+    claudeResult = await prepareHackClaudePlugin({ scope: "user" });
+    codexResult = await prepareHackCodexPlugin({ scope: "user" });
     ticketsResult = await removeTicketsSkill({ scope: "user" });
     sharedSkillResult = await installSharedHackSkill();
     legacySharedResults = await removeDeprecatedSharedHackSkills();
@@ -1006,9 +1074,30 @@ async function runUserScopeSync(opts: {
     action,
     scope: "Global",
     groups: [
-      { label: "Deprecated Cursor integration", results: [cursorResult] },
-      { label: "Deprecated Claude integration", results: [claudeResult] },
-      { label: "Deprecated Codex integration", results: [codexResult] },
+      {
+        label:
+          action !== "remove"
+            ? "Hack Cursor plugin"
+            : "Deprecated Cursor integration",
+        results: [cursorResult],
+        requiresReadyPlugin: true,
+      },
+      {
+        label:
+          action !== "remove"
+            ? "Hack Claude Code plugin"
+            : "Deprecated Claude integration",
+        results: [claudeResult],
+        requiresReadyPlugin: true,
+      },
+      {
+        label:
+          action !== "remove"
+            ? "Hack Codex plugin"
+            : "Deprecated Codex integration",
+        results: [codexResult],
+        requiresReadyPlugin: true,
+      },
       { label: "Shared Hack skill", results: [sharedSkillResult] },
       { label: "Deprecated Tickets skill", results: [ticketsResult] },
       { label: "Deprecated shared Hack skills", results: legacySharedResults },
@@ -1166,6 +1255,7 @@ function logSingleResult(opts: {
   readonly okMessage: string;
   readonly result: {
     readonly status: string;
+    readonly cleanupStatus?: string;
     readonly path: string;
     readonly message?: string;
   };
@@ -1211,7 +1301,27 @@ function logSingleResult(opts: {
     return 1;
   }
 
-  if (["noop", "preserved"].includes(opts.result.status)) {
+  const outcome = resolveAgentPluginInstallOutcome({
+    status: opts.result.status,
+  });
+  if (outcome === "warning") {
+    logger.warn({
+      message:
+        opts.result.message ??
+        `${opts.okMessage} is not ready (${opts.result.status}) at ${opts.result.path}`,
+    });
+    return 1;
+  }
+
+  if (outcome === "unchanged") {
+    if (opts.result.cleanupStatus === "removed") {
+      logger.success({
+        message:
+          opts.result.message ??
+          `Updated ${opts.okMessage} at ${opts.result.path}`,
+      });
+      return 0;
+    }
     logger.info({
       message:
         opts.result.message ??

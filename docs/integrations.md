@@ -46,12 +46,12 @@ Add the GitHub marketplace:
 cursor-agent plugin marketplace add hack-dance/hack
 ```
 
-Open `/plugin` in Cursor, choose the **Hack Dance** marketplace, and install **Hack**. Cursor bundles
+Open `/add-plugin` in Cursor and install **Hack** from the **Hack Dance** marketplace. Cursor bundles
 the generated Hack rule, both skills, and the MCP server. `hack setup cursor --check` verifies the
-installed plugin when the Cursor Agent CLI is available. `hack setup cursor` safely removes matching
-legacy `.cursor/rules/hack.mdc` and standalone MCP entries, then prints install guidance. It exits
-nonzero until the plugin is installed and enabled, so scripted setup cannot mistake cleanup for a
-ready Cursor integration.
+installed plugin when the Cursor Agent CLI is available. `hack setup cursor` retains every legacy
+rule and standalone MCP entry while the plugin is missing or disabled and exits nonzero with install
+guidance. Once the plugin is enabled, setup removes only matching generated copies; edited rules and
+customized MCP entries remain protected.
 
 ### Claude Code
 
@@ -66,9 +66,9 @@ claude plugin install hack@hack-dance
 
 Start a new Claude Code session after installation. The plugin bundles the SessionStart/PreCompact
 primer hooks, both skills, and the MCP server. `hack setup claude --check` verifies the installed and
-enabled plugin. `hack setup claude` safely removes matching legacy hooks, the generated
-`.claude/skills/hack-init` skill, and standalone MCP entries before printing install guidance.
-It exits nonzero until the plugin is installed and enabled.
+enabled plugin. While it is missing or disabled, `hack setup claude` exits nonzero and retains the
+legacy hooks, generated `.claude/skills/hack-init` skill, and standalone MCP entries. Cleanup starts
+only after the plugin is enabled and still preserves user-edited content.
 
 ### Codex
 
@@ -82,13 +82,17 @@ codex plugin marketplace add hack-dance/hack \
 
 Open `/plugins`, install and enable **Hack** from the **Hack Dance** marketplace, then start a new
 Codex session. `hack setup codex --check` verifies the installed/enabled state; `hack setup codex`
-removes unmodified legacy `.codex/skills/hack-cli`, `.codex/skills/hack-init`, and standalone Codex
-MCP entries, then prints install guidance when the plugin is missing. User-edited legacy skills and
-customized MCP entries are never deleted. It exits nonzero until the plugin is installed and enabled.
+retains the legacy `.codex/skills/hack-cli`, `.codex/skills/hack-init`, and standalone Codex MCP
+entries until the plugin is enabled. It then removes only unmodified generated copies. User-edited
+legacy skills and customized MCP entries are never deleted.
 
 For all three commands, `--global` selects where legacy standalone artifacts are audited or removed;
 plugin installation state itself is client-wide. `--remove` removes only legacy Hack-managed
 artifacts and never uninstalls the native plugin from the client.
+
+Interactive `hack init` uses the same readiness contract. If a selected client executable, plugin,
+or enabled state is missing, init still writes the project files but prints a warning and exits
+nonzero so automation cannot interpret the optional integration step as successful.
 
 The plugins are cached and enabled by their clients. Projects keep only their `.hack/` configuration
 and genuinely project-specific agent guidance. Upgrade the Codex marketplace with
@@ -99,11 +103,14 @@ version.
 
 Hack maintains project instructions plus shared `~/.ai/skills` surfaces. Generated guidance
 identifies the CLI version that rendered it. Native plugin installation is managed by each client;
-`setup sync` only cleans up safe-to-remove legacy Cursor, Claude Code, and Codex copies.
+`setup sync` retains legacy Cursor, Claude Code, and Codex copies until the corresponding plugin is
+enabled, then cleans up only exact generated content.
 
 - Audit without writing: `hack setup sync --all-scopes --check`
 - Repair project and global integrations: `hack setup sync --all-scopes`
 - After repair: reload the agent session so cached rules are discarded
 
-Interactive project commands announce detected drift before auto-repair. `hack agent prime` performs
-the same read-only audit at session start and prints a warning before any Hack operating guidance.
+Interactive project commands announce detected drift before auto-repair. Automatic sync checks each
+native plugin before legacy cleanup and remains warning-only when the plugin is unavailable.
+`hack agent prime` performs the same read-only audit at session start and prints a warning before any
+Hack operating guidance.

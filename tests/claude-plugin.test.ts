@@ -116,7 +116,7 @@ test("Claude plugin migration detects and removes a partial legacy hook install"
   expect(settings.hooks.SessionStart).toEqual([]);
 });
 
-test("Claude preparation preserves missing plugin readiness after cleanup", async () => {
+test("Claude preparation preserves legacy hooks when the plugin is missing", async () => {
   tempDir = await mkdtemp(join(tmpdir(), "hack-claude-plugin-"));
   await installClaudeHooks({ scope: "project", projectRoot: tempDir });
 
@@ -126,9 +126,11 @@ test("Claude preparation preserves missing plugin readiness after cleanup", asyn
     runClaudeCommand: async () => ({ exitCode: 0, stdout: "[]", stderr: "" }),
   });
   expect(result.status).toBe("missing");
-  expect(result.cleanupStatus).toBe("removed");
-  expect(result.message).toContain("Removed deprecated standalone");
+  expect(result.cleanupStatus).toBeUndefined();
   expect(result.message).toContain("not installed");
+  expect(
+    await Bun.file(join(tempDir, ".claude", "settings.local.json")).exists()
+  ).toBe(true);
 });
 
 test("Claude plugin manifests match the CLI package version", async () => {

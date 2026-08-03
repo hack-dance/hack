@@ -23,6 +23,7 @@ import {
   type OnboardingMode,
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
+import { resolveAgentPluginInstallOutcome } from "../agents/plugin-lifecycle.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
@@ -3999,7 +4000,9 @@ async function handleInit({
     );
   }
 
-  await maybeSetupAgentIntegrations({ repoRoot });
+  const agentIntegrationsReady = await maybeSetupAgentIntegrations({
+    repoRoot,
+  });
 
   note(
     [
@@ -4026,7 +4029,7 @@ async function handleInit({
     });
   }
 
-  return 0;
+  return agentIntegrationsReady ? 0 : 1;
 }
 
 async function handleInitAuto({
@@ -4318,16 +4321,16 @@ type SetupIntegration = "cursor" | "claude" | "codex" | "agents" | "mcp";
 
 async function maybeSetupAgentIntegrations(opts: {
   readonly repoRoot: string;
-}): Promise<void> {
+}): Promise<boolean> {
   if (!canPrompt()) {
-    return;
+    return true;
   }
   const shouldSetup = await confirm({
     message: "Set up coding agent integrations? (Cursor/Claude/Codex)",
     initialValue: true,
   });
   if (isCancel(shouldSetup) || !shouldSetup) {
-    return;
+    return true;
   }
 
   const selected = await multiselect<SetupIntegration>({
@@ -4343,49 +4346,40 @@ async function maybeSetupAgentIntegrations(opts: {
     initialValues: ["cursor", "claude", "codex"],
   });
   if (isCancel(selected) || selected.length === 0) {
-    return;
+    return true;
   }
 
   const selection = new Set(selected);
-
-  if (selection.has("cursor")) {
-    const result = await prepareHackCursorPlugin({
-      scope: "project",
-      projectRoot: opts.repoRoot,
-    });
-    logInstallResult({
+  const pluginResults = await Promise.all([
+    prepareSelectedAgentPlugin({
+      selected: selection.has("cursor"),
       label: "Hack Cursor plugin",
-      status: result.status,
-      path: result.path,
-      message: result.message,
-    });
-  }
-
-  if (selection.has("claude")) {
-    const result = await prepareHackClaudePlugin({
-      scope: "project",
-      projectRoot: opts.repoRoot,
-    });
-    logInstallResult({
+      prepare: async () =>
+        await prepareHackCursorPlugin({
+          scope: "project",
+          projectRoot: opts.repoRoot,
+        }),
+    }),
+    prepareSelectedAgentPlugin({
+      selected: selection.has("claude"),
       label: "Hack Claude Code plugin",
-      status: result.status,
-      path: result.path,
-      message: result.message,
-    });
-  }
-
-  if (selection.has("codex")) {
-    const result = await prepareHackCodexPlugin({
-      scope: "project",
-      projectRoot: opts.repoRoot,
-    });
-    logInstallResult({
+      prepare: async () =>
+        await prepareHackClaudePlugin({
+          scope: "project",
+          projectRoot: opts.repoRoot,
+        }),
+    }),
+    prepareSelectedAgentPlugin({
+      selected: selection.has("codex"),
       label: "Hack Codex plugin",
-      status: result.status,
-      path: result.path,
-      message: result.message,
-    });
-  }
+      prepare: async () =>
+        await prepareHackCodexPlugin({
+          scope: "project",
+          projectRoot: opts.repoRoot,
+        }),
+    }),
+  ]);
+  let integrationsReady = pluginResults.every(Boolean);
 
   if (selection.has("agents")) {
     const results = await upsertAgentDocs({
@@ -4393,12 +4387,13 @@ async function maybeSetupAgentIntegrations(opts: {
       targets: ["agents", "claude"],
     });
     for (const result of results) {
-      logInstallResult({
-        label: "Agent docs",
-        status: result.status,
-        path: result.path,
-        message: result.message,
-      });
+      integrationsReady =
+        logInstallResult({
+          label: "Agent docs",
+          status: result.status,
+          path: result.path,
+          message: result.message,
+        }) && integrationsReady;
     }
   }
 
@@ -4417,14 +4412,42 @@ async function maybeSetupAgentIntegrations(opts: {
     });
 
     for (const result of results) {
-      logInstallResult({
-        label: "MCP config",
-        status: result.status,
-        path: result.path ?? "unknown path",
-        message: result.message,
-      });
+      integrationsReady =
+        logInstallResult({
+          label: "MCP config",
+          status: result.status,
+          path: result.path ?? "unknown path",
+          message: result.message,
+        }) && integrationsReady;
     }
   }
+
+  return integrationsReady;
+}
+
+async function prepareSelectedAgentPlugin({
+  selected,
+  label,
+  prepare,
+}: {
+  readonly selected: boolean;
+  readonly label: string;
+  readonly prepare: () => Promise<{
+    readonly status: string;
+    readonly path: string;
+    readonly message?: string;
+  }>;
+}): Promise<boolean> {
+  if (!selected) {
+    return true;
+  }
+  const result = await prepare();
+  return logInstallResult({
+    label,
+    status: result.status,
+    path: result.path,
+    message: result.message,
+  });
 }
 
 function logInstallResult(opts: {
@@ -4432,22 +4455,33 @@ function logInstallResult(opts: {
   readonly status: string;
   readonly path: string;
   readonly message?: string;
-}): void {
-  if (opts.status === "error") {
+}): boolean {
+  const outcome = resolveAgentPluginInstallOutcome({ status: opts.status });
+  if (outcome === "error") {
     logger.warn({ message: opts.message ?? `Failed to update ${opts.label}` });
-    return;
+    return false;
   }
 
-  if (["noop", "preserved"].includes(opts.status)) {
+  if (outcome === "warning") {
+    logger.warn({
+      message:
+        opts.message ??
+        `${opts.label} is not ready (${opts.status}) at ${opts.path}`,
+    });
+    return false;
+  }
+
+  if (outcome === "unchanged") {
     logger.info({
       message: opts.message ?? `No changes for ${opts.label} (${opts.path})`,
     });
-    return;
+    return true;
   }
 
   logger.success({
     message: opts.message ?? `Updated ${opts.label} at ${opts.path}`,
   });
+  return true;
 }
 
 // Exported for direct unit-testing of the auto (non-interactive) discovery

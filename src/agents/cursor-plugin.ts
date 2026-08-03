@@ -29,7 +29,7 @@ const MARKETPLACE_COMMAND =
   "cursor-agent plugin marketplace add hack-dance/hack";
 const PLUGIN_GUIDANCE = [
   `Add the Hack marketplace with: ${MARKETPLACE_COMMAND}`,
-  "Then open /plugin in Cursor, choose the Hack Dance marketplace, and install Hack.",
+  "Then open /add-plugin in Cursor and install Hack from the Hack Dance marketplace.",
   "Start a new Cursor session after installation.",
 ].join(" ");
 const LEGACY_RULE_FINGERPRINTS = new Set([
@@ -54,7 +54,7 @@ export async function checkHackCursorPlugin(opts: {
     inspectErrorMessage: "Could not inspect installed Cursor plugins.",
     missingPluginMessage: `The Hack Cursor plugin is not installed. ${PLUGIN_GUIDANCE}`,
     disabledPluginMessage:
-      "The Hack Cursor plugin is installed but disabled. Enable it from /plugin, then start a new session.",
+      "The Hack Cursor plugin is installed but disabled. Enable it from Settings > Plugins, then start a new session.",
     parseState: parseCursorPluginState,
   });
 }

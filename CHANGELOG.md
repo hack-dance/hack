@@ -1,3 +1,7 @@
+## <small>3.5.2 (2026-08-03)</small>
+
+* fix(daemon): bound Docker event refresh work (#74) ([53df352](https://github.com/hack-dance/hack/commit/53df352)), closes [#74](https://github.com/hack-dance/hack/issues/74)
+
 ## <small>3.5.1 (2026-07-30)</small>
 
 * fix(runtime): prevent polling and stale worktree cache buildup (#71) ([1ba67d1](https://github.com/hack-dance/hack/commit/1ba67d1)), closes [#71](https://github.com/hack-dance/hack/issues/71)

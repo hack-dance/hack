@@ -90,6 +90,11 @@ For all three commands, `--global` selects where legacy standalone artifacts are
 plugin installation state itself is client-wide. `--remove` removes only legacy Hack-managed
 artifacts and never uninstalls the native plugin from the client.
 
+If an enabled plugin is ready but setup finds customized legacy rules, skills, hooks, or MCP
+entries, it preserves that content, prints a warning, and exits nonzero. The same incomplete-cutover
+result applies to `hack setup sync`, automatic sync, and interactive `hack init` until the duplicate
+legacy integration is reconciled manually.
+
 Interactive `hack init` uses the same readiness contract. If a selected client executable, plugin,
 or enabled state is missing, init still writes the project files but prints a warning and exits
 nonzero so automation cannot interpret the optional integration step as successful.

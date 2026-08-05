@@ -4434,6 +4434,7 @@ async function prepareSelectedAgentPlugin({
   readonly label: string;
   readonly prepare: () => Promise<{
     readonly status: string;
+    readonly cleanupStatus?: string;
     readonly path: string;
     readonly message?: string;
   }>;
@@ -4445,18 +4446,23 @@ async function prepareSelectedAgentPlugin({
   return logInstallResult({
     label,
     status: result.status,
+    cleanupStatus: result.cleanupStatus,
     path: result.path,
     message: result.message,
   });
 }
 
-function logInstallResult(opts: {
+export function logInstallResult(opts: {
   readonly label: string;
   readonly status: string;
+  readonly cleanupStatus?: string;
   readonly path: string;
   readonly message?: string;
 }): boolean {
-  const outcome = resolveAgentPluginInstallOutcome({ status: opts.status });
+  const outcome = resolveAgentPluginInstallOutcome({
+    status: opts.status,
+    cleanupStatus: opts.cleanupStatus,
+  });
   if (outcome === "error") {
     logger.warn({ message: opts.message ?? `Failed to update ${opts.label}` });
     return false;

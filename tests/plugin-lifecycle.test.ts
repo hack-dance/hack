@@ -122,6 +122,28 @@ test("legacy cleanup aggregation gives errors precedence over mutations", () => 
   });
 });
 
+test("legacy cleanup aggregation gives preserved content precedence over removals", () => {
+  const result = mergeLegacyCleanupResults({
+    scope: "project",
+    fallbackPath: "/fallback",
+    results: [
+      { status: "removed", path: "/generated" },
+      {
+        status: "preserved",
+        path: "/customized",
+        message: "Preserved customized content.",
+      },
+    ],
+  });
+
+  expect(result).toEqual({
+    scope: "project",
+    status: "preserved",
+    path: "/customized",
+    message: "Preserved customized content.",
+  });
+});
+
 test("unavailable plugins are warning outcomes instead of successful installs", () => {
   for (const status of ["missing", "stale", "deprecated"] as const) {
     expect(resolveAgentPluginInstallOutcome({ status })).toBe("warning");
@@ -132,4 +154,16 @@ test("unavailable plugins are warning outcomes instead of successful installs", 
   expect(resolveAgentPluginInstallOutcome({ status: "removed" })).toBe(
     "updated"
   );
+  expect(
+    resolveAgentPluginInstallOutcome({
+      status: "noop",
+      cleanupStatus: "preserved",
+    })
+  ).toBe("warning");
+  expect(
+    resolveAgentPluginInstallOutcome({
+      status: "noop",
+      cleanupStatus: "removed",
+    })
+  ).toBe("updated");
 });

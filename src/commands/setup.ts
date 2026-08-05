@@ -1303,6 +1303,7 @@ function logSingleResult(opts: {
 
   const outcome = resolveAgentPluginInstallOutcome({
     status: opts.result.status,
+    cleanupStatus: opts.result.cleanupStatus,
   });
   if (outcome === "warning") {
     logger.warn({

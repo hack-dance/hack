@@ -39,14 +39,22 @@ export type AgentPluginInstallOutcome =
 /** Map lifecycle states to honest setup/onboarding presentation semantics. */
 export function resolveAgentPluginInstallOutcome({
   status,
+  cleanupStatus,
 }: {
   readonly status: string;
+  readonly cleanupStatus?: string;
 }): AgentPluginInstallOutcome {
-  if (status === "error") {
+  if (status === "error" || cleanupStatus === "error") {
     return "error";
   }
-  if (["missing", "stale", "deprecated"].includes(status)) {
+  if (
+    ["missing", "stale", "deprecated"].includes(status) ||
+    cleanupStatus === "preserved"
+  ) {
     return "warning";
+  }
+  if (cleanupStatus === "removed") {
+    return "updated";
   }
   if (["noop", "preserved", "absent"].includes(status)) {
     return "unchanged";
@@ -175,11 +183,15 @@ export function mergeLegacyCleanupResults<TScope extends string>({
   }[];
 }): AgentPluginResult<TScope> {
   const error = results.find((result) => result.status === "error");
+  const preserved = results.find((result) => result.status === "preserved");
+  const removed = results.find((result) => result.status === "removed");
   const messages = results.flatMap((result) =>
     typeof result.message === "string" ? [result.message] : []
   );
   const path =
     error?.path ??
+    preserved?.path ??
+    removed?.path ??
     results.find((result) => result.status !== "absent")?.path ??
     results.find((result) => result.path)?.path ??
     fallbackPath;
@@ -187,10 +199,10 @@ export function mergeLegacyCleanupResults<TScope extends string>({
   let status: AgentPluginResult<TScope>["status"] = "absent";
   if (error) {
     status = "error";
-  } else if (results.some((result) => result.status === "removed")) {
-    status = "removed";
-  } else if (results.some((result) => result.status === "preserved")) {
+  } else if (preserved) {
     status = "preserved";
+  } else if (removed) {
+    status = "removed";
   }
 
   return {

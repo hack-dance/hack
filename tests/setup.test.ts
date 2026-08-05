@@ -246,6 +246,32 @@ test("setup sync counts plugin-gated legacy cleanup as an update", () => {
   expect(result.item.meta).toBe("1 updated");
 });
 
+test("setup sync reports preserved plugin cleanup as non-success", () => {
+  const result = buildSetupSyncScopeResult({
+    action: "install",
+    scope: "Project",
+    groups: [
+      {
+        label: "Hack Codex plugin",
+        requiresReadyPlugin: true,
+        results: [
+          {
+            status: "noop",
+            cleanupStatus: "preserved",
+            path: "/repo/.codex/config.toml",
+            message: "Preserved customized MCP config.",
+          },
+        ],
+      },
+    ],
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.item.status).toBe("warn");
+  expect(result.item.meta).toBe("0/1 current");
+  expect(result.item.detail).toContain("Preserved customized MCP config.");
+});
+
 test("buildInitAssistantReport captures repo signals", async () => {
   const repoRoot = await setupTempRepo();
   await Bun.write(

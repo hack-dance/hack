@@ -41,3 +41,15 @@ test("automatic integration sync cleans both scopes after plugin readiness", asy
   expect(statuses).toEqual(["removed", "absent"]);
   expect(cleanupCalls).toBe(2);
 });
+
+test("automatic integration sync retains preserved cleanup as incomplete", async () => {
+  const statuses = await syncLegacyScopesWhenPluginReady({
+    check: async () => ({ status: "noop" }),
+    cleanups: [
+      async () => ({ status: "removed" }),
+      async () => ({ status: "preserved" }),
+    ],
+  });
+
+  expect(statuses).toEqual(["removed", "preserved"]);
+});

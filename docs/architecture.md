@@ -208,6 +208,11 @@ containers. It serves a small local API over a Unix socket at `~/.hack/daemon/ha
 - `hack ps --json`
 - streaming consumers (TUI/MCP)
 
+The event watcher ignores container actions such as health-check `exec_*` events that cannot change
+the cached runtime view. Relevant event bursts are debounced and rate-bounded. Event refreshes reuse
+inspect data for unchanged container IDs, while startup, watcher recovery, and the 30-second interval
+perform full inspection so missed events and mutable network data remain eventually consistent.
+
 If the daemon is not running (or version-mismatched), the CLI falls back to direct Docker calls.
 
 Runtime health:

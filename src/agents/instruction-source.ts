@@ -2,8 +2,8 @@
  * Single source of truth for hack CLI agent instructions.
  *
  * Every generated agent-facing instruction surface (AGENTS.md/CLAUDE.md
- * snippet, Codex skill, Cursor rules, session primer) renders from the
- * sections defined here. Surface-specific framing (frontmatter, markers,
+ * snippet, bundled native plugin skills/rules, session primer) renders from
+ * the sections defined here. Surface-specific framing (frontmatter, markers,
  * top-level headings) stays in each renderer; the canonical section titles
  * and bullets live here so content can never drift between surfaces.
  */
@@ -307,7 +307,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     title: "Agent integration maintenance",
     surfaces: ALL_SURFACES,
     bullets: [
-      "Project-level hack commands auto-check integration drift and attempt auto-sync (project docs, client skills/rules, shared global skills, and MCP).",
+      "Project-level hack commands auto-check integration drift and attempt auto-sync (project docs, Cursor/Claude integrations, shared global skills, and MCP).",
       "When drift is detected, Hack reports it before repair and tells the agent to reload after repair; it never silently leaves the session using cached rules.",
       "Set `HACK_SETUP_SYNC_MODE=warn` to only warn, or `HACK_SETUP_SYNC_MODE=off` to disable.",
       "Refresh project + user integrations: `hack setup sync --all-scopes`",
@@ -322,9 +322,9 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     title: "Agent setup (CLI-first)",
     surfaces: ["docs", "skill", "primer"],
     bullets: [
-      "Cursor rules: `hack setup cursor`",
-      "Claude hooks: `hack setup claude`",
-      "Codex skill: `hack setup codex`",
+      "Cursor plugin: run `hack setup cursor`, then install Hack with `/add-plugin` or enable it from Settings > Plugins as directed.",
+      "Claude Code plugin: run `hack setup claude`, then install or enable `hack@hack-dance` as directed.",
+      "Codex plugin: run `hack setup codex`, then install or enable Hack from `/plugins` as directed.",
       "Refresh all local agent integrations: `hack setup sync --all-scopes`",
       "Agent-assisted onboarding: `hack init --with claude|codex|both` (new repos) or `hack agent onboard` (existing projects) print/hand off the full setup prompt; the `/hack-init` skill and the `hack-init` MCP prompt return the same content.",
       "Init prompt: `hack agent init` (use --client cursor|claude|codex to open)",

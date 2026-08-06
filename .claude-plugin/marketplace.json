@@ -1,0 +1,16 @@
+{
+  "name": "hack-dance",
+  "description": "Official Hack plugins for local-first development workflows.",
+  "owner": {
+    "name": "Hack Dance LLC"
+  },
+  "plugins": [
+    {
+      "name": "hack",
+      "source": "./plugins/hack",
+      "description": "Operate and onboard Hack-managed local development environments.",
+      "category": "development",
+      "tags": ["local-development", "docker", "developer-tools", "agents"]
+    }
+  ]
+}

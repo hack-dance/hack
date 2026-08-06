@@ -11,7 +11,7 @@ your installed version.
 | --- | --- |
 | A fresh repo + an agent CLI installed | `hack init --with claude\|codex\|both` |
 | An existing hack project | `hack agent onboard` (prints the prompt) |
-| An agent session with the hack skills installed | `/hack-init` |
+| A Codex session with the Hack plugin installed | `/hack-init` |
 | A no-shell MCP client | the `hack-init` MCP prompt (`hack setup mcp`) |
 
 ## New repo: `hack init --with`
@@ -42,11 +42,11 @@ when present.
 
 ## Agent-side skill: `/hack-init`
 
-`hack setup claude` and `hack setup codex` install a thin `hack-init` skill
-(`.claude/skills/hack-init/SKILL.md` / `.codex/skills/hack-init/SKILL.md`).
-The skill tells the agent to run `hack agent onboard` (or fetch the `hack-init`
-MCP prompt) and follow it — the content stays in the CLI, so installed skills
-never go stale on substance.
+The official Hack plugins for Cursor, Claude Code, and Codex bundle the same `hack-init` skill;
+run `hack setup cursor`, `hack setup claude`, or `hack setup codex` for exact marketplace guidance.
+The skill tells the agent to run `hack agent onboard` (or fetch the
+`hack-init` MCP prompt) and follow it — the content stays in the CLI, so installed skills never go
+stale on substance.
 
 ## What the prompt covers
 

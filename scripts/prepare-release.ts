@@ -3,6 +3,8 @@
 import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import { generateAgentPlugins } from "./generate-agent-plugins.ts";
+
 interface Args {
   readonly version: string | null;
 }
@@ -61,6 +63,9 @@ async function main({ args }: { readonly args: Args }): Promise<number> {
     nextVersion,
     rootPackageJson: pkg,
   });
+
+  await generateAgentPlugins({ repoRoot, version: nextVersion });
+  process.stdout.write(`Updated agent plugin manifests: ${nextVersion}\n`);
 
   // Update macOS app version in Base.xcconfig
   const xconfigPath = resolve(repoRoot, "apps/macos/Config/Base.xcconfig");

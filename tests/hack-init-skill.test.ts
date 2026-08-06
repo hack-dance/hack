@@ -9,11 +9,6 @@ import {
   removeClaudeHooks,
 } from "../src/agents/claude.ts";
 import {
-  checkCodexSkill,
-  installCodexSkill,
-  removeCodexSkill,
-} from "../src/agents/codex-skill.ts";
-import {
   checkHackInitSkill,
   installHackInitSkill,
   removeHackInitSkill,
@@ -55,7 +50,7 @@ test("renderHackInitSkill is a thin pointer to the CLI prompt source", () => {
   expect(skill).not.toContain("## Phase 1");
 });
 
-test("installHackInitSkill writes project-scoped skills for both clients", async () => {
+test("installHackInitSkill writes the project-scoped Claude skill", async () => {
   const repoRoot = await setupTempDir();
 
   const claude = await installHackInitSkill({
@@ -63,19 +58,9 @@ test("installHackInitSkill writes project-scoped skills for both clients", async
     scope: "project",
     projectRoot: repoRoot,
   });
-  const codex = await installHackInitSkill({
-    client: "codex",
-    scope: "project",
-    projectRoot: repoRoot,
-  });
-
   expect(claude.status).toBe("created");
-  expect(codex.status).toBe("created");
   expect(claude.path).toBe(
     join(repoRoot, ".claude", "skills", "hack-init", "SKILL.md")
-  );
-  expect(codex.path).toBe(
-    join(repoRoot, ".codex", "skills", "hack-init", "SKILL.md")
   );
 
   const content = await Bun.file(claude.path).text();
@@ -101,37 +86,43 @@ test("checkHackInitSkill reports noop, stale, and missing", async () => {
   const repoRoot = await setupTempDir();
 
   const missing = await checkHackInitSkill({
-    client: "codex",
+    client: "claude",
     scope: "project",
     projectRoot: repoRoot,
   });
   expect(missing.status).toBe("missing");
 
   await installHackInitSkill({
-    client: "codex",
+    client: "claude",
     scope: "project",
     projectRoot: repoRoot,
   });
   const fresh = await checkHackInitSkill({
-    client: "codex",
+    client: "claude",
     scope: "project",
     projectRoot: repoRoot,
   });
   expect(fresh.status).toBe("noop");
 
-  const skillPath = join(repoRoot, ".codex", "skills", "hack-init", "SKILL.md");
+  const skillPath = join(
+    repoRoot,
+    ".claude",
+    "skills",
+    "hack-init",
+    "SKILL.md"
+  );
   const content = await Bun.file(skillPath).text();
   await Bun.write(
     skillPath,
     content.replace("hack agent onboard", "hack agent old-command")
   );
   const stale = await checkHackInitSkill({
-    client: "codex",
+    client: "claude",
     scope: "project",
     projectRoot: repoRoot,
   });
   expect(stale.status).toBe("stale");
-  expect(stale.message).toContain("hack setup codex");
+  expect(stale.message).toContain("hack setup claude");
 });
 
 test("removeHackInitSkill deletes the skill directory", async () => {
@@ -155,46 +146,6 @@ test("removeHackInitSkill deletes the skill directory", async () => {
     projectRoot: repoRoot,
   });
   expect(gone.status).toBe("missing");
-});
-
-test("installCodexSkill also installs the hack-init skill and detects its drift", async () => {
-  const repoRoot = await setupTempDir();
-
-  const installed = await installCodexSkill({
-    scope: "project",
-    projectRoot: repoRoot,
-  });
-  expect(installed.status).toBe("created");
-
-  const initSkillPath = join(
-    repoRoot,
-    ".codex",
-    "skills",
-    "hack-init",
-    "SKILL.md"
-  );
-  const content = await Bun.file(initSkillPath).text();
-  expect(content).toContain("name: hack-init");
-
-  const fresh = await checkCodexSkill({
-    scope: "project",
-    projectRoot: repoRoot,
-  });
-  expect(fresh.status).toBe("noop");
-
-  await Bun.write(initSkillPath, content.replace("hack agent onboard", "nope"));
-  const stale = await checkCodexSkill({
-    scope: "project",
-    projectRoot: repoRoot,
-  });
-  expect(stale.status).toBe("stale");
-
-  const removed = await removeCodexSkill({
-    scope: "project",
-    projectRoot: repoRoot,
-  });
-  expect(removed.status).toBe("removed");
-  expect(await Bun.file(initSkillPath).exists()).toBe(false);
 });
 
 test("installClaudeHooks also installs the hack-init skill and detects its drift", async () => {

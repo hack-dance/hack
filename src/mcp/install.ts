@@ -1,10 +1,11 @@
+import { unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 
 const CODEX_SERVER_BLOCK_PATTERN =
-  /^\s*\[mcp_servers\.hack\][\s\S]*?(?=^\s*\[|\s*$)/m;
+  /^[ \t]*\[mcp_servers\.hack\][ \t]*(?:\r?\n(?![ \t]*\[)[^\r\n]*)*(?:\r?\n)?/m;
 const CODEX_SERVER_HEADER_PATTERN = /^\s*\[mcp_servers\.hack\]\s*$/m;
 
 export type McpTarget = "claude" | "codex" | "cursor";
@@ -30,6 +31,22 @@ export type McpRemoveResult = {
   readonly target: McpTarget;
   readonly scope: McpInstallScope;
   readonly status: "removed" | "noop" | "error";
+  readonly path?: string;
+  readonly message?: string;
+};
+
+export type DeprecatedCodexMcpResult = {
+  readonly target: "codex";
+  readonly scope: McpInstallScope;
+  readonly status: "deprecated" | "absent" | "removed" | "preserved" | "error";
+  readonly path?: string;
+  readonly message?: string;
+};
+
+export type DeprecatedPluginMcpResult = {
+  readonly target: "claude" | "cursor";
+  readonly scope: McpInstallScope;
+  readonly status: "deprecated" | "absent" | "removed" | "preserved" | "error";
   readonly path?: string;
   readonly message?: string;
 };
@@ -203,6 +220,208 @@ export async function removeMcpConfig(opts: {
   }
 
   return results;
+}
+
+/** Report standalone Codex MCP config superseded by the Hack plugin. */
+export async function checkDeprecatedCodexMcpConfig(opts: {
+  readonly scope: McpInstallScope;
+  readonly projectRoot?: string;
+}): Promise<DeprecatedCodexMcpResult> {
+  const resolved = resolveConfigPath({ target: "codex", ...opts });
+  if (!resolved.ok) {
+    return {
+      target: "codex",
+      scope: opts.scope,
+      status: "error",
+      message: resolved.message,
+    };
+  }
+  const text = await readTextFile(resolved.path);
+  if (!(text && hasCodexServerBlock(text))) {
+    return {
+      target: "codex",
+      scope: opts.scope,
+      status: "absent",
+      path: resolved.path,
+    };
+  }
+  return {
+    target: "codex",
+    scope: opts.scope,
+    status: "deprecated",
+    path: resolved.path,
+    message:
+      "Standalone Hack MCP config for Codex is deprecated; the Hack plugin bundles this server.",
+  };
+}
+
+/** Remove a standalone Codex MCP block only when it matches Hack's renderer. */
+export async function removeDeprecatedCodexMcpConfig(opts: {
+  readonly scope: McpInstallScope;
+  readonly projectRoot?: string;
+}): Promise<DeprecatedCodexMcpResult> {
+  const resolved = resolveConfigPath({ target: "codex", ...opts });
+  if (!resolved.ok) {
+    return {
+      target: "codex",
+      scope: opts.scope,
+      status: "error",
+      message: resolved.message,
+    };
+  }
+  const text = await readTextFile(resolved.path);
+  if (!text) {
+    return {
+      target: "codex",
+      scope: opts.scope,
+      status: "absent",
+      path: resolved.path,
+    };
+  }
+  const block = text.match(CODEX_SERVER_BLOCK_PATTERN)?.[0];
+  if (!block) {
+    return {
+      target: "codex",
+      scope: opts.scope,
+      status: "absent",
+      path: resolved.path,
+    };
+  }
+  if (block.trim() !== renderCodexTomlBlock()) {
+    return {
+      target: "codex",
+      scope: opts.scope,
+      status: "preserved",
+      path: resolved.path,
+      message: "Preserved user-modified standalone Hack MCP config for Codex.",
+    };
+  }
+  const next = text.replace(CODEX_SERVER_BLOCK_PATTERN, "").trimEnd();
+  const normalized = next.length === 0 ? "" : `${next}\n`;
+  const result = await writeTextFileIfChanged(resolved.path, normalized);
+  return {
+    target: "codex",
+    scope: opts.scope,
+    status: result.changed ? "removed" : "absent",
+    path: resolved.path,
+  };
+}
+
+/** Report standalone Claude/Cursor MCP config superseded by a native plugin. */
+export async function checkDeprecatedPluginMcpConfig(opts: {
+  readonly target: "claude" | "cursor";
+  readonly scope: McpInstallScope;
+  readonly projectRoot?: string;
+}): Promise<DeprecatedPluginMcpResult> {
+  const resolved = resolveConfigPath(opts);
+  if (!resolved.ok) {
+    return {
+      target: opts.target,
+      scope: opts.scope,
+      status: "error",
+      message: resolved.message,
+    };
+  }
+  const parsed = await readMcpJsonConfig({ path: resolved.path });
+  if (!parsed.ok) {
+    return {
+      target: opts.target,
+      scope: opts.scope,
+      status: parsed.status,
+      path: resolved.path,
+      message: parsed.message,
+    };
+  }
+  if (!Object.hasOwn(parsed.mcpServers, SERVER_NAME)) {
+    return {
+      target: opts.target,
+      scope: opts.scope,
+      status: "absent",
+      path: resolved.path,
+    };
+  }
+  return {
+    target: opts.target,
+    scope: opts.scope,
+    status: "deprecated",
+    path: resolved.path,
+    message: `Standalone Hack MCP config for ${formatTarget(opts.target)} is deprecated; the Hack plugin bundles this server.`,
+  };
+}
+
+/** Remove only generated standalone Claude/Cursor MCP entries. */
+export async function removeDeprecatedPluginMcpConfig(opts: {
+  readonly target: "claude" | "cursor";
+  readonly scope: McpInstallScope;
+  readonly projectRoot?: string;
+}): Promise<DeprecatedPluginMcpResult> {
+  const resolved = resolveConfigPath(opts);
+  if (!resolved.ok) {
+    return {
+      target: opts.target,
+      scope: opts.scope,
+      status: "error",
+      message: resolved.message,
+    };
+  }
+  const parsed = await readMcpJsonConfig({ path: resolved.path });
+  if (!parsed.ok) {
+    return {
+      target: opts.target,
+      scope: opts.scope,
+      status: parsed.status,
+      path: resolved.path,
+      message: parsed.message,
+    };
+  }
+  const existing = parsed.mcpServers[SERVER_NAME];
+  if (existing === undefined) {
+    return {
+      target: opts.target,
+      scope: opts.scope,
+      status: "absent",
+      path: resolved.path,
+    };
+  }
+  const expected =
+    opts.target === "claude" ? buildClaudeEntry() : buildCursorEntry();
+  if (JSON.stringify(existing) !== JSON.stringify(expected)) {
+    return {
+      target: opts.target,
+      scope: opts.scope,
+      status: "preserved",
+      path: resolved.path,
+      message: `Preserved user-modified standalone Hack MCP config for ${formatTarget(opts.target)}.`,
+    };
+  }
+
+  const mcpServers = { ...parsed.mcpServers };
+  delete mcpServers[SERVER_NAME];
+  const next = { ...parsed.value };
+  if (Object.keys(mcpServers).length === 0) {
+    next.mcpServers = undefined;
+  } else {
+    next.mcpServers = mcpServers;
+  }
+  if (Object.values(next).every((value) => value === undefined)) {
+    await unlink(resolved.path);
+    return {
+      target: opts.target,
+      scope: opts.scope,
+      status: "removed",
+      path: resolved.path,
+    };
+  }
+  const result = await writeTextFileIfChanged(
+    resolved.path,
+    `${JSON.stringify(next, null, 2)}\n`
+  );
+  return {
+    target: opts.target,
+    scope: opts.scope,
+    status: result.changed ? "removed" : "absent",
+    path: resolved.path,
+  };
 }
 
 export function renderMcpConfigSnippet(opts: {
@@ -441,6 +660,39 @@ function parseJsonObject(text: string):
     const message = error instanceof Error ? error.message : "Invalid JSON";
     return { ok: false, message: `Failed to parse config JSON: ${message}` };
   }
+}
+
+async function readMcpJsonConfig(opts: { readonly path: string }): Promise<
+  | {
+      readonly ok: true;
+      readonly value: Record<string, unknown>;
+      readonly mcpServers: Record<string, unknown>;
+    }
+  | {
+      readonly ok: false;
+      readonly status: "absent" | "error";
+      readonly message?: string;
+    }
+> {
+  const text = await readTextFile(opts.path);
+  if (!text) {
+    return { ok: false, status: "absent" };
+  }
+  const parsed = parseJsonObject(text);
+  if (!parsed.ok) {
+    return { ok: false, status: "error", message: parsed.message };
+  }
+  return {
+    ok: true,
+    value: parsed.value,
+    mcpServers: isRecord(parsed.value.mcpServers)
+      ? parsed.value.mcpServers
+      : {},
+  };
+}
+
+function formatTarget(target: "claude" | "cursor"): string {
+  return target === "claude" ? "Claude Code" : "Cursor";
 }
 
 function createOkParseResult(opts: {

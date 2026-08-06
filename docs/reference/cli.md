@@ -1642,9 +1642,9 @@ hack setup <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack setup tmux` | Install the recommended tmux binding for hack workspaces |
-| `hack setup cursor` | Install Cursor rules for hack CLI usage |
-| `hack setup claude` | Install Claude Code hooks for hack CLI usage |
-| `hack setup codex` | Install Codex skill for hack CLI usage |
+| `hack setup cursor` | Check or prepare the official Hack plugin for Cursor |
+| `hack setup claude` | Check or prepare the official Hack plugin for Claude Code |
+| `hack setup codex` | Check or prepare the official Hack plugin for Codex |
 | `hack setup tickets` | Remove or audit the deprecated Hack Tickets skill |
 | `hack setup agents` | Install AGENTS.md / CLAUDE.md snippets for hack CLI usage |
 | `hack setup sync` | Refresh project/global agent guidance and remove deprecated artifacts |
@@ -1680,7 +1680,7 @@ hack setup tmux [options]
 
 ## `hack setup cursor`
 
-Install Cursor rules for hack CLI usage
+Check or prepare the official Hack plugin for Cursor
 
 ### Usage
 
@@ -1702,7 +1702,7 @@ hack setup cursor [options]
 
 ## `hack setup claude`
 
-Install Claude Code hooks for hack CLI usage
+Check or prepare the official Hack plugin for Claude Code
 
 ### Usage
 
@@ -1724,7 +1724,7 @@ hack setup claude [options]
 
 ## `hack setup codex`
 
-Install Codex skill for hack CLI usage
+Check or prepare the official Hack plugin for Codex
 
 ### Usage
 

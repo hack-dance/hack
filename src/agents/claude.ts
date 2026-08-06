@@ -101,6 +101,7 @@ export async function installClaudeHooks(opts: {
 export async function checkClaudeHooks(opts: {
   readonly scope: ClaudeScope;
   readonly projectRoot?: string;
+  readonly checkSkill?: boolean;
 }): Promise<ClaudeHookResult> {
   const resolved = resolveClaudeSettingsPath(opts);
   if (!resolved.ok) {
@@ -127,9 +128,24 @@ export async function checkClaudeHooks(opts: {
     };
   }
 
+  const hasAny = hasSomeHooks({
+    settings: settings.value,
+    command: HOOK_COMMAND,
+  });
   const hasAll = hasHooks({ settings: settings.value, command: HOOK_COMMAND });
   if (!hasAll) {
-    return { scope: opts.scope, status: "missing", path };
+    return {
+      scope: opts.scope,
+      status: hasAny ? "stale" : "missing",
+      path,
+      message: hasAny
+        ? "Only part of the legacy Hack Claude hook integration is installed."
+        : undefined,
+    };
+  }
+
+  if (opts.checkSkill === false) {
+    return { scope: opts.scope, status: "noop", path };
   }
 
   const initResult = await checkHackInitSkill({
@@ -157,6 +173,7 @@ export async function checkClaudeHooks(opts: {
 export async function removeClaudeHooks(opts: {
   readonly scope: ClaudeScope;
   readonly projectRoot?: string;
+  readonly removeSkill?: boolean;
 }): Promise<ClaudeHookResult> {
   const resolved = resolveClaudeSettingsPath(opts);
   if (!resolved.ok) {
@@ -169,12 +186,15 @@ export async function removeClaudeHooks(opts: {
   }
 
   const path = resolved.path;
-  const initResult = await removeHackInitSkill({
-    client: "claude",
-    scope: opts.scope,
-    projectRoot: opts.projectRoot,
-  });
-  const initRemoved = initResult.status === "removed";
+  const initResult =
+    opts.removeSkill === false
+      ? null
+      : await removeHackInitSkill({
+          client: "claude",
+          scope: opts.scope,
+          projectRoot: opts.projectRoot,
+        });
+  const initRemoved = initResult?.status === "removed";
 
   if (!(await pathExists(path))) {
     const status = initRemoved ? "removed" : "missing";
@@ -293,6 +313,17 @@ function hasHooks(opts: {
 }): boolean {
   const hooks = resolveHooksMap(opts.settings);
   return HOOK_EVENTS.every((event) => {
+    const eventHooks = resolveEventHooks({ hooks, event });
+    return eventHasCommand({ eventHooks, command: opts.command });
+  });
+}
+
+function hasSomeHooks(opts: {
+  readonly settings: Record<string, unknown>;
+  readonly command: string;
+}): boolean {
+  const hooks = resolveHooksMap(opts.settings);
+  return HOOK_EVENTS.some((event) => {
     const eventHooks = resolveEventHooks({ hooks, event });
     return eventHasCommand({ eventHooks, command: opts.command });
   });

@@ -62,7 +62,9 @@
     "test:e2e:gateway": "bun run scripts/gateway-e2e.ts",
     "test:e2e:dispatch": "bun run scripts/dispatch-e2e.ts",
     "test:e2e:railway": "bun run scripts/railway-node-e2e.ts",
-    "docs:cli-reference": "bun run scripts/generate-cli-reference.ts"
+    "docs:cli-reference": "bun run scripts/generate-cli-reference.ts",
+    "generate:agent-plugins": "bun run scripts/generate-agent-plugins.ts",
+    "generate:codex-plugin": "bun run scripts/generate-agent-plugins.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.11",

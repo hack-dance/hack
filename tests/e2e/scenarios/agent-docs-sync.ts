@@ -1,5 +1,5 @@
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { chmod, mkdir } from "node:fs/promises";
+import { delimiter, join } from "node:path";
 
 import { createMonorepoFixture } from "../fixture.ts";
 import { expect, expectExit, type Scenario } from "../harness.ts";
@@ -195,8 +195,17 @@ export const agentDocsSyncScenario: Scenario = {
     });
     expectExit({
       result: fullSync,
-      codes: [0],
-      message: "hack setup sync (project scope) should succeed",
+      codes: [1],
+      message:
+        "sync should remain non-successful while native plugins are unavailable",
+    });
+    expect({
+      that:
+        fullSync.combined.includes("Hack Cursor plugin") &&
+        fullSync.combined.includes("Hack Claude Code plugin") &&
+        fullSync.combined.includes("Hack Codex plugin"),
+      message: "sync should identify every unavailable native plugin",
+      result: fullSync,
     });
     const fullSyncCheck = await ctx.cli({
       args: ["setup", "sync", "--all-scopes", "--check"],
@@ -205,27 +214,38 @@ export const agentDocsSyncScenario: Scenario = {
     });
     expectExit({
       result: fullSyncCheck,
-      codes: [0],
+      codes: [1],
       message:
-        "hack setup sync --check right after hack setup sync should be clean",
+        "sync check should remain non-successful while native plugins are unavailable",
+    });
+    expect({
+      that: !(
+        fullSyncCheck.combined.toLowerCase().includes("deprecated tickets") ||
+        fullSyncCheck.combined.toLowerCase().includes("out of date")
+      ),
+      message:
+        "missing plugins must not prevent generated docs and deprecated Tickets artifacts from reconciling",
+      result: fullSyncCheck,
     });
 
-    const currentPrime = await ctx.cli({
+    const reconciledPrime = await ctx.cli({
       args: ["agent", "prime"],
       cwd: fixture.root,
       env: isolatedUserEnv,
     });
     expectExit({
-      result: currentPrime,
+      result: reconciledPrime,
       codes: [0],
-      message: "agent primer should render after project/global repair",
+      message:
+        "agent primer should render after generated guidance reconciliation",
     });
     expect({
-      that: currentPrime.stdout.includes(
+      that: reconciledPrime.stdout.includes(
         "Hack agent integration freshness: current"
       ),
-      message: "agent primer should report current guidance after repair",
-      result: currentPrime,
+      message:
+        "generated guidance should be current even while setup separately reports unavailable plugins",
+      result: reconciledPrime,
     });
 
     const syncedAgents = await Bun.file(agentsPath).text();
@@ -247,6 +267,44 @@ export const agentDocsSyncScenario: Scenario = {
       });
     }
 
+    const readyPluginEnv = await createReadyPluginEnv({
+      tempRoot: ctx.tempRoot,
+      home: ctx.hackHome,
+    });
+    const readySync = await ctx.cli({
+      args: ["setup", "sync", "--all-scopes"],
+      cwd: fixture.root,
+      env: readyPluginEnv,
+    });
+    expectExit({
+      result: readySync,
+      codes: [0],
+      message: "sync should succeed after every native plugin is ready",
+    });
+    const readyCheck = await ctx.cli({
+      args: ["setup", "sync", "--all-scopes", "--check"],
+      cwd: fixture.root,
+      env: readyPluginEnv,
+    });
+    expectExit({
+      result: readyCheck,
+      codes: [0],
+      message: "sync check should be clean after ready-plugin reconciliation",
+    });
+    const currentPrime = await ctx.cli({
+      args: ["agent", "prime"],
+      cwd: fixture.root,
+      env: readyPluginEnv,
+    });
+    expect({
+      that: currentPrime.stdout.includes(
+        "Hack agent integration freshness: current"
+      ),
+      message:
+        "agent primer should report current guidance after plugin readiness",
+      result: currentPrime,
+    });
+
     await Bun.write(
       agentsPath,
       syncedAgents.replace(
@@ -257,7 +315,7 @@ export const agentDocsSyncScenario: Scenario = {
     const autoRepair = await ctx.cli({
       args: ["config", "get", "name"],
       cwd: fixture.root,
-      env: { ...isolatedUserEnv, HACK_SETUP_SYNC_MODE: "auto" },
+      env: { ...readyPluginEnv, HACK_SETUP_SYNC_MODE: "auto" },
     });
     expectExit({
       result: autoRepair,
@@ -282,3 +340,50 @@ export const agentDocsSyncScenario: Scenario = {
     });
   },
 };
+
+async function createReadyPluginEnv({
+  tempRoot,
+  home,
+}: {
+  readonly tempRoot: string;
+  readonly home: string;
+}): Promise<Record<string, string>> {
+  const binDir = join(tempRoot, "ready-agent-plugins");
+  await mkdir(binDir, { recursive: true });
+  const clients = [
+    {
+      name: "cursor-agent",
+      output: [{ id: "hack@hack-dance", enabled: true }],
+    },
+    {
+      name: "claude",
+      output: [{ id: "hack@hack-dance", enabled: true }],
+    },
+    {
+      name: "codex",
+      output: {
+        installed: [
+          {
+            name: "hack",
+            marketplaceName: "hack-dance",
+            installed: true,
+            enabled: true,
+          },
+        ],
+      },
+    },
+  ] as const;
+  for (const client of clients) {
+    const path = join(binDir, client.name);
+    await Bun.write(
+      path,
+      `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(client.output)}'\n`
+    );
+    await chmod(path, 0o755);
+  }
+
+  return {
+    HOME: home,
+    PATH: [binDir, process.env.PATH].filter(Boolean).join(delimiter),
+  };
+}

@@ -24,7 +24,10 @@
           "packages/db/package.json",
           "services/auth-broker/package.json",
           "bun.lock",
-          "apps/macos/Config/Base.xcconfig"
+          "apps/macos/Config/Base.xcconfig",
+          "plugins/hack/.codex-plugin/plugin.json",
+          "plugins/hack/.claude-plugin/plugin.json",
+          "plugins/hack/.cursor-plugin/plugin.json"
         ],
         "message": "chore(release): ${nextRelease.version}\n\n${nextRelease.notes}"
       }

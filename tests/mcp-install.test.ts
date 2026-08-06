@@ -3,7 +3,13 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { installMcpConfig } from "../src/mcp/install.ts";
+import {
+  checkDeprecatedCodexMcpConfig,
+  checkDeprecatedPluginMcpConfig,
+  installMcpConfig,
+  removeDeprecatedCodexMcpConfig,
+  removeDeprecatedPluginMcpConfig,
+} from "../src/mcp/install.ts";
 
 let tempDir: string | null = null;
 const originalHome = process.env.HOME;
@@ -67,6 +73,62 @@ test("installMcpConfig is idempotent for codex", async () => {
   expect(codexText).toContain("[mcp_servers.hack]");
   expect(codexText).toContain('command = "hack"');
   expect(codexText).toContain('args = ["mcp", "serve"]');
+});
+
+test("deprecated Codex MCP cleanup removes generated config", async () => {
+  await setupTempHome();
+  await installMcpConfig({ targets: ["codex"], scope: "user" });
+
+  const check = await checkDeprecatedCodexMcpConfig({ scope: "user" });
+  expect(check.status).toBe("deprecated");
+
+  const removed = await removeDeprecatedCodexMcpConfig({ scope: "user" });
+  expect(removed.status).toBe("removed");
+  const absent = await checkDeprecatedCodexMcpConfig({ scope: "user" });
+  expect(absent.status).toBe("absent");
+});
+
+test("deprecated Codex MCP cleanup preserves customized config", async () => {
+  const homeDir = await setupTempHome();
+  const codexPath = join(homeDir, ".codex", "config.toml");
+  await Bun.write(
+    codexPath,
+    '[mcp_servers.hack]\ncommand = "custom-hack"\nargs = ["mcp", "serve"]\n'
+  );
+
+  const result = await removeDeprecatedCodexMcpConfig({ scope: "user" });
+  expect(result.status).toBe("preserved");
+  expect(await Bun.file(codexPath).text()).toContain('command = "custom-hack"');
+});
+
+test("plugin MCP cleanup removes generated entries and preserves customized entries", async () => {
+  const homeDir = await setupTempHome();
+  await installMcpConfig({ targets: ["cursor", "claude"], scope: "user" });
+
+  const deprecated = await checkDeprecatedPluginMcpConfig({
+    target: "cursor",
+    scope: "user",
+  });
+  expect(deprecated.status).toBe("deprecated");
+  const cursorResult = await removeDeprecatedPluginMcpConfig({
+    target: "cursor",
+    scope: "user",
+  });
+  expect(cursorResult.status).toBe("removed");
+  expect(await Bun.file(join(homeDir, ".cursor", "mcp.json")).exists()).toBe(
+    false
+  );
+
+  const claudePath = join(homeDir, ".claude", "settings.json");
+  const claude = await Bun.file(claudePath).json();
+  claude.mcpServers.hack.command = "custom-hack";
+  await Bun.write(claudePath, `${JSON.stringify(claude, null, 2)}\n`);
+  const claudeResult = await removeDeprecatedPluginMcpConfig({
+    target: "claude",
+    scope: "user",
+  });
+  expect(claudeResult.status).toBe("preserved");
+  expect(await Bun.file(claudePath).text()).toContain("custom-hack");
 });
 
 async function setupTempHome(): Promise<string> {

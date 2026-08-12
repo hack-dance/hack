@@ -1,0 +1,4 @@
+{
+  "name": "hack CLI",
+  "install": "bash .cursor/install.sh"
+}

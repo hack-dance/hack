@@ -14,15 +14,7 @@ test("root help leads with the local-first offer and new command grouping", () =
   expect(help).toContain("Local helpers:");
   expect(help).toContain("Unsupported experimental:");
   expect(help).toContain("Extension commands:");
-  expect(help).toMatch(
-    /hack tickets(?: \[args\.\.\.\])?\s+Deprecated: legacy repo-local Tickets compatibility commands/
-  );
-  expect(help).toMatch(
-    /hack auth(?: \[args\.\.\.\])?\s+Removed: Hack account sign-in no longer ships with the local-first CLI/
-  );
-  expect(help).toMatch(
-    /hack linear(?: \[args\.\.\.\])?\s+Removed: Linear integration is no longer part of Hack v3/
-  );
+  expect(help).not.toMatch(/hack (?:tickets|auth|org|team|linear)\b/);
   expect(help).toMatch(
     /hack remote\s+Beta: guided remote access and gateway helpers/
   );
@@ -38,12 +30,7 @@ test("markdown help preserves the local-first grouping", () => {
   expect(help).toContain("### Core workflows");
   expect(help).toContain("### Local helpers");
   expect(help).toContain("### Unsupported experimental");
-  expect(help).toContain("`hack tickets [args...]`");
-  expect(help).toContain(
-    "Deprecated: legacy repo-local Tickets compatibility commands"
-  );
-  expect(help).toContain("`hack auth [args...]`");
-  expect(help).toContain("`hack linear [args...]`");
+  expect(help).not.toMatch(/`hack (?:tickets|auth|org|team|linear)\b/);
 });
 
 test("experimental subcommand help stays visibly labeled experimental", () => {
@@ -60,5 +47,5 @@ test("dispatch help no longer advertises built-in GitHub PR automation", () => {
 
   expect(help).toContain("hack dispatch run");
   expect(help).not.toContain("create/update GitHub PR");
-  expect(help).toContain("Removed in v3: legacy GitHub PR automation flag");
+  expect(help).not.toMatch(/--pr(?:-|\b)|--github-profile/);
 });

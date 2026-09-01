@@ -897,8 +897,6 @@ async function resolveProjectExtensions(opts: {
 
 function mapExtensionFeature(id: string): string | null {
   switch (id) {
-    case "dance.hack.tickets":
-      return "tickets";
     case "dance.hack.cloudflare":
       return "cloudflare";
     case "dance.hack.railway":

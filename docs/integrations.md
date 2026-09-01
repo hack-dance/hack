@@ -14,17 +14,8 @@ path and reason for stale, missing, or failed artifacts. Exit status remains the
 and the individual `hack setup cursor|claude|codex|agents|mcp --check` commands remain available when
 you need per-artifact detail.
 
-What was removed:
-
-- Hack Tickets agent integration; legacy commands remain compatibility-only and are deprecated
-- built-in GitHub integration
-- built-in Linear integration
-- hosted auth/account/org/team surfaces
-- web dashboard control plane
-
-Removed surfaces still exist as explicit tombstone commands (`hack auth`, `hack org`, `hack team`,
-`hack linear`) that print a removal reason and the replacement, so hitting them redirects you
-instead of failing hard.
+What does not ship: Hack Tickets, built-in GitHub or Linear integrations, hosted
+auth/account/org/team surfaces, and the web dashboard control plane.
 
 Recommended replacements:
 
@@ -40,5 +31,6 @@ surfaces. Generated guidance identifies the CLI version that rendered it.
 - Repair project and global integrations: `hack setup sync --all-scopes`
 - After repair: reload the agent session so cached rules are discarded
 
-Interactive project commands announce detected drift before auto-repair. `hack agent prime` performs
-the same read-only audit at session start and prints a warning before any Hack operating guidance.
+Ordinary commands, `hack update`, and `hack doctor --fix` do not inspect or modify these surfaces.
+`hack agent prime` performs a read-only audit at session start and prints a warning before any Hack
+operating guidance.

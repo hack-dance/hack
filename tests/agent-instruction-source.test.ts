@@ -101,11 +101,11 @@ test("no stale command patterns in any surface", () => {
   }
 });
 
-test("deprecated tickets do not appear in generated agent guidance", () => {
+test("retired Tickets do not appear in generated agent guidance", () => {
   for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
     expect(
       rendered,
-      `surface "${surface}" mentions deprecated Tickets`
+      `surface "${surface}" mentions retired Tickets`
     ).not.toMatch(/hack[ -]?tickets|dance\.hack\.tickets/i);
   }
 });

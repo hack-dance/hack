@@ -402,11 +402,6 @@ test("doctor summary groups detailed checks into concise sections", () => {
         message:
           "1 env input file changed since materialization (run: hack env materialize)",
       },
-      {
-        name: "tickets git",
-        status: "ok",
-        message: "Healthy (refs/hack/tickets)",
-      },
     ],
   });
 

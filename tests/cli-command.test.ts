@@ -13,18 +13,14 @@ type CapturedRunResult = {
   readonly stderr: string;
 };
 
-let originalSetupSyncMode: string | undefined;
 let originalLogger: string | undefined;
 
 beforeEach(() => {
-  originalSetupSyncMode = process.env.HACK_SETUP_SYNC_MODE;
   originalLogger = process.env.HACK_LOGGER;
-  process.env.HACK_SETUP_SYNC_MODE = "off";
   process.env.HACK_LOGGER = "console";
 });
 
 afterEach(() => {
-  process.env.HACK_SETUP_SYNC_MODE = originalSetupSyncMode;
   process.env.HACK_LOGGER = originalLogger;
 });
 
@@ -73,14 +69,10 @@ test("parseOptionsForCommand converts number options", () => {
   expect(parsed.follow).toBe(true);
 });
 
-test("removed surfaces still resolve as top-level migration stubs", () => {
-  const authResolved = resolveCommand(CLI_SPEC, ["auth"]);
-  const linearResolved = resolveCommand(CLI_SPEC, ["linear"]);
-
-  expect(authResolved.command?.summary).toContain("Removed:");
-  expect(linearResolved.command?.summary).toContain("Removed:");
-  expect(authResolved.remainingPositionals).toEqual([]);
-  expect(linearResolved.remainingPositionals).toEqual([]);
+test("retired product surfaces no longer resolve", () => {
+  for (const command of ["auth", "org", "team", "linear", "tickets"]) {
+    expect(resolveCommand(CLI_SPEC, [command]).command).toBeNull();
+  }
 });
 
 test("resolveCommand exposes host exec path", () => {
@@ -93,16 +85,7 @@ test("resolveCommand exposes host exec path", () => {
   expect(resolved.remainingPositionals).toEqual(["bun", "test"]);
 });
 
-test("help shows usage for removed namespace-style commands", async () => {
-  const result = await runCliWithCapturedOutput(["help", "org"]);
-
-  expect(result.exitCode).toBe(0);
-  expect(result.stdout).toContain("Usage:");
-  expect(result.stdout).toContain("hack org [args...]");
-  expect(result.stdout).toContain("Removed in v3:");
-});
-
-test("dispatch rejects removed GitHub PR automation flags with migration guidance", async () => {
+test("dispatch rejects retired GitHub PR automation flags as unknown", async () => {
   const result = await runCliWithCapturedOutput([
     "dispatch",
     "run",
@@ -115,23 +98,7 @@ test("dispatch rejects removed GitHub PR automation flags with migration guidanc
   ]);
 
   expect(result.exitCode).toBe(1);
-  expect(result.stderr).toContain(
-    "Built-in GitHub PR automation was removed in Hack v3."
-  );
-  expect(result.stderr).toContain("gh pr create");
-});
-
-test("removed linear stub still emits migration guidance for legacy flags", async () => {
-  const result = await runCliWithCapturedOutput([
-    "linear",
-    "status",
-    "--profile",
-    "demo",
-  ]);
-
-  expect(result.exitCode).toBe(1);
-  expect(result.stderr).toContain("`hack linear status` was removed in v3.");
-  expect(result.stderr).toContain("Use repo-local tickets");
+  expect(result.stderr).toContain("Unknown option '--pr'");
 });
 
 async function runCliWithCapturedOutput(

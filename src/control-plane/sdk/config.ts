@@ -21,24 +21,6 @@ const ExtensionEnablementSchema = z.object({
   config: z.record(z.string(), z.unknown()).default({}),
 });
 
-const TicketsGitRefModeSchema = z.enum(["heads", "hidden"]);
-
-const TicketsGitConfigInputSchema = z.object({
-  enabled: z.boolean().optional(),
-  branch: z.string().optional(),
-  remote: z.string().optional(),
-  forceBareClone: z.boolean().optional(),
-  refMode: TicketsGitRefModeSchema.optional(),
-});
-
-const TicketsGitConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  branch: z.string().default("hack/tickets"),
-  remote: z.string().default("origin"),
-  forceBareClone: z.boolean().default(false),
-  refMode: TicketsGitRefModeSchema.default("hidden"),
-});
-
 const SupervisorConfigInputSchema = z.object({
   enabled: z.boolean().optional(),
   maxConcurrentJobs: z.number().int().positive().optional(),
@@ -349,11 +331,6 @@ const PreferencesConfigSchema = z.object({
 
 const ControlPlaneConfigInputSchema = z.object({
   extensions: z.record(z.string(), ExtensionEnablementInputSchema).optional(),
-  tickets: z
-    .object({
-      git: TicketsGitConfigInputSchema.optional(),
-    })
-    .optional(),
   supervisor: SupervisorConfigInputSchema.optional(),
   tui: TuiConfigInputSchema.optional(),
   usage: UsageConfigInputSchema.optional(),
@@ -370,11 +347,6 @@ const ControlPlaneConfigInputSchema = z.object({
 
 const ControlPlaneConfigSchema = z.object({
   extensions: z.record(z.string(), ExtensionEnablementSchema).default({}),
-  tickets: z
-    .object({
-      git: TicketsGitConfigSchema,
-    })
-    .default({ git: TicketsGitConfigSchema.parse({}) }),
   supervisor: SupervisorConfigSchema.default(SupervisorConfigSchema.parse({})),
   tui: TuiConfigSchema.default(TuiConfigSchema.parse({})),
   usage: UsageConfigSchema.default(UsageConfigSchema.parse({})),
@@ -394,8 +366,6 @@ const ControlPlaneConfigSchema = z.object({
 export type ControlPlaneConfig = z.infer<typeof ControlPlaneConfigSchema>;
 export type DaemonConfig = z.infer<typeof DaemonConfigSchema>;
 export type DaemonLaunchdConfig = z.infer<typeof DaemonLaunchdConfigSchema>;
-export type TicketsGitConfig = z.infer<typeof TicketsGitConfigSchema>;
-export type TicketsGitRefMode = z.infer<typeof TicketsGitRefModeSchema>;
 export type ClusterConfig = z.infer<typeof ClusterConfigSchema>;
 export type ProjectExecutionMode = z.infer<typeof ProjectExecutionModeSchema>;
 export type ExecutionSyncEngine = z.infer<typeof ExecutionSyncEngineSchema>;

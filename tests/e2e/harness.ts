@@ -207,7 +207,6 @@ export function buildCliEnv(opts: {
     }
   }
   env.HACK_HOME = opts.hackHome;
-  env.HACK_SETUP_SYNC_MODE = "off";
   env.HACK_NO_INTERACTIVE = "1";
   env.NO_COLOR = "1";
   env.CLICOLOR = "0";

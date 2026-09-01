@@ -2412,12 +2412,11 @@ async function runDoctorFix(opts: {
   await maybeInstallMutagenForDoctorFix();
   await maybeUntrackGeneratedFiles({ startDir: opts.startDir });
   await maybeRepairHackd();
-  await maybeRepairAgentIntegrations({ startDir: opts.startDir });
 
   const dockerOk = await dockerInfoOk();
   if (!dockerOk) {
     note(
-      "Docker is not reachable; daemon and agent repairs were still applied, but Docker-backed fixes were skipped.",
+      "Docker is not reachable; daemon repairs were still applied, but Docker-backed fixes were skipped.",
       "doctor"
     );
     return;
@@ -2917,8 +2916,8 @@ async function maybeInstallMutagenForDoctorFix(): Promise<void> {
  * `hack doctor --fix` confirmation helper.
  *
  * Wraps {@link confirmSafe} with the doctor-specific non-interactive
- * defaults: safe remediations (network/CoreDNS/CA/daemon restarts, generated
- * file writes, tickets git repair) proceed automatically
+ * defaults: safe remediations (network/CoreDNS/CA/daemon restarts and generated
+ * file writes) proceed automatically
  * (`nonInteractive: "accept-default"`); destructive/system-level steps
  * (anything invoking `sudo`, touching the macOS keychain, or writing outside
  * the project) decline automatically and print a note via
@@ -2995,35 +2994,6 @@ async function maybeRepairHackd(): Promise<void> {
   });
   if (okStart) {
     await runHackSubcommand({ args: ["daemon", "start"] });
-  }
-}
-
-async function maybeRepairAgentIntegrations(opts: {
-  readonly startDir: string;
-}): Promise<void> {
-  const project = await findProjectContext(opts.startDir);
-  const report = await inspectDoctorAgentIntegrations({
-    projectRoot: project?.projectRoot ?? null,
-  });
-  if (report.status !== "stale") {
-    return;
-  }
-  const ok = await doctorConfirm({
-    message: project
-      ? "Refresh stale project and global agent integrations now?"
-      : "Refresh stale global agent integrations now?",
-    initialValue: true,
-  });
-  if (ok) {
-    await runHackSubcommand({
-      args: project
-        ? ["setup", "sync", "--all-scopes"]
-        : ["setup", "sync", "--global"],
-    });
-    note(
-      "Agent integrations refreshed. Reload active agent sessions so cached rules are replaced.",
-      "agent integrations"
-    );
   }
 }
 
@@ -3572,10 +3542,7 @@ export function buildDoctorSummaryLines(input: {
 
   const ungrouped = input.results.filter(
     (result) =>
-      !(
-        isHiddenDoctorCheck(result) ||
-        DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
-      )
+      !DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
   );
   if (ungrouped.length > 0) {
     const issues = ungrouped.filter(
@@ -3590,10 +3557,6 @@ export function buildDoctorSummaryLines(input: {
   }
 
   return lines;
-}
-
-function isHiddenDoctorCheck(result: RecoveryCheckResult): boolean {
-  return result.name === "tickets git";
 }
 
 export function buildDoctorSummaryStatusItems(input: {
@@ -3613,10 +3576,7 @@ export function buildDoctorSummaryStatusItems(input: {
 
   const ungrouped = input.results.filter(
     (result) =>
-      !(
-        isHiddenDoctorCheck(result) ||
-        DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
-      )
+      !DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
   );
   if (ungrouped.length > 0) {
     items.push(

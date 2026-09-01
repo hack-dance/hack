@@ -51,7 +51,6 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `.env.state.json`
 - `hack.env.local.yaml`
 - `hack.env.*.local.yaml`
-- `tickets/` (deprecated Tickets compatibility cache)
 
 How it is maintained:
 

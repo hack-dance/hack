@@ -165,37 +165,6 @@ test("setup sync keeps failing artifact paths visible", () => {
   });
 });
 
-test("setup sync treats installed deprecated artifacts as actionable", () => {
-  const result = buildSetupSyncScopeResult({
-    action: "check",
-    scope: "Global",
-    groups: [
-      {
-        label: "Deprecated shared Hack skills",
-        results: [
-          {
-            status: "deprecated",
-            path: "<home>/.ai/skills/hack/SKILL.md",
-            message: "Deprecated Hack skill is still installed",
-          },
-          { status: "absent", path: "<home>/.ai/skills/hack-tickets/SKILL.md" },
-        ],
-      },
-    ],
-  });
-
-  expect(result).toEqual({
-    exitCode: 1,
-    item: {
-      label: "Global",
-      status: "warn",
-      meta: "1/2 current",
-      detail:
-        "Deprecated shared Hack skills: Deprecated Hack skill is still installed",
-    },
-  });
-});
-
 test("buildInitAssistantReport captures repo signals", async () => {
   const repoRoot = await setupTempRepo();
   await Bun.write(

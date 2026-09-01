@@ -41,7 +41,6 @@ test("readControlPlaneConfig returns defaults when config is missing", async () 
 
   const result = await readControlPlaneConfig({ projectDir });
   expect(result.parseError).toBeUndefined();
-  expect(result.config.tickets.git.branch).toBe("hack/tickets");
   expect(result.config.supervisor.enabled).toBe(true);
   expect(result.config.daemon.autoStart).toBe(true);
   expect(result.config.daemon.launchd.runAtLoad).toBe(true);

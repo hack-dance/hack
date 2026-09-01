@@ -12,22 +12,14 @@ type CapturedRunResult = {
   readonly stderr: string;
 };
 
-let originalSyncMode: string | undefined;
 let originalAck: string | undefined;
 
 beforeEach(() => {
-  originalSyncMode = process.env.HACK_SETUP_SYNC_MODE;
   originalAck = process.env.HACK_EXPERIMENTAL_ACK;
-  process.env.HACK_SETUP_SYNC_MODE = "off";
   Reflect.deleteProperty(process.env, "HACK_EXPERIMENTAL_ACK");
 });
 
 afterEach(() => {
-  if (originalSyncMode === undefined) {
-    Reflect.deleteProperty(process.env, "HACK_SETUP_SYNC_MODE");
-  } else {
-    process.env.HACK_SETUP_SYNC_MODE = originalSyncMode;
-  }
   if (originalAck === undefined) {
     Reflect.deleteProperty(process.env, "HACK_EXPERIMENTAL_ACK");
   } else {

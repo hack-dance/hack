@@ -318,7 +318,6 @@ export const HACK_DIR_GITIGNORE_ENTRIES = [
   ".env.state.json",
   "hack.env.local.yaml",
   "hack.env.*.local.yaml",
-  "tickets/",
 ] as const;
 
 /**
@@ -683,23 +682,6 @@ export function renderProjectConfigSchemaJson(): string {
                 config: {
                   type: "object",
                   additionalProperties: true,
-                },
-              },
-            },
-          },
-          tickets: {
-            type: "object",
-            additionalProperties: true,
-            properties: {
-              git: {
-                type: "object",
-                additionalProperties: true,
-                properties: {
-                  enabled: { type: "boolean" },
-                  branch: { type: "string" },
-                  remote: { type: "string" },
-                  forceBareClone: { type: "boolean" },
-                  refMode: { type: "string" },
                 },
               },
             },

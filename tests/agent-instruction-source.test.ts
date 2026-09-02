@@ -151,6 +151,30 @@ test("all generated surfaces expose integration freshness and repair upfront", (
   }
 });
 
+test("checked-in agent examples use the current integration contract", async () => {
+  const maintenance = INSTRUCTION_SECTIONS.find(
+    (section) => section.id === "maintenance"
+  );
+  expect(maintenance).toBeDefined();
+
+  for (const path of ["examples/basic/AGENTS.md", "examples/basic/CLAUDE.md"]) {
+    const content = await Bun.file(path).text();
+    expect(content).toContain(
+      `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``
+    );
+    for (const bullet of maintenance?.bullets ?? []) {
+      expect(content, `${path} lacks current maintenance guidance`).toContain(
+        bullet
+      );
+    }
+  }
+
+  const cliGuide = await Bun.file("docs/cli.md").text();
+  expect(cliGuide).not.toContain(
+    "`hack doctor --fix` never inspect or rewrite"
+  );
+});
+
 test("agent integration content revision changes with canonical guidance", () => {
   const revision = createHash("sha256")
     .update(

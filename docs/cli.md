@@ -61,7 +61,8 @@ Generated agent docs, Cursor rules, Codex skills, and the shared `~/.ai/skills/h
 the Hack CLI version that generated them. Audit both project and global surfaces with
 `hack setup sync --all-scopes --check`; repair them with the explicit
 `hack setup sync --all-scopes`, then reload the agent session so it stops using cached guidance.
-Ordinary commands, `hack update`, and `hack doctor --fix` never inspect or rewrite these files.
+Ordinary commands, `hack update`, and `hack doctor --fix` may audit freshness but never render,
+repair, remove, or otherwise mutate these files.
 
 ## First-run path
 

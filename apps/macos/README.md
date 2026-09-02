@@ -95,7 +95,9 @@ bun run macos:ghostty:setup
 
 This script:
 
-- clones the Ghostty repo into `apps/macos/vendor/ghostty`
+- checks out the pinned Ghostty revision from
+  `apps/macos/Experiments/GhosttyVTBridge/GHOSTTY_REVISION` into
+  `apps/macos/vendor/ghostty`
 - builds the VT bridge via Zig
 - installs `libhack_ghostty_vt.dylib` into:
   `~/Library/Application Support/Hack/ghostty/lib`

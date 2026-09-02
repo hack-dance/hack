@@ -146,15 +146,25 @@ jobs:
 
           VENDOR_DIR="apps/macos/vendor/ghostty"
           BRIDGE_DIR="apps/macos/Experiments/GhosttyVTBridge"
+          REVISION_FILE="$BRIDGE_DIR/GHOSTTY_REVISION"
           OUT_DIR="apps/macos/App/GhosttyVT/ghostty/lib"
           OUT_LIB="$OUT_DIR/libhack_ghostty_vt.dylib"
+          GHOSTTY_REVISION="$(tr -d '[:space:]' < "$REVISION_FILE")"
 
           if [ ! -d "$VENDOR_DIR" ]; then
             mkdir -p "$(dirname "$VENDOR_DIR")"
-            git clone --depth 1 https://github.com/ghostty-org/ghostty "$VENDOR_DIR"
+            git clone --filter=blob:none --no-checkout https://github.com/ghostty-org/ghostty "$VENDOR_DIR"
           fi
 
-          git -C "$VENDOR_DIR" rev-parse --short HEAD
+          git -C "$VENDOR_DIR" fetch --depth 1 origin "$GHOSTTY_REVISION"
+          git -C "$VENDOR_DIR" checkout --detach --force FETCH_HEAD
+
+          ACTUAL_GHOSTTY_REVISION="$(git -C "$VENDOR_DIR" rev-parse HEAD)"
+          if [ "$ACTUAL_GHOSTTY_REVISION" != "$GHOSTTY_REVISION" ]; then
+            echo "Expected Ghostty $GHOSTTY_REVISION, checked out $ACTUAL_GHOSTTY_REVISION"
+            exit 1
+          fi
+          echo "Ghostty revision: $ACTUAL_GHOSTTY_REVISION"
 
           mkdir -p "$OUT_DIR"
 

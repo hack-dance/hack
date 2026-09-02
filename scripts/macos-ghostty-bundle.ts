@@ -7,6 +7,10 @@ import { $ } from "bun";
 const repoRoot = path.resolve(import.meta.dir, "..");
 const vendorDir = path.join(repoRoot, "apps/macos/vendor/ghostty");
 const bridgeDir = path.join(repoRoot, "apps/macos/Experiments/GhosttyVTBridge");
+const ghosttyRevision = readFileSync(
+  path.join(bridgeDir, "GHOSTTY_REVISION"),
+  "utf8"
+).trim();
 const outDir = path.join(repoRoot, "apps/macos/App/GhosttyVT/ghostty/lib");
 const outLib = path.join(outDir, "libhack_ghostty_vt.dylib");
 
@@ -74,6 +78,21 @@ const main = async (): Promise<void> => {
       `Missing Ghostty vendor directory at ${vendorDir}. Run \`bun run macos:ghostty:setup\` once to fetch it.`
     );
   }
+
+  if (!/^[0-9a-f]{40}$/.test(ghosttyRevision)) {
+    throw new Error("GHOSTTY_REVISION must contain one full Git commit SHA");
+  }
+
+  const checkedOutRevision = (
+    await $`git -C ${vendorDir} rev-parse HEAD`.text()
+  ).trim();
+  if (checkedOutRevision !== ghosttyRevision) {
+    throw new Error(
+      `Ghostty ${checkedOutRevision} is checked out; expected ${ghosttyRevision}. Run \`bun run macos:ghostty:setup\` to restore the pinned revision.`
+    );
+  }
+
+  await $`git -C ${vendorDir} reset --hard ${ghosttyRevision}`;
 
   const minVersionMatch = readFileSync(
     path.join(vendorDir, "build.zig.zon"),

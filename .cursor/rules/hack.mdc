@@ -95,6 +95,7 @@ Prefer `hack` when shell access is available. Use MCP only when shell access is 
 - Use `hack setup sync` only when explicitly choosing to manage project or user docs, skills, rules, hooks, or MCP config.
 - Read-only freshness checks are available through `hack setup sync --all-scopes --check`, `hack doctor`, and `hack agent prime`.
 - Refresh project + user integrations: `hack setup sync --all-scopes`
+- Explicit sync removes recognized Hack-owned artifacts from retired integrations and preserves unrecognized files for manual review.
 - Audit integration state only: `hack setup sync --all-scopes --check`
 - Remove generated integration artifacts: `hack setup sync --all-scopes --remove`
 - After upgrading CLI: `hack update` then `hack setup sync --all-scopes`

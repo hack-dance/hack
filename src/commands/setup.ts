@@ -22,6 +22,12 @@ import {
   removeCursorRules,
 } from "../agents/cursor.ts";
 import {
+  checkLegacyProjectAgentArtifacts,
+  checkLegacyUserAgentArtifacts,
+  removeLegacyProjectAgentArtifacts,
+  removeLegacyUserAgentArtifacts,
+} from "../agents/legacy-artifacts.ts";
+import {
   checkSharedHackSkill,
   installSharedHackSkill,
   removeSharedHackSkill,
@@ -675,7 +681,8 @@ export function buildSetupSyncScopeResult(input: {
       return true;
     }
     return (
-      input.action === "check" && ["missing", "stale"].includes(entry.status)
+      input.action === "check" &&
+      ["missing", "stale", "deprecated"].includes(entry.status)
     );
   });
   const errorCount = failures.filter(
@@ -778,6 +785,7 @@ async function runProjectScopeSync(opts: {
   let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
   let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
   let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
+  let legacyResults: SetupMultiLogResult[];
   let mcpResults: SetupMultiLogResult[];
   let docsResults: SetupMultiLogResult[];
 
@@ -785,6 +793,7 @@ async function runProjectScopeSync(opts: {
     cursorResult = await checkCursorRules({ scope: "project", projectRoot });
     claudeResult = await checkClaudeHooks({ scope: "project", projectRoot });
     codexResult = await checkCodexSkill({ scope: "project", projectRoot });
+    legacyResults = await checkLegacyProjectAgentArtifacts({ projectRoot });
     mcpResults = await checkMcpConfig({
       scope: "project",
       targets: ["cursor", "claude", "codex"],
@@ -798,6 +807,7 @@ async function runProjectScopeSync(opts: {
     cursorResult = await removeCursorRules({ scope: "project", projectRoot });
     claudeResult = await removeClaudeHooks({ scope: "project", projectRoot });
     codexResult = await removeCodexSkill({ scope: "project", projectRoot });
+    legacyResults = await removeLegacyProjectAgentArtifacts({ projectRoot });
     mcpResults = await removeMcpConfig({
       scope: "project",
       targets: ["cursor", "claude", "codex"],
@@ -811,6 +821,7 @@ async function runProjectScopeSync(opts: {
     cursorResult = await installCursorRules({ scope: "project", projectRoot });
     claudeResult = await installClaudeHooks({ scope: "project", projectRoot });
     codexResult = await installCodexSkill({ scope: "project", projectRoot });
+    legacyResults = await removeLegacyProjectAgentArtifacts({ projectRoot });
     mcpResults = await installMcpConfig({
       scope: "project",
       targets: ["cursor", "claude", "codex"],
@@ -829,6 +840,7 @@ async function runProjectScopeSync(opts: {
       { label: "Cursor", results: [cursorResult] },
       { label: "Claude", results: [claudeResult] },
       { label: "Codex", results: [codexResult] },
+      { label: "Retired agent artifacts", results: legacyResults },
       { label: "MCP config", results: mcpResults },
       { label: "Agent docs", results: docsResults },
     ],
@@ -838,7 +850,7 @@ async function runProjectScopeSync(opts: {
 /**
  * Run one sync action across all global (user) scope integrations and log
  * results. Shared `~/.ai/skills` guidance is managed alongside client-specific
- * integrations.
+ * integrations. Known retired Hack-owned skills are cleaned up safely.
  */
 async function runUserScopeSync(opts: {
   readonly action: SetupSyncAction;
@@ -848,6 +860,7 @@ async function runUserScopeSync(opts: {
   let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
   let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
   let sharedSkillResult: SetupMultiLogResult & { readonly path: string };
+  let legacyResults: SetupMultiLogResult[];
   let mcpResults: SetupMultiLogResult[];
 
   if (action === "check") {
@@ -855,6 +868,7 @@ async function runUserScopeSync(opts: {
     claudeResult = await checkClaudeHooks({ scope: "user" });
     codexResult = await checkCodexSkill({ scope: "user" });
     sharedSkillResult = await checkSharedHackSkill();
+    legacyResults = await checkLegacyUserAgentArtifacts();
     mcpResults = await checkMcpConfig({
       scope: "user",
       targets: ["cursor", "claude", "codex"],
@@ -864,6 +878,7 @@ async function runUserScopeSync(opts: {
     claudeResult = await removeClaudeHooks({ scope: "user" });
     codexResult = await removeCodexSkill({ scope: "user" });
     sharedSkillResult = await removeSharedHackSkill();
+    legacyResults = await removeLegacyUserAgentArtifacts();
     mcpResults = await removeMcpConfig({
       scope: "user",
       targets: ["cursor", "claude", "codex"],
@@ -873,6 +888,7 @@ async function runUserScopeSync(opts: {
     claudeResult = await installClaudeHooks({ scope: "user" });
     codexResult = await installCodexSkill({ scope: "user" });
     sharedSkillResult = await installSharedHackSkill();
+    legacyResults = await removeLegacyUserAgentArtifacts();
     mcpResults = await installMcpConfig({
       scope: "user",
       targets: ["cursor", "claude", "codex"],
@@ -887,6 +903,7 @@ async function runUserScopeSync(opts: {
       { label: "Claude", results: [claudeResult] },
       { label: "Codex", results: [codexResult] },
       { label: "Shared Hack skill", results: [sharedSkillResult] },
+      { label: "Retired agent artifacts", results: legacyResults },
       { label: "MCP config", results: mcpResults },
     ],
   });

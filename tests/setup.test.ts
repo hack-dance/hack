@@ -165,6 +165,28 @@ test("setup sync keeps failing artifact paths visible", () => {
   });
 });
 
+test("setup sync check reports retired agent artifacts as stale", () => {
+  const result = buildSetupSyncScopeResult({
+    action: "check",
+    scope: "Project",
+    groups: [
+      {
+        label: "Retired agent artifacts",
+        results: [
+          {
+            status: "deprecated",
+            path: "/repo/.codex/skills/hack-tickets/SKILL.md",
+          },
+        ],
+      },
+    ],
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.item.status).toBe("warn");
+  expect(result.item.meta).toBe("0/1 current");
+});
+
 test("buildInitAssistantReport captures repo signals", async () => {
   const repoRoot = await setupTempRepo();
   await Bun.write(

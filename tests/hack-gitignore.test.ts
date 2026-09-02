@@ -186,6 +186,7 @@ test("nested .hack/.gitignore makes git ignore generated files, including in lin
     ".hack/.env.state.json",
     ".hack/hack.env.local.yaml",
     ".hack/hack.env.qa.local.yaml",
+    ".hack/tickets/state/projection.sqlite",
   ]) {
     expect(
       await gitCheckIgnore({ repoRoot: sourceRoot, path }),
@@ -202,6 +203,7 @@ test("nested .hack/.gitignore makes git ignore generated files, including in lin
     ".hack/.branch/compose.0b88.override.yml",
     ".hack/.env.state.json",
     ".hack/hack.env.qa.local.yaml",
+    ".hack/tickets/git/bare.git/HEAD",
   ]) {
     expect(
       await gitCheckIgnore({ repoRoot: linkedRoot, path }),

@@ -887,6 +887,7 @@ async function resolveProjectExtensions(opts: {
   const enabled = Object.entries(config.extensions)
     .filter(([, value]) => value.enabled)
     .map(([key]) => key)
+    .filter((id) => !RETIRED_EXTENSION_IDS.has(id))
     .sort((a, b) => a.localeCompare(b));
   const features = enabled
     .map((id) => mapExtensionFeature(id))
@@ -894,6 +895,12 @@ async function resolveProjectExtensions(opts: {
     .sort((a, b) => a.localeCompare(b));
   return { enabled, features };
 }
+
+const RETIRED_EXTENSION_IDS: ReadonlySet<string> = new Set([
+  "dance.hack.github",
+  "dance.hack.linear",
+  "dance.hack.tickets",
+]);
 
 function mapExtensionFeature(id: string): string | null {
   switch (id) {

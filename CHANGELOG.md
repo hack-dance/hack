@@ -1,3 +1,9 @@
+## [4.0.1](https://github.com/hack-dance/hack/compare/v4.0.0...v4.0.1) (2026-09-02)
+
+### Bug Fixes
+
+* **release:** pin Ghostty source revision ([#78](https://github.com/hack-dance/hack/issues/78)) ([67976a0](https://github.com/hack-dance/hack/commit/67976a0ce4f29faeb8638c3fe089b635461ad99f))
+
 ## [4.0.0](https://github.com/hack-dance/hack/compare/v3.5.2...v4.0.0) (2026-09-02)
 
 ### ⚠ BREAKING CHANGES

@@ -78,7 +78,7 @@ test("ExtensionManager warns and falls back on namespace collisions", async () =
       id: "ext.a",
       version: "0.1.0",
       scopes: ["global"],
-      cliNamespace: "tickets",
+      cliNamespace: "example",
     },
     commands: [],
   };
@@ -88,7 +88,7 @@ test("ExtensionManager warns and falls back on namespace collisions", async () =
       id: "ext.b",
       version: "0.1.0",
       scopes: ["global"],
-      cliNamespace: "tickets",
+      cliNamespace: "example",
     },
     commands: [],
   };
@@ -97,9 +97,9 @@ test("ExtensionManager warns and falls back on namespace collisions", async () =
   manager.registerExtension({ extension: extB });
 
   const resolved = manager.listExtensions();
-  expect(resolved[0]?.namespace).toBe("tickets");
-  expect(resolved[1]?.namespace).not.toBe("tickets");
-  expect(resolved[1]?.namespace?.startsWith("tickets.")).toBe(true);
+  expect(resolved[0]?.namespace).toBe("example");
+  expect(resolved[1]?.namespace).not.toBe("example");
+  expect(resolved[1]?.namespace?.startsWith("example.")).toBe(true);
   expect(manager.getWarnings().length).toBe(1);
 });
 

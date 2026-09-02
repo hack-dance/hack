@@ -63,7 +63,6 @@ control-plane SDK, and API-level detail for the beta surface.
 - `docs/extensions.md` — extension model, dispatch (`hack x <namespace> <command>`), built-in extensions
 - `docs/integrations.md` — what shipped, what was removed, optional agent-setup helpers
 - `docs/guides/create-extension.md` — how to author a new extension
-- `docs/guides/tickets.md` — deprecated compatibility and migration reference
 - `docs/gateway-api.md` — gateway HTTP/WS API surface (unsupported experimental)
 - `docs/sdk.md` — control-plane SDK
 

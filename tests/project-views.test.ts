@@ -185,6 +185,35 @@ test("buildProjectViews includes defined services and runtime status", async () 
   });
 });
 
+test("buildProjectViews filters retired extensions from upgraded configs", async () => {
+  const project = await createProject({
+    name: "legacy-extensions",
+    services: [],
+    configJson: JSON.stringify({
+      controlPlane: {
+        extensions: {
+          "dance.example.custom": { enabled: true },
+          "dance.hack.github": { enabled: true },
+          "dance.hack.linear": { enabled: true },
+          "dance.hack.tickets": { enabled: true },
+        },
+      },
+    }),
+  });
+
+  const views = await buildProjectViews({
+    registryProjects: [project],
+    runtime: [],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+  });
+
+  expect(views[0]?.extensionsEnabled).toEqual(["dance.example.custom"]);
+  expect(views[0]?.features).toEqual(["dance.example.custom"]);
+});
+
 test("buildProjectViews includes explicit project ownership metadata", async () => {
   const alpha = await createProject({
     name: "alpha",

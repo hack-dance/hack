@@ -309,7 +309,8 @@ export const HACK_DIR_GITIGNORE_END_MARKER = "# end managed by hack" as const;
 /**
  * Canonical ignore entries for the committed `.hack/.gitignore`, relative to
  * the `.hack/` directory. Root-level `.hack.secret.key` stays in the root
- * `.gitignore` (see `ensureProjectEnvSecretKey`).
+ * `.gitignore` (see `ensureProjectEnvSecretKey`). The retired `tickets/`
+ * entry remains upgrade-safe so existing machine-local caches cannot be staged.
  */
 export const HACK_DIR_GITIGNORE_ENTRIES = [
   ".internal/",
@@ -683,23 +684,6 @@ export function renderProjectConfigSchemaJson(): string {
                 config: {
                   type: "object",
                   additionalProperties: true,
-                },
-              },
-            },
-          },
-          tickets: {
-            type: "object",
-            additionalProperties: true,
-            properties: {
-              git: {
-                type: "object",
-                additionalProperties: true,
-                properties: {
-                  enabled: { type: "boolean" },
-                  branch: { type: "string" },
-                  remote: { type: "string" },
-                  forceBareClone: { type: "boolean" },
-                  refMode: { type: "string" },
                 },
               },
             },

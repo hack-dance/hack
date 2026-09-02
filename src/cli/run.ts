@@ -19,7 +19,6 @@ import {
   resolveCommand,
 } from "./command.ts";
 import { printHelpForPath } from "./help.ts";
-import { maybeEnsureAgentIntegrations } from "./integration-sync.ts";
 import { CLI_SPEC } from "./spec.ts";
 
 function isTruthyEnv(value: string | undefined): boolean {
@@ -89,11 +88,6 @@ export async function runCli(argv: readonly string[]): Promise<number> {
     maybeWarnExperimentalCommand({
       path: resolved.path,
       jsonRequested: parsed.values.json === true,
-    });
-
-    await maybeEnsureAgentIntegrations({
-      cwd: process.cwd(),
-      commandPath: resolved.path.map((command) => command.name),
     });
 
     return await resolved.command.handler({
@@ -188,7 +182,7 @@ function isExtensionDispatch(opts: {
     if (token.startsWith("-")) {
       continue;
     }
-    return token === "x" || token === "tickets";
+    return token === "x";
   }
   return false;
 }
@@ -221,7 +215,6 @@ function validateResolvedCommandOptions(opts: {
 }): void {
   if (
     opts.command.name === "x" ||
-    opts.command.name === "tickets" ||
     allowsUnknownOptions({ command: opts.command })
   ) {
     return;

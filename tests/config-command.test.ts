@@ -14,18 +14,15 @@ let tempDir: string | null = null;
 let originalHome: string | undefined;
 let originalLogger: string | undefined;
 let originalGlobalConfigPath: string | undefined;
-let originalSetupSyncMode: string | undefined;
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
   originalLogger = process.env.HACK_LOGGER;
   originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
-  originalSetupSyncMode = process.env.HACK_SETUP_SYNC_MODE;
   tempDir = await mkdtemp(join(tmpdir(), "hack-config-command-"));
   process.env.HOME = tempDir;
   process.env.HACK_LOGGER = "console";
   process.env.HACK_GLOBAL_CONFIG_PATH = join(tempDir, "hack.config.json");
-  process.env.HACK_SETUP_SYNC_MODE = "off";
 });
 
 afterEach(async () => {
@@ -36,7 +33,6 @@ afterEach(async () => {
   process.env.HOME = originalHome;
   process.env.HACK_LOGGER = originalLogger;
   process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
-  process.env.HACK_SETUP_SYNC_MODE = originalSetupSyncMode;
 });
 
 test("config set --global updates extension enabled using bracket path", async () => {

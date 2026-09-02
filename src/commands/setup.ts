@@ -22,10 +22,14 @@ import {
   removeCursorRules,
 } from "../agents/cursor.ts";
 import {
-  checkDeprecatedSharedHackSkills,
+  checkLegacyProjectAgentArtifacts,
+  checkLegacyUserAgentArtifacts,
+  removeLegacyProjectAgentArtifacts,
+  removeLegacyUserAgentArtifacts,
+} from "../agents/legacy-artifacts.ts";
+import {
   checkSharedHackSkill,
   installSharedHackSkill,
-  removeDeprecatedSharedHackSkills,
   removeSharedHackSkill,
 } from "../agents/shared-skill.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
@@ -36,15 +40,6 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
-import {
-  checkDeprecatedTicketsAgentDocs,
-  removeTicketsAgentDocs,
-} from "../control-plane/extensions/tickets/agent-docs.ts";
-import {
-  checkDeprecatedTicketsSkill,
-  removeTicketsSkill,
-  type TicketsSkillResult,
-} from "../control-plane/extensions/tickets/tickets-skill.ts";
 import { pathExists, readTextFile, writeTextFile } from "../lib/fs.ts";
 import { canPrompt } from "../lib/interactivity.ts";
 import { findRepoRootForInit } from "../lib/project.ts";
@@ -138,7 +133,6 @@ const setupTmuxOptions = [optCheck, optRemove] as const;
 const setupCursorOptions = [optPath, optGlobal, optCheck, optRemove] as const;
 const setupClaudeOptions = [optPath, optGlobal, optCheck, optRemove] as const;
 const setupCodexOptions = [optPath, optGlobal, optCheck, optRemove] as const;
-const setupTicketsOptions = [optPath, optGlobal, optCheck, optRemove] as const;
 const setupAgentsOptions = [
   optPath,
   optAll,
@@ -169,7 +163,6 @@ type SetupTmuxArgs = CommandArgs<typeof setupTmuxOptions, readonly []>;
 type SetupCursorArgs = CommandArgs<typeof setupCursorOptions, readonly []>;
 type SetupClaudeArgs = CommandArgs<typeof setupClaudeOptions, readonly []>;
 type SetupCodexArgs = CommandArgs<typeof setupCodexOptions, readonly []>;
-type SetupTicketsArgs = CommandArgs<typeof setupTicketsOptions, readonly []>;
 type SetupAgentsArgs = CommandArgs<typeof setupAgentsOptions, readonly []>;
 type SetupSyncArgs = CommandArgs<typeof setupSyncOptions, readonly []>;
 type SetupMcpArgs = CommandArgs<typeof setupMcpOptions, readonly []>;
@@ -216,15 +209,6 @@ const codexSpec = defineCommand({
   subcommands: [],
 } as const);
 
-const ticketsSpec = defineCommand({
-  name: "tickets",
-  summary: "Remove or audit the deprecated Hack Tickets skill",
-  group: "Agents",
-  options: setupTicketsOptions,
-  positionals: [],
-  subcommands: [],
-} as const);
-
 const agentsSpec = defineCommand({
   name: "agents",
   summary: "Install AGENTS.md / CLAUDE.md snippets for hack CLI usage",
@@ -236,8 +220,7 @@ const agentsSpec = defineCommand({
 
 const syncSpec = defineCommand({
   name: "sync",
-  summary:
-    "Refresh project/global agent guidance and remove deprecated artifacts",
+  summary: "Refresh project/global agent guidance",
   group: "Agents",
   options: setupSyncOptions,
   positionals: [],
@@ -265,7 +248,6 @@ export const setupCommand = defineCommand({
     withHandler(cursorSpec, handleSetupCursor),
     withHandler(claudeSpec, handleSetupClaude),
     withHandler(codexSpec, handleSetupCodex),
-    withHandler(ticketsSpec, handleSetupTickets),
     withHandler(agentsSpec, handleSetupAgents),
     withHandler(syncSpec, handleSetupSync),
     withHandler(mcpSpec, handleSetupMcp),
@@ -618,39 +600,6 @@ async function handleSetupCodex({
   });
 }
 
-async function handleSetupTickets({
-  ctx,
-  args,
-}: {
-  readonly ctx: CliContext;
-  readonly args: SetupTicketsArgs;
-}): Promise<number> {
-  const action = resolveAction(args.options);
-  const scope = resolveScope({ global: args.options.global === true });
-  const projectRoot =
-    scope === "project"
-      ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
-      : undefined;
-
-  logger.info({
-    message:
-      "Hack Tickets agent integrations are deprecated. This command now audits or removes the legacy skill; it never installs it.",
-  });
-
-  let result: TicketsSkillResult;
-  if (action === "check") {
-    result = await checkDeprecatedTicketsSkill({ scope, projectRoot });
-  } else {
-    result = await removeTicketsSkill({ scope, projectRoot });
-  }
-
-  return logSingleResult({
-    action,
-    okMessage: "Deprecated Tickets skill",
-    result,
-  });
-}
-
 async function handleSetupAgents({
   ctx,
   args,
@@ -827,10 +776,7 @@ async function handleSetupSync({
   return Math.max(0, ...scopeResults.map((result) => result.exitCode));
 }
 
-/**
- * Run one sync action across all project-scope integrations and log results.
- * Deprecated Tickets agent artifacts are always audited and removed by sync.
- */
+/** Run one explicit sync action across all project-scope integrations. */
 async function runProjectScopeSync(opts: {
   readonly action: SetupSyncAction;
   readonly projectRoot: string;
@@ -839,8 +785,7 @@ async function runProjectScopeSync(opts: {
   let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
   let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
   let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
-  let ticketsResult: TicketsSkillResult;
-  let ticketsDocsResults: SetupMultiLogResult[];
+  let legacyResults: SetupMultiLogResult[];
   let mcpResults: SetupMultiLogResult[];
   let docsResults: SetupMultiLogResult[];
 
@@ -848,14 +793,7 @@ async function runProjectScopeSync(opts: {
     cursorResult = await checkCursorRules({ scope: "project", projectRoot });
     claudeResult = await checkClaudeHooks({ scope: "project", projectRoot });
     codexResult = await checkCodexSkill({ scope: "project", projectRoot });
-    ticketsResult = await checkDeprecatedTicketsSkill({
-      scope: "project",
-      projectRoot,
-    });
-    ticketsDocsResults = await checkDeprecatedTicketsAgentDocs({
-      projectRoot,
-      targets: ["agents", "claude"],
-    });
+    legacyResults = await checkLegacyProjectAgentArtifacts({ projectRoot });
     mcpResults = await checkMcpConfig({
       scope: "project",
       targets: ["cursor", "claude", "codex"],
@@ -869,11 +807,7 @@ async function runProjectScopeSync(opts: {
     cursorResult = await removeCursorRules({ scope: "project", projectRoot });
     claudeResult = await removeClaudeHooks({ scope: "project", projectRoot });
     codexResult = await removeCodexSkill({ scope: "project", projectRoot });
-    ticketsResult = await removeTicketsSkill({ scope: "project", projectRoot });
-    ticketsDocsResults = await removeTicketsAgentDocs({
-      projectRoot,
-      targets: ["agents", "claude"],
-    });
+    legacyResults = await removeLegacyProjectAgentArtifacts({ projectRoot });
     mcpResults = await removeMcpConfig({
       scope: "project",
       targets: ["cursor", "claude", "codex"],
@@ -887,11 +821,7 @@ async function runProjectScopeSync(opts: {
     cursorResult = await installCursorRules({ scope: "project", projectRoot });
     claudeResult = await installClaudeHooks({ scope: "project", projectRoot });
     codexResult = await installCodexSkill({ scope: "project", projectRoot });
-    ticketsResult = await removeTicketsSkill({ scope: "project", projectRoot });
-    ticketsDocsResults = await removeTicketsAgentDocs({
-      projectRoot,
-      targets: ["agents", "claude"],
-    });
+    legacyResults = await removeLegacyProjectAgentArtifacts({ projectRoot });
     mcpResults = await installMcpConfig({
       scope: "project",
       targets: ["cursor", "claude", "codex"],
@@ -910,8 +840,7 @@ async function runProjectScopeSync(opts: {
       { label: "Cursor", results: [cursorResult] },
       { label: "Claude", results: [claudeResult] },
       { label: "Codex", results: [codexResult] },
-      { label: "Deprecated Tickets skill", results: [ticketsResult] },
-      { label: "Deprecated Tickets instructions", results: ticketsDocsResults },
+      { label: "Retired agent artifacts", results: legacyResults },
       { label: "MCP config", results: mcpResults },
       { label: "Agent docs", results: docsResults },
     ],
@@ -921,7 +850,7 @@ async function runProjectScopeSync(opts: {
 /**
  * Run one sync action across all global (user) scope integrations and log
  * results. Shared `~/.ai/skills` guidance is managed alongside client-specific
- * integrations, and known legacy Hack skills are cleaned up safely.
+ * integrations. Known retired Hack-owned skills are cleaned up safely.
  */
 async function runUserScopeSync(opts: {
   readonly action: SetupSyncAction;
@@ -930,18 +859,16 @@ async function runUserScopeSync(opts: {
   let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
   let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
   let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
-  let ticketsResult: TicketsSkillResult;
   let sharedSkillResult: SetupMultiLogResult & { readonly path: string };
-  let legacySharedResults: SetupMultiLogResult[];
+  let legacyResults: SetupMultiLogResult[];
   let mcpResults: SetupMultiLogResult[];
 
   if (action === "check") {
     cursorResult = await checkCursorRules({ scope: "user" });
     claudeResult = await checkClaudeHooks({ scope: "user" });
     codexResult = await checkCodexSkill({ scope: "user" });
-    ticketsResult = await checkDeprecatedTicketsSkill({ scope: "user" });
     sharedSkillResult = await checkSharedHackSkill();
-    legacySharedResults = await checkDeprecatedSharedHackSkills();
+    legacyResults = await checkLegacyUserAgentArtifacts();
     mcpResults = await checkMcpConfig({
       scope: "user",
       targets: ["cursor", "claude", "codex"],
@@ -950,9 +877,8 @@ async function runUserScopeSync(opts: {
     cursorResult = await removeCursorRules({ scope: "user" });
     claudeResult = await removeClaudeHooks({ scope: "user" });
     codexResult = await removeCodexSkill({ scope: "user" });
-    ticketsResult = await removeTicketsSkill({ scope: "user" });
     sharedSkillResult = await removeSharedHackSkill();
-    legacySharedResults = await removeDeprecatedSharedHackSkills();
+    legacyResults = await removeLegacyUserAgentArtifacts();
     mcpResults = await removeMcpConfig({
       scope: "user",
       targets: ["cursor", "claude", "codex"],
@@ -961,9 +887,8 @@ async function runUserScopeSync(opts: {
     cursorResult = await installCursorRules({ scope: "user" });
     claudeResult = await installClaudeHooks({ scope: "user" });
     codexResult = await installCodexSkill({ scope: "user" });
-    ticketsResult = await removeTicketsSkill({ scope: "user" });
     sharedSkillResult = await installSharedHackSkill();
-    legacySharedResults = await removeDeprecatedSharedHackSkills();
+    legacyResults = await removeLegacyUserAgentArtifacts();
     mcpResults = await installMcpConfig({
       scope: "user",
       targets: ["cursor", "claude", "codex"],
@@ -978,8 +903,7 @@ async function runUserScopeSync(opts: {
       { label: "Claude", results: [claudeResult] },
       { label: "Codex", results: [codexResult] },
       { label: "Shared Hack skill", results: [sharedSkillResult] },
-      { label: "Deprecated Tickets skill", results: [ticketsResult] },
-      { label: "Deprecated shared Hack skills", results: legacySharedResults },
+      { label: "Retired agent artifacts", results: legacyResults },
       { label: "MCP config", results: mcpResults },
     ],
   });
@@ -1205,14 +1129,6 @@ function logCheckResult(opts: {
       message:
         opts.result.message ??
         `${opts.okMessage} content is stale at ${opts.path}`,
-    });
-    return 1;
-  }
-  if (opts.result.status === "deprecated") {
-    logger.warn({
-      message:
-        opts.result.message ??
-        `${opts.okMessage} is deprecated at ${opts.path}`,
     });
     return 1;
   }

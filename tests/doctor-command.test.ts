@@ -209,6 +209,15 @@ test("doctor audits global agent guidance without a project", async () => {
       inspectDoctorAgentIntegrations({ projectRoot: null, homeDir: home })
     ).resolves.toEqual({ status: "current" });
 
+    const legacySkillDir = join(home, ".codex", "skills", "hack-tickets");
+    const legacySkill = join(legacySkillDir, "SKILL.md");
+    await mkdir(legacySkillDir, { recursive: true });
+    await writeFile(legacySkill, "---\nname: hack-tickets\n---\n");
+    await expect(
+      inspectDoctorAgentIntegrations({ projectRoot: null, homeDir: home })
+    ).resolves.toEqual({ status: "stale" });
+    await rm(legacySkillDir, { recursive: true, force: true });
+
     await writeFile(paths[0] ?? "", "stale\n");
     await expect(
       inspectDoctorAgentIntegrations({ projectRoot: null, homeDir: home })
@@ -401,11 +410,6 @@ test("doctor summary groups detailed checks into concise sections", () => {
         status: "warn",
         message:
           "1 env input file changed since materialization (run: hack env materialize)",
-      },
-      {
-        name: "tickets git",
-        status: "ok",
-        message: "Healthy (refs/hack/tickets)",
       },
     ],
   });

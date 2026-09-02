@@ -243,8 +243,7 @@ graph LR
 The control plane keeps the core CLI minimal while adding features as extensions. `hackd` loads
 extension manifests and exposes their APIs; the CLI dispatches extension commands via `hack x`.
 
-Builtin extensions: **Tickets** (opt-in local ticket store — disabled by default, requires enabling
-before use), **Supervisor** (job execution + streaming for agents), **Gateway** (optional HTTP/WS
+Builtin extensions: **Supervisor** (job execution + streaming for agents), **Gateway** (optional HTTP/WS
 access to `hackd`), **Cloudflare**, and **Tailscale** (exposure/tunnel helpers).
 
 > Gateway, remote, node, and dispatch surfaces are experimental and unsupported. They are hidden
@@ -258,7 +257,6 @@ graph LR
   Hackd --> ExtMgr["ExtensionManager"]
   ExtMgr --> Gateway["Gateway"]
   ExtMgr --> Supervisor["Supervisor"]
-  ExtMgr --> Tickets["Tickets (opt-in)"]
   ExtMgr --> Cloudflare["Cloudflare"]
   ExtMgr --> Tailscale["Tailscale"]
   Remote["Remote client"] -->|HTTP/WS| Gateway
@@ -319,8 +317,10 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
   - `hack.config.json`
   - `hack.branches.json` (optional)
   - `.gitignore` (committed, self-healing on `init`/`up`; covers machine-local generated files —
-    `.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`, `tickets/`. If generated files
-    leaked into git, `hack doctor --fix` untracks them without deleting them from disk.)
+    `.internal/`, `.branch/`, `.env`, `.env.state.json`, and `hack.env*.local.yaml`. The retired
+    `tickets/` path stays ignored only to contain legacy machine-local caches during upgrades. If
+    generated files leaked into git, `hack doctor --fix` untracks them without deleting them from
+    disk.)
   - `hack.env.default.yaml` plus optional `hack.env.<overlay>.yaml` (committed env)
   - `hack.env.local.yaml` / `hack.env.<overlay>.local.yaml` (worktree-local overrides)
   - `.env.state.json`

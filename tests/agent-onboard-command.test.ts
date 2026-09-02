@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,19 +10,7 @@ type CapturedRunResult = {
 };
 
 let tempDir: string | null = null;
-let originalSyncMode: string | undefined;
-
-beforeEach(() => {
-  originalSyncMode = process.env.HACK_SETUP_SYNC_MODE;
-  process.env.HACK_SETUP_SYNC_MODE = "off";
-});
-
 afterEach(async () => {
-  if (originalSyncMode === undefined) {
-    Reflect.deleteProperty(process.env, "HACK_SETUP_SYNC_MODE");
-  } else {
-    process.env.HACK_SETUP_SYNC_MODE = originalSyncMode;
-  }
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;

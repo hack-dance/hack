@@ -5,8 +5,8 @@ Durable architecture rules for current Hack work.
 ## Core Product Boundary
 
 - Hack v3 is CLI-first, local-first, and self-contained.
-- Supported product surface: project init, local runtime orchestration, routing/TLS, env and secrets, lifecycle, sessions, diagnostics, MCP/agent setup, the slim macOS companion, and optional local tickets.
-- Retired product surfaces: hosted auth, account/org/team admin, web dashboard, built-in GitHub workflows, and built-in Linear sync.
+- Supported product surface: project init, local runtime orchestration, routing/TLS, env and secrets, lifecycle, sessions, diagnostics, MCP/agent setup, and the slim macOS companion.
+- Retired product surfaces: hosted auth, account/org/team admin, web dashboard, Hack Tickets, built-in GitHub workflows, and built-in Linear sync.
 - Remote/gateway/node/dispatch code may remain source-available, but it is unsupported experimental and must stay out of first-run docs, release gates, and default agent paths.
 
 ## Runtime Ownership
@@ -30,9 +30,3 @@ Durable architecture rules for current Hack work.
 - Use `onConflict: "adopt"` only when a complete existing listener set is equivalent and should be reused.
 - `singleton` adoption is listener-level reuse, not ownership transfer; Hack must leave adopted external processes running on `hack down`.
 - Stale mux state should be recovered through lifecycle metadata carefully enough to avoid orphaning Hack-owned processes while not broadening cleanup to unrelated process groups.
-
-## Tickets Ownership
-
-- Tickets are optional local helpers, not a headline hosted workflow.
-- Durable ticket state is the git-backed JSONL journal under `refs/hack/tickets` or the configured branch ref.
-- Local projection and checkout state under `.hack/tickets/` is rebuildable.

@@ -40,7 +40,6 @@ RUN chmod +x /usr/local/bin/hack \
 ENV HOME=/var/lib/hack
 ENV HACK_EXECUTION_MODE=codex
 ENV HACK_DAEMON_DISABLE_DOCKER_EVENTS=1
-ENV HACK_SETUP_SYNC_MODE=warn
 
 WORKDIR /workspace
 VOLUME ["/var/lib/hack", "/workspace"]

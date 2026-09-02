@@ -101,13 +101,43 @@ test("no stale command patterns in any surface", () => {
   }
 });
 
-test("deprecated tickets do not appear in generated agent guidance", () => {
+test("retired Tickets do not appear in generated agent guidance", () => {
   for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
     expect(
       rendered,
-      `surface "${surface}" mentions deprecated Tickets`
+      `surface "${surface}" mentions retired Tickets`
     ).not.toMatch(/hack[ -]?tickets|dance\.hack\.tickets/i);
   }
+});
+
+test("active contributor guidance and examples do not advertise retired Tickets", async () => {
+  const guidancePaths = [
+    "WORKFLOW.md",
+    ".hack/README.md",
+    ".factory/library/architecture.md",
+    ".factory/library/environment.md",
+    ".factory/library/user-testing.md",
+    ".factory/skills/control-plane-worker/SKILL.md",
+  ];
+  const retiredGuidancePattern =
+    /`hack(?: x)? tickets\b|optional local tickets|tickets extension|dance\.hack\.tickets/i;
+  for (const path of guidancePaths) {
+    const content = await Bun.file(path).text();
+    expect(content, `${path} advertises retired Tickets`).not.toMatch(
+      retiredGuidancePattern
+    );
+  }
+
+  for (const path of [
+    ".hack/hack.config.json",
+    "examples/basic/.hack/hack.config.json",
+  ]) {
+    const content = await Bun.file(path).text();
+    expect(content, `${path} configures a retired extension`).not.toMatch(
+      /dance\.hack\.(?:github|linear|tickets)/
+    );
+  }
+  expect(await Bun.file("examples/tickets/README.md").exists()).toBe(false);
 });
 
 test("all generated surfaces expose integration freshness and repair upfront", () => {
@@ -119,6 +149,30 @@ test("all generated surfaces expose integration freshness and repair upfront", (
     expect(rendered).toContain("hack setup sync --all-scopes");
     expect(rendered).toContain("reload the agent session");
   }
+});
+
+test("checked-in agent examples use the current integration contract", async () => {
+  const maintenance = INSTRUCTION_SECTIONS.find(
+    (section) => section.id === "maintenance"
+  );
+  expect(maintenance).toBeDefined();
+
+  for (const path of ["examples/basic/AGENTS.md", "examples/basic/CLAUDE.md"]) {
+    const content = await Bun.file(path).text();
+    expect(content).toContain(
+      `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``
+    );
+    for (const bullet of maintenance?.bullets ?? []) {
+      expect(content, `${path} lacks current maintenance guidance`).toContain(
+        bullet
+      );
+    }
+  }
+
+  const cliGuide = await Bun.file("docs/cli.md").text();
+  expect(cliGuide).not.toContain(
+    "`hack doctor --fix` never inspect or rewrite"
+  );
 });
 
 test("agent integration content revision changes with canonical guidance", () => {

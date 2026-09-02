@@ -17,7 +17,6 @@ export type SharedSkillResult = {
     | "noop"
     | "absent"
     | "stale"
-    | "deprecated"
     | "removed"
     | "missing"
     | "error";
@@ -29,20 +28,6 @@ const SHARED_SKILLS_DIR = ".ai/skills";
 const HACK_CLI_SKILL_NAME = "hack-cli";
 const SKILL_FILENAME = "SKILL.md";
 const HACK_CLI_MARKER = /name:\s*hack-cli\b/i;
-
-const LEGACY_SHARED_SKILLS = [
-  {
-    name: "hack",
-    markers: [
-      /name:\s*hack\b/i,
-      /homepage:\s*https:\/\/github\.com\/hack-dance\/hack-cli/i,
-    ],
-  },
-  {
-    name: "hack-tickets",
-    markers: [/name:\s*hack-tickets\b/i],
-  },
-] as const;
 
 /** Install the canonical Hack skill in the shared agent skill root. */
 export async function installSharedHackSkill(): Promise<SharedSkillResult> {
@@ -105,59 +90,6 @@ export async function removeSharedHackSkill(): Promise<SharedSkillResult> {
   }
   await rm(dirname(resolved.path), { recursive: true, force: true });
   return { status: "removed", path: resolved.path };
-}
-
-/** Report known superseded shared skills without treating arbitrary user skills as owned. */
-export async function checkDeprecatedSharedHackSkills(): Promise<
-  SharedSkillResult[]
-> {
-  const results: SharedSkillResult[] = [];
-  for (const legacy of LEGACY_SHARED_SKILLS) {
-    const resolved = resolveSharedSkillPath({ skillName: legacy.name });
-    if (!resolved.ok) {
-      results.push({
-        status: "error",
-        path: SKILL_FILENAME,
-        message: resolved.message,
-      });
-      continue;
-    }
-    const content = await readTextFile(resolved.path);
-    if (!content) {
-      results.push({ status: "absent", path: resolved.path });
-      continue;
-    }
-    const owned = legacy.markers.every((marker) => marker.test(content));
-    results.push({
-      status: owned ? "deprecated" : "error",
-      path: resolved.path,
-      message: owned
-        ? `Deprecated Hack skill is still installed at ${resolved.path}. Run: hack setup sync --all-scopes`
-        : `Refusing to remove unrecognized skill at ${resolved.path}`,
-    });
-  }
-  return results;
-}
-
-/** Remove only legacy skills whose known ownership markers still match. */
-export async function removeDeprecatedSharedHackSkills(): Promise<
-  SharedSkillResult[]
-> {
-  const checked = await checkDeprecatedSharedHackSkills();
-  const results: SharedSkillResult[] = [];
-  for (const result of checked) {
-    if (
-      result.status === "noop" ||
-      result.status === "absent" ||
-      result.status === "error"
-    ) {
-      results.push(result);
-      continue;
-    }
-    await rm(dirname(result.path), { recursive: true, force: true });
-    results.push({ status: "removed", path: result.path });
-  }
-  return results;
 }
 
 function resolveSharedSkillPath(opts: {

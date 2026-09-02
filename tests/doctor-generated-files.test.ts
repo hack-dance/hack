@@ -48,6 +48,7 @@ async function createLeakedRepo(): Promise<string> {
   tempDirs.add(dir);
   const repoRoot = resolve(dir, "repo");
   await mkdir(resolve(repoRoot, ".hack", ".branch"), { recursive: true });
+  await mkdir(resolve(repoRoot, ".hack", "tickets"), { recursive: true });
   await runGit(["init", "-b", "main"], repoRoot);
   await runGit(["config", "user.name", "Hack Test"], repoRoot);
   await runGit(["config", "user.email", "hack@example.com"], repoRoot);
@@ -63,6 +64,10 @@ async function createLeakedRepo(): Promise<string> {
   await writeFile(
     resolve(repoRoot, ".hack", ".env.state.json"),
     '{"env":"default"}\n'
+  );
+  await writeFile(
+    resolve(repoRoot, ".hack", "tickets", "legacy-cache.json"),
+    "{}\n"
   );
   await writeFile(
     resolve(repoRoot, PROJECT_ENV_KEY_FILENAME),
@@ -85,6 +90,7 @@ test("inspectTrackedGeneratedFiles lists tracked generated files and flags the s
     PROJECT_ENV_KEY_FILENAME,
     ".hack/.branch/compose.x.override.yml",
     ".hack/.env.state.json",
+    ".hack/tickets/legacy-cache.json",
   ]);
   expect(inspection?.secretKeyTracked).toBe(true);
 });
@@ -125,55 +131,6 @@ test("tracked .hack/hack.env.local.yaml is not flagged (legacy shared overlay)",
   expect(inspection?.trackedPaths).toEqual([]);
 });
 
-test("buildGeneratedFilePathspecs covers the tickets extension's local git cache", () => {
-  expect(buildGeneratedFilePathspecs({ projectDirName: ".hack" })).toContain(
-    ".hack/tickets"
-  );
-});
-
-test("tracked .hack/tickets/ (leaked tickets git cache) is flagged and can be untracked", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "hack-doctor-generated-tickets-"));
-  tempDirs.add(dir);
-  const repoRoot = resolve(dir, "repo");
-  await mkdir(resolve(repoRoot, ".hack", "tickets", "git"), {
-    recursive: true,
-  });
-  await runGit(["init", "-b", "main"], repoRoot);
-  await runGit(["config", "user.name", "Hack Test"], repoRoot);
-  await runGit(["config", "user.email", "hack@example.com"], repoRoot);
-  await writeFile(
-    resolve(repoRoot, ".hack", "docker-compose.yml"),
-    "services:\n  api: {}\n"
-  );
-  await writeFile(
-    resolve(repoRoot, ".hack", "tickets", "git", "marker.txt"),
-    "leaked tickets cache\n"
-  );
-  await runGit(["add", "-f", "."], repoRoot);
-  await runGit(["commit", "-m", "leak tickets cache"], repoRoot);
-
-  const inspection = await inspectTrackedGeneratedFiles({
-    projectRoot: repoRoot,
-    projectDirName: ".hack",
-  });
-  expect(inspection?.trackedPaths).toEqual([".hack/tickets/git/marker.txt"]);
-
-  const untracked = await untrackGeneratedFiles({
-    projectRoot: repoRoot,
-    paths: inspection?.trackedPaths ?? [],
-  });
-  expect(untracked).toEqual({ ok: true, error: null });
-
-  const second = await inspectTrackedGeneratedFiles({
-    projectRoot: repoRoot,
-    projectDirName: ".hack",
-  });
-  expect(second?.trackedPaths).toEqual([]);
-  expect(
-    await pathExists(resolve(repoRoot, ".hack", "tickets", "git", "marker.txt"))
-  ).toBe(true);
-});
-
 test("untrackGeneratedFiles removes offenders from the index, keeps files on disk, and a rerun is clean", async () => {
   const repoRoot = await createLeakedRepo();
 
@@ -181,7 +138,7 @@ test("untrackGeneratedFiles removes offenders from the index, keeps files on dis
     projectRoot: repoRoot,
     projectDirName: ".hack",
   });
-  expect(inspection?.trackedPaths.length).toBe(3);
+  expect(inspection?.trackedPaths.length).toBe(4);
 
   // Same flow as `hack doctor --fix`: untrack, then ensure the nested ignore.
   const untracked = await untrackGeneratedFiles({
@@ -195,6 +152,7 @@ test("untrackGeneratedFiles removes offenders from the index, keeps files on dis
   for (const path of [
     ".hack/.branch/compose.x.override.yml",
     ".hack/.env.state.json",
+    ".hack/tickets/legacy-cache.json",
     PROJECT_ENV_KEY_FILENAME,
   ]) {
     expect(

@@ -49,7 +49,6 @@ Supported:
 - env management
 - sessions
 - diagnostics
-- optional local tickets
 - slim macOS companion
 
 Removed:

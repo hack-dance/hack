@@ -24,7 +24,6 @@ terminal).
 - `hack daemon` — optional local daemon for faster JSON status/ps
 - `hack agent onboard` — agent-assisted onboarding for existing projects
 - `hack setup` — install/refresh agent integrations (Cursor rules, Claude hooks, Codex skill, MCP)
-- `hack tickets` — deprecated compatibility surface for existing Tickets data
 
 Interactive diagnostics use compact status rows: healthy groups stay on one line, while warnings
 and errors expand with wrapped detail and recovery guidance. `hack doctor --json` remains the stable,
@@ -35,16 +34,8 @@ Run `hack help` for the full command list, or `hack help --all` to include hidde
 experimental commands. Every command and flag on this page is also in the generated
 [CLI reference](reference/cli.md).
 
-## Removed surfaces
-
-These commands remain only as migration stubs that print the removal reason and any replacement:
-
-- `hack auth`
-- `hack linear`
-- `hack org`
-- `hack team`
-
-Built-in GitHub workflows were also removed. Use native `git` and `gh`.
+Hosted auth/account/org/team, built-in GitHub and Linear workflows, and Hack Tickets are outside the
+CLI surface. Use native `git` and `gh` for repository collaboration.
 
 ## Unsupported experimental
 
@@ -68,9 +59,10 @@ See [Beta workflows](beta.md) for guides on this surface.
 
 Generated agent docs, Cursor rules, Codex skills, and the shared `~/.ai/skills/hack-cli` skill carry
 the Hack CLI version that generated them. Audit both project and global surfaces with
-`hack setup sync --all-scopes --check`; repair them with `hack setup sync --all-scopes`, then reload
-the agent session so it stops using cached guidance. Interactive project commands also report drift
-before auto-repair instead of repairing silently.
+`hack setup sync --all-scopes --check`; repair them with the explicit
+`hack setup sync --all-scopes`, then reload the agent session so it stops using cached guidance.
+Ordinary commands, `hack update`, and `hack doctor --fix` may audit freshness but never render,
+repair, remove, or otherwise mutate these files.
 
 ## First-run path
 
@@ -309,31 +301,15 @@ materialized `.hack/.env` or `.hack/.env.state.json` is stale and should be rege
 ## Project files
 
 Hack owns a committed `.hack/.gitignore` (self-healing on `init`/`up`) that ignores machine-local
-generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`,
-`tickets/`). Keep
-it committed. If generated files ever leak into git, `hack doctor --fix` untracks them (the files
-stay on disk). Runtime metadata is written to `.internal/compose.runtime.override.yml` for the base
-instance and `.branch/compose.<branch>.runtime.override.yml` for branch instances. See
-[Architecture](architecture.md) for the full file map.
+generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`). The
+retired `tickets/` path remains ignored only so upgrades cannot recommit legacy machine-local
+caches. Keep `.hack/.gitignore` committed. If generated files ever leak into git, `hack doctor
+--fix` untracks them (the files stay on disk). Runtime metadata is written to
+`.internal/compose.runtime.override.yml` for the base instance and
+`.branch/compose.<branch>.runtime.override.yml` for branch instances. See [Architecture](architecture.md)
+for the full file map.
 
 The global config root defaults to `~/.hack`; override it with `HACK_HOME`.
-
-## Tickets
-
-Hack Tickets is deprecated. It is no longer installed into agent instructions or skills, and
-`hack setup sync --all-scopes` removes legacy Tickets agent artifacts. Existing commands remain
-available only for compatibility and migration when the extension is explicitly enabled.
-
-```bash
-hack tickets create --title "Investigate flaky lifecycle cleanup"
-hack tickets list
-hack tickets show T-00001
-hack tickets sync
-```
-
-`hack tickets setup` now removes deprecated agent skills/instruction blocks and performs compatible
-storage hygiene; it does not enable Tickets or reinstall guidance. See the migration reference:
-[Tickets](guides/tickets.md).
 
 ## Lifecycle
 

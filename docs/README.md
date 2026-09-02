@@ -39,7 +39,7 @@ Use this path for:
 
 - full command reference: [CLI overview](cli.md) plus the generated [CLI reference](reference/cli.md) (every command and flag)
 - extension configuration and authoring
-- tickets and integrations
+- integrations
 - gateway API and SDK details
 
 This section is easy to find, but it does not lead the product story.

@@ -165,35 +165,26 @@ test("setup sync keeps failing artifact paths visible", () => {
   });
 });
 
-test("setup sync treats installed deprecated artifacts as actionable", () => {
+test("setup sync check reports retired agent artifacts as stale", () => {
   const result = buildSetupSyncScopeResult({
     action: "check",
-    scope: "Global",
+    scope: "Project",
     groups: [
       {
-        label: "Deprecated shared Hack skills",
+        label: "Retired agent artifacts",
         results: [
           {
             status: "deprecated",
-            path: "<home>/.ai/skills/hack/SKILL.md",
-            message: "Deprecated Hack skill is still installed",
+            path: "/repo/.codex/skills/hack-tickets/SKILL.md",
           },
-          { status: "absent", path: "<home>/.ai/skills/hack-tickets/SKILL.md" },
         ],
       },
     ],
   });
 
-  expect(result).toEqual({
-    exitCode: 1,
-    item: {
-      label: "Global",
-      status: "warn",
-      meta: "1/2 current",
-      detail:
-        "Deprecated shared Hack skills: Deprecated Hack skill is still installed",
-    },
-  });
+  expect(result.exitCode).toBe(1);
+  expect(result.item.status).toBe("warn");
+  expect(result.item.meta).toBe("0/1 current");
 });
 
 test("buildInitAssistantReport captures repo signals", async () => {

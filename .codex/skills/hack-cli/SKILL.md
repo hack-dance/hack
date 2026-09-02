@@ -16,7 +16,7 @@ Use `hack` as the primary interface for local-first development.
 - At session start, audit project and global integrations with `hack setup sync --all-scopes --check`.
 - If anything is stale or missing, run `hack setup sync --all-scopes`, then reload the agent session so cached instructions are replaced.
 - Never copy or hand-edit generated Hack rules to refresh them; update the CLI and run the sync command.
-- Content revision: `9e40aaab2d26` (version alone is not a freshness guarantee).
+- Content revision: `844380b12a6e` (version alone is not a freshness guarantee).
 
 ## Product boundary
 

@@ -23,6 +23,9 @@ describe("Ghostty source pin", () => {
     expect(setupScript).toContain('path.join(bridgeDir, "GHOSTTY_REVISION")');
     expect(bundleScript).toContain('path.join(bridgeDir, "GHOSTTY_REVISION")');
     expect(bundleScript).toContain("git -C ${vendorDir} rev-parse HEAD");
+    expect(bundleScript).toContain(
+      "git -C ${vendorDir} reset --hard ${ghosttyRevision}"
+    );
     expect(releaseWorkflow).toContain(
       'REVISION_FILE="$BRIDGE_DIR/GHOSTTY_REVISION"'
     );

@@ -92,6 +92,8 @@ const main = async (): Promise<void> => {
     );
   }
 
+  await $`git -C ${vendorDir} reset --hard ${ghosttyRevision}`;
+
   const minVersionMatch = readFileSync(
     path.join(vendorDir, "build.zig.zon"),
     "utf8"

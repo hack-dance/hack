@@ -1,3 +1,9 @@
+## [4.0.2](https://github.com/hack-dance/hack/compare/v4.0.1...v4.0.2) (2026-09-02)
+
+### Bug Fixes
+
+* **release:** stop publishing macOS app ([#79](https://github.com/hack-dance/hack/issues/79)) ([c7ffe96](https://github.com/hack-dance/hack/commit/c7ffe96ea2380f92c66ba183527b57f43968ad89))
+
 ## [4.0.1](https://github.com/hack-dance/hack/compare/v4.0.0...v4.0.1) (2026-09-02)
 
 ### Bug Fixes

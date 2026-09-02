@@ -300,11 +300,13 @@ materialized `.hack/.env` or `.hack/.env.state.json` is stale and should be rege
 ## Project files
 
 Hack owns a committed `.hack/.gitignore` (self-healing on `init`/`up`) that ignores machine-local
-generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`). Keep
-it committed. If generated files ever leak into git, `hack doctor --fix` untracks them (the files
-stay on disk). Runtime metadata is written to `.internal/compose.runtime.override.yml` for the base
-instance and `.branch/compose.<branch>.runtime.override.yml` for branch instances. See
-[Architecture](architecture.md) for the full file map.
+generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`). The
+retired `tickets/` path remains ignored only so upgrades cannot recommit legacy machine-local
+caches. Keep `.hack/.gitignore` committed. If generated files ever leak into git, `hack doctor
+--fix` untracks them (the files stay on disk). Runtime metadata is written to
+`.internal/compose.runtime.override.yml` for the base instance and
+`.branch/compose.<branch>.runtime.override.yml` for branch instances. See [Architecture](architecture.md)
+for the full file map.
 
 The global config root defaults to `~/.hack`; override it with `HACK_HOME`.
 

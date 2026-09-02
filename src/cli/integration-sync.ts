@@ -2,6 +2,10 @@ import { checkClaudeHooks } from "../agents/claude.ts";
 import { checkCodexSkill } from "../agents/codex-skill.ts";
 import { checkCursorRules } from "../agents/cursor.ts";
 import { HACK_AGENT_INTEGRATION_CLI_VERSION } from "../agents/instruction-source.ts";
+import {
+  checkLegacyProjectAgentArtifacts,
+  checkLegacyUserAgentArtifacts,
+} from "../agents/legacy-artifacts.ts";
 import { checkSharedHackSkill } from "../agents/shared-skill.ts";
 import { type AgentDocCheckResult, checkAgentDocs } from "../mcp/agent-docs.ts";
 import { checkMcpConfig, type McpCheckResult } from "../mcp/install.ts";
@@ -59,6 +63,8 @@ async function detectIntegrationDrift(opts: {
     mcpProject,
     mcpUser,
     docs,
+    legacyProject,
+    legacyUser,
   ] = await Promise.all([
     checkCursorRules({ scope: "project", projectRoot: opts.projectRoot }),
     checkCursorRules({ scope: "user" }),
@@ -80,6 +86,8 @@ async function detectIntegrationDrift(opts: {
       projectRoot: opts.projectRoot,
       targets: ["agents", "claude"],
     }),
+    checkLegacyProjectAgentArtifacts({ projectRoot: opts.projectRoot }),
+    checkLegacyUserAgentArtifacts(),
   ]);
 
   const singleChecks = [
@@ -97,8 +105,11 @@ async function detectIntegrationDrift(opts: {
   );
   const mcpDrift = hasMcpDrift({ checks: [...mcpProject, ...mcpUser] });
   const docsDrift = hasDocDrift({ checks: docs });
+  const legacyDrift = [...legacyProject, ...legacyUser].some(
+    (check) => check.status !== "absent"
+  );
   return {
-    hasDrift: singleDrift || mcpDrift || docsDrift,
+    hasDrift: singleDrift || mcpDrift || docsDrift || legacyDrift,
   };
 }
 

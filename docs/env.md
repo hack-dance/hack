@@ -51,6 +51,7 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `.env.state.json`
 - `hack.env.local.yaml`
 - `hack.env.*.local.yaml`
+- `tickets/` (retained only to contain retired machine-local ticket caches during upgrades)
 
 How it is maintained:
 
@@ -66,7 +67,7 @@ How it is maintained:
 Leak detection and repair:
 
 - `hack doctor` runs a "generated files" check: it lists any of the paths
-  above (plus `.hack.secret.key`) that are tracked in git, except a tracked
+  above (including retired `.hack/tickets/` caches, plus `.hack.secret.key`) that are tracked in git, except a tracked
   `.hack/hack.env.local.yaml`, which is never flagged because older repos may
   intentionally track it as the shared `--env local` overlay (see the legacy
   compatibility note above)

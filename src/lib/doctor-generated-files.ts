@@ -26,6 +26,7 @@ export function buildGeneratedFilePathspecs(opts: {
     `${dir}/.branch`,
     `${dir}/.env`,
     `${dir}/.env.state.json`,
+    `${dir}/tickets`,
     `${dir}/hack.env.*.local.yaml`,
     PROJECT_ENV_KEY_FILENAME,
   ];

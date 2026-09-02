@@ -175,7 +175,41 @@ export const agentDocsSyncScenario: Scenario = {
 
     await Bun.write(
       agentsPath,
-      syncedAgents.replace(
+      `${syncedAgents}\n<!-- hack:tickets:start -->\nRetired ticket guidance\n<!-- hack:tickets:end -->\n`
+    );
+    const legacyPrime = await ctx.cli({
+      args: ["agent", "prime"],
+      cwd: fixture.root,
+      env: isolatedUserEnv,
+    });
+    expect({
+      that: legacyPrime.stdout.includes(
+        "WARNING: Hack agent integrations are stale"
+      ),
+      message: "agent primer should report retained legacy artifacts as stale",
+      result: legacyPrime,
+    });
+
+    const legacyCleanup = await ctx.cli({
+      args: ["setup", "sync", "--all-scopes"],
+      cwd: fixture.root,
+      env: isolatedUserEnv,
+    });
+    expectExit({
+      result: legacyCleanup,
+      codes: [0],
+      message: "explicit setup sync should remove retired instruction blocks",
+    });
+    const cleanedAgents = await Bun.file(agentsPath).text();
+    expect({
+      that: !cleanedAgents.includes("hack:tickets"),
+      message: "explicit setup sync should remove retired ticket guidance",
+      result: legacyCleanup,
+    });
+
+    await Bun.write(
+      agentsPath,
+      cleanedAgents.replace(
         MARKER_START,
         `${MARKER_START}\nSTALE-ORDINARY-COMMAND-PROBE`
       )

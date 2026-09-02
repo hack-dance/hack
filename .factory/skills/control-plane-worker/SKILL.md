@@ -1,6 +1,6 @@
 ---
 name: control-plane-worker
-description: Implements local-first CLI, runtime, env, lifecycle, tickets, and macOS companion features for Hack.
+description: Implements local-first CLI, runtime, env, lifecycle, and macOS companion features for Hack.
 ---
 
 # Control Plane Worker
@@ -12,7 +12,7 @@ NOTE: Startup and cleanup are handled by `worker-base`. This skill defines the W
 Use this skill for features that primarily touch:
 - `src/**` CLI and control-plane code
 - `.hack/docker-compose.yml`, `.hack/hack.config.json`, or other source-of-truth Hack runtime files
-- local runtime orchestration, env/runtime hardening, lifecycle processes, tickets, sessions, MCP/agent setup, docs, or the slim macOS companion
+- local runtime orchestration, env/runtime hardening, lifecycle processes, sessions, MCP/agent setup, docs, or the slim macOS companion
 
 Do not use this skill for retired v3 surfaces:
 - hosted auth/account/org/team management
@@ -22,16 +22,15 @@ Do not use this skill for retired v3 surfaces:
 
 ## Required Skills
 
-- `hack-cli` — invoke when the feature touches `.hack/**`, runtime orchestration, lifecycle/session flows, tickets, env, or any `hack up/ps/open/down` verification.
+- `hack-cli` — invoke when the feature touches `.hack/**`, runtime orchestration, lifecycle/session flows, env, or any `hack up/ps/open/down` verification.
 
 ## Work Procedure
 
 1. Read the assigned feature, `mission.md`, mission `AGENTS.md`, `.factory/services.yaml`, and relevant `.factory/library/*.md` files. Restate the exact assertions or outcomes the feature must complete.
 2. Investigate existing code paths and add the failing test or regression harness first. Prefer the narrowest relevant suites under `tests/*.test.ts`. If the feature has no `fulfills` claims, still add characterization or regression coverage for the changed behavior.
-3. Implement the smallest coherent change set in CLI, runtime config, tickets, env, lifecycle, macOS, or agent setup. Never hand-edit `.hack/.internal/**` or `.hack/.branch/**`; only change source-of-truth files.
+3. Implement the smallest coherent change set in CLI, runtime config, env, lifecycle, macOS, or agent setup. Never hand-edit `.hack/.internal/**` or `.hack/.branch/**`; only change source-of-truth files.
 4. Run focused validators first, then the smallest meaningful `typecheck`/`check` commands for the touched surfaces. For repo-bound CLI behavior, build and validate with `./dist/hack` or repo-local Bun entrypoints. When invoking `bun test` from the repo root against files outside `./tests`, use absolute paths or explicit `./`-prefixed paths that Bun actually honors in this repo so targeted commands do not silently skip files.
    - If the assigned feature is explicitly about fixing a known red baseline, capture the failing baseline evidence once, then continue the repair work and rerun the gate before handoff.
-   - If repo-bound GitHub CLI routes cannot reach the changed auth code because `dance.hack.github` is not enabled in project config yet, use a direct resolver or similarly narrow deterministic smoke and record why the repo-bound path was unavailable.
    - If no safe repo-bound hook exists to force a failure mode (for example local-sync failure injection), deterministic regression tests are acceptable proof as long as you explain why a live manual repro would mutate real project state.
    - For daemon/gateway request-target hardening, raw-socket regression coverage against the proxy transport is preferred. If you also need live proof without mutating shared user daemon state, an isolated temp-HOME `bun index.ts daemon start --foreground` smoke is an acceptable validation pattern; record the isolation setup in the handoff.
    - For lifecycle changes, verify shell semantics, process-group cleanup, stale pane/process metadata reconciliation, singleton listener behavior, and doctor recovery guidance.

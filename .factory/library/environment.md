@@ -22,7 +22,7 @@ Environment variables, external dependencies, and setup notes for current Hack w
 
 - Use `hackdance/hack:slim` for repo-local managed-agent containers when Docker Hub is available.
 - Inject `HACK_ENV_SECRET_KEY` from the runtime or secret manager; never bake `.hack.secret.key` into an image.
-- Slim/codex mode should use repo-local commands such as `hack env list`, `hack host exec`, `hack host shell`, and `hack tickets`.
+- Slim/codex mode should use repo-local commands such as `hack env list`, `hack host exec`, and `hack host shell`.
 - Machine-wide surfaces such as `hack global install`, Caddy/CoreDNS/Loki/Grafana, and local CA bootstrap are not expected in slim mode.
 
 ## Runtime and Lifecycle
@@ -35,4 +35,3 @@ Environment variables, external dependencies, and setup notes for current Hack w
 
 - For stale env compatibility output, use `hack doctor` and `hack env materialize`.
 - For stale lifecycle state, use `hack doctor`, then `hack down`, then rerun `hack doctor`.
-- For tickets remote auth failures, prefer explicit SSH guidance and bounded timeouts over interactive prompts.

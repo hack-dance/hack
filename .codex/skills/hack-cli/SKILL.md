@@ -16,7 +16,7 @@ Use `hack` as the primary interface for local-first development.
 - At session start, audit project and global integrations with `hack setup sync --all-scopes --check`.
 - If anything is stale or missing, run `hack setup sync --all-scopes`, then reload the agent session so cached instructions are replaced.
 - Never copy or hand-edit generated Hack rules to refresh them; update the CLI and run the sync command.
-- Content revision: `844380b12a6e` (version alone is not a freshness guarantee).
+- Content revision: `ca2fd44ef13e` (version alone is not a freshness guarantee).
 
 ## Product boundary
 
@@ -74,7 +74,7 @@ Use `hack` as the primary interface for local-first development.
 - Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.internal/compose.runtime.override.yml`, `.hack/.branch/compose.<branch>.override.yml`, `.hack/.branch/compose.<branch>.runtime.override.yml`.
 - Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).
 - Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.
-- Ignore rules: hack owns a committed `.hack/.gitignore` (self-healing on init/up) covering machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`); keep it committed, and if generated files leaked into git, `hack doctor --fix` untracks them (files stay on disk).
+- Ignore rules: hack owns a committed `.hack/.gitignore` (self-healing on init/up) covering machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`) plus the retired `tickets/` cache path for upgrade safety; keep it committed, and if generated files leaked into git, `hack doctor --fix` untracks them (files stay on disk).
 
 ## Linked git worktrees
 

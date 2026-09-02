@@ -1,3 +1,18 @@
+## [4.0.0](https://github.com/hack-dance/hack/compare/v3.5.2...v4.0.0) (2026-09-02)
+
+### ⚠ BREAKING CHANGES
+
+* remove implicit agent writes and retired surfaces
+
+### Features
+
+* remove implicit agent writes and retired surfaces ([bb10f99](https://github.com/hack-dance/hack/commit/bb10f998f751a6d0ac764fdf77e1131d228cfb94))
+
+### Bug Fixes
+
+* **release:** recognize bang breaking markers ([8db8742](https://github.com/hack-dance/hack/commit/8db8742b990add501d537699da7aca65eb87d7df)), closes [#75](https://github.com/hack-dance/hack/issues/75) [#75](https://github.com/hack-dance/hack/issues/75)
+* **release:** use compatible changelog preset ([f211223](https://github.com/hack-dance/hack/commit/f211223dbafa33a29f60bd19e7bce8419151d0e0)), closes [#76](https://github.com/hack-dance/hack/issues/76) [#75](https://github.com/hack-dance/hack/issues/75)
+
 ## <small>3.5.2 (2026-08-03)</small>
 
 * fix(daemon): bound Docker event refresh work (#74) ([53df352](https://github.com/hack-dance/hack/commit/53df352)), closes [#74](https://github.com/hack-dance/hack/issues/74)

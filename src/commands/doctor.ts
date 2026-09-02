@@ -4,6 +4,10 @@ import { dirname, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
 import { YAML } from "bun";
 import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../agents/integration-revision.ts";
+import {
+  checkLegacyProjectAgentArtifacts,
+  checkLegacyUserAgentArtifacts,
+} from "../agents/legacy-artifacts.ts";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -3016,11 +3020,22 @@ export async function inspectDoctorAgentIntegrations(opts: {
     resolve(home, ".ai", "skills", "hack-cli", "SKILL.md"),
   ];
   const marker = `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``;
-  const contents = await Promise.all(paths.map((path) => readTextFile(path)));
+  const [contents, legacyProject, legacyUser] = await Promise.all([
+    Promise.all(paths.map((path) => readTextFile(path))),
+    opts.projectRoot
+      ? checkLegacyProjectAgentArtifacts({ projectRoot: opts.projectRoot })
+      : Promise.resolve([]),
+    checkLegacyUserAgentArtifacts({ home }),
+  ]);
+  const hasLegacyArtifacts = [...legacyProject, ...legacyUser].some(
+    (check) => check.status !== "absent"
+  );
   return {
-    status: contents.every((content) => content?.includes(marker))
-      ? "current"
-      : "stale",
+    status:
+      contents.every((content) => content?.includes(marker)) &&
+      !hasLegacyArtifacts
+        ? "current"
+        : "stale",
   };
 }
 

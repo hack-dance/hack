@@ -307,7 +307,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     title: "Agent integration maintenance",
     surfaces: ALL_SURFACES,
     bullets: [
-      "Ordinary Hack commands, `hack update`, and `hack doctor --fix` never inspect, render, repair, or remove agent integration files.",
+      "Ordinary Hack commands, `hack update`, and `hack doctor --fix` may audit freshness but never render, repair, remove, or otherwise mutate agent integration files.",
       "Use `hack setup sync` only when explicitly choosing to manage project or user docs, skills, rules, hooks, or MCP config.",
       "Read-only freshness checks are available through `hack setup sync --all-scopes --check`, `hack doctor`, and `hack agent prime`.",
       "Refresh project + user integrations: `hack setup sync --all-scopes`",

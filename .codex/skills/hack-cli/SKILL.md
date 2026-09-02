@@ -16,7 +16,7 @@ Use `hack` as the primary interface for local-first development.
 - At session start, audit project and global integrations with `hack setup sync --all-scopes --check`.
 - If anything is stale or missing, run `hack setup sync --all-scopes`, then reload the agent session so cached instructions are replaced.
 - Never copy or hand-edit generated Hack rules to refresh them; update the CLI and run the sync command.
-- Content revision: `ca2fd44ef13e` (version alone is not a freshness guarantee).
+- Content revision: `994ef1552d14` (version alone is not a freshness guarantee).
 
 ## Product boundary
 
@@ -190,7 +190,7 @@ Use `hack` as the primary interface for local-first development.
 
 ## Agent integration maintenance
 
-- Ordinary Hack commands, `hack update`, and `hack doctor --fix` never inspect, render, repair, or remove agent integration files.
+- Ordinary Hack commands, `hack update`, and `hack doctor --fix` may audit freshness but never render, repair, remove, or otherwise mutate agent integration files.
 - Use `hack setup sync` only when explicitly choosing to manage project or user docs, skills, rules, hooks, or MCP config.
 - Read-only freshness checks are available through `hack setup sync --all-scopes --check`, `hack doctor`, and `hack agent prime`.
 - Refresh project + user integrations: `hack setup sync --all-scopes`

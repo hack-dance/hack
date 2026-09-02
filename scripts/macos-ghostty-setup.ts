@@ -7,6 +7,10 @@ import { $ } from "bun";
 const repoRoot = path.resolve(import.meta.dir, "..");
 const vendorDir = path.join(repoRoot, "apps/macos/vendor/ghostty");
 const bridgeDir = path.join(repoRoot, "apps/macos/Experiments/GhosttyVTBridge");
+const ghosttyRevision = readFileSync(
+  path.join(bridgeDir, "GHOSTTY_REVISION"),
+  "utf8"
+).trim();
 const installDir = path.join(
   process.env.HOME ?? "",
   "Library/Application Support/Hack/ghostty/lib"
@@ -44,11 +48,24 @@ const _isAtLeast = (
   return current.patch >= min.patch;
 };
 
-if (existsSync(vendorDir)) {
-  await $`git -C ${vendorDir} fetch --depth 1 origin main`;
-  await $`git -C ${vendorDir} reset --hard origin/main`;
-} else {
-  await $`git clone --depth 1 https://github.com/ghostty-org/ghostty ${vendorDir}`;
+if (!/^[0-9a-f]{40}$/.test(ghosttyRevision)) {
+  throw new Error("GHOSTTY_REVISION must contain one full Git commit SHA");
+}
+
+if (!existsSync(vendorDir)) {
+  await $`git clone --filter=blob:none --no-checkout https://github.com/ghostty-org/ghostty ${vendorDir}`;
+}
+
+await $`git -C ${vendorDir} fetch --depth 1 origin ${ghosttyRevision}`;
+await $`git -C ${vendorDir} checkout --detach --force FETCH_HEAD`;
+
+const checkedOutRevision = (
+  await $`git -C ${vendorDir} rev-parse HEAD`.text()
+).trim();
+if (checkedOutRevision !== ghosttyRevision) {
+  throw new Error(
+    `Expected Ghostty ${ghosttyRevision}, checked out ${checkedOutRevision}`
+  );
 }
 
 const minVersionMatch = readFileSync(

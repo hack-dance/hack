@@ -1064,8 +1064,8 @@ async function checkAgentIntegrationsUnsafe(opts: {
         name: "agent integrations",
         status: "warn",
         message: project
-          ? "Project or global guidance is stale (run: hack setup sync --all-scopes, reload the agent session, verify: hack setup sync --all-scopes --check)"
-          : "Global guidance is stale (run: hack setup sync --global, reload the agent session, verify: hack setup sync --global --check)",
+          ? "Agent integration review needed (inspect: hack setup sync --all-scopes --check; repair only affected, authorized targets; missing optional integrations need not be installed)"
+          : "Global agent integration review needed (inspect: hack setup sync --global --check; repair only affected, authorized targets; missing optional integrations need not be installed)",
       };
 }
 

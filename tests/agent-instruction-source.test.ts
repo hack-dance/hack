@@ -140,14 +140,15 @@ test("active contributor guidance and examples do not advertise retired Tickets"
   expect(await Bun.file("examples/tickets/README.md").exists()).toBe(false);
 });
 
-test("all generated surfaces expose integration freshness and repair upfront", () => {
+test("all generated surfaces keep freshness checks scoped and optional", () => {
   for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
     expect(rendered, `surface "${surface}" lacks freshness status`).toContain(
       "Integration freshness"
     );
     expect(rendered).toContain("hack setup sync --all-scopes --check");
     expect(rendered).toContain("hack setup sync --all-scopes");
-    expect(rendered).toContain("reload the agent session");
+    expect(rendered).toContain("restart only if");
+    expect(rendered).not.toContain("At session start, audit");
   }
 });
 

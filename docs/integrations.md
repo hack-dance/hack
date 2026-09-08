@@ -27,10 +27,14 @@ Recommended replacements:
 Hack maintains project instructions plus global Cursor, Claude, Codex, and shared `~/.ai/skills`
 surfaces. Generated guidance identifies the CLI version that rendered it.
 
-- Audit without writing: `hack setup sync --all-scopes --check`
-- Repair project and global integrations: `hack setup sync --all-scopes`
-- After repair: reload the agent session so cached rules are discarded
+Run checks when Hack is relevant and there is evidence of drift; there is no mandatory startup audit.
+Plain `hack agent prime`, including installed SessionStart/PreCompact hooks, prints the current
+primer without scanning project or global integrations. Use `hack agent prime --check` for an
+explicit read-only inventory, or a targeted `hack setup ... --check` for per-artifact detail.
+Inventory findings do not block unrelated work, and missing optional integrations need not be installed.
 
-Ordinary commands, `hack update`, and `hack doctor --fix` do not inspect or modify these surfaces.
-`hack agent prime` performs a read-only audit at session start and prints a warning before any Hack
-operating guidance.
+Ordinary commands, `hack update`, and `hack doctor --fix` never modify these surfaces. Doctor may
+report freshness findings. Repair only the affected integration and scope covered by the request;
+`hack setup sync --all-scopes` remains available for an explicitly requested full refresh.
+Existing authorization for that action and scope is sufficient. After repair, read the updated
+guidance; restart only if the client cannot reload changed hooks or skills.

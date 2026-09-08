@@ -111,12 +111,12 @@ export function buildDoctorRecoveryGuidance(input: {
     }
 
     if (result.message.includes("hack setup sync --all-scopes")) {
-      pushUnique(configurationRepair, "hack setup sync --all-scopes");
+      pushUnique(configurationRepair, "hack setup sync --all-scopes --check");
       continue;
     }
 
     if (result.message.includes("hack setup sync --global")) {
-      pushUnique(configurationRepair, "hack setup sync --global");
+      pushUnique(configurationRepair, "hack setup sync --global --check");
       continue;
     }
 

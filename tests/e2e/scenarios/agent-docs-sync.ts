@@ -79,8 +79,28 @@ export const agentDocsSyncScenario: Scenario = {
       result: staleCheck,
     });
 
-    const stalePrime = await ctx.cli({
+    const plainPrime = await ctx.cli({
       args: ["agent", "prime"],
+      cwd: fixture.root,
+      env: isolatedUserEnv,
+    });
+    expectExit({
+      result: plainPrime,
+      codes: [0],
+      message: "plain primer renders despite drift",
+    });
+    expect({
+      that:
+        !(
+          plainPrime.stdout.includes("Hack integration inventory:") ||
+          plainPrime.stdout.includes("WARNING:")
+        ) && (await Bun.file(agentsPath).text()) === corrupted,
+      message: "plain primer must not audit or repair stale integrations",
+      result: plainPrime,
+    });
+
+    const stalePrime = await ctx.cli({
+      args: ["agent", "prime", "--check"],
       cwd: fixture.root,
       env: isolatedUserEnv,
     });
@@ -92,10 +112,10 @@ export const agentDocsSyncScenario: Scenario = {
     expect({
       that:
         stalePrime.stdout.includes(
-          "WARNING: Hack agent integrations are stale"
+          "Hack integration inventory: review needed"
         ) &&
         stalePrime.stdout.includes("hack setup sync --all-scopes") &&
-        stalePrime.stdout.includes("reload the agent session"),
+        stalePrime.stdout.includes("restart only if"),
       message:
         "agent primer should expose stale project/global guidance upfront",
       result: stalePrime,
@@ -150,7 +170,7 @@ export const agentDocsSyncScenario: Scenario = {
     });
 
     const currentPrime = await ctx.cli({
-      args: ["agent", "prime"],
+      args: ["agent", "prime", "--check"],
       cwd: fixture.root,
       env: isolatedUserEnv,
     });
@@ -178,13 +198,13 @@ export const agentDocsSyncScenario: Scenario = {
       `${syncedAgents}\n<!-- hack:tickets:start -->\nRetired ticket guidance\n<!-- hack:tickets:end -->\n`
     );
     const legacyPrime = await ctx.cli({
-      args: ["agent", "prime"],
+      args: ["agent", "prime", "--check"],
       cwd: fixture.root,
       env: isolatedUserEnv,
     });
     expect({
       that: legacyPrime.stdout.includes(
-        "WARNING: Hack agent integrations are stale"
+        "Hack integration inventory: review needed"
       ),
       message: "agent primer should report retained legacy artifacts as stale",
       result: legacyPrime,

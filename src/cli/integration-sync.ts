@@ -33,7 +33,7 @@ export async function inspectAgentIntegrationFreshness(opts: {
   };
 }
 
-/** Render an upfront status block suitable for SessionStart hooks and agents. */
+/** Render a non-blocking result for an explicitly requested integration inventory. */
 export function renderAgentIntegrationFreshnessNotice(opts: {
   readonly report: AgentIntegrationFreshnessReport;
 }): string {
@@ -41,11 +41,12 @@ export function renderAgentIntegrationFreshnessNotice(opts: {
     return `Hack agent integration freshness: current (CLI v${opts.report.cliVersion}).`;
   }
   return [
-    `WARNING: Hack agent integrations are stale for CLI v${opts.report.cliVersion}.`,
-    "Do not rely on cached Hack rules or skills until they are refreshed.",
-    `Fix project + global integrations: ${opts.report.fixCommand}`,
-    `Verify: ${opts.report.verifyCommand}`,
-    "Then reload the agent session so it reads the updated rules.",
+    `Hack integration inventory: review needed (CLI v${opts.report.cliVersion}).`,
+    "Some integrations are missing, stale, or could not be checked. Missing optional integrations need not be installed.",
+    `Inspect affected paths: ${opts.report.verifyCommand}`,
+    "Repair only the affected integration and scope authorized for this task.",
+    `For an explicitly requested full refresh: ${opts.report.fixCommand}`,
+    "Read refreshed guidance; restart only if the client cannot reload changed hooks or skills. Unrelated work can continue.",
   ].join("\n");
 }
 

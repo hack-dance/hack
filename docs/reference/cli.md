@@ -1858,6 +1858,7 @@ hack agent prime [options]
 
 | Option | Description |
 | --- | --- |
+| `--check` | Include a read-only project and global integration inventory |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

@@ -450,3 +450,7 @@ and group members without a surviving identity are explicitly unverified.
 
 See [runtime performance diagnostics](performance.md) for project-listing timings,
 container details, watcher measurements and read-only cleanup previews.
+
+For terminal commands cancelled through the wrapper PID, Hack captures the child
+process tree and revalidates process start times before signalling surviving
+descendants. It never signals the shared terminal process group.

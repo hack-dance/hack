@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { createJobStore } from "../src/control-plane/extensions/supervisor/job-store.ts";
 import { createSupervisorService } from "../src/control-plane/extensions/supervisor/service.ts";
 import { readTextFile } from "../src/lib/fs.ts";
 
@@ -70,9 +71,21 @@ test("Supervisor service cancels running jobs", async () => {
 
   const cancel = await service.cancelJob({ projectDir, jobId: created.jobId });
   expect(cancel.ok).toBe(true);
-
+  // A successful cancellation response includes durable terminal state.
+  expect(
+    (await service.getJob({ projectDir, jobId: created.jobId }))?.status
+  ).toBe("cancelled");
+  const store = await createJobStore({ projectDir });
+  const events = await store.readEvents({ jobId: created.jobId });
+  expect(events.filter((event) => event.type === "job.cancelled")).toHaveLength(
+    1
+  );
+  expect(events.some((event) => event.type === "job.failed")).toBe(false);
   const result = await created.run;
   expect(result.status).toBe("cancelled");
+  expect(await service.cancelJob({ projectDir, jobId: created.jobId })).toEqual(
+    { ok: false, status: "not_running" }
+  );
 
   const job = await service.getJob({ projectDir, jobId: created.jobId });
   expect(job?.status).toBe("cancelled");
@@ -107,3 +120,116 @@ async function waitForJobStatus(opts: {
   }
   throw new Error(`Timed out waiting for job status: ${opts.status}`);
 }
+
+for (const failurePoint of ["status", "event-before", "event-after"] as const) {
+  test(`cancellation persistence failure at ${failurePoint} preserves the claimed outcome`, async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "hack-supervisor-service-"));
+    const projectDir = join(tempDir, ".hack");
+    const failure = new Error(`Injected ${failurePoint} failure`);
+    const service = createSupervisorService({
+      createStore: async (opts) => {
+        const store = await createJobStore(opts);
+        return {
+          ...store,
+          updateJobStatus: async (input) => {
+            if (input.status === "cancelled" && failurePoint === "status") {
+              throw failure;
+            }
+            return await store.updateJobStatus(input);
+          },
+          appendEvent: async (input) => {
+            if (input.type !== "job.cancelled") {
+              return await store.appendEvent(input);
+            }
+            if (failurePoint === "event-before") {
+              throw failure;
+            }
+            if (failurePoint === "event-after") {
+              const meta = await store.readJobMeta({ jobId: input.jobId });
+              if (!meta) {
+                throw new Error("Missing test job");
+              }
+              // Fail after the event append, before its sequence reaches metadata.
+              await appendFile(
+                store.getJobPaths(input).eventsPath,
+                `${JSON.stringify({
+                  seq: meta.lastEventSeq + 1,
+                  ts: new Date().toISOString(),
+                  type: input.type,
+                })}\n`
+              );
+              throw failure;
+            }
+            return await store.appendEvent(input);
+          },
+        };
+      },
+    });
+    const created = await service.createJob({
+      projectDir,
+      runner: "generic",
+      command: [process.execPath, "-e", "setTimeout(() => {}, 5000)"],
+    });
+    const outcome = created.run.catch((error: unknown) => error);
+    await waitForJobStatus({
+      service,
+      projectDir,
+      jobId: created.jobId,
+      status: "running",
+      timeoutMs: 10_000,
+    });
+    await expect(
+      service.cancelJob({ projectDir, jobId: created.jobId })
+    ).rejects.toThrow(failure.message);
+    expect(await outcome).toBe(failure);
+    const stored = await service.getJob({ projectDir, jobId: created.jobId });
+    expect(stored?.status).toBe(
+      failurePoint === "status" ? "running" : "cancelled"
+    );
+    const store = await createJobStore({ projectDir });
+    const events = await store.readEvents({ jobId: created.jobId });
+    expect(stored?.lastEventSeq).toBe(3);
+    expect(events.filter((event) => event.type === "job.failed")).toHaveLength(
+      0
+    );
+    expect(
+      events.filter((event) => event.type === "job.cancelled")
+    ).toHaveLength(failurePoint === "event-after" ? 1 : 0);
+  });
+}
+
+test("completion event persistence failure does not replace completed with failed", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "hack-supervisor-service-"));
+  const projectDir = join(tempDir, ".hack");
+  const failure = new Error("Injected completion event failure");
+  const service = createSupervisorService({
+    createStore: async (opts) => {
+      const store = await createJobStore(opts);
+      return {
+        ...store,
+        appendEvent: async (input) => {
+          const event = await store.appendEvent(input);
+          if (input.type === "job.completed") {
+            throw failure;
+          }
+          return event;
+        },
+      };
+    },
+  });
+  const created = await service.createJob({
+    projectDir,
+    runner: "generic",
+    command: [process.execPath, "-e", "process.exit(0)"],
+  });
+  await expect(created.run).rejects.toThrow(failure.message);
+  expect(
+    (await service.getJob({ projectDir, jobId: created.jobId }))?.status
+  ).toBe("completed");
+  const store = await createJobStore({ projectDir });
+  expect(
+    (await store.readEvents({ jobId: created.jobId })).map(
+      (event) => event.type
+    )
+  ).toEqual(["job.created", "job.starting", "job.started", "job.completed"]);
+});

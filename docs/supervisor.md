@@ -1,6 +1,6 @@
 # Supervisor (jobs + shells)
 
-> **Status: unsupported experimental.** These surfaces are source-available but outside the supported v3 product contract. They are hidden from default `hack --help` (see `hack help --all`) and print a warning when invoked.
+> **Status: unsupported experimental.** These surfaces are source-available but outside the supported product contract. They are hidden from default `hack --help` (see `hack help --all`) and print a warning when invoked.
 
 The supervisor is the execution engine behind remote workflows. It can run commands as jobs,
 stream logs/events, and host PTY-backed shells. The CLI exposes it locally via `hack x supervisor`
@@ -9,6 +9,16 @@ and remotely through the gateway API.
 This page documents a beta-adjacent execution surface.
 Use [Beta workflows](beta.md) for the guided remote path and [Extensions & reference](reference.md)
 for the rest of the command and API material.
+
+Cancellation is coordinated with the job runner. A successful cancel response waits
+for the runner's terminal metadata and event, not process exit or log drain; it does not
+race a second writer against process exit. Once terminal persistence has started,
+a later cancellation returns `not_running` and preserves the completed/failed outcome.
+Repeated requests accepted before finalization share one cancellation outcome and event.
+If terminal persistence fails, cancellation and the run promise report that failure;
+the service logs it without replacing the claimed outcome with `failed`. Metadata or
+event history can be incomplete, so a persistence error is not a successful acknowledgement.
+No automatic retry appends another terminal event after a partial write.
 
 ## Local usage
 

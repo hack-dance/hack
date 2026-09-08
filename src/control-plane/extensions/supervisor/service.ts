@@ -76,12 +76,15 @@ export type SupervisorService = {
  * Create a supervisor service for managing jobs and their metadata.
  *
  * @param opts.logger - Optional logger override.
+ * @param opts.createStore - Optional job-store factory.
  * @returns Supervisor service helpers.
  */
 export function createSupervisorService(opts?: {
   readonly logger?: Logger;
+  readonly createStore?: typeof createJobStore;
 }): SupervisorService {
   const logger = opts?.logger ?? baseLogger;
+  const createStore = opts?.createStore ?? createJobStore;
   const runningJobs = new Map<
     string,
     { readonly cancel: () => Promise<boolean> }
@@ -96,7 +99,7 @@ export function createSupervisorService(opts?: {
     readonly cwd?: string;
     readonly env?: Record<string, string>;
   }): Promise<CreateJobResult> => {
-    const store = await createJobStore({ projectDir: input.projectDir });
+    const store = await createStore({ projectDir: input.projectDir });
     const jobId = randomUUID();
     const meta = await store.createJob({
       jobId,
@@ -106,17 +109,24 @@ export function createSupervisorService(opts?: {
       projectName: input.projectName,
     });
 
+    let terminalClaimed = false;
     const run = runJob({
       jobStore: store,
       jobId,
       command: input.command,
       cwd: input.cwd,
       env: input.env,
+      onTerminalClaim: () => {
+        terminalClaimed = true;
+      },
       onSpawn: ({ cancel }) => {
         runningJobs.set(jobId, { cancel });
       },
     })
       .catch(async (error) => {
+        if (terminalClaimed) {
+          throw error;
+        }
         logger.error({ message: `Job failed: ${formatError(error)}` });
         await store.updateJobStatus({ jobId, status: "failed" });
         await store.appendEvent({
@@ -131,6 +141,13 @@ export function createSupervisorService(opts?: {
         runningJobs.delete(jobId);
       });
 
+    // Background callers need not await run; observing errors here keeps the
+    // returned promise rejected without creating an unhandled daemon rejection.
+    void run.catch((error) => {
+      logger.error({
+        message: `Job persistence failed: ${formatError(error)}`,
+      });
+    });
     return { jobId, meta, run };
   };
 
@@ -141,7 +158,7 @@ export function createSupervisorService(opts?: {
     readonly projectDir: string;
     readonly jobId: string;
   }): Promise<CancelJobResult> => {
-    const store = await createJobStore({ projectDir });
+    const store = await createStore({ projectDir });
     const meta = await store.readJobMeta({ jobId });
     if (!meta) {
       return { ok: false, status: "not_found" };
@@ -165,7 +182,7 @@ export function createSupervisorService(opts?: {
     readonly projectDir: string;
     readonly jobId: string;
   }): Promise<JobMeta | null> => {
-    const store = await createJobStore({ projectDir });
+    const store = await createStore({ projectDir });
     return await store.readJobMeta({ jobId });
   };
 
@@ -174,7 +191,7 @@ export function createSupervisorService(opts?: {
   }: {
     readonly projectDir: string;
   }): Promise<readonly JobMeta[]> => {
-    const store = await createJobStore({ projectDir });
+    const store = await createStore({ projectDir });
     const entries = await safeReadDir(store.jobsRoot);
     const metas = await Promise.all(
       entries.map((jobId) => store.readJobMeta({ jobId }))

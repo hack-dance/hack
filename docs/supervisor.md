@@ -15,6 +15,10 @@ for the runner's terminal metadata and event, not process exit or log drain; it 
 race a second writer against process exit. Once terminal persistence has started,
 a later cancellation returns `not_running` and preserves the completed/failed outcome.
 Repeated requests accepted before finalization share one cancellation outcome and event.
+If terminal persistence fails, cancellation and the run promise report that failure;
+the service logs it without replacing the claimed outcome with `failed`. Metadata or
+event history can be incomplete, so a persistence error is not a successful acknowledgement.
+No automatic retry appends another terminal event after a partial write.
 
 ## Local usage
 

@@ -25,6 +25,7 @@ type SpawnedProcess = ReturnType<typeof Bun.spawn>;
  * @param opts.cwd - Optional working directory for the process.
  * @param opts.env - Optional environment overrides.
  * @param opts.onSpawn - Optional hook with the spawned process handle.
+ * @param opts.onTerminalClaim - Observe the chosen outcome before persistence yields.
  * @returns Final job status and exit code.
  */
 export async function runJob(opts: {
@@ -34,6 +35,7 @@ export async function runJob(opts: {
   readonly cwd?: string;
   readonly env?: Record<string, string>;
   readonly onSpawn?: JobSpawnListener;
+  readonly onTerminalClaim?: (opts: { readonly status: JobStatus }) => void;
 }): Promise<JobRunResult> {
   const meta = await opts.jobStore.readJobMeta({ jobId: opts.jobId });
   if (!meta) {
@@ -93,6 +95,7 @@ export async function runJob(opts: {
     }
     // Claim the outcome before storage yields; both paths share one writer.
     terminalStatus = input.status;
+    opts.onTerminalClaim?.({ status: input.status });
     terminalWrite = (async () => {
       await opts.jobStore.updateJobStatus({
         jobId: opts.jobId,

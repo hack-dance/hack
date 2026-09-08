@@ -58,11 +58,14 @@ See [Beta workflows](beta.md) for guides on this surface.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
 
 Generated agent docs, Cursor rules, Codex skills, and the shared `~/.ai/skills/hack-cli` skill carry
-the Hack CLI version that generated them. Audit both project and global surfaces with
-`hack setup sync --all-scopes --check`; repair them with the explicit
-`hack setup sync --all-scopes`, then reload the agent session so it stops using cached guidance.
-Ordinary commands, `hack update`, and `hack doctor --fix` may audit freshness but never render,
-repair, remove, or otherwise mutate these files.
+the Hack CLI version that generated them. Plain `hack agent prime` prints current guidance without
+an integration scan. Use `hack agent prime --check` for an explicit project/global inventory or a
+targeted `hack setup ... --check` when diagnosing drift. Missing optional integrations do not
+require installation. Repair only affected targets within the authorized scope; use
+`hack setup sync --all-scopes` for an explicitly requested full refresh. Read updated guidance after
+repair; restart only if the client cannot reload changed hooks or skills.
+Ordinary commands, `hack update`, and `hack doctor --fix` never render, repair, remove, or otherwise
+mutate integration files. CLI upgrades do not trigger integration updates.
 
 ## First-run path
 

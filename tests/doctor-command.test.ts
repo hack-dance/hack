@@ -176,19 +176,23 @@ test("doctor guidance includes daemon recovery for stale local api state", () =>
   expect(guidance.configurationRepair).toEqual([]);
 });
 
-test("doctor guidance routes global agent drift to global sync", () => {
+test("doctor guidance keeps global integration recovery read-only", () => {
   const guidance = buildDoctorRecoveryGuidance({
     results: [
       {
         name: "agent integrations",
         status: "warn",
         message:
-          "Global guidance is stale (run: hack setup sync --global, reload the agent session)",
+          "Global agent integration review needed (inspect: hack setup sync --global --check; repair only affected, authorized targets; missing optional integrations need not be installed)",
       },
     ],
   });
 
-  expect(guidance.configurationRepair).toEqual(["hack setup sync --global"]);
+  expect(guidance.configurationRepair).toEqual([]);
+  expect(guidance.followUp[0]).toBe(
+    "Inspect global integration paths: hack setup sync --global --check"
+  );
+  expect(guidance.followUp[1]).toContain("reported global targets");
 });
 
 test("doctor audits global agent guidance without a project", async () => {
@@ -537,4 +541,22 @@ test("recovery workflow lines scope repo-specific commands for doctor output", (
     "6. If it still fails:",
     "   - `hack crash-capture --path '/tmp/work repo'`",
   ]);
+});
+
+test("doctor does not turn an all-scope inventory into an automatic repair", () => {
+  const guidance = buildDoctorRecoveryGuidance({
+    results: [
+      {
+        name: "agent integrations",
+        status: "warn",
+        message:
+          "Freshness audit unavailable (verify: hack setup sync --all-scopes --check)",
+      },
+    ],
+  });
+  expect(guidance.configurationRepair).toEqual([]);
+  expect(guidance.followUp[0]).toBe(
+    "Inspect integration paths: hack setup sync --all-scopes --check"
+  );
+  expect(guidance.followUp[1]).toContain("authorized project/global scope");
 });

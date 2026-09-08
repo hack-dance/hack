@@ -1925,6 +1925,7 @@ async function runHostCommandWithInjectedEnv(input: {
       cwd: project.projectRoot,
       env: envState.env,
       stdin: "inherit",
+      forwardSignals: true,
     }
   );
 }

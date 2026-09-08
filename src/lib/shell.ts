@@ -73,27 +73,96 @@ export interface RunOptions {
    */
   readonly stdout?: "inherit" | "stderr";
   readonly timeoutMs?: number;
+  /** Forward cancellation to an owned command process group, preserving TTY input. */
+  readonly forwardSignals?: boolean;
 }
 
 export async function run(
   cmd: readonly string[],
   opts: RunOptions = {}
 ): Promise<number> {
+  if (
+    opts.forwardSignals &&
+    process.stdin.isTTY &&
+    (opts.stdin ?? "inherit") === "inherit"
+  ) {
+    const { runWithTerminalGroup } = await import("./tty-run.ts");
+    return await runWithTerminalGroup({
+      command: cmd,
+      cwd: opts.cwd,
+      env: buildSpawnEnv(opts.env),
+      stdout: opts.stdout,
+      timeoutMs: opts.timeoutMs,
+    });
+  }
+  const ownsProcessGroup =
+    opts.timeoutMs !== undefined || opts.forwardSignals === true;
   const proc = Bun.spawn([...cmd], {
     cwd: opts.cwd,
     env: buildSpawnEnv(opts.env),
     stdin: opts.stdin ?? "inherit",
     stdout: opts.stdout === "stderr" ? 2 : "inherit",
     stderr: "inherit",
-    detached: opts.timeoutMs !== undefined,
+    detached: ownsProcessGroup,
   });
   const timeout = installSubprocessTimeout({
     pid: proc.pid,
     timeoutMs: opts.timeoutMs,
   });
-  const exitCode = await proc.exited;
-  timeout.dispose();
-  return timeout.didTimeout() ? 124 : exitCode;
+  const cancellation = opts.forwardSignals
+    ? installSubprocessSignalForwarding({
+        pid: proc.pid,
+      })
+    : null;
+  try {
+    const exitCode = await proc.exited;
+    return cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
+  } finally {
+    timeout.dispose();
+    cancellation?.dispose();
+  }
+}
+
+/** Detached noninteractive children keep cancellation scoped to their group. */
+function installSubprocessSignalForwarding(opts: { readonly pid: number }): {
+  readonly dispose: () => void;
+  readonly exitCode: () => number | null;
+} {
+  let exitCode: number | null = null;
+  let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+  const send = (signal: NodeJS.Signals): void => {
+    try {
+      process.kill(-opts.pid, signal);
+    } catch {
+      // The owned group may already have exited.
+    }
+  };
+  const cancel = (signal: "SIGINT" | "SIGTERM"): void => {
+    if (exitCode !== null) {
+      send("SIGKILL");
+      return;
+    }
+    exitCode = signal === "SIGINT" ? 130 : 143;
+    send(signal);
+    forceKillTimer = setTimeout(() => send("SIGKILL"), 2000);
+  };
+  const onInterrupt = (): void => cancel("SIGINT");
+  const onTerminate = (): void => cancel("SIGTERM");
+  process.on("SIGINT", onInterrupt);
+  process.on("SIGTERM", onTerminate);
+  return {
+    exitCode: () => exitCode,
+    dispose: () => {
+      process.off("SIGINT", onInterrupt);
+      process.off("SIGTERM", onTerminate);
+      if (forceKillTimer) {
+        clearTimeout(forceKillTimer);
+      }
+      if (exitCode !== null) {
+        send("SIGKILL");
+      }
+    },
+  };
 }
 
 function installSubprocessTimeout(opts: {

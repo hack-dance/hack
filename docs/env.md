@@ -242,6 +242,16 @@ hack host exec --env qa --scope api -- bun db:migrate
 hack host exec --env qa --scope api --target compose -- bun test
 ```
 
+Cancelling `hack host exec` or `hack env exec` with SIGINT or SIGTERM forwards
+the signal to the command. Commands run in an owned process group,
+so cancellation also stops their descendants, escalating to SIGKILL after two
+seconds if necessary. Hack returns 130 for SIGINT and 143 for SIGTERM. Interactive
+commands use a supervisor in their own foreground group on the same terminal,
+preserving stdin, separate output streams, and Ctrl-Z/foreground resume. The
+supervisor holds group ownership until cancellation cleanup finishes. SIGKILL cannot be forwarded; supervisors must terminate the
+whole owned process tree when force-killing a wrapper. Commands have no implicit
+time limit, and normal completion preserves the command's exit status.
+
 When you want to inspect an injected value, avoid `hack host exec -- echo $VAR`. Your current
 shell expands `$VAR` before Hack starts the child process, so the command often sees an empty
 string.

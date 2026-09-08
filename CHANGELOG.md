@@ -1,3 +1,9 @@
+## [4.1.0](https://github.com/hack-dance/hack/compare/v4.0.3...v4.1.0) (2026-09-08)
+
+### Features
+
+* **agents:** add optional native plugins and align Hack guidance ([#73](https://github.com/hack-dance/hack/issues/73)) ([88876e1](https://github.com/hack-dance/hack/commit/88876e19d3fe7620bc492fd2c1827e26674b1c0a)), closes [#81](https://github.com/hack-dance/hack/issues/81)
+
 ## [4.0.3](https://github.com/hack-dance/hack/compare/v4.0.2...v4.0.3) (2026-09-08)
 
 ### Bug Fixes

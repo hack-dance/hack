@@ -1,3 +1,6 @@
+import { readSubprocessResourceUsage } from "./process-resource-usage.ts";
+import { hasControllingTerminal } from "./tty-process-group.ts";
+
 export interface ExecResult {
   readonly exitCode: number;
   readonly stdout: string;
@@ -75,7 +78,22 @@ export interface RunOptions {
   readonly timeoutMs?: number;
   /** Forward cancellation to an owned command process group, preserving TTY input. */
   readonly forwardSignals?: boolean;
+  readonly onSpawn?: (event: {
+    readonly pid: number;
+    readonly ownsProcessGroup: boolean;
+    readonly processGroupId?: number;
+  }) => Promise<void>;
+  readonly onExit?: (event: RunExitEvent) => Promise<void>;
 }
+
+export type RunExitEvent = {
+  readonly finishedAt: string;
+  readonly exitCode: number;
+  readonly timedOut: boolean;
+  readonly cancelled: boolean;
+  readonly cpuTimeMs: number | null;
+  readonly maxRssBytes: number | null;
+};
 
 export async function run(
   cmd: readonly string[],
@@ -83,8 +101,7 @@ export async function run(
 ): Promise<number> {
   if (
     opts.forwardSignals &&
-    process.stdin.isTTY &&
-    (opts.stdin ?? "inherit") === "inherit"
+    (process.stdin.isTTY || hasControllingTerminal())
   ) {
     const { runWithTerminalGroup } = await import("./tty-run.ts");
     return await runWithTerminalGroup({
@@ -92,7 +109,10 @@ export async function run(
       cwd: opts.cwd,
       env: buildSpawnEnv(opts.env),
       stdout: opts.stdout,
+      stdin: opts.stdin,
       timeoutMs: opts.timeoutMs,
+      onSpawn: opts.onSpawn,
+      onExit: opts.onExit,
     });
   }
   const ownsProcessGroup =
@@ -114,13 +134,34 @@ export async function run(
         pid: proc.pid,
       })
     : null;
-  try {
-    const exitCode = await proc.exited;
-    return cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
-  } finally {
-    timeout.dispose();
-    cancellation?.dispose();
-  }
+  // Observe completion immediately: diagnostic setup must not keep deadlines armed
+  // after the command has exited. Record callbacks still finish in spawn/exit order.
+  const completion = (async (): Promise<RunExitEvent> => {
+    try {
+      const exitCode = await proc.exited;
+      const code =
+        cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
+      const usage = opts.onExit
+        ? readSubprocessResourceUsage(proc)
+        : { cpuTimeMs: null, maxRssBytes: null };
+      return {
+        finishedAt: new Date().toISOString(),
+        exitCode: code,
+        timedOut: timeout.didTimeout(),
+        cancelled: cancellation?.exitCode() != null,
+        ...usage,
+      };
+    } finally {
+      timeout.dispose();
+      cancellation?.dispose();
+    }
+  })();
+  const [result] = await Promise.all([
+    completion,
+    opts.onSpawn?.({ pid: proc.pid, ownsProcessGroup }),
+  ]);
+  await opts.onExit?.(result);
+  return result.exitCode;
 }
 
 /** Detached noninteractive children keep cancellation scoped to their group. */

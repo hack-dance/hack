@@ -79,7 +79,8 @@ export async function findOrphanRuntimeProjects(input: {
   const out: OrphanedRuntimeProject[] = [];
   for (const project of input.runtime) {
     const workingDir = project.workingDir;
-    if (!workingDir) {
+    const containerIds = collectContainerIds(project);
+    if (!workingDir || containerIds.length === 0) {
       continue;
     }
     if (!(await pathExists(workingDir))) {
@@ -87,7 +88,7 @@ export async function findOrphanRuntimeProjects(input: {
         project: project.project,
         workingDir,
         reason: "missing working dir",
-        containerIds: collectContainerIds(project),
+        containerIds,
       });
       continue;
     }
@@ -97,7 +98,7 @@ export async function findOrphanRuntimeProjects(input: {
         project: project.project,
         workingDir,
         reason: "missing compose file",
-        containerIds: collectContainerIds(project),
+        containerIds,
       });
     }
   }
@@ -151,7 +152,10 @@ function collectContainerIds(project: RuntimeProject): readonly string[] {
   const out: string[] = [];
   for (const service of project.services.values()) {
     for (const container of service.containers) {
-      if (container.id.length > 0) {
+      if (
+        container.id.length > 0 &&
+        container.labels?.["hack.lifecycle.process"] !== "true"
+      ) {
         out.push(container.id);
       }
     }

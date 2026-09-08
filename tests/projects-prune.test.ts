@@ -173,3 +173,26 @@ function runtimeProject(project: string): RuntimeProject {
     isGlobal: false,
   };
 }
+
+test("prune dry-run leaves a missing registration intact", async () => {
+  const dead = buildRegistration({
+    id: "preview000001",
+    name: "preview",
+    repoRoot: join(tempDir ?? "", "gone"),
+  });
+  await writeRegistry([dead]);
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli([
+      "projects",
+      "prune",
+      "--project",
+      "preview",
+      "--dry-run",
+      "--json",
+    ])
+  ).toBe(0);
+  expect(
+    (await readProjectsRegistry()).projects.map((project) => project.id)
+  ).toEqual([dead.id]);
+});

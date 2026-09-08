@@ -1122,6 +1122,7 @@ hack usage [options]
 | Option | Description |
 | --- | --- |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--details` | Show per-container usage and mount types |
 | `--include-global` | Include global infra projects under ~/.hack (e.g. logging stack) |
 | `--watch` | Refresh usage continuously |
 | `--interval <value>` | Refresh interval (ms) for --watch |
@@ -1154,6 +1155,9 @@ hack projects <subcommand> [options]
 | --- | --- |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--details` | Show per-project service tables |
+| `--summary` | Return compact project counts with --json; load details with --project |
+| `--timings` | Write numeric listing phase timings to stderr (requires --json) |
+| `--no-daemon` | Read runtime directly instead of the daemon cache |
 | `--meta` | Include git/worktree/session/env metadata (implies --details) |
 | `--include-global` | Include global infra projects under ~/.hack (e.g. logging stack) |
 | `--all` | Include unregistered docker compose projects (best-effort) |
@@ -1178,6 +1182,7 @@ hack projects prune [options]
 | --- | --- |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--include-global` | Include global infra projects under ~/.hack (e.g. logging stack) |
+| `--dry-run` | Report prune candidates without changing registry entries or containers |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -2250,6 +2255,8 @@ Inject the selected Hack env overlay directly into a one-off host command withou
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
 | `--shell <command>` | Run a shell command string via /bin/sh -lc after env injection so `$VAR` expansion happens inside the child shell |
+| `--timeout <seconds>` | Bound a non-TTY host command; terminate its process group and return 124 on expiry |
+| `--lifetime <command|persistent>` | Declare intended lifetime for diagnostics (default: command; does not detach) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -2350,6 +2357,7 @@ Use hack host when a command should run on your host machine, not inside the com
 
 | Command | Summary |
 | --- | --- |
+| `hack host ps` | Inspect host command lifetimes, CPU and lifecycle ownership (read-only) |
 | `hack host exec [command...]` | Run a host command with project env injected |
 | `hack host shell` | Open a host shell with project env injected |
 
@@ -2357,6 +2365,26 @@ Use hack host when a command should run on your host machine, not inside the com
 
 | Option | Description |
 | --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack host ps`
+
+Inspect host command lifetimes, CPU and lifecycle ownership (read-only)
+
+### Usage
+
+```bash
+hack host ps [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -2389,6 +2417,8 @@ Run a one-off command on the host with the selected Hack env overlay injected. U
 | `--scope <global|service>` | Resolve values for one env scope while still running the command on the host |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
 | `--shell <command>` | Run a shell command string via /bin/sh -lc after env injection so `$VAR` expansion happens inside the child shell |
+| `--timeout <seconds>` | Bound a non-TTY host command; terminate its process group and return 124 on expiry |
+| `--lifetime <command|persistent>` | Declare intended lifetime for diagnostics (default: command; does not detach) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

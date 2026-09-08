@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import type { RunExitEvent, RunOptions } from "./shell.ts";
 import { openTerminalControl, signalOwnedGroup } from "./tty-process-group.ts";
 import { TTY_SUPERVISOR_ARGUMENT } from "./tty-supervisor.ts";
 
@@ -8,7 +9,10 @@ export async function runWithTerminalGroup(opts: {
   readonly cwd?: string;
   readonly env: Record<string, string>;
   readonly stdout?: "inherit" | "stderr";
+  readonly stdin?: RunOptions["stdin"];
   readonly timeoutMs?: number;
+  readonly onSpawn?: RunOptions["onSpawn"];
+  readonly onExit?: RunOptions["onExit"];
 }): Promise<number> {
   const terminal = openTerminalControl();
   const parentGroup = terminal.group();
@@ -20,6 +24,14 @@ export async function runWithTerminalGroup(opts: {
   let cancellationCode: number | null = null;
   let escalation: ReturnType<typeof setTimeout> | undefined;
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  let spawnObservation: Promise<void> = Promise.resolve();
+  let observationError: unknown;
+  const measurements: {
+    accounting: Pick<
+      RunExitEvent,
+      "finishedAt" | "cpuTimeMs" | "maxRssBytes"
+    > | null;
+  } = { accounting: null };
   const entrypoint = fileURLToPath(new URL("../../index.ts", import.meta.url));
   const invocation = Bun.main.startsWith("/$bunfs/")
     ? [process.execPath]
@@ -27,7 +39,7 @@ export async function runWithTerminalGroup(opts: {
   const child = Bun.spawn([...invocation, TTY_SUPERVISOR_ARGUMENT], {
     cwd: opts.cwd,
     env: opts.env,
-    stdin: "inherit",
+    stdin: opts.stdin ?? "inherit",
     stdout: opts.stdout === "stderr" ? 2 : "inherit",
     stderr: "inherit",
     ipc(message: unknown) {
@@ -46,18 +58,42 @@ export async function runWithTerminalGroup(opts: {
         (message.signal === "SIGINT" || message.signal === "SIGTERM")
       ) {
         cancel(message.signal, message.signal === "SIGINT" ? 130 : 143, false);
+      } else if (
+        message.kind === "spawn" &&
+        "pid" in message &&
+        typeof message.pid === "number"
+      ) {
+        observeSpawn(message.pid);
       } else if (message.kind === "done") {
-        if (cancellationCode !== null) {
-          signalOwnedGroup(child.pid, "SIGKILL");
-        } else {
-          acknowledged = true;
-          child.send("ack");
-        }
+        finishCommand(message);
       } else if (message.kind === "stop") {
         suspend();
       }
     },
   });
+  function finishCommand(message: object): void {
+    clearTimeout(timeout);
+    measurements.accounting = readAccounting(message);
+    if (cancellationCode !== null) {
+      signalOwnedGroup(child.pid, "SIGKILL");
+    } else {
+      acknowledged = true;
+      child.send("ack");
+    }
+  }
+  function observeSpawn(pid: number): void {
+    spawnObservation = Promise.resolve()
+      .then(() =>
+        opts.onSpawn?.({
+          pid,
+          ownsProcessGroup: true,
+          processGroupId: child.pid,
+        })
+      )
+      .catch((error: unknown) => {
+        observationError = error;
+      });
+  }
   function startCommand(): void {
     ready = true;
     if (cancellationCode !== null) {
@@ -131,9 +167,18 @@ export async function runWithTerminalGroup(opts: {
   if (opts.timeoutMs !== undefined) {
     timeout = setTimeout(() => cancel("SIGTERM", 124, true), opts.timeoutMs);
   }
+  let result: RunExitEvent;
   try {
     const code = await child.exited;
-    return cancellationCode ?? code;
+    result = {
+      finishedAt:
+        measurements.accounting?.finishedAt ?? new Date().toISOString(),
+      exitCode: cancellationCode ?? code,
+      cancelled: cancellationCode === 130 || cancellationCode === 143,
+      timedOut: cancellationCode === 124,
+      cpuTimeMs: measurements.accounting?.cpuTimeMs ?? null,
+      maxRssBytes: measurements.accounting?.maxRssBytes ?? null,
+    };
   } finally {
     clearTimeout(timeout);
     clearTimeout(escalation);
@@ -150,4 +195,29 @@ export async function runWithTerminalGroup(opts: {
     restoreTerminal();
     terminal.close();
   }
+  await spawnObservation;
+  if (observationError) {
+    throw observationError;
+  }
+  await opts.onExit?.(result);
+  return result.exitCode;
+}
+
+function readAccounting(
+  message: object
+): Pick<RunExitEvent, "finishedAt" | "cpuTimeMs" | "maxRssBytes"> | null {
+  if (!("finishedAt" in message) || typeof message.finishedAt !== "string") {
+    return null;
+  }
+  return {
+    finishedAt: message.finishedAt,
+    cpuTimeMs:
+      "cpuTimeMs" in message && typeof message.cpuTimeMs === "number"
+        ? message.cpuTimeMs
+        : null,
+    maxRssBytes:
+      "maxRssBytes" in message && typeof message.maxRssBytes === "number"
+        ? message.maxRssBytes
+        : null,
+  };
 }

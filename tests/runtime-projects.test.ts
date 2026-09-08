@@ -22,13 +22,15 @@ const shellMock = await registerScopedModuleMock({
         };
       }
       if (command[1] === "inspect") {
-        const ids = [...command.slice(2)];
+        expect(command[2]).toBe("--format");
+        expect(command[3]).not.toContain(".Env");
+        const ids = [...command.slice(4)];
         inspectCalls.push(ids);
         const returnedIds = inspectExitCode === 0 ? ids : ids.slice(0, 1);
         return {
-          stdout: JSON.stringify(
-            returnedIds.map((id) => makeInspectRow({ id }))
-          ),
+          stdout: returnedIds
+            .map((id) => JSON.stringify(makeInspectRow({ id })))
+            .join("\n"),
           stderr:
             inspectExitCode === 0 ? "" : "one inspected container disappeared",
           exitCode: inspectExitCode,

@@ -330,6 +330,41 @@ function buildUnregisteredProjectView(opts: {
   };
 }
 
+/** Summary projection deliberately excludes container labels, mounts and command definitions. */
+export function serializeProjectSummary(
+  view: ProjectView
+): Record<string, unknown> {
+  const runtimes = [
+    view.runtime,
+    ...view.branchRuntime.map((branch) => branch.runtime),
+  ].filter((runtime): runtime is RuntimeProject => runtime !== null);
+  const containers = runtimes.flatMap((runtime) =>
+    [...runtime.services.values()].flatMap((service) => service.containers)
+  );
+  return {
+    project_id: view.projectId ?? null,
+    name: view.name,
+    repo_root: view.repoRoot,
+    dev_host: view.devHost,
+    status: view.status,
+    runtime_status: view.runtimeStatus,
+    defined_service_count: view.definedServices?.length ?? null,
+    host_process_count: containers.filter(
+      (container) => container.labels?.["hack.lifecycle.process"] === "true"
+    ).length,
+    container_count: containers.filter(
+      (container) => container.labels?.["hack.lifecycle.process"] !== "true"
+    ).length,
+    running_container_count: containers.filter(
+      (container) =>
+        container.state === "running" &&
+        container.labels?.["hack.lifecycle.process"] !== "true"
+    ).length,
+    branch_count: view.branchRuntime.length,
+    session_count: view.sessions.length,
+  };
+}
+
 export function serializeProjectView(
   view: ProjectView
 ): Record<string, unknown> {

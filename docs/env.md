@@ -247,7 +247,9 @@ the signal to the command. Commands run in an owned process group,
 so cancellation also stops their descendants, escalating to SIGKILL after two
 seconds if necessary. Hack returns 130 for SIGINT and 143 for SIGTERM. Interactive
 commands use a supervisor in their own foreground group on the same terminal,
-preserving stdin, separate output streams, and Ctrl-Z/foreground resume. The
+preserving stdin, separate output streams, and Ctrl-Z/foreground resume. Piped
+stdin also retains the controlling terminal, so commands can open `/dev/tty`
+for native authentication prompts. The
 supervisor holds group ownership until cancellation cleanup finishes. SIGKILL cannot be forwarded; supervisors must terminate the
 whole owned process tree when force-killing a wrapper. Commands have no implicit
 time limit, and normal completion preserves the command's exit status.
@@ -405,3 +407,49 @@ If you are writing new docs or new project setup flows, document the YAML overla
 - [Sessions](sessions.md)
 - [CLI reference](cli.md)
 - [Pulumi-style env config design](plans/2026-03-27-pulumi-style-env-config-design.md)
+
+
+### Host command lifetime and diagnostics
+
+`hack host exec` and `hack env exec` record payload-free execution metadata under
+`$HACK_HOME/host-commands` (normally `~/.hack/host-commands`). Records contain the
+executable basename, project, process identities, owned process group, intended
+lifetime, elapsed time, exit/cancellation/timeout outcome, and final child CPU/RSS
+accounting. Arguments, shell strings, environment values and command output are
+not recorded. Completed records expire after seven days during later executions;
+interrupted records remain available for review. A diagnostic storage failure
+warns on stderr and preserves command execution and exit status.
+
+```sh
+hack host exec --timeout 60 -- bun scripts/check.ts </dev/null
+hack env exec --timeout 30 -- bun scripts/probe.ts </dev/null
+hack host exec --lifetime persistent -- bun run dev
+hack host ps --json
+hack host ps --project my-project
+```
+
+`--timeout` is a positive number of seconds. It sends SIGTERM to the owned process
+group, escalates after two seconds, and returns 124. It currently requires
+non-TTY stdin; piping input or redirecting from `/dev/null` preserves a safe group
+boundary without changing interactive terminal job control. There is no default
+timeout. `--lifetime persistent` declares intent and does not detach or create a
+mux session; it cannot be combined with a timeout. Persistent commands still
+respond to explicit cancellation. Use lifecycle processes or `hack session` for
+managed persistent workspaces.
+
+`hack host ps` also inspects existing lifecycle sessions using their stored mux
+ownership evidence. It is read-only: missing wrappers and unverified groups are
+reported for review and never killed. A PID must match its recorded start time
+before live command metrics are attributed to it. Lifecycle definition freshness
+is not revalidated by this resource snapshot. Commands started before tracking was
+available cannot be retroactively assigned ownership.
+
+Live CPU time is the cumulative CPU of currently observed tree/group members;
+short-lived descendants already gone are not included. Final CPU comes from the
+OS-reaped child resource usage and is a separate accounting source. RSS sums may
+count shared memory more than once. Missing observations are null, not zero.
+SIGKILL cannot be intercepted: interrupted records may lack a completion result,
+and group members without a surviving identity are explicitly unverified.
+
+See [runtime performance diagnostics](performance.md) for project-listing timings,
+container details, watcher measurements and read-only cleanup previews.

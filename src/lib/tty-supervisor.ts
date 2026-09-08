@@ -1,3 +1,4 @@
+import { readSubprocessResourceUsage } from "./process-resource-usage.ts";
 import { openTerminalControl } from "./tty-process-group.ts";
 
 export const TTY_SUPERVISOR_ARGUMENT = "--internal-tty-supervisor";
@@ -55,9 +56,14 @@ export async function runTtySupervisor(): Promise<number> {
           stderr: "inherit",
           env: process.env,
         });
+        process.send?.({ kind: "spawn", pid: child.pid });
         child.exited.then((code) => {
           completed = code;
-          process.send?.({ kind: "done" });
+          process.send?.({
+            kind: "done",
+            finishedAt: new Date().toISOString(),
+            ...readSubprocessResourceUsage(child),
+          });
         });
       } catch (error) {
         process.stderr.write(

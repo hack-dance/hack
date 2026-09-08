@@ -62,6 +62,8 @@ type DaemonMetrics = {
   refreshRequests: number;
   refreshRequestsCoalesced: number;
   refreshFailures: number;
+  lastProjectsSerializationMs: number | null;
+  lastProjectsResponseBytes: number | null;
 };
 
 export async function runDaemon({
@@ -101,6 +103,8 @@ export async function runDaemon({
     refreshRequests: 0,
     refreshRequestsCoalesced: 0,
     refreshFailures: 0,
+    lastProjectsSerializationMs: null,
+    lastProjectsResponseBytes: null,
   };
 
   const cache = createRuntimeCache({
@@ -419,6 +423,9 @@ async function handleRequest({
       refresh_requests_coalesced: metrics.refreshRequestsCoalesced,
       refresh_failures: metrics.refreshFailures,
       refresh_in_flight: diagnostics.refreshInFlight,
+      last_refresh_phases_ms: diagnostics.lastRefreshPhasesMs,
+      last_projects_serialization_ms: metrics.lastProjectsSerializationMs,
+      last_projects_response_bytes: metrics.lastProjectsResponseBytes,
       last_refresh_duration_ms: diagnostics.lastRefreshDurationMs,
       max_refresh_duration_ms: diagnostics.maxRefreshDurationMs,
       last_event_at: metrics.lastEventAtMs
@@ -461,13 +468,29 @@ async function handleRequest({
     const includeMeta = parseBoolean({
       value: url.searchParams.get("include_meta"),
     });
+    const summary = parseBoolean({ value: url.searchParams.get("summary") });
+    if (summary && includeMeta) {
+      return jsonResponse({ error: "summary_incompatible_with_meta" }, 400);
+    }
     const payload = await cache.getProjectsPayload({
       filter,
       includeGlobal,
       includeUnregistered,
       includeMeta,
+      summary,
+      profile: parseBoolean({ value: url.searchParams.get("profile") }),
     });
-    return jsonResponse(payload);
+    const started = performance.now();
+    const body = JSON.stringify(payload);
+    metrics.lastProjectsSerializationMs = performance.now() - started;
+    metrics.lastProjectsResponseBytes = Buffer.byteLength(body);
+    const response = new Response(body, {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      },
+    });
+    return response;
   }
 
   if (url.pathname === "/v1/ps") {

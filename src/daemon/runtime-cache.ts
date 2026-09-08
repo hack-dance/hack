@@ -1,8 +1,10 @@
 import { resolve } from "node:path";
 import { PROJECT_COMPOSE_FILENAME } from "../constants.ts";
+import { createOperationTimings } from "../lib/operation-timings.ts";
 import { resolveProjectMeta } from "../lib/project-meta.ts";
 import {
   buildProjectViews,
+  serializeProjectSummary,
   serializeProjectView,
 } from "../lib/project-views.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
@@ -47,6 +49,8 @@ export type RuntimeSnapshot = {
 };
 
 export type ProjectsPayload = {
+  readonly detail_level?: "summary";
+  readonly profiling?: Record<string, unknown>;
   readonly generated_at: string;
   readonly filter: string | null;
   readonly include_global: boolean;
@@ -109,6 +113,8 @@ export interface RuntimeCache {
     readonly includeGlobal: boolean;
     readonly includeUnregistered: boolean;
     readonly includeMeta: boolean;
+    readonly summary?: boolean;
+    readonly profile?: boolean;
   }): Promise<ProjectsPayload>;
   getPsPayload(opts: {
     readonly composeProject: string;
@@ -120,6 +126,7 @@ export interface RuntimeCache {
 }
 
 export type RuntimeCacheDiagnostics = {
+  readonly lastRefreshPhasesMs: Readonly<Record<string, number>>;
   readonly refreshInFlight: boolean;
   readonly lastRefreshDurationMs: number | null;
   readonly maxRefreshDurationMs: number | null;
@@ -153,6 +160,7 @@ export function createRuntimeCache(opts: {
     resolveProjectMeta: opts.deps?.resolveProjectMeta ?? resolveProjectMeta,
   } as const;
 
+  let lastRefreshPhasesMs: Readonly<Record<string, number>> = {};
   let snapshot: RuntimeSnapshot | null = null;
   let refreshTask: Promise<void> | null = null;
   let pendingRefresh: QueuedRefresh | null = null;
@@ -223,6 +231,7 @@ export function createRuntimeCache(opts: {
     forceInspect,
   }: QueuedRefresh): Promise<void> {
     const startedAtMs = Date.now();
+    const profiler = createOperationTimings();
     try {
       const checkedAtMs = Date.now();
       const previousSnapshot = snapshot;
@@ -230,14 +239,17 @@ export function createRuntimeCache(opts: {
         includeGlobal: true,
         inspectCache,
         forceInspect,
+        profiler,
       });
-      const refreshed = await resolveRefreshResult({
-        checkedAtMs,
-        currentHealth: health,
-        previousSnapshot,
-        reason,
-        runtimeResult,
-      });
+      const refreshed = await profiler.measure("runtime_identity_ms", () =>
+        resolveRefreshResult({
+          checkedAtMs,
+          currentHealth: health,
+          previousSnapshot,
+          reason,
+          runtimeResult,
+        })
+      );
       if (refreshed.repairReason) {
         queueRefresh({
           forceInspect: true,
@@ -248,9 +260,11 @@ export function createRuntimeCache(opts: {
 
       let nextSnapshot: RuntimeSnapshot;
       if (runtimeResult.ok) {
-        await autoRegisterRuntimeHackProjects({
-          runtime: runtimeResult.runtime,
-        });
+        await profiler.measure("auto_register_ms", () =>
+          autoRegisterRuntimeHackProjects({
+            runtime: runtimeResult.runtime,
+          })
+        );
         nextSnapshot = {
           runtime: runtimeResult.runtime,
           updatedAtMs: checkedAtMs,
@@ -269,6 +283,7 @@ export function createRuntimeCache(opts: {
       opts.onRefresh?.(nextSnapshot);
     } finally {
       const durationMs = Math.max(0, Date.now() - startedAtMs);
+      lastRefreshPhasesMs = { ...profiler.timings };
       lastRefreshDurationMs = durationMs;
       maxRefreshDurationMs = Math.max(maxRefreshDurationMs ?? 0, durationMs);
     }
@@ -279,27 +294,37 @@ export function createRuntimeCache(opts: {
     includeGlobal,
     includeUnregistered,
     includeMeta,
+    summary = false,
+    profile = false,
   }: {
     readonly filter: string | null;
     readonly includeGlobal: boolean;
     readonly includeUnregistered: boolean;
     readonly includeMeta: boolean;
+    readonly summary?: boolean;
+    readonly profile?: boolean;
   }): Promise<ProjectsPayload> => {
+    const profiler = createOperationTimings();
     if (!snapshot) {
       await refresh({ reason: "projects" });
     }
-    const registry = await deps.readProjectsRegistry();
+    const registry = await profiler.measure(
+      "registry_ms",
+      deps.readProjectsRegistry
+    );
     const runtime = filterRuntimeProjects({
       runtime: snapshot?.runtime ?? [],
       includeGlobal,
     });
-    const views = await deps.buildProjectViews({
-      registryProjects: registry.projects,
-      runtime,
-      runtimeOk: health.ok,
-      filter,
-      includeUnregistered,
-    });
+    const views = await profiler.measure("project_views_ms", () =>
+      deps.buildProjectViews({
+        registryProjects: registry.projects,
+        runtime,
+        runtimeOk: health.ok,
+        filter,
+        includeUnregistered,
+      })
+    );
 
     const runtimeMeta = serializeRuntimeHealth({ health });
 
@@ -307,29 +332,55 @@ export function createRuntimeCache(opts: {
       registry.projects.map((p) => [p.name, p] as const)
     );
     const metas = includeMeta
-      ? await Promise.all(
-          views.map(async (view) => {
-            if (view.kind !== "registered") {
-              return null;
-            }
-            const reg = registryByName.get(view.name) ?? null;
-            if (!reg) {
-              return null;
-            }
-            try {
-              return await deps.resolveProjectMeta({
-                projectName: reg.name,
-                repoRoot: reg.repoRoot,
-                projectDir: reg.projectDir,
-                composeFile: resolve(reg.projectDir, PROJECT_COMPOSE_FILENAME),
-              });
-            } catch {
-              return null;
-            }
-          })
+      ? await profiler.measure("metadata_ms", () =>
+          Promise.all(
+            views.map(async (view) => {
+              if (view.kind !== "registered") {
+                return null;
+              }
+              const reg = registryByName.get(view.name) ?? null;
+              if (!reg) {
+                return null;
+              }
+              try {
+                return await deps.resolveProjectMeta({
+                  projectName: reg.name,
+                  repoRoot: reg.repoRoot,
+                  projectDir: reg.projectDir,
+                  composeFile: resolve(
+                    reg.projectDir,
+                    PROJECT_COMPOSE_FILENAME
+                  ),
+                });
+              } catch {
+                return null;
+              }
+            })
+          )
         )
       : [];
+    const projects = profiler.measureSync("projection_ms", () =>
+      views.map((view, i) => ({
+        ...(summary
+          ? serializeProjectSummary(view)
+          : deps.serializeProjectView(view)),
+        ...(includeMeta ? { meta: metas[i] ?? null } : {}),
+      }))
+    );
     return {
+      ...(summary ? { detail_level: "summary" as const } : {}),
+      ...(profile
+        ? {
+            profiling: {
+              source: "daemon",
+              cache_age_ms: snapshot?.updatedAtMs
+                ? Date.now() - snapshot.updatedAtMs
+                : null,
+              request_phases_ms: { ...profiler.timings },
+              last_refresh_phases_ms: lastRefreshPhasesMs,
+            },
+          }
+        : {}),
       generated_at: new Date().toISOString(),
       filter,
       include_global: includeGlobal,
@@ -347,10 +398,7 @@ export function createRuntimeCache(opts: {
       runtime_repair_action: runtimeMeta.lastRepairAction,
       runtime_repair_outcome: runtimeMeta.lastRepairOutcome,
       runtime_next_step: runtimeMeta.nextStep,
-      projects: views.map((view, i) => ({
-        ...deps.serializeProjectView(view),
-        ...(includeMeta ? { meta: metas[i] ?? null } : {}),
-      })),
+      projects,
     };
   };
 
@@ -427,6 +475,7 @@ export function createRuntimeCache(opts: {
         cache: inspectCache,
       });
       return {
+        lastRefreshPhasesMs,
         refreshInFlight: refreshTask !== null,
         lastRefreshDurationMs,
         maxRefreshDurationMs,

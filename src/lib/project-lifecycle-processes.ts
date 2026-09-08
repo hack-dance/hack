@@ -39,43 +39,44 @@ export function parseProcessSnapshotOutput(text: string): ProcessSnapshotRow[] {
     });
 }
 
+/** Collect the process tree without interpreting names or taking ownership. */
+export function collectDescendantProcessIds(opts: {
+  readonly snapshot: readonly ProcessSnapshotRow[];
+  readonly rootPids: readonly number[];
+}): number[] {
+  const children = new Map<number, number[]>();
+  const live = new Set(opts.snapshot.map((row) => row.pid));
+  for (const row of opts.snapshot) {
+    const siblings = children.get(row.ppid) ?? [];
+    siblings.push(row.pid);
+    children.set(row.ppid, siblings);
+  }
+  const queue = [...opts.rootPids];
+  const visited = new Set<number>();
+  for (let index = 0; index < queue.length; index++) {
+    const pid = queue[index];
+    if (pid === undefined || visited.has(pid) || !live.has(pid)) {
+      continue;
+    }
+    visited.add(pid);
+    queue.push(...(children.get(pid) ?? []));
+  }
+  return [...visited];
+}
+
 /** Collect distinct process groups reachable from the provided root PIDs. */
 export function collectDescendantProcessGroupIds(opts: {
   readonly snapshot: readonly ProcessSnapshotRow[];
   readonly rootPids: readonly number[];
 }): number[] {
-  const processByParent = new Map<number, ProcessSnapshotRow[]>();
-  const groups = new Set<number>();
-  const queue = [...opts.rootPids];
-  const visited = new Set<number>();
-
-  for (const row of opts.snapshot) {
-    const siblings = processByParent.get(row.ppid) ?? [];
-    siblings.push(row);
-    processByParent.set(row.ppid, siblings);
-  }
-
-  while (queue.length > 0) {
-    const pid = queue.shift();
-    if (!(pid && pid > 0) || visited.has(pid)) {
-      continue;
-    }
-    visited.add(pid);
-
-    const current = opts.snapshot.find((row) => row.pid === pid);
-    if (current) {
-      groups.add(current.processGroupId);
-    }
-
-    for (const child of processByParent.get(pid) ?? []) {
-      groups.add(child.processGroupId);
-      if (!visited.has(child.pid)) {
-        queue.push(child.pid);
-      }
-    }
-  }
-
-  return [...groups].sort((left, right) => left - right);
+  const pids = new Set(collectDescendantProcessIds(opts));
+  return [
+    ...new Set(
+      opts.snapshot
+        .filter((row) => pids.has(row.pid))
+        .map((row) => row.processGroupId)
+    ),
+  ].sort((left, right) => left - right);
 }
 
 /** Reconcile mux pane state with persisted lifecycle metadata to recover live groups. */

@@ -730,3 +730,56 @@ async function waitFor(opts: {
     await Bun.sleep(1);
   }
 }
+
+test("summary payload keeps project identity and omits detailed runtime payloads", async () => {
+  const view: ProjectView = {
+    name: "summary-fixture",
+    devHost: "fixture.hack",
+    repoRoot: "/fixture",
+    projectDir: "/fixture/.hack",
+    definedServices: ["web"],
+    extensionsEnabled: null,
+    features: null,
+    serviceHosts: null,
+    runtimeConfigured: true,
+    runtimeStatus: "stopped",
+    runtime: null,
+    branchRuntime: [],
+    sessions: [],
+    lifecycle: null,
+    ownership: null,
+    worktrees: null,
+    kind: "registered",
+    status: "stopped",
+  };
+  const cache = createRuntimeCache({
+    deps: {
+      readProjectsRegistry: async () => ({ version: 1, projects: [] }),
+      buildProjectViews: async () => [view],
+      serializeProjectView: () => {
+        throw new Error("full serializer must not run for summary");
+      },
+    },
+  });
+  const payload = await cache.getProjectsPayload({
+    filter: null,
+    includeGlobal: false,
+    includeUnregistered: false,
+    includeMeta: false,
+    summary: true,
+    profile: true,
+  });
+  expect(payload.detail_level).toBe("summary");
+  expect(payload.projects[0]).toMatchObject({
+    name: "summary-fixture",
+    defined_service_count: 1,
+    container_count: 0,
+    running_container_count: 0,
+  });
+  expect(payload.projects[0]).not.toHaveProperty("runtime");
+  expect(payload.projects[0]).not.toHaveProperty("lifecycle");
+  expect(payload.profiling?.source).toBe("daemon");
+  expect(cache.getDiagnostics().lastRefreshPhasesMs).toHaveProperty(
+    "auto_register_ms"
+  );
+});

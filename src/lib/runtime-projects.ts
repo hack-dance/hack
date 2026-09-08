@@ -9,6 +9,10 @@ import { pathExists } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
 import { parseJsonLines } from "./json-lines.ts";
 import { readLifecycleState } from "./lifecycle-runtime.ts";
+import {
+  createOperationTimings,
+  type OperationTimings,
+} from "./operation-timings.ts";
 import { upsertProjectRegistration } from "./projects-registry.ts";
 import { exec, findExecutableInPath } from "./shell.ts";
 
@@ -143,7 +147,9 @@ export async function readRuntimeProjects(opts: {
   readonly includeGlobal: boolean;
   readonly inspectCache?: RuntimeInspectCache;
   readonly forceInspect?: boolean;
+  readonly profiler?: OperationTimings;
 }): Promise<RuntimeProjectsResult> {
+  const profiler = opts.profiler ?? createOperationTimings();
   const checkedAtMs = Date.now();
   if (!findExecutableInPath("docker")) {
     return {
@@ -156,17 +162,19 @@ export async function readRuntimeProjects(opts: {
 
   let res: Awaited<ReturnType<typeof exec>>;
   try {
-    res = await exec(
-      [
-        "docker",
-        "ps",
-        "-a",
-        "--filter",
-        "label=com.docker.compose.project",
-        "--format",
-        "json",
-      ],
-      { stdin: "ignore" }
+    res = await profiler.measure("docker_list_ms", () =>
+      exec(
+        [
+          "docker",
+          "ps",
+          "-a",
+          "--filter",
+          "label=com.docker.compose.project",
+          "--format",
+          "json",
+        ],
+        { stdin: "ignore" }
+      )
     );
   } catch (error: unknown) {
     return {
@@ -193,13 +201,15 @@ export async function readRuntimeProjects(opts: {
   const ids = baseRows
     .map((row) => getString(row, "ID") ?? getString(row, "Id") ?? "")
     .filter((id) => id.length > 0);
-  const inspectById = opts.inspectCache
-    ? await readCachedContainerInspectData({
-        cache: opts.inspectCache,
-        forceInspect: opts.forceInspect ?? true,
-        ids,
-      })
-    : await readContainerInspectData({ ids });
+  const inspectById = await profiler.measure("docker_inspect_ms", async () =>
+    opts.inspectCache
+      ? await readCachedContainerInspectData({
+          cache: opts.inspectCache,
+          forceInspect: opts.forceInspect ?? true,
+          ids,
+        })
+      : await readContainerInspectData({ ids })
+  );
 
   const globalRoot = resolveGlobalHackDir();
 
@@ -286,9 +296,11 @@ export async function readRuntimeProjects(opts: {
     });
   }
 
-  const runtimeWithLifecycle = await addLifecycleProcessServices({
-    runtime: out,
-  });
+  const runtimeWithLifecycle = await profiler.measure("lifecycle_ms", () =>
+    addLifecycleProcessServices({
+      runtime: out,
+    })
+  );
 
   return {
     ok: true,
@@ -584,6 +596,10 @@ export async function readContainerLabels(opts: {
   return labelsById;
 }
 
+// Request only fields used by the runtime model; Docker must not return env values or command arguments.
+const RUNTIME_INSPECT_FORMAT =
+  '{"Id":{{json .Id}},"Config":{"Labels":{{json .Config.Labels}},"Image":{{json .Config.Image}}},"Mounts":{{json .Mounts}},"NetworkSettings":{"Networks":{{json .NetworkSettings.Networks}}}}';
+
 async function readContainerInspectData(opts: {
   readonly ids: readonly string[];
 }): Promise<Map<string, ContainerInspectData>> {
@@ -591,15 +607,21 @@ async function readContainerInspectData(opts: {
     return new Map();
   }
 
-  const res = await exec(["docker", "inspect", ...opts.ids], {
-    stdin: "ignore",
-  });
+  const res = await exec(
+    ["docker", "inspect", "--format", RUNTIME_INSPECT_FORMAT, ...opts.ids],
+    {
+      stdin: "ignore",
+    }
+  );
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(res.stdout);
   } catch {
-    return new Map();
+    parsed = parseJsonLines(res.stdout);
+  }
+  if (isRecord(parsed)) {
+    parsed = [parsed];
   }
   if (!Array.isArray(parsed)) {
     return new Map();

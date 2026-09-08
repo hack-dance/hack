@@ -12,8 +12,18 @@ import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { readDaemonPid } from "../daemon/process.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
+import {
+  type HostCommandRecord,
+  type ObservedProcess,
+  observeHostCommand,
+  readHostCommandRecords,
+  readObservedProcesses,
+} from "../lib/host-command-observation.ts";
 import { sanitizeProjectSlug } from "../lib/project.ts";
-import type { RuntimeProject } from "../lib/runtime-projects.ts";
+import type {
+  RuntimeContainer,
+  RuntimeProject,
+} from "../lib/runtime-projects.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import { exec } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
@@ -56,8 +66,16 @@ const optNoHost = defineOption({
   description: "Skip host process metrics",
 } as const);
 
+const optDetails = defineOption({
+  name: "details",
+  type: "boolean",
+  long: "--details",
+  description: "Show per-container usage and mount types",
+} as const);
+
 const options = [
   optProject,
+  optDetails,
   optIncludeGlobal,
   optWatch,
   optInterval,
@@ -102,6 +120,7 @@ const handleUsage: CommandHandlerFor<typeof spec> = async ({
       includeHost,
       intervalMs: watchIntervalMs,
       historySize: usageConfig.historySize,
+      details: args.options.details === true,
     });
     return 0;
   }
@@ -150,7 +169,15 @@ type UsageProjectRow = {
   readonly containers: number;
 };
 
+type ContainerUsageRow = DockerStatsSample & {
+  readonly project: string;
+  readonly service: string;
+  readonly name: string;
+  readonly mounts: RuntimeContainer["mounts"];
+};
+
 type UsageReport = {
+  readonly containerDetails?: readonly ContainerUsageRow[];
   readonly projects: readonly UsageProjectRow[];
   readonly total: UsageProjectRow | null;
 };
@@ -169,6 +196,7 @@ type HostUsageReport = {
 };
 
 type ContainerIndex = {
+  readonly containerById: ReadonlyMap<string, RuntimeContainer>;
   readonly containerIds: readonly string[];
   readonly projectByContainer: ReadonlyMap<string, string>;
 };
@@ -186,6 +214,7 @@ async function runUsageWatch(opts: {
   readonly includeHost: boolean;
   readonly intervalMs: number;
   readonly historySize: number;
+  readonly details: boolean;
 }): Promise<void> {
   let running = true;
   const cpuHistory: Array<number | null> = [];
@@ -210,6 +239,7 @@ async function runUsageWatch(opts: {
 
       const output = renderUsageSnapshot({
         snapshot,
+        details: opts.details,
         intervalMs: opts.intervalMs,
         cpuHistory,
         memHistory,
@@ -239,11 +269,15 @@ async function resolveUsageSnapshot(opts: {
   });
   const runtime = runtimeResult.ok ? runtimeResult.runtime : [];
   const filtered = opts.filter
-    ? runtime.filter((project) => project.project === opts.filter)
+    ? runtime.filter(
+        (project) =>
+          project.project === opts.filter ||
+          project.project.startsWith(`${opts.filter}--`)
+      )
     : runtime;
   const index = buildContainerIndex({ projects: filtered });
   const host = opts.includeHost
-    ? await readHostUsage()
+    ? await readHostUsage({ filter: opts.filter })
     : { rows: [], total: null };
   const errors: string[] = [];
   if (!runtimeResult.ok) {
@@ -272,23 +306,53 @@ async function resolveUsageSnapshot(opts: {
   };
 }
 
+function formatContainerMounts(mounts: RuntimeContainer["mounts"]): string {
+  return (
+    mounts.map((mount) => `${mount.type}:${mount.destination}`).join(", ") ||
+    "none"
+  );
+}
+
+function appendContainerDetails(
+  lines: string[],
+  snapshot: UsageSnapshot
+): void {
+  if (snapshot.report.containerDetails?.length) {
+    lines.push(
+      "",
+      "Containers",
+      renderTable({
+        columns: ["Container", "CPU", "Memory", "PIDs", "Mounts"],
+        rows: snapshot.report.containerDetails.map((row) => [
+          row.name,
+          formatPercent({ percent: row.cpuPercent }),
+          formatBytesMaybe({ bytes: row.memUsedBytes }),
+          String(row.pids ?? "n/a"),
+          formatContainerMounts(row.mounts),
+        ]),
+      })
+    );
+  }
+}
+
+function appendUsageErrors(lines: string[], errors: readonly string[]): void {
+  if (errors.length > 0) {
+    lines.push("", "Errors:", ...errors.map((error) => `- ${error}`));
+  }
+}
+
 function renderUsageSnapshot(opts: {
   readonly snapshot: UsageSnapshot;
   readonly intervalMs: number;
   readonly cpuHistory: readonly (number | null)[];
   readonly memHistory: readonly (number | null)[];
+  readonly details: boolean;
 }): string {
   const lines: string[] = [];
   lines.push(
     `hack usage --watch (interval ${opts.intervalMs}ms)  ${opts.snapshot.timestamp.toISOString()}`
   );
-  if (opts.snapshot.errors.length > 0) {
-    lines.push("");
-    lines.push("Errors:");
-    opts.snapshot.errors.forEach((error) => {
-      lines.push(`- ${error}`);
-    });
-  }
+  appendUsageErrors(lines, opts.snapshot.errors);
 
   if (opts.snapshot.report.projects.length > 0) {
     lines.push("");
@@ -314,6 +378,9 @@ function renderUsageSnapshot(opts: {
     lines.push("Projects: none");
   }
 
+  if (opts.details) {
+    appendContainerDetails(lines, opts.snapshot);
+  }
   if (opts.snapshot.host.rows.length > 0) {
     lines.push("");
     lines.push("Host processes");
@@ -450,14 +517,18 @@ function resolveIntervalMs(opts: {
   return Math.max(250, Math.floor(raw));
 }
 
-async function readHostUsage(): Promise<HostUsageReport> {
-  const trackedPids = await resolveTrackedPids();
+async function readHostUsage(opts: {
+  readonly filter: string | null;
+}): Promise<HostUsageReport> {
+  const trackedPids = await resolveTrackedPids(opts);
   const samples = await readHostProcessSamples({ trackedPids });
   return buildHostUsageReport({ samples });
 }
 
-async function resolveTrackedPids(): Promise<Map<number, string>> {
-  const tracked = new Map<number, string>();
+async function resolveTrackedPids(opts: {
+  readonly filter: string | null;
+}): Promise<Map<number, string | null>> {
+  const tracked = new Map<number, string | null>();
   const daemonPaths = resolveDaemonPaths({});
   const daemonPid = await readDaemonPid({ pidPath: daemonPaths.pidPath });
   if (daemonPid) {
@@ -473,11 +544,73 @@ async function resolveTrackedPids(): Promise<Map<number, string>> {
   if (cloudflaredPid) {
     tracked.set(cloudflaredPid, "cloudflared");
   }
+  const [records, snapshot] = await Promise.all([
+    readHostCommandRecords(),
+    readObservedProcesses(),
+  ]);
+  for (const [pid, name] of collectTrackedHostPids({
+    records,
+    snapshot,
+    filter: opts.filter,
+  })) {
+    tracked.set(pid, name);
+  }
   return tracked;
 }
 
+function collectTrackedHostPids(opts: {
+  readonly records: readonly HostCommandRecord[];
+  readonly snapshot: readonly ObservedProcess[] | null;
+  readonly filter: string | null;
+}): Map<number, string | null> {
+  const tracked = new Map<number, string | null>();
+  const parents = new Map(
+    (opts.snapshot ?? []).map((row) => [row.pid, row.ppid])
+  );
+  const records = [...opts.records].sort(
+    (left, right) =>
+      processDepth(right.child.pid, parents) -
+      processDepth(left.child.pid, parents)
+  );
+  for (const record of records) {
+    if (record.status !== "running") {
+      continue;
+    }
+    const included =
+      opts.filter === null ||
+      record.project === opts.filter ||
+      record.project.startsWith(`${opts.filter}--`);
+    const observed = observeHostCommand(record, opts.snapshot);
+    for (const pid of observed.observedPids) {
+      if (tracked.has(pid)) {
+        continue;
+      }
+      // Inner command roots take precedence over their enclosing command trees.
+      // A null entry also excludes known foreign commands from generic host heuristics.
+      tracked.set(
+        pid,
+        included ? `host:${record.project}:${record.executable}` : null
+      );
+    }
+  }
+  return tracked;
+}
+
+function processDepth(
+  pid: number,
+  parents: ReadonlyMap<number, number>
+): number {
+  const seen = new Set<number>();
+  let current = pid;
+  while (current > 0 && !seen.has(current)) {
+    seen.add(current);
+    current = parents.get(current) ?? 0;
+  }
+  return seen.size;
+}
+
 async function readHostProcessSamples(opts: {
-  readonly trackedPids: Map<number, string>;
+  readonly trackedPids: Map<number, string | null>;
 }): Promise<HostProcessSample[]> {
   const res = await exec(["ps", "-axo", "pid=,pcpu=,rss=,command="], {
     stdin: "ignore",
@@ -505,8 +638,9 @@ async function readHostProcessSamples(opts: {
     const rssKb = Number.parseInt(match[3] ?? "", 10);
     const command = match[4] ?? "";
 
-    const trackedName =
-      opts.trackedPids.get(pid) ?? resolveHostProcessKind({ command });
+    const trackedName = opts.trackedPids.has(pid)
+      ? opts.trackedPids.get(pid)
+      : resolveHostProcessKind({ command });
     if (!trackedName) {
       continue;
     }
@@ -631,14 +765,21 @@ function buildContainerIndex(opts: {
   projects: readonly RuntimeProject[];
 }): ContainerIndex {
   const projectByContainer = new Map<string, string>();
+  const containerById = new Map<string, RuntimeContainer>();
   const containerIds: string[] = [];
   for (const project of opts.projects) {
     for (const service of project.services.values()) {
       for (const container of service.containers) {
-        if (!container.id) {
+        if (
+          !container.id ||
+          container.state !== "running" ||
+          container.labels?.["hack.lifecycle.process"] === "true"
+        ) {
           continue;
         }
         containerIds.push(container.id);
+        containerById.set(container.id, container);
+        containerById.set(container.id.slice(0, 12), container);
         projectByContainer.set(container.id, project.project);
         if (container.id.length >= 12) {
           projectByContainer.set(container.id.slice(0, 12), project.project);
@@ -647,6 +788,7 @@ function buildContainerIndex(opts: {
     }
   }
   return {
+    containerById,
     containerIds: [...new Set(containerIds)],
     projectByContainer,
   };
@@ -800,11 +942,15 @@ async function runUsageOnce(opts: {
   });
   const runtime = runtimeResult.ok ? runtimeResult.runtime : [];
   const filtered = opts.filter
-    ? runtime.filter((project) => project.project === opts.filter)
+    ? runtime.filter(
+        (project) =>
+          project.project === opts.filter ||
+          project.project.startsWith(`${opts.filter}--`)
+      )
     : runtime;
   const index = buildContainerIndex({ projects: filtered });
   const hostReport = opts.includeHost
-    ? await readHostUsage()
+    ? await readHostUsage({ filter: opts.filter })
     : { rows: [], total: null };
   const stats =
     index.containerIds.length === 0
@@ -949,6 +1095,9 @@ async function renderUsageSuccess(opts: {
   if (opts.args.options.json === true) {
     writeJson({
       payload: {
+        ...(opts.args.options.details
+          ? { containers: opts.report.containerDetails ?? [] }
+          : {}),
         projects: opts.report.projects,
         total: opts.report.total,
         host: opts.hostReport.rows,
@@ -960,6 +1109,18 @@ async function renderUsageSuccess(opts: {
     return 0;
   }
 
+  if (opts.args.options.details) {
+    await display.table({
+      columns: ["Container", "CPU", "Memory", "PIDs", "Mounts"],
+      rows: (opts.report.containerDetails ?? []).map((row) => [
+        row.name,
+        formatPercent({ percent: row.cpuPercent }),
+        formatBytesMaybe({ bytes: row.memUsedBytes }),
+        row.pids ?? "n/a",
+        formatContainerMounts(row.mounts),
+      ]),
+    });
+  }
   await renderProjectUsageTable({ report: opts.report });
   await renderHostUsageTable({ hostReport: opts.hostReport });
   await renderTotalUsagePanels({
@@ -1093,9 +1254,26 @@ function buildUsageReport(opts: {
       }
     : null;
 
+  const containerDetails = opts.samples.flatMap((sample) => {
+    const container = sample.containerId
+      ? opts.index.containerById.get(sample.containerId)
+      : null;
+    return container
+      ? [
+          {
+            ...sample,
+            project: container.project,
+            service: container.service,
+            name: container.name,
+            mounts: container.mounts,
+          },
+        ]
+      : [];
+  });
   return {
     projects,
     total,
+    containerDetails,
   };
 }
 
@@ -1278,3 +1456,10 @@ function getString(value: Record<string, unknown>, key: string): string | null {
   const raw = value[key];
   return typeof raw === "string" ? raw.trim() : null;
 }
+
+export const __testOnlyUsage = {
+  buildContainerIndex,
+  buildUsageReport,
+  collectTrackedHostPids,
+  buildHostUsageReport,
+};

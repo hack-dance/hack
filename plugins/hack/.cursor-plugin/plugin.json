@@ -1,6 +1,6 @@
 {
   "name": "hack",
-  "version": "4.1.0",
+  "version": "4.1.1",
   "description": "Operate and onboard Hack-managed local development environments.",
   "author": {
     "name": "Hack Dance LLC"

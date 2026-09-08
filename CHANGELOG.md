@@ -1,3 +1,9 @@
+## [4.1.1](https://github.com/hack-dance/hack/compare/v4.1.0...v4.1.1) (2026-09-08)
+
+### Bug Fixes
+
+* **supervisor:** serialize cancellation and terminal job state ([#82](https://github.com/hack-dance/hack/issues/82)) ([450b64e](https://github.com/hack-dance/hack/commit/450b64e171a4d1a4679702f823ef510ca5d85f7a))
+
 ## [4.1.0](https://github.com/hack-dance/hack/compare/v4.0.3...v4.1.0) (2026-09-08)
 
 ### Features

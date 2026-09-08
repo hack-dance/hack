@@ -81,12 +81,11 @@ test("Supervisor service cancels running jobs", async () => {
     1
   );
   expect(events.some((event) => event.type === "job.failed")).toBe(false);
+  const result = await created.run;
+  expect(result.status).toBe("cancelled");
   expect(await service.cancelJob({ projectDir, jobId: created.jobId })).toEqual(
     { ok: false, status: "not_running" }
   );
-
-  const result = await created.run;
-  expect(result.status).toBe("cancelled");
 
   const job = await service.getJob({ projectDir, jobId: created.jobId });
   expect(job?.status).toBe("cancelled");

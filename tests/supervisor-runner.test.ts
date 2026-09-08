@@ -94,7 +94,9 @@ test("cancellation survives process exit before terminal persistence and is reco
   });
   const terminalWrite = Promise.withResolvers<void>();
   const allowWrite = Promise.withResolvers<void>();
-  let cancel: () => boolean = () => false;
+  let cancel: () => Promise<boolean> = async () => false;
+  let cancellations: Promise<boolean>[] = [];
+  let processExited: Promise<number> = Promise.resolve(0);
   const run = runJob({
     jobId: "cancel-before-write",
     jobStore: {
@@ -109,21 +111,22 @@ test("cancellation survives process exit before terminal persistence and is reco
     },
     onSpawn: (control) => {
       cancel = control.cancel;
-      expect(cancel()).toBe(true);
-      expect(cancel()).toBe(true);
+      processExited = control.proc.exited;
+      cancellations = [cancel(), cancel()];
     },
   });
   try {
     await terminalWrite.promise;
+    await processExited;
     // The killed process has exited, but no terminal metadata has been saved.
     expect(
       (await store.readJobMeta({ jobId: "cancel-before-write" }))?.status
     ).toBe("running");
-    expect(cancel()).toBe(false);
   } finally {
     allowWrite.resolve();
     await run;
   }
+  expect(await Promise.all(cancellations)).toEqual([true, true]);
   expect((await run).status).toBe("cancelled");
   expect(
     (await store.readJobMeta({ jobId: "cancel-before-write" }))?.status
@@ -148,7 +151,7 @@ test("late cancellation cannot replace a completed outcome while its write is pe
   });
   const terminalWrite = Promise.withResolvers<void>();
   const allowWrite = Promise.withResolvers<void>();
-  let cancel: () => boolean = () => false;
+  let cancel: () => Promise<boolean> = async () => false;
   const run = runJob({
     jobId: "completion-first",
     jobStore: {
@@ -167,7 +170,7 @@ test("late cancellation cannot replace a completed outcome while its write is pe
   });
   try {
     await terminalWrite.promise;
-    expect(cancel()).toBe(false);
+    expect(await cancel()).toBe(false);
   } finally {
     allowWrite.resolve();
     await run;
@@ -183,4 +186,62 @@ test("late cancellation cannot replace a completed outcome while its write is pe
     "job.started",
     "job.completed",
   ]);
+});
+
+test("cancellation acknowledgement does not wait for a process that ignores SIGTERM", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "hack-supervisor-runner-"));
+  const readyPath = join(tempDir, "ready");
+  const store = await createJobStore({ projectDir: join(tempDir, ".hack") });
+  await store.createJob({
+    jobId: "ignores-signal",
+    runner: "generic",
+    command: [
+      process.execPath,
+      "-e",
+      `process.on("SIGTERM", () => {}); await Bun.write(${JSON.stringify(readyPath)}, "ready"); setInterval(() => {}, 1000);`,
+    ],
+  });
+  let control:
+    | Parameters<NonNullable<Parameters<typeof runJob>[0]["onSpawn"]>>[0]
+    | undefined;
+  const run = runJob({
+    jobStore: store,
+    jobId: "ignores-signal",
+    onSpawn: (value) => {
+      control = value;
+    },
+  });
+  let exited = false;
+  const observedRun = run.finally(() => {
+    exited = true;
+  });
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const deadline = Date.now() + 2000;
+    while (!(await Bun.file(readyPath).exists())) {
+      if (Date.now() > deadline) {
+        throw new Error("Child did not become ready");
+      }
+      await Bun.sleep(10);
+    }
+    if (!control) {
+      throw new Error("Missing process control");
+    }
+    const deadlinePromise = new Promise<never>((_resolve, reject) => {
+      deadlineTimer = setTimeout(
+        () => reject(new Error("Cancellation waited for process exit")),
+        2000
+      );
+    });
+    expect(await Promise.race([control.cancel(), deadlinePromise])).toBe(true);
+    expect(exited).toBe(false);
+    expect((await store.readJobMeta({ jobId: "ignores-signal" }))?.status).toBe(
+      "cancelled"
+    );
+  } finally {
+    clearTimeout(deadlineTimer);
+    control?.proc.kill("SIGKILL");
+    await observedRun;
+  }
+  expect((await run).status).toBe("cancelled");
 });

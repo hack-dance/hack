@@ -11,7 +11,7 @@ export type JobRunResult = {
 export type JobSpawnListener = (opts: {
   readonly proc: SpawnedProcess;
   /** Request cancellation before terminal status persistence begins. */
-  readonly cancel: () => boolean;
+  readonly cancel: () => Promise<boolean>;
 }) => void;
 
 type SpawnedProcess = ReturnType<typeof Bun.spawn>;
@@ -75,27 +75,52 @@ export async function runJob(opts: {
     return { jobId: opts.jobId, status: "failed", exitCode: 1 };
   }
 
-  let cancellationRequested = false;
-  let finalizing = false;
-  opts.onSpawn?.({
-    proc,
-    cancel: () => {
-      if (finalizing) {
-        return false;
-      }
-      if (!cancellationRequested) {
-        proc.kill();
-        cancellationRequested = true;
-      }
-      return true;
-    },
-  });
-
   await opts.jobStore.updateJobStatus({ jobId: opts.jobId, status: "running" });
   await opts.jobStore.appendEvent({
     jobId: opts.jobId,
     type: "job.started",
     payload: { pid: proc.pid },
+  });
+
+  let terminalStatus: JobStatus | undefined;
+  let terminalWrite: Promise<JobStatus> | undefined;
+  const finish = (input: {
+    readonly status: JobStatus;
+    readonly exitCode?: number;
+  }): Promise<JobStatus> => {
+    if (terminalWrite) {
+      return terminalWrite;
+    }
+    // Claim the outcome before storage yields; both paths share one writer.
+    terminalStatus = input.status;
+    terminalWrite = (async () => {
+      await opts.jobStore.updateJobStatus({
+        jobId: opts.jobId,
+        status: input.status,
+      });
+      await opts.jobStore.appendEvent({
+        jobId: opts.jobId,
+        type: `job.${input.status}`,
+        ...(input.exitCode === undefined
+          ? {}
+          : { payload: { exitCode: input.exitCode } }),
+      });
+      return input.status;
+    })();
+    return terminalWrite;
+  };
+  opts.onSpawn?.({
+    proc,
+    cancel: async () => {
+      if (terminalStatus && terminalStatus !== "cancelled") {
+        return false;
+      }
+      if (!terminalStatus) {
+        proc.kill();
+      }
+      await finish({ status: "cancelled" });
+      return true;
+    },
   });
 
   const paths = opts.jobStore.getJobPaths({ jobId: opts.jobId });
@@ -111,19 +136,10 @@ export async function runJob(opts: {
   const exitCode = await proc.exited;
   await Promise.all([stdoutTask, stderrTask]);
 
-  // Claim the terminal outcome synchronously, before any persistence yields.
-  finalizing = true;
-  let status: JobStatus = exitCode === 0 ? "completed" : "failed";
-  if (cancellationRequested) {
-    status = "cancelled";
-  }
-  await opts.jobStore.updateJobStatus({ jobId: opts.jobId, status });
-  await opts.jobStore.appendEvent({
-    jobId: opts.jobId,
-    type: `job.${status}`,
-    payload: { exitCode },
+  const status = await finish({
+    status: exitCode === 0 ? "completed" : "failed",
+    exitCode,
   });
-
   return { jobId: opts.jobId, status, exitCode };
 }
 

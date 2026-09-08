@@ -11,7 +11,7 @@ Use [Beta workflows](beta.md) for the guided remote path and [Extensions & refer
 for the rest of the command and API material.
 
 Cancellation is coordinated with the job runner. A successful cancel response waits
-for the process/log drain and the runner's terminal metadata and event; it does not
+for the runner's terminal metadata and event, not process exit or log drain; it does not
 race a second writer against process exit. Once terminal persistence has started,
 a later cancellation returns `not_running` and preserves the completed/failed outcome.
 Repeated requests accepted before finalization share one cancellation outcome and event.

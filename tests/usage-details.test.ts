@@ -152,4 +152,17 @@ test("project-scoped host usage includes branch descendants and excludes other p
     __testOnlyUsage.collectTrackedHostPids({ records, snapshot, filter: null })
       .size
   ).toBe(8);
+  const nestedSnapshot = snapshot.map((row) =>
+    row.pid === 301 ? { ...row, ppid: 102 } : row
+  );
+  for (const filter of ["alpha", "beta", null]) {
+    const nested = __testOnlyUsage.collectTrackedHostPids({
+      records,
+      snapshot: nestedSnapshot,
+      filter,
+    });
+    expect(nested.get(301)).toBe(filter === "alpha" ? null : "host:beta:bun");
+    expect(nested.get(302)).toBe(filter === "alpha" ? null : "host:beta:bun");
+    expect(nested.get(101)).toBe(filter === "beta" ? null : "host:alpha:bun");
+  }
 });

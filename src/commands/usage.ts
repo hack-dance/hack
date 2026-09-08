@@ -564,7 +564,15 @@ function collectTrackedHostPids(opts: {
   readonly filter: string | null;
 }): Map<number, string | null> {
   const tracked = new Map<number, string | null>();
-  for (const record of opts.records) {
+  const parents = new Map(
+    (opts.snapshot ?? []).map((row) => [row.pid, row.ppid])
+  );
+  const records = [...opts.records].sort(
+    (left, right) =>
+      processDepth(right.child.pid, parents) -
+      processDepth(left.child.pid, parents)
+  );
+  for (const record of records) {
     if (record.status !== "running") {
       continue;
     }
@@ -574,6 +582,10 @@ function collectTrackedHostPids(opts: {
       record.project.startsWith(`${opts.filter}--`);
     const observed = observeHostCommand(record, opts.snapshot);
     for (const pid of observed.observedPids) {
+      if (tracked.has(pid)) {
+        continue;
+      }
+      // Inner command roots take precedence over their enclosing command trees.
       // A null entry also excludes known foreign commands from generic host heuristics.
       tracked.set(
         pid,
@@ -582,6 +594,19 @@ function collectTrackedHostPids(opts: {
     }
   }
   return tracked;
+}
+
+function processDepth(
+  pid: number,
+  parents: ReadonlyMap<number, number>
+): number {
+  const seen = new Set<number>();
+  let current = pid;
+  while (current > 0 && !seen.has(current)) {
+    seen.add(current);
+    current = parents.get(current) ?? 0;
+  }
+  return seen.size;
 }
 
 async function readHostProcessSamples(opts: {

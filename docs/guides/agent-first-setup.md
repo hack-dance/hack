@@ -46,28 +46,25 @@ when present.
 (`.claude/skills/hack-init/SKILL.md` / `.codex/skills/hack-init/SKILL.md`).
 The skill tells the agent to run `hack agent onboard` (or fetch the `hack-init`
 MCP prompt) and follow it — the content stays in the CLI, so installed skills
-never go stale on substance.
+fetch guidance matching the installed CLI.
 
 ## What the prompt covers
 
-1. Inventory — package manager, workspaces, services and ports, databases/queues,
-   `.env*` files (they become `hack env` candidates), scripts that need env.
-2. Setup — `hack init --auto` or config edits, compose services with Caddy labels
-   on the `hack-dev` network, dev_host/subdomain design, `hack env add`
-   (`--secret` for secrets; `.env` files get replaced by hack env +
-   `hack host exec`).
-3. Platform nuances — deps container pattern (named `node_modules` volume so
-   macOS-host installs never poison linux containers) and an ops/tooling
-   container for migrations and one-off jobs.
-4. Running things — the `hack run` / `hack exec` / `hack host exec` /
-   Caddy-hostname decision guide.
-5. Verification loop — `hack up --json` → `hack ps --json` → `hack open --json`
-   → curl or `hack logs`, iterating until `hack doctor` is clean.
+1. Inventory — package manager, services, ports, backing services, and required
+   variable names. Preserve the existing credential flow without copying secrets.
+2. Setup — configure the requested container or host workflow, routing, and managed
+   env injection. Verify replacements before removing any old env files.
+3. Platform nuances — isolate Linux native dependencies from host installs when
+   needed. Reuse existing tooling; add an ops container only when justified.
+4. Running things — choose `hack run`, `hack exec`, or `hack host exec` for the target.
+5. Verification — check expected long-running services, successful one-shot exits,
+   actual routed URLs with normal TLS verification, and the requested host workflow.
+   Preserve native trust approvals, ownership, and destructive-cleanup gates.
+   Unrelated optional integration warnings do not block completion.
 
 ## Partial adoption (backing services only)
 
-Full containerization (every process in compose) is the default recommendation, but
-it is not the only supported shape. hack works fine running only the backing
+Choose the shape that fits the requested workflow. Hack can run only the backing
 services — postgres, temporal, redis, and similar — while app dev servers (`bun
 dev`, `dotnet watch`, `vite`) stay on the host.
 
@@ -80,13 +77,12 @@ dev`, `dotnet watch`, `vite`) stay on the host.
   not worth the churn.
 
 **What hack still gives you in this shape:**
-- Stable hostnames and TLS for the backing services via Caddy (`postgres.<project>.hack`,
-  `temporal.<project>.hack`, ...), so host processes and containers address them the
-  same way.
+- Stable hostnames and TLS for HTTP services and admin UIs via Caddy. Raw database
+  protocols use their configured host ports or container-network addresses.
 - Branch instances for the containerized services (`--branch <name>`), even though
   the host-run app processes are not branch-isolated on their own.
-- Committed, hack-managed env (`hack env add`) for connection strings and secrets,
-  instead of hand-maintained `.env` files.
+- Managed environment configuration and secret injection. Commit only non-secret
+  values; use the configured secret backend for credentials.
 - Lifecycle hooks (`startup`/`lifecycle` in `.hack/hack.config.json`) for host-side
   setup — tunnels, SSO bootstrap — that would otherwise be ad-hoc terminal steps.
 
@@ -95,8 +91,7 @@ dev`, `dotnet watch`, `vite`) stay on the host.
   where a stable hostname is useful (databases usually don't need one — connect by
   container port — but admin UIs, queues, or shared services often do).
 - Give host dev servers their connection info via `hack host exec --scope <svc> --
-  <cmd>` (injects the resolved env without touching `.env` files) or `hack env list`
-  for a one-off lookup.
+  <cmd>` (injects the resolved env without touching `.env` files) without exposing secret values.
 - App URLs can stay on plain `localhost:<port>` for the fast path, or get promoted
   to a routed compose service later if you want a stable `*.hack` hostname for them
   too — the two are not mutually exclusive and can be migrated incrementally.
@@ -118,6 +113,8 @@ Paste this into a fresh Claude Code / Codex session started at the repo root:
 ```text
 Set this repository up to run under the hack CLI. Run `hack agent onboard`
 (pass --no-interactive to hack commands) and follow the printed onboarding
-prompt exactly, phase by phase. If the hack CLI is missing, stop and tell me.
-Finish only when `hack doctor` is clean and every routable service responds.
+prompt for the requested scope. Preserve native approvals, existing credential
+flows, runtime ownership, and publishing gates. If the CLI is missing, report
+that blocker and continue independent setup work. Verify the chosen services
+and host workflows, and distinguish reachability from certificate trust.
 ```

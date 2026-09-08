@@ -74,7 +74,7 @@ export async function checkSharedHackSkill(): Promise<SharedSkillResult> {
     return {
       status: "stale",
       path: resolved.path,
-      message: `Shared Hack skill is stale at ${resolved.path}. Run: hack setup sync --all-scopes`,
+      message: `Shared Hack skill is stale at ${resolved.path}. Inspect this shared file and refresh only the authorized integration. Full global sync also changes other clients; use it only when that scope is requested.`,
     };
   }
   return { status: "noop", path: resolved.path };

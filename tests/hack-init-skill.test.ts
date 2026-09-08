@@ -236,3 +236,16 @@ test("installClaudeHooks also installs the hack-init skill and detects its drift
   expect(removed.status).toBe("removed");
   expect(await Bun.file(initSkillPath).exists()).toBe(false);
 });
+
+test("checked-in onboarding skills match the thin prompt adapter", async () => {
+  for (const path of [
+    ".claude/skills/hack-init/SKILL.md",
+    ".codex/skills/hack-init/SKILL.md",
+    "plugins/hack/skills/hack-init/SKILL.md",
+  ]) {
+    const content = await Bun.file(path).text();
+    expect(content).toBe(renderHackInitSkill());
+    expect(content).not.toContain("doctor` is clean");
+    expect(content).toContain("authorized workflow");
+  }
+});

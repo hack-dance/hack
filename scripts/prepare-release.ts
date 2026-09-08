@@ -62,6 +62,11 @@ async function main({ args }: { readonly args: Args }): Promise<number> {
     rootPackageJson: pkg,
   });
 
+  // Start a fresh process so renderers read the newly written package version.
+  await Bun.$`${process.execPath} run scripts/generate-agent-plugins.ts`.cwd(
+    repoRoot
+  );
+
   return 0;
 }
 

@@ -1,0 +1,16 @@
+{
+  "name": "hack-dance",
+  "owner": {
+    "name": "Hack Dance LLC"
+  },
+  "metadata": {
+    "description": "Official Hack plugins for local-first development workflows."
+  },
+  "plugins": [
+    {
+      "name": "hack",
+      "source": "plugins/hack",
+      "description": "Operate and onboard Hack-managed local development environments."
+    }
+  ]
+}

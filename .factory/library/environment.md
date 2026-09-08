@@ -27,11 +27,11 @@ Environment variables, external dependencies, and setup notes for current Hack w
 
 ## Runtime and Lifecycle
 
-- Prefer `hack doctor` and `hack doctor --fix` before manual runtime/network repair.
+- Inspect with `hack doctor`; apply only authorized runtime/network repairs.
 - For lifecycle changes, verify `sh -c` semantics, stdin behavior, process-group cleanup, stale mux metadata recovery, and singleton listener handling.
 - For daemon/gateway request-target hardening, use an isolated temp-HOME repo-built daemon (`bun index.ts daemon start --foreground`) when live proof would otherwise mutate shared user daemon state.
 
 ## Outage and Drift Proofs
 
 - For stale env compatibility output, use `hack doctor` and `hack env materialize`.
-- For stale lifecycle state, use `hack doctor`, then `hack down`, then rerun `hack doctor`.
+- For stale lifecycle state, inspect with `hack doctor`, apply the specific authorized recovery action, and re-check ownership and runtime state.

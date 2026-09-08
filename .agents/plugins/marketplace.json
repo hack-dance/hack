@@ -1,0 +1,20 @@
+{
+  "name": "hack-dance",
+  "interface": {
+    "displayName": "Hack Dance"
+  },
+  "plugins": [
+    {
+      "name": "hack",
+      "source": {
+        "source": "local",
+        "path": "./plugins/hack"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

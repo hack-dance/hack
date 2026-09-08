@@ -101,7 +101,7 @@ export function renderInitAssistantPrompt(opts: {
   lines.push(
     [
       "You are helping a user bootstrap hack in this repo.",
-      "Prefer hack CLI; ask before making assumptions.",
+      "Prefer the Hack CLI and infer routine details from the repo; ask only when missing information materially affects correctness or scope.",
       "A pre-computed repo inventory follows — confirm and extend it while working through the onboarding phases below.",
     ].join(" ")
   );
@@ -158,7 +158,9 @@ export function renderInitAssistantPrompt(opts: {
     }
   }
   lines.push("");
-  lines.push("Questions to confirm with the user:");
+  lines.push(
+    "Resolve these questions from the repo first; ask only for unresolved blockers:"
+  );
   for (const question of buildSuggestedQuestions({ report: opts.report })) {
     lines.push(`- ${question}`);
   }

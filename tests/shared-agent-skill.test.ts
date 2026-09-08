@@ -49,5 +49,6 @@ test("shared Hack skill installs current ticket-free guidance and detects drift"
   );
   const stale = await checkSharedHackSkill();
   expect(stale.status).toBe("stale");
-  expect(stale.message).toContain("hack setup sync --all-scopes");
+  expect(stale.message).toContain("only the authorized integration");
+  expect(stale.message).not.toContain("Run: hack setup sync");
 });

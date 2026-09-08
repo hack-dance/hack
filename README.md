@@ -149,3 +149,6 @@ experimental — hidden behind `hack help --all`.
 ## License
 
 See [LICENSE](./LICENSE).
+
+Optional native plugins for Codex, Claude Code, and Cursor bundle Hack skills and MCP.
+See [agent plugin setup](docs/integrations.md#optional-native-plugins). Existing standalone setup remains supported.

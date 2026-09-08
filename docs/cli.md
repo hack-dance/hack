@@ -1,6 +1,6 @@
 # CLI Overview
 
-Hack v3 is the local-first CLI surface. This page is a supported-surface overview with the
+Hack is the local-first CLI surface. This page is a supported-surface overview with the
 running-things decision guide; for exhaustive per-command options and flags, see the generated
 [CLI reference](reference/cli.md) (`bun run docs:cli-reference`, or `hack help <command>` in the
 terminal).

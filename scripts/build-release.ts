@@ -479,7 +479,6 @@ function renderCodexSlimInstallScript(): string {
     `  printf '%s\\n' '#!/usr/bin/env bash' 'set -euo pipefail'`,
     `  printf '%s\\n' 'export HACK_EXECUTION_MODE="\${HACK_EXECUTION_MODE:-codex}"'`,
     `  printf '%s\\n' 'export HACK_DAEMON_DISABLE_DOCKER_EVENTS="\${HACK_DAEMON_DISABLE_DOCKER_EVENTS:-1}"'`,
-    `  printf '%s\\n' 'export HACK_SETUP_SYNC_MODE="\${HACK_SETUP_SYNC_MODE:-warn}"'`,
     `  printf 'export HACK_ASSETS_DIR="\${HACK_ASSETS_DIR:-%s}"\\n' "$INSTALL_ASSETS"`,
     `  printf 'exec "%s" "$@"\\n' "$REAL_BIN"`,
     '} > "$WRAPPER_BIN"',

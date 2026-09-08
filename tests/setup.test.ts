@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installClaudeHooks } from "../src/agents/claude.ts";
+import { installCodexSkill } from "../src/agents/codex-skill.ts";
 import { installCursorRules } from "../src/agents/cursor.ts";
 import {
   buildInitAssistantReport,
@@ -58,6 +59,26 @@ test("installClaudeHooks writes settings.local.json hooks", async () => {
 
   expect(containsCommand(sessionHooks, "hack agent prime")).toBe(true);
   expect(containsCommand(preCompactHooks, "hack agent prime")).toBe(true);
+});
+
+test("installCodexSkill writes SKILL.md with hack-cli frontmatter", async () => {
+  const repoRoot = await setupTempRepo();
+  const result = await installCodexSkill({
+    scope: "project",
+    projectRoot: repoRoot,
+  });
+
+  expect(result.status).toBe("created");
+  const skillPath = join(repoRoot, ".codex", "skills", "hack-cli", "SKILL.md");
+  const content = await Bun.file(skillPath).text();
+  expect(content).toContain("name: hack-cli");
+  expect(content).toContain("hack setup cursor");
+  expect(content).toContain("## Product boundary");
+  expect(content).toContain(
+    "Experimental and unsupported: remote/gateway/node/dispatch"
+  );
+  expect(content).toContain("singleton.ports");
+  expect(content).not.toContain(".hack/hack.env.json");
 });
 
 test("renderAgentPrimer is CLI-first and mentions MCP", () => {
@@ -144,122 +165,17 @@ test("setup sync keeps failing artifact paths visible", () => {
   });
 });
 
-test("setup sync treats installed deprecated artifacts as actionable", () => {
+test("setup sync check reports retired agent artifacts as stale", () => {
   const result = buildSetupSyncScopeResult({
     action: "check",
-    scope: "Global",
+    scope: "Project",
     groups: [
       {
-        label: "Deprecated shared Hack skills",
+        label: "Retired agent artifacts",
         results: [
           {
             status: "deprecated",
-            path: "<home>/.ai/skills/hack/SKILL.md",
-            message: "Deprecated Hack skill is still installed",
-          },
-          { status: "absent", path: "<home>/.ai/skills/hack-tickets/SKILL.md" },
-        ],
-      },
-    ],
-  });
-
-  expect(result).toEqual({
-    exitCode: 1,
-    item: {
-      label: "Global",
-      status: "warn",
-      meta: "1/2 current",
-      detail:
-        "Deprecated shared Hack skills: Deprecated Hack skill is still installed",
-    },
-  });
-});
-
-test("setup sync reports unavailable native plugins as non-success", () => {
-  const result = buildSetupSyncScopeResult({
-    action: "install",
-    scope: "Project",
-    groups: [
-      {
-        label: "Hack Cursor plugin",
-        requiresReadyPlugin: true,
-        results: [
-          {
-            status: "missing",
-            path: "hack@hack-dance",
-            message: "Install Hack with /add-plugin before migration.",
-          },
-        ],
-      },
-    ],
-  });
-
-  expect(result).toEqual({
-    exitCode: 1,
-    item: {
-      label: "Project",
-      status: "warn",
-      meta: "0/1 current",
-      detail:
-        "Hack Cursor plugin: Install Hack with /add-plugin before migration.",
-    },
-  });
-});
-
-test("setup sync does not treat absent deprecated artifacts as plugin failures", () => {
-  const result = buildSetupSyncScopeResult({
-    action: "install",
-    scope: "Global",
-    groups: [
-      {
-        label: "Deprecated Tickets skill",
-        results: [{ status: "missing", path: "<home>/hack-tickets" }],
-      },
-    ],
-  });
-
-  expect(result.exitCode).toBe(0);
-  expect(result.item.status).toBe("ok");
-  expect(result.item.meta).toBe("already current");
-});
-
-test("setup sync counts plugin-gated legacy cleanup as an update", () => {
-  const result = buildSetupSyncScopeResult({
-    action: "install",
-    scope: "Project",
-    groups: [
-      {
-        label: "Hack Codex plugin",
-        requiresReadyPlugin: true,
-        results: [
-          {
-            status: "noop",
-            cleanupStatus: "removed",
-            path: "hack@hack-dance",
-          },
-        ],
-      },
-    ],
-  });
-
-  expect(result.exitCode).toBe(0);
-  expect(result.item.meta).toBe("1 updated");
-});
-
-test("setup sync reports preserved plugin cleanup as non-success", () => {
-  const result = buildSetupSyncScopeResult({
-    action: "install",
-    scope: "Project",
-    groups: [
-      {
-        label: "Hack Codex plugin",
-        requiresReadyPlugin: true,
-        results: [
-          {
-            status: "noop",
-            cleanupStatus: "preserved",
-            path: "/repo/.codex/config.toml",
-            message: "Preserved customized MCP config.",
+            path: "/repo/.codex/skills/hack-tickets/SKILL.md",
           },
         ],
       },
@@ -269,7 +185,6 @@ test("setup sync reports preserved plugin cleanup as non-success", () => {
   expect(result.exitCode).toBe(1);
   expect(result.item.status).toBe("warn");
   expect(result.item.meta).toBe("0/1 current");
-  expect(result.item.detail).toContain("Preserved customized MCP config.");
 });
 
 test("buildInitAssistantReport captures repo signals", async () => {

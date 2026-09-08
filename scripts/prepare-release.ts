@@ -3,8 +3,6 @@
 import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { generateAgentPlugins } from "./generate-agent-plugins.ts";
-
 interface Args {
   readonly version: string | null;
 }
@@ -64,26 +62,10 @@ async function main({ args }: { readonly args: Args }): Promise<number> {
     rootPackageJson: pkg,
   });
 
-  await generateAgentPlugins({ repoRoot, version: nextVersion });
-  process.stdout.write(`Updated agent plugin manifests: ${nextVersion}\n`);
-
-  // Update macOS app version in Base.xcconfig
-  const xconfigPath = resolve(repoRoot, "apps/macos/Config/Base.xcconfig");
-  try {
-    const xconfigContent = await Bun.file(xconfigPath).text();
-    const updatedXconfig = xconfigContent.replace(
-      /^MARKETING_VERSION = .*/m,
-      `MARKETING_VERSION = ${nextVersion}`
-    );
-    if (updatedXconfig !== xconfigContent) {
-      await Bun.write(xconfigPath, updatedXconfig);
-      process.stdout.write(
-        `Updated Base.xcconfig: MARKETING_VERSION → ${nextVersion}\n`
-      );
-    }
-  } catch {
-    // macOS config may not exist, that's fine
-  }
+  // Start a fresh process so renderers read the newly written package version.
+  await Bun.$`${process.execPath} run scripts/generate-agent-plugins.ts`.cwd(
+    repoRoot
+  );
 
   return 0;
 }

@@ -16,12 +16,6 @@ export type TrackedGeneratedFilesInspection = {
  * Intentionally excluded: `<dir>/hack.env.local.yaml` — older repos may track
  * it on purpose as the shared `--env local` overlay (legacy compatibility in
  * `project-env-config.ts`), so a tracked copy is not treated as a leak.
- *
- * `<dir>/tickets` is included because the tickets extension's local git
- * cache (`<dir>/tickets/git/bare.git`, `.../worktree`) is machine-local
- * working state that syncs via the hidden `refs/hack/tickets` ref — see
- * `docs/guides/tickets.md`. No project is documented to intentionally commit
- * it, so a tracked copy is always treated as a leak.
  */
 export function buildGeneratedFilePathspecs(opts: {
   readonly projectDirName: string;
@@ -32,8 +26,8 @@ export function buildGeneratedFilePathspecs(opts: {
     `${dir}/.branch`,
     `${dir}/.env`,
     `${dir}/.env.state.json`,
-    `${dir}/hack.env.*.local.yaml`,
     `${dir}/tickets`,
+    `${dir}/hack.env.*.local.yaml`,
     PROJECT_ENV_KEY_FILENAME,
   ];
 }

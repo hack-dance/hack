@@ -23,9 +23,7 @@ terminal).
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
 - `hack daemon` — optional local daemon for faster JSON status/ps
 - `hack agent onboard` — agent-assisted onboarding for existing projects
-- `hack setup` — check/prepare native Cursor, Claude Code, and Codex plugins; refresh project
-  instructions; or explicitly configure standalone MCP
-- `hack tickets` — deprecated compatibility surface for existing Tickets data
+- `hack setup` — install/refresh agent integrations (Cursor rules, Claude hooks, Codex skill, MCP)
 
 Interactive diagnostics use compact status rows: healthy groups stay on one line, while warnings
 and errors expand with wrapped detail and recovery guidance. `hack doctor --json` remains the stable,
@@ -36,16 +34,8 @@ Run `hack help` for the full command list, or `hack help --all` to include hidde
 experimental commands. Every command and flag on this page is also in the generated
 [CLI reference](reference/cli.md).
 
-## Removed surfaces
-
-These commands remain only as migration stubs that print the removal reason and any replacement:
-
-- `hack auth`
-- `hack linear`
-- `hack org`
-- `hack team`
-
-Built-in GitHub workflows were also removed. Use native `git` and `gh`.
+Hosted auth/account/org/team, built-in GitHub and Linear workflows, and Hack Tickets are outside the
+CLI surface. Use native `git` and `gh` for repository collaboration.
 
 ## Unsupported experimental
 
@@ -67,12 +57,15 @@ See [Beta workflows](beta.md) for guides on this surface.
   apply documented defaults or fail fast with `E_INTERACTIVE_REQUIRED`.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
 
-Generated agent docs, native plugin content, and the shared `~/.ai/skills/hack-cli` skill carry the Hack CLI
-version that generated them. Native agent plugins are versioned with the Hack release and installed once
-from the `hack-dance/hack` marketplace. Audit project and global generated surfaces with
-`hack setup sync --all-scopes --check`; repair them with `hack setup sync --all-scopes`, then reload
-the agent session so it stops using cached guidance. Interactive project commands also report drift
-before auto-repair instead of repairing silently.
+Generated agent docs, Cursor rules, Codex skills, and the shared `~/.ai/skills/hack-cli` skill carry
+the Hack CLI version that generated them. Plain `hack agent prime` prints current guidance without
+an integration scan. Use `hack agent prime --check` for an explicit project/global inventory or a
+targeted `hack setup ... --check` when diagnosing drift. Missing optional integrations do not
+require installation. Repair only affected targets within the authorized scope; use
+`hack setup sync --all-scopes` for an explicitly requested full refresh. Read updated guidance after
+repair; restart only if the client cannot reload changed hooks or skills.
+Ordinary commands, `hack update`, and `hack doctor --fix` never render, repair, remove, or otherwise
+mutate integration files. CLI upgrades do not trigger integration updates.
 
 ## First-run path
 
@@ -311,31 +304,15 @@ materialized `.hack/.env` or `.hack/.env.state.json` is stale and should be rege
 ## Project files
 
 Hack owns a committed `.hack/.gitignore` (self-healing on `init`/`up`) that ignores machine-local
-generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`,
-`tickets/`). Keep
-it committed. If generated files ever leak into git, `hack doctor --fix` untracks them (the files
-stay on disk). Runtime metadata is written to `.internal/compose.runtime.override.yml` for the base
-instance and `.branch/compose.<branch>.runtime.override.yml` for branch instances. See
-[Architecture](architecture.md) for the full file map.
+generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`). The
+retired `tickets/` path remains ignored only so upgrades cannot recommit legacy machine-local
+caches. Keep `.hack/.gitignore` committed. If generated files ever leak into git, `hack doctor
+--fix` untracks them (the files stay on disk). Runtime metadata is written to
+`.internal/compose.runtime.override.yml` for the base instance and
+`.branch/compose.<branch>.runtime.override.yml` for branch instances. See [Architecture](architecture.md)
+for the full file map.
 
 The global config root defaults to `~/.hack`; override it with `HACK_HOME`.
-
-## Tickets
-
-Hack Tickets is deprecated. It is no longer installed into agent instructions or skills, and
-`hack setup sync --all-scopes` removes legacy Tickets agent artifacts. Existing commands remain
-available only for compatibility and migration when the extension is explicitly enabled.
-
-```bash
-hack tickets create --title "Investigate flaky lifecycle cleanup"
-hack tickets list
-hack tickets show T-00001
-hack tickets sync
-```
-
-`hack tickets setup` now removes deprecated agent skills/instruction blocks and performs compatible
-storage hygiene; it does not enable Tickets or reinstall guidance. See the migration reference:
-[Tickets](guides/tickets.md).
 
 ## Lifecycle
 

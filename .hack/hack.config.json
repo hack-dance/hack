@@ -3,30 +3,8 @@
   "name": "hack-cli",
   "dev_host": "hack-cli.hack",
   "controlPlane": {
-    "extensions": {
-      "dance.hack.github": {
-        "enabled": false
-      },
-      "dance.hack.tickets": {
-        "enabled": false
-      },
-      "dance.hack.linear": {
-        "enabled": false
-      }
-    },
     "gateway": {
       "enabled": true
-    },
-    "routing": {
-      "overrides": {
-        "linear": {
-          "profile": "default",
-          "projectId": "7a3c8adf-ede5-4d3a-8779-9c32695c76bf",
-          "projectName": "Hack",
-          "teamId": "e0aedec9-5273-446f-b975-aa4cd1525900",
-          "additionalProjects": []
-        }
-      }
     }
   }
 }

@@ -15,12 +15,11 @@
 - [Sessions](./sessions.md)
 - [Agent-first setup](./guides/agent-first-setup.md)
 
-## Extensions & legacy compatibility
+## Extensions
 
 - [Extensions](./extensions.md)
 - [Creating an extension](./guides/create-extension.md)
 - [Integrations](./integrations.md)
-- [Tickets migration reference (deprecated compatibility surface)](./guides/tickets.md)
 - [SDK](./sdk.md)
 
 ## Experimental / beta

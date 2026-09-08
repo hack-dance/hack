@@ -117,7 +117,6 @@ binary and bundled assets under `~/.hack/` (override with `HACK_INSTALL_BIN`), a
 
 - `HACK_EXECUTION_MODE=codex`
 - `HACK_DAEMON_DISABLE_DOCKER_EVENTS=1`
-- `HACK_SETUP_SYNC_MODE=warn`
 - `HACK_ASSETS_DIR` pointed at the installed assets
 
 For reproducible CI, pin the release with `HACK_INSTALL_TAG` or `HACK_INSTALL_VERSION` (and

@@ -14,14 +14,11 @@ type CapturedRunResult = {
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
-let originalSyncMode: string | undefined;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "hack-lifecycle-json-"));
   originalHome = process.env.HOME;
-  originalSyncMode = process.env.HACK_SETUP_SYNC_MODE;
   process.env.HOME = tempDir;
-  process.env.HACK_SETUP_SYNC_MODE = "off";
 });
 
 afterEach(async () => {
@@ -31,11 +28,6 @@ afterEach(async () => {
     tempDir = null;
   }
   process.env.HOME = originalHome;
-  if (originalSyncMode === undefined) {
-    Reflect.deleteProperty(process.env, "HACK_SETUP_SYNC_MODE");
-  } else {
-    process.env.HACK_SETUP_SYNC_MODE = originalSyncMode;
-  }
 });
 
 test("buildLifecycleJsonData shapes the envelope payload with sorted services", () => {

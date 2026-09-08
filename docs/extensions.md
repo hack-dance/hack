@@ -11,16 +11,11 @@ built-in GitHub integration, or built-in Linear integration.
 
 ## Scope
 
-- Deprecated compatibility helpers:
-  - Tickets: `hack x tickets ...` (existing data migration only)
 - Unsupported experimental workflows:
   - Gateway: `hack x gateway ...`
   - Supervisor: `hack x supervisor ...`
   - Remote node / dispatch flows documented under [beta.md](beta.md)
-- Retired from the supported product:
-  - `hack auth`
-  - `hack linear`
-  - built-in GitHub browser/profile flows
+- Hosted auth, GitHub, Linear, and Tickets integrations are not registered.
 
 ## Behavior
 
@@ -37,20 +32,13 @@ built-in GitHub integration, or built-in Linear integration.
 
 ## Built-in Extensions
 
-- Tickets (deprecated; disabled unless `controlPlane.extensions["dance.hack.tickets"].enabled` is
-  explicitly set to `true`; no agent skills or instructions are installed):
-  - `hack x tickets setup|create|update|comment|review-note|document|list|show|status|resolve-conflict|sync|tui`
-  - Also available as the top-level alias `hack tickets <command>` (see
-    [docs/guides/tickets.md](guides/tickets.md)).
-  - `setup` removes legacy Tickets guidance and repairs storage hygiene; it no longer enables the
-    extension or installs agent integrations.
 - Unsupported experimental:
   - `hack x gateway token-create|token-list|token-revoke`
   - `hack x supervisor job-create|job-list|job-show|job-tail|job-attach|job-cancel|shell`
   - `hack x cloudflare ...`
   - `hack x tailscale ...`
 
-GitHub and Linear are intentionally not part of the shipped built-in extension set for Hack v3.
+GitHub, Linear, and Tickets are intentionally not part of the shipped built-in extension set.
 
 ## Dispatch Model
 

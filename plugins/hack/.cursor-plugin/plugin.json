@@ -1,18 +1,14 @@
 {
   "name": "hack",
-  "displayName": "Hack",
-  "version": "3.5.1",
+  "version": "4.0.2",
   "description": "Operate and onboard Hack-managed local development environments.",
   "author": {
     "name": "Hack Dance LLC"
   },
-  "publisher": "Hack Dance LLC",
   "homepage": "https://github.com/hack-dance/hack",
   "repository": "https://github.com/hack-dance/hack",
   "license": "MIT",
   "keywords": ["local-development", "docker", "developer-tools", "agents"],
-  "category": "developer-tools",
-  "tags": ["local-development", "docker", "agents"],
   "skills": "./skills/",
   "rules": "./rules/",
   "mcpServers": "./.mcp.json"

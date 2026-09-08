@@ -29,11 +29,6 @@ extension ProjectSummary {
     !isRuntimeConfigured && !featureList.isEmpty
   }
 
-  var supportsTickets: Bool {
-    if featureList.contains("tickets") { return true }
-    return extensionsEnabled?.contains("dance.hack.tickets") == true
-  }
-
   var runtimeStatusLabel: String {
     if let runtimeStatus {
       return displayRuntimeStatus(runtimeStatus)
@@ -43,8 +38,6 @@ extension ProjectSummary {
 
   private func displayFeatureName(_ feature: String) -> String {
     switch feature {
-    case "tickets":
-      return "Tickets"
     case "cloudflare":
       return "Cloudflare"
     case "tailscale":

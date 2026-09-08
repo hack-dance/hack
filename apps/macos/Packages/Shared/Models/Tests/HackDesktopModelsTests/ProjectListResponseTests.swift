@@ -20,8 +20,8 @@ final class ProjectListResponseTests: XCTestCase {
           "repo_root": "/repo",
           "project_dir": "/repo",
           "defined_services": ["api"],
-          "extensions_enabled": ["dance.hack.tickets"],
-          "features": ["tickets"],
+          "extensions_enabled": ["dance.hack.cloudflare"],
+          "features": ["cloudflare"],
           "service_hosts": {
             "api": ["api.hack-cli.test", "api.hack-cli.test.gy"]
           },

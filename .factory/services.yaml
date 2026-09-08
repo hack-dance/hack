@@ -13,7 +13,6 @@ commands:
   lifecycle_tests: bun test tests/project-lifecycle-processes.test.ts tests/project-lifecycle-singleton.test.ts tests/project-lifecycle-hygiene.test.ts
   env_list_json: ./dist/hack env list --json
   env_tests: bun test tests/project-env-config.test.ts tests/env-command.test.ts tests/project-run-command.test.ts
-  tickets_tests: bun test tests/tickets-git-channel.test.ts tests/tickets-store.test.ts
   setup_docs_tests: bun test tests/setup.test.ts tests/mcp.test.ts
 
 services:

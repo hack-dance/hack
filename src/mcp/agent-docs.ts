@@ -92,7 +92,7 @@ export async function getExistingAgentDocs(opts: {
  *
  * Reports `stale` when the markers exist but the wrapped content no longer
  * matches the current render (normalized comparison), so `setup sync --check`
- * can flag content drift and auto-sync can repair it.
+ * can flag content drift and an explicit sync can repair it.
  */
 export async function checkAgentDocs(opts: {
   readonly projectRoot: string;

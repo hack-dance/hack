@@ -23,7 +23,7 @@ failed (nothing ran).
 ## Isolation model (HACK_HOME)
 
 Every CLI invocation runs with `HACK_HOME=<fresh tempdir>` plus
-`HACK_SETUP_SYNC_MODE=off`, `HACK_NO_INTERACTIVE=1`, `NO_COLOR=1`,
+`HACK_NO_INTERACTIVE=1`, `NO_COLOR=1`,
 `TERM=dumb`, and stdin closed. Global state (projects registry, global
 config) must land under `HACK_HOME`, never under the real `~/.hack`.
 

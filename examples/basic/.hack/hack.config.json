@@ -18,11 +18,6 @@
   "controlPlane": {
     "gateway": {
       "enabled": true
-    },
-    "extensions": {
-      "dance.hack.linear": {
-        "enabled": true
-      }
     }
   }
 }

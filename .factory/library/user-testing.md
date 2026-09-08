@@ -7,7 +7,7 @@ Testing surfaces, tools, and validation concurrency for current Hack work.
 ### CLI and runtime
 
 - Primary tools: `./dist/hack`, repo-local Bun commands, and global `hack` only for installed-runtime orchestration checks.
-- Use for: runtime lifecycle, env, tickets, sessions, doctor, daemon, project config, and agent setup.
+- Use for: runtime lifecycle, env, sessions, doctor, daemon, project config, and agent setup.
 - Prefer `--json` when validating machine-readable behavior.
 - If validating current-branch command behavior, build first and run `./dist/hack` or `bun index.ts` from the repo root.
 
@@ -32,7 +32,7 @@ Testing surfaces, tools, and validation concurrency for current Hack work.
 ### CLI validators
 
 - Max concurrent validators: `2`.
-- Rationale: project state, tickets state, runtime metadata, and branch/worktree artifacts can race.
+- Rationale: project state, runtime metadata, and branch/worktree artifacts can race.
 
 ### Runtime/lifecycle validators
 
@@ -48,5 +48,4 @@ Testing surfaces, tools, and validation concurrency for current Hack work.
 
 - Env changes: cover overlay order, worktree-local overrides, linked-worktree key lookup, host-vs-compose target mode, and materialization drift.
 - Lifecycle changes: cover shell semantics, process groups, stale metadata, singleton full/partial listener conflicts, and doctor recovery guidance.
-- Tickets changes: cover offline/stale-local fallback only for transient connectivity; hard remote misconfiguration should surface clearly.
 - Agent setup changes: update source renderers and checked-in generated examples, then run setup/MCP tests.

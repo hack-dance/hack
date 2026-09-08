@@ -11,9 +11,9 @@ import {
   text,
 } from "@clack/prompts";
 import { YAML } from "bun";
-import { prepareHackClaudePlugin } from "../agents/claude-plugin.ts";
-import { prepareHackCodexPlugin } from "../agents/codex-plugin.ts";
-import { prepareHackCursorPlugin } from "../agents/cursor-plugin.ts";
+import { installClaudeHooks } from "../agents/claude.ts";
+import { installCodexSkill } from "../agents/codex-skill.ts";
+import { installCursorRules } from "../agents/cursor.ts";
 import {
   type OnboardingWith,
   parseOnboardingWith,
@@ -23,7 +23,6 @@ import {
   type OnboardingMode,
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
-import { resolveAgentPluginInstallOutcome } from "../agents/plugin-lifecycle.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
@@ -4000,9 +3999,7 @@ async function handleInit({
     );
   }
 
-  const agentIntegrationsReady = await maybeSetupAgentIntegrations({
-    repoRoot,
-  });
+  await maybeSetupAgentIntegrations({ repoRoot });
 
   note(
     [
@@ -4029,7 +4026,7 @@ async function handleInit({
     });
   }
 
-  return agentIntegrationsReady ? 0 : 1;
+  return 0;
 }
 
 async function handleInitAuto({
@@ -4321,65 +4318,77 @@ type SetupIntegration = "cursor" | "claude" | "codex" | "agents" | "mcp";
 
 async function maybeSetupAgentIntegrations(opts: {
   readonly repoRoot: string;
-}): Promise<boolean> {
+}): Promise<void> {
   if (!canPrompt()) {
-    return true;
+    return;
   }
   const shouldSetup = await confirm({
     message: "Set up coding agent integrations? (Cursor/Claude/Codex)",
     initialValue: true,
   });
   if (isCancel(shouldSetup) || !shouldSetup) {
-    return true;
+    return;
   }
 
   const selected = await multiselect<SetupIntegration>({
     message: "Select integrations to install:",
     required: true,
     options: [
-      { value: "cursor", label: "Hack Cursor plugin (user-installed)" },
-      { value: "claude", label: "Hack Claude Code plugin (user-installed)" },
-      { value: "codex", label: "Hack Codex plugin (user-installed)" },
+      { value: "cursor", label: "Cursor rules (.cursor/rules/hack.mdc)" },
+      {
+        value: "claude",
+        label: "Claude Code hooks (.claude/settings.local.json)",
+      },
+      { value: "codex", label: "Codex skill (.codex/skills/hack-cli)" },
       { value: "agents", label: "AGENTS.md / CLAUDE.md snippets" },
-      { value: "mcp", label: "Standalone MCP config (advanced)" },
+      { value: "mcp", label: "MCP config (no-shell clients)" },
     ],
     initialValues: ["cursor", "claude", "codex"],
   });
   if (isCancel(selected) || selected.length === 0) {
-    return true;
+    return;
   }
 
   const selection = new Set(selected);
-  const pluginResults = await Promise.all([
-    prepareSelectedAgentPlugin({
-      selected: selection.has("cursor"),
-      label: "Hack Cursor plugin",
-      prepare: async () =>
-        await prepareHackCursorPlugin({
-          scope: "project",
-          projectRoot: opts.repoRoot,
-        }),
-    }),
-    prepareSelectedAgentPlugin({
-      selected: selection.has("claude"),
-      label: "Hack Claude Code plugin",
-      prepare: async () =>
-        await prepareHackClaudePlugin({
-          scope: "project",
-          projectRoot: opts.repoRoot,
-        }),
-    }),
-    prepareSelectedAgentPlugin({
-      selected: selection.has("codex"),
-      label: "Hack Codex plugin",
-      prepare: async () =>
-        await prepareHackCodexPlugin({
-          scope: "project",
-          projectRoot: opts.repoRoot,
-        }),
-    }),
-  ]);
-  let integrationsReady = pluginResults.every(Boolean);
+
+  if (selection.has("cursor")) {
+    const result = await installCursorRules({
+      scope: "project",
+      projectRoot: opts.repoRoot,
+    });
+    logInstallResult({
+      label: "Cursor rules",
+      status: result.status,
+      path: result.path,
+      message: result.message,
+    });
+  }
+
+  if (selection.has("claude")) {
+    const result = await installClaudeHooks({
+      scope: "project",
+      projectRoot: opts.repoRoot,
+    });
+    logInstallResult({
+      label: "Claude hooks",
+      status: result.status,
+      path: result.path,
+      message: result.message,
+    });
+  }
+
+  if (selection.has("codex")) {
+    const result = await installCodexSkill({
+      scope: "project",
+      projectRoot: opts.repoRoot,
+    });
+    logInstallResult({
+      label: "Codex skill",
+      status: result.status,
+      path: result.path,
+      message: result.message,
+    });
+  }
 
   if (selection.has("agents")) {
     const results = await upsertAgentDocs({
@@ -4387,22 +4396,21 @@ async function maybeSetupAgentIntegrations(opts: {
       targets: ["agents", "claude"],
     });
     for (const result of results) {
-      integrationsReady =
-        logInstallResult({
-          label: "Agent docs",
-          status: result.status,
-          path: result.path,
-          message: result.message,
-        }) && integrationsReady;
+      logInstallResult({
+        label: "Agent docs",
+        status: result.status,
+        path: result.path,
+        message: result.message,
+      });
     }
   }
 
   if (selection.has("mcp")) {
     const targetHints = selected.filter(
-      (value) => value === "cursor" || value === "claude"
+      (value) => value === "cursor" || value === "claude" || value === "codex"
     );
     const targets = (
-      targetHints.length > 0 ? targetHints : ["cursor", "claude"]
+      targetHints.length > 0 ? targetHints : ["cursor", "claude", "codex"]
     ) as McpTarget[];
 
     const results = await installMcpConfig({
@@ -4412,82 +4420,33 @@ async function maybeSetupAgentIntegrations(opts: {
     });
 
     for (const result of results) {
-      integrationsReady =
-        logInstallResult({
-          label: "MCP config",
-          status: result.status,
-          path: result.path ?? "unknown path",
-          message: result.message,
-        }) && integrationsReady;
+      logInstallResult({
+        label: "MCP config",
+        status: result.status,
+        path: result.path ?? "unknown path",
+        message: result.message,
+      });
     }
   }
-
-  return integrationsReady;
 }
 
-async function prepareSelectedAgentPlugin({
-  selected,
-  label,
-  prepare,
-}: {
-  readonly selected: boolean;
-  readonly label: string;
-  readonly prepare: () => Promise<{
-    readonly status: string;
-    readonly cleanupStatus?: string;
-    readonly path: string;
-    readonly message?: string;
-  }>;
-}): Promise<boolean> {
-  if (!selected) {
-    return true;
-  }
-  const result = await prepare();
-  return logInstallResult({
-    label,
-    status: result.status,
-    cleanupStatus: result.cleanupStatus,
-    path: result.path,
-    message: result.message,
-  });
-}
-
-export function logInstallResult(opts: {
+function logInstallResult(opts: {
   readonly label: string;
   readonly status: string;
-  readonly cleanupStatus?: string;
   readonly path: string;
   readonly message?: string;
-}): boolean {
-  const outcome = resolveAgentPluginInstallOutcome({
-    status: opts.status,
-    cleanupStatus: opts.cleanupStatus,
-  });
-  if (outcome === "error") {
+}): void {
+  if (opts.status === "error") {
     logger.warn({ message: opts.message ?? `Failed to update ${opts.label}` });
-    return false;
+    return;
   }
 
-  if (outcome === "warning") {
-    logger.warn({
-      message:
-        opts.message ??
-        `${opts.label} is not ready (${opts.status}) at ${opts.path}`,
-    });
-    return false;
+  if (opts.status === "noop") {
+    logger.info({ message: `No changes for ${opts.label} (${opts.path})` });
+    return;
   }
 
-  if (outcome === "unchanged") {
-    logger.info({
-      message: opts.message ?? `No changes for ${opts.label} (${opts.path})`,
-    });
-    return true;
-  }
-
-  logger.success({
-    message: opts.message ?? `Updated ${opts.label} at ${opts.path}`,
-  });
-  return true;
+  logger.success({ message: `Updated ${opts.label} at ${opts.path}` });
 }
 
 // Exported for direct unit-testing of the auto (non-interactive) discovery

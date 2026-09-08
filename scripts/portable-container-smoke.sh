@@ -40,7 +40,6 @@ docker run \
   --rm \
   --platform "${platform}" \
   -e HACK_ENV_SECRET_KEY="${secret_key}" \
-  -e HACK_SETUP_SYNC_MODE=off \
   -v "${fixture_project}:/workspace/project" \
   --workdir /workspace/project \
   --entrypoint sh \

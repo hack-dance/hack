@@ -11,7 +11,6 @@ import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
 } from "../lib/mutagen.ts";
-import { findProjectContext } from "../lib/project.ts";
 import {
   compareVersions,
   detectHackInstall,
@@ -21,7 +20,6 @@ import {
   resolveUpdateTarget,
   selectCliTarballAsset,
 } from "../lib/self-update.ts";
-import { exec } from "../lib/shell.ts";
 
 const optCheck = defineOption({
   name: "check",
@@ -230,9 +228,6 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
   }
 
   const mutagenProvision = await ensureMutagenAfterUpdate();
-  const agentIntegrations = await syncAgentIntegrationsAfterUpdate({
-    binaryPath: bin.path,
-  });
 
   return writeResult({
     json: args.options.json === true,
@@ -246,11 +241,8 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
       binaryPath: bin.path,
       assetsDir,
       mutagen: mutagenProvision,
-      agentIntegrations,
     },
-    human: agentIntegrations.synced
-      ? `Updated to v${latestVersion}; refreshed ${agentIntegrations.scope === "all" ? "project and global" : "global"} agent integrations.`
-      : `Updated to v${latestVersion}. ${agentIntegrations.warning}`,
+    human: `Updated to v${latestVersion}.`,
   });
 };
 
@@ -294,38 +286,6 @@ type MutagenProvisionResult = {
   readonly path: string | null;
   readonly warning?: string;
 };
-
-type AgentIntegrationUpdateResult = {
-  readonly synced: boolean;
-  readonly scope: "global" | "all";
-  readonly warning?: string;
-};
-
-/** Refresh the newly installed CLI's generated rules before the old process exits. */
-async function syncAgentIntegrationsAfterUpdate(opts: {
-  readonly binaryPath: string;
-}): Promise<AgentIntegrationUpdateResult> {
-  const project = await findProjectContext(process.cwd());
-  const scope = project ? "all" : "global";
-  const args = [
-    opts.binaryPath,
-    "setup",
-    "sync",
-    ...(project ? ["--all-scopes"] : ["--global"]),
-  ];
-  const result = await exec(args, { stdin: "ignore" });
-  if (result.exitCode === 0) {
-    return { synced: true, scope };
-  }
-  const detail = result.stderr.trim() || result.stdout.trim();
-  return {
-    synced: false,
-    scope,
-    warning: detail
-      ? `Agent integration refresh failed: ${detail}`
-      : "Agent integration refresh failed; run hack setup sync --all-scopes.",
-  };
-}
 
 async function ensureMutagenAfterUpdate(): Promise<MutagenProvisionResult> {
   const existing = getMutagenPath();
@@ -457,7 +417,6 @@ type UpdateOutput =
       readonly binaryPath: string;
       readonly assetsDir: string;
       readonly mutagen?: MutagenProvisionResult;
-      readonly agentIntegrations?: AgentIntegrationUpdateResult;
     }
   | {
       readonly ok: false;

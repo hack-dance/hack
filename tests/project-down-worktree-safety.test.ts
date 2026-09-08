@@ -31,17 +31,14 @@ type RuntimeFixture = {
 let tempDir: string | null = null;
 let originalHome: string | undefined;
 let originalPath: string | undefined;
-let originalSyncMode: string | undefined;
 let originalLogger: string | undefined;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "hack-down-worktree-"));
   originalHome = process.env.HOME;
   originalPath = process.env.PATH;
-  originalSyncMode = process.env.HACK_SETUP_SYNC_MODE;
   originalLogger = process.env.HACK_LOGGER;
   process.env.HOME = tempDir;
-  process.env.HACK_SETUP_SYNC_MODE = "off";
   process.env.HACK_LOGGER = "console";
 });
 
@@ -52,7 +49,6 @@ afterEach(async () => {
   }
   restoreEnv("HOME", originalHome);
   restoreEnv("PATH", originalPath);
-  restoreEnv("HACK_SETUP_SYNC_MODE", originalSyncMode);
   restoreEnv("HACK_LOGGER", originalLogger);
 });
 

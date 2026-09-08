@@ -20,12 +20,7 @@ type CapturedRunResult = {
 
 type SavedEnv = Record<string, string | undefined>;
 
-const ENV_KEYS = [
-  "PATH",
-  "HACK_HOME",
-  "HACK_NO_INTERACTIVE",
-  "HACK_SETUP_SYNC_MODE",
-] as const;
+const ENV_KEYS = ["PATH", "HACK_HOME", "HACK_NO_INTERACTIVE"] as const;
 
 let tempDir: string | null = null;
 let savedEnv: SavedEnv = {};
@@ -42,7 +37,6 @@ beforeEach(async () => {
   process.env.PATH = join(tempDir, "empty-path");
   process.env.HACK_HOME = join(tempDir, "hack-home");
   process.env.HACK_NO_INTERACTIVE = "1";
-  process.env.HACK_SETUP_SYNC_MODE = "off";
 });
 
 afterEach(async () => {

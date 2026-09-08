@@ -1,42 +1,14 @@
-import {
-  checkDeprecatedHackClaudeIntegration,
-  checkHackClaudePlugin,
-  removeDeprecatedHackClaudeIntegration,
-} from "../agents/claude-plugin.ts";
-import {
-  checkDeprecatedHackCodexIntegration,
-  checkHackCodexPlugin,
-  removeDeprecatedHackCodexIntegration,
-} from "../agents/codex-plugin.ts";
-import {
-  checkDeprecatedHackCursorIntegration,
-  checkHackCursorPlugin,
-  removeDeprecatedHackCursorIntegration,
-} from "../agents/cursor-plugin.ts";
+import { checkClaudeHooks } from "../agents/claude.ts";
+import { checkCodexSkill } from "../agents/codex-skill.ts";
+import { checkCursorRules } from "../agents/cursor.ts";
 import { HACK_AGENT_INTEGRATION_CLI_VERSION } from "../agents/instruction-source.ts";
 import {
-  checkDeprecatedSharedHackSkills,
-  checkSharedHackSkill,
-  installSharedHackSkill,
-  removeDeprecatedSharedHackSkills,
-} from "../agents/shared-skill.ts";
-import {
-  checkDeprecatedTicketsAgentDocs,
-  removeTicketsAgentDocs,
-} from "../control-plane/extensions/tickets/agent-docs.ts";
-import {
-  checkDeprecatedTicketsSkill,
-  removeTicketsSkill,
-} from "../control-plane/extensions/tickets/tickets-skill.ts";
-import { findProjectContext } from "../lib/project.ts";
-import {
-  type AgentDocCheckResult,
-  checkAgentDocs,
-  upsertAgentDocs,
-} from "../mcp/agent-docs.ts";
-import { logger } from "../ui/logger.ts";
-
-type IntegrationSyncMode = "auto" | "warn" | "off";
+  checkLegacyProjectAgentArtifacts,
+  checkLegacyUserAgentArtifacts,
+} from "../agents/legacy-artifacts.ts";
+import { checkSharedHackSkill } from "../agents/shared-skill.ts";
+import { type AgentDocCheckResult, checkAgentDocs } from "../mcp/agent-docs.ts";
+import { checkMcpConfig, type McpCheckResult } from "../mcp/install.ts";
 
 export type AgentIntegrationFreshnessReport = {
   readonly status: "current" | "stale";
@@ -46,88 +18,24 @@ export type AgentIntegrationFreshnessReport = {
 };
 
 const SYNC_COMMAND = "hack setup sync --all-scopes";
-const INTEGRATION_SYNC_MODE_ENV = "HACK_SETUP_SYNC_MODE";
 const VERIFY_COMMAND = "hack setup sync --all-scopes --check";
-const SKIP_TOP_LEVEL = new Set([
-  "setup",
-  "mcp",
-  "agent",
-  "update",
-  "help",
-  "version",
-]);
-
-/**
- * Project-level integration guard.
- *
- * For interactive sessions, detect drift in generated docs/skills/MCP configs.
- * Default behavior is auto-heal; fallback is a compact warning with the fix command.
- */
-export async function maybeEnsureAgentIntegrations(opts: {
-  readonly cwd: string;
-  readonly commandPath: readonly string[];
-}): Promise<void> {
-  if (!shouldRunIntegrationGuard({ commandPath: opts.commandPath })) {
-    return;
-  }
-
-  const mode = resolveIntegrationSyncMode();
-  if (mode === "off") {
-    return;
-  }
-
-  const project = await findProjectContext(opts.cwd);
-  if (!project) {
-    return;
-  }
-
-  const drift = await detectIntegrationDrift({
-    projectRoot: project.projectRoot,
-  });
-  if (!drift.hasDrift) {
-    return;
-  }
-
-  if (mode === "auto") {
-    logger.warn({
-      message:
-        "Detected stale Hack agent integrations. Refreshing project and global rules before this command continues.",
-    });
-    const autoSync = await autoSyncIntegrations({
-      projectRoot: project.projectRoot,
-    });
-    if (autoSync.ok) {
-      logger.warn({
-        message:
-          "Refreshed Hack agent integrations. Reload the agent session before relying on cached Hack rules; verify with: hack setup sync --all-scopes --check",
-      });
-      return;
-    }
-    logger.warn({
-      message: `Agent integrations are out of sync and auto-sync could not fully repair them. Run: ${SYNC_COMMAND}`,
-    });
-    return;
-  }
-
-  logger.warn({
-    message: `Hack agent integrations are stale (project/global docs, skills, or MCP). Do not rely on cached rules. Run: ${SYNC_COMMAND}, then reload the agent session.`,
-  });
-}
 
 /** Inspect project and global generated guidance without mutating it. */
 export async function inspectAgentIntegrationFreshness(opts: {
-  readonly projectRoot: string;
+  readonly projectRoot: string | null;
 }): Promise<AgentIntegrationFreshnessReport> {
   const drift = await detectIntegrationDrift(opts);
   return {
     status: drift.hasDrift ? "stale" : "current",
     cliVersion: HACK_AGENT_INTEGRATION_CLI_VERSION,
-    fixCommand: SYNC_COMMAND,
-    verifyCommand: VERIFY_COMMAND,
+    fixCommand: opts.projectRoot ? SYNC_COMMAND : "hack setup sync --global",
+    verifyCommand: opts.projectRoot
+      ? VERIFY_COMMAND
+      : "hack setup sync --global --check",
   };
 }
 
-/** Render an upfront status block suitable for SessionStart hooks and agents. */
+/** Render a non-blocking result for an explicitly requested integration inventory. */
 export function renderAgentIntegrationFreshnessNotice(opts: {
   readonly report: AgentIntegrationFreshnessReport;
 }): string {
@@ -135,117 +43,61 @@ export function renderAgentIntegrationFreshnessNotice(opts: {
     return `Hack agent integration freshness: current (CLI v${opts.report.cliVersion}).`;
   }
   return [
-    `WARNING: Hack agent integrations are stale for CLI v${opts.report.cliVersion}.`,
-    "Do not rely on cached Hack rules or skills until they are refreshed.",
-    `Fix project + global integrations: ${opts.report.fixCommand}`,
-    `Verify: ${opts.report.verifyCommand}`,
-    "Then reload the agent session so it reads the updated rules.",
+    `Hack integration inventory: review needed (CLI v${opts.report.cliVersion}).`,
+    "Some integrations are missing, stale, or could not be checked. Missing optional integrations need not be installed.",
+    `Inspect affected paths: ${opts.report.verifyCommand}`,
+    "Repair only the affected integration and scope authorized for this task.",
+    `For an explicitly requested full refresh: ${opts.report.fixCommand}`,
+    "Read refreshed guidance; restart only if the client cannot reload changed hooks or skills. Unrelated work can continue.",
   ].join("\n");
 }
 
-function shouldRunIntegrationGuard(opts: {
-  readonly commandPath: readonly string[];
-}): boolean {
-  const explicitMode = (process.env[INTEGRATION_SYNC_MODE_ENV] ?? "").trim();
-  if (!(process.stdout.isTTY || process.stderr.isTTY || explicitMode)) {
-    return false;
-  }
-
-  const topLevel = opts.commandPath[0];
-  if (typeof topLevel !== "string" || topLevel.length === 0) {
-    return false;
-  }
-  return !SKIP_TOP_LEVEL.has(topLevel);
-}
-
-function resolveIntegrationSyncMode(): IntegrationSyncMode {
-  const raw = (process.env[INTEGRATION_SYNC_MODE_ENV] ?? "")
-    .trim()
-    .toLowerCase();
-  if (raw === "off") {
-    return "off";
-  }
-  if (raw === "warn") {
-    return "warn";
-  }
-  return "auto";
-}
-
 async function detectIntegrationDrift(opts: {
-  readonly projectRoot: string;
+  readonly projectRoot: string | null;
 }): Promise<{ readonly hasDrift: boolean }> {
-  const [
-    cursorProject,
-    cursorUser,
-    claudeProject,
-    claudeUser,
-    codexProject,
-    codexUser,
-    ticketsProject,
-    ticketsUser,
-    ticketsDocs,
-    sharedSkill,
-    deprecatedSharedSkills,
-    docs,
-  ] = await Promise.all([
-    checkDeprecatedHackCursorIntegration({
-      scope: "project",
-      projectRoot: opts.projectRoot,
-    }),
-    checkDeprecatedHackCursorIntegration({ scope: "user" }),
-    checkDeprecatedHackClaudeIntegration({
-      scope: "project",
-      projectRoot: opts.projectRoot,
-    }),
-    checkDeprecatedHackClaudeIntegration({ scope: "user" }),
-    checkDeprecatedHackCodexIntegration({
-      scope: "project",
-      projectRoot: opts.projectRoot,
-    }),
-    checkDeprecatedHackCodexIntegration({ scope: "user" }),
-    checkDeprecatedTicketsSkill({
-      scope: "project",
-      projectRoot: opts.projectRoot,
-    }),
-    checkDeprecatedTicketsSkill({ scope: "user" }),
-    checkDeprecatedTicketsAgentDocs({
-      projectRoot: opts.projectRoot,
-      targets: ["agents", "claude"],
-    }),
-    checkSharedHackSkill(),
-    checkDeprecatedSharedHackSkills(),
-    checkAgentDocs({
-      projectRoot: opts.projectRoot,
-      targets: ["agents", "claude"],
-    }),
+  const projectRoot = opts.projectRoot;
+  const [singleChecks, mcpChecks, docs, legacy] = await Promise.all([
+    Promise.all([
+      checkCursorRules({ scope: "user" }),
+      checkClaudeHooks({ scope: "user" }),
+      checkCodexSkill({ scope: "user" }),
+      checkSharedHackSkill(),
+      ...(projectRoot
+        ? [
+            checkCursorRules({ scope: "project", projectRoot }),
+            checkClaudeHooks({ scope: "project", projectRoot }),
+            checkCodexSkill({ scope: "project", projectRoot }),
+          ]
+        : []),
+    ]),
+    Promise.all([
+      checkMcpConfig({ scope: "user", targets: ["cursor", "claude", "codex"] }),
+      ...(projectRoot
+        ? [
+            checkMcpConfig({
+              scope: "project",
+              projectRoot,
+              targets: ["cursor", "claude", "codex"],
+            }),
+          ]
+        : []),
+    ]),
+    projectRoot
+      ? checkAgentDocs({ projectRoot, targets: ["agents", "claude"] })
+      : [],
+    Promise.all([
+      checkLegacyUserAgentArtifacts(),
+      ...(projectRoot
+        ? [checkLegacyProjectAgentArtifacts({ projectRoot })]
+        : []),
+    ]),
   ]);
-
-  const singleChecks = [
-    cursorProject.status,
-    cursorUser.status,
-    claudeProject.status,
-    claudeUser.status,
-    codexProject.status,
-    codexUser.status,
-    ticketsProject.status,
-    ticketsUser.status,
-    sharedSkill.status,
-  ] as const;
-
-  const singleDrift = singleChecks.some((status) =>
-    hasSingleCheckDrift(status)
-  );
-  const docsDrift = hasDocDrift({ checks: docs });
-  const deprecatedDocsDrift = ticketsDocs.some(
-    (check) => check.status !== "noop" && check.status !== "absent"
-  );
-  const deprecatedSharedDrift = deprecatedSharedSkills.some(
-    (check) => check.status !== "noop" && check.status !== "absent"
-  );
-
   return {
     hasDrift:
-      singleDrift || docsDrift || deprecatedDocsDrift || deprecatedSharedDrift,
+      singleChecks.some((check) => hasSingleCheckDrift(check.status)) ||
+      hasMcpDrift({ checks: mcpChecks.flat() }) ||
+      hasDocDrift({ checks: docs }) ||
+      legacy.flat().some((check) => check.status !== "absent"),
   };
 }
 
@@ -253,139 +105,14 @@ function hasSingleCheckDrift(status: string): boolean {
   return status !== "noop" && status !== "absent";
 }
 
-function hasDocDrift(opts: {
-  readonly checks: readonly AgentDocCheckResult[];
+function hasMcpDrift(opts: {
+  readonly checks: readonly McpCheckResult[];
 }): boolean {
   return opts.checks.some((check) => check.status !== "present");
 }
 
-async function autoSyncIntegrations(opts: {
-  readonly projectRoot: string;
-}): Promise<{ readonly ok: boolean }> {
-  const [
-    cursorStatuses,
-    claudeStatuses,
-    codexStatuses,
-    ticketsProject,
-    ticketsUser,
-    ticketsDocs,
-    sharedSkill,
-    deprecatedSharedSkills,
-    docs,
-  ] = await Promise.all([
-    syncLegacyScopesWhenPluginReady({
-      check: async () => await checkHackCursorPlugin({ scope: "user" }),
-      cleanups: [
-        async () =>
-          await removeDeprecatedHackCursorIntegration({
-            scope: "project",
-            projectRoot: opts.projectRoot,
-          }),
-        async () =>
-          await removeDeprecatedHackCursorIntegration({ scope: "user" }),
-      ],
-    }),
-    syncLegacyScopesWhenPluginReady({
-      check: async () => await checkHackClaudePlugin({ scope: "user" }),
-      cleanups: [
-        async () =>
-          await removeDeprecatedHackClaudeIntegration({
-            scope: "project",
-            projectRoot: opts.projectRoot,
-          }),
-        async () =>
-          await removeDeprecatedHackClaudeIntegration({ scope: "user" }),
-      ],
-    }),
-    syncLegacyScopesWhenPluginReady({
-      check: async () => await checkHackCodexPlugin({ scope: "user" }),
-      cleanups: [
-        async () =>
-          await removeDeprecatedHackCodexIntegration({
-            scope: "project",
-            projectRoot: opts.projectRoot,
-          }),
-        async () =>
-          await removeDeprecatedHackCodexIntegration({ scope: "user" }),
-      ],
-    }),
-    removeTicketsSkill({ scope: "project", projectRoot: opts.projectRoot }),
-    removeTicketsSkill({ scope: "user" }),
-    removeTicketsAgentDocs({
-      projectRoot: opts.projectRoot,
-      targets: ["agents", "claude"],
-    }),
-    installSharedHackSkill(),
-    removeDeprecatedSharedHackSkills(),
-    upsertAgentDocs({
-      projectRoot: opts.projectRoot,
-      targets: ["agents", "claude"],
-    }),
-  ]);
-
-  const nativeStatuses = [
-    ...cursorStatuses,
-    ...claudeStatuses,
-    ...codexStatuses,
-  ] as const;
-  const singleStatuses = [
-    ticketsProject.status,
-    ticketsUser.status,
-    sharedSkill.status,
-  ] as const;
-  const nativeErrors = nativeStatuses.some((status) =>
-    hasNativeSyncFailure(status)
-  );
-  const singleErrors = singleStatuses.some((status) =>
-    hasSingleInstallError(status)
-  );
-  const docsErrors = hasDocInstallErrors({ results: docs });
-  const ticketsDocsErrors = hasDocInstallErrors({ results: ticketsDocs });
-  const deprecatedSharedErrors = deprecatedSharedSkills.some(
-    (result) => result.status === "error"
-  );
-
-  return {
-    ok: !(
-      singleErrors ||
-      nativeErrors ||
-      docsErrors ||
-      ticketsDocsErrors ||
-      deprecatedSharedErrors
-    ),
-  };
-}
-
-function hasSingleInstallError(status: string): boolean {
-  return status === "error";
-}
-
-function hasNativeSyncFailure(status: string): boolean {
-  return ["error", "missing", "stale", "deprecated", "preserved"].includes(
-    status
-  );
-}
-
-/** Gate automatic project/user cleanup behind one native-plugin readiness check. */
-export async function syncLegacyScopesWhenPluginReady({
-  check,
-  cleanups,
-}: {
-  readonly check: () => Promise<{ readonly status: string }>;
-  readonly cleanups: readonly (() => Promise<{ readonly status: string }>)[];
-}): Promise<readonly string[]> {
-  const plugin = await check();
-  if (plugin.status !== "noop") {
-    return [plugin.status];
-  }
-  const results = await Promise.all(
-    cleanups.map(async (cleanup) => await cleanup())
-  );
-  return results.map((result) => result.status);
-}
-
-function hasDocInstallErrors(opts: {
-  readonly results: readonly { readonly status: string }[];
+function hasDocDrift(opts: {
+  readonly checks: readonly AgentDocCheckResult[];
 }): boolean {
-  return opts.results.some((result) => result.status === "error");
+  return opts.checks.some((check) => check.status !== "present");
 }

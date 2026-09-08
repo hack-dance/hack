@@ -1,23 +1,17 @@
 # Hack agent plugin
 
-Operate and onboard [Hack](https://github.com/hack-dance/hack)-managed local development
-environments from Cursor, Claude Code, or Codex.
+Optional Hack integration for Codex, Claude Code, and Cursor. Install the `hack`
+executable first; the plugin uses it from PATH.
 
-The plugin bundles:
+The bundle contains `hack-cli` and `hack-init` skills, `hack mcp serve`, Claude
+primer hooks, and a Cursor rule selected when relevant. It is generated from
+Hack's canonical guidance and versioned with the CLI.
 
-- `hack-cli`: local runtime, environment, logs, sessions, and diagnostic guidance
-- `hack-init`: agent-assisted onboarding through `hack agent onboard`
-- `hack mcp serve`: the no-shell MCP fallback
-- client-native Cursor rules and Claude Code primer hooks
+See [installation and migration guidance](../../docs/integrations.md#optional-native-plugins).
+Existing standalone setup remains supported. Installation never deletes legacy
+content, changes global policy, or triggers broad integration sync. Use one integration
+path per client to avoid duplicate skills, hooks, and MCP registrations.
 
-The `hack` executable must be installed and available on `PATH`. Plugin skills prefer the CLI when
-shell access is available and use MCP only when it is not.
-
-## Installation
-
-See the repository's [agent integration guide](../../docs/integrations.md) for the native marketplace
-commands for Cursor, Claude Code, and Codex. Start a new agent session after installing or updating
-the plugin.
-
-This directory is generated and versioned with the Hack CLI release. Update canonical guidance in
-`src/agents/instruction-source.ts`, then run `bun run generate:agent-plugins`.
+Contributors: run `bun run generate:agent-plugins` after changing canonical guidance.
+Do not edit generated skills or rules directly. Validate actual component loading in
+a fresh client session before describing an installation as working.

@@ -46,8 +46,7 @@ the branch — review a PR while your main checkout keeps running.
 **Built for agents.** `hack init --with claude|codex` hands setup to an agent.
 Machine surfaces are first-class: `--json` envelopes with stable error codes,
 `--no-interactive`, and agent instructions that sync themselves into
-AGENTS.md/CLAUDE.md. Cursor, Claude Code, and Codex support ship as native,
-user-installed Hack plugins from this repository's marketplaces.
+AGENTS.md/CLAUDE.md, Cursor rules, and Codex skills.
 
 ## More than ports
 
@@ -150,3 +149,6 @@ experimental — hidden behind `hack help --all`.
 ## License
 
 See [LICENSE](./LICENSE).
+
+Optional native plugins for Codex, Claude Code, and Cursor bundle Hack skills and MCP.
+See [agent plugin setup](docs/integrations.md#optional-native-plugins). Existing standalone setup remains supported.

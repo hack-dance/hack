@@ -1642,12 +1642,11 @@ hack setup <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack setup tmux` | Install the recommended tmux binding for hack workspaces |
-| `hack setup cursor` | Check or prepare the official Hack plugin for Cursor |
-| `hack setup claude` | Check or prepare the official Hack plugin for Claude Code |
-| `hack setup codex` | Check or prepare the official Hack plugin for Codex |
-| `hack setup tickets` | Remove or audit the deprecated Hack Tickets skill |
+| `hack setup cursor` | Install Cursor rules for hack CLI usage |
+| `hack setup claude` | Install Claude Code hooks for hack CLI usage |
+| `hack setup codex` | Install Codex skill for hack CLI usage |
 | `hack setup agents` | Install AGENTS.md / CLAUDE.md snippets for hack CLI usage |
-| `hack setup sync` | Refresh project/global agent guidance and remove deprecated artifacts |
+| `hack setup sync` | Refresh project/global agent guidance |
 | `hack setup mcp` | Install MCP configs for hack CLI usage (no-shell only) |
 
 ### Options
@@ -1680,7 +1679,7 @@ hack setup tmux [options]
 
 ## `hack setup cursor`
 
-Check or prepare the official Hack plugin for Cursor
+Install Cursor rules for hack CLI usage
 
 ### Usage
 
@@ -1702,7 +1701,7 @@ hack setup cursor [options]
 
 ## `hack setup claude`
 
-Check or prepare the official Hack plugin for Claude Code
+Install Claude Code hooks for hack CLI usage
 
 ### Usage
 
@@ -1724,34 +1723,12 @@ hack setup claude [options]
 
 ## `hack setup codex`
 
-Check or prepare the official Hack plugin for Codex
+Install Codex skill for hack CLI usage
 
 ### Usage
 
 ```bash
 hack setup codex [options]
-```
-
-### Options
-
-| Option | Description |
-| --- | --- |
-| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
-| `--global` | Use global (user) scope instead of project scope |
-| `--check` | Check whether integration is installed |
-| `--remove` | Remove integration files/config |
-| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
-| `--help, -h` | Show help |
-| `--version, -v` | Show version |
-
-## `hack setup tickets`
-
-Remove or audit the deprecated Hack Tickets skill
-
-### Usage
-
-```bash
-hack setup tickets [options]
 ```
 
 ### Options
@@ -1792,7 +1769,7 @@ hack setup agents [options]
 
 ## `hack setup sync`
 
-Refresh project/global agent guidance and remove deprecated artifacts
+Refresh project/global agent guidance
 
 ### Usage
 
@@ -1881,6 +1858,7 @@ hack agent prime [options]
 
 | Option | Description |
 | --- | --- |
+| `--check` | Include a read-only project and global integration inventory |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -2049,122 +2027,6 @@ hack secrets delete [name] [options]
 
 
 ## Integrations
-
-## `hack auth [args...]`
-
-Removed: Hack account sign-in no longer ships with the local-first CLI
-
-### Usage
-
-```bash
-hack auth [args...] [options]
-```
-
-Removed in v3: Hack no longer ships a centralized auth broker or hosted account surface.
-
-Migration: Local workflows no longer require Hack account sign-in. Use local project ownership, tickets, env, and sessions directly.
-
-### Arguments
-
-| Arg | Description |
-| --- | --- |
-| `args` | Legacy subcommand and arguments |
-
-### Options
-
-| Option | Description |
-| --- | --- |
-| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
-| `--help, -h` | Show help |
-| `--version, -v` | Show version |
-
-
-## `hack org [args...]`
-
-Removed: hosted organization management is no longer part of Hack
-
-### Usage
-
-```bash
-hack org [args...] [options]
-```
-
-Removed in v3: Hack v3 dropped centralized org and membership administration with the broker-backed control plane.
-
-Migration: Keep project ownership local and use native git collaboration plus repo-local tickets instead.
-
-### Arguments
-
-| Arg | Description |
-| --- | --- |
-| `args` | Legacy subcommand and arguments |
-
-### Options
-
-| Option | Description |
-| --- | --- |
-| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
-| `--help, -h` | Show help |
-| `--version, -v` | Show version |
-
-
-## `hack team [args...]`
-
-Removed: hosted team management is no longer part of Hack
-
-### Usage
-
-```bash
-hack team [args...] [options]
-```
-
-Removed in v3: Hack v3 removed broker-backed team and membership lifecycle management.
-
-Migration: Use repo-local ownership plus native collaboration tools outside Hack.
-
-### Arguments
-
-| Arg | Description |
-| --- | --- |
-| `args` | Legacy subcommand and arguments |
-
-### Options
-
-| Option | Description |
-| --- | --- |
-| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
-| `--help, -h` | Show help |
-| `--version, -v` | Show version |
-
-
-## `hack linear [args...]`
-
-Removed: Linear integration is no longer part of Hack v3
-
-### Usage
-
-```bash
-hack linear [args...] [options]
-```
-
-Removed in v3: Hack v3 removed hosted planning and sync integrations to stay self-contained and local-first.
-
-Migration: Use repo-local tickets for optional in-repo tracking and keep Linear outside Hack.
-
-### Arguments
-
-| Arg | Description |
-| --- | --- |
-| `args` | Legacy subcommand and arguments |
-
-### Options
-
-| Option | Description |
-| --- | --- |
-| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
-| `--help, -h` | Show help |
-| `--version, -v` | Show version |
-
 
 ## `hack env`
 
@@ -2552,44 +2414,6 @@ Start an interactive host shell with the selected Hack env overlay injected. Use
 | `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
 | `--scope <global|service>` | Resolve values for one env scope while still running the command on the host |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
-| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
-| `--help, -h` | Show help |
-| `--version, -v` | Show version |
-
-
-## `hack tickets [args...]`
-
-Deprecated: legacy repo-local Tickets compatibility commands
-
-### Usage
-
-```bash
-hack tickets [args...] [options]
-```
-
-Usage:
-  hack tickets list
-  hack tickets create --title "..."
-  hack tickets show <ticket-id>
-  hack tickets status <ticket-id> <open\|in_progress\|blocked\|done>
-  hack tickets update <ticket-id> [--title "..."] [--body "..."]
-  hack tickets sync
-  hack tickets setup
-  hack tickets tui
-
-Deprecated compatibility surface. It is no longer installed into agent instructions or skills.
-Alias for `hack x tickets <command>`. Requires extension enabled.
-
-### Arguments
-
-| Arg | Description |
-| --- | --- |
-| `args` |  |
-
-### Options
-
-| Option | Description |
-| --- | --- |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

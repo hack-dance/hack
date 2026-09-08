@@ -1,7 +1,7 @@
 import { dirname, resolve } from "node:path";
 
 import { renderCodexSkill } from "../src/agents/codex-skill.ts";
-import { renderCursorPluginRule } from "../src/agents/cursor.ts";
+import { renderCursorRules } from "../src/agents/cursor.ts";
 import { renderHackInitSkill } from "../src/agents/hack-init-skill.ts";
 
 export async function generateAgentPlugins({
@@ -24,7 +24,7 @@ export async function generateAgentPlugins({
     },
     {
       path: resolve(pluginRoot, "rules", "hack.mdc"),
-      content: renderCursorPluginRule(),
+      content: renderPluginRule(),
     },
   ] as const;
 
@@ -46,8 +46,19 @@ export async function generateAgentPlugins({
     >;
     manifest.version = version;
     await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-    await Bun.$`bun x biome format --write ${manifestPath}`.quiet();
+    await Bun.$`${process.execPath} x --no-install biome format --write ${manifestPath}`.quiet();
   }
+}
+
+export function renderPluginRule(): string {
+  return [
+    "---",
+    "description: Use Hack for local services, environments, logs, and project onboarding when working with a Hack-managed project.",
+    "alwaysApply: false",
+    "---",
+    "",
+    renderCursorRules(),
+  ].join("\n");
 }
 
 if (import.meta.main) {

@@ -34,7 +34,6 @@ if [ -d "\${HOME}/.local/share/mise/shims" ]; then
 fi
 export HACK_EXECUTION_MODE="${mode}"
 export HACK_DAEMON_DISABLE_DOCKER_EVENTS="\${HACK_DAEMON_DISABLE_DOCKER_EVENTS:-1}"
-export HACK_SETUP_SYNC_MODE="\${HACK_SETUP_SYNC_MODE:-warn}"
 export HACK_ASSETS_DIR="\${HACK_ASSETS_DIR:-${assets_dir}}"
 exec "${bun_bin}" "${repo_root}/index.ts" "\$@"
 EOF

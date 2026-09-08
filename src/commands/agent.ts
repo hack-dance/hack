@@ -31,7 +31,15 @@ import {
 import { findExecutableInPath, run } from "../lib/shell.ts";
 import { logger } from "../ui/logger.ts";
 
-type PrimeArgs = CommandArgs<readonly [], readonly []>;
+const primeOptions = [
+  defineOption({
+    name: "check",
+    type: "boolean",
+    long: "--check",
+    description: "Include a read-only project and global integration inventory",
+  } as const),
+] as const;
+type PrimeArgs = CommandArgs<typeof primeOptions, readonly []>;
 type PatternsArgs = CommandArgs<readonly [], readonly []>;
 
 const onboardOptions = [optPath] as const;
@@ -55,7 +63,7 @@ const primeSpec = defineCommand({
   name: "prime",
   summary: "Print agent primer text",
   group: "Agents",
-  options: [],
+  options: primeOptions,
   positionals: [],
   subcommands: [],
 } as const);
@@ -103,25 +111,18 @@ export const agentCommand = defineCommand({
 
 async function handleAgentPrime({
   ctx,
-  args: _args,
+  args,
 }: {
   readonly ctx: CliContext;
   readonly args: PrimeArgs;
 }): Promise<number> {
-  const project = await findProjectContext(ctx.cwd);
-  if (!project) {
-    process.stdout.write(
-      [
-        "Hack agent integration freshness: not checked outside a Hack project.",
-        "From a project, run: hack setup sync --all-scopes --check",
-        "",
-        renderAgentPrimer(),
-      ].join("\n")
-    );
+  if (!args.options.check) {
+    process.stdout.write(`${renderAgentPrimer()}\n`);
     return 0;
   }
+  const project = await findProjectContext(ctx.cwd);
   const report = await inspectAgentIntegrationFreshness({
-    projectRoot: project.projectRoot,
+    projectRoot: project?.projectRoot ?? null,
   });
   process.stdout.write(
     `${renderAgentIntegrationFreshnessNotice({ report })}\n\n${renderAgentPrimer()}`

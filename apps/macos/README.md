@@ -2,7 +2,9 @@
 
 Native macOS app for managing local hack projects, runtime status, and quick actions.
 
-Hack v3 keeps the app intentionally small and local-first.
+The source is retained for possible future work, but the app is currently unsupported and is not
+built, signed, or published by Hack's CI/release pipeline. The commands below are local development
+tools only.
 
 ## Requirements
 
@@ -95,7 +97,9 @@ bun run macos:ghostty:setup
 
 This script:
 
-- clones the Ghostty repo into `apps/macos/vendor/ghostty`
+- checks out the pinned Ghostty revision from
+  `apps/macos/Experiments/GhosttyVTBridge/GHOSTTY_REVISION` into
+  `apps/macos/vendor/ghostty`
 - builds the VT bridge via Zig
 - installs `libhack_ghostty_vt.dylib` into:
   `~/Library/Application Support/Hack/ghostty/lib`

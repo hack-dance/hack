@@ -10,14 +10,11 @@ type CapturedRunResult = {
 };
 
 let tempDir: string | null = null;
-let originalSetupSyncMode: string | undefined;
 let originalLogger: string | undefined;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "hack-up-missing-project-"));
-  originalSetupSyncMode = process.env.HACK_SETUP_SYNC_MODE;
   originalLogger = process.env.HACK_LOGGER;
-  process.env.HACK_SETUP_SYNC_MODE = "off";
   process.env.HACK_LOGGER = "console";
 });
 
@@ -25,11 +22,6 @@ afterEach(async () => {
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
-  }
-  if (originalSetupSyncMode !== undefined) {
-    process.env.HACK_SETUP_SYNC_MODE = originalSetupSyncMode;
-  } else {
-    process.env.HACK_SETUP_SYNC_MODE = undefined;
   }
   if (originalLogger !== undefined) {
     process.env.HACK_LOGGER = originalLogger;

@@ -88,9 +88,6 @@ struct ProjectDetailView: View {
     .onChange(of: lifecycleSummary.hasEntries) { _, _ in
       ensureSidebarSelection()
     }
-    .onChange(of: project.supportsTickets) { _, _ in
-      ensureSidebarSelection()
-    }
     .onChange(of: project.kind) { _, _ in
       ensureSidebarSelection()
     }

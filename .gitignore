@@ -73,7 +73,7 @@ apps/macos/.ghostty/
 zig-cache/
 zig-out/
 
-# hack tickets
+# Retired Hack Tickets cache retained for upgrade safety
 .hack/tickets/
 .hack/.internal/
 .hack/supervisor/

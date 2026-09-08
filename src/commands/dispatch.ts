@@ -6,7 +6,6 @@ import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optFollow, optJson, optTail } from "../cli/options.ts";
 import type { JobMeta } from "../control-plane/extensions/supervisor/job-store.ts";
-import { persistDispatchRunToTicketsChannel } from "../control-plane/extensions/tickets/runs-channel.ts";
 import { appendPolicyAuditEvent } from "../control-plane/policy/audit.ts";
 import { resolvePolicyDecision } from "../control-plane/policy/engine.ts";
 import { assessCommandRisk } from "../control-plane/policy/risk.ts";
@@ -135,45 +134,6 @@ const optApprove = defineOption({
   description: "Approve high/critical command risk without interactive prompt",
 } as const);
 
-const optPr = defineOption({
-  name: "pr",
-  type: "boolean",
-  long: "--pr",
-  description: "Removed in v3: legacy GitHub PR automation flag",
-} as const);
-
-const optPrBase = defineOption({
-  name: "prBase",
-  type: "string",
-  long: "--pr-base",
-  valueHint: "<branch>",
-  description: "Removed in v3: legacy GitHub PR automation flag",
-} as const);
-
-const optPrTitle = defineOption({
-  name: "prTitle",
-  type: "string",
-  long: "--pr-title",
-  valueHint: "<title>",
-  description: "Removed in v3: legacy GitHub PR automation flag",
-} as const);
-
-const optPrBody = defineOption({
-  name: "prBody",
-  type: "string",
-  long: "--pr-body",
-  valueHint: "<markdown>",
-  description: "Removed in v3: legacy GitHub PR automation flag",
-} as const);
-
-const optGitHubProfile = defineOption({
-  name: "githubProfile",
-  type: "string",
-  long: "--github-profile",
-  valueHint: "<profile-id>",
-  description: "Removed in v3: legacy GitHub PR automation flag",
-} as const);
-
 const runOptions = [
   optNode,
   optProvider,
@@ -184,11 +144,6 @@ const runOptions = [
   optTicket,
   optRunner,
   optApprove,
-  optPr,
-  optPrBase,
-  optPrTitle,
-  optPrBody,
-  optGitHubProfile,
   optJson,
 ] as const;
 
@@ -289,16 +244,6 @@ async function handleDispatchRun({
         "Missing command. Example: hack dispatch run --project my-app --branch feat/foo -- bun test",
     });
     return 1;
-  }
-  const removedPrMessage = resolveRemovedDispatchPrAutomationMessage({
-    pr: args.options.pr,
-    prBase: args.options.prBase,
-    prTitle: args.options.prTitle,
-    prBody: args.options.prBody,
-    githubProfile: args.options.githubProfile,
-  });
-  if (removedPrMessage) {
-    logger.warn({ message: removedPrMessage });
   }
   const runner = (args.options.runner ?? "generic").trim() || "generic";
   const ticketId = (args.options.ticket ?? "").trim() || undefined;
@@ -439,8 +384,6 @@ async function handleDispatchRun({
       errorMessage: policy.error,
       status: "cancelled",
       reason: "policy_denied",
-      controlPlaneConfig: controlPlane.config,
-      actor,
     });
     logger.error({ message: policy.error });
     return 1;
@@ -494,8 +437,6 @@ async function handleDispatchRun({
       errorMessage,
       status: "error",
       reason: "workspace_ensure_failed",
-      controlPlaneConfig: controlPlane.config,
-      actor,
     });
     logger.error({ message: errorMessage });
     return 1;
@@ -556,8 +497,6 @@ async function handleDispatchRun({
       errorMessage: preparedSync.error,
       status: "error",
       reason: preparedSync.reason,
-      controlPlaneConfig: controlPlane.config,
-      actor,
     });
     logger.error({ message: preparedSync.error });
     return 1;
@@ -591,8 +530,6 @@ async function handleDispatchRun({
       errorMessage,
       status: "error",
       reason: "job_create_failed",
-      controlPlaneConfig: controlPlane.config,
-      actor,
     });
     logger.error({ message: errorMessage });
     return 1;
@@ -719,13 +656,6 @@ async function handleDispatchRun({
       },
     });
 
-    const currentRun = (await readDispatchRunRecord({ runId })) ?? run;
-    await persistRunArtifactsToCanonicalTickets({
-      run: currentRun,
-      controlPlaneConfig: controlPlane.config,
-      actor,
-    });
-
     const exitCode = status === "completed" ? 0 : 1;
     if (args.options.json) {
       process.stdout.write(
@@ -779,8 +709,6 @@ async function handleDispatchRun({
     errorMessage: failure,
     status: "error",
     reason: "job_stream_failed",
-    controlPlaneConfig: controlPlane.config,
-    actor,
   });
   logger.error({ message: failure });
   return 1;
@@ -1926,8 +1854,6 @@ async function finalizeFailedRun(input: {
   readonly errorMessage: string;
   readonly status: DispatchRunStatus;
   readonly reason: string;
-  readonly controlPlaneConfig: ControlPlaneConfig;
-  readonly actor: string;
 }): Promise<void> {
   await updateDispatchRunRecord({
     runId: input.run.runId,
@@ -1962,13 +1888,6 @@ async function finalizeFailedRun(input: {
       error: input.errorMessage,
       reason: input.reason,
     },
-  });
-  const currentRun =
-    (await readDispatchRunRecord({ runId: input.run.runId })) ?? input.run;
-  await persistRunArtifactsToCanonicalTickets({
-    run: currentRun,
-    controlPlaneConfig: input.controlPlaneConfig,
-    actor: input.actor,
   });
 }
 
@@ -2036,43 +1955,6 @@ function runStatusToExitCode(input: {
     return 0;
   }
   return 1;
-}
-
-async function persistRunArtifactsToCanonicalTickets(input: {
-  readonly run: DispatchRunRecord;
-  readonly controlPlaneConfig: ControlPlaneConfig;
-  readonly actor: string;
-}): Promise<void> {
-  if (!input.run.projectRoot) {
-    return;
-  }
-  const persisted = await persistDispatchRunToTicketsChannel({
-    projectRoot: input.run.projectRoot,
-    controlPlaneConfig: input.controlPlaneConfig,
-    run: input.run,
-    actor: input.actor,
-    logger,
-  });
-  if (!persisted.ok) {
-    logger.warn({
-      message: `Failed to persist canonical run artifacts: ${persisted.error}`,
-    });
-    await appendDispatchRunEvent({
-      runId: input.run.runId,
-      event: {
-        type: "run.artifacts.persist_failed",
-        error: persisted.error,
-      },
-    });
-    return;
-  }
-  await appendDispatchRunEvent({
-    runId: input.run.runId,
-    event: {
-      type: "run.artifacts.persisted",
-      canonicalPath: `.hack/tickets/runs/${input.run.runId}`,
-    },
-  });
 }
 
 type StreamOutcome = {
@@ -2324,33 +2206,6 @@ function normalizeOptionalString(value: unknown): string | undefined {
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
 }
-
-function resolveRemovedDispatchPrAutomationMessage(input: {
-  readonly pr?: boolean;
-  readonly prBase?: string;
-  readonly prTitle?: string;
-  readonly prBody?: string;
-  readonly githubProfile?: string;
-}): string | null {
-  const requested =
-    input.pr === true ||
-    normalizeOptionalString(input.prBase) !== undefined ||
-    normalizeOptionalString(input.prTitle) !== undefined ||
-    normalizeOptionalString(input.prBody) !== undefined ||
-    normalizeOptionalString(input.githubProfile) !== undefined;
-  if (!requested) {
-    return null;
-  }
-  return [
-    "Built-in GitHub PR automation was removed in Hack v3.",
-    "Dispatch still runs the remote command, but push and PR follow-up must now use native git and gh outside Hack.",
-    "Migration: run `git push -u origin <branch>` and `gh pr create` or `gh pr edit` after the dispatch completes.",
-  ].join(" ");
-}
-
-export const __testOnlyDispatch = {
-  resolveRemovedDispatchPrAutomationMessage,
-};
 
 function parseConfigBoolean(input: {
   readonly config: Record<string, unknown>;

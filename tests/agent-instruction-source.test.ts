@@ -3,7 +3,11 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { renderCodexSkill } from "../src/agents/codex-skill.ts";
+import {
+  checkCodexSkill,
+  installCodexSkill,
+  renderCodexSkill,
+} from "../src/agents/codex-skill.ts";
 import {
   checkCursorRules,
   installCursorRules,
@@ -97,24 +101,91 @@ test("no stale command patterns in any surface", () => {
   }
 });
 
-test("deprecated tickets do not appear in generated agent guidance", () => {
+test("retired Tickets do not appear in generated agent guidance", () => {
   for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
     expect(
       rendered,
-      `surface "${surface}" mentions deprecated Tickets`
+      `surface "${surface}" mentions retired Tickets`
     ).not.toMatch(/hack[ -]?tickets|dance\.hack\.tickets/i);
   }
 });
 
-test("all generated surfaces expose integration freshness and repair upfront", () => {
+test("active contributor guidance and examples do not advertise retired Tickets", async () => {
+  const guidancePaths = [
+    "WORKFLOW.md",
+    ".hack/README.md",
+    ".factory/library/architecture.md",
+    ".factory/library/environment.md",
+    ".factory/library/user-testing.md",
+    ".factory/skills/control-plane-worker/SKILL.md",
+  ];
+  const retiredGuidancePattern =
+    /`hack(?: x)? tickets\b|optional local tickets|tickets extension|dance\.hack\.tickets/i;
+  for (const path of guidancePaths) {
+    const content = await Bun.file(path).text();
+    expect(content, `${path} advertises retired Tickets`).not.toMatch(
+      retiredGuidancePattern
+    );
+  }
+
+  for (const path of [
+    ".hack/hack.config.json",
+    "examples/basic/.hack/hack.config.json",
+  ]) {
+    const content = await Bun.file(path).text();
+    expect(content, `${path} configures a retired extension`).not.toMatch(
+      /dance\.hack\.(?:github|linear|tickets)/
+    );
+  }
+  expect(await Bun.file("examples/tickets/README.md").exists()).toBe(false);
+});
+
+test("all generated surfaces keep freshness checks scoped and optional", () => {
   for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
     expect(rendered, `surface "${surface}" lacks freshness status`).toContain(
       "Integration freshness"
     );
     expect(rendered).toContain("hack setup sync --all-scopes --check");
     expect(rendered).toContain("hack setup sync --all-scopes");
-    expect(rendered).toContain("reload the agent session");
+    expect(rendered).toContain("restart only if");
+    expect(rendered).not.toContain("At session start, audit");
   }
+});
+
+test("checked-in agent examples use the current integration contract", async () => {
+  const maintenance = INSTRUCTION_SECTIONS.find(
+    (section) => section.id === "maintenance"
+  );
+  expect(maintenance).toBeDefined();
+  const freshness = INSTRUCTION_SECTIONS.find(
+    (section) => section.id === "freshness"
+  );
+  expect(freshness).toBeDefined();
+
+  for (const path of [
+    "examples/basic/AGENTS.md",
+    "examples/basic/CLAUDE.md",
+    ".codex/skills/hack-cli/SKILL.md",
+    ".cursor/rules/hack.mdc",
+  ]) {
+    const content = await Bun.file(path).text();
+    expect(content).toContain(
+      `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``
+    );
+    for (const bullet of [
+      ...(maintenance?.bullets ?? []),
+      ...(freshness?.bullets.slice(1) ?? []),
+    ]) {
+      expect(content, `${path} lacks current maintenance guidance`).toContain(
+        bullet
+      );
+    }
+  }
+
+  const cliGuide = await Bun.file("docs/cli.md").text();
+  expect(cliGuide).not.toContain(
+    "`hack doctor --fix` never inspect or rewrite"
+  );
 });
 
 test("agent integration content revision changes with canonical guidance", () => {
@@ -222,15 +293,25 @@ test("checkCursorRules detects content drift as stale", async () => {
   expect(stale.status).toBe("stale");
 });
 
-test("bundled Codex skill matches the canonical renderer", async () => {
-  const skillPath = join(
-    import.meta.dir,
-    "..",
-    "plugins",
-    "hack",
-    "skills",
-    "hack-cli",
-    "SKILL.md"
+test("checkCodexSkill detects content drift as stale", async () => {
+  const repoRoot = await setupTempRepo();
+  await installCodexSkill({ scope: "project", projectRoot: repoRoot });
+
+  const fresh = await checkCodexSkill({
+    scope: "project",
+    projectRoot: repoRoot,
+  });
+  expect(fresh.status).toBe("noop");
+
+  const skillPath = join(repoRoot, ".codex", "skills", "hack-cli", "SKILL.md");
+  const content = await Bun.file(skillPath).text();
+  await Bun.write(
+    skillPath,
+    content.replace("## Standard workflow", "## Old workflow")
   );
-  expect(await Bun.file(skillPath).text()).toBe(renderCodexSkill());
+  const stale = await checkCodexSkill({
+    scope: "project",
+    projectRoot: repoRoot,
+  });
+  expect(stale.status).toBe("stale");
 });

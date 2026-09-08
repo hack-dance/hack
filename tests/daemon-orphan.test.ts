@@ -8,19 +8,30 @@ const PS_LINES = [
   "  789 vim src/commands/daemon.ts",
   "  999 hack daemon status",
 ];
+const DAEMON_ROOT = "/tmp/hack-home/.hack/daemon";
+const LSOF_LINES = [
+  "p123",
+  `n${DAEMON_ROOT}/hackd.sock`,
+  "p456",
+  `n${DAEMON_ROOT}/hackd.internal.sock`,
+];
 
 test("finds daemon processes not tracked by the pid file", async () => {
   const orphans = await findOrphanDaemonProcesses({
     trackedPid: 123,
+    daemonRoot: DAEMON_ROOT,
     psLines: PS_LINES,
+    lsofLines: LSOF_LINES,
   });
   expect(orphans).toEqual([456]);
 });
 
-test("all daemon processes are orphans when no pid is tracked", async () => {
+test("only socket-owned daemon processes are orphans when no pid is tracked", async () => {
   const orphans = await findOrphanDaemonProcesses({
     trackedPid: null,
+    daemonRoot: DAEMON_ROOT,
     psLines: PS_LINES,
+    lsofLines: LSOF_LINES,
   });
   expect(orphans).toEqual([123, 456]);
 });
@@ -28,6 +39,7 @@ test("all daemon processes are orphans when no pid is tracked", async () => {
 test("ignores its own pid, non-hack executables, and near-miss commands", async () => {
   const orphans = await findOrphanDaemonProcesses({
     trackedPid: null,
+    daemonRoot: DAEMON_ROOT,
     psLines: [
       `  ${process.pid} hack daemon start --foreground`,
       "  789 tail -f daemon-start-foreground.log",
@@ -35,8 +47,39 @@ test("ignores its own pid, non-hack executables, and near-miss commands", async 
       "  791 /tmp/hack-repo/bin/hack-dev daemon start --foreground",
       "  792 bun /tmp/hack-repo/index.ts daemon start --foreground",
     ],
+    lsofLines: [
+      "p791",
+      `n${DAEMON_ROOT}/hackd.sock`,
+      "p792",
+      `n${DAEMON_ROOT}/hackd.internal.sock`,
+    ],
   });
   expect(orphans).toEqual([791, 792]);
+});
+
+test("preserves daemons belonging to another state directory", async () => {
+  const orphans = await findOrphanDaemonProcesses({
+    trackedPid: null,
+    daemonRoot: DAEMON_ROOT,
+    psLines: PS_LINES,
+    lsofLines: [
+      "p123",
+      "n/tmp/other-home/daemon/hackd.sock",
+      "p456",
+      `n${DAEMON_ROOT}/hackd.sock.backup`,
+    ],
+  });
+  expect(orphans).toEqual([]);
+});
+
+test("does not authorize cleanup without socket ownership evidence", async () => {
+  const orphans = await findOrphanDaemonProcesses({
+    trackedPid: null,
+    daemonRoot: DAEMON_ROOT,
+    psLines: PS_LINES,
+    lsofLines: [],
+  });
+  expect(orphans).toEqual([]);
 });
 
 import {

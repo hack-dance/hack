@@ -215,6 +215,13 @@ perform full inspection so missed events and mutable network data remain eventua
 
 If the daemon is not running (or version-mismatched), the CLI falls back to direct Docker calls.
 
+Daemon startup and `hack daemon clear` only terminate untracked daemon processes
+when `lsof` confirms they hold a socket in the target daemon state directory.
+Matching a process name is insufficient: a different `HOME` or `HACK_HOME` may
+own another daemon. If socket ownership cannot be established, automatic orphan
+termination is skipped. Scripted/noninteractive commands do not autostart the
+daemon; after an explicit stop, use `hack daemon start` to restore cached queries.
+
 Runtime health:
 - The daemon treats the container runtime as ephemeral; it fingerprints the engine (socket + engine id)
   and detects resets.

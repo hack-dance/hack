@@ -1,4 +1,8 @@
+import { realpath } from "node:fs/promises";
+import { resolve } from "node:path";
+
 import { readTextFile, writeTextFile } from "../lib/fs.ts";
+import { exec, findExecutableInPath } from "../lib/shell.ts";
 
 export async function readDaemonPid({
   pidPath,
@@ -79,12 +83,18 @@ const WHITESPACE_PATTERN = /\s+/;
  * pid file — the root cause of "daemon starts then exits" contradictions:
  * the orphan holds the API while every newly spawned daemon exits.
  *
+ * Only processes holding a socket in the target daemon directory are eligible.
+ * A command-name match alone cannot distinguish another HOME/HACK_HOME daemon.
+ * Missing ownership evidence must never authorize termination.
+ *
  * @param opts.trackedPid - pid currently recorded in the pid file, if any.
  * @param opts.psLines - injectable `ps -axo pid=,command=` lines for tests.
  */
 export async function findOrphanDaemonProcesses(opts: {
   readonly trackedPid: number | null;
+  readonly daemonRoot: string;
   readonly psLines?: readonly string[];
+  readonly lsofLines?: readonly string[];
 }): Promise<readonly number[]> {
   const lines = opts.psLines ?? (await listProcessTable());
   const orphans: number[] = [];
@@ -110,7 +120,67 @@ export async function findOrphanDaemonProcesses(opts: {
     }
     orphans.push(pid);
   }
-  return orphans;
+  if (orphans.length === 0) {
+    return [];
+  }
+  const owners = await findDaemonSocketOwners({
+    daemonRoot: opts.daemonRoot,
+    lines: opts.lsofLines ?? (await listOpenUnixSockets({ pids: orphans })),
+  });
+  return orphans.filter((orphan) => owners.has(orphan));
+}
+
+async function findDaemonSocketOwners(opts: {
+  readonly daemonRoot: string;
+  readonly lines: readonly string[];
+}): Promise<ReadonlySet<number>> {
+  const roots = new Set([resolve(opts.daemonRoot)]);
+  try {
+    roots.add(await realpath(opts.daemonRoot));
+  } catch {
+    // A deleted directory can still appear in an open socket's pathname.
+  }
+  const socketPaths = new Set(
+    [...roots].flatMap((root) =>
+      ["hackd.sock", "hackd.internal.sock", "gateway.internal.sock"].map(
+        (name) => resolve(root, name)
+      )
+    )
+  );
+  const owners = new Set<number>();
+  let pid: number | null = null;
+  for (const line of opts.lines) {
+    if (line.startsWith("p")) {
+      pid = Number.parseInt(line.slice(1), 10);
+    } else if (
+      pid !== null &&
+      line.startsWith("n") &&
+      socketPaths.has(line.slice(1))
+    ) {
+      owners.add(pid);
+    }
+  }
+  return owners;
+}
+
+async function listOpenUnixSockets(opts: {
+  readonly pids: readonly number[];
+}): Promise<readonly string[]> {
+  const lsof = findExecutableInPath("lsof");
+  if (!lsof) {
+    return [];
+  }
+  try {
+    const result = await exec(
+      // Socket names do not need filesystem stat/readlink calls, which can
+      // block on unrelated mounted filesystems during daemon recovery.
+      [lsof, "-nP", "-b", "-w", "-a", "-U", "-p", opts.pids.join(","), "-Fpn"],
+      { stdin: "ignore", timeoutMs: 3000 }
+    );
+    return result.exitCode === 0 ? result.stdout.split("\n") : [];
+  } catch {
+    return [];
+  }
 }
 
 /**

@@ -252,6 +252,7 @@ async function handleDaemonStart({
   // make every freshly spawned daemon exit cleanly. Sweep them first.
   const orphans = await findOrphanDaemonProcesses({
     trackedPid: status.pid,
+    daemonRoot: paths.root,
   });
   if (orphans.length > 0) {
     logger.warn({
@@ -603,6 +604,7 @@ async function handleDaemonClear({
 
   const orphans = await findOrphanDaemonProcesses({
     trackedPid: status.pid,
+    daemonRoot: paths.root,
   });
   if (orphans.length > 0) {
     logger.warn({

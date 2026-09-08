@@ -73,27 +73,86 @@ export interface RunOptions {
    */
   readonly stdout?: "inherit" | "stderr";
   readonly timeoutMs?: number;
+  /** Forward cancellation to the child, owning its process group when stdin is not a TTY. */
+  readonly forwardSignals?: boolean;
 }
 
 export async function run(
   cmd: readonly string[],
   opts: RunOptions = {}
 ): Promise<number> {
+  const ownsProcessGroup =
+    opts.timeoutMs !== undefined ||
+    (opts.forwardSignals === true && !process.stdin.isTTY);
   const proc = Bun.spawn([...cmd], {
     cwd: opts.cwd,
     env: buildSpawnEnv(opts.env),
     stdin: opts.stdin ?? "inherit",
     stdout: opts.stdout === "stderr" ? 2 : "inherit",
     stderr: "inherit",
-    detached: opts.timeoutMs !== undefined,
+    detached: ownsProcessGroup,
   });
   const timeout = installSubprocessTimeout({
     pid: proc.pid,
     timeoutMs: opts.timeoutMs,
   });
-  const exitCode = await proc.exited;
-  timeout.dispose();
-  return timeout.didTimeout() ? 124 : exitCode;
+  const cancellation = opts.forwardSignals
+    ? installSubprocessSignalForwarding({ pid: proc.pid, ownsProcessGroup })
+    : null;
+  try {
+    const exitCode = await proc.exited;
+    return cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
+  } finally {
+    timeout.dispose();
+    cancellation?.dispose();
+  }
+}
+
+/**
+ * Noninteractive commands own a separate group so cancelling just the wrapper
+ * also stops descendants. TTY children keep their foreground group for stdin
+ * and terminal job control; the terminal delivers group signals itself.
+ */
+function installSubprocessSignalForwarding(opts: {
+  readonly pid: number;
+  readonly ownsProcessGroup: boolean;
+}): { readonly dispose: () => void; readonly exitCode: () => number | null } {
+  let exitCode: number | null = null;
+  let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+  const send = (signal: NodeJS.Signals): void => {
+    try {
+      process.kill(opts.ownsProcessGroup ? -opts.pid : opts.pid, signal);
+    } catch {
+      // The owned process/group may already have exited.
+    }
+  };
+  const cancel = (signal: "SIGINT" | "SIGTERM"): void => {
+    if (exitCode !== null) {
+      send("SIGKILL");
+      return;
+    }
+    exitCode = signal === "SIGINT" ? 130 : 143;
+    send(signal);
+    forceKillTimer = setTimeout(() => send("SIGKILL"), 2000);
+  };
+  const onInterrupt = (): void => cancel("SIGINT");
+  const onTerminate = (): void => cancel("SIGTERM");
+  process.on("SIGINT", onInterrupt);
+  process.on("SIGTERM", onTerminate);
+  return {
+    exitCode: () => exitCode,
+    dispose: () => {
+      process.off("SIGINT", onInterrupt);
+      process.off("SIGTERM", onTerminate);
+      if (forceKillTimer) {
+        clearTimeout(forceKillTimer);
+      }
+      if (exitCode !== null && opts.ownsProcessGroup) {
+        // A cooperative child can exit before its stubborn descendants.
+        send("SIGKILL");
+      }
+    },
+  };
 }
 
 function installSubprocessTimeout(opts: {

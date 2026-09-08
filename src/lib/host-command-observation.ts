@@ -184,7 +184,7 @@ export async function runObservedHostCommand(opts: {
         const completedStatus = event.cancelled ? "cancelled" : "exited";
         await saveRecord({
           ...record,
-          finishedAt: new Date().toISOString(),
+          finishedAt: event.finishedAt,
           status: event.timedOut ? "timed_out" : completedStatus,
           exitCode: event.exitCode,
           cpuTimeMs: event.cpuTimeMs,

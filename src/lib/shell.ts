@@ -90,6 +90,7 @@ export interface RunOptions {
 }
 
 export type RunExitEvent = {
+  readonly finishedAt: string;
   readonly exitCode: number;
   readonly timedOut: boolean;
   readonly cancelled: boolean;
@@ -123,25 +124,32 @@ export async function run(
         childRunning: () => proc.exitCode === null,
       })
     : null;
-  let result: RunExitEvent;
-  try {
-    await opts.onSpawn?.({ pid: proc.pid, ownsProcessGroup });
-    const exitCode = await proc.exited;
-    const code =
-      cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
-    const usage = opts.onExit
-      ? readSubprocessResourceUsage(proc)
-      : { cpuTimeMs: null, maxRssBytes: null };
-    result = {
-      exitCode: code,
-      timedOut: timeout.didTimeout(),
-      cancelled: cancellation?.exitCode() != null,
-      ...usage,
-    };
-  } finally {
-    timeout.dispose();
-    await cancellation?.dispose();
-  }
+  // Observe completion immediately: diagnostic setup must not keep deadlines armed
+  // after the command has exited. Record callbacks still finish in spawn/exit order.
+  const completion = (async (): Promise<RunExitEvent> => {
+    try {
+      const exitCode = await proc.exited;
+      const code =
+        cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
+      const usage = opts.onExit
+        ? readSubprocessResourceUsage(proc)
+        : { cpuTimeMs: null, maxRssBytes: null };
+      return {
+        finishedAt: new Date().toISOString(),
+        exitCode: code,
+        timedOut: timeout.didTimeout(),
+        cancelled: cancellation?.exitCode() != null,
+        ...usage,
+      };
+    } finally {
+      timeout.dispose();
+      await cancellation?.dispose();
+    }
+  })();
+  const [result] = await Promise.all([
+    completion,
+    opts.onSpawn?.({ pid: proc.pid, ownsProcessGroup }),
+  ]);
   await opts.onExit?.(result);
   return result.exitCode;
 }
@@ -156,7 +164,13 @@ function readSubprocessResourceUsage(
       return { cpuTimeMs: null, maxRssBytes: null };
     }
     const cpuTimeMs = Number(usage.cpuTime.total) / 1000;
-    const maxRssBytes = Number(usage.maxRSS);
+    // Bun 1.3 exposes native ru_maxrss (KiB on Linux); Bun 1.4 normalizes to bytes.
+    const rssScale =
+      process.platform === "linux" &&
+      Bun.semver.satisfies(Bun.version, "<1.4.0")
+        ? 1024
+        : 1;
+    const maxRssBytes = Number(usage.maxRSS) * rssScale;
     return {
       cpuTimeMs: Number.isFinite(cpuTimeMs) ? cpuTimeMs : null,
       maxRssBytes: Number.isFinite(maxRssBytes) ? maxRssBytes : null,

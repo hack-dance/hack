@@ -304,6 +304,13 @@ async function resolveUsageSnapshot(opts: {
   };
 }
 
+function formatContainerMounts(mounts: RuntimeContainer["mounts"]): string {
+  return (
+    mounts.map((mount) => `${mount.type}:${mount.destination}`).join(", ") ||
+    "none"
+  );
+}
+
 function appendContainerDetails(
   lines: string[],
   snapshot: UsageSnapshot
@@ -313,12 +320,13 @@ function appendContainerDetails(
       "",
       "Containers",
       renderTable({
-        columns: ["Container", "CPU", "Memory", "PIDs"],
+        columns: ["Container", "CPU", "Memory", "PIDs", "Mounts"],
         rows: snapshot.report.containerDetails.map((row) => [
           row.name,
           formatPercent({ percent: row.cpuPercent }),
           formatBytesMaybe({ bytes: row.memUsedBytes }),
           String(row.pids ?? "n/a"),
+          formatContainerMounts(row.mounts),
         ]),
       })
     );
@@ -1044,12 +1052,13 @@ async function renderUsageSuccess(opts: {
 
   if (opts.args.options.details) {
     await display.table({
-      columns: ["Container", "CPU", "Memory", "PIDs"],
+      columns: ["Container", "CPU", "Memory", "PIDs", "Mounts"],
       rows: (opts.report.containerDetails ?? []).map((row) => [
         row.name,
         formatPercent({ percent: row.cpuPercent }),
         formatBytesMaybe({ bytes: row.memUsedBytes }),
         row.pids ?? "n/a",
+        formatContainerMounts(row.mounts),
       ]),
     });
   }

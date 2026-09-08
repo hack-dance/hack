@@ -1,4 +1,5 @@
 import { dlopen, FFIType, type Pointer } from "bun:ffi";
+import { closeSync, openSync } from "node:fs";
 import { constants } from "node:os";
 
 /** POSIX job control without a proxy PTY: all three command streams stay intact. */
@@ -18,6 +19,8 @@ export function openTerminalControl() {
   const library =
     process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6";
   const libc = dlopen(library, symbols);
+  const controllingDescriptor = openControllingTerminal();
+  const descriptor = controllingDescriptor ?? 0;
   function withoutBackgroundStop<T>(operation: () => T): T {
     const previous = libc.symbols.signal(
       constants.signals.SIGTTOU,
@@ -32,20 +35,29 @@ export function openTerminalControl() {
   return {
     createGroup: () => libc.symbols.setpgid(0, 0) === 0,
     group: () => libc.symbols.getpgrp(),
-    foreground: () => libc.symbols.tcgetpgrp(0),
+    foreground: () => libc.symbols.tcgetpgrp(descriptor),
     setForeground: (group: number) =>
-      withoutBackgroundStop(() => libc.symbols.tcsetpgrp(0, group) === 0),
+      withoutBackgroundStop(
+        () => libc.symbols.tcsetpgrp(descriptor, group) === 0
+      ),
     attributes: () => {
       // Opaque termios storage, larger than both Darwin and Linux structures.
       const value = new Uint8Array(256);
-      return libc.symbols.tcgetattr(0, value) === 0 ? value : null;
+      return libc.symbols.tcgetattr(descriptor, value) === 0 ? value : null;
     },
     restoreAttributes: (value: Uint8Array | null) => {
       if (value) {
-        withoutBackgroundStop(() => libc.symbols.tcsetattr(0, 0, value));
+        withoutBackgroundStop(() =>
+          libc.symbols.tcsetattr(descriptor, 0, value)
+        );
       }
     },
-    close: () => libc.close(),
+    close: () => {
+      if (controllingDescriptor !== null) {
+        closeSync(controllingDescriptor);
+      }
+      libc.close();
+    },
   };
 }
 
@@ -55,4 +67,21 @@ export function signalOwnedGroup(pid: number, signal: NodeJS.Signals): void {
   } catch {
     // The owned group may already have exited.
   }
+}
+
+function openControllingTerminal(): number | null {
+  try {
+    return openSync("/dev/tty", "r+");
+  } catch {
+    return null;
+  }
+}
+
+export function hasControllingTerminal(): boolean {
+  const descriptor = openControllingTerminal();
+  if (descriptor === null) {
+    return false;
+  }
+  closeSync(descriptor);
+  return true;
 }

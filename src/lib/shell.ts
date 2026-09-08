@@ -1,4 +1,5 @@
 import { readSubprocessResourceUsage } from "./process-resource-usage.ts";
+import { hasControllingTerminal } from "./tty-process-group.ts";
 
 export interface ExecResult {
   readonly exitCode: number;
@@ -100,8 +101,7 @@ export async function run(
 ): Promise<number> {
   if (
     opts.forwardSignals &&
-    process.stdin.isTTY &&
-    (opts.stdin ?? "inherit") === "inherit"
+    (process.stdin.isTTY || hasControllingTerminal())
   ) {
     const { runWithTerminalGroup } = await import("./tty-run.ts");
     return await runWithTerminalGroup({
@@ -109,6 +109,7 @@ export async function run(
       cwd: opts.cwd,
       env: buildSpawnEnv(opts.env),
       stdout: opts.stdout,
+      stdin: opts.stdin,
       timeoutMs: opts.timeoutMs,
       onSpawn: opts.onSpawn,
       onExit: opts.onExit,

@@ -25,14 +25,19 @@ def worker(root, behavior):
         write_json(root / 'tty.json', {
             'stdin': os.isatty(0), 'stdout': os.isatty(1), 'stderr': os.isatty(2),
             'devTty': os.isatty(tty.fileno()),
-            'foreground': os.tcgetpgrp(0) == os.getpgrp(),
+            'foreground': os.tcgetpgrp(tty.fileno()) == os.getpgrp(),
         })
     # Publish the parent before spawning the grandchild: its readiness can never race this file.
     (root / 'child.pid').write_text(str(os.getpid()))
     if behavior != 'normal':
         subprocess.Popen([sys.executable, __file__, 'grandchild', str(root)])
-    if behavior in ['normal', 'io']:
-        (root / 'input.txt').write_text(sys.stdin.readline())
+    if behavior in ['normal', 'io', 'pipe']:
+        if behavior == 'pipe':
+            (root / 'pipe-input.txt').write_text(sys.stdin.readline())
+            with open('/dev/tty') as tty:
+                (root / 'input.txt').write_text(tty.readline())
+        else:
+            (root / 'input.txt').write_text(sys.stdin.readline())
         print('child stdout', flush=True)
         print('child stderr', file=sys.stderr, flush=True)
         if behavior == 'normal':
@@ -52,11 +57,17 @@ def launcher(root, bun, entrypoint, behavior):
     if wrapper == 0:
         for sig in [signal.SIGHUP, signal.SIGINT, signal.SIGTERM, signal.SIGTSTP]:
             signal.signal(sig, signal.SIG_DFL)
-        if behavior in ['normal', 'io']:
+        if behavior in ['normal', 'io', 'pipe']:
             for number, name in [(1, 'stdout.txt'), (2, 'stderr.txt')]:
                 output = os.open(str(root / name), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
                 os.dup2(output, number)
                 os.close(output)
+        if behavior == 'pipe':
+            reader, writer = os.pipe()
+            os.write(writer, b'piped data\n')
+            os.close(writer)
+            os.dup2(reader, 0)
+            os.close(reader)
         env = dict(os.environ, HACK_HOME=str(root / 'state'))
         os.execve(bun, [bun, *([entrypoint] if entrypoint else []), 'host', 'exec', '--path', str(root), '--no-interactive', '--', sys.executable, __file__, 'worker', str(root), behavior], env)
     (root / 'wrapper.pid').write_text(str(wrapper))
@@ -134,7 +145,7 @@ def probe(bun, entrypoint, requested_signal, behavior, mode):
                 (root / 'resume.request').write_text('resume')
                 if not wait_for(['continued']):
                     raise RuntimeError('Command did not resume after fg')
-            if behavior in ['normal', 'io']:
+            if behavior in ['normal', 'io', 'pipe']:
                 os.write(fd, b'hello tty\n')
                 if not wait_for(['input.txt']):
                     raise RuntimeError('Command did not read terminal stdin')
@@ -169,8 +180,10 @@ def probe(bun, entrypoint, requested_signal, behavior, mode):
                     'groupDifferentFromChild': record['processGroupId'] != record['child']['pid'],
                     'maxRssBytes': record['maxRssBytes'], 'cpuTimeMs': record['cpuTimeMs'],
                 }
-            if behavior in ['normal', 'io']:
+            if behavior in ['normal', 'io', 'pipe']:
                 output.update({name: (root / path).read_text() for name, path in [('input', 'input.txt'), ('stdout', 'stdout.txt'), ('stderr', 'stderr.txt')]})
+            if behavior == 'pipe':
+                output['pipeInput'] = (root / 'pipe-input.txt').read_text()
             print(json.dumps(output))
         finally:
             # Every PID below was created by this fixture. Never signal the shared outer group.

@@ -47,6 +47,13 @@ const cases = [
     code: 143,
   },
   {
+    name: "piped stdin retains the controlling terminal",
+    signal: "SIGTERM",
+    behavior: "pipe",
+    mode: "wrapper",
+    code: 143,
+  },
+  {
     name: "normal command return",
     signal: "SIGTERM",
     behavior: "normal",
@@ -93,7 +100,11 @@ for (const scenario of cases) {
         childAlive: false,
         grandchildAlive: false,
         siblingAlive: true,
-        tty: { stdin: true, devTty: true, foreground: true },
+        tty: {
+          stdin: scenario.behavior !== "pipe",
+          devTty: true,
+          foreground: true,
+        },
       });
       expect(outcome.record).toMatchObject({
         status: scenario.behavior === "normal" ? "exited" : "cancelled",
@@ -106,13 +117,20 @@ for (const scenario of cases) {
         expect(outcome.record.maxRssBytes).toBeGreaterThan(0);
         expect(outcome.record.cpuTimeMs).toBeGreaterThan(0);
       }
-      if (scenario.behavior === "normal" || scenario.behavior === "io") {
+      if (
+        scenario.behavior === "normal" ||
+        scenario.behavior === "io" ||
+        scenario.behavior === "pipe"
+      ) {
         expect(outcome).toMatchObject({
           input: "hello tty\n",
           stdout: "child stdout\n",
           stderr: "child stderr\n",
           tty: { stdout: false, stderr: false },
         });
+      }
+      if (scenario.behavior === "pipe") {
+        expect(outcome.pipeInput).toBe("piped data\n");
       }
       if (scenario.mode === "resume") {
         expect(outcome.stopped).toEqual({ foregroundRestored: true });

@@ -9,6 +9,7 @@ export async function runWithTerminalGroup(opts: {
   readonly cwd?: string;
   readonly env: Record<string, string>;
   readonly stdout?: "inherit" | "stderr";
+  readonly stdin?: RunOptions["stdin"];
   readonly timeoutMs?: number;
   readonly onSpawn?: RunOptions["onSpawn"];
   readonly onExit?: RunOptions["onExit"];
@@ -38,7 +39,7 @@ export async function runWithTerminalGroup(opts: {
   const child = Bun.spawn([...invocation, TTY_SUPERVISOR_ARGUMENT], {
     cwd: opts.cwd,
     env: opts.env,
-    stdin: "inherit",
+    stdin: opts.stdin ?? "inherit",
     stdout: opts.stdout === "stderr" ? 2 : "inherit",
     stderr: "inherit",
     ipc(message: unknown) {

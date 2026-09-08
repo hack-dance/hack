@@ -75,7 +75,20 @@ export interface RunOptions {
   readonly timeoutMs?: number;
   /** Forward cancellation to the child, owning its process group when stdin is not a TTY. */
   readonly forwardSignals?: boolean;
+  readonly onSpawn?: (event: {
+    readonly pid: number;
+    readonly ownsProcessGroup: boolean;
+  }) => Promise<void>;
+  readonly onExit?: (event: RunExitEvent) => Promise<void>;
 }
+
+export type RunExitEvent = {
+  readonly exitCode: number;
+  readonly timedOut: boolean;
+  readonly cancelled: boolean;
+  readonly cpuTimeMs: number | null;
+  readonly maxRssBytes: number | null;
+};
 
 export async function run(
   cmd: readonly string[],
@@ -99,12 +112,46 @@ export async function run(
   const cancellation = opts.forwardSignals
     ? installSubprocessSignalForwarding({ pid: proc.pid, ownsProcessGroup })
     : null;
+  let result: RunExitEvent;
   try {
+    await opts.onSpawn?.({ pid: proc.pid, ownsProcessGroup });
     const exitCode = await proc.exited;
-    return cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
+    const code =
+      cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
+    const usage = opts.onExit
+      ? readSubprocessResourceUsage(proc)
+      : { cpuTimeMs: null, maxRssBytes: null };
+    result = {
+      exitCode: code,
+      timedOut: timeout.didTimeout(),
+      cancelled: cancellation?.exitCode() != null,
+      ...usage,
+    };
   } finally {
     timeout.dispose();
     cancellation?.dispose();
+  }
+  await opts.onExit?.(result);
+  return result.exitCode;
+}
+
+/** Bun versions expose CPU counters as either numbers or bigints despite older type declarations. */
+function readSubprocessResourceUsage(
+  proc: Pick<Bun.Subprocess, "resourceUsage">
+): { cpuTimeMs: number | null; maxRssBytes: number | null } {
+  try {
+    const usage = proc.resourceUsage();
+    if (!usage) {
+      return { cpuTimeMs: null, maxRssBytes: null };
+    }
+    const cpuTimeMs = Number(usage.cpuTime.total) / 1000;
+    const maxRssBytes = Number(usage.maxRSS);
+    return {
+      cpuTimeMs: Number.isFinite(cpuTimeMs) ? cpuTimeMs : null,
+      maxRssBytes: Number.isFinite(maxRssBytes) ? maxRssBytes : null,
+    };
+  } catch {
+    return { cpuTimeMs: null, maxRssBytes: null };
   }
 }
 

@@ -1,6 +1,11 @@
 import { resolve } from "node:path";
 import type { CommandHandlerFor } from "../cli/command.ts";
-import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
+import {
+  CliUsageError,
+  defineCommand,
+  defineOption,
+  withHandler,
+} from "../cli/command.ts";
 import { optJson, optProject } from "../cli/options.ts";
 import { PROJECT_COMPOSE_FILENAME } from "../constants.ts";
 import { requestDaemonJson } from "../daemon/client.ts";
@@ -10,6 +15,10 @@ import {
 } from "../lib/caddy-hosts.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { confirmSafe } from "../lib/interactivity.ts";
+import {
+  createOperationTimings,
+  type OperationTimings,
+} from "../lib/operation-timings.ts";
 import { findProjectContext } from "../lib/project.ts";
 import { type ProjectMeta, resolveProjectMeta } from "../lib/project-meta.ts";
 import {
@@ -20,6 +29,7 @@ import {
 import type { ProjectView } from "../lib/project-views.ts";
 import {
   buildProjectViews,
+  serializeProjectSummary,
   serializeProjectView,
 } from "../lib/project-views.ts";
 import {
@@ -71,9 +81,40 @@ const optMeta = defineOption({
   description: "Include git/worktree/session/env metadata (implies --details)",
 } as const);
 
+const optSummary = defineOption({
+  name: "summary",
+  type: "boolean",
+  long: "--summary",
+  description:
+    "Return compact project counts with --json; load details with --project",
+} as const);
+const optTimings = defineOption({
+  name: "timings",
+  type: "boolean",
+  long: "--timings",
+  description:
+    "Write numeric listing phase timings to stderr (requires --json)",
+} as const);
+const optNoDaemon = defineOption({
+  name: "noDaemon",
+  type: "boolean",
+  long: "--no-daemon",
+  description: "Read runtime directly instead of the daemon cache",
+} as const);
+const optDryRun = defineOption({
+  name: "dryRun",
+  type: "boolean",
+  long: "--dry-run",
+  description:
+    "Report prune candidates without changing registry entries or containers",
+} as const);
+
 const options = [
   optProject,
   optDetails,
+  optSummary,
+  optTimings,
+  optNoDaemon,
   optMeta,
   optIncludeGlobal,
   optAll,
@@ -99,7 +140,12 @@ const statusSpec = defineCommand({
   expandInRootHelp: true,
 } as const);
 
-const pruneOptions = [optProject, optIncludeGlobal, optJson] as const;
+const pruneOptions = [
+  optProject,
+  optIncludeGlobal,
+  optDryRun,
+  optJson,
+] as const;
 const pruneSpec = defineCommand({
   name: "prune",
   summary: "Remove stale registry entries and stop orphaned containers",
@@ -123,13 +169,30 @@ const handleProjects: CommandHandlerFor<typeof spec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  if ((args.options.summary || args.options.timings) && !args.options.json) {
+    throw new CliUsageError("--summary and --timings require --json.");
+  }
+  if (args.options.summary && (args.options.meta || args.options.details)) {
+    throw new CliUsageError(
+      "--summary cannot be combined with --meta or --details."
+    );
+  }
+  const profiler = createOperationTimings();
+  const started = performance.now();
   const requestedProject =
     typeof args.options.project === "string"
       ? sanitizeName(args.options.project)
       : "";
   const filter = requestedProject.length > 0 ? requestedProject : null;
-  await touchCwdProjectRegistration({ cwd: ctx.cwd });
+  await profiler.measure("cwd_registration_ms", () =>
+    touchCwdProjectRegistration({ cwd: ctx.cwd })
+  );
   return await runProjects({
+    profiler,
+    started,
+    summary: args.options.summary === true,
+    timings: args.options.timings === true,
+    noDaemon: args.options.noDaemon === true,
     filter,
     includeGlobal: args.options.includeGlobal === true,
     includeUnregistered: args.options.all === true,
@@ -235,6 +298,30 @@ const handlePrune: CommandHandlerFor<typeof pruneSpec> = async ({
     (sum, entry) => sum + entry.containerIds.length,
     0
   );
+
+  if (args.options.dryRun) {
+    const data = {
+      dryRun: true,
+      runtimeOk: runtimeResult.ok,
+      registryCandidates: candidates.map((entry) => ({
+        name: entry.project.name,
+        projectDir: entry.project.projectDir,
+        reason: entry.reason,
+      })),
+      orphanedProjects: orphaned.map((entry) => ({ ...entry })),
+      candidateContainerCount: orphanedContainerCount,
+    };
+    if (json) {
+      emitCliResult({ result: okResult({ data }) });
+    } else {
+      await display.panel({
+        title: "Prune preview",
+        tone: "info",
+        lines: [JSON.stringify(data, null, 2)],
+      });
+    }
+    return 0;
+  }
 
   if (json) {
     await applyPrune({ candidates, orphaned });
@@ -369,48 +456,57 @@ async function runProjects(opts: {
   readonly details: boolean;
   readonly meta: boolean;
   readonly json: boolean;
+  readonly profiler?: OperationTimings;
+  readonly started?: number;
+  readonly summary?: boolean;
+  readonly timings?: boolean;
+  readonly noDaemon?: boolean;
 }): Promise<number> {
-  const daemonRuntimeMeta = opts.json
-    ? null
-    : await readDaemonRuntimeRecoveryMeta();
+  const profiler = opts.profiler ?? createOperationTimings();
+  const started = opts.started ?? performance.now();
+  const daemonRuntimeMeta =
+    opts.json || opts.noDaemon ? null : await readDaemonRuntimeRecoveryMeta();
 
-  if (opts.json) {
-    const daemon = await requestDaemonJson({
-      path: "/v1/projects",
-      query: {
-        filter: opts.filter ?? null,
-        include_global: opts.includeGlobal,
-        include_unregistered: opts.includeUnregistered,
-        include_meta: opts.meta,
-      },
-    });
-    if (daemon?.ok && daemon.json) {
-      process.stdout.write(`${JSON.stringify(daemon.json, null, 2)}\n`);
-      return 0;
-    }
+  if (
+    opts.json &&
+    !opts.noDaemon &&
+    (await outputDaemonProjects({ opts, profiler, started }))
+  ) {
+    return 0;
   }
 
   const runtime = await readRuntimeProjects({
     includeGlobal: opts.includeGlobal,
+    profiler,
   });
 
   if (runtime.ok) {
-    await autoRegisterRuntimeHackProjects({ runtime: runtime.runtime });
+    await profiler.measure("auto_register_ms", () =>
+      autoRegisterRuntimeHackProjects({ runtime: runtime.runtime })
+    );
   }
-  const registry = await readProjectsRegistry();
+  const registry = await profiler.measure("registry_ms", readProjectsRegistry);
 
-  const views = await buildProjectViews({
-    registryProjects: registry.projects,
-    runtime: runtime.runtime,
-    runtimeOk: runtime.ok,
-    filter: opts.filter,
-    includeUnregistered: opts.includeUnregistered,
-  });
+  const views = await profiler.measure("project_views_ms", () =>
+    buildProjectViews({
+      registryProjects: registry.projects,
+      runtime: runtime.runtime,
+      runtimeOk: runtime.ok,
+      filter: opts.filter,
+      includeUnregistered: opts.includeUnregistered,
+    })
+  );
   const metaByName = opts.meta
-    ? await buildMetaByProjectName({ views })
+    ? await profiler.measure("metadata_ms", () =>
+        buildMetaByProjectName({ views })
+      )
     : new Map<string, ProjectMeta>();
   if (opts.json) {
     outputProjectsJson({
+      summary: opts.summary === true,
+      profiler,
+      started,
+      timings: opts.timings === true,
       filter: opts.filter,
       includeGlobal: opts.includeGlobal,
       includeUnregistered: opts.includeUnregistered,
@@ -476,6 +572,47 @@ async function runProjects(opts: {
   return 0;
 }
 
+async function outputDaemonProjects({
+  opts,
+  profiler,
+  started,
+}: {
+  readonly opts: Parameters<typeof runProjects>[0];
+  readonly profiler: OperationTimings;
+  readonly started: number;
+}): Promise<boolean> {
+  const daemon = await profiler.measure("daemon_request_ms", () =>
+    requestDaemonJson({
+      path: "/v1/projects",
+      query: {
+        filter: opts.filter ?? null,
+        include_global: opts.includeGlobal,
+        include_unregistered: opts.includeUnregistered,
+        include_meta: opts.meta,
+        summary: opts.summary ?? false,
+        profile: opts.timings ?? false,
+      },
+    })
+  );
+  if (
+    daemon?.ok &&
+    daemon.json &&
+    (!opts.summary || daemon.json.detail_level === "summary")
+  ) {
+    const { profiling, ...payload } = daemon.json;
+    writeProfiledProjects({
+      payload,
+      profiler,
+      started,
+      enabled: opts.timings === true,
+      source: "daemon",
+      daemonProfiling: profiling,
+    });
+    return true;
+  }
+  return false;
+}
+
 type RuntimeRecoveryMeta = {
   readonly resetCount: number;
   readonly lastResetSummary: string | null;
@@ -491,6 +628,10 @@ type RuntimeRecoveryNotice = {
 };
 
 function outputProjectsJson(opts: {
+  readonly summary: boolean;
+  readonly profiler: OperationTimings;
+  readonly started: number;
+  readonly timings: boolean;
   readonly filter: string | null;
   readonly includeGlobal: boolean;
   readonly includeUnregistered: boolean;
@@ -501,6 +642,7 @@ function outputProjectsJson(opts: {
 }): void {
   const runtimeMeta = formatRuntimeMeta({ runtime: opts.runtime });
   const payload = {
+    ...(opts.summary ? { detail_level: "summary" } : {}),
     generated_at: new Date().toISOString(),
     filter: opts.filter,
     include_global: opts.includeGlobal,
@@ -518,14 +660,43 @@ function outputProjectsJson(opts: {
     runtime_repair_action: runtimeMeta.lastRepairAction,
     runtime_repair_outcome: runtimeMeta.lastRepairOutcome,
     runtime_next_step: runtimeMeta.nextStep,
-    projects: opts.views.map((view) => ({
-      ...serializeProjectView(view),
-      ...(opts.includeMeta
-        ? { meta: opts.metaByName.get(view.name) ?? null }
-        : {}),
-    })),
+    projects: opts.profiler.measureSync("projection_ms", () =>
+      opts.views.map((view) => ({
+        ...(opts.summary
+          ? serializeProjectSummary(view)
+          : serializeProjectView(view)),
+        ...(opts.includeMeta
+          ? { meta: opts.metaByName.get(view.name) ?? null }
+          : {}),
+      }))
+    ),
   };
-  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  writeProfiledProjects({
+    payload,
+    profiler: opts.profiler,
+    started: opts.started,
+    enabled: opts.timings,
+    source: "direct",
+  });
+}
+
+function writeProfiledProjects(opts: {
+  readonly payload: Record<string, unknown>;
+  readonly profiler: OperationTimings;
+  readonly started: number;
+  readonly enabled: boolean;
+  readonly source: "daemon" | "direct";
+  readonly daemonProfiling?: unknown;
+}): void {
+  const text = opts.profiler.measureSync("json_serialization_ms", () =>
+    JSON.stringify(opts.payload, null, 2)
+  );
+  process.stdout.write(`${text}\n`);
+  if (opts.enabled) {
+    process.stderr.write(
+      `${JSON.stringify({ source: opts.source, elapsed_ms: performance.now() - opts.started, phases_ms: opts.profiler.timings, response_bytes: Buffer.byteLength(text) + 1, daemon: opts.daemonProfiling ?? null })}\n`
+    );
+  }
 }
 
 async function renderRuntimeNotices(opts: {

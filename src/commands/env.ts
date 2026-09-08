@@ -39,6 +39,7 @@ import {
   serializeEnvClassificationForJson,
   serializeEnvStorageForJson as serializeEnvStorageForJsonShape,
 } from "../lib/hack-env-status.ts";
+import { runObservedHostCommand } from "../lib/host-command-observation.ts";
 import {
   canPrompt,
   confirmSafe,
@@ -76,6 +77,7 @@ import {
 import { run } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
+import { hostPsCommand } from "./host-ps.ts";
 
 const optShowSecrets = defineOption({
   name: "showSecrets",
@@ -144,6 +146,23 @@ const optShellCommand = defineOption({
   valueHint: "<command>",
   description:
     "Run a shell command string via /bin/sh -lc after env injection so `$VAR` expansion happens inside the child shell",
+} as const);
+
+const optHostTimeout = defineOption({
+  name: "timeout",
+  type: "number",
+  long: "--timeout",
+  valueHint: "<seconds>",
+  description:
+    "Bound a non-TTY host command; terminate its process group and return 124 on expiry",
+} as const);
+const optHostLifetime = defineOption({
+  name: "lifetime",
+  type: "string",
+  long: "--lifetime",
+  valueHint: "<command|persistent>",
+  description:
+    "Declare intended lifetime for diagnostics (default: command; does not detach)",
 } as const);
 
 const SECRET_MASK = "***";
@@ -239,6 +258,8 @@ const execSpec = defineCommand({
     optService,
     optTarget,
     optShellCommand,
+    optHostTimeout,
+    optHostLifetime,
   ],
   positionals: [{ name: "command", required: false, multiple: true }],
   subcommands: [],
@@ -261,7 +282,16 @@ const hostExecSpec = defineCommand({
   group: "Project",
   description:
     'Run a one-off command on the host with the selected Hack env overlay injected. Use --scope when you want service-scoped values without running inside that service container. To inspect a value, prefer `printenv KEY` or `sh -lc \'printf "%s\\n" "$KEY"\'`; `echo $KEY` expands in your current shell before Hack injects env.',
-  options: [optPath, optProject, optEnv, optScope, optTarget, optShellCommand],
+  options: [
+    optPath,
+    optProject,
+    optEnv,
+    optScope,
+    optTarget,
+    optShellCommand,
+    optHostTimeout,
+    optHostLifetime,
+  ],
   positionals: [{ name: "command", required: false, multiple: true }],
   subcommands: [],
 } as const);
@@ -1885,7 +1915,35 @@ async function runHostCommandWithInjectedEnv(input: {
   readonly targetOpt: string | undefined;
   readonly command: readonly string[];
   readonly shellCommandOpt?: string;
+  readonly timeout?: number;
+  readonly lifetime?: string;
 }): Promise<number> {
+  if (
+    input.timeout !== undefined &&
+    (!Number.isFinite(input.timeout) ||
+      input.timeout <= 0 ||
+      input.timeout * 1000 > 2_147_483_647)
+  ) {
+    throw new CliUsageError(
+      "--timeout must be a positive number of seconds, at most 2147483."
+    );
+  }
+  if (
+    input.lifetime !== undefined &&
+    !["command", "persistent"].includes(input.lifetime)
+  ) {
+    throw new CliUsageError("--lifetime must be command or persistent.");
+  }
+  if (input.timeout !== undefined && input.lifetime === "persistent") {
+    throw new CliUsageError(
+      "--timeout cannot be combined with --lifetime persistent."
+    );
+  }
+  if (input.timeout !== undefined && process.stdin.isTTY) {
+    throw new CliUsageError(
+      "--timeout requires non-TTY stdin; pipe input or redirect from /dev/null for a finite job."
+    );
+  }
   const project = await resolveProjectForEnv({
     ctx: input.ctx,
     pathOpt: input.pathOpt,
@@ -1917,17 +1975,23 @@ async function runHostCommandWithInjectedEnv(input: {
     }),
     target,
   });
-  return await run(
-    shellCommand
+  const declaredLifetime =
+    input.lifetime === "persistent" ? "persistent" : "command";
+  return await runObservedHostCommand({
+    command: shellCommand
       ? resolveShellCommandCommand({ command: shellCommand })
       : positionalCommand,
-    {
+    project: projectName,
+    projectRoot: project.projectRoot,
+    lifetime: input.timeout !== undefined ? "bounded" : declaredLifetime,
+    runOptions: {
       cwd: project.projectRoot,
       env: envState.env,
       stdin: "inherit",
       forwardSignals: true,
-    }
-  );
+      timeoutMs: input.timeout === undefined ? undefined : input.timeout * 1000,
+    },
+  });
 }
 
 async function openHostShellWithInjectedEnv(input: {
@@ -1982,6 +2046,8 @@ const handleEnvExec: CommandHandlerFor<typeof execSpec> = async ({
     targetOpt: args.options.target,
     command: args.positionals.command,
     shellCommandOpt: args.options.shellCommand,
+    timeout: args.options.timeout,
+    lifetime: args.options.lifetime,
   });
 };
 
@@ -2012,6 +2078,8 @@ const handleHostExec: CommandHandlerFor<typeof hostExecSpec> = async ({
     targetOpt: args.options.target,
     command: args.positionals.command,
     shellCommandOpt: args.options.shellCommand,
+    timeout: args.options.timeout,
+    lifetime: args.options.lifetime,
   });
 };
 
@@ -2413,6 +2481,7 @@ export const hostCommand = defineCommand({
   options: [],
   positionals: [],
   subcommands: [
+    hostPsCommand,
     withHandler(hostExecSpec, handleHostExec),
     withHandler(hostShellSpec, handleHostShell),
   ],

@@ -1,5 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -92,6 +99,96 @@ test("host exec preserves piped stdin and a normal nonzero exit status", async (
   expect(await output).toBe("received:fixture-input\n");
 });
 
+for (const ignores of [false, true]) {
+  test(`host timeout records bounded lifetime and stops descendants (ignores=${ignores})`, async () => {
+    const root = await createFixture({ childIgnoresSignals: ignores });
+    const wrapper = Bun.spawn(
+      hostCommand({ root, flags: ["--timeout", "0.5"] }),
+      {
+        cwd: root,
+        env: fixtureEnv(root),
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "pipe",
+        detached: true,
+      }
+    );
+    wrappers.push(wrapper);
+    const child = await waitForPid(resolve(root, "child.pid"));
+    const grandchild = await waitForPid(resolve(root, "grandchild.pid"));
+    expect(await wrapper.exited).toBe(124);
+    await expectStopped(child);
+    await expectStopped(grandchild);
+    const directory = resolve(root, "hack-home", "host-commands");
+    const files = (await readdir(directory)).filter((name) =>
+      name.endsWith(".json")
+    );
+    expect(files).toHaveLength(1);
+    const record = await Bun.file(resolve(directory, files[0] ?? "")).json();
+    expect(record).toMatchObject({
+      lifetime: "bounded",
+      status: "timed_out",
+      exitCode: 124,
+      ownsProcessGroup: true,
+      timeoutMs: 500,
+    });
+    expect(record.cpuTimeMs).toBeGreaterThanOrEqual(0);
+  }, 10_000);
+}
+
+test("persistent commands have no implicit deadline and orphan inspection leaves them alive", async () => {
+  const root = await createFixture({ childIgnoresSignals: false });
+  const wrapper = Bun.spawn(
+    [
+      ...hostCommand({ root, flags: ["--lifetime", "persistent"] }),
+      "sensitive-argument-fixture",
+    ],
+    {
+      cwd: root,
+      env: fixtureEnv(root),
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      detached: true,
+    }
+  );
+  wrappers.push(wrapper);
+  const child = await waitForPid(resolve(root, "child.pid"));
+  await waitForPid(resolve(root, "grandchild.pid"));
+  const recordDir = resolve(root, "hack-home", "host-commands");
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const files = await readdir(recordDir).catch(() => []);
+    if (files.some((file) => file.endsWith(".json"))) {
+      break;
+    }
+    await Bun.sleep(20);
+  }
+  expect(wrapper.exitCode).toBeNull();
+  signalPid(wrapper.pid, "SIGKILL");
+  await wrapper.exited;
+  const query = Bun.spawn(
+    [process.execPath, entrypoint, "host", "ps", "--json"],
+    {
+      cwd: root,
+      env: fixtureEnv(root),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const output = await new Response(query.stdout).text();
+  expect(await query.exited).toBe(0);
+  const record = JSON.parse(output).commands[0];
+  expect(record).toMatchObject({
+    lifetime: "persistent",
+    status: "orphaned",
+    attention: "persistent_wrapper_lost",
+    timeoutMs: null,
+  });
+  expect(output).not.toContain("sensitive-argument-fixture");
+  expect(process.kill(child, 0)).toBe(true);
+});
+
 function startHostCommand({ root }: { readonly root: string }) {
   const wrapper = Bun.spawn(hostCommand({ root }), {
     cwd: root,
@@ -105,7 +202,13 @@ function startHostCommand({ root }: { readonly root: string }) {
   return wrapper;
 }
 
-function hostCommand({ root }: { readonly root: string }): string[] {
+function hostCommand({
+  root,
+  flags = [],
+}: {
+  readonly root: string;
+  readonly flags?: readonly string[];
+}): string[] {
   return [
     process.execPath,
     entrypoint,
@@ -114,6 +217,7 @@ function hostCommand({ root }: { readonly root: string }): string[] {
     "--path",
     root,
     "--no-interactive",
+    ...flags,
     "--",
     process.execPath,
     resolve(root, "child.ts"),

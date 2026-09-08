@@ -1,23 +1,23 @@
 commands:
-  install: bun install
+  install: bun install --frozen-lockfile
   build: bun run build
   typecheck: bun run typecheck
   check: bun run check
   test: bun run test
   db_test: bun run db:test
-  runtime_up: hack up -d
-  runtime_ps: hack ps --json
-  runtime_open: hack open --json
-  runtime_doctor: hack doctor
-  runtime_down: hack down
+  runtime_up: ./dist/hack up -d
+  runtime_ps: ./dist/hack ps --json
+  runtime_open: ./dist/hack open --json
+  runtime_doctor: ./dist/hack doctor
+  runtime_down: ./dist/hack down
   lifecycle_tests: bun test tests/project-lifecycle-processes.test.ts tests/project-lifecycle-singleton.test.ts tests/project-lifecycle-hygiene.test.ts
   env_list_json: ./dist/hack env list --json
-  env_tests: bun test tests/project-env-config.test.ts tests/env-command.test.ts tests/project-run-command.test.ts
+  env_tests: bun test tests/project-env-config.test.ts tests/env-command-modern.test.ts tests/run-exec-branch-default.test.ts
   setup_docs_tests: bun test tests/setup.test.ts tests/mcp.test.ts
 
 services:
   hack-stack:
-    start: hack up -d
-    stop: hack down
-    healthcheck: hack ps --json
+    start: ./dist/hack up -d
+    stop: ./dist/hack down
+    healthcheck: ./dist/hack ps --json
     depends_on: []

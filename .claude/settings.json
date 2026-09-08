@@ -1,17 +1,4 @@
 {
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bun x ultracite fix"
-          }
-        ]
-      }
-    ]
-  },
   "mcpServers": {
     "hack": {
       "type": "stdio",

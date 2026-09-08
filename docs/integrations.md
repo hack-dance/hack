@@ -1,13 +1,13 @@
 # Local Helpers
 
-Hack v3 no longer ships hosted or broker-backed integrations.
+Hack no longer ships hosted or broker-backed integrations.
 
 What remains:
 
 - local env management and host/container injection
 - local sessions and runtime orchestration
 - optional coding-agent setup helpers: `hack init --with claude|codex|both`, `hack agent onboard` /
-  `hack agent init` / `hack agent prime`, and `hack setup sync --all-scopes`
+  `hack agent init` / `hack agent prime`, and scoped `hack setup` commands
 
 `hack setup sync` keeps interactive output compact: it summarizes each scope and only expands the
 path and reason for stale, missing, or failed artifacts. Exit status remains the automation contract,
@@ -71,8 +71,10 @@ claude plugin install hack@hack-dance
 ```
 
 Cursor: open Customize, find Hack in the configured marketplace, and choose the
-project or user installation scope. For development, load the plugin directory
-using the current client's supported local-plugin flow. See
+project or user installation scope. For local development, copy `plugins/hack` into
+`~/.cursor/plugins/local/hack` when that destination is unused, then reload Cursor
+and inspect the Hack plugin in Customize. Cursor 3.18.25 rejects symlinks to targets
+outside its local-plugin root; use a copy rather than weakening that boundary. See
 [Cursor's plugin documentation](https://cursor.com/docs/plugins) for marketplace
 and local development support in the installed client version.
 

@@ -48,7 +48,7 @@ test("onboarding prompt renders all phases in both modes", () => {
     expect(prompt).toContain("## Phase 2 — Set up hack");
     expect(prompt).toContain("## Phase 3 — Platform nuances");
     expect(prompt).toContain("## Phase 4 — Running things (decision guide)");
-    expect(prompt).toContain("## Phase 5 — Verify (loop until clean)");
+    expect(prompt).toContain("## Phase 5 — Verify the requested workflow");
     expect(prompt).toContain("## Ground rules");
   }
 });
@@ -66,7 +66,9 @@ test("onboarding prompt covers env + secret guidance", () => {
   for (const prompt of Object.values(ALL_PROMPTS)) {
     expect(prompt).toContain("hack env add");
     expect(prompt).toContain("--secret");
-    expect(prompt).toContain("Never commit plaintext secrets");
+    expect(prompt).toContain(
+      "never put secret values in an agent prompt, command argument, log, or source control"
+    );
     expect(prompt).toContain(
       "hack host exec --env <overlay> --scope <service>"
     );
@@ -77,9 +79,9 @@ test("onboarding prompt includes the deps-container pattern with a concrete comp
   for (const prompt of Object.values(ALL_PROMPTS)) {
     expect(prompt).toContain("node_modules:/app/node_modules");
     expect(prompt).toContain("service_completed_successfully");
-    expect(prompt).toContain("inside linux containers");
-    expect(prompt).toContain("macOS-host install can never poison");
-    expect(prompt).toContain("Ops/tooling container");
+    expect(prompt).toContain("inside that container environment");
+    expect(prompt).toContain("avoids mixing macOS and Linux binaries");
+    expect(prompt).toContain("ops/tooling container only when");
   }
 });
 
@@ -101,7 +103,9 @@ test("onboarding prompt includes the verification loop", () => {
     expect(prompt).toContain("hack ps --json");
     expect(prompt).toContain("hack open --json");
     expect(prompt).toContain("hack logs");
-    expect(prompt).toContain("`hack doctor` reports no issues");
+    expect(prompt).toContain(
+      "unrelated optional integrations are not a completion gate"
+    );
   }
 });
 
@@ -130,5 +134,20 @@ test("every hack subcommand referenced by the prompt exists in CLI_SPEC", () => 
       unknown,
       `mode "${mode}" references unknown hack subcommands`
     ).toEqual([]);
+  }
+});
+
+test("onboarding preserves trust and ownership without imposing a full migration", () => {
+  for (const prompt of Object.values(ALL_PROMPTS)) {
+    expect(prompt).toContain("partial adoption is a valid end state");
+    expect(prompt).toContain("may be exited with code 0");
+    expect(prompt).toContain("normal TLS verification");
+    expect(prompt).toContain("let the user complete native prompts");
+    expect(prompt).toContain(
+      "deletion or broader migration requires authorization"
+    );
+    expect(prompt).toContain("Do not broadly classify");
+    expect(prompt).not.toContain("curl -k");
+    expect(prompt).not.toMatch(/`hack (?:node|remote|gateway|dispatch)\b/);
   }
 });

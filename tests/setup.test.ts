@@ -35,8 +35,8 @@ test("installCursorRules writes hack.mdc with markers", async () => {
   const content = await Bun.file(rulesPath).text();
   expect(content).toContain("# BEGIN HACK INTEGRATION");
   expect(content).toContain("hack up --detach");
-  expect(content).toContain("Hack v3 is local-first");
-  expect(content).toContain("singleton.ports");
+  expect(content).toContain("Hack is local-first");
+  expect(content).toContain("adopted external processes must remain running");
   expect(content).not.toContain(".hack/hack.env.json");
 });
 
@@ -87,16 +87,15 @@ test("renderAgentPrimer is CLI-first and mentions MCP", () => {
   expect(primer).toContain("hack agent init");
   expect(primer).toContain("hack agent patterns");
   expect(primer).toContain("MCP");
-  expect(primer).toContain("Supported v3 surface");
-  expect(primer).toContain("singleton.ports");
+  expect(primer).toContain("Supported CLI surface");
+  expect(primer).toContain("adopted external processes must remain running");
   expect(primer).not.toContain(".hack/hack.env.json");
 });
 
-test("renderAgentDocsSnippet reflects local-first v3 boundaries", () => {
+test("renderAgentDocsSnippet reflects current local-first boundaries", () => {
   const snippet = renderAgentDocsSnippet();
-  expect(snippet).toContain("Supported v3 surface");
-  expect(snippet).toContain("built-in GitHub workflows");
-  expect(snippet).toContain("built-in Linear sync");
+  expect(snippet).toContain("Supported CLI surface");
+  expect(snippet).toContain("built-in GitHub/Linear integrations are retired");
   expect(snippet).toContain("singleton.ports");
   expect(snippet).toContain("HACK_ENV_SECRET_KEY");
   expect(snippet).not.toContain("services/auth-broker");

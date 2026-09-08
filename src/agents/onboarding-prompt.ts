@@ -19,7 +19,7 @@ const RUNNING_THINGS_SECTION_ID = "running-things";
 const DEPS_CONTAINER_SNIPPET = [
   "  services:",
   "    deps:",
-  "      image: oven/bun:1 # match the project runtime (node:22, etc)",
+  "      image: oven/bun:1 # replace with the repo-pinned runtime image",
   "      working_dir: /app",
   "      volumes:",
   "        - ..:/app",
@@ -92,12 +92,12 @@ function renderHeader(opts: {
 function renderIntro(opts: { readonly mode: OnboardingMode }): string[] {
   const goal =
     opts.mode === "new-project"
-      ? "Your goal: every service in this repo runs under hack (docker compose + Caddy DNS/TLS + managed env), verified end to end."
-      : "Your goal: understand and complete this project's hack setup so every service runs under hack, verified end to end.";
+      ? "Your goal: make the requested local development workflow work with Hack and verify it. Full containerization or backing-services-only adoption are both valid."
+      : "Your goal: complete the requested parts of this project's Hack setup and verify the chosen container and host workflows.";
   return [
     "You are a coding agent setting this repository up to run with the hack CLI (local-first runtime orchestration: compose, DNS/TLS, logs, env).",
     goal,
-    "Work through the phases in order. Prefer `hack` commands over raw `docker` / `docker compose`. Run `hack help <cmd>` when unsure about flags.",
+    "Use the phases relevant to the requested scope; infer routine details from existing config and ask only for unresolved blockers. Prefer `hack` commands over raw `docker` / `docker compose`. Run `hack help <cmd>` when unsure about flags.",
   ];
 }
 
@@ -108,7 +108,7 @@ function renderInventoryPhase(): string[] {
     "- Read the root package.json, workspace globs, and lockfiles to identify the package manager and monorepo layout.",
     "- Identify runnable services (web, api, workers): dev/start scripts, framework configs, and the ports they listen on.",
     "- Detect databases, caches, and queues from code and config: ORM schemas (prisma/drizzle), migration dirs, existing Dockerfiles and compose files.",
-    "- List every `.env*` file. Their keys and values are candidates for `hack env add`; treat `.env.example` values as placeholders (ask the user for real values or leave them unset). Not every repo has `.env*` files — also harvest candidate keys from `environment:` blocks in existing compose files, `ENV` lines in Dockerfiles, and CI config (workflow env/secrets).",
+    "- Inventory env variable names from `.env*` example files, configuration, compose, Dockerfiles, and CI references without printing or copying secret values. Preserve the existing package manager, runtime, and credential flow.",
     "- Note repo scripts that need env vars to run (migrations, seeds, codegen) — they will run via `hack host exec` or an ops container later.",
     "- Read README/docs for one-time setup steps you might otherwise miss.",
   ];
@@ -130,10 +130,10 @@ function renderSetupPhase(opts: {
     bootstrap,
     "- Decide full containerization vs backing-services-only (partial adoption): if the inventory shows heavy native toolchains (.NET, large native builds) or the human prefers host dev servers, compose backing services (db/queue/cache) only and keep app dev servers on the host pointed at the routed services — ask the human when it's ambiguous; partial adoption is a valid end state, not a fallback to fix later.",
     "- Check for reuse before authoring new services: if the repo already containerizes for prod (existing Dockerfiles/compose with build contexts, runtime-config injection points like an nginx-served runtime-config.js), prefer reusing those images/contexts with minimal glue over hand-authoring new dev-mode services from scratch.",
-    "- Define one compose service per runnable process in `.hack/docker-compose.yml`. HTTP services need the Caddy labels (`caddy`, `caddy.reverse_proxy`, `caddy.tls=internal`) and the `hack-dev` network to be routable.",
+    "- Define one compose service per process chosen for containerization in `.hack/docker-compose.yml`. HTTP services need the Caddy labels (`caddy`, `caddy.reverse_proxy`, `caddy.tls=internal`) and the `hack-dev` network to be routable.",
     `- Design hostnames: the primary app answers on dev_host (${devHostExample}); every other routable service gets a subdomain (\`api.${devHostExample}\`, \`grafana.${devHostExample}\`, ...). Set dev_host in \`.hack/hack.config.json\`.`,
-    "- Migrate env values: for each key found during inventory run `hack env add <KEY> <value>` — add `--secret` for anything sensitive (API keys, tokens, passwords, connection strings with credentials). Never commit plaintext secrets to the repo.",
-    "- After migration the `.env` files are superseded: containers get env injected by hack, and host scripts run through `hack host exec --env <overlay> --scope <service> -- <cmd...>` instead of reading `.env` files.",
+    "- Migrate only the env entries required for the authorized setup. Use `hack env add <KEY> <value>` for non-secret values. For secrets, use an authorized secret-manager/injection path or let the user enter them through `hack env add <KEY> --secret`; never put secret values in an agent prompt, command argument, log, or source control.",
+    "- Verify container env injection and host commands through `hack host exec` before treating any old env file as superseded. Preserve files still needed by other workflows; deletion or broader migration requires authorization.",
     "- Encode required host-side setup (tunnels, proxies, credential bootstrap) in `.hack/hack.config.json` under `startup`/`lifecycle` — not in ad-hoc terminal instructions.",
   ];
 }
@@ -142,17 +142,17 @@ function renderPlatformPhase(): string[] {
   return [
     "## Phase 3 — Platform nuances (macOS host, linux containers)",
     "",
-    "- Deps container pattern: native/node dependencies MUST be installed inside linux containers. Use a named `node_modules` volume plus a dedicated deps service so a macOS-host install can never poison the linux containers (the named volume shadows the host directory):",
+    "- For Linux-container Node/Bun services with native dependencies, install dependencies inside that container environment. A named `node_modules` volume plus a one-shot deps service avoids mixing macOS and Linux binaries. Adapt this example to the repo-pinned runtime and package manager:",
     "",
     "```yaml",
     DEPS_CONTAINER_SNIPPET,
     "```",
     "",
-    "- Ops/tooling container: add a dedicated service (same image/network as the app, no ports, no Caddy labels) for one-off tooling — migrations, seeds, cron-like jobs — and run it with `hack run <ops-service> <cmd...>` instead of baking tooling into app images or running it on the host.",
+    "- Add an ops/tooling container only when tooling requires the container runtime or network. Reuse an existing service when suitable, or use `hack host exec` for host tooling. Run migrations and seeds only for the authorized development target.",
     "- Keep images matched to the project runtime version (check `.nvmrc`, `engines`, or the lockfile) so container installs match CI/prod.",
     "- Dev-server host checks: framework dev servers reject unknown hostnames by default — allow the project's `.hack` hosts through (Vite `server.allowedHosts`, Astro/Vike equivalents, Next.js `allowedDevOrigins`, Rails `config.hosts`). Dev-server config only; leave prod builds untouched.",
-    '- App-level "is this URL local?" guards (auth callbacks, transactional-email gates, CSRF origin checks) may not recognize `*.hack` as local — extend them to treat `*.hack` as a local dev host, but keep the public-resolvable OAuth alias (`*.hack.gy` by default) OUT of the local allowlist so deployed-environment guards still apply to it. Lock both behaviors in with tests.',
-    "- `hack global install` and `hack global trust` need sudo/interactive steps (DNS resolver, CA trust) an agent cannot complete — set the stack up fully, verify with in-container checks or `curl --resolve`, and hand the human the exact global commands to run for browser access.",
+    "- If a required dev route fails an origin or callback check, inspect the existing security policy and configure only the exact authorized development origins. Do not broadly classify `*.hack` or the public-resolvable `*.hack.gy` alias as trusted, bypass CSRF checks, or disable transactional-email/publishing gates. Test any changed allowlist and its rejected origins.",
+    "- Global DNS and CA setup may require native sudo/trust approval. Attempt only global actions covered by the request, let the user complete native prompts, and continue independent project work while blocked. Report HTTP reachability and certificate trust separately; do not disable verification to claim success.",
   ];
 }
 
@@ -167,13 +167,13 @@ function renderRunningThingsPhase(): string[] {
 function renderVerifyPhase(opts: { readonly devHost?: string }): string[] {
   const host = opts.devHost ?? "<dev_host>";
   return [
-    "## Phase 5 — Verify (loop until clean)",
+    "## Phase 5 — Verify the requested workflow",
     "",
     "- Start: `hack up --detach --json` — the `{ok, data | error: {code, message}}` envelope tells you exactly what failed; fix and retry.",
-    "- Status: `hack ps --json` — every expected service must be running (not restarting).",
-    `- Routes: \`hack open --json\` lists routable URLs; confirm each one answers (e.g. \`curl -k https://api.${host}\`) or inspect \`hack logs <service> --no-follow --tail 100\`.`,
-    "- Iterate: edit compose/config, then `hack restart` and re-check. Use `hack logs --pretty` while debugging.",
-    "- Done when `hack doctor` reports no issues and every routable service responds over its Caddy hostname.",
+    "- Status: `hack ps --json` should show expected long-running services healthy/running. Successful dependency installers and other one-shot services may be exited with code 0.",
+    `- Routes: use \`hack open --json\` to find the actual routed URLs for ${host}, then check those URLs with normal TLS verification. Use finite \`hack logs <service> --no-follow --tail 100\` reads for diagnosis.`,
+    "- Iterate on the failing behavior and restart only affected services where possible. Use finite log reads and stop when the requested acceptance criteria pass.",
+    "- Finish when the requested services and host workflows work and their routes respond with the expected trust behavior. Classify remaining doctor warnings; unrelated optional integrations are not a completion gate.",
   ];
 }
 
@@ -183,7 +183,7 @@ function renderGroundRules(): string[] {
     "",
     "- Scripted/agent runs: pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) so commands never block on prompts.",
     "- Treat `.hack/.internal/**` and `.hack/.branch/**` as generated artifacts — never hand-edit them.",
-    "- If runtime state looks wrong: `hack doctor`, then `hack doctor --fix` before manual repair.",
+    "- Inspect unexpected state with `hack doctor` and apply only authorized repairs. Preserve runtime ownership, native approval, and destructive-cleanup gates.",
     "- Summarize what you configured (services, hostnames, env keys added, remaining gaps) when you finish.",
   ];
 }

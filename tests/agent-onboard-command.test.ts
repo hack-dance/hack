@@ -52,7 +52,7 @@ test("hack agent onboard prints the new-project prompt outside a hack project", 
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("stand up hack in this repo");
   expect(result.stdout).toContain("hack init --auto");
-  expect(result.stdout).toContain("## Phase 5 — Verify (loop until clean)");
+  expect(result.stdout).toContain("## Phase 5 — Verify the requested workflow");
 });
 
 test("hack agent onboard uses existing-project mode with config name and dev_host", async () => {

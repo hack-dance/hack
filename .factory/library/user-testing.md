@@ -11,15 +11,15 @@ Testing surfaces, tools, and validation concurrency for current Hack work.
 - Prefer `--json` when validating machine-readable behavior.
 - If validating current-branch command behavior, build first and run `./dist/hack` or `bun index.ts` from the repo root.
 
-### macOS companion
+### Retained macOS app (explicit maintenance only)
 
-- Use Xcode/local app commands for retained desktop flows only: project list/detail, daemon/runtime status, up/down/restart/open, logs entrypoints, doctor/trust guidance, menu bar quick actions, and the Ghostty-backed bottom panel.
+- The app is unsupported and excluded from CLI releases. Only for an explicit app request, use Xcode/local commands for retained flows: project list/detail, daemon/runtime status, up/down/restart/open, logs entrypoints, doctor/trust guidance, menu bar quick actions, and the Ghostty-backed bottom panel.
 - Do not reintroduce tickets UI, hosted auth settings, GitHub/Linear settings, topology/network maps, gateway panes, or org/team/admin surfaces.
 
 ### Managed containers
 
 - Use `hackdance/hack:slim` or the release install script for Codex/CI-style environments.
-- Inject `HACK_ENV_SECRET_KEY` and verify `hack env list --json` plus `hack host exec -- printenv KEY`.
+- Inject credentials through an authorized runtime path. Verify redacted env inventory and command behavior without printing secret values.
 - Do not rely on `hack global install`, local CA trust, Caddy/CoreDNS, or Loki/Grafana in slim mode.
 
 ### Unsupported experimental remote

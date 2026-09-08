@@ -145,7 +145,8 @@ test("all generated surfaces keep freshness checks scoped and optional", () => {
     expect(rendered, `surface "${surface}" lacks freshness status`).toContain(
       "Integration freshness"
     );
-    expect(rendered).toContain("hack setup sync --all-scopes --check");
+    expect(rendered).toContain("authorized project scope");
+    expect(rendered).not.toContain("hack setup sync --all-scopes --check");
     expect(rendered).toContain("hack setup sync --all-scopes");
     expect(rendered).toContain("restart only if");
     expect(rendered).not.toContain("At session start, audit");
@@ -314,4 +315,12 @@ test("checkCodexSkill detects content drift as stale", async () => {
     projectRoot: repoRoot,
   });
   expect(stale.status).toBe("stale");
+});
+
+test("contributors share one baseline without per-edit repository-wide hooks", async () => {
+  expect((await Bun.file("CLAUDE.md").text()).trim()).toBe("@AGENTS.md");
+  expect(await Bun.file(".claude/CLAUDE.md").exists()).toBe(false);
+  expect(await Bun.file(".cursor/hooks.json").exists()).toBe(false);
+  const settings = await Bun.file(".claude/settings.json").json();
+  expect(settings.hooks).toBeUndefined();
 });

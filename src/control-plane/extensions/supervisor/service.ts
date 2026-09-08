@@ -40,7 +40,7 @@ export type SupervisorService = {
     readonly env?: Record<string, string>;
   }) => Promise<CreateJobResult>;
   /**
-   * Attempt to cancel a running job.
+   * Cancel a running job and wait for its terminal metadata and event.
    *
    * @param opts.projectDir - Project .hack directory.
    * @param opts.jobId - Job id to cancel.
@@ -84,7 +84,7 @@ export function createSupervisorService(opts?: {
   const logger = opts?.logger ?? baseLogger;
   const runningJobs = new Map<
     string,
-    { readonly proc: ReturnType<typeof Bun.spawn> }
+    { readonly cancel: () => boolean; readonly run: Promise<JobRunResult> }
   >();
 
   const createJob = async (input: {
@@ -106,14 +106,14 @@ export function createSupervisorService(opts?: {
       projectName: input.projectName,
     });
 
-    const run = runJob({
+    const run: Promise<JobRunResult> = runJob({
       jobStore: store,
       jobId,
       command: input.command,
       cwd: input.cwd,
       env: input.env,
-      onSpawn: ({ proc }) => {
-        runningJobs.set(jobId, { proc });
+      onSpawn: ({ cancel }) => {
+        runningJobs.set(jobId, { cancel, run });
       },
     })
       .catch(async (error) => {
@@ -152,10 +152,13 @@ export function createSupervisorService(opts?: {
       return { ok: false, status: "not_running" };
     }
 
-    running.proc.kill();
-    await store.updateJobStatus({ jobId, status: "cancelled" });
-    await store.appendEvent({ jobId, type: "job.cancelled" });
-
+    if (!running.cancel()) {
+      return { ok: false, status: "not_running" };
+    }
+    const result = await running.run;
+    if (result.status !== "cancelled") {
+      throw new Error(`Failed to record cancellation for job: ${jobId}`);
+    }
     return { ok: true, status: "cancelled" };
   };
 

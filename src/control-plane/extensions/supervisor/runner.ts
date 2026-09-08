@@ -10,6 +10,8 @@ export type JobRunResult = {
 
 export type JobSpawnListener = (opts: {
   readonly proc: SpawnedProcess;
+  /** Request cancellation before terminal status persistence begins. */
+  readonly cancel: () => boolean;
 }) => void;
 
 type SpawnedProcess = ReturnType<typeof Bun.spawn>;
@@ -73,13 +75,28 @@ export async function runJob(opts: {
     return { jobId: opts.jobId, status: "failed", exitCode: 1 };
   }
 
+  let cancellationRequested = false;
+  let finalizing = false;
+  opts.onSpawn?.({
+    proc,
+    cancel: () => {
+      if (finalizing) {
+        return false;
+      }
+      if (!cancellationRequested) {
+        proc.kill();
+        cancellationRequested = true;
+      }
+      return true;
+    },
+  });
+
   await opts.jobStore.updateJobStatus({ jobId: opts.jobId, status: "running" });
   await opts.jobStore.appendEvent({
     jobId: opts.jobId,
     type: "job.started",
     payload: { pid: proc.pid },
   });
-  opts.onSpawn?.({ proc });
 
   const paths = opts.jobStore.getJobPaths({ jobId: opts.jobId });
   const stdoutTask = pipeStreamToFiles({
@@ -94,16 +111,16 @@ export async function runJob(opts: {
   const exitCode = await proc.exited;
   await Promise.all([stdoutTask, stderrTask]);
 
-  const metaAfter = await opts.jobStore.readJobMeta({ jobId: opts.jobId });
-  if (metaAfter?.status === "cancelled") {
-    return { jobId: opts.jobId, status: "cancelled", exitCode };
+  // Claim the terminal outcome synchronously, before any persistence yields.
+  finalizing = true;
+  let status: JobStatus = exitCode === 0 ? "completed" : "failed";
+  if (cancellationRequested) {
+    status = "cancelled";
   }
-
-  const status: JobStatus = exitCode === 0 ? "completed" : "failed";
   await opts.jobStore.updateJobStatus({ jobId: opts.jobId, status });
   await opts.jobStore.appendEvent({
     jobId: opts.jobId,
-    type: status === "completed" ? "job.completed" : "job.failed",
+    type: `job.${status}`,
     payload: { exitCode },
   });
 

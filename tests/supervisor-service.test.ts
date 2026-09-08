@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { createJobStore } from "../src/control-plane/extensions/supervisor/job-store.ts";
 import { createSupervisorService } from "../src/control-plane/extensions/supervisor/service.ts";
 import { readTextFile } from "../src/lib/fs.ts";
 
@@ -70,6 +71,19 @@ test("Supervisor service cancels running jobs", async () => {
 
   const cancel = await service.cancelJob({ projectDir, jobId: created.jobId });
   expect(cancel.ok).toBe(true);
+  // A successful cancellation response includes durable terminal state.
+  expect(
+    (await service.getJob({ projectDir, jobId: created.jobId }))?.status
+  ).toBe("cancelled");
+  const store = await createJobStore({ projectDir });
+  const events = await store.readEvents({ jobId: created.jobId });
+  expect(events.filter((event) => event.type === "job.cancelled")).toHaveLength(
+    1
+  );
+  expect(events.some((event) => event.type === "job.failed")).toBe(false);
+  expect(await service.cancelJob({ projectDir, jobId: created.jobId })).toEqual(
+    { ok: false, status: "not_running" }
+  );
 
   const result = await created.run;
   expect(result.status).toBe("cancelled");

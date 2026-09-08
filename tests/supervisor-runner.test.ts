@@ -83,3 +83,104 @@ test("runJob records failed status for non-zero exit", async () => {
   const types = events.map((event) => event.type);
   expect(types).toContain("job.failed");
 });
+
+test("cancellation survives process exit before terminal persistence and is recorded once", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "hack-supervisor-runner-"));
+  const store = await createJobStore({ projectDir: join(tempDir, ".hack") });
+  await store.createJob({
+    jobId: "cancel-before-write",
+    runner: "generic",
+    command: [process.execPath, "-e", "setTimeout(() => {}, 5000)"],
+  });
+  const terminalWrite = Promise.withResolvers<void>();
+  const allowWrite = Promise.withResolvers<void>();
+  let cancel: () => boolean = () => false;
+  const run = runJob({
+    jobId: "cancel-before-write",
+    jobStore: {
+      ...store,
+      updateJobStatus: async (opts) => {
+        if (["cancelled", "completed", "failed"].includes(opts.status)) {
+          terminalWrite.resolve();
+          await allowWrite.promise;
+        }
+        return await store.updateJobStatus(opts);
+      },
+    },
+    onSpawn: (control) => {
+      cancel = control.cancel;
+      expect(cancel()).toBe(true);
+      expect(cancel()).toBe(true);
+    },
+  });
+  try {
+    await terminalWrite.promise;
+    // The killed process has exited, but no terminal metadata has been saved.
+    expect(
+      (await store.readJobMeta({ jobId: "cancel-before-write" }))?.status
+    ).toBe("running");
+    expect(cancel()).toBe(false);
+  } finally {
+    allowWrite.resolve();
+    await run;
+  }
+  expect((await run).status).toBe("cancelled");
+  expect(
+    (await store.readJobMeta({ jobId: "cancel-before-write" }))?.status
+  ).toBe("cancelled");
+  const events = await store.readEvents({ jobId: "cancel-before-write" });
+  expect(events.map((event) => event.type)).toEqual([
+    "job.created",
+    "job.starting",
+    "job.started",
+    "job.cancelled",
+  ]);
+  expect(events.map((event) => event.seq)).toEqual([1, 2, 3, 4]);
+});
+
+test("late cancellation cannot replace a completed outcome while its write is pending", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "hack-supervisor-runner-"));
+  const store = await createJobStore({ projectDir: join(tempDir, ".hack") });
+  await store.createJob({
+    jobId: "completion-first",
+    runner: "generic",
+    command: [process.execPath, "-e", "process.exit(0)"],
+  });
+  const terminalWrite = Promise.withResolvers<void>();
+  const allowWrite = Promise.withResolvers<void>();
+  let cancel: () => boolean = () => false;
+  const run = runJob({
+    jobId: "completion-first",
+    jobStore: {
+      ...store,
+      updateJobStatus: async (opts) => {
+        if (opts.status === "completed") {
+          terminalWrite.resolve();
+          await allowWrite.promise;
+        }
+        return await store.updateJobStatus(opts);
+      },
+    },
+    onSpawn: (control) => {
+      cancel = control.cancel;
+    },
+  });
+  try {
+    await terminalWrite.promise;
+    expect(cancel()).toBe(false);
+  } finally {
+    allowWrite.resolve();
+    await run;
+  }
+  expect((await run).status).toBe("completed");
+  expect((await store.readJobMeta({ jobId: "completion-first" }))?.status).toBe(
+    "completed"
+  );
+  const events = await store.readEvents({ jobId: "completion-first" });
+  expect(events.map((event) => event.type)).toEqual([
+    "job.created",
+    "job.starting",
+    "job.started",
+    "job.completed",
+  ]);
+});

@@ -142,8 +142,12 @@ async function findDaemonSocketOwners(opts: {
   }
   const socketPaths = new Set(
     [...roots].flatMap((root) =>
-      ["hackd.sock", "hackd.internal.sock", "gateway.internal.sock"].map(
-        (name) => resolve(root, name)
+      ["hackd.sock", "hackd.internal.sock", "gateway.internal.sock"].flatMap(
+        (name) => {
+          const path = resolve(root, name);
+          // Linux lsof includes the Unix socket type in its machine-readable name.
+          return [path, `${path} type=STREAM`];
+        }
       )
     )
   );

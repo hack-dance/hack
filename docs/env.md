@@ -243,11 +243,12 @@ hack host exec --env qa --scope api --target compose -- bun test
 ```
 
 Cancelling `hack host exec` or `hack env exec` with SIGINT or SIGTERM forwards
-the signal to the command. Noninteractive commands run in an owned process group,
+the signal to the command. Commands run in an owned process group,
 so cancellation also stops their descendants, escalating to SIGKILL after two
 seconds if necessary. Hack returns 130 for SIGINT and 143 for SIGTERM. Interactive
-commands retain their terminal process group so stdin and terminal job control
-continue to work. SIGKILL cannot be forwarded; supervisors must terminate the
+commands use a supervisor in their own foreground group on the same terminal,
+preserving stdin, separate output streams, and Ctrl-Z/foreground resume. The
+supervisor holds group ownership until cancellation cleanup finishes. SIGKILL cannot be forwarded; supervisors must terminate the
 whole owned process tree when force-killing a wrapper. Commands have no implicit
 time limit, and normal completion preserves the command's exit status.
 
@@ -450,7 +451,3 @@ and group members without a surviving identity are explicitly unverified.
 
 See [runtime performance diagnostics](performance.md) for project-listing timings,
 container details, watcher measurements and read-only cleanup previews.
-
-For terminal commands cancelled through the wrapper PID, Hack captures the child
-process tree and revalidates process start times before signalling surviving
-descendants. It never signals the shared terminal process group.

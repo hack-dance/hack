@@ -157,13 +157,25 @@ test("checked-in agent examples use the current integration contract", async () 
     (section) => section.id === "maintenance"
   );
   expect(maintenance).toBeDefined();
+  const freshness = INSTRUCTION_SECTIONS.find(
+    (section) => section.id === "freshness"
+  );
+  expect(freshness).toBeDefined();
 
-  for (const path of ["examples/basic/AGENTS.md", "examples/basic/CLAUDE.md"]) {
+  for (const path of [
+    "examples/basic/AGENTS.md",
+    "examples/basic/CLAUDE.md",
+    ".codex/skills/hack-cli/SKILL.md",
+    ".cursor/rules/hack.mdc",
+  ]) {
     const content = await Bun.file(path).text();
     expect(content).toContain(
       `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``
     );
-    for (const bullet of maintenance?.bullets ?? []) {
+    for (const bullet of [
+      ...(maintenance?.bullets ?? []),
+      ...(freshness?.bullets.slice(1) ?? []),
+    ]) {
       expect(content, `${path} lacks current maintenance guidance`).toContain(
         bullet
       );

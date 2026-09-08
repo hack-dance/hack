@@ -121,19 +121,8 @@ async function handleAgentPrime({
     return 0;
   }
   const project = await findProjectContext(ctx.cwd);
-  if (!project) {
-    process.stdout.write(
-      [
-        "Hack agent integration freshness: not checked outside a Hack project.",
-        "From a project, run: hack setup sync --all-scopes --check",
-        "",
-        renderAgentPrimer(),
-      ].join("\n")
-    );
-    return 0;
-  }
   const report = await inspectAgentIntegrationFreshness({
-    projectRoot: project.projectRoot,
+    projectRoot: project?.projectRoot ?? null,
   });
   process.stdout.write(
     `${renderAgentIntegrationFreshnessNotice({ report })}\n\n${renderAgentPrimer()}`

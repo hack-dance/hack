@@ -169,6 +169,52 @@ export const agentDocsSyncScenario: Scenario = {
         "hack setup sync --check right after hack setup sync should be clean",
     });
 
+    const globalPrime = await ctx.cli({
+      args: ["agent", "prime", "--check"],
+      cwd: ctx.hackHome,
+      env: isolatedUserEnv,
+    });
+    expectExit({
+      result: globalPrime,
+      codes: [0],
+      message: "global inventory works outside a project",
+    });
+    expect({
+      that: globalPrime.stdout.includes(
+        "Hack agent integration freshness: current"
+      ),
+      message:
+        "outside-project inventory must inspect installed global integrations",
+      result: globalPrime,
+    });
+    const globalSkillPath = join(
+      ctx.hackHome,
+      ".codex",
+      "skills",
+      "hack-cli",
+      "SKILL.md"
+    );
+    const globalSkill = await Bun.file(globalSkillPath).text();
+    await Bun.write(globalSkillPath, `${globalSkill}\nSTALE-GLOBAL-PROBE\n`);
+    const staleGlobalPrime = await ctx.cli({
+      args: ["agent", "prime", "--check"],
+      cwd: ctx.hackHome,
+      env: isolatedUserEnv,
+    });
+    expect({
+      that:
+        staleGlobalPrime.stdout.includes(
+          "Hack integration inventory: review needed"
+        ) &&
+        staleGlobalPrime.stdout.includes(
+          "Inspect affected paths: hack setup sync --global --check"
+        ) &&
+        (await Bun.file(globalSkillPath).text()).includes("STALE-GLOBAL-PROBE"),
+      message: "global inventory reports drift without repairing it",
+      result: staleGlobalPrime,
+    });
+    await Bun.write(globalSkillPath, globalSkill);
+
     const currentPrime = await ctx.cli({
       args: ["agent", "prime", "--check"],
       cwd: fixture.root,

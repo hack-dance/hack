@@ -188,9 +188,11 @@ test("doctor guidance keeps global integration recovery read-only", () => {
     ],
   });
 
-  expect(guidance.configurationRepair).toEqual([
-    "hack setup sync --global --check",
-  ]);
+  expect(guidance.configurationRepair).toEqual([]);
+  expect(guidance.followUp[0]).toBe(
+    "Inspect global integration paths: hack setup sync --global --check"
+  );
+  expect(guidance.followUp[1]).toContain("reported global targets");
 });
 
 test("doctor audits global agent guidance without a project", async () => {
@@ -552,7 +554,9 @@ test("doctor does not turn an all-scope inventory into an automatic repair", () 
       },
     ],
   });
-  expect(guidance.configurationRepair).toEqual([
-    "hack setup sync --all-scopes --check",
-  ]);
+  expect(guidance.configurationRepair).toEqual([]);
+  expect(guidance.followUp[0]).toBe(
+    "Inspect integration paths: hack setup sync --all-scopes --check"
+  );
+  expect(guidance.followUp[1]).toContain("authorized project/global scope");
 });

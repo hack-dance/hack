@@ -111,12 +111,26 @@ export function buildDoctorRecoveryGuidance(input: {
     }
 
     if (result.message.includes("hack setup sync --all-scopes")) {
-      pushUnique(configurationRepair, "hack setup sync --all-scopes --check");
+      pushUnique(
+        followUp,
+        "Inspect integration paths: hack setup sync --all-scopes --check"
+      );
+      pushUnique(
+        followUp,
+        "Repair only reported targets with the matching hack setup <integration> command and authorized project/global scope; missing optional integrations need not be installed."
+      );
       continue;
     }
 
     if (result.message.includes("hack setup sync --global")) {
-      pushUnique(configurationRepair, "hack setup sync --global --check");
+      pushUnique(
+        followUp,
+        "Inspect global integration paths: hack setup sync --global --check"
+      );
+      pushUnique(
+        followUp,
+        "Repair only reported global targets with the matching hack setup <integration> --global command when authorized; missing optional integrations need not be installed."
+      );
       continue;
     }
 

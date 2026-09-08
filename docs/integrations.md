@@ -31,6 +31,8 @@ Run checks when Hack is relevant and there is evidence of drift; there is no man
 Plain `hack agent prime`, including installed SessionStart/PreCompact hooks, prints the current
 primer without scanning project or global integrations. Use `hack agent prime --check` for an
 explicit read-only inventory, or a targeted `hack setup ... --check` for per-artifact detail.
+Outside a Hack project, `hack agent prime --check` inventories global integrations only. Doctor
+classifies inventory commands as follow-up investigation and keeps scoped repair guidance separate.
 Inventory findings do not block unrelated work, and missing optional integrations need not be installed.
 
 Ordinary commands, `hack update`, and `hack doctor --fix` never modify these surfaces. Doctor may

@@ -22,14 +22,16 @@ const VERIFY_COMMAND = "hack setup sync --all-scopes --check";
 
 /** Inspect project and global generated guidance without mutating it. */
 export async function inspectAgentIntegrationFreshness(opts: {
-  readonly projectRoot: string;
+  readonly projectRoot: string | null;
 }): Promise<AgentIntegrationFreshnessReport> {
   const drift = await detectIntegrationDrift(opts);
   return {
     status: drift.hasDrift ? "stale" : "current",
     cliVersion: HACK_AGENT_INTEGRATION_CLI_VERSION,
-    fixCommand: SYNC_COMMAND,
-    verifyCommand: VERIFY_COMMAND,
+    fixCommand: opts.projectRoot ? SYNC_COMMAND : "hack setup sync --global",
+    verifyCommand: opts.projectRoot
+      ? VERIFY_COMMAND
+      : "hack setup sync --global --check",
   };
 }
 
@@ -51,66 +53,51 @@ export function renderAgentIntegrationFreshnessNotice(opts: {
 }
 
 async function detectIntegrationDrift(opts: {
-  readonly projectRoot: string;
+  readonly projectRoot: string | null;
 }): Promise<{ readonly hasDrift: boolean }> {
-  const [
-    cursorProject,
-    cursorUser,
-    claudeProject,
-    claudeUser,
-    codexProject,
-    codexUser,
-    sharedSkill,
-    mcpProject,
-    mcpUser,
-    docs,
-    legacyProject,
-    legacyUser,
-  ] = await Promise.all([
-    checkCursorRules({ scope: "project", projectRoot: opts.projectRoot }),
-    checkCursorRules({ scope: "user" }),
-    checkClaudeHooks({ scope: "project", projectRoot: opts.projectRoot }),
-    checkClaudeHooks({ scope: "user" }),
-    checkCodexSkill({ scope: "project", projectRoot: opts.projectRoot }),
-    checkCodexSkill({ scope: "user" }),
-    checkSharedHackSkill(),
-    checkMcpConfig({
-      scope: "project",
-      projectRoot: opts.projectRoot,
-      targets: ["cursor", "claude", "codex"],
-    }),
-    checkMcpConfig({
-      scope: "user",
-      targets: ["cursor", "claude", "codex"],
-    }),
-    checkAgentDocs({
-      projectRoot: opts.projectRoot,
-      targets: ["agents", "claude"],
-    }),
-    checkLegacyProjectAgentArtifacts({ projectRoot: opts.projectRoot }),
-    checkLegacyUserAgentArtifacts(),
+  const projectRoot = opts.projectRoot;
+  const [singleChecks, mcpChecks, docs, legacy] = await Promise.all([
+    Promise.all([
+      checkCursorRules({ scope: "user" }),
+      checkClaudeHooks({ scope: "user" }),
+      checkCodexSkill({ scope: "user" }),
+      checkSharedHackSkill(),
+      ...(projectRoot
+        ? [
+            checkCursorRules({ scope: "project", projectRoot }),
+            checkClaudeHooks({ scope: "project", projectRoot }),
+            checkCodexSkill({ scope: "project", projectRoot }),
+          ]
+        : []),
+    ]),
+    Promise.all([
+      checkMcpConfig({ scope: "user", targets: ["cursor", "claude", "codex"] }),
+      ...(projectRoot
+        ? [
+            checkMcpConfig({
+              scope: "project",
+              projectRoot,
+              targets: ["cursor", "claude", "codex"],
+            }),
+          ]
+        : []),
+    ]),
+    projectRoot
+      ? checkAgentDocs({ projectRoot, targets: ["agents", "claude"] })
+      : [],
+    Promise.all([
+      checkLegacyUserAgentArtifacts(),
+      ...(projectRoot
+        ? [checkLegacyProjectAgentArtifacts({ projectRoot })]
+        : []),
+    ]),
   ]);
-
-  const singleChecks = [
-    cursorProject.status,
-    cursorUser.status,
-    claudeProject.status,
-    claudeUser.status,
-    codexProject.status,
-    codexUser.status,
-    sharedSkill.status,
-  ] as const;
-
-  const singleDrift = singleChecks.some((status) =>
-    hasSingleCheckDrift(status)
-  );
-  const mcpDrift = hasMcpDrift({ checks: [...mcpProject, ...mcpUser] });
-  const docsDrift = hasDocDrift({ checks: docs });
-  const legacyDrift = [...legacyProject, ...legacyUser].some(
-    (check) => check.status !== "absent"
-  );
   return {
-    hasDrift: singleDrift || mcpDrift || docsDrift || legacyDrift,
+    hasDrift:
+      singleChecks.some((check) => hasSingleCheckDrift(check.status)) ||
+      hasMcpDrift({ checks: mcpChecks.flat() }) ||
+      hasDocDrift({ checks: docs }) ||
+      legacy.flat().some((check) => check.status !== "absent"),
   };
 }
 

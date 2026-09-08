@@ -1,3 +1,25 @@
+## [4.2.0](https://github.com/hack-dance/hack/compare/v4.1.1...v4.2.0) (2026-09-08)
+
+### Features
+
+* add runtime and host command observability ([19f38d5](https://github.com/hack-dance/hack/commit/19f38d5e874cf8abd5350b10607479c90ea65f3f))
+* add runtime and host command observability ([#84](https://github.com/hack-dance/hack/issues/84)) ([38d49be](https://github.com/hack-dance/hack/commit/38d49be005b0f6ea5978e8fe69f1ac937b24eae2))
+
+### Bug Fixes
+
+* cancel host process trees and scope daemon cleanup ([7f5c27d](https://github.com/hack-dance/hack/commit/7f5c27d5027f7d49678a599025a6292a48f6a94b))
+* cancel host process trees and scope daemon cleanup ([#83](https://github.com/hack-dance/hack/issues/83)) ([12822d4](https://github.com/hack-dance/hack/commit/12822d46cce09e2b421183b3d69d97e5f305ac2b))
+* cancel verified TTY command descendants ([bd1c285](https://github.com/hack-dance/hack/commit/bd1c285fc86dbfe7a3f8db8b8f08f084de1c45fd))
+* exclude lifecycle placeholders from orphan cleanup ([a25609b](https://github.com/hack-dance/hack/commit/a25609b3b39ded22446f6db1cc95063338616208))
+* own terminal command groups before forwarding cancellation ([1cc238d](https://github.com/hack-dance/hack/commit/1cc238d71da48b8e1dd0e0f63ccf07a07266dd3b))
+* preserve command outcomes and resource diagnostics ([c52e5ac](https://github.com/hack-dance/hack/commit/c52e5ac04f63bbbc610f30bd58fa7998c05e51df))
+* preserve controlling terminals with piped command input ([3e7f080](https://github.com/hack-dance/hack/commit/3e7f08030d3a777aae8546c947e1c1fe6cf9abaa))
+* preserve nested host command usage attribution ([f4f487d](https://github.com/hack-dance/hack/commit/f4f487d4acaaf023ade5d471ea9ea728ca1c97ec))
+* recognize exact Linux daemon socket names ([a5b2cbd](https://github.com/hack-dance/hack/commit/a5b2cbd7086e64e315bf892aae2e2a602f591aa7))
+* scope tracked host usage to the requested project ([1b0cf32](https://github.com/hack-dance/hack/commit/1b0cf32418a291d5d968ab873be18b23b1ee291b))
+* skip CLI initialization in terminal supervisor ([8091e3a](https://github.com/hack-dance/hack/commit/8091e3a5adadaa5d37f56adafb9119c9925f4c84))
+* use typed Docker inspect fields in resource probes ([b0991af](https://github.com/hack-dance/hack/commit/b0991afdeee899f3b8cb0d552815b00fe197b547))
+
 ## [4.1.1](https://github.com/hack-dance/hack/compare/v4.1.0...v4.1.1) (2026-09-08)
 
 ### Bug Fixes

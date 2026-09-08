@@ -1,3 +1,9 @@
+## [4.0.3](https://github.com/hack-dance/hack/compare/v4.0.2...v4.0.3) (2026-09-08)
+
+### Bug Fixes
+
+* **agents:** make integration checks explicit and recovery scoped ([#81](https://github.com/hack-dance/hack/issues/81)) ([2230a9c](https://github.com/hack-dance/hack/commit/2230a9cbad3391d3595ad33c29c4a0b33c18f884))
+
 ## [4.0.2](https://github.com/hack-dance/hack/compare/v4.0.1...v4.0.2) (2026-09-02)
 
 ### Bug Fixes

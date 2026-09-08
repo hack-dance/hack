@@ -1,3 +1,10 @@
+import {
+  type ProcessIdentityRow,
+  readProcessIdentities,
+  selectProcessTree,
+  signalVerifiedProcessTree,
+} from "./process-tree.ts";
+
 export interface ExecResult {
   readonly exitCode: number;
   readonly stdout: string;
@@ -97,14 +104,18 @@ export async function run(
     timeoutMs: opts.timeoutMs,
   });
   const cancellation = opts.forwardSignals
-    ? installSubprocessSignalForwarding({ pid: proc.pid, ownsProcessGroup })
+    ? installSubprocessSignalForwarding({
+        pid: proc.pid,
+        ownsProcessGroup,
+        childRunning: () => proc.exitCode === null,
+      })
     : null;
   try {
     const exitCode = await proc.exited;
     return cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
   } finally {
     timeout.dispose();
-    cancellation?.dispose();
+    await cancellation?.dispose();
   }
 }
 
@@ -116,24 +127,55 @@ export async function run(
 function installSubprocessSignalForwarding(opts: {
   readonly pid: number;
   readonly ownsProcessGroup: boolean;
-}): { readonly dispose: () => void; readonly exitCode: () => number | null } {
+  readonly childRunning: () => boolean;
+}): {
+  readonly dispose: () => Promise<void>;
+  readonly exitCode: () => number | null;
+} {
   let exitCode: number | null = null;
   let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
   const send = (signal: NodeJS.Signals): void => {
+    if (!(opts.ownsProcessGroup || opts.childRunning())) {
+      return;
+    }
     try {
       process.kill(opts.ownsProcessGroup ? -opts.pid : opts.pid, signal);
     } catch {
       // The owned process/group may already have exited.
     }
   };
+  let ttyTree: ProcessIdentityRow[] = [];
+  let ttyCancellation: Promise<void> = Promise.resolve();
+  let ttyEscalation: Promise<void> = Promise.resolve();
+  const cancelTty = async (signal: NodeJS.Signals): Promise<void> => {
+    ttyTree = selectProcessTree(await readProcessIdentities(), opts.pid);
+    await signalVerifiedProcessTree(ttyTree, signal);
+    if (!ttyTree.some((row) => row.pid === opts.pid)) {
+      send(signal);
+    }
+    forceKillTimer = setTimeout(() => {
+      ttyEscalation = signalVerifiedProcessTree(ttyTree, "SIGKILL");
+      send("SIGKILL");
+    }, 2000);
+  };
   const cancel = (signal: "SIGINT" | "SIGTERM"): void => {
     if (exitCode !== null) {
-      send("SIGKILL");
+      if (opts.ownsProcessGroup) {
+        send("SIGKILL");
+      } else {
+        ttyCancellation = ttyCancellation.then(() =>
+          signalVerifiedProcessTree(ttyTree, "SIGKILL")
+        );
+      }
       return;
     }
     exitCode = signal === "SIGINT" ? 130 : 143;
-    send(signal);
-    forceKillTimer = setTimeout(() => send("SIGKILL"), 2000);
+    if (opts.ownsProcessGroup) {
+      send(signal);
+      forceKillTimer = setTimeout(() => send("SIGKILL"), 2000);
+    } else {
+      ttyCancellation = cancelTty(signal);
+    }
   };
   const onInterrupt = (): void => cancel("SIGINT");
   const onTerminate = (): void => cancel("SIGTERM");
@@ -141,7 +183,8 @@ function installSubprocessSignalForwarding(opts: {
   process.on("SIGTERM", onTerminate);
   return {
     exitCode: () => exitCode,
-    dispose: () => {
+    dispose: async () => {
+      await ttyCancellation;
       process.off("SIGINT", onInterrupt);
       process.off("SIGTERM", onTerminate);
       if (forceKillTimer) {
@@ -150,6 +193,10 @@ function installSubprocessSignalForwarding(opts: {
       if (exitCode !== null && opts.ownsProcessGroup) {
         // A cooperative child can exit before its stubborn descendants.
         send("SIGKILL");
+      }
+      await ttyEscalation;
+      if (exitCode !== null && !opts.ownsProcessGroup) {
+        await signalVerifiedProcessTree(ttyTree, "SIGKILL");
       }
     },
   };

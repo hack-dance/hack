@@ -404,3 +404,7 @@ If you are writing new docs or new project setup flows, document the YAML overla
 - [Sessions](sessions.md)
 - [CLI reference](cli.md)
 - [Pulumi-style env config design](plans/2026-03-27-pulumi-style-env-config-design.md)
+
+For terminal commands cancelled through the wrapper PID, Hack captures the child
+process tree and revalidates process start times before signalling surviving
+descendants. It never signals the shared terminal process group.

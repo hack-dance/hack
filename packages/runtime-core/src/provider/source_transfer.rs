@@ -125,6 +125,15 @@ pub fn publish(
     namespace: &str,
     snapshot: &Snapshot,
 ) -> Result<TransferReceipt, CandidateError> {
+    publish_staged(candidate, namespace, snapshot, |_, _| Ok(()))
+}
+
+fn publish_staged(
+    candidate: &Candidate,
+    namespace: &str,
+    snapshot: &Snapshot,
+    staged: impl FnOnce(&OwnedGuest<'_>, &str) -> Result<(), CandidateError>,
+) -> Result<TransferReceipt, CandidateError> {
     snapshot.receipt().validate()?;
     if namespace.len() != 64
         || !namespace
@@ -146,6 +155,8 @@ pub fn publish(
         }
     }
     let manifest_sha = digest(checksums.as_bytes());
+    let verification = source_sync::verification(Some(snapshot.receipt()));
+    let verifier_sha = digest(verification.as_bytes());
     let revision = &snapshot.receipt().revision;
     let root = format!("/storage/hack-source/{namespace}");
     let pending = format!("{root}/{revision}.pending");
@@ -168,7 +179,7 @@ if test -e "$3" || test -L "$3"; then
 else
   mkdir "$2"
   mkdir "$2/tree"
-  (set -C; : > "$2/source.tar"; : > "$2/files.sha256")
+  (set -C; : > "$2/source.tar"; : > "$2/files.sha256"; : > "$2/verify.sh")
   printf created
 fi
 "#,
@@ -179,15 +190,19 @@ fi
         for (name, bytes) in [
             ("source.tar", archive.as_slice()),
             ("files.sha256", checksums.as_bytes()),
+            ("verify.sh", verification.as_bytes()),
         ] {
             source_sync::upload(&guest, &format!("{pending}/{name}"), bytes)?;
         }
+        staged(&guest, &pending)?;
         guest.execute(
             r#"
+test "$(sha256sum "$1/verify.sh" | cut -d ' ' -f 1)" = "$5"
 test "$(sha256sum "$1/source.tar" | cut -d ' ' -f 1)" = "$2"
 test "$(sha256sum "$1/files.sha256" | cut -d ' ' -f 1)" = "$3"
 tar -xf "$1/source.tar" -C "$1/tree"
-(cd "$1/tree"; sha256sum -c ../files.sha256 >/dev/null)
+(cd "$1/tree"; sh ../verify.sh)
+chmod 444 "$1/verify.sh"
 chmod -R a-w "$1/tree"
 (set -C; printf '%s\n' "$2" > "$1/archive.sha256")
 rm "$1/source.tar"
@@ -197,7 +212,13 @@ test ! -L "$4"
 mv -T "$1" "$4"
 sync
 "#,
-            &[&pending, &archive_sha, &manifest_sha, &complete],
+            &[
+                &pending,
+                &archive_sha,
+                &manifest_sha,
+                &complete,
+                &verifier_sha,
+            ],
             None,
         )?;
     } else if state != "reused" {
@@ -214,36 +235,6 @@ test "$(sha256sum "$1/files.sha256" | cut -d ' ' -f 1)" = "$2"
 (cd "$1/tree"; sha256sum -c ../files.sha256 >/dev/null)
 "#,
         &[&complete, &manifest_sha],
-        None,
-    )?;
-    let verification = source_sync::verification(Some(snapshot.receipt()));
-    let verifier = format!("{complete}/verify.sh");
-    let created = guest.execute(
-        r#"
-test ! -L "$1"
-if test -e "$1"; then
-  test -f "$1"
-  test "$(sha256sum "$1" | cut -d ' ' -f 1)" = "$2"
-  printf reused
-else
-  (set -C; : > "$1")
-  printf created
-fi
-"#,
-        &[&verifier, &digest(verification.as_bytes())],
-        None,
-    )?;
-    if created == "created" {
-        source_sync::upload(&guest, &verifier, verification.as_bytes())?;
-    } else if created != "reused" {
-        return Err(CandidateError::new(
-            "source_transfer_uncertain",
-            "Immutable verifier acknowledgement is invalid.",
-        ));
-    }
-    guest.execute(
-        r#"test ! -L "$1"; test -f "$1"; chmod 444 "$1""#,
-        &[&verifier],
         None,
     )?;
     let publication = Publication {
@@ -282,6 +273,124 @@ fi
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "Manual owned development VM only; requires external resource watchdog"]
+    fn owned_publication_failure_live() -> Result<(), CandidateError> {
+        let root = std::env::var("HACK_LOCAL_TEST_ROOT").expect("candidate root required");
+        let candidate = Candidate::discover(std::path::Path::new(&root))?;
+        let status = super::super::status(&candidate)?;
+        assert_eq!(status.phase, "running");
+        assert_eq!(status.profile, Some(super::super::Profile::Development));
+        let token = format!(
+            "publication-failure-{}-{}",
+            std::process::id(),
+            crate::node::now()
+        );
+        let source = std::env::temp_dir().canonicalize().unwrap().join(&token);
+        state::private_directory(&source)?;
+        std::fs::write(
+            source.join("marker.txt"),
+            b"immutable publication fixture\n",
+        )
+        .map_err(state::io)?;
+        std::fs::write(
+            source.join("compose.yaml"),
+            "services:\n  app:\n    image: busybox:latest\n",
+        )
+        .map_err(state::io)?;
+        let plan = crate::project::plan(
+            &candidate,
+            crate::project::PlanOptions {
+                project: &source,
+                compose_file: std::path::Path::new("compose.yaml"),
+                profiles: &[],
+            },
+        )?;
+        let snapshot = crate::project::snapshot::capture(
+            &source,
+            &Default::default(),
+            &plan.plan.source_selection.metadata_sha256,
+        )?;
+        let revision = &snapshot.receipt().revision;
+        let mut evidence = Vec::new();
+        for fault in ["interrupted", "corrupt-verifier"] {
+            let namespace = digest(format!("{token}-{fault}").as_bytes());
+            let pending = format!("/storage/hack-source/{namespace}/{revision}.pending");
+            let complete = format!("/storage/hack-source/{namespace}/{revision}");
+            let failed = publish_staged(&candidate, &namespace, &snapshot, |guest, stage| {
+                if fault == "interrupted" {
+                    return Err(CandidateError::new(
+                        "injected_interruption",
+                        "Stopped after staged uploads.",
+                    ));
+                }
+                guest.execute("printf corrupted > \"$1/verify.sh\"", &[stage], None)?;
+                Ok(())
+            });
+            assert!(failed.is_err());
+            assert_eq!(
+                load(&candidate, &namespace, revision).err().unwrap().code,
+                "source_not_published"
+            );
+            let inspect = || -> Result<String, CandidateError> {
+                OwnedGuest::connect(&candidate)?.execute(
+                    r#"test ! -e "$2"; test ! -L "$2"; test -d "$1"; test ! -L "$1"; stat -c %d:%i "$1"; sha256sum "$1/verify.sh" "$1/source.tar""#,
+                    &[&pending, &complete], None,
+                )
+            };
+            let retained = inspect()?;
+            assert!(publish(&candidate, &namespace, &snapshot).is_err());
+            assert_eq!(retained, inspect()?);
+            evidence.push(serde_json::json!({"fault":fault,"unpublished":true,"retry_refused":true,"staging_preserved":true}));
+        }
+        let namespace = digest(format!("{token}-complete").as_bytes());
+        publish(&candidate, &namespace, &snapshot)?;
+        let complete = format!("/storage/hack-source/{namespace}/{revision}");
+        let receipt = publication_path(&candidate, &namespace, revision)?;
+        let original_receipt = std::fs::read(&receipt).map_err(state::io)?;
+        for fault in ["corrupt-verifier", "missing-verifier"] {
+            {
+                let guest = OwnedGuest::connect(&candidate)?;
+                if fault == "corrupt-verifier" {
+                    guest.execute(
+                        "chmod 600 \"$1/verify.sh\"; printf corrupted > \"$1/verify.sh\"",
+                        &[&complete],
+                        None,
+                    )?;
+                } else {
+                    guest.execute("rm -- \"$1/verify.sh\"", &[&complete], None)?;
+                }
+            }
+            assert!(publish(&candidate, &namespace, &snapshot).is_err());
+            assert_eq!(
+                std::fs::read(&receipt).map_err(state::io)?,
+                original_receipt
+            );
+            let guest = OwnedGuest::connect(&candidate)?;
+            assert!(verify_published(&guest, &load(&candidate, &namespace, revision)?).is_err());
+            if fault == "missing-verifier" {
+                guest.execute("test ! -e \"$1/verify.sh\"", &[&complete], None)?;
+            } else {
+                guest.execute(
+                    "test \"$(cat \"$1/verify.sh\")\" = corrupted",
+                    &[&complete],
+                    None,
+                )?;
+            }
+            evidence.push(serde_json::json!({"fault":fault,"cache_reuse_refused":true,"host_receipt_unchanged":true,"guest_corruption_preserved":true}));
+        }
+        let directory = candidate.state_root.join("review/wu06");
+        state::private_directory(&directory)?;
+        state::write(
+            &directory.join("publication-failures.json"),
+            &serde_json::json!({
+                "passed":true,"controls":evidence,
+                "scope":"Deterministic interruption after upload and corrupted staged verifier; partials retained. No process-kill or cleanup recovery claim."
+            }),
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn publication_load_reads_a_regular_receipt_and_refuses_aliases() {
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(

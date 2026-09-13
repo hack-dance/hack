@@ -359,3 +359,21 @@ boot is not automatically replayed. Imported images remain in the candidate cach
 This is a development bootstrap interface, not the WU07 application image-resolution workflow.
 The exact pinned application image has been acquired privately; live load and application-test
 acceptance remain pending in the current checkpoint.
+
+## Immutable publication failure boundary
+
+Publication uploads the archive, file checksums and full-tree verifier into a private `.pending`
+directory. It verifies their hashes, extracts and verifies the complete manifest, makes the tree
+read-only, and only then renames staging to the final revision path. The host publication receipt
+is written after the final guest verification. A failed transfer retains staging and has no accepted
+receipt; an ordinary retry refuses that staging directory. Cleanup/recovery remains an explicit
+open acceptance gate, so do not remove a pending directory to force a retry.
+
+Reusing a completed revision verifies the existing verifier and content without rewriting either.
+A missing or corrupt verifier fails closed, including incomplete final directories left by earlier
+candidate versions. Reuse does not silently repair them or replace a prior host receipt.
+
+Native watcher tests exercise a 512-file editor-style burst and separately saturate the one-slot
+notification queue with 100,000 injected events. Rescan and error callbacks retain the explicit
+reconciliation signal even when that slot is already full; excluded paths remain quiet. These
+checks do not establish actual kernel-overflow behavior or end-to-end application reload latency.

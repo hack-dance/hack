@@ -952,3 +952,60 @@ fn native_watcher_observes_atomic_replacement_without_polling_source() {
             .is_some()
     );
 }
+
+#[test]
+fn native_watcher_coalesces_a_burst_into_a_complete_inventory() {
+    let fixture = Fixture::new(BASIC);
+    let selection = fixture.plan().plan.source_selection.metadata_sha256;
+    let watcher = project::watcher::SourceWatcher::new(&fixture.project).unwrap();
+    let batch = fixture.project.join("burst");
+    fs::create_dir(&batch).unwrap();
+    for index in 0..512 {
+        let original = batch.join(format!("file-{index}.txt"));
+        let temporary = batch.join(format!(".save-{index}"));
+        fs::write(&original, "before").unwrap();
+        fs::write(&temporary, format!("after-{index}")).unwrap();
+        fs::rename(&temporary, &original).unwrap();
+        if index % 2 == 0 {
+            fs::remove_file(original).unwrap();
+        } else {
+            fs::rename(original, batch.join(format!("renamed-{index}.txt"))).unwrap();
+        }
+    }
+    assert!(
+        watcher
+            .wait(std::time::Duration::from_secs(8))
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        project::snapshot::capture(&fixture.project, &Default::default(), &selection)
+            .err()
+            .unwrap()
+            .code,
+        "source_changed"
+    );
+    let selection = fixture.plan().plan.source_selection.metadata_sha256;
+    let snapshot =
+        project::snapshot::capture(&fixture.project, &Default::default(), &selection).unwrap();
+    let entries: Vec<_> = snapshot
+        .receipt()
+        .entries
+        .iter()
+        .filter(|e| e.path.starts_with("burst/"))
+        .collect();
+    assert_eq!(entries.len(), 256);
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.kind, "file", "unexpected entry {index}");
+        assert!(entry.path.starts_with("burst/renamed-"));
+    }
+    for index in (1..512).step_by(2) {
+        let path = format!("burst/renamed-{index}.txt");
+        let (entry, bytes) = snapshot
+            .files()
+            .find(|(entry, _)| entry.path == path)
+            .unwrap();
+        assert_eq!(entry.path, path);
+        assert_eq!(bytes, format!("after-{index}").as_bytes());
+    }
+}

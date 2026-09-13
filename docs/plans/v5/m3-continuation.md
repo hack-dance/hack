@@ -37,7 +37,11 @@ ownership still needs scheduling work before graph acceptance.
 Source transfer ENOSPC, interrupted-rename repair, verifier-cache corruption repair and the
 container observer now also pass in the saved checkout. `project sync-status` was repaired;
 batched transfers with a verified prior-script cache reduced warm acknowledgements to roughly
-0.96–0.98 seconds in one run. Native overflow/stress and full performance acceptance remain open.
+0.96–0.98 seconds in one run. Native 512-file burst inventory and callback saturation controls
+now pass. Actual kernel-overflow recovery and full application performance acceptance remain open.
+Immutable publication now verifies staging before its final rename; staged interruption and
+missing/corrupt verifier controls passed in `live-1789326499355320000`. Failed staging remains
+preserved and ordinary retries refuse it. Interrupted cleanup/recovery is still an open gate.
 Do not rerun already passing cases without changed code or an unresolved concern.
 
 WU07 service graph startup is not implemented. Build graph execution, readiness, isolated

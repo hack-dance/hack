@@ -310,3 +310,29 @@ tamper rejection, explicit unknown-outcome reconciliation and the actual Event A
 passed. The earlier 932-test CLI run, typecheck and lint remain valid for unchanged TypeScript
 inputs. The final candidate VM stop was clean. WU05/WU06 remain in progress; graph startup,
 application readiness, persistence and Linux parity have not been accepted.
+
+
+### September 13 publication staging and watcher failure controls
+
+The saved candidate now uploads and verifies the full immutable verifier before the final directory
+rename. Reuse rejects missing/corrupt final verifiers without rebuilding them. The live run
+`live-1789326499355320000` passed deterministic interruption after staging upload, corrupt staged
+verifier rejection, ordinary retry refusal with staging preserved, and missing/corrupt final verifier
+rejection with the existing host receipt unchanged. The same run passed identical-publication reuse,
+ephemeral output/log limits, the immutable A/B/cancel/timeout/tamper controls and four Event Agent
+unit tests. Source fingerprints were unchanged, pressure stayed normal, swapouts stayed at 4,132,
+peak provider footprint was approximately 1.17 GB, and the candidate VM stopped cleanly.
+
+The first attempt (`live-1789326360428894000`) stopped before publication because the synthetic
+fixture used an invented selection digest. It was corrected to use the planner's current digest;
+that failed attempt and its clean-stop evidence remain preserved. These are deterministic staging
+failure controls, not an OS process-kill experiment or proof of interrupted cleanup recovery.
+
+The final Rust suite passed 98 tests with formatting, Clippy and release build passing. Native
+macOS notifications observed a 512-file burst of creation, atomic replacement, rename and deletion;
+a fresh inventory contained exactly the 256 remaining files and their final bytes. Separate
+100,000-event callback saturation tests retained injected rescan/error signals despite the full
+one-slot queue. These establish burst inventory and callback behavior, not an actual kernel queue
+overflow or framework reload performance. The burst test initially reused the pre-edit selection
+digest; it now also asserts that this stale selection is rejected before capturing the fresh plan.
+Existing TypeScript verification remains applicable because its inputs are unchanged.

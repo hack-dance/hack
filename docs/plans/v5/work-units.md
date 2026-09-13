@@ -23,7 +23,7 @@ not satisfy application acceptance. Carry every gap into the next checkpoint's a
 | WU03 | Compose compatibility plan and real-project enrollment | WU02 | Component implemented; root-Compose receipt/readback passed; actual application plan blocked; see [checkpoint 03](checkpoint-03.md) and [real-project gaps](real-project-checkpoints.md) |
 | WU04 | Durable operations, receipts, jobs, and cancellation | WU02–03 | Component implemented for bounded host fixtures; actual project execution blocked; see [checkpoint 04](checkpoint-04.md) and [real-project gaps](real-project-checkpoints.md) |
 | WU05 | Native source and incremental development sync | WU03–04 | In progress; actual source-to-container proof passed, sync acceptance pending |
-| WU06 | Immutable job input and generation enforcement | WU04–05 | In progress; M3 immutable-source execution, real project tests and explicit reconciliation pass; remaining negative controls pending |
+| WU06 | Immutable job input and generation enforcement | WU04–05 | In progress; M3 immutable-source execution, real project tests and explicit reconciliation pass; supervisor-loss containment also passes; remaining negative controls pending |
 | WU07 | Real graph, persistent data, and loopback endpoints | WU03–06 | Planned |
 | WU08 | Durable terminals and bounded event/log streams | WU04, WU07 | Planned |
 | WU09 | Native Linux and private SSH parity | WU05–08 | Planned; requires a selected Linux fixture host |

@@ -14,11 +14,15 @@ pub use profile::Profile;
 mod source_job;
 #[cfg(test)]
 mod source_job_test;
+#[cfg(test)]
+mod source_output_test;
 mod source_probe;
 mod source_sync;
 mod source_transfer;
 #[cfg(test)]
 mod source_watch_test;
+#[cfg(test)]
+mod supervisor_loss_test;
 pub use source_job::{SourceJob, SourceJobEvent, reconcile_source_job, run_source_job};
 pub use source_probe::{ProbeReceipt, verify as verify_source};
 pub use source_sync::{SyncReceipt, SyncSession, sync_status};

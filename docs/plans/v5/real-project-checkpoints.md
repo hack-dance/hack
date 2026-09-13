@@ -130,7 +130,7 @@ open; image acquisition and a successful release build are not runtime proof.
 
 ## M3 live source-job checkpoint — September 13
 
-The user-selected M3 runs the candidate in `/Users/hack/dev/hack-v5-qualification-20260913/hack`.
+The user-selected M3 runs the candidate in `<qualification-root>/hack`.
 The separate Event Agent source copy has revision
 `586ff66ea551ad0d389d2425773e633a6988837e0a8517b909db062a7c6c952d`, matching the selected
 local capture. Runtime state and credentials were not copied. The binary was rebuilt for that
@@ -206,3 +206,54 @@ validated Rust 1.97.1 compiler; hosted CI and Linux runtime qualification remain
 The user requested continuation in the saved `hack-m3` project and confirmed that M3 may run
 Event Agent using its existing Hack environment. Resolve configuration through managed injection;
 do not expose credentials or infer permission for production database mutations.
+
+## Saved M3 checkout: supervisor-loss control — September 13
+
+The saved checkout now tracks `codex/v5-candidate` and includes checkpoint `4b9fd30`.
+Its candidate was rebuilt locally with Rust 1.97.1; the existing qualification checkout and
+captured source were preserved. A separate development VM in this checkout used the same pinned
+provider, engine and Bun image inputs.
+
+The live supervisor-loss control passed in
+`.hack-local/review/wu05/live-1789319934893524000/`. After the fixture-owned supervisor was killed
+and reaped, the container ran the Bun workload and its child, then exited under its independent
+8-second deadline (8.016 seconds observed after supervisor loss, exit 137, guest PID zero).
+The restarted node quarantined the job. Retrying returned the original acceptance; explicit
+reconciliation and its retry confirmed container absence and retained `reconciled_unknown`,
+unknown exit code and one start. Independent engine events were create/start/die/destroy.
+The VM stopped cleanly, protected source/configuration fingerprints matched, memory pressure
+remained normal and swapouts did not increase. This is supervisor-loss containment, not app readiness.
+
+Two earlier harness failures are retained: the first selected the Rust test executable instead
+of the checkout CLI; the second observer contended for the supervisor's exclusive provider lock.
+The corrected test observes the journal start, kills its owned child, and then inspects the engine.
+Both retained jobs were explicitly reconciled without replay. Concurrent engine observations and
+execution still require scheduling work before multi-service graph acceptance.
+
+The actual managed M3 Event Agent checkout was also replanned read-only at commit
+`8baf4757dca16cff0dc0c688c9f8624c6231efcb`, on `codex/hack-env-overlays-and-generate` (two local
+commits ahead, preserved). This configuration has 12 services; it is distinct from the captured
+14-service qualification source. External-network, existing route-label and interpolated mount
+refusals still block enrollment. Managed base/core env inspection listed 150 variables and no
+missing declared required variables, but `DATABASE_URL` was unavailable in that scope. No secret
+values were exposed and no database operation ran. Managed delivery and full graph acceptance
+remain open; the available-variable inventory does not prove usable credentials.
+
+The separate output/reuse run `live-1789320176582870000` also passed. Repeated publication
+preserved the source directory and package-file device/inode identities. The job wrote/read its
+separate output mount, observed `EROFS` on input writes and `ENOSPC` beyond the 64 MiB output
+budget, then wrote successfully after removing its oversized output file. Both 40,000-byte log
+streams were retained within 16 KiB each with truncation reported. The job exited zero, started
+once and had create/start/die/destroy events; container absence and clean VM stop were confirmed.
+This qualifies ephemeral output bounds and identical-content reuse, not durable artifact export,
+cache-collision recovery or interrupted-publication cleanup.
+
+Fresh saved-checkout verification exposed two TypeScript test-environment issues hidden by the
+previous cache-only evidence. Installing the committed lockfile supplied the missing conventional
+commit preset. Project-view tests now isolate their global config path so operator extensions do
+not leak into fixture expectations. No stable Hack configuration was changed.
+
+Final checkpoint gates: 93 offline Rust tests passed (manual live controls run separately),
+format and Clippy passed, release builds passed, and pinned Bun 1.3.9 typecheck/check passed
+without cache reuse. The CLI suite ran 932 passing tests with five existing skips; the unchanged
+database suite used its valid Turbo cache. Hosted CI and Linux runtime remain unverified.

@@ -1,7 +1,7 @@
 # M3 continuation checkpoint
 
 Continue the private candidate on branch `codex/v5-candidate` in the saved `hack-m3` project,
-`/Users/hack/dev/hack-dance/hack-cli`. Read `work-units.md`, `development.md`, and
+`<saved-hack-m3-checkout>`. Read `work-units.md`, `development.md`, and
 `real-project-checkpoints.md` in this directory before implementation. Preserve stable Hack and
 existing workloads. The user authorizes running Event Agent on M3 with its existing Hack env.
 Use managed environment injection and native credential approvals; do not print or copy secrets.
@@ -9,7 +9,7 @@ Confirm any destructive database operation targets the intended disposable envir
 
 ## Existing live fixture and evidence
 
-The qualification checkout is `/Users/hack/dev/hack-v5-qualification-20260913/hack`; its sibling
+The qualification checkout is `<qualification-root>/hack`; its sibling
 `event-agent` is a verified 53,840,094-byte source capture and `inputs` holds pinned provider and
 Bun image archives. Preserve this checkout and its evidence. Its VM is stopped. The candidate
 executable binds its build checkout: rebuild after changing paths, never copy a binary as setup.
@@ -30,7 +30,10 @@ All are under the private scripts directory.
 ## Remaining acceptance
 
 WU05 and WU06 are still in progress: finish the source-sync failure/performance matrix and
-supervisor-loss containment, plus outstanding publication/cache/output controls in the work units.
+the outstanding publication/cache/output controls in the work units.
+Supervisor-loss containment, identical publication reuse and ephemeral output bounds now pass in the saved checkout; see the September 13 saved-checkout
+entry in `real-project-checkpoints.md`. Concurrent engine observation versus supervisor lock
+ownership still needs scheduling work before graph acceptance.
 Do not rerun already passing cases without changed code or an unresolved concern.
 
 WU07 service graph startup is not implemented. Build graph execution, readiness, isolated

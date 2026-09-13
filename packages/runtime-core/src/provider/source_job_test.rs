@@ -25,7 +25,7 @@ fn now() -> u64 {
         .expect("clock")
         .as_secs()
 }
-fn request(
+pub(super) fn request(
     store: &mut Store,
     candidate: &Candidate,
     id: &str,

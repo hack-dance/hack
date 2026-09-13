@@ -257,3 +257,56 @@ Final checkpoint gates: 93 offline Rust tests passed (manual live controls run s
 format and Clippy passed, release builds passed, and pinned Bun 1.3.9 typecheck/check passed
 without cache reuse. The CLI suite ran 932 passing tests with five existing skips; the unchanged
 database suite used its valid Turbo cache. Hosted CI and Linux runtime remain unverified.
+
+## M3 source-status repair and transfer qualification — September 13
+
+The public `project sync-status` command failed on an existing receipt with `invalid_state` because
+it treated `state.json` as a directory. It now validates parent directories separately and reads the
+receipt through the existing bounded, private regular-file reader. The regression covers missing
+state without allocation, ordinary read-only receipt access, symlink/hardlink receipts and an
+aliased parent. The rebuilt CLI read the actual captured-source acknowledgement with the VM stopped.
+
+Source sync now batches its delta and control scripts into one hash-verified envelope. After a
+successful apply, it retains the complete verifier outside the watched tree. A subsequent update
+reuses that prior verifier only after checking its expected hash, with another hash check before
+execution. Every before/after whole-tree check remains. Corrupted caches fail closed; explicit
+reconciliation reconstructs them from the recorded manifests.
+
+The live run `live-1789321210305920000` passed forced source-transfer ENOSPC in a private 1 MiB
+tmpfs, refusal to silently retry pending transfer, explicit repair after resizing that owned tmpfs,
+corrupted-verifier refusal and repair, interrupted-rename refusal and repair, stable watched-root
+identity, complete guest-manifest verification and owned tmpfs removal. This tests a bounded
+filesystem-full failure, not exhaustion of the shared persistent disk. Earlier unsuccessful
+harness attempts remain in private evidence, including an evidence-directory permission mismatch
+and a disk-usage formatting assumption corrected with POSIX output.
+
+The same run passed actual-source container inotify replacement/deletion/restoration. The initial
+uncached acknowledgement took 1307 ms. The four warm acknowledgements took 966, 959, 982 and
+969 ms, versus the earlier checkpoint's 1107, 1122, 1117 and 1123 ms. Warm compressed payloads
+fell from approximately 619 kB to approximately 310 kB
+(619,327–619,645 versus 309,733–309,962 bytes); transfer time fell from 440–442 to 195–205 ms.
+These are per-stage observations from individual runs, not a matched performance cohort, p95
+qualification or application reload proof. Full-tree verification still takes approximately 560 ms.
+The VM stopped cleanly and the captured source/configuration fingerprints remained unchanged.
+
+### Managed environment readback and automatic migration
+
+The earlier base/core `DATABASE_URL` unavailability was resolved by an authorized `hack host exec`
+managed-injection probe. The child reported only booleans: `DATABASE_URL` and `AWS_PROFILE` were
+present. A subsequent redacted `env explain` confirmed global-scope delivery to Compose.
+No secret values were printed, and no database connection or migration command ran.
+
+The installed Hack command automatically migrated legacy env configuration in the separate managed
+Event Agent checkout. Its `.gitignore` and `.hack/hack.config.json` changed, and
+`.hack/hack.env.default.yaml` plus `.hack/hack.env.production.yaml` were created. These changes are
+preserved, uncommitted, and excluded from the v5 branch. This was managed env-format migration,
+not a database migration or proof of graph startup. Do not report that managed checkout as clean.
+The separate qualification capture remained unchanged.
+
+The final source-sync revision then passed the full immutable-source live control again in
+`live-1789321275811362000`: A/B execution, stale/unpublished rejection, cancellation, timeout,
+tamper rejection, explicit unknown-outcome reconciliation and the actual Event Agent test file
+(four passes). Final offline Rust verification passed 95 tests; format, Clippy and release build
+passed. The earlier 932-test CLI run, typecheck and lint remain valid for unchanged TypeScript
+inputs. The final candidate VM stop was clean. WU05/WU06 remain in progress; graph startup,
+application readiness, persistence and Linux parity have not been accepted.

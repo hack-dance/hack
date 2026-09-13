@@ -175,7 +175,7 @@ pub fn sync_status(
     namespace: &str,
 ) -> Result<Option<SyncReceipt>, CandidateError> {
     let path = record_path(candidate, namespace)?;
-    crate::reject_aliased_state(&path)?;
+    crate::reject_aliased_state(path.parent().expect("source state parent"))?;
     if !path
         .try_exists()
         .map_err(|_| error("Cannot inspect source sync state."))?
@@ -396,6 +396,12 @@ fi
         self.record.pending = Some(snapshot.receipt().clone());
         self.record.phase = "applying".into();
         write_record(&self.path, &self.record)?;
+        let before = if reconcile {
+            repair_script(&known_paths)
+        } else {
+            verification(self.record.acknowledged.as_ref())
+        };
+        let before_hash = hash(before.as_bytes());
         let observed_root = guest.execute(
             r#"
 umask 077
@@ -425,8 +431,18 @@ if test "$4" != repair; then
 fi
 mkdir "$2"
 mkdir "$2/tree"
-(set -C; : > "$2/delta.tar"; : > "$2/verify-before.sh"; : > "$2/verify-after.sh"; : > "$2/apply.sh")
-stat -c %i "$1/tree"
+(set -C; : > "$2/payload.tar")
+reuse=new
+test ! -L "$1/verify-current.sh"
+if test -e "$1/verify-current.sh"; then
+  test -f "$1/verify-current.sh"
+  test "$(stat -c %u:%h "$1/verify-current.sh")" = 0:1
+  if test "$4" != repair; then
+    test "$(sha256sum "$1/verify-current.sh" | cut -d ' ' -f 1)" = "$6"
+    reuse=reused
+  fi
+fi
+printf '%s\n%s' "$(stat -c %i "$1/tree")" "$reuse"
 "#,
             &[
                 &root,
@@ -434,11 +450,20 @@ stat -c %i "$1/tree"
                 &previous,
                 if reconcile { "repair" } else { "normal" },
                 &self.record.provider_incarnation,
+                &before_hash,
             ],
             None,
         )?;
-        let inode = observed_root
+        let (observed_inode, cache_state) = observed_root
             .trim()
+            .split_once('\n')
+            .ok_or_else(|| error("Invalid guest source cache acknowledgement."))?;
+        let reused = match cache_state {
+            "new" => false,
+            "reused" => true,
+            _ => return Err(error("Invalid guest source cache acknowledgement.")),
+        };
+        let inode = observed_inode
             .parse::<u64>()
             .ok()
             .filter(|n| *n > 0)
@@ -455,24 +480,29 @@ stat -c %i "$1/tree"
         self.record.guest_tree_inode = Some(inode);
         write_record(&self.path, &self.record)?;
         let archive = snapshot.delta_archive(&delta)?;
-        let before = if reconcile {
-            repair_script(&known_paths)
-        } else {
-            verification(self.record.acknowledged.as_ref())
-        };
         let after = verification(Some(snapshot.receipt()));
         let apply = apply_script(snapshot, &delta.changed_paths, &delta.removed_entries);
-        let prepare_millis = millis(started.elapsed());
-        let transfer_started = Instant::now();
-        let mut compressed_payload_bytes = 0;
-        for (name, bytes) in [
+        let payload = transfer_payload([
             ("delta.tar", archive.as_slice()),
-            ("verify-before.sh", before.as_bytes()),
+            (
+                "verify-before.sh",
+                if reused { &[] } else { before.as_bytes() },
+            ),
             ("verify-after.sh", after.as_bytes()),
             ("apply.sh", apply.as_bytes()),
-        ] {
-            compressed_payload_bytes += upload(&guest, &format!("{stage}/{name}"), bytes)?;
-        }
+        ])?;
+        drop(archive);
+        drop(before);
+        drop(after);
+        drop(apply);
+        let prepare_millis = millis(started.elapsed());
+        let transfer_started = Instant::now();
+        let compressed_payload_bytes = upload(&guest, &format!("{stage}/payload.tar"), &payload)?;
+        guest.execute(
+            "tar -xf \"$1/payload.tar\" -C \"$1\"; rm \"$1/payload.tar\"; if test \"$3\" = reused; then cp \"$2/verify-current.sh\" \"$1/verify-before.sh\"; fi",
+            &[&stage, &root, cache_state],
+            None,
+        )?;
         let transfer_millis = millis(transfer_started.elapsed());
         let apply_started = Instant::now();
         guest
@@ -487,10 +517,13 @@ cd "$1/tree"
 test ! -L "$1/pending"
 printf '%s\n' "$3" > "$1/pending"
 sync
+test "$(sha256sum "$2/verify-before.sh" | cut -d ' ' -f 1)" = "$6"
 sh "$2/verify-before.sh"
 tar -xf "$2/delta.tar" -C "$2/tree"
 sh "$2/apply.sh" "$2/tree"
 sh "$2/verify-after.sh"
+test ! -L "$1/verify-current.sh"
+mv -T "$2/verify-after.sh" "$1/verify-current.sh"
 test ! -L "$1/revision.next"
 if test -e "$1/revision.next"; then
   test "$4" = repair
@@ -510,6 +543,7 @@ printf '%s' "$3"
                     &snapshot.receipt().revision,
                     if reconcile { "repair" } else { "normal" },
                     &inode.to_string(),
+                    &before_hash,
                 ],
                 None,
             )
@@ -558,6 +592,27 @@ fi
 
 fn millis(duration: std::time::Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+/// Fixed-name regular entries keep source content inside the nested delta archive.
+/// The envelope passes the same compressed and decoded identity checks as every upload.
+fn transfer_payload(entries: [(&str, &[u8]); 4]) -> Result<Vec<u8>, CandidateError> {
+    let mut archive = tar::Builder::new(Vec::new());
+    for (name, bytes) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o600);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        archive
+            .append_data(&mut header, name, bytes)
+            .map_err(|_| error("Cannot encode source transfer payload."))?;
+    }
+    archive
+        .into_inner()
+        .map_err(|_| error("Cannot finish source transfer payload."))
 }
 
 pub(super) fn upload(
@@ -700,4 +755,83 @@ fn apply_script(
         }
     }
     script
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transfer_envelope_keeps_binary_source_separate_from_verification_scripts() {
+        let delta = b"\0../apply.sh\nnot-a-script\xff";
+        let expected: [(&str, &[u8]); 4] = [
+            ("delta.tar", delta),
+            ("verify-before.sh", b"before"),
+            ("verify-after.sh", b"after"),
+            ("apply.sh", b"apply"),
+        ];
+        let payload = transfer_payload(expected).unwrap();
+        let mut archive = tar::Archive::new(payload.as_slice());
+        let mut entries = archive.entries().unwrap();
+        for (name, bytes) in expected {
+            let mut entry = entries.next().unwrap().unwrap();
+            assert_eq!(entry.path().unwrap().as_ref(), Path::new(name));
+            assert!(entry.header().entry_type().is_file());
+            assert_eq!(entry.header().mode().unwrap(), 0o600);
+            let mut decoded = Vec::new();
+            entry.read_to_end(&mut decoded).unwrap();
+            assert_eq!(decoded, bytes);
+        }
+        assert!(entries.next().is_none());
+    }
+
+    #[test]
+    fn sync_status_reads_receipts_without_starting_provider_and_refuses_aliases() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-sync-status-{}-{}",
+            std::process::id(),
+            crate::node::now()
+        ));
+        state::private_directory(&root).unwrap();
+        let candidate = Candidate::discover(&root).unwrap();
+        let namespace = "a".repeat(64);
+        assert!(sync_status(&candidate, &namespace).unwrap().is_none());
+        assert!(!candidate.state_root.exists());
+        let path = record_path(&candidate, &namespace).unwrap();
+        state::private_directory(path.parent().unwrap()).unwrap();
+        let record = Record {
+            schema: 1,
+            checkout: candidate.checkout.clone(),
+            source: root.join("source"),
+            namespace: namespace.clone(),
+            provider_incarnation: "b".repeat(32),
+            guest_tree_inode: None,
+            phase: "unpublished".into(),
+            acknowledged: None,
+            pending: None,
+            repair_paths: BTreeSet::new(),
+            pending_operations: vec![],
+        };
+        write_record(&path, &record).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let receipt = sync_status(&candidate, &namespace).unwrap().unwrap();
+        assert_eq!(receipt.phase, "unpublished");
+        assert_eq!(receipt.namespace, namespace);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!candidate.state_root.join("run/smolvm").exists());
+        let retained = path.with_extension("retained");
+        std::fs::rename(&path, &retained).unwrap();
+        std::os::unix::fs::symlink(&retained, &path).unwrap();
+        assert!(sync_status(&candidate, &namespace).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::hard_link(&retained, &path).unwrap();
+        assert!(sync_status(&candidate, &namespace).is_err());
+        std::fs::remove_file(&path).unwrap();
+        let parent = path.parent().unwrap();
+        let retained_parent = parent.with_extension("retained");
+        std::fs::rename(parent, &retained_parent).unwrap();
+        std::os::unix::fs::symlink(&retained_parent, parent).unwrap();
+        assert!(sync_status(&candidate, &namespace).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

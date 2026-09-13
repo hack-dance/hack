@@ -309,9 +309,20 @@ provider process without adopting changed disks. This is an unclean failed boot,
 source to a guest-native working tree. Add `--watch` for native FSEvents/inotify notifications;
 `--duration-seconds` bounds a foreground watch session. Output is JSON Lines with the acknowledged
 revision, payload bytes and elapsed time. `project sync-status` reports the last persisted acknowledgement,
-not a fresh inspection of a running application. These commands cannot start an application graph.
+not a fresh inspection of a running application. Saved receipts remain readable while the provider
+is stopped; status validates receipt parents as directories and the receipt itself as a private
+regular file. Symlinked or hard-linked receipts are refused. These commands cannot start an application graph.
 
-Sync receipts separate preparation, transfer, guest apply and cleanup time. Compressed payload bytes
+Sync receipts separate preparation, transfer, guest apply and cleanup time. Each apply transfers
+one fixed-name envelope containing the delta archive and before/after/apply scripts. Compressed
+and decoded hashes are checked before extracting it into the owned staging directory; the source
+archive is still extracted separately and the whole guest tree is verified before acknowledgement.
+After a verified apply, its complete verifier is retained outside the watched tree. A later normal
+apply reuses that prior verifier only after matching its expected SHA-256, then checks the staged
+copy again before execution. Missing caches are regenerated; altered caches fail closed and require
+explicit reconciliation. Reconciliation regenerates verification from recorded manifests. A client
+that does not update this cache can require reconciliation on a later upgrade. No source-tree check
+is skipped. Interrupted envelopes remain subject to explicit reconciliation and owned staging cleanup. Compressed payload bytes
 include the delta archive and verification metadata; they exclude base64/framing overhead and must
 not be confused with changed source-file bytes. Transfers verify compressed and decoded hashes.
 

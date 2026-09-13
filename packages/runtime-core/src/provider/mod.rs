@@ -11,6 +11,8 @@ mod lifecycle;
 mod process;
 mod profile;
 pub use profile::Profile;
+#[cfg(test)]
+mod source_failure_test;
 mod source_job;
 #[cfg(test)]
 mod source_job_test;

@@ -34,6 +34,10 @@ the outstanding publication/cache/output controls in the work units.
 Supervisor-loss containment, identical publication reuse and ephemeral output bounds now pass in the saved checkout; see the September 13 saved-checkout
 entry in `real-project-checkpoints.md`. Concurrent engine observation versus supervisor lock
 ownership still needs scheduling work before graph acceptance.
+Source transfer ENOSPC, interrupted-rename repair, verifier-cache corruption repair and the
+container observer now also pass in the saved checkout. `project sync-status` was repaired;
+batched transfers with a verified prior-script cache reduced warm acknowledgements to roughly
+0.96–0.98 seconds in one run. Native overflow/stress and full performance acceptance remain open.
 Do not rerun already passing cases without changed code or an unresolved concern.
 
 WU07 service graph startup is not implemented. Build graph execution, readiness, isolated
@@ -47,3 +51,9 @@ prove app startup, reload, endpoints, persistence, Linux parity or release readi
 Continue implementing and testing against the ledger until the requested working runtime is
 actually demonstrated. Keep concrete remaining gates visible. This checkpoint does not authorize
 merging or publishing a release.
+
+The managed Event Agent injection probe succeeded for `DATABASE_URL` and `AWS_PROFILE` (presence
+only). The installed CLI automatically migrated its legacy env config: `.gitignore` and
+`.hack/hack.config.json` changed, and default/production env YAML files were created. Preserve
+these uncommitted managed changes; they are outside this branch and did not run database migrations.
+The current managed checkout has 12 services, distinct from the preserved 14-service capture.

@@ -7,6 +7,30 @@ on:
   pull_request:
 
 jobs:
+  runtime-core:
+    name: Candidate core (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - name: Check candidate formatting
+        run: cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check
+      - name: Lint candidate core
+        run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --jobs 2 -- -D warnings
+      - name: Test candidate isolation contracts
+        run: cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --jobs 2
+      - name: Build and inspect local candidate
+        run: |
+          ./scripts/build-hack-local.sh
+          ./hack-local info --json
+
   secret-scan:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:

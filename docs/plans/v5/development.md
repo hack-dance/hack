@@ -1,0 +1,350 @@
+# Isolated candidate development
+
+The installed `hack` remains the supported v4 executable. `hack-local` is a repository script that
+executes only the Rust candidate built for that physical checkout. It has no fallback to `hack`,
+`dist/hack`, an installed daemon, a default Docker context, or an existing project runtime.
+
+## Build and inspect checkpoint WU01
+
+Prerequisites: the validated Rust 1.97.1 toolchain, Cargo, and a
+POSIX shell. Dependencies are locked in `packages/runtime-core/Cargo.lock`. Build uses the existing
+Cargo cache; it does not install a toolchain, provider, service, or Hack binary. Use the repository's
+pinned Bun 1.3.9 for existing TypeScript checks.
+
+From the candidate checkout:
+
+```sh
+./scripts/build-hack-local.sh
+./hack-local --version
+./hack-local info --json
+./hack-local plan --project /absolute/path/to/a/separate/project --json
+```
+
+`plan` currently previews canonical source identity and isolated future paths only. It does not
+parse Compose or `.env`, copy source, enroll a workspace, verify installed SmolVM, or start anything.
+It reports `runtime_execution_supported: false` and an empty effects list. Top-level project `up`, `down`, `exec`, and `sync` still fail. The separate `runtime` commands
+below affect only the candidate pool.
+
+Use a separate source project or disposable worktree, not the candidate checkout or one of its
+ancestors. This prevents recursive synchronization of candidate state when enrollment is added.
+A missing project or symlinked candidate state produces a typed error rather than adopting it.
+
+## Convenient invocation from another project
+
+The absolute script path works from any working directory. For an optional current-shell alias,
+run this once from the candidate checkout (do not write it to a managed shell profile):
+
+```sh
+alias hack-local="'$(pwd -P)/hack-local'"
+```
+
+Then change directories and call `hack-local info` or `hack-local plan --project "$PWD"`.
+`unalias hack-local` removes the alias. A global symlink is deliberately not installed; the launcher
+rejects direct symlink invocation so the owning checkout remains unambiguous.
+
+## Paths and safety boundaries
+
+| Surface | Candidate contract |
+| --- | --- |
+| Executable | `<checkout>/.hack-local/target/release/hack-runtime-candidate` |
+| Build outputs | `<checkout>/.hack-local/target` |
+| Runtime state | `<checkout>/.hack-local/run` |
+| Provider home/cache/sockets | `.hack-local/run/smolvm/home`; a receipt-bound `/private/tmp/hkl-<random>` alias keeps Unix socket paths short |
+| Provider Docker config | `.hack-local/run/smolvm/docker-config`, empty; no global context or credentials |
+| Project preview | Canonical source path and derived namespace; no persistent enrollment or runtime ownership claim |
+| Future source/data/output | Separate candidate-owned storage, never active v4 volumes |
+| Future routes | Dedicated candidate namespace and loopback ports, never v4 route claims |
+| Official install/config | Unmodified; no `install:dev`, `install:bin`, `bun link`, or `cargo install` in this workflow |
+
+Build and runtime directories are ignored by Git. Inspection does not create them. The build script
+creates only build output and Cargo's normal dependency cache. No global HOME override is used by
+the launcher. Future provider-process path overrides must not leak into clients or project commands.
+
+Rebuild explicitly after source changes. The binary refuses a different checkout root, but does
+not prove that its bytes match every current uncommitted edit. Do not copy built binaries between
+worktrees; build each checkout. The version/banner distinguishes the candidate from v4; package
+version changes and release installation are deferred.
+
+## Verify the checkpoint
+
+```sh
+cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check
+cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml \
+  --target-dir .hack-local/target --all-targets -- -D warnings
+cargo test --locked --manifest-path packages/runtime-core/Cargo.toml \
+  --target-dir .hack-local/target --jobs 2
+./scripts/build-hack-local.sh
+./hack-local info --json
+```
+
+Contract tests run the real candidate executable with an empty executable search path, synthetic
+HOME, poisoned runtime endpoints, a project containing a synthetic secret, and independent
+checkout/project paths. They check refusals, no secret disclosure, no project/home writes, and
+no fallback to a fake global Hack. These are WU01 proofs, not VM or container isolation proofs.
+
+For a review demo, record the official `hack` executable path and SHA-256 before building, then
+compare them afterward. Run a read-only preview against a separate real project and show that its
+Git status has not changed. Do not invoke ordinary `hack up` to test this candidate.
+
+Runtime tests begin in WU02 on fresh owned fixtures with admission, watchdog, and cleanup receipts.
+Tests against real project services begin only after explicit WU03 enrollment and WU07 readiness.
+No test should overlap another stateful test's provider instance, ports, daemon, or containers.
+
+To discard WU01 artifacts, first verify that only WU01 has run; its `.hack-local` contains build
+outputs and no live runtime. Later checkpoints require ownership-checked shutdown before any state
+removal. Do not introduce a broad deletion command or remove retained data as routine cleanup.
+
+
+## WU02: prepare and inspect the private runtime
+
+The Mac adapter currently requires Apple Silicon, native permission to use the hypervisor, and
+Python 3 for the manual fixture only. Its implementation and live evidence are separate; see
+[checkpoint 02](checkpoint-02.md) before treating this as a qualified development environment.
+
+Download the exact archives in [provider-pins.json](../../../packages/runtime-core/provider-pins.json)
+into an ignored local directory, then pass their paths explicitly:
+
+```sh
+./hack-local runtime prepare --archive /path/to/smolvm-1.14.3-darwin-arm64.tar.gz
+./hack-local runtime prepare-engine --archive /path/to/docker-29.5.2.tgz
+./hack-local runtime probe
+./hack-local runtime status
+```
+
+Preparation verifies SHA-256 before extraction, verifies the Mac executable signature, and records
+the installed tree fingerprint. It does not download packages, boot a VM, change native trust, or
+install software globally. A later changed tree is rejected. Interrupted preparation is retained
+for inspection; it is not silently overwritten. Digests pin observed releases; signature verification
+is not a notarization or hypervisor-authorization claim.
+
+The VM receives only the pinned engine directory as a read-only tool mount. Its guest base is a
+private copy of the verified rootfs, with its own readiness marker. Compressed disk templates are
+copied into the provider's private HOME so their expansion cannot modify the pinned installation.
+Docker data and containerd data use the native storage disk; PID, exec, and socket state use a
+separate 1 MiB tmpfs. No project directories, credentials, SSH agent, or application ports are shared.
+
+## WU02: lifecycle demo
+
+```sh
+./hack-local runtime up
+./hack-local runtime status
+./hack-local runtime down
+./hack-local runtime up
+./hack-local runtime down
+```
+
+For fresh capacity, plain `up` applies the research envelope: 2 vCPUs, 2 GiB guest RAM, 4 GiB storage and 4 GiB
+overlay; at least 16 GiB free host RAM and 100 GiB free disk; normal memory/thermal status;
+load below 8; and stable swapouts over three admission samples 15 seconds apart. There is another
+fresh sample immediately before boot. **The 30-second qualification wait is not provider boot
+latency.** These conservative test gates are not the final product admission policy.
+
+### Experimental development profile
+
+`runtime probe --profile development` is read-only. `runtime up --profile development` explicitly
+selects a separate development allocation: 4 vCPUs, 6 GiB guest RAM, 32 GiB storage and 10 GiB overlay.
+Admission requires a 10 GiB **free-plus-file-cache estimate**: the guest allocation, a provisional
+2 GiB provider-overhead allowance, and 2 GiB host reserve. This is a budget and a reclaim estimate,
+not measured overhead or guaranteed allocatable RAM. The estimate is vm_stat free pages minus
+speculative pages (saturating at zero), plus file-backed pages, using the reported page size.
+It excludes separate active, inactive, compressed and purgeable totals. Dirty or mapped file pages
+may still require reclamation work; normal pressure and stable swapouts remain independent gates.
+The raw free-page observation is retained separately. Research admission still uses raw free pages.
+
+Apple's [memory guide](https://support.apple.com/en-gb/guide/activity-monitor/actmntr1004/mac)
+describes cached files as reusable system memory. Do not multiply `kern.memorystatus_level` by RAM:
+[XNU](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/vm/vm_page.h) includes active
+and inactive pages in that pressure-related level on macOS, so it is not spare capacity.
+It also requires normal pressure/thermal state, 100 GiB disk headroom, load below the host's logical
+CPU count, and unchanged swapouts across three samples one second apart and immediately before boot.
+
+This implements the spec's separation between experiment controls and an explicit development
+policy. It does not revise, rerun, or pass the frozen research cohort. Status labels this profile
+`experimental-development-not-benchmark-qualified` and reports the native provider process's RSS
+and physical footprint separately from configured guest RAM. It does not aggregate unrelated VMs
+or prove complete helper/descendant accounting.
+
+Development source-transfer and engine-mutation operations check a 2 GiB free-plus-file-cache estimated host reserve, pressure, swap
+stability and the provider's 8 GiB footprint budget at connection and at most two-second intervals
+between requests. A failed check blocks further effects and retains partial source state. This is
+not a continuous pool governor or automatic shutdown service: live tests need an independent host
+watchdog with owned-pool cleanup. Networked applications remain gated; both profiles currently
+disable VM networking and the Docker bridge.
+
+An existing pool retains its recorded profile on plain `up`. Selecting another profile refuses
+before resizing or replacing anything. Legacy receipts default to the research profile.
+
+The adapter checks native PID/start-time/UID/executable identity, the retained provider configuration,
+open disk handles, ext4 UUIDs, guest boot identity, read-only engine mount and executable digests,
+the persistent owner marker, and Docker readiness. A changed boot ID with the same owner marker
+is the minimal restart readback; it does not prove application/database durability.
+
+`down` checks the guest Docker process identity, requests quiescence and filesystem flush, then
+signals only the verified VM. It confirms process exit, VM-lock release, closed disk handles, and
+absent socket listeners before writing a stopped receipt. An early failure before engine startup
+has a distinct stop path. A failure or timeout retains an uncertain phase and never force-kills or
+claims success. No PID-only or argv-substring fallback is used. macOS identity checks followed by
+signals are not atomic pidfd operations or hostile-process containment.
+
+`status` does not start, reconnect to, or recover the provider. Unknown process state is JSON `null`,
+not a false "stopped" result. `recover` accepts only a confirmed-dead recorded process, validates
+owned disks/locks/sockets, and reports `recovered-unclean`. It does not silently claim a clean stop,
+adopt an unrecorded process, or erase retained data. Missing identity requires explicit inspection.
+
+For a bounded manual fixture, after preparing packages:
+
+```sh
+python3 scripts/test-hack-local-runtime.py
+```
+
+The fixture starts only from an uninitialized pool, checks three boot/stop cycles (two clean
+restarts), and runs a host-memory/swap/deadline watchdog. `--resume-owned-fixture` permits a stopped
+or recovered pool whose receipt the adapter verifies. Each attempt gets new ignored evidence.
+Failures retain receipts and attempt owned shutdown; unverified ownership can still require manual
+inspection. Read the final receipts rather than treating fixture launch as success.
+
+After the clean-cycle fixture passes, run the separate provider-loss check on the stopped pool:
+
+```sh
+python3 scripts/test-hack-local-runtime.py --resume-owned-fixture --crash-recovery
+```
+
+This manual mode needs Cargo on PATH. Its normally ignored Rust test verifies ownership before
+sending provider TERM without guest quiescence, refuses recovery while the provider is alive,
+recovers after confirmed exit, checks the data marker on another boot, and stops the pool.
+It does not simulate a physical power failure or prove application database durability.
+
+The current pool has no project workloads. Keep real project enrollment behind WU03 and full
+graph/data qualification behind WU07. The separate native Linux adapter remains WU09 work.
+
+
+## WU03: review and enroll a project
+
+See the [Compose subset](compose-subset.md) for accepted declarations, redaction, source selection,
+and refusal rules. Use an explicit root and file:
+
+```sh
+./hack-local project plan --project /absolute/project --file docker-compose.yml
+./hack-local project plan --project /absolute/project --file docker-compose.yml --json
+./hack-local project enroll --project /absolute/project --file docker-compose.yml --expect-plan <review-id>
+./hack-local project status --project /absolute/project --json
+```
+
+Review the service graph, source exclusions, proposed loopback ports and compatibility findings
+before passing the plan ID to enrollment. Enrollment rechecks the source and writes a receipt only
+inside this checkout's private workspace namespace. It does not read environment-file values,
+copy project source, start the provider or create application resources. Repeating the same plan
+is idempotent; a different existing enrollment is preserved and refused. Replacement is deferred.
+[Checkpoint 03](checkpoint-03.md) records the local tests and real-project readback.
+
+## WU04: durable host fixture jobs
+
+Build this checkout with `./scripts/build-hack-local.sh`, then explicitly run:
+
+```sh
+./hack-local node serve
+```
+
+In another terminal, `./hack-local node status` returns the node target and current mutation
+generation. `./hack-local node inspect` reads the same journal without contacting or starting the
+service. The [WU04 contract](wu04-contract.md) defines version 1 and its bounds.
+
+Submit with `./hack-local node request '<JSON request>'`. Fill `target`, `expected_generation` and
+`principal` from node status and your numeric `id -u` result:
+
+```json
+{
+  "version": 1,
+  "action": "submit",
+  "mutation": {
+    "operation_id": "my-first-fixture",
+    "expected_generation": 0,
+    "target": "REPLACE_WITH_NODE_TARGET",
+    "principal": 501,
+    "required_capabilities": ["fixture_jobs_v1"]
+  },
+  "fixture": "success",
+  "queue_timeout_ms": 5000,
+  "execution_timeout_ms": 2000
+}
+```
+
+The CLI supplies an omitted digest. Save the exact request and returned `job_id`; after an uncertain
+acknowledgement, retry the same request, including its original expected generation. Do not fetch a
+new generation and silently change a retry. A new operation ID represents a new mutation.
+
+Retrieve a job with `{"version":1,"action":"result","job_id":"RETURNED_JOB_ID"}`.
+Cancel it with action `cancel`, the job ID and a new mutation envelope using the current generation.
+Cancellation acceptance only persists the request; inspect the job's terminal receipt to establish
+cleanup.
+The client waits up to 30 seconds for an operation reply to begin, allowing immutable input
+verification. Once the response starts, its frame still has a one-second transfer deadline and
+the existing size limit. An expired wait does not prove rejection; retry the same sealed request. Available fixtures are `success`, `failure`, `output` and the TERM-resistant `tree`.
+They execute inside private candidate state and do not consume project code or ambient secrets.
+
+Ctrl-C stops the foreground node. Existing supervisors finish independently; explicitly restart
+`node serve` to reconnect. An absent supervisor or uncertain cleanup becomes `quarantined` and
+blocks additional execution. For a quarantined source job only, an explicit `reconcile_source`
+request uses the job ID and a fresh mutation envelope requiring `source_job_reconciliation_v1`.
+It refuses an active supervisor, verifies owned container identity, deletes only that container,
+and confirms absence before committing `reconciled_unknown`. It never replays the job or claims
+its application outcome is known. A lost reconciliation acknowledgement retries the same sealed
+request. Host fixture reconciliation and receipt deletion remain unsupported.
+[Checkpoint 04](checkpoint-04.md) separates the tested local cases from later integration gates.
+
+## Required real-project attempt
+
+At every checkpoint, follow the [real-project acceptance matrix](real-project-checkpoints.md) using
+Event Agent's actual `.hack` configuration. Record unsupported and blocked workflows explicitly.
+The two-service root Compose file and built-in node fixtures cannot satisfy this gate.
+
+Development uses the pinned overlay template's 10 GiB logical size. Smaller requests need a host
+ext4 shrink tool; the provider can otherwise log formatting failure and continue with an oversized,
+unmarked disk. The candidate now rejects an allocation/format mismatch and stops its verified
+provider process without adopting changed disks. This is an unclean failed boot, not a clean stop.
+
+### Source synchronization in progress
+
+`project sync-source --project <path> --file <compose-file> --expect-plan <review-id>` applies
+source to a guest-native working tree. Add `--watch` for native FSEvents/inotify notifications;
+`--duration-seconds` bounds a foreground watch session. Output is JSON Lines with the acknowledged
+revision, payload bytes and elapsed time. `project sync-status` reports the last persisted acknowledgement,
+not a fresh inspection of a running application. These commands cannot start an application graph.
+
+Sync receipts separate preparation, transfer, guest apply and cleanup time. Compressed payload bytes
+include the delta archive and verification metadata; they exclude base64/framing overhead and must
+not be confused with changed source-file bytes. Transfers verify compressed and decoded hashes.
+
+A per-workspace lock permits one host writer. Each apply verifies the prior guest tree, transfers
+changed file content, retains the watched root, verifies the resulting tree, and then acknowledges.
+Host intent is persisted before transfer. An interrupted apply remains pending; `--reconcile`
+rebuilds tracked source paths and refuses unknown guest paths. Staging belongs to recorded operations
+and is removed after successful apply; at most eight interrupted operations are retained. At that
+limit, explicit reconciliation first acquires the guest apply lock and retires only owned staging.
+
+The current implementation inventories and hashes the selected host tree after each coalesced native
+event. Only changed file bytes cross the VM boundary, but host hashing is not yet incremental.
+The actual-source container kernel-event observer passed atomic replacement, deletion and restoration,
+reading only materialized event output. The guest root inode remained stable. Two-byte edits took
+3.7–6.5 seconds to acknowledge in that run because whole-tree verification remains expensive.
+Performance and the complete WU05 negative-case matrix remain acceptance gates.
+
+Live source checkpoint: the actual Event Agent capture reached an isolated read-only container,
+matched all captured file hashes, rejected input writes, and confirmed owned container/image cleanup.
+The development VM restarted/stopped with stable disk identities, normal memory pressure and unchanged
+swapouts. This proves source plumbing, not Event Agent application startup or research qualification.
+
+
+## Explicit image input for source jobs
+
+The experimental runtime load-image command accepts an explicit flat, single-image tarball from
+crane, an expected archive SHA-256 and an expected sha256: configuration ID. It bounds compressed
+input to 256 MiB and expanded layers to 2 GiB, validates manifest membership, Linux ARM64
+configuration and every expanded layer hash, then loads through the owned engine socket. It does
+not contact a registry or read Docker credentials/contexts. Image-load intent is durable before
+the engine request; a lost reply requires content-ID readback, and an unresolved load on the same
+boot is not automatically replayed. Imported images remain in the candidate cache.
+
+This is a development bootstrap interface, not the WU07 application image-resolution workflow.
+The exact pinned application image has been acquired privately; live load and application-test
+acceptance remain pending in the current checkpoint.

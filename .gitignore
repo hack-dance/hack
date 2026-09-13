@@ -87,3 +87,7 @@ REVIEW.md
 dist
 
 .tmp
+
+# v5 candidate build and runtime state; never shares the installed v4 home
+.hack-local/
+packages/runtime-core/target/

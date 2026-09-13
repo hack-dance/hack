@@ -1,0 +1,395 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hack:local-candidate:node-protocol:1",
+  "title": "Hack candidate node protocol v1 request",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "action": {
+          "const": "status"
+        }
+      },
+      "required": ["version", "action"]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "action": {
+          "const": "result"
+        },
+        "job_id": {
+          "type": "string"
+        }
+      },
+      "required": ["version", "action", "job_id"]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "action": {
+          "const": "submit"
+        },
+        "mutation": {
+          "$ref": "#/$defs/mutation"
+        },
+        "fixture": {
+          "enum": ["success", "failure", "output", "tree"]
+        },
+        "queue_timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 30000
+        },
+        "execution_timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 10000
+        }
+      },
+      "required": [
+        "version",
+        "action",
+        "mutation",
+        "fixture",
+        "queue_timeout_ms",
+        "execution_timeout_ms"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "action": {
+          "const": "cancel"
+        },
+        "mutation": {
+          "$ref": "#/$defs/mutation"
+        },
+        "job_id": {
+          "type": "string"
+        }
+      },
+      "required": ["version", "action", "mutation", "job_id"]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "action": {
+          "const": "submit_source"
+        },
+        "mutation": {
+          "$ref": "#/$defs/mutation"
+        },
+        "source": {
+          "$ref": "#/$defs/source_job"
+        },
+        "queue_timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 30000
+        },
+        "execution_timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 300000
+        }
+      },
+      "required": [
+        "version",
+        "action",
+        "mutation",
+        "source",
+        "queue_timeout_ms",
+        "execution_timeout_ms"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "action": {
+          "const": "reconcile_source"
+        },
+        "mutation": {
+          "$ref": "#/$defs/mutation"
+        },
+        "job_id": {
+          "type": "string"
+        }
+      },
+      "required": ["version", "action", "mutation", "job_id"]
+    }
+  ],
+  "$defs": {
+    "mutation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "expected_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "target": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "principal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "required_capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "enum": [
+              "fixture_jobs_v1",
+              "cooperative_process_groups",
+              "immutable_source_jobs_v1",
+              "source_job_reconciliation_v1"
+            ]
+          }
+        }
+      },
+      "required": [
+        "operation_id",
+        "expected_generation",
+        "target",
+        "principal",
+        "request_digest",
+        "required_capabilities"
+      ]
+    },
+    "process_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pid": {
+          "type": "integer"
+        },
+        "uid": {
+          "type": "integer"
+        },
+        "process_group": {
+          "type": "integer"
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "boot": {
+          "type": "string"
+        }
+      },
+      "required": ["pid", "uid", "process_group", "start", "boot"]
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "fixture": {
+          "enum": ["success", "failure", "output", "tree", "immutable-source"]
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "preparing",
+            "running",
+            "finishing",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "timed_out",
+            "queue_expired",
+            "quarantined",
+            "reconciled_unknown"
+          ]
+        },
+        "accepted_at_ms": {
+          "type": "integer"
+        },
+        "queue_deadline_ms": {
+          "type": "integer"
+        },
+        "execution_timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 300000
+        },
+        "starts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "supervisor_pid": {
+          "type": ["integer", "null"]
+        },
+        "child_pid": {
+          "type": ["integer", "null"]
+        },
+        "supervisor_identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/process_identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "child_identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/process_identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel_requested": {
+          "type": "boolean"
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "exit_code": {
+          "type": ["integer", "null"]
+        },
+        "signal": {
+          "type": ["integer", "null"]
+        },
+        "detail": {
+          "type": ["string", "null"]
+        },
+        "source": {
+          "$ref": "#/$defs/source_job"
+        }
+      },
+      "required": [
+        "job_id",
+        "fixture",
+        "state",
+        "accepted_at_ms",
+        "queue_deadline_ms",
+        "execution_timeout_ms",
+        "starts",
+        "supervisor_pid",
+        "child_pid",
+        "supervisor_identity",
+        "child_identity",
+        "cancel_requested",
+        "stdout",
+        "stderr",
+        "truncated",
+        "exit_code",
+        "signal",
+        "detail"
+      ]
+    },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "request_digest": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "integer"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "accepted": {
+          "const": true
+        }
+      },
+      "required": [
+        "version",
+        "operation_id",
+        "request_digest",
+        "generation",
+        "job_id",
+        "accepted"
+      ]
+    },
+    "source_job": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "image": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "memory_bytes": {
+          "type": "integer",
+          "minimum": 67108864,
+          "maximum": 2147483648
+        }
+      },
+      "required": ["namespace", "revision", "image", "argv", "memory_bytes"]
+    }
+  }
+}

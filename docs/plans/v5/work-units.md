@@ -180,9 +180,13 @@ and restart readback proving deleted owned resources stay deleted. No production
    cleanup and `graph archive` after explicit data removal pass `live-1789410072250672000`.
    Restore recreates compute while preserving a database-generated random token; missing data
    is refused. Archive preserves receipt bytes and refuses attempt-ID reuse. Restore histories
-   are bounded at eight; archives at 256. Follow up with restore-specific process-loss controls
-   and an explicit archive export/retention policy that preserves consumed IDs. Changed-graph
-   data adoption remains separate; review-plan redactions are not executable input.
+   are bounded at eight; archives at 256. Restore-specific SIGKILL controls at committed intent,
+   after create and after start pass `live-1789411660314640000`, including explicit recovery
+   with the original database token. Bounded local `graph export` passes byte/hash comparison,
+   overwrite refusal and consumed-ID preservation. Follow up with partial-export reconciliation,
+   archive pruning/export retention with durable consumed-ID reservations, and filesystem/power-loss
+   boundaries. Changed-graph data adoption remains separate; review-plan redactions are not
+   executable input.
    Capture concurrent graph/source resource accounting as a separate follow-up: the initial
    guard intentionally admits one workload and does not provide concurrent scheduling.
 3. Deliver managed environment values without persisting secrets, handle image/build inputs and

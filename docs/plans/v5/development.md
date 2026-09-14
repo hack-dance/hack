@@ -504,7 +504,14 @@ active attempts. `graph archive --run-id <id>` moves a fully removed attempt, in
 recovery history, into `.hack-local/run/graph-archive/<id>/`. It refuses pending journals, retained
 data or any remaining resource. The archive is bounded at 256 attempts, preserves receipt bytes,
 and prevents reuse of archived IDs. Archived receipts are read as evidence at that path; the
-active graph commands do not mutate them. Export and pruning are separate work.
+active graph commands do not mutate them. `graph export --run-id <id>` writes a private,
+deterministic tar of the archive's regular-file evidence to `.hack-local/exports/graphs/<id>.tar`
+and returns its SHA-256, byte count and file count. It requires the owned engine for identity
+verification and retains the original archive and consumed ID. Export refuses overwrite, symlinks,
+hard links, public files and changed/oversized inputs. Limits are 128 total entries, three nested
+directory levels, 1 MiB per file and 16 MiB of file contents. Permissions/timestamps are normalized;
+this is an evidence export, not a filesystem backup/import. Partial output stays `.pending` and
+blocks retry; explicit partial-export recovery and pruning remain separate work.
 
 Private receipts under `.hack-local/run/graphs/<attempt>/state.json` contain identity, readiness
 conditions, ownership and phase metadata; they do not contain commands or environment values.

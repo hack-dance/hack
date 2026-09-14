@@ -114,3 +114,14 @@ Next: restore-specific process-loss qualification, bounded archive export with c
 preservation, source/build and managed-secret delivery, lifecycle/routing and real application
 acceptance. The existing SIGKILL controls exercise fresh graph create/start, not restore history
 publication or archive power loss.
+
+
+`live-1789411660314640000` now qualifies three restore-specific SIGKILL boundaries: committed
+restore intent, create reply and start reply. Direct replay is refused; explicit ordinary cleanup
+and restore preserve the original random database token in all three cases. The two fresh-run kill
+controls still pass. Local archive export preserves every regular file byte-for-byte, returns a
+verified bundle hash, refuses overwrite and leaves the original consumed-ID reservation intact.
+118 Rust tests, release build, rustfmt, all-target clippy and CLI reference generation pass. The
+VM is stopped, pressure stayed normal and swapouts stayed 4132. Partial-export reconciliation,
+archive pruning/retention with durable ID reservations, filesystem/power-loss testing and actual
+application qualification remain open.

@@ -451,6 +451,41 @@ fn owned_driver_live() -> Result<(), CandidateError> {
                     "Archive did not preserve exact receipt bytes.",
                 ));
             }
+            let exported = cli(&candidate, &["export", "--run-id", id])?;
+            let export_path = Path::new(exported["path"].as_str().expect("export path"));
+            let payload = fs::read(export_path).map_err(state::io)?;
+            use sha2::Digest;
+            if exported["sha256"] != format!("{:x}", sha2::Sha256::digest(&payload))
+                || exported["original_retained"] != true
+            {
+                return Err(error(
+                    "graph_test",
+                    "Export hash or retention proof differs.",
+                ));
+            }
+            let mut bundle = tar::Archive::new(payload.as_slice());
+            let mut count = 0;
+            for entry in bundle.entries().map_err(state::io)? {
+                let mut entry = entry.map_err(state::io)?;
+                let source = archive::path(&candidate, id)?.join(entry.path().map_err(state::io)?);
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).map_err(state::io)?;
+                if bytes != fs::read(source).map_err(state::io)? {
+                    return Err(error(
+                        "graph_test",
+                        "Export changed retained evidence bytes.",
+                    ));
+                }
+                count += 1;
+            }
+            if count == 0 || exported["files"] != count {
+                return Err(error("graph_test", "Export file inventory differs."));
+            }
+            if !matches!(cli(&candidate, &["export", "--run-id", id]), Err(e) if e.message=="graph_export_exists")
+                || fs::read(export_path).map_err(state::io)? != payload
+            {
+                return Err(error("graph_test", "Export overwrote existing evidence."));
+            }
             if !matches!(launch(&candidate, &fixture, id, "run"), Err(e) if e.message == "graph_replay_refused")
             {
                 return Err(error("graph_test", "Archived attempt allowed replay."));
@@ -460,7 +495,7 @@ fn owned_driver_live() -> Result<(), CandidateError> {
     })();
     state::write(
         &evidence.join(format!("driver-{run}.json")),
-        &json!({"passed":result.is_ok()&&cleanup.is_ok(),"run":run,"failed_run":failed,"cleanup_confirmed":cleanup.is_ok(),"bidirectional_workload_admission":result.is_ok(),"restore_and_archive":result.is_ok()&&cleanup.is_ok(),"receipts":result.as_ref().ok(),"failure":result.as_ref().err().map(|e|(&e.code,&e.message)),"scope":"Public graph driver, explicit restart identity/persistence, simulated missing create receipt, foreign-name refusal; not actual process-kill or Event Agent qualification"}),
+        &json!({"passed":result.is_ok()&&cleanup.is_ok(),"run":run,"failed_run":failed,"cleanup_confirmed":cleanup.is_ok(),"bidirectional_workload_admission":result.is_ok(),"restore_and_archive":result.is_ok()&&cleanup.is_ok(),"archive_export":cleanup.is_ok(),"receipts":result.as_ref().ok(),"failure":result.as_ref().err().map(|e|(&e.code,&e.message)),"scope":"Public graph driver, explicit restart identity/persistence, simulated missing create receipt, foreign-name refusal; not actual process-kill or Event Agent qualification"}),
     )?;
     cleanup?;
     result.map(|_| ())
@@ -571,7 +606,12 @@ fn fault_child() -> Result<(), CandidateError> {
         profiles: &[],
     };
     let review = project::plan(&candidate, options())?;
-    super::run(
+    let execute = if std::env::var("HACK_LOCAL_GRAPH_ACTION").as_deref() == Ok("restore") {
+        super::restore
+    } else {
+        super::run
+    };
+    execute(
         &candidate,
         RunOptions {
             project: options(),
@@ -608,19 +648,40 @@ fn owned_graph_process_loss_live() -> Result<(), CandidateError> {
     let suite = token();
     let mut controls = Vec::new();
     let result = (|| {
-        for point in ["after-create", "after-start"] {
+        for (action, point) in [
+            ("run", "after-create"),
+            ("run", "after-start"),
+            ("restore", "restore-intent"),
+            ("restore", "after-create"),
+            ("restore", "after-start"),
+        ] {
             let fixture = Fixture::new();
             let run = token();
             let root = directory(&candidate, &run)?;
             let mut document = compose(&image, &run, false);
-            document["services"]["init"]["entrypoint"] =
-                json!(["/usr/local/bin/bun", "-e", "await Bun.sleep(30000)"]);
+            if action == "run" {
+                document["services"]["init"]["entrypoint"] =
+                    json!(["/usr/local/bin/bun", "-e", "await Bun.sleep(30000)"]);
+            }
             state::write(&fixture.0.join("compose.yaml"), &document)?;
             state::write(
                 &evidence.join(format!("driver-kill-{suite}.json")),
                 &json!({"phase":"intent","point":point,"run":run,"completed_controls":controls}),
             )?;
+            let mut prior_token = None;
             let outcome = (|| {
+                if action == "restore" {
+                    let initial = launch(&candidate, &fixture, &run, "run")?;
+                    let engine = Engine::connect(&candidate)?;
+                    let (output, _, _) = engine.logs(
+                        initial["resources"]["container:init"]["id"]
+                            .as_str()
+                            .expect("init"),
+                    )?;
+                    prior_token = output.lines().last().map(str::to_owned);
+                    drop(engine);
+                    cli(&candidate, &["cleanup", "--run-id", &run])?;
+                }
                 let child = Command::new(std::env::current_exe().map_err(state::io)?)
                     .args([
                         "provider::graph::tests::fault_child",
@@ -628,6 +689,7 @@ fn owned_graph_process_loss_live() -> Result<(), CandidateError> {
                         "--exact",
                     ])
                     .env("HACK_LOCAL_GRAPH_FAULT", point)
+                    .env("HACK_LOCAL_GRAPH_ACTION", action)
                     .env("HACK_LOCAL_GRAPH_PROJECT", &fixture.0)
                     .env("HACK_LOCAL_GRAPH_RUN", &run)
                     .stdin(Stdio::null())
@@ -673,7 +735,16 @@ fn owned_graph_process_loss_live() -> Result<(), CandidateError> {
                 source_launch_is_blocked(&candidate, &image)?;
                 let snapshot = cli(&candidate, &["inspect", "--run-id", &run])?;
                 let init = &snapshot["receipt"]["resources"]["container:init"];
-                if point == "after-create" {
+                if point == "restore-intent" {
+                    if init["phase"] != "reserved"
+                        || snapshot["observations"]["container:init"]["state"] != "absent"
+                    {
+                        return Err(error(
+                            "graph_test",
+                            "Restore intent allocated compute early.",
+                        ));
+                    }
+                } else if point == "after-create" {
                     if !init["id"].is_null()
                         || init["phase"] != "create-intent"
                         || snapshot["observations"]["container:init"]["state"] != "created"
@@ -685,7 +756,9 @@ fn owned_graph_process_loss_live() -> Result<(), CandidateError> {
                     }
                 } else if init["id"].is_null()
                     || init["phase"] != "start-intent"
-                    || snapshot["observations"]["container:init"]["state"] != "running"
+                    || !(snapshot["observations"]["container:init"]["state"] == "running"
+                        || (action == "restore"
+                            && snapshot["observations"]["container:init"]["state"] == "exited"))
                 {
                     return Err(error(
                         "graph_test",
@@ -713,8 +786,39 @@ fn owned_graph_process_loss_live() -> Result<(), CandidateError> {
                         "Uncertain reservation allowed another graph allocation.",
                     ));
                 }
+                if action == "restore" {
+                    if !matches!(launch(&candidate, &fixture, &run, "restore"), Err(e) if e.message=="graph_restore_refused")
+                    {
+                        return Err(error("graph_test", "Interrupted restore replayed."));
+                    }
+                    let history: Receipt = state::read(&root.join("restore-1/previous.json"))?;
+                    if history.phase != "stopped-data-retained"
+                        || snapshot["observations"]["volume:data"]["state"] != "present"
+                    {
+                        return Err(error(
+                            "graph_test",
+                            "Restore lost history or retained volume.",
+                        ));
+                    }
+                    cli(&candidate, &["cleanup", "--run-id", &run])?;
+                    let restored = launch(&candidate, &fixture, &run, "restore")?;
+                    let engine = Engine::connect(&candidate)?;
+                    let (output, _, _) = engine.logs(
+                        restored["resources"]["container:init"]["id"]
+                            .as_str()
+                            .expect("init"),
+                    )?;
+                    if prior_token.as_ref().is_none_or(|v| v.len() != 36)
+                        || output.lines().last() != prior_token.as_deref()
+                    {
+                        return Err(error(
+                            "graph_test",
+                            "Explicit post-crash restore lost the database token.",
+                        ));
+                    }
+                }
                 Ok(
-                    json!({"point":point,"helper_pid":pid,"signal":"SIGKILL","snapshot":snapshot,"replay_refused":true,"reservation_preserved":true,"source_launch_refused":true}),
+                    json!({"action":action,"data_preserved":action=="restore","point":point,"helper_pid":pid,"signal":"SIGKILL","snapshot":snapshot,"replay_refused":true,"reservation_preserved":true,"source_launch_refused":true}),
                 )
             })();
             let cleanup = (|| {
@@ -738,7 +842,7 @@ fn owned_graph_process_loss_live() -> Result<(), CandidateError> {
                 }
                 Ok::<_, CandidateError>(())
             })();
-            controls.push(json!({"point":point,"passed":outcome.is_ok() && cleanup.is_ok(),"cleanup_confirmed":cleanup.is_ok(),"evidence":outcome.as_ref().ok(),"failure":outcome.as_ref().err().map(|e|(&e.code,&e.message))}));
+            controls.push(json!({"action":action,"point":point,"passed":outcome.is_ok() && cleanup.is_ok(),"cleanup_confirmed":cleanup.is_ok(),"evidence":outcome.as_ref().ok(),"failure":outcome.as_ref().err().map(|e|(&e.code,&e.message))}));
             cleanup?;
             outcome?;
         }

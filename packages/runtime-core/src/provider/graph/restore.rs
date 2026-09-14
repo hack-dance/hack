@@ -86,6 +86,8 @@ pub fn restore(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         restarting: false,
     };
     session.save()?;
+    #[cfg(test)]
+    session.fault_pause("restore-intent")?;
     let result = (|| {
         session.create_resources(true)?;
         execution::run(&prepared.graph, &mut session, options.timeout)

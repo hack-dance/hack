@@ -579,3 +579,26 @@ all-target clippy and CLI reference generation pass. No application performance 
 Restore-specific process loss, archive export/pruning with consumed-ID preservation, changed-plan
 data adoption, and real application qualification remain explicit follow-ups. The existing
 fresh-run SIGKILL evidence is not a restore-history or archive power-loss qualification.
+
+
+## September 14 — Restore process loss and bounded archive export
+
+`live-1789411660314640000` passes five actual owned child SIGKILL controls: the existing fresh
+create/start cases and restore cases after committed history/intent, after create reply, and after
+start reply. Interrupted restore refuses both restart and restore replay, keeps dependents absent,
+blocks competing graph/source allocation, and retains its prior receipt and volume. Explicit
+ordinary cleanup followed by restore recovers the original random database token in all three
+restore cases. The pause hooks remain test-only; this does not qualify VM/filesystem power loss.
+
+The new `graph export --run-id <archived-id>` creates a private deterministic tar of regular-file
+archive evidence and returns its SHA-256, size and file count. It retains the original archive and
+consumed ID, limits traversal/content, and refuses unsafe files or overwriting existing exports.
+The live control compares every bundled file against the original bytes, verifies the bundle hash,
+refuses a second export, and confirms archived attempt replay remains blocked. Export normalizes
+file metadata and is not a filesystem backup/import. Interrupted output remains pending and blocks
+retry; explicit pending-export reconciliation and pruning/retention remain follow-up work.
+
+All 118 Rust tests, release build, rustfmt, all-target clippy and CLI reference generation pass.
+All fixture resources are confirmed absent; the VM ends stopped with no live provider process.
+Pressure stays normal, swapouts remain 4132, peak provider footprint is 1,003,243,296 bytes, and
+protected inputs are unchanged. No application speedup or full application readiness is claimed.

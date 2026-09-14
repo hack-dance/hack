@@ -2,6 +2,8 @@
 mod archive;
 pub use archive::archive;
 mod config;
+mod export;
+pub use export::{Export, export};
 mod journal;
 mod restore;
 use super::{engine::Engine, state};

@@ -14,7 +14,7 @@ Usage:
   hack-local project sync-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--watch] [--reconcile] [--duration-seconds <seconds>] [--json]
   hack-local project sync-status --project <directory> --file <compose.yaml> [--json]
   hack-local project capture --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--json]
-  hack-local project publish-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--json]
+  hack-local project publish-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--reconcile] [--json]
   hack-local project verify-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--json]
   hack-local runtime probe [--json]
   hack-local runtime engine-info [--json]
@@ -311,7 +311,10 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
             watch = true;
             continue;
         }
-        if option == "--reconcile" && !reconcile && *action == "sync-source" {
+        if option == "--reconcile"
+            && !reconcile
+            && ["sync-source", "publish-source"].contains(action)
+        {
             reconcile = true;
             continue;
         }
@@ -406,11 +409,12 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
             &report.plan.source_selection.metadata_sha256,
         )?;
         if ["publish-source", "verify-source"].contains(action) {
-            let receipt = hack_runtime_core::provider::publish_source(
-                candidate,
-                &report.plan.namespace,
-                &snapshot,
-            )?;
+            let publish = if reconcile {
+                hack_runtime_core::provider::reconcile_source_publication
+            } else {
+                hack_runtime_core::provider::publish_source
+            };
+            let receipt = publish(candidate, &report.plan.namespace, &snapshot)?;
             if *action == "verify-source" {
                 print_json(&hack_runtime_core::provider::verify_source(
                     candidate, &receipt,

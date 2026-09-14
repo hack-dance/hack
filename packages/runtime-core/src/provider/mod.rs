@@ -11,6 +11,7 @@ mod lifecycle;
 mod process;
 mod profile;
 pub use profile::Profile;
+mod publication_stage;
 #[cfg(test)]
 mod source_failure_test;
 mod source_job;
@@ -30,7 +31,9 @@ pub use source_probe::{ProbeReceipt, verify as verify_source};
 pub use source_sync::{SyncReceipt, SyncSession, sync_status};
 mod state;
 pub use lifecycle::{down, recover, status, up, up_with_profile};
-pub use source_transfer::{TransferReceipt, publish as publish_source};
+pub use source_transfer::{
+    TransferReceipt, publish as publish_source, reconcile as reconcile_source_publication,
+};
 
 use crate::{Candidate, CandidateError};
 use serde::Serialize;

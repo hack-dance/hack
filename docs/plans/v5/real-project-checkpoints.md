@@ -336,3 +336,21 @@ one-slot queue. These establish burst inventory and callback behavior, not an ac
 overflow or framework reload performance. The burst test initially reused the pre-edit selection
 digest; it now also asserts that this stale selection is rejected before capturing the fresh plan.
 Existing TypeScript verification remains applicable because its inputs are unchanged.
+
+
+### September 14 explicit publication recovery
+
+`project publish-source --reconcile` now binds new staging to a durable private publication intent
+and guest ownership marker. It retains interrupted staging before retrying, without deleting source
+or failure evidence, and refuses foreign markers or an exhausted eight-copy retention limit.
+`live-1789399037913060000` passed staged interruption/corruption repair and those refusal controls,
+plus unchanged immutable-job and output controls. `live-1789399208758465000` additionally killed the
+owned publisher process after upload and recovered through the public CLI with its reviewed plan.
+No accepted receipt existed before repair; final guest verification and retained staging were checked.
+Both runs stopped the candidate VM cleanly and preserved the selected application source fingerprints.
+The Rust suite passed 99 tests; Clippy passed after adding the process-kill helper. The CLI reference
+generator ran with no generated change because the public TypeScript CLI surface is unchanged.
+
+Remaining boundaries: legacy partials without an ownership marker remain refused; a crash between
+staging directory creation and its marker remains fail-closed. Retained-copy garbage collection and
+crash tests during retention/cleanup are still open. This checkpoint does not qualify graph startup.

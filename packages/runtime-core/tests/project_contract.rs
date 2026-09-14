@@ -1009,3 +1009,35 @@ fn native_watcher_coalesces_a_burst_into_a_complete_inventory() {
         assert_eq!(bytes, format!("after-{index}").as_bytes());
     }
 }
+
+#[test]
+fn publication_reconcile_cli_requires_the_reviewed_plan() {
+    let fixture = Fixture::new(BASIC);
+    let compiled = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_hack-runtime-candidate"))
+        .env_clear()
+        .env("PATH", "")
+        .args([
+            "--candidate-root",
+            compiled.to_str().unwrap(),
+            "project",
+            "publish-source",
+            "--project",
+            fixture.project.to_str().unwrap(),
+            "--file",
+            "compose.yaml",
+            "--expect-plan",
+            &"0".repeat(64),
+            "--reconcile",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    assert!(stderr.contains("stale_plan"), "{stderr}");
+    assert!(!fixture.candidate.state_root.exists());
+}

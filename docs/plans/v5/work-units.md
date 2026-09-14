@@ -131,6 +131,18 @@ cache collision, incompatible architecture/toolchain, and interrupted cleanup.
 **Evidence:** independent absence of start markers/events for rejects, positive observer control,
 whole-tree identity inside actual launched job, immutable input write failure, exact owned cleanup.
 
+### Remaining WU05/WU06 gates
+
+- WU05: actual native event-overflow recovery; application watcher/reload evidence; matched latency
+  and idle/resource measurements against the stated budgets.
+- WU06: qualify explicit partial-publication retention/retry, crash boundaries and interrupted job
+  cleanup; cache identity/collision and incompatible-toolchain controls must remain visible.
+- New recovery work: bounded retained-publication garbage collection needs ownership and restart
+  evidence before it can remove failed attempts. Legacy partials without ownership proof remain
+  refused. Retaining failed attempts is not disk reclamation acceptance.
+- Integration dependency: replace the supervisor-wide exclusive engine observation boundary with
+  scheduling that allows graph status/readiness without unsafe concurrent mutations.
+
 ## WU07 — Run a useful project without losing its data
 
 **Goal:** one web/database/setup/job graph works in the candidate with clear readiness and endpoints.

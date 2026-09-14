@@ -41,7 +41,9 @@ batched transfers with a verified prior-script cache reduced warm acknowledgemen
 now pass. Actual kernel-overflow recovery and full application performance acceptance remain open.
 Immutable publication now verifies staging before its final rename; staged interruption and
 missing/corrupt verifier controls passed in `live-1789326499355320000`. Failed staging remains
-preserved and ordinary retries refuse it. Interrupted cleanup/recovery is still an open gate.
+preserved and ordinary retries refuse it. Explicit publication reconciliation now retains owned
+staging and retries; September 14 live tests include a killed publisher recovered via the public
+CLI. Retained-copy cleanup and the remaining crash boundaries stay open.
 Do not rerun already passing cases without changed code or an unresolved concern.
 
 WU07 service graph startup is not implemented. Build graph execution, readiness, isolated

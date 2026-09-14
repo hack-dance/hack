@@ -125,13 +125,22 @@ pub fn publish(
     namespace: &str,
     snapshot: &Snapshot,
 ) -> Result<TransferReceipt, CandidateError> {
-    publish_staged(candidate, namespace, snapshot, |_, _| Ok(()))
+    publish_staged(candidate, namespace, snapshot, false, |_, _| Ok(()))
+}
+
+pub fn reconcile(
+    candidate: &Candidate,
+    namespace: &str,
+    snapshot: &Snapshot,
+) -> Result<TransferReceipt, CandidateError> {
+    publish_staged(candidate, namespace, snapshot, true, |_, _| Ok(()))
 }
 
 fn publish_staged(
     candidate: &Candidate,
     namespace: &str,
     snapshot: &Snapshot,
+    reconcile: bool,
     staged: impl FnOnce(&OwnedGuest<'_>, &str) -> Result<(), CandidateError>,
 ) -> Result<TransferReceipt, CandidateError> {
     snapshot.receipt().validate()?;
@@ -161,31 +170,14 @@ fn publish_staged(
     let root = format!("/storage/hack-source/{namespace}");
     let pending = format!("{root}/{revision}.pending");
     let complete = format!("{root}/{revision}");
-    let state = guest.execute(
-        r#"
-umask 077
-for d in /storage/hack-source "$1"; do
-  test ! -L "$d"
-  if test ! -e "$d"; then mkdir "$d"; fi
-  test -d "$d"
-  test "$(stat -c %u:%a "$d")" = 0:700
-done
-if test -e "$3" || test -L "$3"; then
-  test ! -L "$3"
-  test -d "$3"
-  test ! -L "$3/archive.sha256"
-  test "$(cat "$3/archive.sha256")" = "$4"
-  printf reused
-else
-  mkdir "$2"
-  mkdir "$2/tree"
-  (set -C; : > "$2/source.tar"; : > "$2/files.sha256"; : > "$2/verify.sh")
-  printf created
-fi
-"#,
-        &[&root, &pending, &complete, &archive_sha],
-        None,
-    )?;
+    let publication = Publication {
+        checkout: candidate.checkout.clone(),
+        namespace: namespace.into(),
+        provider_incarnation: guest.incarnation().into(),
+        manifest: snapshot.receipt().clone(),
+        archive_sha256: archive_sha.clone(),
+    };
+    let state = super::publication_stage::prepare(candidate, &guest, &publication, reconcile)?;
     if state == "created" {
         for (name, bytes) in [
             ("source.tar", archive.as_slice()),
@@ -237,13 +229,6 @@ test "$(sha256sum "$1/files.sha256" | cut -d ' ' -f 1)" = "$2"
         &[&complete, &manifest_sha],
         None,
     )?;
-    let publication = Publication {
-        checkout: candidate.checkout.clone(),
-        namespace: namespace.into(),
-        provider_incarnation: guest.incarnation().into(),
-        manifest: snapshot.receipt().clone(),
-        archive_sha256: archive_sha.clone(),
-    };
     verify_published(&guest, &publication)?;
     let path = publication_path(candidate, namespace, revision)?;
     state::private_directory(path.parent().expect("publication parent"))?;
@@ -313,20 +298,106 @@ mod tests {
         )?;
         let revision = &snapshot.receipt().revision;
         let mut evidence = Vec::new();
+        let marker = source.with_extension("staged");
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = OwnedChild(
+            std::process::Command::new(std::env::current_exe().map_err(state::io)?)
+                .env_clear()
+                .env("HACK_LOCAL_TEST_ROOT", &candidate.checkout)
+                .env("HACK_PUBLICATION_SOURCE", &source)
+                .env("HACK_PUBLICATION_MARKER", &marker)
+                .args([
+                    "provider::source_transfer::tests::publication_crash_helper",
+                    "--ignored",
+                    "--exact",
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(state::io)?,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !marker.try_exists().map_err(state::io)? {
+            assert!(
+                child.0.try_wait().map_err(state::io)?.is_none(),
+                "publication helper exited before upload"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "publication helper upload deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        child.0.kill().map_err(state::io)?;
+        assert!(!child.0.wait().map_err(state::io)?.success());
+        drop(child);
+        assert_eq!(
+            load(&candidate, &plan.plan.namespace, revision)
+                .err()
+                .unwrap()
+                .code,
+            "source_not_published"
+        );
+        let repaired = std::process::Command::new(
+            candidate
+                .state_root
+                .join("target/release/hack-runtime-candidate"),
+        )
+        .env_clear()
+        .args([
+            "--candidate-root",
+            candidate.checkout.to_str().unwrap(),
+            "project",
+            "publish-source",
+            "--project",
+            source.to_str().unwrap(),
+            "--file",
+            "compose.yaml",
+            "--expect-plan",
+            &plan.plan_id,
+            "--reconcile",
+            "--json",
+        ])
+        .output()
+        .map_err(state::io)?;
+        assert!(
+            repaired.status.success(),
+            "{}",
+            String::from_utf8_lossy(&repaired.stderr)
+        );
+        let guest = OwnedGuest::connect(&candidate)?;
+        verify_published(&guest, &load(&candidate, &plan.plan.namespace, revision)?)?;
+        guest.execute(
+            r#"test -d "$1.retained-1"; test ! -e "$1.pending""#,
+            &[&format!(
+                "/storage/hack-source/{}/{revision}",
+                plan.plan.namespace
+            )],
+            None,
+        )?;
+        drop(guest);
+        evidence.push(serde_json::json!({"fault":"publisher-process-killed-after-upload", "unpublished_before_repair":true,"public_cli_reconcile_verified":true,"staging_retained":true}));
         for fault in ["interrupted", "corrupt-verifier"] {
             let namespace = digest(format!("{token}-{fault}").as_bytes());
             let pending = format!("/storage/hack-source/{namespace}/{revision}.pending");
             let complete = format!("/storage/hack-source/{namespace}/{revision}");
-            let failed = publish_staged(&candidate, &namespace, &snapshot, |guest, stage| {
-                if fault == "interrupted" {
-                    return Err(CandidateError::new(
-                        "injected_interruption",
-                        "Stopped after staged uploads.",
-                    ));
-                }
-                guest.execute("printf corrupted > \"$1/verify.sh\"", &[stage], None)?;
-                Ok(())
-            });
+            let failed =
+                publish_staged(&candidate, &namespace, &snapshot, false, |guest, stage| {
+                    if fault == "interrupted" {
+                        return Err(CandidateError::new(
+                            "injected_interruption",
+                            "Stopped after staged uploads.",
+                        ));
+                    }
+                    guest.execute("printf corrupted > \"$1/verify.sh\"", &[stage], None)?;
+                    Ok(())
+                });
             assert!(failed.is_err());
             assert_eq!(
                 load(&candidate, &namespace, revision).err().unwrap().code,
@@ -341,7 +412,57 @@ mod tests {
             let retained = inspect()?;
             assert!(publish(&candidate, &namespace, &snapshot).is_err());
             assert_eq!(retained, inspect()?);
-            evidence.push(serde_json::json!({"fault":fault,"unpublished":true,"retry_refused":true,"staging_preserved":true}));
+            reconcile(&candidate, &namespace, &snapshot)?;
+            let guest = OwnedGuest::connect(&candidate)?;
+            verify_published(&guest, &load(&candidate, &namespace, revision)?)?;
+            let saved = guest.execute(
+                r#"test ! -e "$1"; stat -c %d:%i "$2"; sha256sum "$2/verify.sh" "$2/source.tar""#,
+                &[&pending, &format!("{complete}.retained-1")],
+                None,
+            )?;
+            assert_eq!(
+                retained.replace(&pending, &format!("{complete}.retained-1")),
+                saved
+            );
+            evidence.push(serde_json::json!({"fault":fault,"unpublished_before_repair":true,"retry_refused":true,"staging_preserved":true,"explicit_repair_verified":true}));
+        }
+        for fault in ["foreign-owner", "retention-full"] {
+            let namespace = digest(format!("{token}-{fault}").as_bytes());
+            assert!(
+                publish_staged(&candidate, &namespace, &snapshot, false, |guest, stage| {
+                    if fault == "foreign-owner" {
+                        guest.execute("printf foreign > \"$1/owner\"", &[stage], None)?;
+                    } else {
+                        let complete = stage.strip_suffix(".pending").unwrap();
+                        guest.execute(
+                            r#"for n in 1 2 3 4 5 6 7 8; do mkdir "$1.retained-$n"; done"#,
+                            &[complete],
+                            None,
+                        )?;
+                    }
+                    Err(CandidateError::new(
+                        "injected_interruption",
+                        "Stopped staged publication.",
+                    ))
+                })
+                .is_err()
+            );
+            let pending = format!("/storage/hack-source/{namespace}/{revision}.pending");
+            let inspect = || {
+                OwnedGuest::connect(&candidate)?.execute(
+                    r#"stat -c %d:%i "$1"; sha256sum "$1/owner" "$1/source.tar""#,
+                    &[&pending],
+                    None,
+                )
+            };
+            let before = inspect()?;
+            assert!(reconcile(&candidate, &namespace, &snapshot).is_err());
+            assert_eq!(before, inspect()?);
+            assert_eq!(
+                load(&candidate, &namespace, revision).err().unwrap().code,
+                "source_not_published"
+            );
+            evidence.push(serde_json::json!({"fault":fault,"reconcile_refused":true,"staging_unchanged":true}));
         }
         let namespace = digest(format!("{token}-complete").as_bytes());
         publish(&candidate, &namespace, &snapshot)?;
@@ -385,8 +506,46 @@ mod tests {
             &directory.join("publication-failures.json"),
             &serde_json::json!({
                 "passed":true,"controls":evidence,
-                "scope":"Deterministic interruption after upload and corrupted staged verifier; partials retained. No process-kill or cleanup recovery claim."
+                "scope":"Deterministic staged interruption, explicit ownership-checked retention and repair; foreign ownership and retention exhaustion refused. Real publisher process kill after upload followed by public CLI reconciliation."
             }),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "Subprocess helper for owned_publication_failure_live only"]
+    fn publication_crash_helper() -> Result<(), CandidateError> {
+        let candidate = Candidate::discover(std::path::Path::new(
+            &std::env::var("HACK_LOCAL_TEST_ROOT").expect("root"),
+        ))?;
+        let source = PathBuf::from(std::env::var("HACK_PUBLICATION_SOURCE").expect("source"));
+        let marker = PathBuf::from(std::env::var("HACK_PUBLICATION_MARKER").expect("marker"));
+        let plan = crate::project::plan(
+            &candidate,
+            crate::project::PlanOptions {
+                project: &source,
+                compose_file: std::path::Path::new("compose.yaml"),
+                profiles: &[],
+            },
+        )?;
+        let snapshot = crate::project::snapshot::capture(
+            &source,
+            &Default::default(),
+            &plan.plan.source_selection.metadata_sha256,
+        )?;
+        publish_staged(
+            &candidate,
+            &plan.plan.namespace,
+            &snapshot,
+            false,
+            |_, _| {
+                std::fs::write(&marker, "uploaded").map_err(state::io)?;
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                Err(CandidateError::new(
+                    "helper_timeout",
+                    "Publisher was not killed within the control window.",
+                ))
+            },
         )?;
         Ok(())
     }

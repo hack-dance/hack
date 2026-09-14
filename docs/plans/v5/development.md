@@ -366,8 +366,19 @@ Publication uploads the archive, file checksums and full-tree verifier into a pr
 directory. It verifies their hashes, extracts and verifies the complete manifest, makes the tree
 read-only, and only then renames staging to the final revision path. The host publication receipt
 is written after the final guest verification. A failed transfer retains staging and has no accepted
-receipt; an ordinary retry refuses that staging directory. Cleanup/recovery remains an explicit
-open acceptance gate, so do not remove a pending directory to force a retry.
+receipt; an ordinary retry refuses that staging directory.
+
+Use `project publish-source --reconcile` with the same current `--expect-plan` to retry an
+interrupted publication. Before guest effects, publication records a private host intent bound to
+the checkout, provider incarnation, namespace and exact source/archive. New staging includes a
+matching ownership marker. Reconciliation requires both records, retains the entire failed staging
+directory as `<revision>.retained-1` through `-8`, then starts a fresh verified publication. It never
+deletes retained evidence. Exhausted retention, foreign/aliased ownership, conflicting intent and
+legacy partials lacking a matching marker are refused. A crash after retention can be retried;
+if a crash leaves staging without its ownership marker, automatic recovery remains refused.
+Do not remove pending directories to force a retry. Retained-directory garbage collection and
+crashes during retention/cleanup remain separate acceptance gates. A real publisher kill after
+upload and public CLI reconciliation passed in the September 14 checkpoint.
 
 Reusing a completed revision verifies the existing verifier and content without rewriting either.
 A missing or corrupt verifier fails closed, including incomplete final directories left by earlier

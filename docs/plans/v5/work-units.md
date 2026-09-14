@@ -27,7 +27,7 @@ not satisfy application acceptance. Carry every gap into the next checkpoint's a
 | WU07 | Real graph, persistent data, and loopback endpoints | WU03–06 | In progress; owned graph, persistent restore, process-loss recovery and verified evidence retention pass; real application acceptance open |
 | WU08 | Durable terminals and bounded event/log streams | WU04, WU07 | Planned |
 | WU09 | Native Linux and private SSH parity | WU05–08 | Planned; Hetzner fixture host selected and access verified; adapter qualification open |
-| WU10 | Measured speed, footprint, and reclamation | WU07–09 | In progress; [32-trial warm graph comparison](benchmark-20260914.md) complete; full application, idle/reclamation and remote qualification open |
+| WU10 | Measured speed, footprint, and reclamation | WU07–09 | In progress; [32-trial graph comparison](benchmark-20260914.md) and [idle/resource/cadence checkpoint](resources-20260914.md) complete; full application, complete external accounting and remote qualification open |
 | WU11 | Env/TLS/slim compatibility and migration packaging | WU07–10 | Planned; not a release authorization |
 
 The sequence starts with Mac runtime mechanics, but protocol and source decisions must accommodate
@@ -253,6 +253,15 @@ updated 4.2.0 pass the same bounded init/SQLite/web/check workload. Candidate re
 direct Compose teardown and the internal HTTP probe are faster. See the
 [protocol, samples and limits](benchmark-20260914.md). This closes the warm component comparison,
 not the full WU10 acceptance criteria. Carry the HTTP latency difference into application-load work.
+
+**Resource follow-up:** native CPU timebase calibration and current-descendant accounting pass;
+the ten-minute empty-pool window and matched 100 ms health-check graphs show lower candidate idle
+footprint/CPU but higher graph CPU. An explicit startup-fast/steady-slow cadence reduced candidate
+graph CPU by 76.6% in an A/B/A control, with readiness inside the observed control range. Graph
+cleanup returns CPU close to idle but retains VM footprint until pool stop. See the
+[resource report and caveats](resources-20260914.md). Next measure all external daemon descendants
+from the first sample, reduce observer cost, investigate equal-cadence CPU overhead, and qualify
+idle reclamation against active-work/data and restart-latency requirements. User defaults remain unchanged.
 
 ## WU11 — Preserve compatibility and qualify distribution
 

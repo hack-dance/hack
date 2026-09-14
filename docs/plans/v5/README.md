@@ -15,6 +15,8 @@ Every checkpoint must also complete a [real-project attempt and gap review](real
 [Checkpoint 04](checkpoint-04.md) records durable fixture jobs and owned cancellation.
 The [September 14 benchmark and review](benchmark-20260914.md) compares the owned graph executor
 with direct Docker Compose and stable Hack 4.1.1/4.2.0, including the remaining acceptance gates.
+The [resource and health-cadence checkpoint](resources-20260914.md) adds native CPU/footprint
+measurements, reclamation evidence, command-string support and a controlled CPU-cost reduction.
 
 The first implementation is `packages/runtime-core`, a Rust library and candidate executable.
 The repository-root `hack-local` launcher addresses only that checkout's build. Commands include read-only `info` and `plan`, private package preparation, resource probing, and

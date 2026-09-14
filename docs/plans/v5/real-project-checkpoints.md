@@ -624,3 +624,22 @@ the underlying cause was not established. The test now explicitly unlocks before
 new enrollment succeeds, without changing production locking or adding retries. The focused test
 and full 118-test suite pass, as do release build, rustfmt and all-target clippy. The failed run
 remains in `.hack-local/retention-tests.log`; the final suite is `retention-final-tests.log`.
+
+
+## September 14 — Native resources, command words and startup probe cadence
+
+Checkpoints `09263423` and `8fb05e27` add calibrated native resource trees, bounded command-word
+compilation and explicit health-check startup cadence. The captured 14-service application plan
+still reports 22 errors (12 unresolved mount sources, nine external route/owner-label conflicts,
+one external network) and two metadata warnings. No application start or secret delivery is claimed.
+The application source/configuration is unchanged; source/build, managed environment, lifecycle
+and routing remain the critical path.
+
+The [resource checkpoint](resources-20260914.md) records 122 passing Rust tests, release build,
+rustfmt/clippy, real command-string execution, ten-minute idle observations, matched graph and
+reclamation windows, and the 40.7% → 10.1% → 45.6% one-core CPU cadence control. Persistence and
+cleanup pass. It distinguishes a lower empty-pool footprint from higher frequent-probe graph CPU,
+retained VM memory from pool-stop reclamation, and complete candidate snapshots from the incomplete
+early daemon-child baseline. User defaults are unchanged; the candidate is stopped and v4.2.0
+remains running with a compatible API. This advances WU07/WU10 components without closing full
+application, equal-capacity, sustained-load or distribution acceptance.

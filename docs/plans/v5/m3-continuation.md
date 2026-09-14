@@ -144,3 +144,12 @@ fixture resources/registrations are absent; protected inputs match except normal
 observation timestamps. Global Hack and its running API-compatible daemon are verified at 4.2.0;
 4.1.1 is preserved privately. Application source/build and managed environment delivery remain
 the critical path; this component result does not close WU07 or full WU10.
+
+Native resource accounting and command-string compilation pass checkpoint `09263423` (121 Rust
+tests and live graph execution). Startup health-check cadence support is `8fb05e27` (122 tests,
+release build, rustfmt and clippy). `resources-1789415966310064000` records the ten-minute idle and
+matched graph/reclamation windows. `health-cadence-1789417129874758000` verifies actual engine
+configuration/probe spacing and CPU at 40.7% → 10.1% → 45.6% of one core in an A/B/A control.
+Readiness, persistent restore and owned cleanup pass; the candidate VM is stopped and stable 4.2.0
+remains healthy. Read the [resource checkpoint](resources-20260914.md) for observer/daemon-child
+accounting limits, retained VM footprint, the slower failure-detection tradeoff, and next gates.

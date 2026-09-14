@@ -1271,3 +1271,233 @@ fn health_start_interval_is_reviewed_and_absent_values_preserve_serialization() 
     fs::write(fixture.project.join("compose.yaml"), "services:\n  web:\n    image: alpine:3.21\n    healthcheck:\n      test: [CMD, 'true']\n      start_interval: invalid\n").unwrap();
     assert!(project::plan(&fixture.candidate, fixture.options()).is_err());
 }
+
+#[test]
+fn scoped_environment_is_service_owned_and_separate_from_executable_configuration() {
+    use project::inputs;
+    use std::collections::BTreeMap;
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    command: [echo, '$PUBLIC']\n    environment: {TOKEN: null, LABEL: '$PUBLIC'}\n  worker:\n    image: alpine:3.21\n    environment: [TOKEN]\n",
+    );
+    let review = fixture.plan();
+    let public = BTreeMap::from([("PUBLIC".into(), "fixture-label".into())]);
+    let managed = BTreeMap::from([
+        (
+            "web".into(),
+            BTreeMap::from([("TOKEN".into(), "synthetic-web-$NO_EXPANSION\n'".into())]),
+        ),
+        (
+            "worker".into(),
+            BTreeMap::from([("TOKEN".into(), "synthetic-worker".into())]),
+        ),
+    ]);
+    let result = inputs::compile_scoped(
+        &fixture.candidate,
+        fixture.options(),
+        &review.plan_id,
+        &public,
+        &managed,
+    )
+    .unwrap();
+    assert!(result.executable.requires_managed_environment());
+    assert_eq!(result.managed_environment, managed);
+    assert_eq!(
+        result.executable.services["web"].environment,
+        ["LABEL=fixture-label"]
+    );
+    assert!(result.executable.services["worker"].environment.is_empty());
+    assert_eq!(
+        result.executable.services["web"].command.as_ref().unwrap(),
+        &["echo", "fixture-label"]
+    );
+    let serialized = serde_json::to_string(&result.executable.review).unwrap();
+    for values in managed.values() {
+        for value in values.values() {
+            assert!(!serialized.contains(value));
+        }
+    }
+    assert!(!fixture.candidate.state_root.exists());
+}
+
+#[test]
+fn scoped_environment_refuses_cross_service_fallback_and_conflicting_owners() {
+    use project::inputs;
+    use std::collections::BTreeMap;
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    environment: {TOKEN: null, LABEL: fixed}\n  worker:\n    image: alpine:3.21\n    environment: [TOKEN]\n  inactive:\n    image: alpine:3.21\n    profiles: [optional]\n",
+    );
+    let review = fixture.plan();
+    let values = BTreeMap::from([("TOKEN".into(), "synthetic-sensitive-value".into())]);
+    let valid = BTreeMap::from([
+        ("web".into(), values.clone()),
+        ("worker".into(), values.clone()),
+    ]);
+    for case in 0..8 {
+        let mut managed = valid.clone();
+        let mut public = BTreeMap::new();
+        let code = match case {
+            0 => {
+                managed.remove("worker");
+                "execution_environment_missing"
+            }
+            1 => {
+                managed.insert("unknown".into(), values.clone());
+                "execution_environment_owner"
+            }
+            2 => {
+                managed.insert("inactive".into(), values.clone());
+                "execution_environment_owner"
+            }
+            3 => {
+                managed
+                    .get_mut("web")
+                    .unwrap()
+                    .insert("LABEL".into(), "synthetic-override".into());
+                "execution_environment_owner"
+            }
+            4 => {
+                managed
+                    .get_mut("web")
+                    .unwrap()
+                    .insert("EXTRA".into(), "synthetic-extra".into());
+                "execution_environment_owner"
+            }
+            5 => {
+                public = values.clone();
+                "execution_environment_owner"
+            }
+            6 => {
+                managed
+                    .get_mut("web")
+                    .unwrap()
+                    .insert("TOKEN".into(), "bad\0value".into());
+                "execution_input_budget"
+            }
+            _ => {
+                managed
+                    .get_mut("web")
+                    .unwrap()
+                    .insert("TOKEN".into(), "x".repeat(1024 * 1024));
+                "execution_input_budget"
+            }
+        };
+        let failure = inputs::compile_scoped(
+            &fixture.candidate,
+            fixture.options(),
+            &review.plan_id,
+            &public,
+            &managed,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(failure.code, code, "case {case}");
+        assert!(
+            !serde_json::to_string(&failure)
+                .unwrap()
+                .contains("synthetic")
+        );
+    }
+    assert!(!fixture.candidate.state_root.exists());
+}
+
+#[test]
+fn scoped_environment_cannot_interpolate_into_any_executable_field() {
+    use project::inputs;
+    use std::collections::BTreeMap;
+    for field in [
+        "command: [echo, '$TOKEN']",
+        "entrypoint: ['$TOKEN']",
+        "user: '$TOKEN'",
+        "healthcheck: {test: [CMD, '$TOKEN']}",
+        "environment: {TOKEN: null, OTHER: '$TOKEN'}",
+    ] {
+        let environment = if field.starts_with("environment:") {
+            ""
+        } else {
+            "    environment: [TOKEN]\n"
+        };
+        let fixture = Fixture::new(&format!(
+            "services:\n  web:\n    image: alpine:3.21\n    {field}\n{environment}"
+        ));
+        let review = fixture.plan();
+        let managed = BTreeMap::from([(
+            "web".into(),
+            BTreeMap::from([("TOKEN".into(), "synthetic-no-leak".into())]),
+        )]);
+        let failure = inputs::compile_scoped(
+            &fixture.candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+            &managed,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(failure.code, "execution_environment_missing", "{field}");
+        assert!(
+            !serde_json::to_string(&failure)
+                .unwrap()
+                .contains("synthetic-no-leak")
+        );
+        assert!(!fixture.candidate.state_root.exists());
+    }
+}
+
+#[test]
+fn scoped_environment_preserves_empty_values_and_enforces_a_shared_budget() {
+    use project::inputs;
+    use std::collections::BTreeMap;
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    environment: [TOKEN]\n  worker:\n    image: alpine:3.21\n    environment: [TOKEN]\n",
+    );
+    let review = fixture.plan();
+    let mut managed = BTreeMap::from([
+        (
+            "web".into(),
+            BTreeMap::from([("TOKEN".into(), String::new())]),
+        ),
+        (
+            "worker".into(),
+            BTreeMap::from([("TOKEN".into(), String::new())]),
+        ),
+    ]);
+    let result = inputs::compile_scoped(
+        &fixture.candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+        &managed,
+    )
+    .unwrap();
+    assert_eq!(result.managed_environment, managed);
+    assert!(result.executable.requires_managed_environment());
+    for values in managed.values_mut() {
+        values.insert("TOKEN".into(), "x".repeat(600_000));
+    }
+    let failure = inputs::compile_scoped(
+        &fixture.candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+        &managed,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(failure.code, "execution_input_budget");
+    fs::write(
+        fixture.project.join("compose.yaml"),
+        "services: {web: {image: alpine:3.22}}",
+    )
+    .unwrap();
+    let failure = inputs::compile_scoped(
+        &fixture.candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+        &managed,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(failure.code, "execution_plan_changed");
+    assert!(!fixture.candidate.state_root.exists());
+}

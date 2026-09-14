@@ -937,3 +937,39 @@ fn owned_graph_process_loss_live() -> Result<(), CandidateError> {
     )?;
     result
 }
+
+#[test]
+fn driver_refuses_managed_inputs_even_when_public_environment_is_empty() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let mut document = compose(&image, "marker", false);
+    document["services"]["web"]["environment"] = json!(["TOKEN"]);
+    state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    let managed = BTreeMap::from([(
+        "web".into(),
+        BTreeMap::from([("TOKEN".into(), "synthetic-only".into())]),
+    )]);
+    let inputs = project::inputs::compile_scoped(
+        &candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+        &managed,
+    )
+    .unwrap();
+    assert!(inputs.executable.services["web"].environment.is_empty());
+    let failure = config::prepare(
+        inputs.executable,
+        &goals(),
+        &"a".repeat(32),
+        &"b".repeat(32),
+        None,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(failure.code, "graph_subset");
+    assert!(!candidate.state_root.exists());
+}

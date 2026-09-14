@@ -13,9 +13,21 @@ pub struct ServiceInputs {
     pub health_test: Option<Vec<String>>,
     pub user: Option<String>,
 }
+/// Managed values are separate from engine configuration and cannot be serialized or debugged.
+pub struct ScopedExecutionInputs {
+    pub executable: ExecutionInputs,
+    pub managed_environment: BTreeMap<String, BTreeMap<String, String>>,
+}
+
 pub struct ExecutionInputs {
     pub review: PlanReport,
     pub services: BTreeMap<String, ServiceInputs>,
+    managed_environment_required: bool,
+}
+impl ExecutionInputs {
+    pub fn requires_managed_environment(&self) -> bool {
+        self.managed_environment_required
+    }
 }
 fn error(code: &'static str, message: &str) -> CandidateError {
     CandidateError::new(code, message)
@@ -117,7 +129,11 @@ impl Resolver<'_> {
             )),
         }
     }
-    fn environment(&mut self, value: Option<&Value>) -> Result<Vec<String>, CandidateError> {
+    fn environment(
+        &mut self,
+        value: Option<&Value>,
+        managed: Option<&BTreeMap<String, String>>,
+    ) -> Result<(Vec<String>, BTreeMap<String, String>), CandidateError> {
         let pairs: Vec<(String, Option<String>)> = match value {
             None | Some(Value::Null) => Vec::new(),
             Some(Value::Object(values)) => values
@@ -156,8 +172,9 @@ impl Resolver<'_> {
             _ => return Err(error("execution_environment", "Invalid environment form.")),
         };
         let mut result = BTreeMap::new();
+        let mut scoped = BTreeMap::new();
         for (key, value) in pairs {
-            if !variable(&key) || result.contains_key(&key) {
+            if !variable(&key) || result.contains_key(&key) || scoped.contains_key(&key) {
                 return Err(error(
                     "execution_environment",
                     "Invalid or duplicate environment key.",
@@ -165,16 +182,42 @@ impl Resolver<'_> {
             }
             self.charge(&key)?;
             self.charge("=")?;
+            if let Some(managed) = managed {
+                if value.is_none() {
+                    let value = managed.get(&key).ok_or_else(|| error(
+                        "execution_environment_missing",
+                        "A declared service environment input was not supplied for that service.",
+                    ))?;
+                    self.charge(value)?;
+                    scoped.insert(key, value.clone());
+                    continue;
+                }
+                if managed.contains_key(&key) {
+                    return Err(error(
+                        "execution_environment_owner",
+                        "Managed values cannot replace Compose-owned environment values.",
+                    ));
+                }
+            }
             let value = match value {
                 Some(v) => self.resolve(&v)?,
                 None => self.inherited(&key)?,
             };
             result.insert(key, value);
         }
-        Ok(result
-            .into_iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect())
+        if managed.is_some_and(|values| values.len() != scoped.len()) {
+            return Err(error(
+                "execution_environment_owner",
+                "Managed environment contains undeclared service inputs.",
+            ));
+        }
+        Ok((
+            result
+                .into_iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect(),
+            scoped,
+        ))
     }
 }
 
@@ -228,8 +271,9 @@ fn tokenize(text: &str) -> Result<Vec<String>, CandidateError> {
     Ok(result)
 }
 
-/// Resolve values only from the caller's explicitly supplied map (e.g. an authorized managed-env
-/// injection). No process environment, dotenv file, shell or ambient credential lookup occurs.
+/// Resolve non-secret values only from the caller's explicitly supplied interpolation map.
+/// This legacy path can place values in argv and engine configuration: never supply credentials.
+/// No process environment, dotenv file, shell or ambient credential lookup occurs.
 /// The fresh plan must match `expected_plan`; parsing uses those exact Compose bytes. Building
 /// images and env_file loading remain separate gates and are rejected here.
 pub fn compile(
@@ -238,6 +282,30 @@ pub fn compile(
     expected_plan: &str,
     supplied: &BTreeMap<String, String>,
 ) -> Result<ExecutionInputs, CandidateError> {
+    compile_inner(candidate, options, expected_plan, supplied, None).map(|result| result.executable)
+}
+
+/// Compile service-scoped managed values separately from public executable configuration.
+/// Managed values must correspond exactly to bare/null environment declarations on active services.
+/// They cannot interpolate commands, health checks, users or literal environment expressions.
+/// This is an in-memory compilation boundary, not a provider lease or a runtime delivery operation.
+pub fn compile_scoped(
+    candidate: &Candidate,
+    options: PlanOptions<'_>,
+    expected_plan: &str,
+    non_secret: &BTreeMap<String, String>,
+    managed: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Result<ScopedExecutionInputs, CandidateError> {
+    compile_inner(candidate, options, expected_plan, non_secret, Some(managed))
+}
+
+fn compile_inner(
+    candidate: &Candidate,
+    options: PlanOptions<'_>,
+    expected_plan: &str,
+    supplied: &BTreeMap<String, String>,
+    managed: Option<&BTreeMap<String, BTreeMap<String, String>>>,
+) -> Result<ScopedExecutionInputs, CandidateError> {
     let review = plan(candidate, options)?;
     if review.plan_id != expected_plan {
         return Err(error(
@@ -272,6 +340,26 @@ pub fn compile(
         values: supplied,
         remaining: MAX_EXPANDED,
     };
+    if let Some(managed) = managed {
+        for (name, values) in managed {
+            if !review
+                .plan
+                .services
+                .get(name)
+                .is_some_and(|service| service.active)
+                || values
+                    .keys()
+                    .any(|key| !variable(key) || supplied.contains_key(key))
+            {
+                return Err(error(
+                    "execution_environment_owner",
+                    "Managed inputs require active service ownership and separate interpolation names.",
+                ));
+            }
+        }
+    }
+    let empty = BTreeMap::new();
+    let mut managed_environment = BTreeMap::new();
     let mut services = BTreeMap::new();
     for (name, service) in &review.plan.services {
         if !service.active {
@@ -302,12 +390,19 @@ pub fn compile(
             Some(Value::Number(n)) => Some(resolver.resolve(&n.to_string())?),
             _ => return Err(error("execution_user", "Unsupported service user.")),
         };
+        let (environment, scoped) = resolver.environment(
+            raw.get("environment"),
+            managed.map(|values| values.get(name).unwrap_or(&empty)),
+        )?;
+        if !scoped.is_empty() {
+            managed_environment.insert(name.clone(), scoped);
+        }
         services.insert(
             name.clone(),
             ServiceInputs {
                 command: resolver.argv(raw.get("command"))?,
                 entrypoint: resolver.argv(raw.get("entrypoint"))?,
-                environment: resolver.environment(raw.get("environment"))?,
+                environment,
                 health_test,
                 user,
             },
@@ -319,7 +414,14 @@ pub fn compile(
             "Compose changed while executable inputs were compiled.",
         ));
     }
-    Ok(ExecutionInputs { review, services })
+    Ok(ScopedExecutionInputs {
+        executable: ExecutionInputs {
+            review,
+            services,
+            managed_environment_required: !managed_environment.is_empty(),
+        },
+        managed_environment,
+    })
 }
 
 #[cfg(test)]

@@ -462,14 +462,39 @@ commands/entrypoints, user, scalar/list environment entries and CMD/CMD-SHELL he
 Interpolation accepts `$NAME`, `${NAME}` and literal `$$`, using only the explicitly supplied
 map. Resolved values are not recursively interpolated. Missing inherited values fail closed;
 the compiler does not consult process environment or dotenv files. It rejects NUL and limits
-expanded values to 1 MiB, with at most 4096 entries per argv list. Nonempty Compose command strings,
-interpolation operators/defaults, builds and env_file delivery remain explicit implementation gates.
+expanded values to 1 MiB, with at most 4096 entries per argv list. Simple command strings use
+bounded word splitting. Interpolation operators/defaults, builds and env_file delivery remain
+explicit implementation gates. This shared interpolation map is for non-secret values only: it
+can populate argv and engine configuration.
 
 The live fixture feeds in-memory program values through a reference-only Compose file, then uses
 the compiled commands, environment and healthcheck in its owned Docker driver. Saved review and
 event files contain no program or environment values. Its non-secret sentinel verifies delivery;
 this does not qualify managed-secret delivery, since production Docker environment persistence
 and inspection must be addressed separately before actual application credentials are supplied.
+
+### Service-scoped environment compilation
+
+`project::inputs::compile_scoped` accepts separate non-secret interpolation values and managed
+values indexed by service and variable name. A managed value must match a bare list entry or null
+map value on an active service. Missing values, unknown/inactive services, undeclared variables,
+Compose-owned literal overrides and names shared with the interpolation map are refused. The
+same variable name may have distinct values on different services. Values are copied verbatim,
+including empty strings and newlines, subject to NUL rejection and the shared 1 MiB expanded budget.
+No ambient lookup, provider invocation, filesystem write or runtime operation occurs.
+
+Managed values are returned separately from `ServiceInputs.environment`, command, entrypoint,
+health test and user. Neither result type implements `Debug` or `Serialize`. Reviews and errors
+contain no supplied values. The executable result retains a private delivery-required flag:
+`graph::config::prepare` refuses it even when its public environment is empty. Dropping the managed
+map therefore cannot silently start a graph with missing delivery.
+
+Synthetic regression tests cover separate service values, public field isolation, every executable
+interpolation field, conflicting/missing ownership, NUL/size refusal and the graph refusal. This is
+an in-memory input contract, not live managed-secret delivery. Ordinary Rust strings do not promise
+memory zeroization. Native provider selection, scoped leases/expiry, a verified ephemeral guest
+transport, entrypoint and health-check behavior, restart/redelivery and owned cleanup remain open.
+No actual credentials are used by these tests, and the graph CLI still refuses environment delivery.
 
 ## Owned graph CLI (development profile)
 

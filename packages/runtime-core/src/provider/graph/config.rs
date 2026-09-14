@@ -22,6 +22,9 @@ pub(super) fn prepare(
     owner: &str,
     source: Option<&source::Inputs>,
 ) -> Result<Prepared, CandidateError> {
+    if inputs.requires_managed_environment() {
+        return Err(unsupported());
+    }
     let graph = Graph::from_plan(&inputs.review.plan, readiness)?;
     let plan = &inputs.review.plan;
     if graph.services.len() > 8 {

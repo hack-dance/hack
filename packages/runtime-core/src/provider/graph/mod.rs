@@ -1,5 +1,6 @@
 //! Fresh owned graph attempts. Recovery only observes or cleans recorded resources; never replay.
 mod config;
+mod journal;
 use super::{engine::Engine, state};
 use crate::{
     Candidate, CandidateError,
@@ -218,6 +219,7 @@ fn load(
             "removed",
             "stopped-data-retained",
             "restarting",
+            "reconciled-cleanup-only",
         ]
         .contains(&receipt.phase.as_str())
     {
@@ -286,6 +288,19 @@ struct Session<'a> {
     restarting: bool,
 }
 impl Session<'_> {
+    #[cfg(test)]
+    fn fault_pause(&self, point: &str) -> Result<(), CandidateError> {
+        if std::env::var("HACK_LOCAL_GRAPH_FAULT").as_deref() == Ok(point) {
+            state::write(
+                &self.root.join(format!("fault-{point}.json")),
+                &json!({"point":point,"run":self.receipt.run}),
+            )?;
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        Ok(())
+    }
     fn verify_config(&self, service: &str, inspected: &Value) -> Result<(), CandidateError> {
         let expected = &self.configs[service];
         for (key, value) in expected.as_object().expect("compiled config") {
@@ -460,6 +475,8 @@ impl Driver for Session<'_> {
             &format!("/v1.53/containers/create?name={}", resource.name),
             Some(config),
         )?;
+        #[cfg(test)]
+        self.fault_pause("after-create")?;
         let id = value["Id"]
             .as_str()
             .filter(|v| hex(v, 64))
@@ -479,6 +496,8 @@ impl Driver for Session<'_> {
         self.reserve(&key, "start-intent")?;
         self.engine
             .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+        #[cfg(test)]
+        self.fault_pause("after-start")?;
         Ok(())
     }
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
@@ -821,3 +840,20 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
 
 #[cfg(test)]
 mod tests;
+
+/// Reconcile an interrupted journal for cleanup only. The pending bytes never become execution
+/// authority: every possible create already had a name in the last committed receipt. The
+/// interrupted file is retained, existing resources are verified, and no engine mutation occurs.
+pub fn reconcile(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateError> {
+    let engine = Engine::connect_cleanup(candidate)?;
+    let (mut receipt, root) = load(candidate, &engine, run)?;
+    for resource in receipt.resources.values() {
+        inspect_resource(&engine, &receipt, resource)?;
+    }
+    if let Some(retained) = journal::retain(&root)? {
+        state::write(&retained.join("committed.json"), &receipt)?;
+        receipt.phase = "reconciled-cleanup-only".into();
+        state::write(&root.join("state.json"), &receipt)?;
+    }
+    Ok(receipt)
+}

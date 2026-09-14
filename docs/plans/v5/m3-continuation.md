@@ -46,7 +46,7 @@ staging and retries; September 14 live tests include a killed publisher recovere
 CLI. Retained-copy cleanup and the remaining crash boundaries stay open.
 Do not rerun already passing cases without changed code or an unresolved concern.
 
-WU07 application graph startup is not implemented. A September 14 synthetic init/SQLite/web/HTTP
+WU07 has an owned graph executor; real application startup remains unqualified. A September 14 synthetic init/SQLite/web/HTTP
 probe passes service DNS, VM restart/data readback and owned cleanup. Candidate bootstrap now
 incorporates signed, pinned networking packages before daemon startup; the updated live probe
 passes in `live-1789401520524709000`, including foreign-owner and incomplete-receipt refusals. Packages persist in the owned guest with receipt checks, and the probe no longer installs
@@ -94,7 +94,10 @@ The public `graph run|inspect|restart|cleanup` driver now passes
 IDs and SQLite data across VM restart, retained named data on cleanup, missing-create-ID inspection,
 foreign-name refusal and final removal. 114 Rust tests and all-target clippy pass; CLI reference
 generation has no TypeScript surface drift. `graph restart` is explicit and requires acknowledged
-prior success, identical plan/readiness and stopped containers. Pending journals still block
-mutation, and the missing-ID control is simulated. Next is cleanup-only journal reconciliation and
-actual child-process kills after create/start before acknowledgement. These do not close Event Agent,
+prior success, identical plan/readiness and stopped containers. Cleanup-only journal reconciliation and actual child-process SIGKILLs after create/start before
+acknowledgement now pass `live-1789406422649192000`. Partial bytes are retained; replay and
+competing graph allocation are refused, and cleanup confirms resource absence. 116 Rust tests
+pass; the VM is stopped, pressure stayed normal and protected inputs are unchanged. Next are
+graph/source-job admission coordination, retained-data reattachment and receipt archival. These
+do not close Event Agent,
 source/build, managed-secret, routing or Linux-adapter acceptance.

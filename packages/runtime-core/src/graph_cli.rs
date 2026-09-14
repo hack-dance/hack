@@ -8,14 +8,14 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; inspect/cleanup require --run-id. Cleanup alone may use --remove-data.",
+        "Use graph run|restart with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; inspect/reconcile/cleanup require --run-id. Cleanup alone may use --remove-data.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
     let Some((action, args)) = args.split_first() else {
         return Err(invalid());
     };
-    if !["run", "restart", "inspect", "cleanup"].contains(action) {
+    if !["run", "restart", "inspect", "reconcile", "cleanup"].contains(action) {
         return Err(invalid());
     }
     let mut singles = BTreeMap::new();
@@ -75,6 +75,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     match *action {
         "inspect" => serde_json::to_value(graph::inspect(candidate, run)?)
             .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph snapshot.")),
+        "reconcile" => encode(graph::reconcile(candidate, run)?),
         "cleanup" => encode(graph::cleanup(candidate, run, remove_data)?),
         _ => {
             let project = *singles.get("--project").ok_or_else(invalid)?;

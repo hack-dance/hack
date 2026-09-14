@@ -504,3 +504,25 @@ Validation for this checkpoint: 114 Rust tests, release build, rustfmt, all-targ
 reference generation pass. The TypeScript CLI reference remains unchanged because it does not
 enumerate the Rust candidate. Internal expose metadata is projected by the driver and covered by
 its configuration regression test; public port bindings remain rejected.
+
+
+## September 14 — Interrupted graph journals and process loss
+
+`graph reconcile` verifies the last committed ownership reservations, retains partial journal bytes
+and a hash in a bounded private recovery directory, and marks the attempt cleanup-only. It never
+publishes the interrupted state or starts resources. Symlinks, hard links, public files and an
+exhausted eight-slot retention budget are refused without deleting the pending evidence.
+
+`live-1789406422649192000` passes the public driver control with a partial journal, unchanged
+resource observations after reconciliation, restart refusal and cleanup. A separate test kills
+an owned helper with SIGKILL after container create and start replies, before acknowledgement.
+Public inspection finds the expected created/running resource, dependents remain absent, restart
+and competing graph allocation are refused, and public cleanup confirms every resource absent.
+The pause hooks exist only in the test build; these are actual child-process kills, not VM power-loss
+or application recovery qualification. Executed test and release binary hashes are retained.
+
+All 116 Rust tests, release build, rustfmt, all-target clippy and CLI reference generation pass.
+The final VM is stopped with no live provider process. Pressure stayed normal, swapouts remained
+4132, peak provider footprint was 994,674,440 bytes, and protected inputs were unchanged.
+Graph/source-job admission coordination, retained-data reattachment, receipt archival and actual
+Event Agent acceptance remain open. There is no new application performance claim.

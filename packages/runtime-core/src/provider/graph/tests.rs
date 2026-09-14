@@ -1,8 +1,8 @@
 use super::*;
 use std::{io::Read, path::Path, process::Command};
-struct Fixture(PathBuf);
+pub(super) struct Fixture(pub(super) PathBuf);
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let root = std::env::temp_dir()
             .canonicalize()
             .unwrap()
@@ -275,7 +275,47 @@ fn owned_driver_live() -> Result<(), CandidateError> {
         if launch(&candidate, &fixture, &run, "restart").is_ok() {
             return Err(error("graph_test", "Uncertain graph restarted."));
         }
-        cli(&candidate, &["inspect", "--run-id", &run])?;
+        let before_reconcile = cli(&candidate, &["inspect", "--run-id", &run])?;
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut pending = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(root.join("state.pending"))
+                .map_err(state::io)?;
+            pending
+                .write_all(b"{interrupted journal")
+                .map_err(state::io)?;
+            pending.sync_all().map_err(state::io)?;
+        }
+        if !matches!(cli(&candidate, &["cleanup", "--run-id", &run]), Err(e) if e.message=="graph_journal_uncertain")
+        {
+            return Err(error(
+                "graph_test",
+                "Pending journal did not block cleanup.",
+            ));
+        }
+        let reconciled = cli(&candidate, &["reconcile", "--run-id", &run])?;
+        if reconciled["phase"] != "reconciled-cleanup-only"
+            || fs::read(root.join("recovery-1/interrupted.pending")).map_err(state::io)?
+                != b"{interrupted journal"
+        {
+            return Err(error(
+                "graph_test",
+                "Journal reconciliation did not preserve the partial file.",
+            ));
+        }
+        let after_reconcile = cli(&candidate, &["inspect", "--run-id", &run])?;
+        if before_reconcile["observations"] != after_reconcile["observations"]
+            || launch(&candidate, &fixture, &run, "restart").is_ok()
+        {
+            return Err(error(
+                "graph_test",
+                "Reconciliation changed runtime state or allowed replay.",
+            ));
+        }
         cli(&candidate, &["cleanup", "--run-id", &run])?;
         let stopped = cli(&candidate, &["inspect", "--run-id", &run])?;
         if stopped["observations"]["volume:data"]["state"] != "present" {
@@ -336,4 +376,197 @@ fn owned_driver_live() -> Result<(), CandidateError> {
     )?;
     cleanup?;
     result.map(|_| ())
+}
+
+#[test]
+#[ignore = "Helper for the owned graph process-loss test; never invoke without its parent"]
+fn fault_child() -> Result<(), CandidateError> {
+    let candidate = Candidate::discover(Path::new(
+        &std::env::var("HACK_LOCAL_TEST_ROOT").expect("root"),
+    ))?;
+    let project = PathBuf::from(std::env::var("HACK_LOCAL_GRAPH_PROJECT").expect("fixture"));
+    let run_id = std::env::var("HACK_LOCAL_GRAPH_RUN").expect("run");
+    let options = || PlanOptions {
+        project: &project,
+        compose_file: Path::new("compose.yaml"),
+        profiles: &[],
+    };
+    let review = project::plan(&candidate, options())?;
+    super::run(
+        &candidate,
+        RunOptions {
+            project: options(),
+            expected_plan: &review.plan_id,
+            non_secret_values: &BTreeMap::new(),
+            readiness: &goals(),
+            run_id: &run_id,
+            timeout: Duration::from_secs(60),
+        },
+    )?;
+    Err(error("graph_test", "Fault helper unexpectedly completed."))
+}
+
+#[test]
+#[ignore = "Manual owned development VM, pinned Bun image and external watchdog required"]
+fn owned_graph_process_loss_live() -> Result<(), CandidateError> {
+    use std::process::{Child, Stdio};
+    use std::time::Instant;
+    struct ChildGuard(Option<Child>);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(child) = &mut self.0 {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    let candidate = Candidate::discover(Path::new(
+        &std::env::var("HACK_LOCAL_TEST_ROOT").expect("root"),
+    ))?;
+    let image = std::env::var("HACK_LOCAL_TEST_IMAGE").expect("image");
+    let evidence = candidate.state_root.join("review/wu07");
+    state::private_directory(&evidence)?;
+    let suite = token();
+    let mut controls = Vec::new();
+    let result = (|| {
+        for point in ["after-create", "after-start"] {
+            let fixture = Fixture::new();
+            let run = token();
+            let root = directory(&candidate, &run)?;
+            let mut document = compose(&image, &run, false);
+            document["services"]["init"]["entrypoint"] =
+                json!(["/usr/local/bin/bun", "-e", "await Bun.sleep(30000)"]);
+            state::write(&fixture.0.join("compose.yaml"), &document)?;
+            state::write(
+                &evidence.join(format!("driver-kill-{suite}.json")),
+                &json!({"phase":"intent","point":point,"run":run,"completed_controls":controls}),
+            )?;
+            let outcome = (|| {
+                let child = Command::new(std::env::current_exe().map_err(state::io)?)
+                    .args([
+                        "provider::graph::tests::fault_child",
+                        "--ignored",
+                        "--exact",
+                    ])
+                    .env("HACK_LOCAL_GRAPH_FAULT", point)
+                    .env("HACK_LOCAL_GRAPH_PROJECT", &fixture.0)
+                    .env("HACK_LOCAL_GRAPH_RUN", &run)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map_err(state::io)?;
+                let mut child = ChildGuard(Some(child));
+                let marker = root.join(format!("fault-{point}.json"));
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while !marker.exists() {
+                    if child
+                        .0
+                        .as_mut()
+                        .expect("child")
+                        .try_wait()
+                        .map_err(state::io)?
+                        .is_some()
+                        || Instant::now() >= deadline
+                    {
+                        return Err(error(
+                            "graph_test",
+                            "Fault helper did not reach its owned marker.",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let reached: Value = state::read(&marker)?;
+                if reached["run"] != run || reached["point"] != point {
+                    return Err(error("graph_test", "Fault marker identity differs."));
+                }
+                let pid = child.0.as_ref().expect("child").id();
+                child.0.as_mut().expect("child").kill().map_err(state::io)?;
+                let status = child.0.as_mut().expect("child").wait().map_err(state::io)?;
+                child.0 = None;
+                use std::os::unix::process::ExitStatusExt;
+                if status.signal() != Some(libc::SIGKILL) {
+                    return Err(error(
+                        "graph_test",
+                        "Owned helper was not killed at the intended boundary.",
+                    ));
+                }
+                let snapshot = cli(&candidate, &["inspect", "--run-id", &run])?;
+                let init = &snapshot["receipt"]["resources"]["container:init"];
+                if point == "after-create" {
+                    if !init["id"].is_null()
+                        || init["phase"] != "create-intent"
+                        || snapshot["observations"]["container:init"]["state"] != "created"
+                    {
+                        return Err(error(
+                            "graph_test",
+                            "Create kill did not leave the intended unacknowledged resource.",
+                        ));
+                    }
+                } else if init["id"].is_null()
+                    || init["phase"] != "start-intent"
+                    || snapshot["observations"]["container:init"]["state"] != "running"
+                {
+                    return Err(error(
+                        "graph_test",
+                        "Start kill did not leave the intended unacknowledged running service.",
+                    ));
+                }
+                if snapshot["observations"]["container:web"]["state"] != "absent"
+                    || snapshot["observations"]["container:check"]["state"] != "absent"
+                {
+                    return Err(error(
+                        "graph_test",
+                        "Process loss launched dependent services.",
+                    ));
+                }
+                if !matches!(launch(&candidate, &fixture, &run, "restart"), Err(e) if e.message=="graph_replay_refused")
+                {
+                    return Err(error("graph_test", "Process loss allowed restart replay."));
+                }
+                let another = token();
+                if !matches!(launch(&candidate, &fixture, &another, "run"), Err(e) if e.message=="graph_capacity_reserved")
+                    || directory(&candidate, &another)?.exists()
+                {
+                    return Err(error(
+                        "graph_test",
+                        "Uncertain reservation allowed another graph allocation.",
+                    ));
+                }
+                Ok(
+                    json!({"point":point,"helper_pid":pid,"signal":"SIGKILL","snapshot":snapshot,"replay_refused":true,"reservation_preserved":true}),
+                )
+            })();
+            let cleanup = (|| {
+                if root.join("state.json").exists() {
+                    if root.join("state.pending").exists() {
+                        cli(&candidate, &["reconcile", "--run-id", &run])?;
+                    }
+                    cli(&candidate, &["cleanup", "--run-id", &run, "--remove-data"])?;
+                    let snapshot = cli(&candidate, &["inspect", "--run-id", &run])?;
+                    if !snapshot["observations"]
+                        .as_object()
+                        .expect("observations")
+                        .values()
+                        .all(|v| v["state"] == "absent")
+                    {
+                        return Err(error(
+                            "graph_test",
+                            "Process-loss cleanup left an owned resource.",
+                        ));
+                    }
+                }
+                Ok::<_, CandidateError>(())
+            })();
+            controls.push(json!({"point":point,"passed":outcome.is_ok() && cleanup.is_ok(),"cleanup_confirmed":cleanup.is_ok(),"evidence":outcome.as_ref().ok(),"failure":outcome.as_ref().err().map(|e|(&e.code,&e.message))}));
+            cleanup?;
+            outcome?;
+        }
+        Ok::<_, CandidateError>(())
+    })();
+    state::write(
+        &evidence.join(format!("driver-kill-{suite}.json")),
+        &json!({"passed":result.is_ok(),"cleanup_confirmed":controls.iter().all(|v|v["cleanup_confirmed"]==true),"controls":controls,"scope":"Actual owned child SIGKILL after create and start replies but before journal acknowledgement; inspection, no replay, reservation and cleanup via public CLI"}),
+    )?;
+    result
 }

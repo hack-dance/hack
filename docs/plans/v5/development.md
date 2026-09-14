@@ -482,6 +482,7 @@ reviewed plan ID, and one readiness goal for every active service:
   --expect-plan <reviewed-plan-sha256> --run-id <fresh-32-hex-id> \
   --ready init=completed --ready web=healthy --ready check=completed
 ./hack-local graph inspect --run-id <same-32-hex-id>
+./hack-local graph reconcile --run-id <same-32-hex-id>
 ./hack-local graph restart --project /path/to/fixture --file compose.yaml \
   --expect-plan <same-plan-sha256> --run-id <same-32-hex-id> \
   --ready init=completed --ready web=healthy --ready check=completed
@@ -505,7 +506,11 @@ Every create has a prior durable name reservation. Container IDs are saved befor
 and uncertain effects are retained without retry. Inspection verifies labels, names and recorded
 IDs using the private engine socket; `ready-observed` is historical, while `observations` reports
 current state. A missing create ID can be inspected/cleaned by its exact reserved name and labels.
-Foreign replacements are refused. An incomplete journal blocks mutation rather than being deleted.
+Foreign replacements are refused. An incomplete journal blocks mutation. Explicit `graph reconcile`
+verifies resources against the last committed reservations, retains the interrupted bytes and their
+hash in one of eight private recovery slots, and marks the attempt `reconciled-cleanup-only`. It
+never treats partial bytes as execution authority or starts resources. Reconciled attempts can be
+cleaned up but cannot be restarted. Unsafe files or exhausted retention slots remain blocked.
 
 Explicit restart requires the unchanged plan and readiness goals, acknowledged prior success,
 all resources present, and every container stopped. It reuses recorded IDs and re-verifies the
@@ -515,7 +520,6 @@ removes the exact owned volumes. After ordinary cleanup, reconnecting retained d
 attempt is still a separate implementation gate. VM restart with intact containers is supported.
 
 `--timeout-seconds` bounds the readiness loop (default 30, maximum 600); individual engine requests
-have their own bounded transport timeout. Recovery journal reconciliation, actual process-kill
-boundaries, retained-data reattachment, source/build and managed-secret delivery, graph updates,
+have their own bounded transport timeout. Retained-data reattachment, source/build and managed-secret delivery, graph updates,
 loopback routing, and actual Event Agent execution remain open. The current image/platform boundary
 is Linux arm64 inside the owned M3 VM, not the selected Hetzner/Linux adapter.

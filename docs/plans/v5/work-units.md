@@ -24,7 +24,7 @@ not satisfy application acceptance. Carry every gap into the next checkpoint's a
 | WU04 | Durable operations, receipts, jobs, and cancellation | WU02–03 | Component implemented for bounded host and immutable-source jobs; full application execution remains open; see [checkpoint 04](checkpoint-04.md) and [real-project gaps](real-project-checkpoints.md) |
 | WU05 | Native source and incremental development sync | WU03–04 | In progress; actual source-to-container proof passed, sync acceptance pending |
 | WU06 | Immutable job input and generation enforcement | WU04–05 | In progress; M3 immutable-source execution, real project tests and explicit reconciliation pass; supervisor-loss containment and killed-publisher reconciliation pass; remaining cleanup/cache controls pending |
-| WU07 | Real graph, persistent data, and loopback endpoints | WU03–06 | In progress; synthetic init/web/DNS/SQLite restart and cleanup probe passes; application executor not implemented |
+| WU07 | Real graph, persistent data, and loopback endpoints | WU03–06 | In progress; owned graph driver, readiness, restart/data and process-loss recovery pass; real application acceptance open |
 | WU08 | Durable terminals and bounded event/log streams | WU04, WU07 | Planned |
 | WU09 | Native Linux and private SSH parity | WU05–08 | Planned; requires a selected Linux fixture host |
 | WU10 | Measured speed, footprint, and reclamation | WU07–09 | Planned; corrected research cohort incomplete |
@@ -171,8 +171,11 @@ and restart readback proving deleted owned resources stay deleted. No production
    redacted saved reviews/journals. Complete command-string tokenization,
    interpolation operators and build/env_file delivery. The production driver and public graph
    run/inspect/restart/cleanup commands pass `live-1789405445903018000`, including stable IDs/data
-   across VM restart, named-data retention, simulated missing-create receipts and foreign-name refusal. Finish journal reconciliation, actual create/start process-kill controls, retained-data
-   reattachment after cleanup, receipt archival and graph/source-job admission coordination;
+   across VM restart, named-data retention, simulated missing-create receipts and foreign-name refusal.
+   Cleanup-only journal reconciliation and actual create/start process-kill controls pass
+   `live-1789406422649192000`: interrupted bytes retained, replay/allocation refused and all
+   owned resources removed. Finish retained-data reattachment after cleanup, receipt archival
+   and graph/source-job admission coordination;
    review-plan redactions are not executable input.
 3. Deliver managed environment values without persisting secrets, handle image/build inputs and
    lifecycle processes, and add service-level observation plus isolated host-loopback routing.

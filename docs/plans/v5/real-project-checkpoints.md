@@ -643,3 +643,18 @@ retained VM memory from pool-stop reclamation, and complete candidate snapshots 
 early daemon-child baseline. User defaults are unchanged; the candidate is stopped and v4.2.0
 remains running with a compatible API. This advances WU07/WU10 components without closing full
 application, equal-capacity, sustained-load or distribution acceptance.
+
+## September 14 — Immutable source delivery through graph restart and restore
+
+The [source-backed graph checkpoint](source-graphs-20260914.md) adds explicit publication binding
+and read-only filtered source mounts. Its isolated SQLite/web/check application passes startup,
+owned VM restart and new-compute restore with the same database token. Missing, foreign and altered
+publication controls refuse before initial allocation; missing source during restore leaves its
+receipt and resource state unchanged. This is live component/application-fixture evidence, not
+Event Agent readiness.
+
+A fresh captured Event Agent plan still has 14 services, 22 errors (12 unresolved mount sources,
+nine external route/owner-label conflicts and one external network) and two metadata warnings.
+Protected source/configuration hashes remain unchanged. Build/output delivery, managed environment,
+source update/reload, lifecycle/routing and a profile that admits the actual application remain
+open. The new immutable-source flag does not bypass those gates or increase the eight-service limit.

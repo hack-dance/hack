@@ -490,11 +490,29 @@ reviewed plan ID, and one readiness goal for every active service:
 ./hack-local graph cleanup --run-id <same-32-hex-id> --remove-data
 ```
 
+Source-backed graphs additionally require `--source-revision <published-sha256>` on run,
+restart and restore. First review the isolated project, run `project sync-source` and
+`project publish-source` with that exact `--expect-plan`, then pass the returned revision to the
+graph command. Declare source as an ordinary read-only Compose mount such as `.:/app:ro`.
+The driver resolves it to the filtered, verified guest publication; it never mounts the host tree.
+Selected regular files are supported. Symlink mount roots and subdirectory mounts containing
+symlinks are refused; mount the full selected tree when its internal links are required.
+Excluded credential/generated paths stay excluded.
+
+The receipt records source revision, archive digest and selection digest before resource creation.
+Fresh runs require the current acknowledged source revision. Restart and restore reverify the
+accepted publication and require the same binding and unchanged reviewed plan. No-source graphs
+must omit the flag; old receipts preserve their serialization. Normal owned VM restart retains the
+provider identity and publication; a foreign provider incarnation remains refused. A changed host
+selection currently requires a new review/attempt; restoring an old graph across arbitrary source
+edits is not supported. Cleanup does not require readable source and never removes its publication.
+Publication retention/GC, writable build outputs and live reload remain separate work.
+
 The initial driver requires the explicit development VM profile, pinned local `sha256:` image IDs,
 read-only roots, at most eight services, one internal bridge and eight named volumes. Defaults are
 0.5 CPU, 256 MiB RAM and 64 PIDs per service; total requested limits cannot exceed four CPUs or
 4 GiB RAM. Container logs are limited to one 1 MiB file and `/tmp` to a 16 MiB tmpfs. It rejects
-builds, source bind mounts, port publication, environment delivery, automatic restart, and
+builds, unbound or writable source mounts, port publication, environment delivery, automatic restart, and
 user label/logging overrides. The CLI supplies no ambient interpolation values. The provider mutation lease serializes workload admission with allocation. An active or uncertain
 graph receipt blocks source-job admission and launch as well as competing graph allocation. Any
 retained source-job container blocks graph creation/restart and another source launch until it is

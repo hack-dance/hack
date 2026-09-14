@@ -8,6 +8,7 @@ mod journal;
 mod retention;
 pub use retention::{prune, reconcile_export};
 mod restore;
+mod source;
 use super::{engine::Engine, state};
 use crate::{
     Candidate, CandidateError,
@@ -20,6 +21,7 @@ use reqwest::Method;
 pub use restore::restore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+pub use source::SourceBinding;
 use std::{collections::BTreeMap, fs, os::unix::fs::DirBuilderExt, path::PathBuf, time::Duration};
 
 fn error(code: &'static str, message: &str) -> CandidateError {
@@ -76,6 +78,8 @@ pub struct Receipt {
     pub namespace: String,
     pub plan_id: String,
     pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceBinding>,
     pub readiness: BTreeMap<String, Condition>,
     pub resources: BTreeMap<String, Resource>,
 }
@@ -217,6 +221,7 @@ fn load(
         || receipt.owner != engine.guest().incarnation()
         || !hex(&receipt.namespace, 64)
         || !hex(&receipt.plan_id, 64)
+        || receipt.source.as_ref().is_some_and(|s| !s.valid())
         || receipt.resources.is_empty()
         || receipt.resources.len() > 24
         || ![
@@ -284,6 +289,7 @@ fn load(
 pub struct RunOptions<'a> {
     pub project: PlanOptions<'a>,
     pub expected_plan: &'a str,
+    pub source_revision: Option<&'a str>,
     pub non_secret_values: &'a BTreeMap<String, String>,
     pub readiness: &'a BTreeMap<String, Condition>,
     pub run_id: &'a str,
@@ -540,6 +546,17 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
         options.expected_plan,
         options.non_secret_values,
     )?;
+    source::requested(&inputs.review.plan, options.source_revision)?;
+    let _source_admission = options
+        .source_revision
+        .map(|revision| {
+            super::source_sync::SourceAdmission::acquire(
+                candidate,
+                &inputs.review.plan.namespace,
+                revision,
+            )
+        })
+        .transpose()?;
     let engine = Engine::connect(candidate)?;
     if engine.guest().profile() != super::Profile::Development {
         return Err(error(
@@ -563,11 +580,18 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
     }
     check_reservations(candidate, &engine, None)?;
     super::source_job::check_reservations(&engine)?;
+    let source = source::prepare(
+        candidate,
+        &engine,
+        &inputs.review.plan,
+        options.source_revision,
+    )?;
     let prepared = config::prepare(
         inputs,
         options.readiness,
         options.run_id,
         engine.guest().incarnation(),
+        source.as_ref(),
     )?;
     verify_images(&engine, &prepared.resources)?;
     state::private_directory(root.parent().expect("graph parent"))?;
@@ -582,6 +606,7 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
         namespace: prepared.namespace,
         plan_id: prepared.plan_id,
         phase: "preparing".into(),
+        source: source.map(|s| s.binding),
         readiness: options.readiness.clone(),
         resources: prepared.resources,
     };
@@ -756,11 +781,19 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
     }
     check_reservations(candidate, &engine, Some(options.run_id))?;
     super::source_job::check_reservations(&engine)?;
+    let source = source::prepare(
+        candidate,
+        &engine,
+        &inputs.review.plan,
+        options.source_revision,
+    )?;
+    source::unchanged(&source, &receipt)?;
     let prepared = config::prepare(
         inputs,
         options.readiness,
         options.run_id,
         engine.guest().incarnation(),
+        source.as_ref(),
     )?;
     if prepared.namespace != receipt.namespace
         || prepared.resources.keys().ne(receipt.resources.keys())

@@ -33,11 +33,19 @@ pub fn restore(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
     }
     check_reservations(candidate, &engine, Some(options.run_id))?;
     super::super::source_job::check_reservations(&engine)?;
+    let source = source::prepare(
+        candidate,
+        &engine,
+        &inputs.review.plan,
+        options.source_revision,
+    )?;
+    source::unchanged(&source, &receipt)?;
     let prepared = config::prepare(
         inputs,
         options.readiness,
         options.run_id,
         engine.guest().incarnation(),
+        source.as_ref(),
     )?;
     if prepared.namespace != receipt.namespace
         || prepared.resources.keys().ne(receipt.resources.keys())
@@ -135,6 +143,7 @@ mod tests {
             namespace: "c".repeat(64),
             plan_id: "d".repeat(64),
             phase: "stopped-data-retained".into(),
+            source: None,
             readiness: BTreeMap::new(),
             resources: BTreeMap::new(),
         };

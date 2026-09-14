@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed, plus --source-revision for source mounts; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
@@ -71,7 +71,14 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             profiles.push(value.to_owned());
         } else if key == "--run-id"
             || (["run", "restart", "restore"].contains(action)
-                && ["--project", "--file", "--expect-plan", "--timeout-seconds"].contains(&key))
+                && [
+                    "--project",
+                    "--file",
+                    "--expect-plan",
+                    "--source-revision",
+                    "--timeout-seconds",
+                ]
+                .contains(&key))
         {
             if singles.insert(key, value).is_some() {
                 return Err(invalid());
@@ -112,6 +119,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                     profiles: &profiles,
                 },
                 expected_plan: expected,
+                source_revision: singles.get("--source-revision").copied(),
                 non_secret_values: &values,
                 readiness: &readiness,
                 run_id: run,

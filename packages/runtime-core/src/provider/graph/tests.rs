@@ -95,7 +95,7 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
             &BTreeMap::new(),
         )
         .unwrap();
-        match config::prepare(inputs, &goals(), &"a".repeat(32), &"b".repeat(32)) {
+        match config::prepare(inputs, &goals(), &"a".repeat(32), &"b".repeat(32), None) {
             Ok(prepared) => {
                 assert!(code.is_none());
                 assert_eq!(prepared.resources.len(), 5);
@@ -698,6 +698,7 @@ fn fault_child() -> Result<(), CandidateError> {
         RunOptions {
             project: options(),
             expected_plan: &review.plan_id,
+            source_revision: None,
             non_secret_values: &BTreeMap::new(),
             readiness: &goals(),
             run_id: &run_id,

@@ -17,6 +17,8 @@ The [September 14 benchmark and review](benchmark-20260914.md) compares the owne
 with direct Docker Compose and stable Hack 4.1.1/4.2.0, including the remaining acceptance gates.
 The [resource and health-cadence checkpoint](resources-20260914.md) adds native CPU/footprint
 measurements, reclamation evidence, command-string support and a controlled CPU-cost reduction.
+The [source-backed graph checkpoint](source-graphs-20260914.md) verifies read-only immutable source
+delivery through graph startup, VM restart and persistent-data restore.
 
 The first implementation is `packages/runtime-core`, a Rust library and candidate executable.
 The repository-root `hack-local` launcher addresses only that checkout's build. Commands include read-only `info` and `plan`, private package preparation, resource probing, and

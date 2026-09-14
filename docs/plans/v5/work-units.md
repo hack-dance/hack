@@ -24,7 +24,7 @@ not satisfy application acceptance. Carry every gap into the next checkpoint's a
 | WU04 | Durable operations, receipts, jobs, and cancellation | WU02–03 | Component implemented for bounded host and immutable-source jobs; full application execution remains open; see [checkpoint 04](checkpoint-04.md) and [real-project gaps](real-project-checkpoints.md) |
 | WU05 | Native source and incremental development sync | WU03–04 | In progress; actual source-to-container proof passed, sync acceptance pending |
 | WU06 | Immutable job input and generation enforcement | WU04–05 | In progress; M3 immutable-source execution, real project tests and explicit reconciliation pass; supervisor-loss containment and killed-publisher reconciliation pass; remaining cleanup/cache controls pending |
-| WU07 | Real graph, persistent data, and loopback endpoints | WU03–06 | In progress; owned graph, persistent restore, process-loss recovery and verified evidence retention pass; real application acceptance open |
+| WU07 | Real graph, persistent data, and loopback endpoints | WU03–06 | In progress; owned graph, persistent restore, process-loss recovery, evidence retention and [immutable source mounts](source-graphs-20260914.md) pass; real application acceptance open |
 | WU08 | Durable terminals and bounded event/log streams | WU04, WU07 | Planned |
 | WU09 | Native Linux and private SSH parity | WU05–08 | Planned; Hetzner fixture host selected and access verified; adapter qualification open |
 | WU10 | Measured speed, footprint, and reclamation | WU07–09 | In progress; [32-trial graph comparison](benchmark-20260914.md) and [idle/resource/cadence checkpoint](resources-20260914.md) complete; full application, complete external accounting and remote qualification open |
@@ -194,16 +194,15 @@ and restart readback proving deleted owned resources stay deleted. No production
    guard intentionally admits one workload and does not provide concurrent scheduling.
 3. Deliver managed environment values without persisting secrets, handle image/build inputs and
    lifecycle processes, and add service-level observation plus isolated host-loopback routing.
-   The next source slice must bind each read-only application mount to a verified immutable
-   publication, persist that identity with graph intent, and revalidate it before initial creation
-   and restore. Reuse source publication verification rather than accepting arbitrary guest paths.
-   Fresh admission must require the acknowledged revision; restoration must retain the accepted
-   revision rather than silently following a newer working tree. Publication receipts currently
-   bind to a provider incarnation, so explicitly qualify restart/republication semantics before
-   claiming source-backed graph restore. Test missing, altered and foreign publications before any
-   container allocation, plus same-data restore and source-job/graph exclusion. Build contexts,
-   writable build outputs and managed secrets remain separate delivery contracts; enabling a bind
-   mount alone does not complete application acceptance.
+   The [immutable source slice](source-graphs-20260914.md) now binds read-only application mounts
+   to verified publications, persists that identity with graph intent, and revalidates initial
+   creation, restart and restore. Missing, altered and foreign publication controls pass before
+   allocation. Owned VM restart preserves the publication identity; restored compute retains the
+   same database token. Fresh admission requires the acknowledged revision and retains existing
+   graph/source-job exclusion. Restore still requires an unchanged review: following a newer
+   working tree or restoring across arbitrary edits needs a separate contract. Build contexts,
+   writable outputs, managed secrets and publication GC remain open; source mounts alone do not
+   complete application acceptance.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,
    failures and owned cleanup. The synthetic SQLite probe does not replace this gate.
 5. Qualify the guest base and networking package versions for distribution in WU11; the current

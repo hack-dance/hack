@@ -12,7 +12,7 @@ pub(super) struct Prepared {
 fn unsupported() -> CandidateError {
     error(
         "graph_subset",
-        "Graph driver requires pinned images, read-only roots, no environment delivery, internal networks, named volumes and no automatic restart; build, bind, port, label and logging overrides remain gated.",
+        "Graph driver requires pinned images, read-only roots, no environment delivery, internal networks, named volumes and no automatic restart; build, unbound/writable source, port, label and logging overrides remain gated.",
     )
 }
 pub(super) fn prepare(
@@ -20,6 +20,7 @@ pub(super) fn prepare(
     readiness: &BTreeMap<String, Condition>,
     run: &str,
     owner: &str,
+    source: Option<&source::Inputs>,
 ) -> Result<Prepared, CandidateError> {
     let graph = Graph::from_plan(&inputs.review.plan, readiness)?;
     let plan = &inputs.review.plan;
@@ -63,6 +64,13 @@ pub(super) fn prepare(
             return Err(unsupported());
         }
         for mount in &service.mounts {
+            if mount.kind == "bind" {
+                if !mount.read_only || !source.is_some_and(|s| s.paths.contains_key(&mount.source))
+                {
+                    return Err(unsupported());
+                }
+                continue;
+            }
             if mount.kind != "volume" || !plan.volumes.contains_key(&mount.source) {
                 return Err(unsupported());
             }
@@ -139,7 +147,13 @@ pub(super) fn prepare(
             let network = service.networks.first().ok_or_else(unsupported)?;
             resources[&format!("network:{network}")].name.clone()
         };
-        let mounts: Vec<_> = service.mounts.iter().map(|m| json!({"Type":"volume","Source":resources[&format!("volume:{}",m.source)].name,"Target":m.target,"ReadOnly":m.read_only})).collect();
+        let mounts: Vec<_> = service.mounts.iter().map(|m| {
+            if m.kind == "bind" {
+                json!({"Type":"bind","Source":source.expect("validated source").paths[&m.source],"Target":m.target,"ReadOnly":true,"BindOptions":{"Propagation":"rprivate"}})
+            } else {
+                json!({"Type":"volume","Source":resources[&format!("volume:{}",m.source)].name,"Target":m.target,"ReadOnly":m.read_only})
+            }
+        }).collect();
         let mut config = json!({"Image":image,"Labels":labels,"HostConfig":{
             "NetworkMode":network,"Memory":service.limits.memory_bytes.unwrap_or(268435456),"NanoCpus":(service.limits.cpus.unwrap_or(0.5)*1e9) as u64,
             "PidsLimit":service.limits.pids.unwrap_or(64),"ReadonlyRootfs":true,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"Init":service.init,

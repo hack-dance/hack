@@ -3,6 +3,7 @@ pub mod admission;
 mod agent;
 mod artifact;
 mod engine;
+pub mod environment;
 #[cfg(test)]
 mod environment_probe_test;
 pub mod graph;

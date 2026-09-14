@@ -110,7 +110,9 @@ printf 'removed\n'
     );
     let logs = candidate
         .state_root
-        .join("run/smolvm/home/Library/Caches/smolvm/vms");
+        .join("run/smolvm")
+        .join("home")
+        .join("Library/Caches/smolvm/vms");
     let mut found_control = false;
     for entry in fs::read_dir(logs).unwrap() {
         let path = entry.unwrap().path().join("agent-console.log");

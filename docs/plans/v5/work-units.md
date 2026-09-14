@@ -215,15 +215,19 @@ and restart readback proving deleted owned resources stay deleted. No production
    remain open. Existing resource/latency results are unchanged; this slice makes no performance claim.
    [Guest transport hardening](development.md#guest-transport-before-managed-delivery) removes
    reflected guest output from errors, bounds request encoding before connection, and handles
-   complete replies followed by peer closure under the response deadline. Native agent logging
-   and ephemeral service delivery are still unqualified; this does not enable managed credentials.
+   complete replies followed by peer closure under the response deadline. Managed-credential
+   delivery remains disabled; the subsequent component qualification is recorded below.
    M3 boot/status/shutdown smoke `agent-transport-1789423407597955000` passes with normal memory
    pressure, unchanged swapouts, a stopped owned VM and unchanged global config/installed binary.
    The first smoke attempt stopped on a watchdog-parser error and cleaned up; it is not counted.
    Validation: 135 Rust tests and 940 CLI tests pass, plus typecheck, lint and release build.
    The [pinned agent audit and synthetic tmpfs probe](environment-delivery-20260914.md) identify
-   argv info logging and response debug logging as delivery constraints. Fixed-output delivery,
-   compiler/transport budget alignment, service-scoped leases and graph integration remain open.
+   argv info logging and response debug logging as delivery constraints.
+   The fixed-output component now stages at most 8 KiB per service into one of eight current-boot
+   tmpfs slots, with service/boot binding, expiry refusal and explicit cleanup. Live lease controls
+   pass `environment-lease-1789427425288311000`. Native provider authorization, graph handoff,
+   active-process expiry behavior, interrupted-stage/stale-directory recovery and application
+   restart/redelivery remain open. Expiry does not promise automatic deletion or stop a running app.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,
    failures and owned cleanup. The synthetic SQLite probe does not replace this gate.
 5. Qualify the guest base and networking package versions for distribution in WU11; the current

@@ -3,6 +3,7 @@ use crate::CandidateError;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -13,19 +14,45 @@ fn failure(message: impl Into<String>) -> CandidateError {
 }
 
 pub fn request(path: &Path, body: Value, timeout: Duration) -> Result<Value, CandidateError> {
+    let bytes = encode(&body)?;
     let mut stream = UnixStream::connect(path)
         .map_err(|_| failure("Cannot connect to the owned guest socket; no automatic start."))?;
-    exchange(&mut stream, body, timeout)
+    exchange(&mut stream, &bytes, timeout)
 }
+
+/// Bound encoded allocation as well as transmitted bytes. Never report serialization content.
+fn encode(body: &Value) -> Result<Vec<u8>, CandidateError> {
+    struct Frame(Vec<u8>);
+    impl Write for Frame {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > MAX_FRAME - self.0.len() {
+                return Err(std::io::Error::other("frame limit"));
+            }
+            let needed = self.0.len() + bytes.len();
+            if needed > self.0.capacity() {
+                let capacity = needed
+                    .max(self.0.capacity().saturating_mul(2))
+                    .min(MAX_FRAME);
+                self.0.reserve_exact(capacity - self.0.len());
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut frame = Frame(Vec::new());
+    serde_json::to_writer(&mut frame, body)
+        .map_err(|_| failure("Guest request exceeds frame limit."))?;
+    Ok(frame.0)
+}
+
 fn exchange(
     stream: &mut UnixStream,
-    body: Value,
+    bytes: &[u8],
     timeout: Duration,
 ) -> Result<Value, CandidateError> {
-    let bytes = serde_json::to_vec(&body).map_err(|_| failure("Cannot encode guest request."))?;
-    if bytes.len() > MAX_FRAME {
-        return Err(failure("Guest request exceeds frame limit."));
-    }
     let deadline = Instant::now() + timeout;
     stream
         .set_write_timeout(Some(timeout))
@@ -34,8 +61,11 @@ fn exchange(
         .write_all(&(bytes.len() as u32).to_be_bytes())
         .map_err(|e| failure(e.to_string()))?;
     stream
-        .write_all(&bytes)
+        .write_all(bytes)
         .map_err(|e| failure(e.to_string()))?;
+    stream
+        .set_nonblocking(true)
+        .map_err(|_| failure("Cannot configure bounded guest response reads."))?;
     fn read_until(
         stream: &mut UnixStream,
         mut buffer: &mut [u8],
@@ -45,13 +75,25 @@ fn exchange(
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .ok_or_else(|| failure("Guest response deadline exceeded."))?;
-            stream
-                .set_read_timeout(Some(remaining))
-                .map_err(|e| failure(e.to_string()))?;
             match stream.read(buffer) {
                 Ok(0) => return Err(failure("Guest disconnected mid-response.")),
                 Ok(count) => {
                     buffer = &mut buffer[count..];
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let mut descriptor = libc::pollfd {
+                        fd: stream.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    let milliseconds = (remaining.as_millis() + 1).min(i32::MAX as u128) as i32;
+                    // The descriptor is borrowed from the live stream for this synchronous wait.
+                    let result = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+                    if result < 0
+                        && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                    {
+                        return Err(failure("Cannot wait for the guest response."));
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(failure(e.to_string())),
@@ -104,19 +146,20 @@ pub fn exec_input(
         "interactive":false,"tty":false,"background":background,"stdin_data":input}),
         Duration::from_secs(45),
     )?;
+    decode_execution(response)
+}
+
+/// Error details are guest-controlled and may echo input values. Retain only a numeric exit code.
+fn decode_execution(response: Value) -> Result<String, CandidateError> {
     if response["status"] != "completed" || response["exit_code"] != 0 {
+        let exit = response["exit_code"]
+            .as_i64()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "unknown".into());
         return Err(CandidateError::new(
             "guest_command_failed",
             format!(
-                "Owned guest check failed (exit {}); phase retained. {}",
-                response["exit_code"],
-                response["stderr"]
-                    .as_str()
-                    .and_then(|v| STANDARD.decode(v).ok())
-                    .map(|v| String::from_utf8_lossy(&v[..v.len().min(4096)])
-                        .trim()
-                        .to_owned())
-                    .unwrap_or_default()
+                "Owned guest check failed (exit {exit}); phase retained. Guest output omitted."
             ),
         ));
     }
@@ -133,6 +176,93 @@ pub fn exec_input(
 mod tests {
     use super::*;
     #[test]
+    fn failed_guest_output_and_malformed_metadata_never_enter_errors() {
+        let sentinel = "synthetic-private-input";
+        for response in [
+            json!({"status":"completed", "exit_code":23, "stdout":STANDARD.encode(sentinel), "stderr":STANDARD.encode(sentinel)}),
+            json!({"status":sentinel, "exit_code":sentinel, "stderr":sentinel}),
+            json!({"status":"completed", "exit_code":{"detail":sentinel}, "stderr":STANDARD.encode(sentinel)}),
+            json!({"status":"completed", "exit_code":0, "stdout":sentinel}),
+            json!({"status":"completed", "exit_code":0, "stdout":STANDARD.encode([0xff]), "stderr":sentinel}),
+        ] {
+            let failure = decode_execution(response).unwrap_err();
+            let serialized = serde_json::to_string(&failure).unwrap();
+            assert!(!serialized.contains(sentinel));
+            assert!(!serialized.contains(&STANDARD.encode(sentinel)));
+        }
+        let failure = decode_execution(json!({"status":"completed", "exit_code":23})).unwrap_err();
+        assert_eq!(failure.code, "guest_command_failed");
+        assert!(failure.message.contains("exit 23"));
+    }
+
+    #[test]
+    fn successful_public_receipts_are_preserved() {
+        let receipt = "public-fixture-receipt\n";
+        assert_eq!(decode_execution(json!({"status":"completed", "exit_code":0, "stdout":STANDARD.encode(receipt), "stderr":STANDARD.encode("ignored diagnostic")})).unwrap(), receipt);
+    }
+
+    #[test]
+    fn encoded_frame_budget_counts_json_escaping_and_accepts_exact_limit() {
+        let exact = json!("x".repeat(MAX_FRAME - 2));
+        assert_eq!(encode(&exact).unwrap().len(), MAX_FRAME);
+        assert!(encode(&json!("x".repeat(MAX_FRAME - 1))).is_err());
+        // The raw value fits, but JSON escaping makes its wire representation exceed the budget.
+        assert!(encode(&json!("\n".repeat(MAX_FRAME / 2))).is_err());
+        assert_eq!(
+            encode(&json!({"stdin_data":"line\n'\\$"})).unwrap(),
+            serde_json::to_vec(&json!({"stdin_data":"line\n'\\$"})).unwrap()
+        );
+    }
+
+    #[test]
+    fn oversized_sensitive_input_is_refused_before_connecting() {
+        let error = request(
+            Path::new("/nonexistent/hack-test-agent.sock"),
+            json!({"stdin_data":"synthetic-sensitive-input".repeat(MAX_FRAME)}),
+            Duration::from_millis(10),
+        )
+        .unwrap_err();
+        assert_eq!(error.message, "Guest request exceeds frame limit.");
+        assert!(
+            !serde_json::to_string(&error)
+                .unwrap()
+                .contains("synthetic-sensitive-input")
+        );
+    }
+
+    #[test]
+    fn guest_echo_over_wire_is_not_retained_in_failure() {
+        let sentinel = "synthetic-wire-private-value";
+        let (mut client, mut peer) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut header = [0; 4];
+            peer.read_exact(&mut header).unwrap();
+            let mut bytes = vec![0; u32::from_be_bytes(header) as usize];
+            peer.read_exact(&mut bytes).unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["stdin_data"], sentinel);
+            let response = serde_json::to_vec(&json!({"status":"completed", "exit_code":1, "stderr":STANDARD.encode(body["stdin_data"].as_str().unwrap())})).unwrap();
+            peer.write_all(&(response.len() as u32).to_be_bytes())
+                .unwrap();
+            peer.write_all(&response).unwrap();
+        });
+        let response = exchange(
+            &mut client,
+            &encode(&json!({"stdin_data":sentinel})).unwrap(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let error = decode_execution(response).unwrap_err();
+        assert!(!serde_json::to_string(&error).unwrap().contains(sentinel));
+        assert!(
+            !serde_json::to_string(&error)
+                .unwrap()
+                .contains(&STANDARD.encode(sentinel))
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn oversized_frame_is_rejected_before_body_allocation() {
         let (mut client, mut peer) = UnixStream::pair().unwrap();
         let worker = std::thread::spawn(move || {
@@ -146,7 +276,7 @@ mod tests {
         assert_eq!(
             exchange(
                 &mut client,
-                json!({"method":"ping"}),
+                &encode(&json!({"method":"ping"})).unwrap(),
                 Duration::from_secs(1)
             )
             .unwrap_err()
@@ -164,7 +294,7 @@ mod tests {
         assert!(
             exchange(
                 &mut client,
-                json!({"method":"ping"}),
+                &encode(&json!({"method":"ping"})).unwrap(),
                 Duration::from_millis(50)
             )
             .is_err()

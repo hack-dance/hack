@@ -496,6 +496,24 @@ memory zeroization. Native provider selection, scoped leases/expiry, a verified 
 transport, entrypoint and health-check behavior, restart/redelivery and owned cleanup remain open.
 No actual credentials are used by these tests, and the graph CLI still refuses environment delivery.
 
+### Guest transport before managed delivery
+
+Guest command failures now retain the failure code and a numeric exit status only. Guest stderr,
+stdout and malformed metadata are never interpolated into errors: a failed command can echo its
+input, so redacting only the original request is insufficient. Successful stdout remains available
+for existing public receipts; this is not yet an API for confidential output or managed delivery.
+
+Requests are encoded through a bounded writer and refused above the 64 KiB wire limit before
+opening the guest socket. JSON escaping counts toward that limit. This does not bound memory
+already owned by the caller or erase in-memory values. Responses retain the same frame limit and
+wall-clock deadline. Nonblocking reads with deadline-bounded polling accept a complete reply even
+when the peer immediately closes, while incomplete replies and stalled reads fail closed.
+
+Synthetic tests cover echoed failure values over a Unix socket, malformed response fields,
+successful public receipts, exact/oversized/escaped frame boundaries and stalled response deadlines.
+No real secrets are supplied. Audit of guest-agent request logging/storage and an ephemeral,
+service-owned delivery mechanism remain required before credential-provider integration.
+
 ## Owned graph CLI (development profile)
 
 The candidate now has explicit `graph run`, `graph inspect`, `graph restart` and `graph cleanup`

@@ -47,10 +47,10 @@ CLI. Retained-copy cleanup and the remaining crash boundaries stay open.
 Do not rerun already passing cases without changed code or an unresolved concern.
 
 WU07 application graph startup is not implemented. A September 14 synthetic init/SQLite/web/HTTP
-probe now passes service DNS, VM restart/data readback and owned cleanup. It temporarily installs
-signed, pinned guest networking packages, restarts to refresh Docker capability discovery, and
-restores the original package inventory afterward. Product bootstrap must still incorporate these
-inputs before graph execution. Build graph execution, readiness, isolated
+probe passes service DNS, VM restart/data readback and owned cleanup. Candidate bootstrap now
+incorporates signed, pinned networking packages before daemon startup; the updated live probe
+passes in `live-1789401520524709000`, including foreign-owner and incomplete-receipt refusals. Packages persist in the owned guest with receipt checks, and the probe no longer installs
+or removes them. Interrupted-install recovery and distribution input preparation remain open. Build graph execution, readiness, isolated
 networking, persistent volumes, managed environment delivery, image/build handling, lifecycle
 and routing, then prove the real Event Agent app works and preserves intended data. The captured
 14-service Compose configuration still references old external networks, labels and host credential

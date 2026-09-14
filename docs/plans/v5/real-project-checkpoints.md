@@ -394,3 +394,26 @@ The successful run kept normal memory pressure, unchanged swapouts and an observ
 footprint of approximately 861 MB. These are resource-safety observations, not a matched performance
 cohort. The candidate VM is stopped; installed Hack and managed application env changes remain outside
 this patch. WU09 still needs an explicitly selected Linux fixture; the host-selection question is open.
+
+
+## September 14 — Candidate networking bootstrap
+
+Candidate boot now installs the four pinned, signed Alpine networking APKs before starting Docker.
+It retains private owner/package identity, installed-file checksums and package-inventory receipts
+inside the candidate guest, verifies them on reuse, and refuses unowned or incomplete installations.
+The graph probe no longer installs/removes packages or performs a capability-discovery restart.
+Immutable provider artifacts and stable Hack remain unchanged.
+
+`live-1789401520524709000` proves initial installation through public runtime startup, service-name
+HTTP, SQLite readback after VM restart with receipt reuse, foreign-owner and incomplete-receipt
+refusals, and removal of the exact labelled graph resources. Final state is stopped with no provider
+process. Pressure remained normal, swapouts stayed at 4132 and peak provider footprint was
+930,465,400 bytes. Protected source inputs were unchanged. The earlier attempt
+`live-1789401310889616000` was refused before VM startup by the unchanged host-load admission gate.
+
+Validation: 101 Rust tests pass, plus the ignored live graph control; release build, rustfmt and
+all-target clippy pass. Host-input regression covers corrupt hashes, symbolic/hard links and public
+file modes. This establishes candidate bootstrap and synthetic graph behavior, not actual Event
+Agent startup or an application performance improvement. WU07 stays open. Explicit interrupted
+installation recovery and a distribution input-preparation interface remain tracked alongside the
+actual graph executor, managed environment, lifecycle and loopback-routing work.

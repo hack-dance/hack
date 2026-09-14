@@ -765,6 +765,26 @@ fn finish_boot(
     }
     owner.guest_boot_id = Some(boot.to_owned());
     owner.save(candidate)?;
+    super::network_tools::provision(candidate, &owner.token, &mut |script, args, input| {
+        verify_live(candidate, owner)?;
+        let guarded = format!(
+            "set -eu\ntest \"$(cat /proc/sys/kernel/random/boot_id)\" = \"$1\"\ntest \"$(cat /storage/.hack-local-owner)\" = \"$2\"\nshift 2\n{script}"
+        );
+        let mut arguments = vec![
+            owner.guest_boot_id.as_deref().expect("verified boot"),
+            &owner.token,
+        ];
+        arguments.extend_from_slice(args);
+        let result = agent::exec_input(
+            &socket(candidate, owner, "agent.sock")?,
+            &guarded,
+            &arguments,
+            false,
+            input,
+        )?;
+        verify_live(candidate, owner)?;
+        Ok(result)
+    })?;
     guest(candidate, owner, include_str!("guest-daemon.sh"), &[], true)?;
     let result = guest(
         candidate,

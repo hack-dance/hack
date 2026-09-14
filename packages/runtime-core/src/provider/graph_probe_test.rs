@@ -72,92 +72,6 @@ fn completed(engine: &Engine<'_>, id: &str) -> Result<(), CandidateError> {
     }
 }
 
-fn install_tools(
-    engine: &Engine<'_>,
-    candidate: &Candidate,
-    owner: &str,
-) -> Result<(), CandidateError> {
-    use sha2::{Digest, Sha256};
-    let packages = [
-        (
-            "iptables-1.8.10-r3.apk",
-            "31ab6343f1f3d0fbbf290c4dcf0430b2d08e8073e516e13530dfab25b097d467",
-        ),
-        (
-            "libmnl-1.0.5-r2.apk",
-            "d15e6313880bdd14959f42c1556b4a810ef4894992ae9f73b148126f0cc6021d",
-        ),
-        (
-            "libnftnl-1.2.6-r0.apk",
-            "ec1c2b02869fc65bcf7a1105e3a7ac5df1bd9a8bd8b399cb6cf650dd3112c021",
-        ),
-        (
-            "libxtables-1.8.10-r3.apk",
-            "f0accefde240ece6722479b46cb014d7d2f745af7d796e8eec3ced53571e1088",
-        ),
-    ];
-    let root = format!("/storage/hack-graph-tools-{owner}");
-    engine.guest().execute(r#"
-for p in iptables libmnl libnftnl libxtables; do if apk info -e "$p" >/dev/null 2>&1; then exit 81; fi; done
-umask 077
-mkdir "$1"
-printf '%s' "$2" > "$1/owner"
-apk info -v | sort | sha256sum | cut -d ' ' -f 1 > "$1/baseline"
-"#, &[&root, owner], None)?;
-    for (name, expected) in packages {
-        let path = candidate
-            .state_root
-            .join("providers/network-tools")
-            .join(name);
-        let metadata = std::fs::symlink_metadata(&path).map_err(state::io)?;
-        if !metadata.is_file() || metadata.len() > 2 * 1024 * 1024 {
-            return Err(error("Unsafe tool archive."));
-        }
-        let bytes = std::fs::read(&path).map_err(state::io)?;
-        if format!("{:x}", Sha256::digest(&bytes)) != expected {
-            return Err(error("Network tool archive digest mismatch."));
-        }
-        let target = format!("{root}/{name}");
-        engine
-            .guest()
-            .execute(r#"(set -C; : > "$1")"#, &[&target], None)?;
-        super::source_sync::upload(engine.guest(), &target, &bytes)?;
-        engine.guest().execute(
-            r#"test "$(sha256sum "$1" | cut -d ' ' -f 1)" = "$2"; apk verify "$1""#,
-            &[&target, expected],
-            None,
-        )?;
-    }
-    engine.guest().execute(
-        r#"
-set -- "$1"/*.apk
-apk add --no-network --no-cache --no-scripts --repositories-file /dev/null "$@"
-iptables --version
-"#,
-        &[&root],
-        None,
-    )?;
-    Ok(())
-}
-
-fn remove_tools(engine: &Engine<'_>, owner: &str) -> Result<(), CandidateError> {
-    engine.guest().execute(
-        r#"
-if test ! -e "$1" && test ! -L "$1"; then exit 0; fi
-test ! -L "$1"; test -d "$1"
-test "$(stat -c %u:%a "$1")" = 0:700
-test ! -L "$1/owner"; test "$(cat "$1/owner")" = "$2"
-if apk info -e iptables >/dev/null 2>&1; then
- apk del --no-network --no-scripts --repositories-file /dev/null iptables libmnl libnftnl libxtables
-fi
-test "$(apk info -v | sort | sha256sum | cut -d ' ' -f 1)" = "$(cat "$1/baseline")"
-"#,
-        &[&format!("/storage/hack-graph-tools-{owner}"), owner],
-        None,
-    )?;
-    Ok(())
-}
-
 #[test]
 #[ignore = "Manual owned development VM only; requires pinned Bun image and external watchdog"]
 fn owned_graph_storage_live() -> Result<(), CandidateError> {
@@ -188,17 +102,29 @@ fn owned_graph_storage_live() -> Result<(), CandidateError> {
     let result = (|| {
         {
             let engine = Engine::connect(&candidate)?;
-            install_tools(&engine, &candidate, &owner)?;
             engine
                 .guest()
                 .execute("iptables -t nat -S >/dev/null", &[], None)?;
-            drop(engine);
-            phase = "tool-capability-restart";
-            if super::down(&candidate)?.process_alive != Some(false) {
-                return Err(error("VM did not stop before tool capability reload."));
-            }
-            super::up_with_profile(&candidate, super::Profile::Development)?;
-            let engine = Engine::connect(&candidate)?;
+            // Exercise refusal using the real bootstrap verifier before graph allocation.
+            engine.guest().execute(
+                r#"
+root=/etc/hack-local-network-tools
+identity=$(cat "$root/identity")
+if /bin/sh -c "$1" hack-local foreign-owner "$identity" check; then exit 91; fi
+test ! -e "$root/ready.probe-retained"; test ! -L "$root/ready.probe-retained"
+mv "$root/ready" "$root/ready.probe-retained"
+trap 'mv "$root/ready.probe-retained" "$root/ready"' EXIT
+if /bin/sh -c "$1" hack-local "$2" "$identity" check; then exit 92; fi
+mv "$root/ready.probe-retained" "$root/ready"
+trap - EXIT
+/bin/sh -c "$1" hack-local "$2" "$identity" check
+"#,
+                &[
+                    include_str!("guest-network-tools.sh"),
+                    engine.guest().incarnation(),
+                ],
+                None,
+            )?;
             phase = "network-create";
             engine.request(
                 Method::POST,
@@ -318,7 +244,6 @@ fn owned_graph_storage_live() -> Result<(), CandidateError> {
                 Err(e) => return Err(e),
             }
         }
-        remove_tools(&engine, &owner)?;
         Ok::<_, CandidateError>(())
     })();
     state::write(

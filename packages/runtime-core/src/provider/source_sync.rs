@@ -620,6 +620,18 @@ pub(super) fn upload(
     path: &str,
     bytes: &[u8],
 ) -> Result<u64, CandidateError> {
+    upload_with(
+        &mut |script, args, input| guest.execute(script, args, input),
+        path,
+        bytes,
+    )
+}
+
+pub(super) fn upload_with(
+    execute: &mut impl FnMut(&str, &[&str], Option<&str>) -> Result<String, CandidateError>,
+    path: &str,
+    bytes: &[u8],
+) -> Result<u64, CandidateError> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
     encoder
         .write_all(bytes)
@@ -628,19 +640,19 @@ pub(super) fn upload(
         .finish()
         .map_err(|_| error("Cannot finish source transfer compression."))?;
     let compressed_path = format!("{path}.gz");
-    guest.execute(
+    execute(
         r#"test ! -L "$1"; test -f "$1"; test "$(stat -c %s "$1")" = 0; (set -C; : > "$2")"#,
         &[path, &compressed_path],
         None,
     )?;
     for (index, chunk) in compressed.chunks(30 * 1024).enumerate() {
-        guest.execute(
+        execute(
             r#"test ! -L "$1"; test -f "$1"; test "$(stat -c %s "$1")" = "$2"; base64 -d >> "$1""#,
             &[&compressed_path, &(index * 30 * 1024).to_string()],
             Some(&STANDARD.encode(chunk)),
         )?;
     }
-    guest.execute(
+    execute(
         r#"
 test ! -L "$1"; test -f "$1"; test "$(stat -c %s "$1")" = 0
 test "$(sha256sum "$2" | cut -d ' ' -f 1)" = "$3"

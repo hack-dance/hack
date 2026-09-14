@@ -158,10 +158,11 @@ and restart readback proving deleted owned resources stay deleted. No production
 
 ### WU07 implementation queue after infrastructure qualification
 
-1. Package and verify the required guest networking tools before daemon startup. The minimal
-   Alpine guest omits them; adding packages after Docker starts leaves a cached missing-tool result.
-   The manual probe verifies signed, pinned APKs and restarts, then removes its additions; this is
-   not yet production bootstrap or a distribution contract.
+1. Candidate bootstrap now provisions signed, pinned networking APKs before daemon startup and
+   verifies its owner/package/file/inventory receipt on reuse. First installation, restart reuse,
+   foreign-owner and incomplete-receipt refusals pass in `live-1789401520524709000`.
+   Interrupted installation is retained and blocks startup; add explicit owned recovery
+   and an input-preparation interface before distribution. Never adopt preexisting packages.
 2. Implement executable graph compilation and dependency/readiness reconciliation from the reviewed
    real-project configuration, with durable ownership records and failure-before-dependent-start.
 3. Deliver managed environment values without persisting secrets, handle image/build inputs and

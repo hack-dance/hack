@@ -407,11 +407,11 @@ bridge, named volume and init/web/check containers. It verifies service-name HTT
 across VM restart, and removal of its exact labelled resources. It is not a user-facing graph
 executor, host-loopback routing, or actual Event Agent acceptance.
 
-The bundled Alpine 3.19 guest lacks packet-filter tools needed by Docker's embedded DNS. The probe
-reads four explicitly pinned APKs from `.hack-local/providers/network-tools`, verifies their hashes
-on both sides and their Alpine signatures, installs without network access or package scripts, then
-restarts the VM before creating the graph. It removes its packages and verifies the original package
-inventory after cleanup. Supply these public inputs from
+The bundled Alpine 3.19 guest lacks packet-filter tools needed by Docker's embedded DNS. Runtime
+boot now reads four pinned APKs from `.hack-local/providers/network-tools` before starting Docker.
+The directory must be private (0700), with private (0600), singly linked regular archives. Every
+boot verifies host hashes; initial installation also verifies guest hashes and Alpine signatures,
+and installs without network access or package scripts. Supply these public inputs from
 `https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64/`:
 
 | Archive | SHA-256 |
@@ -423,7 +423,12 @@ inventory after cleanup. Supply these public inputs from
 
 The normal daemon settings retain disabled default bridge, forwarding and masquerading. The
 experimental nftables daemon switch was tested and reverted after engine startup failed; it is not
-enabled by this checkpoint. Product tooling still needs durable provisioning before daemon startup,
-package ownership/recovery and distribution qualification. See the WU07 queue in `work-units.md`.
+enabled by this checkpoint. Networking packages belong to the candidate guest and persist across
+ordinary shutdown; the graph probe no longer installs or removes them. A private guest receipt
+binds the runtime owner and package set, installed-file hashes and complete package inventory.
+Boot refuses unowned packages, changed receipts/files/inventory, incompatible guest bases and
+incomplete installation receipts. Interrupted installation is retained for diagnosis; automatic
+repair/removal and distribution qualification remain open in the WU07/WU11 queue. Missing host
+archives fail boot without starting Docker; there is no implicit download.
 Engine startup failures now report fixed categories from a bounded log tail, without emitting raw
 log lines.

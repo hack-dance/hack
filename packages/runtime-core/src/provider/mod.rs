@@ -8,6 +8,7 @@ mod identity;
 mod image_load;
 pub use image_load::load as load_image;
 mod lifecycle;
+mod network_tools;
 mod process;
 mod profile;
 pub use profile::Profile;

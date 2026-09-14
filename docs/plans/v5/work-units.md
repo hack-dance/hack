@@ -163,8 +163,11 @@ and restart readback proving deleted owned resources stay deleted. No production
    foreign-owner and incomplete-receipt refusals pass in `live-1789401520524709000`.
    Interrupted installation is retained and blocks startup; add explicit owned recovery
    and an input-preparation interface before distribution. Never adopt preexisting packages.
-2. Implement executable graph compilation and dependency/readiness reconciliation from the reviewed
-   real-project configuration, with durable ownership records and failure-before-dependent-start.
+2. Shared dependency/readiness execution core passes `live-1789402358407299000`: init completion,
+   web health and check completion order, failed-init dependent absence, restart and cleanup.
+   It compiles reviewed dependency conditions and requires explicit readiness goals and durable
+   driver intent before start. Complete executable command/build/environment compilation and the
+   production ownership/recovery driver; review-plan redactions are not executable input.
 3. Deliver managed environment values without persisting secrets, handle image/build inputs and
    lifecycle processes, and add service-level observation plus isolated host-loopback routing.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,
@@ -187,6 +190,13 @@ PTY proof. Provider model conversations and credentials remain owned by their in
 
 **Goal:** same execution/source/job/terminal contracts on Linux arm64/amd64 and a private remote node.
 **Inputs:** an explicitly selected host and resource envelope, existing authorized runtime endpoint.
+**Selected target (September 14):** user authorized the existing Hetzner tailnet instance.
+The configured `hetzner-ubuntu` alias connects as `hack`; strict known-host SSH succeeded.
+Observed Linux x86_64, 16 logical CPUs, about 27 GiB available RAM and 70 GiB free root disk;
+Docker 29.8.0 and user Cargo 1.97.1 are present. Existing OpenClaw, routing and tunnel containers
+are active. Start with a separate owned fixture capped at 2 CPUs, 2 GiB RAM and 5 GiB retained
+artifacts; recheck headroom before effects. Do not reuse or stop existing services. This is access
+and capacity evidence only, not Linux adapter or SSH execution qualification.
 **Output:** Linux adapter, authenticated transport, capability negotiation, reconnect/lease behavior.
 **Demo:** plan → sync → web/database/job → tunnel → terminal detach/reattach → cancel → clean readback.
 **Acceptance:** separate transport overhead from executor time; no duplicate work after lost reply;

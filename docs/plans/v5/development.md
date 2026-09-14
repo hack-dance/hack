@@ -432,3 +432,19 @@ repair/removal and distribution qualification remain open in the WU07/WU11 queue
 archives fail boot without starting Docker; there is no implicit download.
 Engine startup failures now report fixed categories from a bounded log tail, without emitting raw
 log lines.
+
+
+## Dependency execution core
+
+`project::execution` compiles dependency conditions from a compatible review plan with explicit
+per-service readiness goals. It validates missing dependencies, cycles and budgets before any
+driver call, records intent before each start, observes readiness, and stops on failed/uncertain
+starts, journal failure, unhealthy services or deadline expiry. It does not retry effects.
+The driver contract requires durable reservations and exact resource-identity verification.
+
+The manual graph probe uses this shared loop with an owned Docker fixture driver and private event
+journals. Its init must complete successfully, its web service must pass its Docker healthcheck,
+and its HTTP check must complete. A failed-init control must leave web/check containers absent.
+This is the execution core, not a public Compose executor: executable command/build/environment
+compilation, durable production resource recovery, service observation and routing remain open.
+Review plans continue to redact values and report runtime execution unsupported.

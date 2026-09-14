@@ -67,3 +67,13 @@ only). The installed CLI automatically migrated its legacy env config: `.gitigno
 `.hack/hack.config.json` changed, and default/production env YAML files were created. Preserve
 these uncommitted managed changes; they are outside this branch and did not run database migrations.
 The current managed checkout has 12 services, distinct from the preserved 14-service capture.
+
+
+September 14 continuation: `project::execution` now compiles dependency intent and runs explicit
+started/healthy/completed readiness goals through a durable-intent driver contract. The updated
+owned Docker probe uses it rather than hand-written ordering. `live-1789402358407299000` passes
+both successful generations across VM restart and a failed-init control with no dependent
+containers. 107 Rust tests, release build, rustfmt and clippy pass. Executable input compilation
+and the production ownership/recovery driver remain open; actual Event Agent execution is not
+qualified. The user selected the existing `hetzner-ubuntu` tailnet host for WU09; SSH and capacity
+were verified read-only. See its shared-host resource envelope in `work-units.md`.

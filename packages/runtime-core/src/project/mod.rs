@@ -1,6 +1,7 @@
 //! WU03 Compose review and metadata-only enrollment. These plans cannot execute services.
 mod compose;
 mod enrollment;
+pub mod execution;
 pub mod snapshot;
 mod source;
 pub mod watcher;

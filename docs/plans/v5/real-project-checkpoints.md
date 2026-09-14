@@ -417,3 +417,30 @@ file modes. This establishes candidate bootstrap and synthetic graph behavior, n
 Agent startup or an application performance improvement. WU07 stays open. Explicit interrupted
 installation recovery and a distribution input-preparation interface remain tracked alongside the
 actual graph executor, managed environment, lifecycle and loopback-routing work.
+
+
+## September 14 — Dependency execution and Linux target discovery
+
+The shared execution core now compiles dependency conditions from compatible review plans with
+explicit readiness goals, validates the graph before effects, requires driver start intent and
+stops without retry on failure, uncertainty or timeout. Regression tests cover dependency order,
+failed init, unhealthy web, cycles/missing dependencies, journal failure, uncertain start,
+readiness timeout and review-to-execution dependency compilation. Redacted review values remain
+non-executable; production command/environment/build compilation and ownership recovery are open.
+
+`live-1789402358407299000` uses the core with the owned Docker fixture driver. Both generations'
+journals show init exit 0 before web launch, web healthy before check launch, and check exit 0
+before ready. The negative journal has only init, exit 23 and no ready; API inspection confirms
+web/check were never created. SQLite data survives the intervening VM restart, cleanup is confirmed,
+and final provider state is stopped. Normal pressure, unchanged swapouts (4132), peak provider
+footprint 866,272,912 bytes and unchanged protected source inputs were recorded. Validation:
+107 Rust tests plus the manual live graph control, release build, rustfmt and all-target clippy pass.
+This proves dependency execution mechanics and the fixture driver, not the actual application graph.
+
+The user selected the existing Hetzner tailnet instance for WU09. Strict known-host SSH using the
+configured `hetzner-ubuntu` alias and `hack` account succeeds. It reports Linux x86_64, 16 logical
+CPUs, 31,337 MiB total/27,558 MiB available RAM, 70 GiB free root storage, Docker 29.8.0 and user
+Cargo 1.97.1. Existing OpenClaw, router, share gateway and tunnel containers are running. No remote
+workloads or configuration were changed. Initial isolated testing is bounded to 2 CPUs, 2 GiB RAM
+and 5 GiB retained artifacts, with fresh headroom checks before effects. The host-selection question
+is resolved; adapter/transport, workload and reconnect qualification remain open.

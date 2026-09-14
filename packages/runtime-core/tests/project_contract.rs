@@ -1041,3 +1041,35 @@ fn publication_reconcile_cli_requires_the_reviewed_plan() {
     assert!(stderr.contains("stale_plan"), "{stderr}");
     assert!(!fixture.candidate.state_root.exists());
 }
+
+#[test]
+fn execution_dependency_compiler_preserves_review_conditions_and_refuses_invalid_goals() {
+    use project::execution::{Condition, Graph};
+    use std::collections::BTreeMap;
+    let fixture = Fixture::new(
+        "services:\n  init:\n    image: alpine:3.21\n    command: ['true']\n  web:\n    image: alpine:3.21\n    depends_on:\n      init:\n        condition: service_completed_successfully\n    healthcheck:\n      test: [CMD, echo, ready]\n",
+    );
+    let mut plan = fixture.plan().plan;
+    assert!(plan.enrollment_compatible);
+    let goals = BTreeMap::from([
+        ("init".into(), Condition::Completed),
+        ("web".into(), Condition::Healthy),
+    ]);
+    let graph = Graph::from_plan(&plan, &goals).unwrap();
+    assert_eq!(
+        graph.services["web"].dependencies["init"],
+        Condition::Completed
+    );
+    assert_eq!(graph.services["web"].ready, Condition::Healthy);
+    assert!(Graph::from_plan(&plan, &BTreeMap::new()).is_err());
+    plan.services.get_mut("web").unwrap().healthcheck = None;
+    assert_eq!(
+        Graph::from_plan(&plan, &goals).unwrap_err().code,
+        "graph_readiness"
+    );
+    plan.enrollment_compatible = false;
+    assert_eq!(
+        Graph::from_plan(&plan, &goals).unwrap_err().code,
+        "graph_incompatible"
+    );
+}

@@ -535,37 +535,8 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
             "A graph attempt directory already exists; inspect or clean it explicitly.",
         ));
     }
-    let parent = root.parent().expect("graph parent");
-    if parent.exists() {
-        state::check_private_directory(parent)?;
-        let entries: Vec<_> = fs::read_dir(parent)
-            .map_err(state::io)?
-            .take(65)
-            .collect::<Result<_, _>>()
-            .map_err(state::io)?;
-        if entries.len() >= 64 {
-            return Err(error(
-                "graph_retention_budget",
-                "Graph receipt retention exceeds 64 attempts; explicit archival is required.",
-            ));
-        }
-        for entry in entries {
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| error("graph_receipt", "Invalid graph directory name."))?;
-            let (other, other_root) = load(candidate, &engine, &name)?;
-            if other_root.join("state.pending").exists()
-                || other_root.join("state.pending").is_symlink()
-                || !["removed", "stopped-data-retained"].contains(&other.phase.as_str())
-            {
-                return Err(error(
-                    "graph_capacity_reserved",
-                    "Another graph retains an active or uncertain reservation; inspect and clean it before allocating another graph.",
-                ));
-            }
-        }
-    }
+    check_reservations(candidate, &engine, None)?;
+    super::source_job::check_reservations(&engine)?;
     let prepared = config::prepare(
         inputs,
         options.readiness,
@@ -782,6 +753,8 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
             "Only a completely acknowledged ready graph with an unchanged plan can explicitly restart.",
         ));
     }
+    check_reservations(candidate, &engine, Some(options.run_id))?;
+    super::source_job::check_reservations(&engine)?;
     let prepared = config::prepare(
         inputs,
         options.readiness,
@@ -856,4 +829,47 @@ pub fn reconcile(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateE
         state::write(&root.join("state.json"), &receipt)?;
     }
     Ok(receipt)
+}
+
+/// Called while holding the provider mutation lease, before any workload allocation.
+pub(super) fn check_reservations(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    except: Option<&str>,
+) -> Result<(), CandidateError> {
+    let parent = candidate.state_root.join("run/graphs");
+    if parent.exists() || parent.is_symlink() {
+        state::check_private_directory(&parent)?;
+        let entries: Vec<_> = fs::read_dir(&parent)
+            .map_err(state::io)?
+            .take(65)
+            .collect::<Result<_, _>>()
+            .map_err(state::io)?;
+        if entries.len() > 64 || (entries.len() == 64 && except.is_none()) {
+            return Err(error(
+                "graph_retention_budget",
+                "Graph receipt retention exceeds 64 attempts; explicit archival is required.",
+            ));
+        }
+        for entry in entries {
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| error("graph_receipt", "Invalid graph directory name."))?;
+            if except == Some(name.as_str()) {
+                continue;
+            }
+            let (other, other_root) = load(candidate, engine, &name)?;
+            if other_root.join("state.pending").exists()
+                || other_root.join("state.pending").is_symlink()
+                || !["removed", "stopped-data-retained"].contains(&other.phase.as_str())
+            {
+                return Err(error(
+                    "graph_capacity_reserved",
+                    "Another graph retains an active or uncertain reservation; inspect and clean it before allocating another graph.",
+                ));
+            }
+        }
+    }
+    Ok(())
 }

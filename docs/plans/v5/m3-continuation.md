@@ -98,6 +98,8 @@ prior success, identical plan/readiness and stopped containers. Cleanup-only jou
 acknowledgement now pass `live-1789406422649192000`. Partial bytes are retained; replay and
 competing graph allocation are refused, and cleanup confirms resource absence. 116 Rust tests
 pass; the VM is stopped, pressure stayed normal and protected inputs are unchanged. Next are
-graph/source-job admission coordination, retained-data reattachment and receipt archival. These
+retained-data reattachment and receipt archival. The initial single-workload graph/source
+admission guard passes `live-1789406782847250000`, including source success after graph cleanup;
+concurrent resource accounting remains separate. These
 do not close Event Agent,
 source/build, managed-secret, routing or Linux-adapter acceptance.

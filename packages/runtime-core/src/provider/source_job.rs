@@ -62,8 +62,10 @@ impl SourceJob {
     pub fn admit(&self, candidate: &Candidate) -> Result<SourceAdmission, CandidateError> {
         self.validate()?;
         let guard = SourceAdmission::acquire(candidate, &self.namespace, &self.revision)?;
-        let publication = source_transfer::load(candidate, &self.namespace, &self.revision)?;
         let engine = Engine::connect(candidate)?;
+        super::graph::check_reservations(candidate, &engine, None)?;
+        check_reservations(&engine)?;
+        let publication = source_transfer::load(candidate, &self.namespace, &self.revision)?;
         source_transfer::verify_published(engine.guest(), &publication)?;
         let image = engine.request(
             Method::GET,
@@ -183,8 +185,10 @@ pub fn run_source_job(
         return Err(error("Invalid source job identity or deadline."));
     }
     let result = (|| {
-        let publication = source_transfer::load(candidate, &source.namespace, &source.revision)?;
         let engine = Engine::connect(candidate)?;
+        super::graph::check_reservations(candidate, &engine, None)?;
+        check_reservations(&engine)?;
+        let publication = source_transfer::load(candidate, &source.namespace, &source.revision)?;
         source_transfer::verify_published(engine.guest(), &publication)?;
         let image = engine.request(
             Method::GET,
@@ -346,6 +350,24 @@ pub fn run_source_job(
             ),
         )
     })
+}
+
+/// A source container keeps the bounded workload slot until explicit verified removal, even after
+/// its client exits. The provider lease serializes this observation with create/start operations.
+pub(super) fn check_reservations(engine: &Engine<'_>) -> Result<(), CandidateError> {
+    let value = engine.request(
+        Method::GET,
+        "/v1.53/containers/json?all=true&limit=1&filters=%7B%22label%22%3A%5B%22io.hack-local.job%22%5D%7D",
+        None,
+    )?;
+    match value.as_array() {
+        Some(values) if values.is_empty() => Ok(()),
+        Some(_) => Err(CandidateError::new(
+            "source_capacity_reserved",
+            "A source-job container retains the workload slot; reconcile it before allocating or restarting a workload.",
+        )),
+        None => Err(error("Cannot verify source-job reservation inventory.")),
+    }
 }
 
 #[cfg(test)]

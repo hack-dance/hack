@@ -495,9 +495,11 @@ read-only roots, at most eight services, one internal bridge and eight named vol
 0.5 CPU, 256 MiB RAM and 64 PIDs per service; total requested limits cannot exceed four CPUs or
 4 GiB RAM. Container logs are limited to one 1 MiB file and `/tmp` to a 16 MiB tmpfs. It rejects
 builds, source bind mounts, port publication, environment delivery, automatic restart, and
-user label/logging overrides. The CLI supplies no ambient interpolation values. A separate owned
-graph driver reservation blocks fresh allocation while another graph remains active or uncertain;
-it is not yet a shared scheduler for graphs and source jobs. Receipt retention is capped at 64
+user label/logging overrides. The CLI supplies no ambient interpolation values. The provider mutation lease serializes workload admission with allocation. An active or uncertain
+graph receipt blocks source-job admission and launch as well as competing graph allocation. Any
+retained source-job container blocks graph creation/restart and another source launch until it is
+explicitly reconciled. Ordinary graph cleanup releases compute admission while retaining named
+data. This conservative single-workload policy does not yet provide concurrent resource scheduling. Receipt retention is capped at 64
 attempts pending explicit archival support.
 
 Private receipts under `.hack-local/run/graphs/<attempt>/state.json` contain identity, readiness

@@ -247,7 +247,9 @@ fn owned_driver_live() -> Result<(), CandidateError> {
             &fixture.0.join("compose.yaml"),
             &compose(&image, &run, false),
         )?;
+        source_reservation_blocks_graph(&candidate, &fixture, &image, &token(), "run")?;
         let first = launch(&candidate, &fixture, &run, "run")?;
+        source_launch_is_blocked(&candidate, &image)?;
         if launch(&candidate, &fixture, &run, "run").is_ok() {
             return Err(error("graph_test", "Duplicate attempt replayed."));
         }
@@ -256,6 +258,7 @@ fn owned_driver_live() -> Result<(), CandidateError> {
         }
         super::super::down(&candidate)?;
         super::super::up_with_profile(&candidate, super::super::Profile::Development)?;
+        source_reservation_blocks_graph(&candidate, &fixture, &image, &run, "restart")?;
         let second = launch(&candidate, &fixture, &run, "restart")?;
         for name in ["init", "web", "check"] {
             let key = format!("container:{name}");
@@ -372,10 +375,101 @@ fn owned_driver_live() -> Result<(), CandidateError> {
     })();
     state::write(
         &evidence.join(format!("driver-{run}.json")),
-        &json!({"passed":result.is_ok()&&cleanup.is_ok(),"run":run,"failed_run":failed,"cleanup_confirmed":cleanup.is_ok(),"receipts":result.as_ref().ok(),"failure":result.as_ref().err().map(|e|(&e.code,&e.message)),"scope":"Public graph driver, explicit restart identity/persistence, simulated missing create receipt, foreign-name refusal; not actual process-kill or Event Agent qualification"}),
+        &json!({"passed":result.is_ok()&&cleanup.is_ok(),"run":run,"failed_run":failed,"cleanup_confirmed":cleanup.is_ok(),"bidirectional_workload_admission":result.is_ok(),"receipts":result.as_ref().ok(),"failure":result.as_ref().err().map(|e|(&e.code,&e.message)),"scope":"Public graph driver, explicit restart identity/persistence, simulated missing create receipt, foreign-name refusal; not actual process-kill or Event Agent qualification"}),
     )?;
     cleanup?;
     result.map(|_| ())
+}
+
+fn source_launch_is_blocked(candidate: &Candidate, image: &str) -> Result<(), CandidateError> {
+    let source = super::super::source_job::SourceJob {
+        namespace: token().repeat(2),
+        revision: token().repeat(2),
+        image: image.into(),
+        argv: vec!["/usr/local/bin/bun".into(), "--version".into()],
+        memory_bytes: 268435456,
+    };
+    let mut started = false;
+    let outcome = super::super::source_job::run_source_job(
+        candidate,
+        &token().repeat(2),
+        &source,
+        1000,
+        |event| {
+            if matches!(event, super::super::source_job::SourceJobEvent::Started) {
+                started = true;
+            }
+            Ok(false)
+        },
+    );
+    if started
+        || !matches!(outcome, Err(e) if e.code=="source_job_failed_cleaned" && e.message.contains("graph_capacity_reserved"))
+    {
+        return Err(error(
+            "graph_test",
+            "Graph reservation did not block source launch.",
+        ));
+    }
+    Ok(())
+}
+
+fn source_reservation_blocks_graph(
+    candidate: &Candidate,
+    fixture: &Fixture,
+    image: &str,
+    run: &str,
+    action: &str,
+) -> Result<(), CandidateError> {
+    let marker = token();
+    let id = {
+        let engine = Engine::connect(candidate)?;
+        let created = engine.request(Method::POST, &format!("/v1.53/containers/create?name=hack-admission-{marker}"), Some(&json!({
+            "Image":image,"Entrypoint":["/usr/local/bin/bun","--version"],
+            "Labels":{"io.hack-local.job":marker.repeat(2),"io.hack-local.admission-fixture":marker},
+            "HostConfig":{"NetworkMode":"none","ReadonlyRootfs":true,"Memory":268435456,"PidsLimit":64,"NanoCpus":500000000}
+        })))?;
+        created["Id"]
+            .as_str()
+            .filter(|v| hex(v, 64))
+            .ok_or_else(|| error("graph_test", "Missing admission fixture ID."))?
+            .to_owned()
+    };
+    let result = launch(candidate, fixture, run, action);
+    let engine = Engine::connect_cleanup(candidate)?;
+    let observed = engine.request(Method::GET, &format!("/v1.53/containers/{id}/json"), None)?;
+    if observed["Config"]["Labels"]["io.hack-local.admission-fixture"] != marker
+        || observed["State"]["Status"] != "created"
+    {
+        return Err(error(
+            "graph_test",
+            "Admission fixture identity or state changed.",
+        ));
+    }
+    engine.request(
+        Method::DELETE,
+        &format!("/v1.53/containers/{id}?force=true&v=true"),
+        None,
+    )?;
+    if !matches!(engine.request(Method::GET,&format!("/v1.53/containers/{id}/json"),None),Err(e) if e.code=="engine_not_found")
+    {
+        return Err(error(
+            "graph_test",
+            "Admission fixture cleanup unconfirmed.",
+        ));
+    }
+    if !matches!(result,Err(e) if e.message=="source_capacity_reserved") {
+        return Err(error(
+            "graph_test",
+            "Source reservation did not block graph allocation/restart.",
+        ));
+    }
+    if action == "run" && directory(candidate, run)?.exists() {
+        return Err(error(
+            "graph_test",
+            "Refused graph wrote an attempt directory.",
+        ));
+    }
+    Ok(())
 }
 
 #[test]
@@ -491,6 +585,7 @@ fn owned_graph_process_loss_live() -> Result<(), CandidateError> {
                         "Owned helper was not killed at the intended boundary.",
                     ));
                 }
+                source_launch_is_blocked(&candidate, &image)?;
                 let snapshot = cli(&candidate, &["inspect", "--run-id", &run])?;
                 let init = &snapshot["receipt"]["resources"]["container:init"];
                 if point == "after-create" {
@@ -534,7 +629,7 @@ fn owned_graph_process_loss_live() -> Result<(), CandidateError> {
                     ));
                 }
                 Ok(
-                    json!({"point":point,"helper_pid":pid,"signal":"SIGKILL","snapshot":snapshot,"replay_refused":true,"reservation_preserved":true}),
+                    json!({"point":point,"helper_pid":pid,"signal":"SIGKILL","snapshot":snapshot,"replay_refused":true,"reservation_preserved":true,"source_launch_refused":true}),
                 )
             })();
             let cleanup = (|| {

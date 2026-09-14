@@ -526,3 +526,28 @@ The final VM is stopped with no live provider process. Pressure stayed normal, s
 4132, peak provider footprint was 994,674,440 bytes, and protected inputs were unchanged.
 Graph/source-job admission coordination, retained-data reattachment, receipt archival and actual
 Event Agent acceptance remain open. There is no new application performance claim.
+
+
+## September 14 — Shared graph/source workload admission
+
+Inspection found that source jobs release the provider mutation lease while executing, and graph
+readiness returns while its containers remain live. Neither path previously accounted for the
+other's workload. Admission and allocation now check retained graph receipts and source-job
+containers under that lease. An active/uncertain graph blocks source admission and launch. A
+retained source container, including one not yet started, blocks graph creation/restart and another
+source launch. Observation and explicit cleanup remain available. This is a conservative one-workload
+guard; concurrent resource accounting is captured separately in WU07.
+
+`live-1789406782847250000` passes graph creation/restart refusal with a separately owned source-label
+fixture, source-launch refusal with ready and process-killed graphs, and the earlier recovery and
+cleanup controls. Refused fresh graphs leave no attempt directory; admission fixtures remain
+unstarted and are explicitly removed by their exact ID and fixture label. After graph cleanup,
+the real source-output control passes admission, starts once, succeeds, enforces immutable input
+and bounded output/logs, and confirms container removal. This also proves the new guard releases
+capacity after cleanup rather than refusing all source jobs.
+
+All 116 Rust tests, release build, rustfmt and all-target clippy pass. The VM ends stopped with no
+live provider process. Pressure stays normal, swapouts remain 4132, peak provider footprint is
+1,209,321,488 bytes, and protected source inputs are unchanged. This mixed control's footprint is
+not a matched application benchmark or a performance improvement claim. Retained-data reattachment,
+receipt archival, concurrent resource accounting and actual application acceptance remain open.

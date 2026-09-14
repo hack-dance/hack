@@ -174,9 +174,12 @@ and restart readback proving deleted owned resources stay deleted. No production
    across VM restart, named-data retention, simulated missing-create receipts and foreign-name refusal.
    Cleanup-only journal reconciliation and actual create/start process-kill controls pass
    `live-1789406422649192000`: interrupted bytes retained, replay/allocation refused and all
-   owned resources removed. Finish retained-data reattachment after cleanup, receipt archival
-   and graph/source-job admission coordination;
-   review-plan redactions are not executable input.
+   owned resources removed. Graph/source admission now checks retained receipts and containers
+   under the provider mutation lease before allocation. Bidirectional refusals and post-cleanup
+   source success pass `live-1789406782847250000`. Finish retained-data reattachment
+   after cleanup and receipt archival; review-plan redactions are not executable input.
+   Capture concurrent graph/source resource accounting as a separate follow-up: the initial
+   guard intentionally admits one workload and does not provide concurrent scheduling.
 3. Deliver managed environment values without persisting secrets, handle image/build inputs and
    lifecycle processes, and add service-level observation plus isolated host-loopback routing.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,

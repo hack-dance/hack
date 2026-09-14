@@ -551,3 +551,31 @@ live provider process. Pressure stays normal, swapouts remain 4132, peak provide
 1,209,321,488 bytes, and protected source inputs are unchanged. This mixed control's footprint is
 not a matched application benchmark or a performance improvement claim. Retained-data reattachment,
 receipt archival, concurrent resource accounting and actual application acceptance remain open.
+
+
+## September 14 — Restore retained data and archive removed attempts
+
+`graph restore` requires the unchanged reviewed plan/readiness and completed ordinary cleanup.
+It verifies named volumes, refuses missing data, retains the previous receipt, recreates removed
+compute/network, and reruns the reviewed graph. Failed/interrupted attempts cannot restore without
+explicit recovery/cleanup. Histories are capped at eight without overwriting earlier evidence.
+`graph archive` requires explicit data removal, no pending journal and verified resource absence;
+it moves the entire attempt into a bounded 256-entry archive and preserves consumed attempt IDs.
+Archived records remain available as files; active graph commands do not mutate them.
+
+`live-1789410072250672000` passes new-container identity checks and database-token readback across
+cleanup/restore, missing-data refusal, refusal to archive retained data, exact receipt-byte
+preservation and archived-ID replay refusal. The persistence fixture was strengthened: a fixed
+marker could be reconstructed in a fresh empty database, so it now generates a random token once
+and compares the observed value before cleanup and after restore. Earlier fixed-marker evidence
+alone should not be used to prove that a newly recreated volume retained data.
+
+The prior public recovery, fresh create/start SIGKILL and bidirectional workload admission controls
+also pass. All resources are absent after explicit cleanup, and the VM ends stopped with no live
+provider process. Pressure stays normal, swapouts remain 4132, peak provider footprint is
+972,310,208 bytes, and protected inputs are unchanged. All 117 Rust tests, release build, rustfmt,
+all-target clippy and CLI reference generation pass. No application performance claim is made.
+
+Restore-specific process loss, archive export/pruning with consumed-ID preservation, changed-plan
+data adoption, and real application qualification remain explicit follow-ups. The existing
+fresh-run SIGKILL evidence is not a restore-history or archive power-loss qualification.

@@ -176,8 +176,13 @@ and restart readback proving deleted owned resources stay deleted. No production
    `live-1789406422649192000`: interrupted bytes retained, replay/allocation refused and all
    owned resources removed. Graph/source admission now checks retained receipts and containers
    under the provider mutation lease before allocation. Bidirectional refusals and post-cleanup
-   source success pass `live-1789406782847250000`. Finish retained-data reattachment
-   after cleanup and receipt archival; review-plan redactions are not executable input.
+   source success pass `live-1789406782847250000`. Same-plan `graph restore` after ordinary
+   cleanup and `graph archive` after explicit data removal pass `live-1789410072250672000`.
+   Restore recreates compute while preserving a database-generated random token; missing data
+   is refused. Archive preserves receipt bytes and refuses attempt-ID reuse. Restore histories
+   are bounded at eight; archives at 256. Follow up with restore-specific process-loss controls
+   and an explicit archive export/retention policy that preserves consumed IDs. Changed-graph
+   data adoption remains separate; review-plan redactions are not executable input.
    Capture concurrent graph/source resource accounting as a separate follow-up: the initial
    guard intentionally admits one workload and does not provide concurrent scheduling.
 3. Deliver managed environment values without persisting secrets, handle image/build inputs and

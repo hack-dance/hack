@@ -8,14 +8,24 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; inspect/reconcile/cleanup require --run-id. Cleanup alone may use --remove-data.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; inspect/reconcile/cleanup/archive require --run-id. Cleanup alone may use --remove-data.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
     let Some((action, args)) = args.split_first() else {
         return Err(invalid());
     };
-    if !["run", "restart", "inspect", "reconcile", "cleanup"].contains(action) {
+    if ![
+        "run",
+        "restart",
+        "restore",
+        "inspect",
+        "reconcile",
+        "cleanup",
+        "archive",
+    ]
+    .contains(action)
+    {
         return Err(invalid());
     }
     let mut singles = BTreeMap::new();
@@ -43,7 +53,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         }
         let value = *args.get(index).ok_or_else(invalid)?;
         index += 1;
-        if key == "--ready" && ["run", "restart"].contains(action) {
+        if key == "--ready" && ["run", "restart", "restore"].contains(action) {
             let (service, condition) = value.split_once('=').ok_or_else(invalid)?;
             let condition = match condition {
                 "started" => Condition::Started,
@@ -54,10 +64,10 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             if readiness.insert(service.to_owned(), condition).is_some() {
                 return Err(invalid());
             }
-        } else if key == "--profile" && ["run", "restart"].contains(action) {
+        } else if key == "--profile" && ["run", "restart", "restore"].contains(action) {
             profiles.push(value.to_owned());
         } else if key == "--run-id"
-            || (["run", "restart"].contains(action)
+            || (["run", "restart", "restore"].contains(action)
                 && ["--project", "--file", "--expect-plan", "--timeout-seconds"].contains(&key))
         {
             if singles.insert(key, value).is_some() {
@@ -75,6 +85,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     match *action {
         "inspect" => serde_json::to_value(graph::inspect(candidate, run)?)
             .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph snapshot.")),
+        "archive" => encode(graph::archive(candidate, run)?),
         "reconcile" => encode(graph::reconcile(candidate, run)?),
         "cleanup" => encode(graph::cleanup(candidate, run, remove_data)?),
         _ => {
@@ -101,6 +112,8 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             };
             encode(if *action == "run" {
                 graph::run(candidate, options)?
+            } else if *action == "restore" {
+                graph::restore(candidate, options)?
             } else {
                 graph::restart(candidate, options)?
             })

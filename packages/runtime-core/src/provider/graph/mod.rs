@@ -1,6 +1,9 @@
 //! Fresh owned graph attempts. Recovery only observes or cleans recorded resources; never replay.
+mod archive;
+pub use archive::archive;
 mod config;
 mod journal;
+mod restore;
 use super::{engine::Engine, state};
 use crate::{
     Candidate, CandidateError,
@@ -10,6 +13,7 @@ use crate::{
     },
 };
 use reqwest::Method;
+pub use restore::restore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, os::unix::fs::DirBuilderExt, path::PathBuf, time::Duration};
@@ -219,6 +223,7 @@ fn load(
             "removed",
             "stopped-data-retained",
             "restarting",
+            "restoring",
             "reconciled-cleanup-only",
         ]
         .contains(&receipt.phase.as_str())
@@ -344,7 +349,7 @@ impl Session<'_> {
             .phase = phase.into();
         self.save()
     }
-    fn create_resources(&mut self) -> Result<(), CandidateError> {
+    fn create_resources(&mut self, retain_data: bool) -> Result<(), CandidateError> {
         let keys: Vec<_> = self
             .receipt
             .resources
@@ -354,6 +359,15 @@ impl Session<'_> {
             .collect();
         for key in keys {
             let resource = self.receipt.resources[&key].clone();
+            if retain_data && resource.kind == Kind::Volume {
+                if inspect_resource(&self.engine, &self.receipt, &resource)?.is_none() {
+                    return Err(error(
+                        "graph_data_missing",
+                        "Retained data disappeared; restore will not recreate it.",
+                    ));
+                }
+                continue;
+            }
             if inspect_resource(&self.engine, &self.receipt, &resource)?.is_some() {
                 return Err(error(
                     "graph_resource_exists",
@@ -529,7 +543,8 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
             "Graph allocation requires the explicit development VM profile.",
         ));
     }
-    if root.exists() || root.is_symlink() {
+    let archived = archive::path(candidate, options.run_id)?;
+    if root.exists() || root.is_symlink() || archived.exists() || archived.is_symlink() {
         return Err(error(
             "graph_replay_refused",
             "A graph attempt directory already exists; inspect or clean it explicitly.",
@@ -543,32 +558,7 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
         options.run_id,
         engine.guest().incarnation(),
     )?;
-    for resource in prepared
-        .resources
-        .values()
-        .filter(|r| r.kind == Kind::Container)
-    {
-        let image = engine.request(
-            Method::GET,
-            &format!(
-                "/v1.53/images/{}/json",
-                resource.image.as_deref().expect("image")
-            ),
-            None,
-        )?;
-        if image["Id"].as_str() != resource.image.as_deref()
-            || image["Os"] != "linux"
-            || image["Architecture"] != "arm64"
-            || image["Config"]["Volumes"]
-                .as_object()
-                .is_some_and(|v| !v.is_empty())
-        {
-            return Err(error(
-                "graph_image",
-                "Pinned image architecture or implicit volumes are incompatible.",
-            ));
-        }
-    }
+    verify_images(&engine, &prepared.resources)?;
     state::private_directory(root.parent().expect("graph parent"))?;
     fs::DirBuilder::new()
         .mode(0o700)
@@ -593,7 +583,7 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
     };
     session.save()?;
     let result = (|| {
-        session.create_resources()?;
+        session.create_resources(false)?;
         execution::run(&prepared.graph, &mut session, options.timeout)
     })();
     if let Err(failure) = result {
@@ -869,6 +859,35 @@ pub(super) fn check_reservations(
                     "Another graph retains an active or uncertain reservation; inspect and clean it before allocating another graph.",
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn verify_images(
+    engine: &Engine<'_>,
+    resources: &BTreeMap<String, Resource>,
+) -> Result<(), CandidateError> {
+    for resource in resources.values().filter(|r| r.kind == Kind::Container) {
+        let image = engine.request(
+            Method::GET,
+            &format!(
+                "/v1.53/images/{}/json",
+                resource.image.as_deref().expect("image")
+            ),
+            None,
+        )?;
+        if image["Id"].as_str() != resource.image.as_deref()
+            || image["Os"] != "linux"
+            || image["Architecture"] != "arm64"
+            || image["Config"]["Volumes"]
+                .as_object()
+                .is_some_and(|v| !v.is_empty())
+        {
+            return Err(error(
+                "graph_image",
+                "Pinned image architecture or implicit volumes are incompatible.",
+            ));
         }
     }
     Ok(())

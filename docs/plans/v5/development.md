@@ -500,7 +500,11 @@ graph receipt blocks source-job admission and launch as well as competing graph 
 retained source-job container blocks graph creation/restart and another source launch until it is
 explicitly reconciled. Ordinary graph cleanup releases compute admission while retaining named
 data. This conservative single-workload policy does not yet provide concurrent resource scheduling. Receipt retention is capped at 64
-attempts pending explicit archival support.
+active attempts. `graph archive --run-id <id>` moves a fully removed attempt, including its
+recovery history, into `.hack-local/run/graph-archive/<id>/`. It refuses pending journals, retained
+data or any remaining resource. The archive is bounded at 256 attempts, preserves receipt bytes,
+and prevents reuse of archived IDs. Archived receipts are read as evidence at that path; the
+active graph commands do not mutate them. Export and pruning are separate work.
 
 Private receipts under `.hack-local/run/graphs/<attempt>/state.json` contain identity, readiness
 conditions, ownership and phase metadata; they do not contain commands or environment values.
@@ -518,10 +522,15 @@ Explicit restart requires the unchanged plan and readiness goals, acknowledged p
 all resources present, and every container stopped. It reuses recorded IDs and re-verifies the
 compiled configuration. It never creates replacement containers for an uncertain start. Ordinary
 cleanup removes owned containers/network while retaining named data; `--remove-data` additionally
-removes the exact owned volumes. After ordinary cleanup, reconnecting retained data to a new
-attempt is still a separate implementation gate. VM restart with intact containers is supported.
+removes the exact owned volumes. `graph restore` takes the same reviewed project, plan, readiness
+and run ID arguments as `graph restart`, but requires completed ordinary cleanup. It preserves
+verified named volumes and recreates removed containers/network, rerunning the reviewed init and
+service commands. It refuses missing data, changed plans and interrupted attempts. Up to eight
+previous receipts are retained under `restore-N/previous.json`; no history is overwritten. This
+supports reusing data within the same attempt identity, not transferring it to another project
+or applying a changed graph. VM restart with intact containers remains `graph restart`.
 
 `--timeout-seconds` bounds the readiness loop (default 30, maximum 600); individual engine requests
-have their own bounded transport timeout. Retained-data reattachment, source/build and managed-secret delivery, graph updates,
+have their own bounded transport timeout. Source/build and managed-secret delivery, graph updates,
 loopback routing, and actual Event Agent execution remain open. The current image/platform boundary
 is Linux arm64 inside the owned M3 VM, not the selected Hetzner/Linux adapter.

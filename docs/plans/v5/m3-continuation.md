@@ -103,3 +103,14 @@ admission guard passes `live-1789406782847250000`, including source success afte
 concurrent resource accounting remains separate. These
 do not close Event Agent,
 source/build, managed-secret, routing or Linux-adapter acceptance.
+
+
+Same-plan restore after ordinary cleanup and receipt archival now pass
+`live-1789410072250672000`. New container IDs retain the database-generated random token; missing
+volumes are refused, prior restore receipts are retained, and archived attempt IDs cannot replay.
+117 Rust tests, release build, rustfmt, all-target clippy and CLI reference generation pass. The
+VM is stopped, pressure stayed normal, swapouts stayed 4132, and protected inputs are unchanged.
+Next: restore-specific process-loss qualification, bounded archive export with consumed-ID
+preservation, source/build and managed-secret delivery, lifecycle/routing and real application
+acceptance. The existing SIGKILL controls exercise fresh graph create/start, not restore history
+publication or archive power loss.

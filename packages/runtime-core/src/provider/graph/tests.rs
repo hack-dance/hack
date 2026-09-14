@@ -43,7 +43,7 @@ fn compose(image: &str, marker: &str, fail: bool) -> Value {
         "process.exit(23)".into()
     } else {
         format!(
-            "import {{Database}} from 'bun:sqlite';const db=new Database('/data/proof.sqlite');db.exec('CREATE TABLE IF NOT EXISTS proof(id INTEGER PRIMARY KEY,value TEXT)');db.query('INSERT OR IGNORE INTO proof VALUES (1,?)').run('{marker}');if(db.query('SELECT value FROM proof WHERE id=1').get().value!=='{marker}')throw Error('persistence');db.close();"
+            "import {{Database}} from 'bun:sqlite';const db=new Database('/data/proof.sqlite');db.exec('CREATE TABLE IF NOT EXISTS proof(id INTEGER PRIMARY KEY,value TEXT)');db.query('INSERT OR IGNORE INTO proof VALUES (1,?)').run('{marker}');if(db.query('SELECT value FROM proof WHERE id=1').get().value!=='{marker}')throw Error('persistence');db.query('INSERT OR IGNORE INTO proof VALUES (2,?)').run(crypto.randomUUID());console.log(db.query('SELECT value FROM proof WHERE id=2').get().value);db.close();"
         )
     };
     let base = |program: String, data: bool| {
@@ -266,6 +266,62 @@ fn owned_driver_live() -> Result<(), CandidateError> {
                 return Err(error("graph_test", "Restart recreated a container."));
             }
         }
+        if !matches!(launch(&candidate, &fixture, &run, "restore"), Err(e) if e.message == "graph_restore_refused")
+        {
+            return Err(error("graph_test", "Restore accepted live compute."));
+        }
+        let prior_token = {
+            let engine = Engine::connect(&candidate)?;
+            let (output, _, _) = engine.logs(
+                second["resources"]["container:init"]["id"]
+                    .as_str()
+                    .expect("init ID"),
+            )?;
+            output.lines().last().unwrap_or_default().to_owned()
+        };
+        cli(&candidate, &["cleanup", "--run-id", &run])?;
+        if !matches!(cli(&candidate, &["archive", "--run-id", &run]), Err(e) if e.message == "graph_archive_refused")
+        {
+            return Err(error("graph_test", "Archive accepted retained data."));
+        }
+        let restored = launch(&candidate, &fixture, &run, "restore")?;
+        {
+            let engine = Engine::connect(&candidate)?;
+            let (output, _, _) = engine.logs(
+                restored["resources"]["container:init"]["id"]
+                    .as_str()
+                    .expect("init ID"),
+            )?;
+            if prior_token.len() != 36 || output.lines().last() != Some(prior_token.as_str()) {
+                return Err(error(
+                    "graph_test",
+                    "Restore lost the database-generated token.",
+                ));
+            }
+        }
+        for name in ["init", "web", "check"] {
+            if restored["resources"][format!("container:{name}")]["id"]
+                == second["resources"][format!("container:{name}")]["id"]
+            {
+                return Err(error(
+                    "graph_test",
+                    "Restore did not recreate removed compute.",
+                ));
+            }
+        }
+        if restored["resources"]["volume:data"]["name"]
+            != second["resources"]["volume:data"]["name"]
+        {
+            return Err(error(
+                "graph_test",
+                "Restore changed retained volume identity.",
+            ));
+        }
+        let previous: Receipt =
+            state::read(&directory(&candidate, &run)?.join("restore-1/previous.json"))?;
+        if previous.phase != "stopped-data-retained" {
+            return Err(error("graph_test", "Restore history is missing."));
+        }
         // Simulate a lost create receipt while retaining its already-durable name reservation.
         let root = directory(&candidate, &run)?;
         let mut receipt: Receipt = state::read(&root.join("state.json"))?;
@@ -371,11 +427,40 @@ fn owned_driver_live() -> Result<(), CandidateError> {
                 }
             }
         }
+        // Missing data cannot become a fresh empty database, even with an ordinary-cleanup receipt.
+        let root = directory(&candidate, &run)?;
+        let removed: Receipt = state::read(&root.join("state.json"))?;
+        let mut missing = removed.clone();
+        missing.phase = "stopped-data-retained".into();
+        state::write(&root.join("state.json"), &missing)?;
+        let refusal = launch(&candidate, &fixture, &run, "restore");
+        state::write(&root.join("state.json"), &removed)?;
+        if !matches!(refusal, Err(e) if e.message == "graph_data_missing") {
+            return Err(error("graph_test", "Restore recreated missing data."));
+        }
+        for id in [&failed, &run] {
+            let active = directory(&candidate, id)?;
+            let bytes = fs::read(active.join("state.json")).map_err(state::io)?;
+            cli(&candidate, &["archive", "--run-id", id])?;
+            if active.exists()
+                || fs::read(archive::path(&candidate, id)?.join("state.json")).map_err(state::io)?
+                    != bytes
+            {
+                return Err(error(
+                    "graph_test",
+                    "Archive did not preserve exact receipt bytes.",
+                ));
+            }
+            if !matches!(launch(&candidate, &fixture, id, "run"), Err(e) if e.message == "graph_replay_refused")
+            {
+                return Err(error("graph_test", "Archived attempt allowed replay."));
+            }
+        }
         Ok::<_, CandidateError>(())
     })();
     state::write(
         &evidence.join(format!("driver-{run}.json")),
-        &json!({"passed":result.is_ok()&&cleanup.is_ok(),"run":run,"failed_run":failed,"cleanup_confirmed":cleanup.is_ok(),"bidirectional_workload_admission":result.is_ok(),"receipts":result.as_ref().ok(),"failure":result.as_ref().err().map(|e|(&e.code,&e.message)),"scope":"Public graph driver, explicit restart identity/persistence, simulated missing create receipt, foreign-name refusal; not actual process-kill or Event Agent qualification"}),
+        &json!({"passed":result.is_ok()&&cleanup.is_ok(),"run":run,"failed_run":failed,"cleanup_confirmed":cleanup.is_ok(),"bidirectional_workload_admission":result.is_ok(),"restore_and_archive":result.is_ok()&&cleanup.is_ok(),"receipts":result.as_ref().ok(),"failure":result.as_ref().err().map(|e|(&e.code,&e.message)),"scope":"Public graph driver, explicit restart identity/persistence, simulated missing create receipt, foreign-name refusal; not actual process-kill or Event Agent qualification"}),
     )?;
     cleanup?;
     result.map(|_| ())

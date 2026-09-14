@@ -87,3 +87,14 @@ passes the graph through this compiler across restart, with a non-secret environ
 redacted saved reviews/events. 111 Rust tests, release build, formatting and clippy pass. Next:
 production graph ownership/recovery driver, then remaining command/build/interpolation support,
 managed-secret delivery and actual application startup. No Event Agent credentials were used.
+
+
+The public `graph run|inspect|restart|cleanup` driver now passes
+`live-1789405445903018000`: pinned images, owned resources, dependency readiness, stable container
+IDs and SQLite data across VM restart, retained named data on cleanup, missing-create-ID inspection,
+foreign-name refusal and final removal. 114 Rust tests and all-target clippy pass; CLI reference
+generation has no TypeScript surface drift. `graph restart` is explicit and requires acknowledged
+prior success, identical plan/readiness and stopped containers. Pending journals still block
+mutation, and the missing-ID control is simulated. Next is cleanup-only journal reconciliation and
+actual child-process kills after create/start before acknowledgement. These do not close Event Agent,
+source/build, managed-secret, routing or Linux-adapter acceptance.

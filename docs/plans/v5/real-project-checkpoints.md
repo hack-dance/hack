@@ -469,3 +469,38 @@ This qualifies executable value compilation and its fixture-driver integration. 
 ownership/recovery driver, command-string/interpolation expansion coverage, builds, managed-secret
 delivery without Docker metadata persistence, lifecycle/routing and actual Event Agent startup
 remain open. No application credentials or existing Hetzner workloads were changed.
+
+
+## September 14 — Public owned graph driver
+
+The production driver and candidate `graph run|inspect|restart|cleanup` CLI now use the compiled
+review and dependency executor. Private receipts reserve all names before allocation and preserve
+readiness goals, owner, namespace, plan, IDs and create/start phases without executable values.
+Only the explicit development VM profile is admitted. The initial subset uses pinned arm64 images,
+read-only roots, internal networking and named volumes; caps, bounded logs and scratch space are
+applied and verified. New graph allocation refuses an existing active/uncertain reservation.
+Environment, bind/build inputs, automatic restart and public ports remain refused.
+
+`live-1789405445903018000` passes the public CLI pipeline, failed-init dependent absence, duplicate
+attempt refusal, refusal to restart running services, VM restart with unchanged container IDs and
+SQLite marker, ordinary cleanup retaining named data, and explicit data removal. A simulated missing
+create ID is inspected/cleaned by reserved name and labels without replay. A foreign replacement
+at that name is refused and preserved, then removed only by the separate fixture owner. All graph
+resources are confirmed absent afterward and the VM is stopped. Pressure stayed normal, swapouts
+remained 4132, peak provider footprint was 951,027,272 bytes, and protected source inputs were
+unchanged. Actual process-kill at these graph boundaries remains a separate gate.
+
+Earlier attempts `live-1789404981391254000`, `live-1789405169074946000` and
+`live-1789405311157830000` retained failures and confirmed cleanup. Field-only diagnostics exposed
+Docker's omitted default `ReadOnly: false` and empty `Mounts` serialization. The verifier now
+normalizes only omitted false/empty-array values; changed values and missing positive constraints
+still fail, with regression coverage. No executable values are included in these diagnostics.
+
+Pending graph journals deliberately block mutation. Explicit journal reconciliation, reattaching
+retained data after cleanup, receipt archival, graph/source-job admission coordination, and real
+application/managed-secret delivery remain open in the work-unit ledger.
+
+Validation for this checkpoint: 114 Rust tests, release build, rustfmt, all-target clippy and CLI
+reference generation pass. The TypeScript CLI reference remains unchanged because it does not
+enumerate the Rust candidate. Internal expose metadata is projected by the driver and covered by
+its configuration regression test; public port bindings remain rejected.

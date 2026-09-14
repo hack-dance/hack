@@ -2,13 +2,13 @@
 //! A failed or uncertain start is never retried here; reconciliation requires a separate operation.
 use super::PlanData;
 use crate::CandidateError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Condition {
     Started,

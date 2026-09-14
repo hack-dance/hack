@@ -3,6 +3,7 @@ pub mod admission;
 mod agent;
 mod artifact;
 mod engine;
+pub mod graph;
 pub use engine::{EngineInfo, info as engine_info};
 mod identity;
 mod image_load;

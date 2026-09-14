@@ -169,7 +169,10 @@ and restart readback proving deleted owned resources stay deleted. No production
    driver intent before start. Exact-review executable argv/environment/healthcheck compilation
    passes `live-1789403260125753000`, including explicit non-secret environment delivery and
    redacted saved reviews/journals. Complete command-string tokenization,
-   interpolation operators, build/env_file delivery and the production ownership/recovery driver;
+   interpolation operators and build/env_file delivery. The production driver and public graph
+   run/inspect/restart/cleanup commands pass `live-1789405445903018000`, including stable IDs/data
+   across VM restart, named-data retention, simulated missing-create receipts and foreign-name refusal. Finish journal reconciliation, actual create/start process-kill controls, retained-data
+   reattachment after cleanup, receipt archival and graph/source-job admission coordination;
    review-plan redactions are not executable input.
 3. Deliver managed environment values without persisting secrets, handle image/build inputs and
    lifecycle processes, and add service-level observation plus isolated host-loopback routing.

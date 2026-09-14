@@ -1,3 +1,4 @@
+mod graph_cli;
 use hack_runtime_core::{CANDIDATE_VERSION, Candidate, CandidateError};
 use serde::Serialize;
 use std::path::Path;
@@ -16,6 +17,9 @@ Usage:
   hack-local project capture --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--json]
   hack-local project publish-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--reconcile] [--json]
   hack-local project verify-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--json]
+  hack-local graph run|restart --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... [--profile <name>] [--timeout-seconds <seconds>] [--json]
+  hack-local graph inspect --run-id <32-hex> [--json]
+  hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
   hack-local runtime probe [--json]
   hack-local runtime engine-info [--json]
   hack-local runtime probe|up --profile research|development [--json]
@@ -29,7 +33,7 @@ Usage:
   hack-local --help
 
 Build with: ./scripts/build-hack-local.sh
-Runtime commands affect only the candidate pool. Project up/exec/down are not implemented.
+Runtime commands affect only the candidate pool. Graph commands support a bounded pinned-image subset; full project up/exec/down remains unimplemented.
 The installed hack and its state are never used as a fallback.";
 
 fn main() {
@@ -91,7 +95,7 @@ fn run() -> Result<(), CandidateError> {
                 println!("Executable: {}", candidate.executable.display());
                 println!("Candidate state: {}", candidate.state_root.display());
                 println!("Runtime lifecycle: experimental; live qualification pending");
-                println!("Project execution: not implemented; info contacts no provider");
+                println!("Graph execution: bounded experimental subset; info contacts no provider");
             }
         }
         ["plan", "--project", project] | ["plan", "--project", project, "--json"] => {
@@ -184,6 +188,10 @@ fn run() -> Result<(), CandidateError> {
         }
         ["__job_fixture", fixture] => {
             hack_runtime_core::node::fixture(fixture)?;
+        }
+        ["graph", arguments @ ..] => {
+            let candidate = Candidate::discover(&requested)?;
+            print_json(&graph_cli::command(&candidate, arguments)?)?;
         }
         ["project", arguments @ ..] => {
             project_command(&Candidate::discover(&requested)?, arguments)?;

@@ -235,3 +235,26 @@ fn unbuilt_launcher_never_invokes_hack_on_path() {
     assert_eq!(output.status.code(), Some(69));
     assert!(!fixture.0.join("global-hack-called").exists());
 }
+
+#[test]
+fn graph_cli_rejects_duplicate_and_cross_action_flags_before_runtime_access() {
+    for args in [
+        vec!["graph", "inspect", "--run-id", "a", "--remove-data"],
+        vec!["graph", "cleanup", "--run-id", "a", "--run-id", "b"],
+        vec![
+            "graph",
+            "run",
+            "--ready",
+            "web=healthy",
+            "--ready",
+            "web=started",
+        ],
+        vec!["graph", "restart", "--ready", "web=unknown"],
+    ] {
+        let fixture = Fixture::new();
+        let output = invoke(&fixture, &args);
+        assert!(!output.status.success());
+        let failure: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(failure["code"], "graph_arguments");
+    }
+}

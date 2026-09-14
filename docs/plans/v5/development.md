@@ -470,3 +470,52 @@ the compiled commands, environment and healthcheck in its owned Docker driver. S
 event files contain no program or environment values. Its non-secret sentinel verifies delivery;
 this does not qualify managed-secret delivery, since production Docker environment persistence
 and inspection must be addressed separately before actual application credentials are supplied.
+
+## Owned graph CLI (development profile)
+
+The candidate now has explicit `graph run`, `graph inspect`, `graph restart` and `graph cleanup`
+commands. `graph run` requires a fresh 32-character lowercase hexadecimal attempt ID, the exact
+reviewed plan ID, and one readiness goal for every active service:
+
+```sh
+./hack-local graph run --project /path/to/fixture --file compose.yaml \
+  --expect-plan <reviewed-plan-sha256> --run-id <fresh-32-hex-id> \
+  --ready init=completed --ready web=healthy --ready check=completed
+./hack-local graph inspect --run-id <same-32-hex-id>
+./hack-local graph restart --project /path/to/fixture --file compose.yaml \
+  --expect-plan <same-plan-sha256> --run-id <same-32-hex-id> \
+  --ready init=completed --ready web=healthy --ready check=completed
+./hack-local graph cleanup --run-id <same-32-hex-id>
+./hack-local graph cleanup --run-id <same-32-hex-id> --remove-data
+```
+
+The initial driver requires the explicit development VM profile, pinned local `sha256:` image IDs,
+read-only roots, at most eight services, one internal bridge and eight named volumes. Defaults are
+0.5 CPU, 256 MiB RAM and 64 PIDs per service; total requested limits cannot exceed four CPUs or
+4 GiB RAM. Container logs are limited to one 1 MiB file and `/tmp` to a 16 MiB tmpfs. It rejects
+builds, source bind mounts, port publication, environment delivery, automatic restart, and
+user label/logging overrides. The CLI supplies no ambient interpolation values. A separate owned
+graph driver reservation blocks fresh allocation while another graph remains active or uncertain;
+it is not yet a shared scheduler for graphs and source jobs. Receipt retention is capped at 64
+attempts pending explicit archival support.
+
+Private receipts under `.hack-local/run/graphs/<attempt>/state.json` contain identity, readiness
+conditions, ownership and phase metadata; they do not contain commands or environment values.
+Every create has a prior durable name reservation. Container IDs are saved before start intent,
+and uncertain effects are retained without retry. Inspection verifies labels, names and recorded
+IDs using the private engine socket; `ready-observed` is historical, while `observations` reports
+current state. A missing create ID can be inspected/cleaned by its exact reserved name and labels.
+Foreign replacements are refused. An incomplete journal blocks mutation rather than being deleted.
+
+Explicit restart requires the unchanged plan and readiness goals, acknowledged prior success,
+all resources present, and every container stopped. It reuses recorded IDs and re-verifies the
+compiled configuration. It never creates replacement containers for an uncertain start. Ordinary
+cleanup removes owned containers/network while retaining named data; `--remove-data` additionally
+removes the exact owned volumes. After ordinary cleanup, reconnecting retained data to a new
+attempt is still a separate implementation gate. VM restart with intact containers is supported.
+
+`--timeout-seconds` bounds the readiness loop (default 30, maximum 600); individual engine requests
+have their own bounded transport timeout. Recovery journal reconciliation, actual process-kill
+boundaries, retained-data reattachment, source/build and managed-secret delivery, graph updates,
+loopback routing, and actual Event Agent execution remain open. The current image/platform boundary
+is Linux arm64 inside the owned M3 VM, not the selected Hetzner/Linux adapter.

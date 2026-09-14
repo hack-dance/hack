@@ -336,6 +336,10 @@ impl<'a> OwnedGuest<'a> {
         })
     }
 
+    pub(super) fn profile(&self) -> super::Profile {
+        self.owner.profile
+    }
+
     pub(super) fn incarnation(&self) -> &str {
         &self.owner.token
     }

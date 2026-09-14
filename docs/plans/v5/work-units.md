@@ -168,8 +168,9 @@ and restart readback proving deleted owned resources stay deleted. No production
    It compiles reviewed dependency conditions and requires explicit readiness goals and durable
    driver intent before start. Exact-review executable argv/environment/healthcheck compilation
    passes `live-1789403260125753000`, including explicit non-secret environment delivery and
-   redacted saved reviews/journals. Complete command-string tokenization,
-   interpolation operators and build/env_file delivery. The production driver and public graph
+   redacted saved reviews/journals. Bounded command-string word splitting now passes a Compose reference corpus and a live
+   graph; unquoted control syntax remains refused. Complete interpolation operators and
+   build/env_file delivery. The production driver and public graph
    run/inspect/restart/cleanup commands pass `live-1789405445903018000`, including stable IDs/data
    across VM restart, named-data retention, simulated missing-create receipts and foreign-name refusal.
    Cleanup-only journal reconciliation and actual create/start process-kill controls pass
@@ -232,7 +233,9 @@ owned-resource absence. Cross-principal hostile isolation remains a separate cap
 
 ## WU10 — Decide whether this is fast and light enough
 
-**Goal:** accept, optimize, or replace the provider using comparable usable workloads.
+**Goal:** accept, optimize, or replace the provider using comparable usable workloads. Reduce
+steady idle CPU, CPU per correct task, working-set/peak memory and retained footprint while
+preserving responsiveness, correctness and the declared capacity/feature envelope.
 **Output:** frozen protocol, raw sample cohort, resource attribution, ergonomic review, decision.
 **Demo:** perform the same real-project workflow from fresh capacity and warm capacity, locally and
 remotely. Compare stable baseline, candidate, and VZ reference where supported.

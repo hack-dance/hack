@@ -548,3 +548,29 @@ or applying a changed graph. VM restart with intact containers remains `graph re
 have their own bounded transport timeout. Source/build and managed-secret delivery, graph updates,
 loopback routing, and actual Event Agent execution remain open. The current image/platform boundary
 is Linux arm64 inside the owned M3 VM, not the selected Hetzner/Linux adapter.
+
+
+## Native resource accounting and command words
+
+`runtime status --json` includes `provider_resources` while the owned provider is live. It records
+native PID/start/UID/executable identities, resident and physical-footprint bytes, CPU nanoseconds,
+disk I/O bytes and idle wakeups for the root and its current descendants. Enumeration is bounded at
+64 processes and checked again after sampling; identity changes, unavailable observations and budget
+overflow return an error rather than a misleading partial total. Stopped providers report null.
+The existing `provider_memory` field remains the root-only memory observation.
+
+CPU counters are converted using the native Mach timebase and regression-tested against `getrusage`.
+For identical process identities across two samples, compute percent of one core as
+`100 * delta(user_cpu_nanoseconds + system_cpu_nanoseconds) / delta(wall_nanoseconds)`.
+Do not divide by host core count or describe cumulative CPU time as a percentage. Changed identities
+require a new interval. This live tree does not account for exited/reparented helpers; memory sums
+can include shared pages. Instrumentation, transient CLI children, and shared external engines need
+separate accounting. A resource snapshot is not an atomic lifetime trace or a pressure guarantee.
+
+Executable Compose command/entrypoint strings now support bounded word splitting: whitespace,
+quotes, empty arguments, concatenated quoted words, Unicode and backslash escapes. They are not
+implicitly executed by a shell. Unquoted control operators and backticks are refused; use explicit
+argv, or explicitly invoke a shell with its script quoted as one argument. Unclosed quotes, dangling
+escapes and more than 4096 arguments are refused. Interpolation still uses only explicitly supplied
+inputs; operators, build and env-file delivery remain separate gates. The recorded Compose 5.1.2
+reference cases are in `packages/runtime-core/tests/fixtures/compose-argv.json`.

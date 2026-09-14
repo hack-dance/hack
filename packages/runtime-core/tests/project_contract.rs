@@ -1126,7 +1126,7 @@ fn executable_inputs_preserve_argv_and_resolve_only_explicit_values() {
 }
 
 #[test]
-fn executable_inputs_reject_stale_review_and_unsupported_string_semantics() {
+fn executable_inputs_reject_stale_review_and_accept_simple_command_strings() {
     use project::inputs;
     let fixture = Fixture::new(BASIC);
     let old = fixture.plan();
@@ -1153,17 +1153,16 @@ fn executable_inputs_reject_stale_review_and_unsupported_string_semantics() {
     )
     .unwrap();
     let review = fixture.plan();
+    let inputs = inputs::compile(
+        &fixture.candidate,
+        fixture.options(),
+        &review.plan_id,
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(
-        inputs::compile(
-            &fixture.candidate,
-            fixture.options(),
-            &review.plan_id,
-            &Default::default()
-        )
-        .err()
-        .unwrap()
-        .code,
-        "execution_argv"
+        inputs.services["web"].command.as_ref().unwrap(),
+        &["echo", "hello"]
     );
     assert!(!fixture.candidate.state_root.exists());
 }

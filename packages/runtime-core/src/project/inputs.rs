@@ -101,7 +101,7 @@ impl Resolver<'_> {
     fn argv(&mut self, value: Option<&Value>) -> Result<Option<Vec<String>>, CandidateError> {
         match value {
             None | Some(Value::Null) => Ok(None),
-            Some(Value::String(s)) if s.is_empty() => Ok(Some(Vec::new())),
+            Some(Value::String(s)) => tokenize(&self.resolve(s)?).map(Some),
             Some(Value::Array(values)) if values.len() <= 4096 => values
                 .iter()
                 .map(|v| {
@@ -113,7 +113,7 @@ impl Resolver<'_> {
                 .map(Some),
             _ => Err(error(
                 "execution_argv",
-                "Use an explicit argv list; nonempty Compose command strings require a separately qualified tokenizer.",
+                "Executable command must be a string or an argv list.",
             )),
         }
     }
@@ -176,6 +176,56 @@ impl Resolver<'_> {
             .map(|(k, v)| format!("{k}={v}"))
             .collect())
     }
+}
+
+/// Bounded Compose-compatible word splitting for ordinary argv strings. This never runs a shell.
+/// Unquoted control syntax is deliberately refused rather than silently truncating the command.
+fn tokenize(text: &str) -> Result<Vec<String>, CandidateError> {
+    let fail = || {
+        error(
+            "execution_argv",
+            "Unclosed quote, escape, control syntax or excessive argv; use an explicit argv list or an explicitly quoted shell command.",
+        )
+    };
+    let mut result = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut started = false;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && quote != Some('\'') {
+            word.push(chars.next().ok_or_else(fail)?);
+            started = true;
+        } else if Some(ch) == quote {
+            quote = None;
+        } else if quote.is_none() && matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+            started = true;
+        } else if quote.is_none() && matches!(ch, ';' | '&' | '|' | '<' | '>' | '`') {
+            return Err(fail());
+        } else if quote.is_none() && matches!(ch, ' ' | '\t' | '\r' | '\n') {
+            if started {
+                result.push(std::mem::take(&mut word));
+                started = false;
+                if result.len() > 4096 {
+                    return Err(fail());
+                }
+            }
+        } else {
+            word.push(ch);
+            started = true;
+        }
+    }
+    if quote.is_some() {
+        return Err(fail());
+    }
+    if started {
+        result.push(word);
+    }
+    if result.len() > 4096 {
+        return Err(fail());
+    }
+    Ok(result)
 }
 
 /// Resolve values only from the caller's explicitly supplied map (e.g. an authorized managed-env
@@ -270,4 +320,30 @@ pub fn compile(
         ));
     }
     Ok(ExecutionInputs { review, services })
+}
+
+#[cfg(test)]
+mod argv_tests {
+    use super::*;
+    #[test]
+    fn command_words_match_recorded_compose_reference() {
+        let cases: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../tests/fixtures/compose-argv.json")).unwrap();
+        for case in cases {
+            let text = case["input"].as_str().unwrap();
+            if case["candidate_refuses"].as_bool() == Some(true) {
+                assert!(tokenize(text).is_err(), "{text:?}");
+            } else {
+                assert_eq!(
+                    serde_json::json!(tokenize(text).unwrap()),
+                    case["compose"],
+                    "{text:?}"
+                );
+            }
+        }
+        assert!(tokenize(&"a ".repeat(4097)).is_err());
+        assert!(tokenize("echo a && b").is_err());
+        assert!(tokenize("echo `date`").is_err());
+        assert_eq!(tokenize("echo \\; \\|").unwrap(), ["echo", ";", "|"]);
+    }
 }

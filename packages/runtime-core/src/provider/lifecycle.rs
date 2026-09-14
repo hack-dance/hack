@@ -20,6 +20,7 @@ pub struct RuntimeStatus {
     pub profile: Option<super::Profile>,
     pub guest_memory_mib: Option<u32>,
     pub provider_memory: Option<identity::MemoryUsage>,
+    pub provider_resources: Option<super::resources::ResourceTree>,
     pub qualification: &'static str,
     pub machine: Option<String>,
     pub process_alive: Option<bool>,
@@ -463,6 +464,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             profile: None,
             guest_memory_mib: None,
             provider_memory: None,
+            provider_resources: None,
             qualification: "WU02-live-qualification-pending",
             machine: None,
             process_alive: Some(false),
@@ -486,7 +488,15 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     if owner.storage.is_some() {
         verify_disks(candidate, &owner)?;
     }
+    let resources = if alive == Some(true) {
+        Some(super::resources::observe(
+            owner.process.as_ref().expect("live process"),
+        )?)
+    } else {
+        None
+    };
     Ok(RuntimeStatus {
+        provider_resources: resources,
         provider_memory: if alive == Some(true) {
             Some(identity::memory_usage(
                 owner.process.as_ref().expect("live process").pid,

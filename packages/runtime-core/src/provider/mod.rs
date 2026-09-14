@@ -7,6 +7,7 @@ pub mod graph;
 pub use engine::{EngineInfo, info as engine_info};
 mod identity;
 mod image_load;
+mod resources;
 pub use image_load::load as load_image;
 mod lifecycle;
 mod network_tools;

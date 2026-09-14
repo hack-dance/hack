@@ -194,6 +194,16 @@ and restart readback proving deleted owned resources stay deleted. No production
    guard intentionally admits one workload and does not provide concurrent scheduling.
 3. Deliver managed environment values without persisting secrets, handle image/build inputs and
    lifecycle processes, and add service-level observation plus isolated host-loopback routing.
+   The next source slice must bind each read-only application mount to a verified immutable
+   publication, persist that identity with graph intent, and revalidate it before initial creation
+   and restore. Reuse source publication verification rather than accepting arbitrary guest paths.
+   Fresh admission must require the acknowledged revision; restoration must retain the accepted
+   revision rather than silently following a newer working tree. Publication receipts currently
+   bind to a provider incarnation, so explicitly qualify restart/republication semantics before
+   claiming source-backed graph restore. Test missing, altered and foreign publications before any
+   container allocation, plus same-data restore and source-job/graph exclusion. Build contexts,
+   writable build outputs and managed secrets remain separate delivery contracts; enabling a bind
+   mount alone does not complete application acceptance.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,
    failures and owned cleanup. The synthetic SQLite probe does not replace this gate.
 5. Qualify the guest base and networking package versions for distribution in WU11; the current

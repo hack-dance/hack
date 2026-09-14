@@ -125,6 +125,54 @@ fixture resources/registrations were removed. The installed v4.2.0 daemon remain
 
 ## Work-unit review and next acceptance gates
 
+### Persistent native observer follow-up
+
+The Rust `resource-sampler` example now observes 1–8 explicitly selected, disjoint native process
+trees in one persistent process. Selection requires the exact executable and current-user native
+identity; every sample rechecks root/descendant identities. Overlapping trees, an observer inside
+a selected tree, unavailable processes and invalid budgets fail without emitting a partial sample.
+Output is bounded to one hour, uses absolute sampling deadlines, and records both observer usage
+and a final completion marker. A consumer must require that marker and successful exit; earlier
+samples alone do not prove completion. Sampling reads no command arguments or environment values
+and confers no lifecycle authority over external processes.
+
+Build with `CARGO_TARGET_DIR=.hack-local/target cargo +1.97.1 build --manifest-path
+packages/runtime-core/Cargo.toml --release --example resource-sampler` (one shell command).
+Invoke `.hack-local/target/release/examples/resource-sampler COUNT INTERVAL_MS LABEL PID
+EXACT_EXECUTABLE`, adding label/PID/executable triples for additional roots. Supply freshly verified
+PIDs and executable paths. The example emits JSON Lines to stdout; preserve it as private evidence.
+
+A read-only follow-up collected 31 samples over 60.000 seconds at two-second cadence. The candidate
+VM stayed stopped. Both stable-daemon processes, including the Docker events child, appeared in
+every sample; all selected identities remained unchanged.
+
+| Selected component | Processes | CPU, percent of one core | Median footprint |
+| --- | --- | --- | --- |
+| OrbStack UI | 1 | 0.0023% | 102.67 MiB |
+| OrbStack helper | 1 | 1.0181% | 2269.01 MiB |
+| Stable Hack daemon and descendants | 2 | 0.6859% | 83.44 MiB |
+| Persistent observer | 1 | 0.0614% | 1.94 MiB |
+
+Median sample observation took 1,012 microseconds. This closes the missing-descendant issue for
+this selected daemon and window, and provides a lower-cost collection path. It does not repair the
+earlier cohort, cover unrelated Hack clients, or prove whole-system accounting. The earlier harness
+also performed lifecycle/pressure checks, so its 1.35–1.92% cost is not an equivalent-workload
+speedup baseline. Exited/reparented helpers and shared memory remain outside complete accounting.
+
+Private evidence is `.hack-local/review/native-sampler-20260914/`: exact command, JSONL samples,
+exit status, negative controls and derived summary. Raw samples SHA-256:
+`892043358e59f995f6e5b9e2386b338f454b3b172b6b115b169eec0121bd1faa`.
+Observed binary SHA-256: `6cceda921f1acacba30cbaad7fa10e3f464086eccb90162cf6cc2d97dd726399`.
+Wrong executable, overlapping roots and invalid-budget controls all exit nonzero without a sample.
+An owned sleep process was terminated after the first sample; the sampler rejected its next
+observation, exited nonzero and omitted the completion marker. The fixture was reaped. The native
+regression suite additionally checks stale identities and CPU-clock calibration. All **123 Rust
+tests**, rustfmt, all-target clippy, release builds and privacy/document-link checks pass locally;
+13 opt-in tests remain excluded. The fresh 14-service application plan retains the same 22 errors
+and two warnings, and both protected input hashes match the previous checkpoint.
+
+### Remaining application and performance gates
+
 - WU07 advances with executable command words and startup cadence compatibility. The captured
   14-service application plan still has 22 errors: 12 unresolved mount sources, nine external
   route/owner-label conflicts and one external network; two metadata warnings are separate. Build,
@@ -132,8 +180,8 @@ fixture resources/registrations were removed. The installed v4.2.0 daemon remain
 - WU10 now has calibrated native CPU/footprint observations, a ten-minute empty-pool window,
   running-graph and reclamation windows, and a cadence counterfactual. Full application load,
   CPU per completed task, reload/build, longer memory trends and equal-capacity comparison remain open.
-- Resource follow-ups: include every external daemon descendant from the first sample; reduce
-  observer overhead with native/batched sampling; investigate remaining candidate CPU overhead
+- Resource follow-ups: integrate the qualified persistent sampler into the next matched graph
+  cohort, including every selected external daemon descendant from the first sample; investigate remaining candidate CPU overhead
   under equal probe cadence; evaluate explicit idle-pool reclamation against restart latency and
   active-work/data guarantees. Do not add automatic shutdown or change user defaults without those controls.
 - WU05/06 synchronization/cache recovery, WU08 durable terminals, WU09 Linux/SSH parity, and WU11

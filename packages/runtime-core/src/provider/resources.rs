@@ -1,5 +1,5 @@
 //! Native live-process accounting. Snapshots are not lifetime or unique-page accounting.
-use super::identity::ProcessIdentity;
+pub use super::identity::ProcessIdentity;
 use crate::CandidateError;
 use serde::Serialize;
 
@@ -20,6 +20,14 @@ pub struct ResourceTree {
     pub scope: &'static str,
     pub observation_microseconds: u64,
     pub processes: Vec<ProcessUsage>,
+}
+
+/// Bind an explicitly selected, same-user process to its native identity before sampling.
+/// This grants no lifecycle authority over the selected process.
+pub fn bind(pid: i32, executable: &std::path::Path) -> Result<ProcessIdentity, CandidateError> {
+    let observed = super::identity::observe(pid)?;
+    super::identity::verify(&observed, &observed, executable, unsafe { libc::geteuid() })?;
+    Ok(observed)
 }
 
 #[cfg(target_os = "macos")]
@@ -146,7 +154,7 @@ mod native {
             return Err(unavailable());
         }
         Ok(ResourceTree {
-            scope: "owned-root-and-current-descendants; excludes exited/reparented helpers and observer; memory sums may share pages; compare CPU deltas only across identical identities",
+            scope: "selected-root-and-current-descendants; excludes exited/reparented helpers and observer; memory sums may share pages; compare CPU deltas only across identical identities",
             observation_microseconds: start.elapsed().as_micros().min(u64::MAX as u128) as u64,
             processes,
         })
@@ -172,6 +180,16 @@ pub fn observe(root: &ProcessIdentity) -> Result<ResourceTree, CandidateError> {
 mod tests {
     use super::*;
     use crate::provider::identity;
+    #[test]
+    fn explicit_root_binding_requires_exact_executable() {
+        let pid = std::process::id() as i32;
+        let path = std::env::current_exe().unwrap();
+        let root = bind(pid, &path).unwrap();
+        assert_eq!(root, identity::observe(pid).unwrap());
+        assert!(bind(pid, std::path::Path::new("/wrong/executable")).is_err());
+        assert!(bind(1, &path).is_err());
+    }
+
     #[test]
     fn owned_tree_includes_live_child_and_refuses_stale_root() {
         let mut child = std::process::Command::new("/bin/bash")

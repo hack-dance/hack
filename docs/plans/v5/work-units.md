@@ -221,6 +221,9 @@ and restart readback proving deleted owned resources stay deleted. No production
    pressure, unchanged swapouts, a stopped owned VM and unchanged global config/installed binary.
    The first smoke attempt stopped on a watchdog-parser error and cleaned up; it is not counted.
    Validation: 135 Rust tests and 940 CLI tests pass, plus typecheck, lint and release build.
+   The [pinned agent audit and synthetic tmpfs probe](environment-delivery-20260914.md) identify
+   argv info logging and response debug logging as delivery constraints. Fixed-output delivery,
+   compiler/transport budget alignment, service-scoped leases and graph integration remain open.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,
    failures and owned cleanup. The synthetic SQLite probe does not replace this gate.
 5. Qualify the guest base and networking package versions for distribution in WU11; the current

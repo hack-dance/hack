@@ -3,6 +3,8 @@ pub mod admission;
 mod agent;
 mod artifact;
 mod engine;
+#[cfg(test)]
+mod environment_probe_test;
 pub mod graph;
 pub use engine::{EngineInfo, info as engine_info};
 mod identity;

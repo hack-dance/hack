@@ -574,3 +574,10 @@ argv, or explicitly invoke a shell with its script quoted as one argument. Unclo
 escapes and more than 4096 arguments are refused. Interpolation still uses only explicitly supplied
 inputs; operators, build and env-file delivery remain separate gates. The recorded Compose 5.1.2
 reference cases are in `packages/runtime-core/tests/fixtures/compose-argv.json`.
+
+Health checks also preserve Compose `start_interval` as an optional reviewed value and deliver it
+to Docker as `StartInterval`. For example, `start_period: 10s`, `start_interval: 100ms`, and
+`interval: 1s` allow frequent startup probes followed by a slower steady cadence. These settings
+are explicit project inputs; the candidate does not rewrite existing defaults. A slower steady
+cadence also delays detection of later failures. Plans without this field keep their previous
+health serialization, so adding support does not change their identity by inserting a null field.

@@ -1250,3 +1250,24 @@ fn executable_compiler_does_not_guess_interpolation_operators_or_load_env_files(
             .contains("never-load-this-value")
     );
 }
+
+#[test]
+fn health_start_interval_is_reviewed_and_absent_values_preserve_serialization() {
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    healthcheck:\n      test: [CMD, 'true']\n      interval: 1s\n      start_period: 10s\n      start_interval: 100ms\n",
+    );
+    let review = fixture.plan();
+    let health = review.plan.services["web"].healthcheck.as_ref().unwrap();
+    assert_eq!(health.interval_nanos, Some(1_000_000_000));
+    assert_eq!(health.start_interval_nanos, Some(100_000_000));
+    assert_eq!(health.start_period_nanos, Some(10_000_000_000));
+    assert!(review.plan.enrollment_compatible);
+    let mut absent = health.clone();
+    absent.start_interval_nanos = None;
+    let value = serde_json::to_value(&absent).unwrap();
+    assert!(value.get("start_interval_nanos").is_none());
+    let decoded: project::HealthPlan = serde_json::from_value(value).unwrap();
+    assert!(decoded.start_interval_nanos.is_none());
+    fs::write(fixture.project.join("compose.yaml"), "services:\n  web:\n    image: alpine:3.21\n    healthcheck:\n      test: [CMD, 'true']\n      start_interval: invalid\n").unwrap();
+    assert!(project::plan(&fixture.candidate, fixture.options()).is_err());
+}

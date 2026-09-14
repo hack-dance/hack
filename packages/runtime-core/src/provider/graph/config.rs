@@ -199,6 +199,7 @@ pub(super) fn prepare(
                 ("Interval", health.interval_nanos),
                 ("Timeout", health.timeout_nanos),
                 ("StartPeriod", health.start_period_nanos),
+                ("StartInterval", health.start_interval_nanos),
             ] {
                 if let Some(nanos) = value_nanos {
                     value[key] = json!(nanos);

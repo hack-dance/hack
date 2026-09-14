@@ -390,6 +390,7 @@ fn health(
             "interval",
             "timeout",
             "start_period",
+            "start_interval",
             "retries",
         ],
         field,
@@ -438,6 +439,7 @@ fn health(
         interval_nanos: duration(m.get("interval"))?,
         timeout_nanos: duration(m.get("timeout"))?,
         start_period_nanos: duration(m.get("start_period"))?,
+        start_interval_nanos: duration(m.get("start_interval"))?,
         retries: m.get("retries").map(positive_u32).transpose()?,
     }))
 }

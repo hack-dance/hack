@@ -106,6 +106,8 @@ pub struct HealthPlan {
     pub interval_nanos: Option<u64>,
     pub timeout_nanos: Option<u64>,
     pub start_period_nanos: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_interval_nanos: Option<u64>,
     pub retries: Option<u32>,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]

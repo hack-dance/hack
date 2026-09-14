@@ -86,3 +86,6 @@ pub fn prepare_engine(
 ) -> Result<impl Serialize, CandidateError> {
     artifact::prepare_engine(candidate, archive)
 }
+
+#[cfg(test)]
+mod graph_probe_test;

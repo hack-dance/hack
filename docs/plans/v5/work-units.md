@@ -21,10 +21,10 @@ not satisfy application acceptance. Carry every gap into the next checkpoint's a
 | WU01 | Rust core and checkout-local read-only CLI | WU00 | Implemented; see [checkpoint evidence](checkpoint-01.md) |
 | WU02 | Private SmolVM lifecycle and recovery | WU01 | Implemented; bounded M3 lifecycle/recovery passed; broader limits in [checkpoint 02](checkpoint-02.md) |
 | WU03 | Compose compatibility plan and real-project enrollment | WU02 | Component implemented; root-Compose receipt/readback passed; actual application plan blocked; see [checkpoint 03](checkpoint-03.md) and [real-project gaps](real-project-checkpoints.md) |
-| WU04 | Durable operations, receipts, jobs, and cancellation | WU02–03 | Component implemented for bounded host fixtures; actual project execution blocked; see [checkpoint 04](checkpoint-04.md) and [real-project gaps](real-project-checkpoints.md) |
+| WU04 | Durable operations, receipts, jobs, and cancellation | WU02–03 | Component implemented for bounded host and immutable-source jobs; full application execution remains open; see [checkpoint 04](checkpoint-04.md) and [real-project gaps](real-project-checkpoints.md) |
 | WU05 | Native source and incremental development sync | WU03–04 | In progress; actual source-to-container proof passed, sync acceptance pending |
-| WU06 | Immutable job input and generation enforcement | WU04–05 | In progress; M3 immutable-source execution, real project tests and explicit reconciliation pass; supervisor-loss containment also passes; remaining negative controls pending |
-| WU07 | Real graph, persistent data, and loopback endpoints | WU03–06 | Planned |
+| WU06 | Immutable job input and generation enforcement | WU04–05 | In progress; M3 immutable-source execution, real project tests and explicit reconciliation pass; supervisor-loss containment and killed-publisher reconciliation pass; remaining cleanup/cache controls pending |
+| WU07 | Real graph, persistent data, and loopback endpoints | WU03–06 | In progress; synthetic init/web/DNS/SQLite restart and cleanup probe passes; application executor not implemented |
 | WU08 | Durable terminals and bounded event/log streams | WU04, WU07 | Planned |
 | WU09 | Native Linux and private SSH parity | WU05–08 | Planned; requires a selected Linux fixture host |
 | WU10 | Measured speed, footprint, and reclamation | WU07–09 | Planned; corrected research cohort incomplete |
@@ -155,6 +155,21 @@ candidate endpoint identity differs from v4; no runtime socket exposed to applic
 restart, orphan resource, restart after cleanup, and explicit migration failure.
 **Evidence:** browser/host HTTP plus database readback, graph receipts, before/after v4 inventory,
 and restart readback proving deleted owned resources stay deleted. No production project mutations.
+
+### WU07 implementation queue after infrastructure qualification
+
+1. Package and verify the required guest networking tools before daemon startup. The minimal
+   Alpine guest omits them; adding packages after Docker starts leaves a cached missing-tool result.
+   The manual probe verifies signed, pinned APKs and restarts, then removes its additions; this is
+   not yet production bootstrap or a distribution contract.
+2. Implement executable graph compilation and dependency/readiness reconciliation from the reviewed
+   real-project configuration, with durable ownership records and failure-before-dependent-start.
+3. Deliver managed environment values without persisting secrets, handle image/build inputs and
+   lifecycle processes, and add service-level observation plus isolated host-loopback routing.
+4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,
+   failures and owned cleanup. The synthetic SQLite probe does not replace this gate.
+5. Qualify the guest base and networking package versions for distribution in WU11; the current
+   pins match the existing Alpine 3.19 fixture and are not a release support promise.
 
 ## WU08 — Keep terminals and observations useful after detach
 

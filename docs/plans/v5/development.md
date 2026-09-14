@@ -398,3 +398,32 @@ disks, boot configuration and owner identity, and rejects a lifecycle change aro
 It can therefore inspect a running engine while a source job holds the mutation lock. It cannot
 execute guest scripts or allocate/start/delete engine resources. Mutation serialization is unchanged;
 concurrent graph mutation and service-level status/readiness remain separate implementation work.
+
+
+## WU07 infrastructure qualification
+
+The manual `owned_graph_storage_live` test uses a pinned Bun image and a candidate-owned internal
+bridge, named volume and init/web/check containers. It verifies service-name HTTP, a SQLite marker
+across VM restart, and removal of its exact labelled resources. It is not a user-facing graph
+executor, host-loopback routing, or actual Event Agent acceptance.
+
+The bundled Alpine 3.19 guest lacks packet-filter tools needed by Docker's embedded DNS. The probe
+reads four explicitly pinned APKs from `.hack-local/providers/network-tools`, verifies their hashes
+on both sides and their Alpine signatures, installs without network access or package scripts, then
+restarts the VM before creating the graph. It removes its packages and verifies the original package
+inventory after cleanup. Supply these public inputs from
+`https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64/`:
+
+| Archive | SHA-256 |
+| --- | --- |
+| iptables-1.8.10-r3.apk | 31ab6343f1f3d0fbbf290c4dcf0430b2d08e8073e516e13530dfab25b097d467 |
+| libmnl-1.0.5-r2.apk | d15e6313880bdd14959f42c1556b4a810ef4894992ae9f73b148126f0cc6021d |
+| libnftnl-1.2.6-r0.apk | ec1c2b02869fc65bcf7a1105e3a7ac5df1bd9a8bd8b399cb6cf650dd3112c021 |
+| libxtables-1.8.10-r3.apk | f0accefde240ece6722479b46cb014d7d2f745af7d796e8eec3ced53571e1088 |
+
+The normal daemon settings retain disabled default bridge, forwarding and masquerading. The
+experimental nftables daemon switch was tested and reverted after engine startup failed; it is not
+enabled by this checkpoint. Product tooling still needs durable provisioning before daemon startup,
+package ownership/recovery and distribution qualification. See the WU07 queue in `work-units.md`.
+Engine startup failures now report fixed categories from a bounded log tail, without emitting raw
+log lines.

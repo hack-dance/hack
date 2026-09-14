@@ -46,7 +46,11 @@ staging and retries; September 14 live tests include a killed publisher recovere
 CLI. Retained-copy cleanup and the remaining crash boundaries stay open.
 Do not rerun already passing cases without changed code or an unresolved concern.
 
-WU07 service graph startup is not implemented. Build graph execution, readiness, isolated
+WU07 application graph startup is not implemented. A September 14 synthetic init/SQLite/web/HTTP
+probe now passes service DNS, VM restart/data readback and owned cleanup. It temporarily installs
+signed, pinned guest networking packages, restarts to refresh Docker capability discovery, and
+restores the original package inventory afterward. Product bootstrap must still incorporate these
+inputs before graph execution. Build graph execution, readiness, isolated
 networking, persistent volumes, managed environment delivery, image/build handling, lifecycle
 and routing, then prove the real Event Agent app works and preserves intended data. The captured
 14-service Compose configuration still references old external networks, labels and host credential

@@ -779,6 +779,11 @@ for attempt in $(seq 1 100); do
  fi
  sleep 0.1
 done
+for category in libnftables 'unknown flag' 'operation not supported' iptables 'permission denied' 'not found' 'protocol not supported'; do
+ if tail -c 8192 /storage/hack-local-dockerd.log | grep -Fqi "$category"; then
+  printf 'Engine startup log category: %s\n' "$category" >&2
+ fi
+done
 exit 43"#,
         &[],
         false,

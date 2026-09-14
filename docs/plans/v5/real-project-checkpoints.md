@@ -365,3 +365,32 @@ the mutation lock, while a second mutation connection still receives `provider_b
 loss, independent deadline containment and explicit unknown-outcome reconciliation still passed;
 the VM stopped cleanly. The Rust suite passed 100 tests. This closes the engine-version inspection
 contention case, not service-status/readiness APIs or concurrent graph mutation scheduling.
+
+
+### September 14 WU07 network and persistence probe
+
+`live-1789400597261589000` passed the synthetic init → SQLite-backed web → HTTP check pipeline,
+including service-name DNS and the same stored token after a subsequent VM restart. Each phase
+uses the pinned Bun image, an internal candidate-owned bridge and a labelled persistent volume.
+Exact container/network/volume absence and restoration of the original guest package inventory
+were verified; the outer watchdog confirmed final VM stop and unchanged application fingerprints.
+This proves internal network/data mechanics, not the application executor or Event Agent startup.
+
+Earlier probes created their network/volume and initialized the database, but service DNS failed
+while HTTP over the container IP succeeded. Explicit aliases did not fix it. A trial nftables daemon
+flag failed at engine startup with a fixed `not found` diagnostic and was reverted. The working
+probe hash-checks four Alpine APKs, verifies their signatures, installs them offline, and restarts
+before creating networks; installing into an already-running daemon did not repair cached tool
+discovery. The guest kernel supports the resulting rules. Packages are removed after the test;
+normal product bootstrap still needs this dependency provisioning.
+
+Preserved failed evidence includes `live-1789399672754265000`, `live-1789399825295701000`,
+`live-1789399906894276000`, `live-1789400056197384000`, `live-1789400191452678000`, and
+`live-1789400468804275000`. Failed boots were explicitly recovered before reuse; no resource guard
+was relaxed. Source and owned disk identities were preserved.
+
+Final verification after this probe passed 100 Rust tests, formatting, Clippy and the release build.
+The successful run kept normal memory pressure, unchanged swapouts and an observed peak provider
+footprint of approximately 861 MB. These are resource-safety observations, not a matched performance
+cohort. The candidate VM is stopped; installed Hack and managed application env changes remain outside
+this patch. WU09 still needs an explicitly selected Linux fixture; the host-selection question is open.

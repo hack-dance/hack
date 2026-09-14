@@ -77,3 +77,13 @@ containers. 107 Rust tests, release build, rustfmt and clippy pass. Executable i
 and the production ownership/recovery driver remain open; actual Event Agent execution is not
 qualified. The user selected the existing `hetzner-ubuntu` tailnet host for WU09; SSH and capacity
 were verified read-only. See its shared-host resource envelope in `work-units.md`.
+
+
+`project::inputs` now compiles active-service argv, entrypoint, environment, user and health-test
+values from exact reviewed Compose bytes using an explicitly supplied map. It preserves null versus
+empty overrides, rejects stale reviews, absent inputs, unsupported operators/string commands,
+NUL and excessive expansion, and does not serialize executable values. `live-1789403260125753000`
+passes the graph through this compiler across restart, with a non-secret environment sentinel and
+redacted saved reviews/events. 111 Rust tests, release build, formatting and clippy pass. Next:
+production graph ownership/recovery driver, then remaining command/build/interpolation support,
+managed-secret delivery and actual application startup. No Event Agent credentials were used.

@@ -1073,3 +1073,179 @@ fn execution_dependency_compiler_preserves_review_conditions_and_refuses_invalid
         "graph_incompatible"
     );
 }
+
+#[test]
+fn executable_inputs_preserve_argv_and_resolve_only_explicit_values() {
+    use project::inputs;
+    use std::collections::BTreeMap;
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    command: [echo, '${INPUT}', '$$LITERAL', '']\n    entrypoint: []\n    environment:\n      INPUT:\n      EMPTY: ''\n      COUNT: 2\n    healthcheck:\n      test: 'test -n \"$$INPUT\"'\n",
+    );
+    let review = fixture.plan();
+    let sentinel = "private-fixture-value-$NOT_RECURSIVE";
+    let values = BTreeMap::from([("INPUT".into(), sentinel.into())]);
+    let compiled = inputs::compile(
+        &fixture.candidate,
+        fixture.options(),
+        &review.plan_id,
+        &values,
+    )
+    .unwrap();
+    let service = &compiled.services["web"];
+    assert_eq!(
+        service.command.as_ref().unwrap(),
+        &["echo", sentinel, "$LITERAL", ""]
+    );
+    assert_eq!(service.entrypoint, Some(vec![]));
+    assert_eq!(
+        service.environment,
+        vec!["COUNT=2", "EMPTY=", &format!("INPUT={sentinel}")]
+    );
+    assert_eq!(
+        service.health_test,
+        Some(vec!["CMD-SHELL".into(), "test -n \"$INPUT\"".into()])
+    );
+    assert!(
+        !serde_json::to_string(&compiled.review)
+            .unwrap()
+            .contains(sentinel)
+    );
+    let failure = inputs::compile(
+        &fixture.candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(failure.code, "execution_environment_missing");
+    assert!(!serde_json::to_string(&failure).unwrap().contains(sentinel));
+    assert!(!fixture.candidate.state_root.exists());
+}
+
+#[test]
+fn executable_inputs_reject_stale_review_and_unsupported_string_semantics() {
+    use project::inputs;
+    let fixture = Fixture::new(BASIC);
+    let old = fixture.plan();
+    fs::write(
+        fixture.project.join("compose.yaml"),
+        BASIC.replace("hello", "changed"),
+    )
+    .unwrap();
+    assert_eq!(
+        inputs::compile(
+            &fixture.candidate,
+            fixture.options(),
+            &old.plan_id,
+            &Default::default()
+        )
+        .err()
+        .unwrap()
+        .code,
+        "execution_plan_changed"
+    );
+    fs::write(
+        fixture.project.join("compose.yaml"),
+        "services:\n  web:\n    image: alpine:3.21\n    command: 'echo hello'\n",
+    )
+    .unwrap();
+    let review = fixture.plan();
+    assert_eq!(
+        inputs::compile(
+            &fixture.candidate,
+            fixture.options(),
+            &review.plan_id,
+            &Default::default()
+        )
+        .err()
+        .unwrap()
+        .code,
+        "execution_argv"
+    );
+    assert!(!fixture.candidate.state_root.exists());
+}
+
+#[test]
+fn executable_expansion_is_bounded_and_null_differs_from_empty_override() {
+    use project::inputs;
+    use std::collections::BTreeMap;
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    command: null\n    entrypoint: ''\n    environment: [INPUT]\n",
+    );
+    let review = fixture.plan();
+    let values = BTreeMap::from([("INPUT".into(), "".into())]);
+    let compiled = inputs::compile(
+        &fixture.candidate,
+        fixture.options(),
+        &review.plan_id,
+        &values,
+    )
+    .unwrap();
+    assert_eq!(compiled.services["web"].command, None);
+    assert_eq!(compiled.services["web"].entrypoint, Some(vec![]));
+    assert_eq!(compiled.services["web"].environment, ["INPUT="]);
+    for value in ["x".repeat(1024 * 1024 + 1), "nul\0value".into()] {
+        let values = BTreeMap::from([("INPUT".into(), value)]);
+        assert_eq!(
+            inputs::compile(
+                &fixture.candidate,
+                fixture.options(),
+                &review.plan_id,
+                &values
+            )
+            .err()
+            .unwrap()
+            .code,
+            "execution_input_budget"
+        );
+    }
+}
+
+#[test]
+fn executable_compiler_does_not_guess_interpolation_operators_or_load_env_files() {
+    use project::inputs;
+    use std::collections::BTreeMap;
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    command: [echo, '${INPUT:-fallback}']\n",
+    );
+    let review = fixture.plan();
+    let values = BTreeMap::from([("INPUT".into(), "provided".into())]);
+    assert_eq!(
+        inputs::compile(
+            &fixture.candidate,
+            fixture.options(),
+            &review.plan_id,
+            &values
+        )
+        .err()
+        .unwrap()
+        .code,
+        "execution_interpolation"
+    );
+    fs::write(
+        fixture.project.join("fixture.env"),
+        "INPUT=never-load-this-value\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.project.join("compose.yaml"),
+        "services:\n  web:\n    image: alpine:3.21\n    env_file: fixture.env\n",
+    )
+    .unwrap();
+    let review = fixture.plan();
+    let failure = inputs::compile(
+        &fixture.candidate,
+        fixture.options(),
+        &review.plan_id,
+        &values,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(failure.code, "execution_input_unsupported");
+    assert!(
+        !serde_json::to_string(&failure)
+            .unwrap()
+            .contains("never-load-this-value")
+    );
+}

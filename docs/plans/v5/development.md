@@ -445,6 +445,28 @@ The driver contract requires durable reservations and exact resource-identity ve
 The manual graph probe uses this shared loop with an owned Docker fixture driver and private event
 journals. Its init must complete successfully, its web service must pass its Docker healthcheck,
 and its HTTP check must complete. A failed-init control must leave web/check containers absent.
-This is the execution core, not a public Compose executor: executable command/build/environment
-compilation, durable production resource recovery, service observation and routing remain open.
+This is the execution core, not a public Compose executor: build/managed-secret delivery,
+durable production resource recovery, service observation and routing remain open.
 Review plans continue to redact values and report runtime execution unsupported.
+
+
+## Executable input compilation
+
+`project::inputs::compile` re-plans the project, requires the caller's exact reviewed plan ID,
+and verifies the Compose bytes before and after compiling active-service executable values.
+Values are held in structures without `Debug` or `Serialize`; only the redacted review can be
+saved. Compilation creates no runtime state and executes no shell or image build.
+
+The initial subset preserves null/inherit versus explicit empty argv overrides, resolves argv
+commands/entrypoints, user, scalar/list environment entries and CMD/CMD-SHELL health tests.
+Interpolation accepts `$NAME`, `${NAME}` and literal `$$`, using only the explicitly supplied
+map. Resolved values are not recursively interpolated. Missing inherited values fail closed;
+the compiler does not consult process environment or dotenv files. It rejects NUL and limits
+expanded values to 1 MiB, with at most 4096 entries per argv list. Nonempty Compose command strings,
+interpolation operators/defaults, builds and env_file delivery remain explicit implementation gates.
+
+The live fixture feeds in-memory program values through a reference-only Compose file, then uses
+the compiled commands, environment and healthcheck in its owned Docker driver. Saved review and
+event files contain no program or environment values. Its non-secret sentinel verifies delivery;
+this does not qualify managed-secret delivery, since production Docker environment persistence
+and inspection must be addressed separately before actual application credentials are supplied.

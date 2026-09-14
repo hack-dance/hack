@@ -1,8 +1,6 @@
 //! Manual WU07 infrastructure probe, not actual-project graph acceptance.
 use super::{engine::Engine, source_probe, state};
-use crate::project::execution::{
-    self, Condition, Driver, Event, Graph, Health, Observation, Service,
-};
+use crate::project::execution::{self, Condition, Driver, Event, Graph, Health, Observation};
 use crate::{Candidate, CandidateError};
 use reqwest::Method;
 use serde_json::{Value, json};
@@ -56,9 +54,11 @@ fn start(engine: &Engine<'_>, name: &str, mut config: Value) -> Result<String, C
     Ok(id)
 }
 
+type ProbeConfigs = BTreeMap<String, (String, Value)>;
+
 struct ProbeDriver<'a, 'b> {
     engine: &'a Engine<'b>,
-    configs: BTreeMap<String, (String, Value)>,
+    configs: ProbeConfigs,
     ids: BTreeMap<String, String>,
     intents: BTreeSet<String>,
     events: Vec<Value>,
@@ -128,32 +128,94 @@ impl Driver for ProbeDriver<'_, '_> {
     }
 }
 
-fn graph() -> Graph {
-    Graph {
-        services: BTreeMap::from([
-            (
-                "init".into(),
-                Service {
-                    dependencies: BTreeMap::new(),
-                    ready: Condition::Completed,
-                },
-            ),
-            (
-                "web".into(),
-                Service {
-                    dependencies: BTreeMap::from([("init".into(), Condition::Completed)]),
-                    ready: Condition::Healthy,
-                },
-            ),
-            (
-                "check".into(),
-                Service {
-                    dependencies: BTreeMap::from([("web".into(), Condition::Healthy)]),
-                    ready: Condition::Completed,
-                },
-            ),
-        ]),
+/// The fixture supplies executable values in memory, then uses the same exact-review compiler
+/// intended for the production driver. Saved Compose and review data contain references only.
+fn compile_configs(
+    candidate: &Candidate,
+    owner: &str,
+    generation: usize,
+    mut configs: ProbeConfigs,
+) -> Result<(ProbeConfigs, Graph), CandidateError> {
+    use crate::project::{self, PlanOptions, inputs};
+    use std::os::unix::fs::DirBuilderExt;
+    struct Fixture(std::path::PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
+    let root = std::env::temp_dir()
+        .canonicalize()
+        .map_err(state::io)?
+        .join(format!("hack-inputs-{owner}-{generation}"));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .map_err(state::io)?;
+    let fixture = Fixture(root);
+    let mut supplied = BTreeMap::from([("PROBE_INPUT".into(), "compiler-ok".into())]);
+    let mut services = serde_json::Map::new();
+    for (name, (_, config)) in &configs {
+        let key = format!("{}_PROGRAM", name.to_uppercase());
+        let program = config["Entrypoint"][2]
+            .as_str()
+            .ok_or_else(|| error("Fixture entrypoint missing."))?;
+        supplied.insert(
+            key.clone(),
+            format!("if(process.env.PROBE_INPUT!=='compiler-ok')throw Error('input'); {program}"),
+        );
+        let mut service = json!({"image":config["Image"],"command":[],"entrypoint":["/usr/local/bin/bun","-e",format!("${{{key}}}")],"environment":{"PROBE_INPUT":null}});
+        if name == "web" {
+            supplied.insert(
+                "HEALTH_PROGRAM".into(),
+                config["Healthcheck"]["Test"][3]
+                    .as_str()
+                    .ok_or_else(|| error("Fixture healthcheck missing."))?
+                    .into(),
+            );
+            service["healthcheck"] = json!({"test":["CMD","/usr/local/bin/bun","-e","${HEALTH_PROGRAM}"],"interval":"100ms","timeout":"1s","retries":10});
+            service["depends_on"] = json!({"init":{"condition":"service_completed_successfully"}});
+        } else if name == "check" {
+            service["depends_on"] = json!({"web":{"condition":"service_healthy"}});
+        }
+        services.insert(name.clone(), service);
+    }
+    state::write(
+        &fixture.0.join("compose.yaml"),
+        &json!({"services":services}),
+    )?;
+    let options = || PlanOptions {
+        project: &fixture.0,
+        compose_file: Path::new("compose.yaml"),
+        profiles: &[],
+    };
+    let review = project::plan(candidate, options())?;
+    let compiled = inputs::compile(candidate, options(), &review.plan_id, &supplied)?;
+    state::write(
+        &candidate
+            .state_root
+            .join("review/wu07")
+            .join(format!("{owner}-generation-{generation}-input-review.json")),
+        &compiled.review,
+    )?;
+    let graph = Graph::from_plan(
+        &compiled.review.plan,
+        &BTreeMap::from([
+            ("init".into(), Condition::Completed),
+            ("web".into(), Condition::Healthy),
+            ("check".into(), Condition::Completed),
+        ]),
+    )?;
+    for (name, input) in compiled.services {
+        let config = &mut configs.get_mut(&name).expect("compiled service").1;
+        config["Cmd"] = json!(input.command);
+        config["Entrypoint"] = json!(input.entrypoint);
+        config["Env"] = json!(input.environment);
+        if let Some(test) = input.health_test {
+            config["Healthcheck"]["Test"] = json!(test);
+        }
+    }
+    Ok((configs, graph))
 }
 
 #[test]
@@ -269,6 +331,8 @@ trap - EXIT
                 ("web".into(), (names[1].clone(), web)),
                 ("check".into(), (names[2].clone(), config(probe, false))),
             ]);
+            let (configs, compiled_graph) =
+                compile_configs(&candidate, &owner, generation, configs)?;
             if generation == 0 {
                 phase = "failed-init-control";
                 let mut failed = ProbeDriver {
@@ -281,7 +345,7 @@ trap - EXIT
                 };
                 failed.configs.get_mut("init").expect("init").1 =
                     config("process.exit(23)".into(), false);
-                if !matches!(execution::run(&graph(), &mut failed, Duration::from_secs(20)), Err(e) if e.code == "graph_service_failed")
+                if !matches!(execution::run(&compiled_graph, &mut failed, Duration::from_secs(20)), Err(e) if e.code == "graph_service_failed")
                 {
                     return Err(error("Failed init was not rejected."));
                 }
@@ -305,7 +369,7 @@ trap - EXIT
                 events: Vec::new(),
                 journal: evidence_dir.join(format!("{owner}-generation-{generation}-events.json")),
             };
-            execution::run(&graph(), &mut driver, Duration::from_secs(20))?;
+            execution::run(&compiled_graph, &mut driver, Duration::from_secs(20))?;
             for name in &names {
                 remove_container(&engine, name, &owner)?;
             }

@@ -444,3 +444,28 @@ Cargo 1.97.1. Existing OpenClaw, router, share gateway and tunnel containers are
 workloads or configuration were changed. Initial isolated testing is bounded to 2 CPUs, 2 GiB RAM
 and 5 GiB retained artifacts, with fresh headroom checks before effects. The host-selection question
 is resolved; adapter/transport, workload and reconnect qualification remain open.
+
+
+## September 14 — Exact-review executable inputs
+
+`project::inputs` re-plans and verifies the caller's expected plan ID, then verifies the exact
+Compose bytes around compilation. Active-service argv/entrypoint, scalar/list environment, user
+and CMD/CMD-SHELL health values resolve only from explicitly supplied inputs; process environment
+and dotenv files are not consulted. Structures containing resolved values are neither Debug nor
+Serialize. Compilation itself creates no runtime state. Null/inherited and empty overrides remain
+distinct; missing values, unsupported command-string/operator/build/env_file forms, NUL and expanded
+values beyond 1 MiB are refused. Four regression tests cover these boundaries and redacted errors.
+
+`live-1789403260125753000` runs both synthetic graph generations through the compiler. Compose
+contains references and program values are supplied in memory; each service confirms a non-secret
+environment sentinel. Init completion, web health, DNS/HTTP check, failed-init dependent absence,
+SQLite restart persistence and cleanup pass. Saved input reviews and event journals were checked
+for absence of the sentinel and program text. Pressure stayed normal, swapouts remained 4132 and
+peak provider footprint was 912,639,560 bytes. Protected source inputs were unchanged; final VM
+state is stopped. Validation: 111 Rust tests plus the live graph control, release build, rustfmt
+and all-target clippy pass.
+
+This qualifies executable value compilation and its fixture-driver integration. The production
+ownership/recovery driver, command-string/interpolation expansion coverage, builds, managed-secret
+delivery without Docker metadata persistence, lifecycle/routing and actual Event Agent startup
+remain open. No application credentials or existing Hetzner workloads were changed.

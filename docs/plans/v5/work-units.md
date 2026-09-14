@@ -166,8 +166,11 @@ and restart readback proving deleted owned resources stay deleted. No production
 2. Shared dependency/readiness execution core passes `live-1789402358407299000`: init completion,
    web health and check completion order, failed-init dependent absence, restart and cleanup.
    It compiles reviewed dependency conditions and requires explicit readiness goals and durable
-   driver intent before start. Complete executable command/build/environment compilation and the
-   production ownership/recovery driver; review-plan redactions are not executable input.
+   driver intent before start. Exact-review executable argv/environment/healthcheck compilation
+   passes `live-1789403260125753000`, including explicit non-secret environment delivery and
+   redacted saved reviews/journals. Complete command-string tokenization,
+   interpolation operators, build/env_file delivery and the production ownership/recovery driver;
+   review-plan redactions are not executable input.
 3. Deliver managed environment values without persisting secrets, handle image/build inputs and
    lifecycle processes, and add service-level observation plus isolated host-loopback routing.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,

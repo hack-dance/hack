@@ -2,6 +2,7 @@
 mod compose;
 mod enrollment;
 pub mod execution;
+pub mod inputs;
 pub mod snapshot;
 mod source;
 pub mod watcher;

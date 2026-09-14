@@ -89,16 +89,66 @@ watchdog completed owned VM shutdown with unchanged installed Hack/global config
 The first pilot exposed a shell rule: placing a subshell in an `||` list disables `set -e` inside
 its body. Removing that conditional context restored preflight and ownership refusals. The next
 pilot exposed retained empty mount-point directories after VM shutdown. Admission is now scoped
-to the current boot; earlier empty directories cannot consume its eight-slot budget. Those earlier
-pilot directories are retained metadata, not claimed as reclaimed disk space. Stale-directory
-recovery and interrupted-stage reconciliation remain open. A failed stage attempts identity-checked
+to the current boot; earlier empty directories cannot consume its eight-slot budget. The nine earlier
+pilot directories have now been explicitly retired under the recovery qualification below. A failed stage attempts identity-checked
 cleanup and reports uncertainty when success is not established; callers must not assume absence.
+
+## Recovery from immutable allocation intent
+
+Before any guest allocation, staging now durably writes an immutable, mode-0600 intent under
+`.hack-local/run/environment-leases`. It contains only schema version, service, slot ID, provider
+incarnation and guest boot. Values, environment keys, value hashes and renewal authority are absent.
+A staging error identifies its retained cleanup intent so a caller can address it after losing the
+in-memory handle. At most 4096 intent files are admitted; retired intents are retained for retry,
+and pruning that metadata is a separate open task.
+
+`provider::environment_recovery::recorded_slots` lists intent-file IDs, not live leases or validated
+contents. `retire_recorded` is an explicit cleanup operation: callers must own the allocation's
+lifecycle, and must not automatically retire every listed entry. Cleanup uses the provider mutation
+lock and cleanup admission, validates the private receipt and incarnation, and never restores data
+or refreshes expiry.
+
+On the same guest boot, a matching tmpfs allocation can be removed even if interruption occurred
+before its service/expiry files were written. An absent slot or an empty, unmounted directory is
+also retry-safe. On an older boot of the same provider incarnation, only absent or empty, unmounted
+directories are eligible. Foreign mount sources, symlinks, nonempty unmounted directories,
+unrecorded paths and foreign incarnations are refused. Cleanup removes no recursive directory tree.
+The ordinary in-memory handle still refuses a different boot; cross-boot retirement requires the
+cleanup-only intent path.
+
+A complete initial `.pending` intent can be validated and atomically promoted before cleanup.
+Partial JSON, unknown fields, identity mismatches, conflicting committed/pending files and aliases
+are retained and refused. Recovery never deletes pending publication state to force a retry. These
+controls do not claim recovery from arbitrary torn storage writes or hostile modification by the
+runtime owner.
+
+Live run `environment-recovery-1789428814471630000` passed the existing fixed-output lease
+controls together with lost-handle cleanup, missing guest
+metadata, an empty mount-point directory, foreign-mount/symlink/nonempty/unrecorded refusal, and
+repeated retirement. After an actual VM shutdown and restart, the synthetic payload file was
+absent and the prior-boot directory was retired from its original intent without reconstructing
+values. The retained records contained neither the synthetic value nor its environment key.
+
+The nine pre-intent pilot directories were handled separately in
+`environment-legacy-cleanup-1789428106505741000`. Their exact names and timestamps matched the
+recorded pilot; a private manifest selected only those entries. The manual fixture cleanup
+rechecked root ownership, 0700 permissions, exact modification time, lack of a mount, and emptiness
+at removal. The final inventory found none remaining. This one-time qualification path is not
+automatic adoption of unknown directories by the product API. Both runs stopped the owned VM and
+preserved installed Hack/global configuration hashes.
+
+The full Rust gate also exposed an enrollment operation reported as busy after completion.
+Enrollment now explicitly unlocks on exit instead of relying on descriptor closure. A regression
+test retains a duplicated descriptor: it fails with close-only release and passes with explicit
+unlock. This proves the descriptor-lifetime mechanism; the exact inheritance timing of the original
+suite failure was not traced. All 142 regular Rust tests and Clippy pass after the correction.
 
 ## Remaining implementation and acceptance
 
 - Integrate the fixed-output delivery component with graph allocation and its mutation lock.
-- Bind ephemeral material to the service, provider incarnation, guest boot, authorized provider
-  reference and lease expiry. Verify ownership before cleanup; refuse missing or expired delivery.
+- Bind native provider authorization and expiry to the existing service/incarnation/boot guards.
+  The cleanup intent alone must never authorize reading values or renewing a lease.
+- Qualify pruning of retired cleanup intents without losing retry or ownership evidence.
 - Apply the stricter 8 KiB delivery admission at the graph boundary; the input compiler still
   accepts a 1 MiB aggregate. Larger delivery and chunking remain unsupported.
 - Integrate service startup and non-root/entrypoint behavior, health checks, restart/redelivery and

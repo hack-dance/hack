@@ -17,7 +17,7 @@ fn error(code: &'static str) -> CandidateError {
         "Environment delivery refused; values and guest output omitted.",
     )
 }
-fn name(value: &str) -> bool {
+pub(super) fn name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value
@@ -42,10 +42,10 @@ pub struct PendingEnvironment {
 /// An in-memory handle, not a durable receipt or native provider lease.
 /// Expiry blocks verification/use; explicit removal or VM shutdown reclaims the tmpfs.
 pub struct EnvironmentLease {
-    service: String,
-    slot: String,
-    incarnation: String,
-    boot: String,
+    pub(super) service: String,
+    pub(super) slot: String,
+    pub(super) incarnation: String,
+    pub(super) boot: String,
     deadline: Instant,
 }
 impl PendingEnvironment {
@@ -101,6 +101,7 @@ impl PendingEnvironment {
             boot: guest.boot_id().into(),
             deadline: self.deadline,
         };
+        super::environment_recovery::record(candidate, &lease)?;
         let seconds = remaining(lease.deadline)?;
         let result = guest.execute(
             STAGE,
@@ -112,11 +113,19 @@ impl PendingEnvironment {
             .is_ok_and(|value| value == "environment-staged-v1\n")
         {
             // Identity-checked removal also handles a partially written payload. Never expose output.
-            let _ = guest.execute(REMOVE, &[&lease.slot, &lease.service], None);
-            return Err(error("environment_stage_uncertain"));
+            let _ =
+                super::environment_recovery::retire(candidate, &guest, &lease.slot, Some(&lease));
+            return Err(CandidateError::new(
+                "environment_stage_uncertain",
+                format!(
+                    "Environment staging uncertain; cleanup intent {} retained. Values and guest output omitted.",
+                    lease.slot
+                ),
+            ));
         }
         if remaining(lease.deadline).is_err() {
-            let _ = guest.execute(REMOVE, &[&lease.slot, &lease.service], None);
+            let _ =
+                super::environment_recovery::retire(candidate, &guest, &lease.slot, Some(&lease));
             return Err(error("environment_expired"));
         }
         Ok(lease)
@@ -131,8 +140,16 @@ fn remaining(deadline: Instant) -> Result<u64, CandidateError> {
         .ok_or_else(|| error("environment_expired"))
 }
 impl EnvironmentLease {
-    fn guest<'a>(&self, candidate: &'a Candidate) -> Result<OwnedGuest<'a>, CandidateError> {
-        let guest = OwnedGuest::connect(candidate)?;
+    fn guest<'a>(
+        &self,
+        candidate: &'a Candidate,
+        cleanup: bool,
+    ) -> Result<OwnedGuest<'a>, CandidateError> {
+        let guest = if cleanup {
+            OwnedGuest::connect_cleanup(candidate)?
+        } else {
+            OwnedGuest::connect(candidate)?
+        };
         if guest.incarnation() != self.incarnation || guest.boot_id() != self.boot {
             return Err(error("environment_boot_changed"));
         }
@@ -141,7 +158,7 @@ impl EnvironmentLease {
     /// Revalidates the lease before exposing its guest file path. Callers must not cache this as authority.
     pub fn verified_path(&self, candidate: &Candidate) -> Result<String, CandidateError> {
         remaining(self.deadline)?;
-        let guest = self.guest(candidate)?;
+        let guest = self.guest(candidate, false)?;
         let result = guest.execute(VERIFY, &[&self.slot, &self.service], None)?;
         if result != "environment-verified-v1\n" {
             return Err(error("environment_verification"));
@@ -151,12 +168,8 @@ impl EnvironmentLease {
     }
     /// Cleanup is permitted after expiry and is retry-safe for an absent slot on the same boot.
     pub fn remove(&self, candidate: &Candidate) -> Result<(), CandidateError> {
-        let guest = self.guest(candidate)?;
-        let result = guest.execute(REMOVE, &[&self.slot, &self.service], None)?;
-        if result != "environment-removed-v1\n" {
-            return Err(error("environment_cleanup"));
-        }
-        Ok(())
+        let guest = self.guest(candidate, true)?;
+        super::environment_recovery::retire(candidate, &guest, &self.slot, Some(self))
     }
 }
 
@@ -208,20 +221,6 @@ test "$(cut -d. -f1 /proc/uptime)" -lt "$(cat "$root/expires")"
 test "$(stat -c %s "$root/values.json")" -le 8192
 ) >/dev/null 2>&1
 printf 'environment-verified-v1\n'
-"#;
-const REMOVE: &str = r#"
-(
-set -eu
-root="/run/$1"
-test ! -L "$root"
-if test ! -e "$root"; then exit 0; fi
-test "$(findmnt -n -o FSTYPE --mountpoint "$root")" = tmpfs
-test "$(findmnt -n -o SOURCE --mountpoint "$root")" = "$1"
-test "$(cat "$root/service")" = "$2"
-umount "$root"
-rmdir "$root"
-) >/dev/null 2>&1
-printf 'environment-removed-v1\n'
 "#;
 
 #[cfg(test)]
@@ -311,6 +310,13 @@ mod tests {
                 .err()
                 .unwrap();
             assert_eq!(overflow.code, "environment_stage_uncertain");
+            assert!(
+                super::super::environment_recovery::recorded_slots(&candidate)
+                    .unwrap()
+                    .iter()
+                    .any(|slot| overflow.message.contains(slot))
+            );
+            assert!(!overflow.message.contains("synthetic-lease-only"));
             leases[0].service = "wrong-service".into();
             assert!(leases[0].verified_path(&candidate).is_err());
             assert!(leases[0].remove(&candidate).is_err());
@@ -380,5 +386,81 @@ mod tests {
         assert!(positive_control, "lease log control missing");
         let guest = OwnedGuest::connect(&candidate).unwrap();
         assert_eq!(guest.execute("for path in /run/\"$1\"*; do if test -e \"$path\" || test -L \"$path\"; then exit 1; fi; done; printf 'empty\\n'", &[&format!("hack-env-lease-{}-", guest.boot_id())], None).unwrap(), "empty\n");
+    }
+    #[test]
+    #[ignore = "Manual recovery phase one; owned VM and external watchdog required"]
+    fn interrupted_allocations_are_retired_from_immutable_intent() {
+        use super::super::environment_recovery::{recorded_slots, retire_recorded};
+        let root = std::env::var("HACK_LOCAL_TEST_ROOT").expect("explicit candidate root");
+        let candidate = Candidate::discover(std::path::Path::new(&root)).unwrap();
+        let values = BTreeMap::from([("TOKEN".into(), "synthetic-recovery-only".into())]);
+        for case in 0..6 {
+            let lease = PendingEnvironment::new("web", &values, Duration::from_secs(120))
+                .unwrap()
+                .stage(&candidate)
+                .unwrap();
+            let slot = lease.slot.clone();
+            drop(lease);
+            if case != 0 {
+                let guest = OwnedGuest::connect(&candidate).unwrap();
+                let script = match case {
+                    1 => "rm \"$root/service\" \"$root/expires\" \"$root/values.json\"",
+                    2 => "umount \"$root\"",
+                    3 => "umount \"$root\"; printf fixture > \"$root/unexpected\"",
+                    4 => {
+                        "umount \"$root\"; mount -t tmpfs -o mode=0700,size=65536 environment-foreign-test \"$root\""
+                    }
+                    _ => "umount \"$root\"; rmdir \"$root\"; ln -s /tmp \"$root\"",
+                };
+                guest.execute(&format!("root=\"/run/$1\"; test \"$(findmnt -n -o SOURCE --mountpoint \"$root\")\" = \"$1\"; {script}"), &[&slot], None).unwrap();
+            }
+            if case >= 3 {
+                assert!(
+                    retire_recorded(&candidate, &slot).is_err(),
+                    "foreign state must be retained"
+                );
+                let guest = OwnedGuest::connect_cleanup(&candidate).unwrap();
+                let repair = match case {
+                    3 => "test \"$(cat \"$root/unexpected\")\" = fixture; rm \"$root/unexpected\"",
+                    4 => {
+                        "test \"$(findmnt -n -o SOURCE --mountpoint \"$root\")\" = environment-foreign-test; umount \"$root\""
+                    }
+                    _ => "test -L \"$root\"; test \"$(readlink \"$root\")\" = /tmp; rm \"$root\"",
+                };
+                guest
+                    .execute(&format!("root=\"/run/$1\"; {repair}"), &[&slot], None)
+                    .unwrap();
+            }
+            retire_recorded(&candidate, &slot).unwrap();
+            retire_recorded(&candidate, &slot).unwrap();
+        }
+        {
+            let guest = OwnedGuest::connect(&candidate).unwrap();
+            let unknown = format!("hack-env-lease-{}-{}", guest.boot_id(), "f".repeat(32));
+            guest
+                .execute("umask 077; mkdir \"/run/$1\"", &[&unknown], None)
+                .unwrap();
+            drop(guest);
+            assert!(retire_recorded(&candidate, &unknown).is_err());
+            let guest = OwnedGuest::connect_cleanup(&candidate).unwrap();
+            guest
+                .execute("test -d \"/run/$1\"; rmdir \"/run/$1\"", &[&unknown], None)
+                .unwrap();
+        }
+        // Leave one real allocation for an actual VM restart; no handle survives into phase two.
+        let lease = PendingEnvironment::new("web", &values, Duration::from_secs(120))
+            .unwrap()
+            .stage(&candidate)
+            .unwrap();
+        assert!(recorded_slots(&candidate).unwrap().contains(&lease.slot));
+        let record = std::fs::read_to_string(
+            candidate
+                .state_root
+                .join("run/environment-leases")
+                .join(format!("{}.json", lease.slot)),
+        )
+        .unwrap();
+        assert!(!record.contains("synthetic-recovery-only"));
+        assert!(!record.contains("TOKEN"));
     }
 }

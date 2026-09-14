@@ -5,6 +5,13 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 
 const MAX_RECEIPT_BYTES: u64 = 4 * 1024 * 1024;
+struct EnrollmentLock(File);
+impl Drop for EnrollmentLock {
+    fn drop(&mut self) {
+        // A duplicated descriptor must not extend the completed operation's lock lifetime.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnrollmentReceipt {
@@ -238,7 +245,7 @@ pub fn enroll(
             "Another enrollment operation holds this candidate's lock.",
         ));
     }
-    // Lock is held through publication and released by close, including every error path.
+    let _lock = EnrollmentLock(lock);
     let current = super::plan(candidate, options)?;
     if current.plan_id != expected_plan {
         return Err(problem(
@@ -330,4 +337,46 @@ pub fn enroll(
             "Published enrollment could not be read back.",
         )
     })
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    #[test]
+    fn released_enrollment_lock_is_not_extended_by_a_duplicated_descriptor() {
+        let mut random = [0; 16];
+        File::open("/dev/urandom")
+            .unwrap()
+            .read_exact(&mut random)
+            .unwrap();
+        let token: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("hack-enrollment-lock-{token}"));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let guard = EnrollmentLock(file);
+        let inherited = guard.0.try_clone().unwrap();
+        drop(guard);
+        let next = File::open(&path).unwrap();
+        let acquired = unsafe { libc::flock(next.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        // Remove the owned fixture even when checking the unfixed close-only behavior.
+        drop(inherited);
+        drop(next);
+        fs::remove_file(path).unwrap();
+        assert_eq!(
+            acquired, 0,
+            "a completed operation must release its lock while duplicate descriptors remain alive"
+        );
+    }
 }

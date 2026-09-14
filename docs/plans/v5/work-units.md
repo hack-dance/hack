@@ -226,8 +226,16 @@ and restart readback proving deleted owned resources stay deleted. No production
    The fixed-output component now stages at most 8 KiB per service into one of eight current-boot
    tmpfs slots, with service/boot binding, expiry refusal and explicit cleanup. Live lease controls
    pass `environment-lease-1789427425288311000`. Native provider authorization, graph handoff,
-   active-process expiry behavior, interrupted-stage/stale-directory recovery and application
-   restart/redelivery remain open. Expiry does not promise automatic deletion or stop a running app.
+   active-process expiry behavior and application restart/redelivery remain open. Expiry does not
+   promise automatic deletion or stop a running app.
+   Immutable, value-free allocation intents now authorize explicit interrupted-stage cleanup and
+   old-boot empty-directory retirement. Live recovery passes `environment-recovery-1789428814471630000`;
+   all nine pre-intent pilot directories were individually verified and removed in
+   `environment-legacy-cleanup-1789428106505741000`. Retired-intent pruning remains open; intent
+   records authorize cleanup only, not renewed use or automatic retirement of active allocations.
+   Validation: 142 regular Rust tests, 940 CLI tests, typecheck, lint, privacy and release build pass.
+   The Rust gate also exposed an enrollment lock lifetime defect; explicit unlock now passes a
+   regression that retained a duplicated descriptor and failed under the previous close-only release.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,
    failures and owned cleanup. The synthetic SQLite probe does not replace this gate.
 5. Qualify the guest base and networking package versions for distribution in WU11; the current

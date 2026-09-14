@@ -6,6 +6,7 @@ mod engine;
 pub mod environment;
 #[cfg(test)]
 mod environment_probe_test;
+pub mod environment_recovery;
 pub mod graph;
 pub use engine::{EngineInfo, info as engine_info};
 mod identity;

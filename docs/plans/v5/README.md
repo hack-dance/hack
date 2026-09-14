@@ -13,12 +13,17 @@ Every checkpoint must also complete a [real-project attempt and gap review](real
 [Checkpoint 02](checkpoint-02.md) tracks the private lifecycle implementation and its live gates.
 [Checkpoint 03](checkpoint-03.md) records Compose review and real-project enrollment.
 [Checkpoint 04](checkpoint-04.md) records durable fixture jobs and owned cancellation.
+The [September 14 benchmark and review](benchmark-20260914.md) compares the owned graph executor
+with direct Docker Compose and stable Hack 4.1.1/4.2.0, including the remaining acceptance gates.
 
 The first implementation is `packages/runtime-core`, a Rust library and candidate executable.
 The repository-root `hack-local` launcher addresses only that checkout's build. Commands include read-only `info` and `plan`, private package preparation, resource probing, and
 experimental `runtime up/status/down/recover`, bounded `project plan/enroll/status`, and an explicit
-local node for durable built-in fixture jobs. Project execution is not implemented. A project path in a plan is
-not permission to mount it, read its secrets, or attach to its existing environment.
+local node for durable built-in fixture jobs. The owned graph executor can run a bounded supported
+Compose plan, inspect readiness, restart or restore retained data, clean up, and export/prune archived
+evidence. Full application source/build, managed environment, lifecycle and routing compatibility
+remain open. A project path in a plan is not permission to mount it, read its secrets, or attach to
+its existing environment.
 
 ## Decisions
 

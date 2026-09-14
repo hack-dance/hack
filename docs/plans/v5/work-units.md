@@ -24,10 +24,10 @@ not satisfy application acceptance. Carry every gap into the next checkpoint's a
 | WU04 | Durable operations, receipts, jobs, and cancellation | WU02–03 | Component implemented for bounded host and immutable-source jobs; full application execution remains open; see [checkpoint 04](checkpoint-04.md) and [real-project gaps](real-project-checkpoints.md) |
 | WU05 | Native source and incremental development sync | WU03–04 | In progress; actual source-to-container proof passed, sync acceptance pending |
 | WU06 | Immutable job input and generation enforcement | WU04–05 | In progress; M3 immutable-source execution, real project tests and explicit reconciliation pass; supervisor-loss containment and killed-publisher reconciliation pass; remaining cleanup/cache controls pending |
-| WU07 | Real graph, persistent data, and loopback endpoints | WU03–06 | In progress; owned graph driver, readiness, restart/data and process-loss recovery pass; real application acceptance open |
+| WU07 | Real graph, persistent data, and loopback endpoints | WU03–06 | In progress; owned graph, persistent restore, process-loss recovery and verified evidence retention pass; real application acceptance open |
 | WU08 | Durable terminals and bounded event/log streams | WU04, WU07 | Planned |
-| WU09 | Native Linux and private SSH parity | WU05–08 | Planned; requires a selected Linux fixture host |
-| WU10 | Measured speed, footprint, and reclamation | WU07–09 | Planned; corrected research cohort incomplete |
+| WU09 | Native Linux and private SSH parity | WU05–08 | Planned; Hetzner fixture host selected and access verified; adapter qualification open |
+| WU10 | Measured speed, footprint, and reclamation | WU07–09 | In progress; [32-trial warm graph comparison](benchmark-20260914.md) complete; full application, idle/reclamation and remote qualification open |
 | WU11 | Env/TLS/slim compatibility and migration packaging | WU07–10 | Planned; not a release authorization |
 
 The sequence starts with Mac runtime mechanics, but protocol and source decisions must accommodate
@@ -244,6 +244,12 @@ profiles silently. Leave shared OrbStack accounting incomparable where attributi
 cache/order bias, stalled output subscriber, and repeated create/cancel leakage.
 **Evidence:** raw per-run timing/identity/failure records; five rotated lifecycle runs at minimum;
 longer idle/resource windows; actual reviewer-driven local and remote DX. No single-number winner.
+
+**September 14 checkpoint:** eight rotated rounds against direct Compose, preserved Hack 4.1.1 and
+updated 4.2.0 pass the same bounded init/SQLite/web/check workload. Candidate readiness is faster;
+direct Compose teardown and the internal HTTP probe are faster. See the
+[protocol, samples and limits](benchmark-20260914.md). This closes the warm component comparison,
+not the full WU10 acceptance criteria. Carry the HTTP latency difference into application-load work.
 
 ## WU11 — Preserve compatibility and qualify distribution
 

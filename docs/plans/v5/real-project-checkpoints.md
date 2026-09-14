@@ -619,8 +619,8 @@ host power loss and deliberately torn filesystem writes remain unqualified. The 
 pressure stays normal, swapouts remain 4132, peak provider footprint is 1,017,382,592 bytes, and
 protected source inputs are unchanged.
 
-The initial full suite exposed a lock-release test race: a new enrollment briefly still observed
-its test-owned lock as busy after handle drop. The test now explicitly unlocks before asserting
+The initial full suite observed an intermittent busy lock after the test-owned handle was dropped;
+the underlying cause was not established. The test now explicitly unlocks before asserting
 new enrollment succeeds, without changing production locking or adding retries. The focused test
 and full 118-test suite pass, as do release build, rustfmt and all-target clippy. The failed run
 remains in `.hack-local/retention-tests.log`; the final suite is `retention-final-tests.log`.

@@ -134,3 +134,13 @@ validation passes after making test-owned enrollment lock release explicit. Phys
 loss/torn filesystem writes remain a separate test boundary. Benchmark qualification now targets
 installed stable 4.1.1, updated 4.2.0, direct Docker Compose and the candidate with matched isolated
 workload/resource settings; pilot measurements are not the final cohort.
+
+The corrected eight-round cohort `benchmark-1789414107167633000` passes all 32 measured trials
+and four excluded warmups. Median fresh readiness including the 200-request check is 1.282s for
+the candidate, 1.550s for Compose, 2.162s for 4.1.1 and 2.217s for 4.2.0. Direct Compose tears down
+faster, and the candidate's internal HTTP probe has higher latency. See the
+[full benchmark, excluded attempts and review](benchmark-20260914.md). The VM is stopped and all
+fixture resources/registrations are absent; protected inputs match except normal registry
+observation timestamps. Global Hack and its running API-compatible daemon are verified at 4.2.0;
+4.1.1 is preserved privately. Application source/build and managed environment delivery remain
+the critical path; this component result does not close WU07 or full WU10.

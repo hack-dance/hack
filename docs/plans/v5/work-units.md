@@ -183,9 +183,11 @@ and restart readback proving deleted owned resources stay deleted. No production
    are bounded at eight; archives at 256. Restore-specific SIGKILL controls at committed intent,
    after create and after start pass `live-1789411660314640000`, including explicit recovery
    with the original database token. Bounded local `graph export` passes byte/hash comparison,
-   overwrite refusal and consumed-ID preservation. Follow up with partial-export reconciliation,
-   archive pruning/export retention with durable consumed-ID reservations, and filesystem/power-loss
-   boundaries. Changed-graph data adoption remains separate; review-plan redactions are not
+   overwrite refusal and consumed-ID preservation. Export reconciliation, verified archive pruning
+   with durable consumed-ID records, retry of partial consumed-ID publication, and abrupt owned-VM
+   loss with committed database-token readback pass `live-1789412593555594000`. Export bundles and
+   consumed IDs are retained; physical host power loss and torn-write/filesystem fault injection
+   remain outside this bounded qualification. Changed-graph data adoption remains separate; review-plan redactions are not
    executable input.
    Capture concurrent graph/source resource accounting as a separate follow-up: the initial
    guard intentionally admits one workload and does not provide concurrent scheduling.

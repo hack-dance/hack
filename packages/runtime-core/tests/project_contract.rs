@@ -808,6 +808,8 @@ fn a_live_enrollment_lock_refuses_another_writer() {
         "enrollment_busy"
     );
     assert!(!parent.join(&plan.plan.namespace).exists());
+    // Release the test lock explicitly before asserting that another writer can acquire it.
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
     drop(lock);
     assert_eq!(
         project::enroll(&fixture.candidate, fixture.options(), &plan.plan_id)

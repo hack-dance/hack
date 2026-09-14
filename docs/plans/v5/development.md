@@ -511,7 +511,14 @@ verification and retains the original archive and consumed ID. Export refuses ov
 hard links, public files and changed/oversized inputs. Limits are 128 total entries, three nested
 directory levels, 1 MiB per file and 16 MiB of file contents. Permissions/timestamps are normalized;
 this is an evidence export, not a filesystem backup/import. Partial output stays `.pending` and
-blocks retry; explicit partial-export recovery and pruning remain separate work.
+blocks retry. `graph reconcile-export --run-id <id>` retains the pending bytes in one of eight
+private recovery slots before allowing a fresh export; it never publishes interrupted bytes.
+`graph prune --run-id <id>` requires an exact verified export, commits a consumed-ID record under
+`.hack-local/run/graph-consumed/<id>/`, then removes only matching original evidence. The export
+and consumed ID remain. Repeating prune resumes verified partial deletion; a partial consumed-ID
+publication is retained and rebuilt only while the original archive still exactly matches its
+export. Altered or missing exports block pruning. Consumed records are capped at 4096; this is
+not permission to delete them or to reclaim exported bundles.
 
 Private receipts under `.hack-local/run/graphs/<attempt>/state.json` contain identity, readiness
 conditions, ownership and phase metadata; they do not contain commands or environment values.

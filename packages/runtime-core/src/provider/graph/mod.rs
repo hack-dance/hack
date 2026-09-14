@@ -5,6 +5,8 @@ mod config;
 mod export;
 pub use export::{Export, export};
 mod journal;
+mod retention;
+pub use retention::{prune, reconcile_export};
 mod restore;
 use super::{engine::Engine, state};
 use crate::{
@@ -546,7 +548,14 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
         ));
     }
     let archived = archive::path(candidate, options.run_id)?;
-    if root.exists() || root.is_symlink() || archived.exists() || archived.is_symlink() {
+    let consumed = retention::consumed(candidate, options.run_id)?;
+    if root.exists()
+        || root.is_symlink()
+        || archived.exists()
+        || archived.is_symlink()
+        || consumed.exists()
+        || consumed.is_symlink()
+    {
         return Err(error(
             "graph_replay_refused",
             "A graph attempt directory already exists; inspect or clean it explicitly.",

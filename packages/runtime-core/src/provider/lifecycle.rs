@@ -1176,6 +1176,39 @@ fn engine_was_not_started(phase: &str, boot: Option<&str>, daemon: Option<u32>) 
 }
 
 #[cfg(test)]
+pub(super) fn kill_owned_vm_for_test(candidate: &Candidate) -> Result<(), CandidateError> {
+    let guest = OwnedGuest::connect(candidate)?;
+    if guest.profile() != super::Profile::Development {
+        return Err(CandidateError::new(
+            "fixture_profile",
+            "VM kill control requires development profile.",
+        ));
+    }
+    let recorded = guest.owner.process.as_ref().expect("verified process");
+    identity::verify(
+        recorded,
+        &identity::observe(recorded.pid)?,
+        &binary(candidate),
+        unsafe { libc::geteuid() },
+    )?;
+    // Test-only abrupt VM loss, after checking native PID/start/UID/executable identity.
+    if unsafe { libc::kill(recorded.pid, libc::SIGKILL) } != 0 {
+        return Err(io(std::io::Error::last_os_error()));
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while identity::alive(recorded.pid)? && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if identity::alive(recorded.pid)? {
+        return Err(CandidateError::new(
+            "fixture_kill",
+            "Owned VM remains alive after kill control.",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

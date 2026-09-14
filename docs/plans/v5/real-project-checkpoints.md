@@ -602,3 +602,25 @@ All 118 Rust tests, release build, rustfmt, all-target clippy and CLI reference 
 All fixture resources are confirmed absent; the VM ends stopped with no live provider process.
 Pressure stays normal, swapouts remain 4132, peak provider footprint is 1,003,243,296 bytes, and
 protected inputs are unchanged. No application speedup or full application readiness is claimed.
+
+
+## September 14 — Retention recovery, verified pruning and abrupt VM loss
+
+`live-1789412593555594000` passes retained partial-export bytes and explicit reconciliation,
+byte-verified archive pruning after durable consumed-ID publication, recovery from a simulated
+partial consumed-ID receipt, idempotent prune, and replay refusal after the original archive is
+removed. The exported evidence remains. Partial deletion can resume only while remaining bytes
+match the verified export and the consumed-ID receipt identifies the same owned attempt.
+
+A test-only native-identity check gates SIGKILL of the owned development VM while the graph is
+ready. Explicit runtime recovery and graph restart preserve the committed random database token.
+The existing five graph-client SIGKILL controls also pass. This is abrupt VM/process loss; physical
+host power loss and deliberately torn filesystem writes remain unqualified. The VM ends stopped,
+pressure stays normal, swapouts remain 4132, peak provider footprint is 1,017,382,592 bytes, and
+protected source inputs are unchanged.
+
+The initial full suite exposed a lock-release test race: a new enrollment briefly still observed
+its test-owned lock as busy after handle drop. The test now explicitly unlocks before asserting
+new enrollment succeeds, without changing production locking or adding retries. The focused test
+and full 118-test suite pass, as do release build, rustfmt and all-target clippy. The failed run
+remains in `.hack-local/retention-tests.log`; the final suite is `retention-final-tests.log`.

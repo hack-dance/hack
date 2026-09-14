@@ -32,19 +32,7 @@ pub fn export(candidate: &Candidate, run: &str) -> Result<Export, CandidateError
             "Archive identity differs from the owned removed attempt.",
         ));
     }
-    let mut files = BTreeMap::new();
-    collect(&root, &root, 0, &mut files, &mut 0, &mut 128)?;
-    let mut tar = tar::Builder::new(Vec::new());
-    for (name, bytes) in &files {
-        let mut header = tar::Header::new_gnu();
-        header.set_size(bytes.len() as u64);
-        header.set_mode(0o600);
-        header.set_mtime(0);
-        header.set_cksum();
-        tar.append_data(&mut header, name, bytes.as_slice())
-            .map_err(state::io)?;
-    }
-    let bytes = tar.into_inner().map_err(state::io)?;
+    let (bytes, files) = bundle(&root)?;
     let parent = candidate.state_root.join("exports/graphs");
     state::private_directory(&parent)?;
     let path = parent.join(format!("{run}.tar"));
@@ -73,12 +61,29 @@ pub fn export(candidate: &Candidate, run: &str) -> Result<Export, CandidateError
         path,
         sha256: format!("{:x}", Sha256::digest(&bytes)),
         bytes: bytes.len(),
-        files: files.len(),
+        files,
         original_retained: true,
     })
 }
 
-fn collect(
+pub(super) fn bundle(root: &Path) -> Result<(Vec<u8>, usize), CandidateError> {
+    let mut files = BTreeMap::new();
+    collect(root, root, 0, &mut files, &mut 0, &mut 128)?;
+    let mut tar = tar::Builder::new(Vec::new());
+    for (name, bytes) in &files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o600);
+        header.set_mtime(0);
+        header.set_cksum();
+        tar.append_data(&mut header, name, bytes.as_slice())
+            .map_err(state::io)?;
+    }
+    let bytes = tar.into_inner().map_err(state::io)?;
+    Ok((bytes, files.len()))
+}
+
+pub(super) fn collect(
     root: &Path,
     directory: &Path,
     depth: usize,

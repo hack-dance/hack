@@ -125,3 +125,12 @@ verified bundle hash, refuses overwrite and leaves the original consumed-ID rese
 VM is stopped, pressure stayed normal and swapouts stayed 4132. Partial-export reconciliation,
 archive pruning/retention with durable ID reservations, filesystem/power-loss testing and actual
 application qualification remain open.
+
+
+Retention follow-ups now pass `live-1789412593555594000`: explicit partial-export reconciliation,
+verified pruning with retained export and durable consumed ID, partial consumed-ID publication
+recovery, and abrupt development-VM SIGKILL followed by committed data readback. Full 118-test
+validation passes after making test-owned enrollment lock release explicit. Physical host power
+loss/torn filesystem writes remain a separate test boundary. Benchmark qualification now targets
+installed stable 4.1.1, updated 4.2.0, direct Docker Compose and the candidate with matched isolated
+workload/resource settings; pilot measurements are not the final cohort.

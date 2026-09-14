@@ -256,7 +256,17 @@ fn owned_driver_live() -> Result<(), CandidateError> {
         if launch(&candidate, &fixture, &run, "restart").is_ok() {
             return Err(error("graph_test", "Restart accepted a running graph."));
         }
-        super::super::down(&candidate)?;
+        let before_vm_token = {
+            let engine = Engine::connect(&candidate)?;
+            let (output, _, _) = engine.logs(
+                first["resources"]["container:init"]["id"]
+                    .as_str()
+                    .expect("init"),
+            )?;
+            output.lines().last().unwrap_or_default().to_owned()
+        };
+        super::super::lifecycle::kill_owned_vm_for_test(&candidate)?;
+        super::super::recover(&candidate)?;
         super::super::up_with_profile(&candidate, super::super::Profile::Development)?;
         source_reservation_blocks_graph(&candidate, &fixture, &image, &run, "restart")?;
         let second = launch(&candidate, &fixture, &run, "restart")?;
@@ -269,6 +279,22 @@ fn owned_driver_live() -> Result<(), CandidateError> {
         if !matches!(launch(&candidate, &fixture, &run, "restore"), Err(e) if e.message == "graph_restore_refused")
         {
             return Err(error("graph_test", "Restore accepted live compute."));
+        }
+        {
+            let engine = Engine::connect(&candidate)?;
+            let (output, _, _) = engine.logs(
+                second["resources"]["container:init"]["id"]
+                    .as_str()
+                    .expect("init"),
+            )?;
+            if before_vm_token.len() != 36
+                || output.lines().last() != Some(before_vm_token.as_str())
+            {
+                return Err(error(
+                    "graph_test",
+                    "Abrupt VM loss lost committed database token.",
+                ));
+            }
         }
         let prior_token = {
             let engine = Engine::connect(&candidate)?;
@@ -451,6 +477,37 @@ fn owned_driver_live() -> Result<(), CandidateError> {
                     "Archive did not preserve exact receipt bytes.",
                 ));
             }
+            let export_parent = candidate.state_root.join("exports/graphs");
+            state::private_directory(&export_parent)?;
+            let partial = export_parent.join(format!("{id}.pending"));
+            {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&partial)
+                    .map_err(state::io)?;
+                file.write_all(b"partial export").map_err(state::io)?;
+                file.sync_all().map_err(state::io)?;
+            }
+            if cli(&candidate, &["export", "--run-id", id]).is_ok() {
+                return Err(error("graph_test", "Partial export was overwritten."));
+            }
+            let repaired = cli(&candidate, &["reconcile-export", "--run-id", id])?;
+            if fs::read(
+                Path::new(repaired["retained"].as_str().expect("retained path"))
+                    .join("interrupted.pending"),
+            )
+            .map_err(state::io)?
+                != b"partial export"
+            {
+                return Err(error(
+                    "graph_test",
+                    "Partial export bytes were not retained.",
+                ));
+            }
             let exported = cli(&candidate, &["export", "--run-id", id])?;
             let export_path = Path::new(exported["path"].as_str().expect("export path"));
             let payload = fs::read(export_path).map_err(state::io)?;
@@ -486,6 +543,31 @@ fn owned_driver_live() -> Result<(), CandidateError> {
             {
                 return Err(error("graph_test", "Export overwrote existing evidence."));
             }
+            // Simulate a process loss before consumed-ID publication; the directory already reserves the ID.
+            let consumed = retention::consumed(&candidate, id)?;
+            state::private_directory(&consumed)?;
+            {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(consumed.join("state.pending"))
+                    .map_err(state::io)?;
+                file.write_all(b"partial consumed ID").map_err(state::io)?;
+            }
+            let pruned = cli(&candidate, &["prune", "--run-id", id])?;
+            if pruned["consumed_id_retained"] != true
+                || archive::path(&candidate, id)?.exists()
+                || fs::read(export_path).map_err(state::io)? != payload
+            {
+                return Err(error(
+                    "graph_test",
+                    "Pruning lost export or consumed-ID reservation.",
+                ));
+            }
+            cli(&candidate, &["prune", "--run-id", id])?;
             if !matches!(launch(&candidate, &fixture, id, "run"), Err(e) if e.message == "graph_replay_refused")
             {
                 return Err(error("graph_test", "Archived attempt allowed replay."));
@@ -495,7 +577,7 @@ fn owned_driver_live() -> Result<(), CandidateError> {
     })();
     state::write(
         &evidence.join(format!("driver-{run}.json")),
-        &json!({"passed":result.is_ok()&&cleanup.is_ok(),"run":run,"failed_run":failed,"cleanup_confirmed":cleanup.is_ok(),"bidirectional_workload_admission":result.is_ok(),"restore_and_archive":result.is_ok()&&cleanup.is_ok(),"archive_export":cleanup.is_ok(),"receipts":result.as_ref().ok(),"failure":result.as_ref().err().map(|e|(&e.code,&e.message)),"scope":"Public graph driver, explicit restart identity/persistence, simulated missing create receipt, foreign-name refusal; not actual process-kill or Event Agent qualification"}),
+        &json!({"passed":result.is_ok()&&cleanup.is_ok(),"run":run,"failed_run":failed,"cleanup_confirmed":cleanup.is_ok(),"bidirectional_workload_admission":result.is_ok(),"restore_and_archive":result.is_ok()&&cleanup.is_ok(),"archive_export":cleanup.is_ok(),"retention_recovery":cleanup.is_ok(),"abrupt_vm_loss":result.is_ok(),"receipts":result.as_ref().ok(),"failure":result.as_ref().err().map(|e|(&e.code,&e.message)),"scope":"Public graph driver, explicit restart identity/persistence, simulated missing create receipt, foreign-name refusal; not actual process-kill or Event Agent qualification"}),
     )?;
     cleanup?;
     result.map(|_| ())

@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; inspect/reconcile/cleanup/archive/export require --run-id. Cleanup alone may use --remove-data.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
@@ -24,6 +24,8 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "cleanup",
         "archive",
         "export",
+        "reconcile-export",
+        "prune",
     ]
     .contains(action)
     {
@@ -84,6 +86,8 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph receipt."))
     };
     match *action {
+        "prune" => graph::prune(candidate, run),
+        "reconcile-export" => graph::reconcile_export(candidate, run),
         "inspect" => serde_json::to_value(graph::inspect(candidate, run)?)
             .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph snapshot.")),
         "export" => serde_json::to_value(graph::export(candidate, run)?)

@@ -9,8 +9,17 @@ use std::{
 };
 
 pub(super) fn retain(root: &Path) -> Result<Option<PathBuf>, CandidateError> {
+    retain_file(root, "state.pending", "recovery", 1024 * 1024)
+}
+
+pub(super) fn retain_file(
+    root: &Path,
+    name: &str,
+    prefix: &str,
+    limit: u64,
+) -> Result<Option<PathBuf>, CandidateError> {
     state::check_private_directory(root)?;
-    let pending = root.join("state.pending");
+    let pending = root.join(name);
     let mut file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -27,7 +36,7 @@ pub(super) fn retain(root: &Path) -> Result<Option<PathBuf>, CandidateError> {
         || metadata.nlink() != 1
         || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.mode() & 0o077 != 0
-        || metadata.len() > 1024 * 1024
+        || metadata.len() > limit
     {
         return Err(error(
             "graph_journal_unsafe",
@@ -36,7 +45,7 @@ pub(super) fn retain(root: &Path) -> Result<Option<PathBuf>, CandidateError> {
     }
     let mut bytes = Vec::new();
     (&mut file)
-        .take(1024 * 1024 + 1)
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(state::io)?;
     let current = fs::symlink_metadata(&pending).map_err(state::io)?;
@@ -53,7 +62,7 @@ pub(super) fn retain(root: &Path) -> Result<Option<PathBuf>, CandidateError> {
     file.sync_all().map_err(state::io)?;
     let mut selected = None;
     for index in 1..=8 {
-        let directory = root.join(format!("recovery-{index}"));
+        let directory = root.join(format!("{prefix}-{index}"));
         match fs::DirBuilder::new().mode(0o700).create(&directory) {
             Ok(()) => {
                 selected = Some(directory);
@@ -84,7 +93,7 @@ pub(super) fn retain(root: &Path) -> Result<Option<PathBuf>, CandidateError> {
         .map_err(state::io)?;
     state::write(
         &selected.join("retention.json"),
-        &serde_json::json!({"bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(&bytes)),"policy":"retained bytes are evidence only; committed name reservations remain authority"}),
+        &serde_json::json!({"bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(&bytes)),"policy":"retained bytes are evidence only; never publication authority"}),
     )?;
     Ok(Some(selected))
 }

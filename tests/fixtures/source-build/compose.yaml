@@ -1,0 +1,67 @@
+services:
+  build:
+    image: sha256:862bef9be2a18d4c737c040c247594ad9810bfe8166cc67b0f85f7aa5dc5479c
+    read_only: true
+    network_mode: none
+    cpus: 1
+    mem_limit: 512m
+    pids_limit: 64
+    shm_size: 64m
+    stop_grace_period: 1s
+    entrypoint: [/usr/local/bin/bun, /source/build.ts]
+    command: []
+    volumes: [".:/source:ro", "artifacts:/artifacts"]
+  init:
+    image: sha256:862bef9be2a18d4c737c040c247594ad9810bfe8166cc67b0f85f7aa5dc5479c
+    read_only: true
+    network_mode: none
+    cpus: 0.5
+    mem_limit: 256m
+    pids_limit: 64
+    shm_size: 64m
+    stop_grace_period: 1s
+    entrypoint: [/usr/local/bin/bun, /source/init.ts]
+    command: []
+    depends_on:
+      build: {condition: service_completed_successfully}
+    volumes: [".:/source:ro", "data:/data"]
+  web:
+    image: sha256:862bef9be2a18d4c737c040c247594ad9810bfe8166cc67b0f85f7aa5dc5479c
+    read_only: true
+    cpus: 0.5
+    mem_limit: 256m
+    pids_limit: 64
+    shm_size: 64m
+    stop_grace_period: 1s
+    entrypoint: [/usr/local/bin/bun, /source/loader.ts]
+    command: []
+    depends_on:
+      init: {condition: service_completed_successfully}
+    volumes: [".:/source:ro", "artifacts:/artifacts:ro", "data:/data:ro"]
+    networks: [private]
+    healthcheck:
+      test: [CMD, /usr/local/bin/bun, -e, "if (!(await fetch('http://127.0.0.1:3000')).ok) process.exit(1)"]
+      interval: 1s
+      start_interval: 100ms
+      start_period: 10s
+      timeout: 1s
+      retries: 10
+  check:
+    image: sha256:862bef9be2a18d4c737c040c247594ad9810bfe8166cc67b0f85f7aa5dc5479c
+    read_only: true
+    cpus: 0.5
+    mem_limit: 256m
+    pids_limit: 64
+    shm_size: 64m
+    stop_grace_period: 1s
+    entrypoint: [/usr/local/bin/bun, /source/check.ts]
+    command: []
+    depends_on:
+      web: {condition: service_healthy}
+    volumes: [".:/source:ro"]
+    networks: [private]
+networks:
+  private: {internal: true}
+volumes:
+  artifacts: {}
+  data: {}

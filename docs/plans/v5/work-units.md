@@ -201,8 +201,12 @@ and restart readback proving deleted owned resources stay deleted. No production
    same database token. Fresh admission requires the acknowledged revision and retains existing
    graph/source-job exclusion. Restore still requires an unchanged review: following a newer
    working tree or restoring across arbitrary edits needs a separate contract. Build contexts,
-   writable outputs, managed secrets and publication GC remain open; source mounts alone do not
-   complete application acceptance.
+   The [build-output fixture](build-outputs-20260914.md) now verifies a completed native build
+   producer, read-only artifact consumption, same-data restore with verified output reuse, and
+   compile/interruption/tamper failures that block dependent creation. This is a maintained fixture
+   over existing graph primitives; Dockerfile/dependency builds, general output quotas/manifests,
+   cross-project cache reuse, managed secrets and publication GC remain open. Next connect managed
+   environment delivery and source update/reload to the real application compatibility work.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,
    failures and owned cleanup. The synthetic SQLite probe does not replace this gate.
 5. Qualify the guest base and networking package versions for distribution in WU11; the current

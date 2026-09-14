@@ -19,6 +19,8 @@ The [resource and health-cadence checkpoint](resources-20260914.md) adds native 
 measurements, reclamation evidence, command-string support and a controlled CPU-cost reduction.
 The [source-backed graph checkpoint](source-graphs-20260914.md) verifies read-only immutable source
 delivery through graph startup, VM restart and persistent-data restore.
+The [build-output checkpoint](build-outputs-20260914.md) adds real TypeScript compilation,
+verified artifact reuse, read-only consumption and failed-build dependency controls.
 
 The first implementation is `packages/runtime-core`, a Rust library and candidate executable.
 The repository-root `hack-local` launcher addresses only that checkout's build. Commands include read-only `info` and `plan`, private package preparation, resource probing, and

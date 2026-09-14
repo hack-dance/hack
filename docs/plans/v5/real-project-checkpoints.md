@@ -658,3 +658,17 @@ nine external route/owner-label conflicts and one external network) and two meta
 Protected source/configuration hashes remain unchanged. Build/output delivery, managed environment,
 source update/reload, lifecycle/routing and a profile that admits the actual application remain
 open. The new immutable-source flag does not bypass those gates or increase the eight-service limit.
+
+## September 14 — Native build producer and verified artifact reuse
+
+The [build-output checkpoint](build-outputs-20260914.md) adds a maintained four-service fixture
+that compiles TypeScript from a verified publication, serves its bundle from a read-only output
+volume, and restores new compute with the same bundle and database token. Actual compile failure,
+injected staging failure and output tampering all prevent dependent container creation. It uses
+the existing graph primitives; Dockerfile/build-context compatibility and dependency installation
+are still open.
+
+A fresh captured Event Agent plan remains at 14 services, 22 errors (12 unresolved mount sources,
+nine external route/owner-label conflicts and one external network) and two metadata warnings.
+Protected application inputs are unchanged. Managed environment, lifecycle/routing, reload,
+application-size admission and matched real-application resource measurements remain required.

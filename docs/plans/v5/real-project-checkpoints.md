@@ -354,3 +354,14 @@ generator ran with no generated change because the public TypeScript CLI surface
 Remaining boundaries: legacy partials without an ownership marker remain refused; a crash between
 staging directory creation and its marker remains fail-closed. Retained-copy garbage collection and
 crash tests during retention/cleanup are still open. This checkpoint does not qualify graph startup.
+
+
+### September 14 concurrent read-only engine inspection
+
+`runtime engine-info` now uses an observation-only connection with provider identity checks around
+its fixed version read. It does not acquire or bypass the mutation lease to execute guest scripts.
+`live-1789399457252864000` proved the public CLI read succeeds while the live job supervisor holds
+the mutation lock, while a second mutation connection still receives `provider_busy`. Supervisor
+loss, independent deadline containment and explicit unknown-outcome reconciliation still passed;
+the VM stopped cleanly. The Rust suite passed 100 tests. This closes the engine-version inspection
+contention case, not service-status/readiness APIs or concurrent graph mutation scheduling.

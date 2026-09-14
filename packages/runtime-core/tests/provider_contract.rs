@@ -26,6 +26,17 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn read_only_engine_observation_does_not_initialize_a_runtime() {
+    let fixture = Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    assert_eq!(
+        provider::engine_info(&candidate).unwrap_err().code,
+        "runtime_not_running"
+    );
+    assert!(!candidate.state_root.exists());
+}
+
+#[test]
 fn status_down_and_recovery_of_an_uninitialized_candidate_create_no_state() {
     let fixture = Fixture::new();
     let candidate = Candidate::discover(&fixture.0).unwrap();

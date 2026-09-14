@@ -32,8 +32,8 @@ All are under the private scripts directory.
 WU05 and WU06 are still in progress: finish the source-sync failure/performance matrix and
 the outstanding publication/cache/output controls in the work units.
 Supervisor-loss containment, identical publication reuse and ephemeral output bounds now pass in the saved checkout; see the September 13 saved-checkout
-entry in `real-project-checkpoints.md`. Concurrent engine observation versus supervisor lock
-ownership still needs scheduling work before graph acceptance.
+entry in `real-project-checkpoints.md`. Read-only engine-version inspection now succeeds while the supervisor retains its mutation lock;
+service-level observation and graph mutation scheduling remain open.
 Source transfer ENOSPC, interrupted-rename repair, verifier-cache corruption repair and the
 container observer now also pass in the saved checkout. `project sync-status` was repaired;
 batched transfers with a verified prior-script cache reduced warm acknowledgements to roughly

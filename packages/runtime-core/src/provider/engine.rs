@@ -1,6 +1,9 @@
 //! Docker HTTP is pinned to the verified private Unix socket. No contexts, proxies,
 //! redirects, TCP fallback or transparent retries participate in engine requests.
-use super::{artifact, lifecycle::OwnedGuest};
+use super::{
+    artifact,
+    lifecycle::{ObservedGuest, OwnedGuest},
+};
 use crate::{Candidate, CandidateError};
 use reqwest::{Method, blocking::Client};
 use serde::Serialize;
@@ -272,29 +275,52 @@ impl<'a> Engine<'a> {
     }
 
     fn info(&self) -> Result<EngineInfo, CandidateError> {
-        let value = self.request(Method::GET, "/version", None)?;
-        if value["Version"] != artifact::ENGINE_VERSION
-            || value["Os"] != "linux"
-            || value["Arch"] != "arm64"
-        {
-            return Err(failure(
-                "Private engine version or platform does not match the pinned provider.",
-            ));
-        }
-        let api = value["ApiVersion"]
-            .as_str()
-            .ok_or_else(|| failure("Missing engine API version."))?;
-        if api.len() > 16 || !api.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
-            return Err(failure("Invalid engine API version."));
-        }
-        Ok(EngineInfo {
-            version: artifact::ENGINE_VERSION.into(),
-            api_version: api.into(),
-            operating_system: "linux".into(),
-            architecture: "arm64".into(),
-            transport: "verified-candidate-unix-socket",
-        })
+        decode_info(self.request(Method::GET, "/version", None)?)
     }
+}
+
+/// Observation exposes only fixed read-only endpoints; it cannot execute guest scripts or mutations.
+pub(super) struct Observer<'a> {
+    guest: ObservedGuest<'a>,
+    transport: Transport,
+}
+impl<'a> Observer<'a> {
+    pub(super) fn connect(candidate: &'a Candidate) -> Result<Self, CandidateError> {
+        let guest = ObservedGuest::connect(candidate)?;
+        let transport = Transport::new(&guest.engine_socket()?, Duration::from_secs(10))?;
+        Ok(Self { guest, transport })
+    }
+
+    fn info(&self) -> Result<EngineInfo, CandidateError> {
+        self.guest.verify()?;
+        let value = self.transport.request(Method::GET, "/version", None)?;
+        self.guest.verify()?;
+        decode_info(value)
+    }
+}
+
+fn decode_info(value: Value) -> Result<EngineInfo, CandidateError> {
+    if value["Version"] != artifact::ENGINE_VERSION
+        || value["Os"] != "linux"
+        || value["Arch"] != "arm64"
+    {
+        return Err(failure(
+            "Private engine version or platform does not match the pinned provider.",
+        ));
+    }
+    let api = value["ApiVersion"]
+        .as_str()
+        .ok_or_else(|| failure("Missing engine API version."))?;
+    if api.len() > 16 || !api.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return Err(failure("Invalid engine API version."));
+    }
+    Ok(EngineInfo {
+        version: artifact::ENGINE_VERSION.into(),
+        api_version: api.into(),
+        operating_system: "linux".into(),
+        architecture: "arm64".into(),
+        transport: "verified-candidate-unix-socket",
+    })
 }
 
 fn decode_logs(bytes: &[u8]) -> Result<(String, String, bool), CandidateError> {
@@ -356,7 +382,7 @@ fn bounded_log_text(bytes: &[u8], truncated: &mut bool) -> String {
 }
 
 pub fn info(candidate: &Candidate) -> Result<EngineInfo, CandidateError> {
-    Engine::connect(candidate)?.info()
+    Observer::connect(candidate)?.info()
 }
 
 #[cfg(test)]

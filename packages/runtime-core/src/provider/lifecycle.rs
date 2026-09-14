@@ -183,6 +183,57 @@ fn guest(
     Ok(response)
 }
 
+/// Read-only observation takes no mutation lease and detects lifecycle changes around each read.
+pub(super) struct ObservedGuest<'a> {
+    candidate: &'a Candidate,
+    owner: Owner,
+}
+
+impl<'a> ObservedGuest<'a> {
+    pub(super) fn connect(candidate: &'a Candidate) -> Result<Self, CandidateError> {
+        reject_aliased_state(&root(candidate))?;
+        if !root(candidate)
+            .join("owner.json")
+            .try_exists()
+            .map_err(io)?
+        {
+            return Err(CandidateError::new(
+                "runtime_not_running",
+                "The candidate runtime is not running.",
+            ));
+        }
+        let observed = Self {
+            candidate,
+            owner: Owner::load(candidate)?,
+        };
+        observed.verify()?;
+        audit_boot(candidate, &observed.owner)?;
+        observed.verify()?;
+        Ok(observed)
+    }
+
+    pub(super) fn verify(&self) -> Result<(), CandidateError> {
+        let current = Owner::load(self.candidate)?;
+        if current.phase != "running"
+            || current.guest_boot_id.is_none()
+            || current.token != self.owner.token
+            || current.guest_boot_id != self.owner.guest_boot_id
+            || current.process != self.owner.process
+        {
+            return Err(CandidateError::new(
+                "runtime_changed",
+                "Runtime identity changed during read-only observation.",
+            ));
+        }
+        verify_live(self.candidate, &current)
+    }
+
+    pub(super) fn engine_socket(&self) -> Result<std::path::PathBuf, CandidateError> {
+        self.verify()?;
+        socket(self.candidate, &self.owner, "docker.sock")
+    }
+}
+
 pub(super) struct OwnedGuest<'a> {
     candidate: &'a Candidate,
     owner: Owner,

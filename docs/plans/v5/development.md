@@ -388,3 +388,13 @@ Native watcher tests exercise a 512-file editor-style burst and separately satur
 notification queue with 100,000 injected events. Rescan and error callbacks retain the explicit
 reconciliation signal even when that slot is already full; excluded paths remain quiet. These
 checks do not establish actual kernel-overflow behavior or end-to-end application reload latency.
+
+
+## Engine observation during jobs
+
+`runtime engine-info` uses a dedicated read-only observer and does not acquire the supervisor's
+mutation lock. It reads only the fixed engine version endpoint, verifies the provider process,
+disks, boot configuration and owner identity, and rejects a lifecycle change around the read.
+It can therefore inspect a running engine while a source job holds the mutation lock. It cannot
+execute guest scripts or allocate/start/delete engine resources. Mutation serialization is unchanged;
+concurrent graph mutation and service-level status/readiness remain separate implementation work.

@@ -146,6 +146,39 @@ fn owned_supervisor_loss_live() -> Result<(), CandidateError> {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+        // The supervisor retains the mutation lock; read-only inspection must still work.
+        let busy = Engine::connect(&candidate)
+            .err()
+            .ok_or_else(|| failure("Supervisor mutation lock was not retained."))?;
+        if busy.code != "provider_busy" {
+            return Err(failure("Unexpected mutation-lock refusal."));
+        }
+        let cli = Command::new(
+            candidate
+                .state_root
+                .join("target/release/hack-runtime-candidate"),
+        )
+        .env_clear()
+        .args([
+            "--candidate-root",
+            candidate.checkout.to_str().unwrap(),
+            "runtime",
+            "engine-info",
+            "--json",
+        ])
+        .output()
+        .map_err(|_| failure("Cannot inspect engine through CLI."))?;
+        if !cli.status.success() {
+            return Err(failure(
+                "Read-only CLI observation contended with the live supervisor.",
+            ));
+        }
+        let observed = super::engine::info(&candidate)?;
+        if observed.architecture != "arm64" {
+            return Err(failure(
+                "Concurrent engine observation returned the wrong provider.",
+            ));
+        }
         supervisor
             .0
             .kill()
@@ -256,7 +289,7 @@ fn owned_supervisor_loss_live() -> Result<(), CandidateError> {
         Ok(
             json!({"running_id":running["Id"], "stopped_state":stopped["State"],
             "receipt":receipt,"events":events,"container_absent":true,"retry_identical":true,
-            "containment_seconds":containment_seconds}),
+            "containment_seconds":containment_seconds,"concurrent_read_only_cli":true,"concurrent_mutation_refused":true}),
         )
     })();
     drop(supervisor);

@@ -346,7 +346,16 @@ selected daemon descendants from their first samples. Remaining work: profile co
 against host VM CPU per completed probe, account for transient helpers and safety-observer cost,
 and qualify idle reclamation against active-work/data and restart-latency requirements. The
 higher candidate CPU at matched requested cadence is an optimization target, not a closed gate.
-User defaults remain unchanged.
+User defaults remain unchanged. The [cleanup and CPU checkpoint](cleanup-cpu-20260914.md)
+reduces cleanup journal commits, qualifies interrupted absence updates with actual SIGKILL, and
+repeats all 32 latency trials. Archiving 64 fully removed attempts resolved active-journal admission
+pressure while preserving evidence; retired environment intent pruning and archive retention remain
+open. A container/host CPU pilot confirms that web cgroup counters alone do not explain the higher
+candidate host CPU. An A/B/A experiment using identical `runc` bytes in guest memory reduced host
+CPU by 13.5% against the two original-file controls. The implementation now provisions a pinned,
+read-only 32 MiB execution cache before starting Docker. Eleven live controls pass, including
+cache digest/replacement refusal and prior-boot recovery; completed-probe normalization, transient
+helper accounting, full-application load and further CPU reduction remain open.
 
 ## WU11 — Preserve compatibility and qualify distribution
 

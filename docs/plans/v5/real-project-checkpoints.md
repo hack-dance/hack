@@ -685,3 +685,17 @@ A fresh captured Event Agent plan still reports 14 services, 22 errors and two w
 classes remain 12 unresolved mount sources, nine external route/owner-label conflicts and one
 external network. Protected inputs were unchanged during measurement. Actual application startup,
 reload, lifecycle/routing, native credentials and full-application resource comparison remain open.
+
+## September 14 — Cleanup batching and CPU attribution
+
+The [cleanup and CPU checkpoint](cleanup-cpu-20260914.md) adds recovery proof for an interrupted
+cleanup whose container deletion has not reached the journal. All ten live controls and the frozen
+32-trial latency cohort pass. The active journal hit its retained-attempt limit; supported archival
+preserved 64 removed attempts and released admission capacity. Retired environment intents remain
+a separate retention gate. A subsequent identical-byte `runc` A/B/A experiment supports a bounded
+guest-local executable cache. The implemented cache passes all eleven live controls, including
+read-only/digest checks, replacement refusal and recovery after VM restart.
+
+The CPU pilot measures the same synthetic graph and does not establish full-application CPU or
+throughput. The last captured Event Agent plan remains incompatible at 14 services, 22 errors and
+two warnings; this checkpoint does not change its source, routing, credentials or admission gates.

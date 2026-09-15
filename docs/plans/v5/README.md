@@ -13,6 +13,8 @@ Every checkpoint must also complete a [real-project attempt and gap review](real
 [Checkpoint 02](checkpoint-02.md) tracks the private lifecycle implementation and its live gates.
 [Checkpoint 03](checkpoint-03.md) records Compose review and real-project enrollment.
 [Checkpoint 04](checkpoint-04.md) records durable fixture jobs and owned cancellation.
+The [cleanup and CPU checkpoint](cleanup-cpu-20260914.md) qualifies journal batching with driver
+crash recovery and repeats the frozen latency comparison.
 The [current performance refresh](performance-refresh-20260914.md) repeats the latency cohort and
 compares both engines at matched health-check cadences with complete selected process trees.
 The [September 14 benchmark and review](benchmark-20260914.md) compares the owned graph executor

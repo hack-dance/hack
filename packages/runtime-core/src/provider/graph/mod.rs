@@ -314,19 +314,23 @@ struct Session<'a> {
     leases: BTreeMap<String, super::environment::EnvironmentLease>,
     launcher: Option<String>,
 }
+#[cfg(test)]
+fn fault_pause(root: &std::path::Path, run: &str, point: &str) -> Result<(), CandidateError> {
+    if std::env::var("HACK_LOCAL_GRAPH_FAULT").as_deref() == Ok(point) {
+        state::write(
+            &root.join(format!("fault-{point}.json")),
+            &json!({"point":point,"run":run}),
+        )?;
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+    Ok(())
+}
 impl Session<'_> {
     #[cfg(test)]
     fn fault_pause(&self, point: &str) -> Result<(), CandidateError> {
-        if std::env::var("HACK_LOCAL_GRAPH_FAULT").as_deref() == Ok(point) {
-            state::write(
-                &self.root.join(format!("fault-{point}.json")),
-                &json!({"point":point,"run":self.receipt.run}),
-            )?;
-            loop {
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        }
-        Ok(())
+        fault_pause(&self.root, &self.receipt.run, point)
     }
     fn verify_config(&self, service: &str, inspected: &Value) -> Result<(), CandidateError> {
         let expected = &self.configs[service];
@@ -817,7 +821,10 @@ pub fn cleanup(
                 }
             }
             receipt.resources.get_mut(&key).expect("resource").phase = "absent".into();
-            state::write(&root.join("state.json"), &receipt)?;
+            // The durable cleanup intent owns every retry. Reinspection recovers partial removal;
+            // only the final receipt needs another commit, including environment-slot retirement.
+            #[cfg(test)]
+            fault_pause(&root, &receipt.run, "cleanup-after-remove")?;
         }
     }
     for slot in environment_slots {

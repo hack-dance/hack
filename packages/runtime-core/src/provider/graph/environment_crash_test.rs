@@ -52,6 +52,15 @@ fn execute(
 fn environment_crash_child() {
     let candidate =
         Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap())).unwrap();
+    if std::env::var("HACK_LOCAL_GRAPH_ACTION").unwrap() == "cleanup" {
+        cleanup(
+            &candidate,
+            &std::env::var("HACK_LOCAL_GRAPH_RUN").unwrap(),
+            false,
+        )
+        .unwrap();
+        panic!("cleanup helper unexpectedly completed");
+    }
     execute(
         &candidate,
         Path::new(&std::env::var("HACK_LOCAL_GRAPH_PROJECT").unwrap()),
@@ -219,5 +228,109 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
         cleaned?;
         cleanup(&candidate, &run, true)?;
     }
+    Ok(())
+}
+
+#[test]
+#[ignore = "Manual owned VM, launcher feature and external watchdog"]
+fn cleanup_driver_loss_recovers_uncommitted_absence_and_retires_leases()
+-> Result<(), CandidateError> {
+    use std::os::unix::process::ExitStatusExt;
+    let candidate =
+        Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))?;
+    let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
+    let fixture = tests::Fixture::new();
+    let run = format!(
+        "{:032x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    state::write(
+        &fixture.0.join("compose.yaml"),
+        &json!({"services":{"app":{"image":image,"user":"1001:1001","init":true,"read_only":true,"network_mode":"none","environment":{"TOKEN":null},"entrypoint":["/usr/local/bin/bun","-e","setInterval(()=>{},1000)"],"command":[]}}}),
+    )?;
+    let root = directory(&candidate, &run)?;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<(), CandidateError> {
+            execute(&candidate, &fixture.0, &run, false)?;
+            let child = Command::new(std::env::current_exe().map_err(state::io)?)
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "provider::graph::environment_crash_test::environment_crash_child",
+                ])
+                .env("HACK_LOCAL_GRAPH_PROJECT", &fixture.0)
+                .env("HACK_LOCAL_GRAPH_RUN", &run)
+                .env("HACK_LOCAL_GRAPH_ACTION", "cleanup")
+                .env("HACK_LOCAL_GRAPH_FAULT", "cleanup-after-remove")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(state::io)?;
+            let mut child = OwnedChild(Some(child));
+            let marker = root.join("fault-cleanup-after-remove.json");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !marker.exists() {
+                assert!(
+                    child
+                        .0
+                        .as_mut()
+                        .unwrap()
+                        .try_wait()
+                        .map_err(state::io)?
+                        .is_none()
+                );
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let value: Value = state::read(&marker)?;
+            assert_eq!(value["run"], run);
+            assert_eq!(value["point"], "cleanup-after-remove");
+            child.0.as_mut().unwrap().kill().map_err(state::io)?;
+            assert_eq!(
+                child
+                    .0
+                    .as_mut()
+                    .unwrap()
+                    .wait()
+                    .map_err(state::io)?
+                    .signal(),
+                Some(libc::SIGKILL)
+            );
+            child.0 = None;
+            let engine = Engine::connect_cleanup(&candidate)?;
+            let (receipt, _) = load(&candidate, &engine, &run)?;
+            assert_eq!(receipt.phase, "cleanup-intent");
+            assert_eq!(receipt.resources["container:app"].phase, "started");
+            assert!(
+                inspect_resource(&engine, &receipt, &receipt.resources["container:app"])?.is_none()
+            );
+            let slots =
+                super::super::environment_recovery::graph_slots(&candidate, engine.guest(), &run)?;
+            assert_eq!(slots.len(), 1);
+            assert_eq!(engine.guest().execute_cleanup("set -e; (test -d \"/run/$1\" && mountpoint -q \"/run/$1\") >/dev/null 2>&1; printf 'present\\n'", &[&slots[0].0])?,"present\n");
+            drop(engine);
+            assert_eq!(
+                execute(&candidate, &fixture.0, &run, true)
+                    .unwrap_err()
+                    .code,
+                "graph_restore_refused"
+            );
+            cleanup(&candidate, &run, false)?;
+            cleanup(&candidate, &run, false)?;
+            assert_eq!(
+                execute(&candidate, &fixture.0, &run, true)?.phase,
+                "ready-observed"
+            );
+            Ok(())
+        },
+    ));
+    let cleaned = cleanup(&candidate, &run, true);
+    outcome.unwrap()?;
+    cleaned?;
+    cleanup(&candidate, &run, true)?;
     Ok(())
 }

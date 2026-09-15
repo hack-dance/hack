@@ -836,6 +836,23 @@ fn finish_boot(
         verify_live(candidate, owner)?;
         Ok(result)
     })?;
+    let cached = guest(
+        candidate,
+        owner,
+        include_str!("guest-runc-cache.sh"),
+        &[
+            &owner.token,
+            owner.guest_boot_id.as_deref().expect("verified boot"),
+            &artifact::digest(&artifact::engine_root(candidate).join("runc"))?,
+        ],
+        false,
+    )?;
+    if cached != "engine-exec-cache-v1\n" {
+        return Err(CandidateError::new(
+            "engine_execution_cache",
+            "Verified guest executable cache was not confirmed; engine startup refused.",
+        ));
+    }
     guest(candidate, owner, include_str!("guest-daemon.sh"), &[], true)?;
     let result = guest(
         candidate,
@@ -1258,6 +1275,57 @@ pub(super) fn kill_owned_vm_for_test(candidate: &Candidate) -> Result<(), Candid
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "Manual owned VM and external watchdog required"]
+    fn runc_cache_is_pinned_bounded_read_only_and_refuses_replacement() {
+        let candidate = Candidate::discover(std::path::Path::new(
+            &std::env::var("HACK_LOCAL_TEST_ROOT").expect("explicit candidate root"),
+        ))
+        .unwrap();
+        let owned = OwnedGuest::connect_cleanup(&candidate).unwrap();
+        let digest = artifact::digest(&artifact::engine_root(&candidate).join("runc")).unwrap();
+        let verify = || {
+            assert_eq!(
+                owned
+                    .execute_cleanup(
+                        r#"
+cache=/run/hack-local/engine-exec
+test "$(stat -c %u:%g:%a "$cache")" = 0:0:700
+test "$(stat -c %u:%g:%a "$cache/runc")" = 0:0:555
+for target in "$cache" /opt/hack-engine/runc; do
+ test "$(findmnt -n -o FSTYPE --mountpoint "$target")" = tmpfs
+ case ",$(findmnt -n -o OPTIONS --mountpoint "$target")," in *,ro,*) ;; *) exit 1;; esac
+done
+for path in "$cache/runc" /opt/hack-engine/runc; do
+ test "$(sha256sum "$path" | cut -d ' ' -f 1)" = "$1"
+ if (exec 3>>"$path") >/dev/null 2>&1; then exit 1; fi
+done
+/opt/hack-engine/runc --version >/dev/null
+set -- $(stat -f -c '%S %b' "$cache")
+test "$(( $1 * $2 ))" = 33554432
+printf 'verified-cache\n'
+"#,
+                        &[&digest],
+                    )
+                    .unwrap(),
+                "verified-cache\n"
+            );
+        };
+        verify();
+        for expected in ["0".repeat(64), digest.clone()] {
+            let error = guest(
+                &candidate,
+                &owned.owner,
+                include_str!("guest-runc-cache.sh"),
+                &[&owned.owner.token, owned.boot_id(), &expected],
+                false,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "guest_command_failed");
+            verify();
+        }
+    }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]

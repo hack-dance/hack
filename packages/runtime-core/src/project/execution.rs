@@ -162,10 +162,10 @@ impl Graph {
             ));
         }
         let graph = Self { services };
-        graph.validate()?;
+        graph.execution_order()?;
         Ok(graph)
     }
-    fn validate(&self) -> Result<(), CandidateError> {
+    fn execution_order(&self) -> Result<Vec<&String>, CandidateError> {
         if self.services.is_empty() || self.services.len() > 128 {
             return Err(error(
                 "graph_budget",
@@ -196,6 +196,7 @@ impl Graph {
             }
         }
         let mut remaining: BTreeSet<_> = self.services.keys().collect();
+        let mut order = Vec::with_capacity(remaining.len());
         while !remaining.is_empty() {
             let ready: Vec<_> = remaining
                 .iter()
@@ -215,9 +216,10 @@ impl Graph {
             }
             for name in ready {
                 remaining.remove(name);
+                order.push(name);
             }
         }
-        Ok(())
+        Ok(order)
     }
 }
 fn inspect(
@@ -257,7 +259,16 @@ pub fn run(
     driver: &mut impl Driver,
     timeout: Duration,
 ) -> Result<(), CandidateError> {
-    graph.validate()?;
+    run_with_wait(graph, driver, timeout, std::thread::sleep)
+}
+
+fn run_with_wait(
+    graph: &Graph,
+    driver: &mut impl Driver,
+    timeout: Duration,
+    mut wait: impl FnMut(Duration),
+) -> Result<(), CandidateError> {
+    let order = graph.execution_order()?;
     if timeout.is_zero() || timeout > Duration::from_secs(600) {
         return Err(error(
             "graph_timeout_budget",
@@ -273,7 +284,9 @@ pub fn run(
             inspect(driver, name, &mut observations)?;
             before_deadline(deadline)?;
         }
-        for (name, service) in &graph.services {
+        for name in &order {
+            let name = *name;
+            let service = &graph.services[name];
             if started.contains(name) {
                 continue;
             }
@@ -317,9 +330,7 @@ pub fn run(
                 return Ok(());
             }
         }
-        std::thread::sleep(
-            Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())),
-        );
+        wait(Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())));
     }
 }
 
@@ -398,10 +409,95 @@ mod tests {
     #[test]
     fn dependency_conditions_override_alphabetic_order() {
         let mut driver = driver();
-        run(&graph(), &mut driver, Duration::from_secs(1)).unwrap();
+        run_with_wait(&graph(), &mut driver, Duration::from_secs(1), |_| {
+            panic!("ready dependencies must not wait for a polling interval")
+        })
+        .unwrap();
         assert_eq!(driver.starts, ["init", "web", "check"]);
         assert_eq!(driver.events.last().unwrap(), "{\"event\":\"ready\"}");
     }
+    #[test]
+    fn stalled_dependencies_back_off_and_are_reobserved_before_start() {
+        use std::{cell::Cell, rc::Rc};
+        struct Waiting {
+            inner: Fake,
+            released: Rc<Cell<bool>>,
+            observations: usize,
+        }
+        impl Driver for Waiting {
+            fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
+                self.inner.record(event)
+            }
+            fn start(&mut self, service: &str) -> Result<(), CandidateError> {
+                assert!(service == "init" || self.released.get());
+                self.inner.start(service)
+            }
+            fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
+                self.observations += 1;
+                assert!(self.observations < 40, "readiness must not busy poll");
+                if service == "init" && !self.released.get() {
+                    Ok(Observation::Running {
+                        health: Health::None,
+                    })
+                } else {
+                    self.inner.observe(service)
+                }
+            }
+        }
+        let released = Rc::new(Cell::new(false));
+        let mut driver = Waiting {
+            inner: driver(),
+            released: released.clone(),
+            observations: 0,
+        };
+        let mut waits = 0;
+        run_with_wait(&graph(), &mut driver, Duration::from_secs(1), |duration| {
+            assert_eq!(duration, Duration::from_millis(100));
+            waits += 1;
+            released.set(true);
+        })
+        .unwrap();
+        assert_eq!(waits, 1);
+        assert_eq!(driver.inner.starts, ["init", "web", "check"]);
+    }
+
+    #[test]
+    fn dependency_order_rechecks_health_before_starting_a_dependent() {
+        struct Receding {
+            inner: Fake,
+            web_reads: usize,
+        }
+        impl Driver for Receding {
+            fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
+                self.inner.record(event)
+            }
+            fn start(&mut self, service: &str) -> Result<(), CandidateError> {
+                self.inner.start(service)
+            }
+            fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
+                if service == "web" {
+                    self.web_reads += 1;
+                    if self.web_reads > 1 {
+                        return Ok(Observation::Running {
+                            health: Health::Unhealthy,
+                        });
+                    }
+                }
+                self.inner.observe(service)
+            }
+        }
+        let mut driver = Receding {
+            inner: driver(),
+            web_reads: 0,
+        };
+        let error = run_with_wait(&graph(), &mut driver, Duration::from_secs(1), |_| {
+            panic!("ready dependency order should not need a polling interval")
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "graph_service_failed");
+        assert_eq!(driver.inner.starts, ["init", "web"]);
+    }
+
     #[test]
     fn failed_init_and_unhealthy_web_block_dependents() {
         for (service, state, starts) in [

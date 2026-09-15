@@ -4,7 +4,9 @@ The remaining cleanup delay is concentrated in engine container/network deletion
 verification. Normal-build lifecycle measurements also show lower candidate engine CPU despite
 longer cleanup wall time. The next targeted experiment is to avoid unnecessary scheduler sleep
 after dependency progress, then evaluate bounded concurrent container deletion. Neither change is
-implemented or qualified by this profiling unit.
+implemented or qualified by this profiling unit. The subsequent
+[dependency-order scheduling unit](dependency-scheduler-20260915.md) now qualifies that latency
+improvement; the extra immediate-pass approach was rejected.
 
 ## Evidence and scope
 

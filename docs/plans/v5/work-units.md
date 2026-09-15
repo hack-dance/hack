@@ -387,8 +387,10 @@ Startup/restore are faster in the two observations; cleanup is slightly slower. 
 VM capacities remain explicit caveats.
 [Launch/cleanup profiling](graph-phase-profile-20260915.md) is complete: normal-build lifecycle
 CPU is 47–60% lower than Compose across startup, restore and cleanup phases. Container/network
-deletion dominates cleanup wall time; ownership checks are only 5–6 ms. Next evaluate bounded
-progress-aware scheduling, then concurrent owned container deletion with crash controls.
+deletion dominates cleanup wall time; ownership checks are only 5–6 ms. [Dependency-ordered scheduling](dependency-scheduler-20260915.md) now removes the unnecessary
+polling delay: four old/new/old sequences show 7.8% faster startup and 8.7% faster restore medians,
+with essentially unchanged median engine CPU. The immediate-pass alternative was rejected after
+higher startup CPU. Next evaluate concurrent owned container deletion with crash controls.
 Open work: automatic idle reclamation and real-application recovery,
 crun OCI/kernel compatibility, vCPU sweeps, launch profiling and the existing application gates.
 

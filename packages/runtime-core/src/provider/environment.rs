@@ -42,6 +42,7 @@ pub struct PendingEnvironment {
 /// An in-memory handle, not a durable receipt or native provider lease.
 /// Expiry blocks verification/use; explicit removal or VM shutdown reclaims the tmpfs.
 pub struct EnvironmentLease {
+    pub(super) graph: Option<super::environment_recovery::GraphBinding>,
     pub(super) service: String,
     pub(super) slot: String,
     pub(super) incarnation: String,
@@ -49,6 +50,10 @@ pub struct EnvironmentLease {
     deadline: Instant,
 }
 impl PendingEnvironment {
+    pub(super) fn service(&self) -> &str {
+        &self.service
+    }
+
     pub fn new(
         service: &str,
         values: &BTreeMap<String, String>,
@@ -96,6 +101,13 @@ impl PendingEnvironment {
         self,
         guest: &OwnedGuest<'_>,
     ) -> Result<EnvironmentLease, CandidateError> {
+        self.stage_bound(guest, None)
+    }
+    pub(super) fn stage_bound(
+        self,
+        guest: &OwnedGuest<'_>,
+        graph: Option<super::environment_recovery::GraphBinding>,
+    ) -> Result<EnvironmentLease, CandidateError> {
         guest.require_allocation()?;
         remaining(self.deadline)?;
         let candidate = guest.candidate();
@@ -105,6 +117,7 @@ impl PendingEnvironment {
             .map_err(|_| error("environment_identity"))?;
         let token: String = random.iter().map(|b| format!("{b:02x}")).collect();
         let lease = EnvironmentLease {
+            graph,
             service: self.service,
             slot: format!("hack-env-lease-{}-{token}", guest.boot_id()),
             incarnation: guest.incarnation().into(),

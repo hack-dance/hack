@@ -176,10 +176,56 @@ This closes the mutation-guard borrowing prerequisite only. The graph executor s
 managed environment inputs: container attachment, entrypoint behavior, durable graph-to-slot
 ownership and native authorization are not enabled by these internal methods.
 
+## Container attachment and graph cleanup ownership
+
+The experimental `graph::stage_environment` API accepts a pending environment only for a
+committed, preparing graph's reserved service on the development VM. It refuses an existing
+container, a pending graph journal or a second allocation for that service. It marks the graph as
+requiring environment delivery and records the graph ID and exact container name in the immutable
+allocation intent before guest staging. Values and their hashes remain absent from both records.
+The normal graph input compiler/startup path still refuses managed environment inputs.
+
+Container-bound retirement requires a confirmed engine not-found response for the recorded
+container name. A stopped or never-started container still blocks retirement because its bind
+mount may retain access to the payload. Engine errors and a foreign container occupying that name
+also refuse cleanup. Graph cleanup validates each matching binding against its service resource,
+removes and verifies absence of containers, then retires the slots before marking cleanup complete.
+A lost create reply can therefore recover by the recorded name and ownership labels without the
+returned ID or an in-memory lease. Intent inventory does not promote pending files; explicit
+retirement can promote a complete, validated initial intent as before.
+
+Graphs with attachments retain an `environment_attached` marker. Restart, restore and archive
+export refuse these graphs until redelivery and binding retention are qualified. Older receipts
+omit the false marker and preserve their serialization. The bounded intent inventory currently
+requires all candidate allocation records to validate; uncertain records must be resolved before
+attachment discovery or attached-graph cleanup can proceed. Ordinary graphs skip this inventory.
+
+The manual attachment fixture binds the payload file read-only into a pinned Bun container. A
+finite root-only parent loads it and passes exact values to a child through its process environment,
+with child stdout/stderr suppressed and a fixed completion acknowledgment. This is a synthetic
+attachment proof, not a production entrypoint wrapper. It covers interruption before create, after
+create without retaining its returned ID, and after child execution. A second test process performs
+cleanup without any lease handles, checks graph-binding mismatch refusal and repeats retirement.
+It also verifies the engine's environment metadata has no injected values and its mount is read-only.
+These are retained phase snapshots and dropped handles, not SIGKILL fault injection.
+
+Live run `environment-attachment-1789431561987618000` passed both attachment/recovery tests,
+borrowed-engine and admission-refusal controls, the existing lease checks, and recovery across a
+real VM restart. All three fixture graphs reached removed state through explicit cleanup. The
+observed agent console contained lease-slot logging but none of the new synthetic values in
+plaintext, JSON, base64 or byte-vector form. The VM was stopped with normal host pressure,
+unchanged swapouts and unchanged installed Hack/global configuration hashes.
+
+Validation passed 144 regular Rust tests, 940 CLI tests, typecheck, lint, privacy and release build.
+An initial regression correctly caught the false marker changing legacy serialized receipts; the
+marker now omits itself when false and that compatibility test passes. No performance improvement
+is claimed by this checkpoint.
+
 ## Remaining implementation and acceptance
 
-- Integrate container attachment and graph-to-slot recovery ownership using the borrowed mutation
-  guard; keep value delivery out of executable configs and engine metadata.
+- Wire qualified attachment into normal graph startup. Define the entrypoint adapter, non-root
+  ownership and signal/exit handling before enabling managed input execution; the finite Bun fixture
+  does not supply a general wrapper.
 - Bind native provider authorization and expiry to the existing service/incarnation/boot guards.
   The cleanup intent alone must never authorize reading values or renewing a lease.
 - Qualify pruning of retired cleanup intents without losing retry or ownership evidence.

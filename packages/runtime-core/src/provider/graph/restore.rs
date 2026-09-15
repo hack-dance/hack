@@ -20,6 +20,7 @@ pub fn restore(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         ));
     }
     let (mut receipt, root) = load(candidate, &engine, options.run_id)?;
+    environment::require_replay_supported(&receipt)?;
     if root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()
         || receipt.phase != "stopped-data-retained"
@@ -143,6 +144,7 @@ mod tests {
             namespace: "c".repeat(64),
             plan_id: "d".repeat(64),
             phase: "stopped-data-retained".into(),
+            environment_attached: false,
             source: None,
             readiness: BTreeMap::new(),
             resources: BTreeMap::new(),

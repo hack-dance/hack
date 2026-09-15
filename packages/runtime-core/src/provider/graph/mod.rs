@@ -2,6 +2,8 @@
 mod archive;
 pub use archive::archive;
 mod config;
+mod environment;
+pub use environment::stage_environment;
 mod export;
 pub use export::{Export, export};
 mod journal;
@@ -78,6 +80,8 @@ pub struct Receipt {
     pub namespace: String,
     pub plan_id: String,
     pub phase: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub environment_attached: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceBinding>,
     pub readiness: BTreeMap<String, Condition>,
@@ -606,6 +610,7 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
         namespace: prepared.namespace,
         plan_id: prepared.plan_id,
         phase: "preparing".into(),
+        environment_attached: false,
         source: source.map(|s| s.binding),
         readiness: options.readiness.clone(),
         resources: prepared.resources,
@@ -666,6 +671,7 @@ pub fn cleanup(
             "Pending graph journal is retained; cleanup is blocked until journal reconciliation.",
         ));
     }
+    let environment_slots = environment::cleanup_slots(candidate, &engine, &receipt)?;
     receipt.phase = "cleanup-intent".into();
     state::write(&root.join("state.json"), &receipt)?;
     for kind in [Kind::Container, Kind::Network, Kind::Volume] {
@@ -709,6 +715,9 @@ pub fn cleanup(
             receipt.resources.get_mut(&key).expect("resource").phase = "absent".into();
             state::write(&root.join("state.json"), &receipt)?;
         }
+    }
+    for slot in environment_slots {
+        super::environment_recovery::retire(candidate, engine.guest(), &slot, None)?;
     }
     receipt.phase = if remove_data {
         "removed"
@@ -768,6 +777,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         ));
     }
     let (mut receipt, root) = load(candidate, &engine, options.run_id)?;
+    environment::require_replay_supported(&receipt)?;
     if root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()
         || receipt.phase != "ready-observed"

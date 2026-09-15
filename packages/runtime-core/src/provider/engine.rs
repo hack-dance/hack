@@ -280,6 +280,25 @@ impl<'a> Engine<'a> {
 }
 
 /// Observation exposes only fixed read-only endpoints; it cannot execute guest scripts or mutations.
+/// Only an explicit not-found response permits retirement of a container-bound slot.
+pub(super) fn require_container_absent(
+    guest: &OwnedGuest<'_>,
+    name: &str,
+) -> Result<(), CandidateError> {
+    guest.verify()?;
+    let transport = Transport::new(&guest.engine_socket()?, Duration::from_secs(10))?;
+    let result = transport.request(Method::GET, &format!("/v1.53/containers/{name}/json"), None);
+    guest.verify()?;
+    match result {
+        Err(e) if e.code == "engine_not_found" => Ok(()),
+        Err(e) => Err(e),
+        Ok(_) => Err(CandidateError::new(
+            "environment_container_present",
+            "Remove the recorded graph container before retiring its environment allocation.",
+        )),
+    }
+}
+
 pub(super) struct Observer<'a> {
     guest: ObservedGuest<'a>,
     transport: Transport,

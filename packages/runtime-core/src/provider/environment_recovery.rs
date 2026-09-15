@@ -4,10 +4,18 @@ use crate::{Candidate, CandidateError};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GraphBinding {
+    pub run: String,
+    pub container: String,
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Intent {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    graph: Option<GraphBinding>,
     service: String,
     slot: String,
     incarnation: String,
@@ -55,6 +63,15 @@ fn validate(intent: &Intent, slot: &str) -> Result<(), CandidateError> {
         || !uuid(&intent.boot)
         || !slot.starts_with(&format!("hack-env-lease-{}-", intent.boot))
         || !hex(&intent.incarnation, 32)
+        || intent.graph.as_ref().is_some_and(|g| {
+            !hex(&g.run, 32)
+                || !g
+                    .container
+                    .strip_prefix(&format!("hkg-{}-container-", g.run))
+                    .is_some_and(|n| {
+                        !n.is_empty() && n.len() <= 2 && n.bytes().all(|b| b.is_ascii_digit())
+                    })
+        })
         || !super::environment::name(&intent.service)
     {
         return Err(error());
@@ -75,6 +92,7 @@ pub(super) fn record(
     }
     let intent = Intent {
         version: 1,
+        graph: lease.graph.clone(),
         service: lease.service.clone(),
         slot: lease.slot.clone(),
         incarnation: lease.incarnation.clone(),
@@ -93,6 +111,15 @@ fn read(
     slot: &str,
     incarnation: &str,
     lease: Option<&EnvironmentLease>,
+) -> Result<Intent, CandidateError> {
+    read_mode(candidate, slot, incarnation, lease, true)
+}
+fn read_mode(
+    candidate: &Candidate,
+    slot: &str,
+    incarnation: &str,
+    lease: Option<&EnvironmentLease>,
+    promote: bool,
 ) -> Result<Intent, CandidateError> {
     if !valid_slot(slot) {
         return Err(error());
@@ -117,7 +144,8 @@ fn read(
         return Err(error());
     }
     if let Some(lease) = lease {
-        if lease.service != intent.service
+        if lease.graph != intent.graph
+            || lease.service != intent.service
             || lease.boot != intent.boot
             || lease.incarnation != intent.incarnation
         {
@@ -125,7 +153,7 @@ fn read(
         }
     }
     // Promote only a complete, validated initial intent. Never delete retained pending state.
-    if has_pending {
+    if has_pending && promote {
         fs::rename(&pending, &path).map_err(state::io)?;
         fs::File::open(&directory)
             .and_then(|f| f.sync_all())
@@ -163,6 +191,23 @@ pub fn recorded_slots(candidate: &Candidate) -> Result<Vec<String>, CandidateErr
     }
     Ok(slots.into_iter().collect())
 }
+/// Validates immutable records before associating them with graph cleanup.
+pub(super) fn graph_slots(
+    candidate: &Candidate,
+    guest: &OwnedGuest<'_>,
+    run: &str,
+) -> Result<Vec<(String, String, GraphBinding)>, CandidateError> {
+    let mut bindings = Vec::new();
+    for slot in recorded_slots(candidate)? {
+        let intent = read_mode(candidate, &slot, guest.incarnation(), None, false)?;
+        if let Some(binding) = intent.graph {
+            if binding.run == run {
+                bindings.push((slot, intent.service, binding));
+            }
+        }
+    }
+    Ok(bindings)
+}
 /// Explicitly retires a recorded allocation. It may still be live: the caller must own its lifecycle.
 /// Same-boot partial tmpfs allocations are removable. An older boot permits only absent/empty,
 /// unmounted directories. Foreign incarnations, symlinks and unexpected mounts are refused.
@@ -177,6 +222,9 @@ pub(super) fn retire(
     lease: Option<&EnvironmentLease>,
 ) -> Result<(), CandidateError> {
     let intent = read(candidate, slot, guest.incarnation(), lease)?;
+    if let Some(binding) = &intent.graph {
+        super::engine::require_container_absent(guest, &binding.container)?;
+    }
     let mode = if intent.boot == guest.boot_id() {
         "same"
     } else {
@@ -236,6 +284,7 @@ mod tests {
             let boot = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string();
             Intent {
                 version: 1,
+                graph: None,
                 service: "web".into(),
                 slot: format!("hack-env-lease-{boot}-{}", "a".repeat(32)),
                 boot,
@@ -258,6 +307,31 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0.checkout).unwrap();
+        }
+    }
+    #[test]
+    fn graph_binding_requires_its_container_namespace_and_preserves_read_only_inventory() {
+        let fixture = Fixture::new();
+        let mut intent = fixture.intent();
+        let run = "a".repeat(32);
+        intent.graph = Some(GraphBinding {
+            run: run.clone(),
+            container: format!("hkg-{run}-container-0"),
+        });
+        assert!(validate(&intent, &intent.slot).is_ok());
+        let bytes = serde_json::to_vec(&intent).unwrap();
+        let pending = fixture.pending(&bytes, &intent.slot);
+        assert!(read_mode(&fixture.0, &intent.slot, &intent.incarnation, None, false).is_ok());
+        assert!(pending.exists());
+        assert!(!pending.with_extension("json").exists());
+        for container in [
+            "../outside".into(),
+            format!("hkg-{}-container-0", "b".repeat(32)),
+            format!("hkg-{run}-container-000"),
+            format!("hkg-{run}-container-é"),
+        ] {
+            intent.graph.as_mut().unwrap().container = container;
+            assert!(validate(&intent, &intent.slot).is_err());
         }
     }
     #[test]

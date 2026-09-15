@@ -240,8 +240,16 @@ and restart readback proving deleted owned resources stay deleted. No production
    cleanup-only refusal. Retirement bypasses allocation admission without releasing that lock.
    Live run `environment-handoff-1789430822574659000` passes engine/lease interleaving, retained lock
    exclusion, forced admission-refusal cleanup and the prior lease/restart recovery controls.
-   Container attachment, graph-to-slot recovery ownership and native authorization remain open;
-   the graph executor still refuses managed environment inputs.
+   The subsequent attachment checkpoint addresses graph-to-slot cleanup ownership; normal graph
+   startup still refuses managed environment inputs.
+   Experimental attachment now records graph/container ownership before staging. Graph cleanup
+   validates those bindings and removes containers before retiring their slots; container existence
+   blocks standalone retirement. Attached graphs refuse restart, restore and export pending qualified
+   redelivery. Normal managed-input startup, entrypoint/non-root behavior and native authorization
+   remain open. Live attachment and independent-process cleanup pass
+   `environment-attachment-1789431561987618000`, including mismatched-binding refusal, exact
+   synthetic child values, metadata omission and read-only mounting. These are retained phase
+   snapshots, not SIGKILL injection. Validation: 144 Rust tests, 940 CLI tests and required checks.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,
    failures and owned cleanup. The synthetic SQLite probe does not replace this gate.
 5. Qualify the guest base and networking package versions for distribution in WU11; the current

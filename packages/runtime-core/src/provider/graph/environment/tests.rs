@@ -52,6 +52,7 @@ fn container_attachment_records_ownership_before_create_and_omits_values_from_me
             phase: "reserved".into(),
         };
         let mut receipt = Receipt {
+            probes: BTreeMap::new(),
             version: 1,
             run: run.clone(),
             owner: engine.guest().incarnation().into(),

@@ -392,10 +392,28 @@ fn health(
             "start_period",
             "start_interval",
             "retries",
+            "x-hack-http",
         ],
         field,
         diagnostics,
     );
+    let native_http = m
+        .get("x-hack-http")
+        .map(|value| {
+            let probe: crate::provider::http_probe::HttpProbe =
+                serde_json::from_value(value.clone()).map_err(|_| {
+                    problem("invalid_healthcheck", "Invalid native HTTP declaration.")
+                })?;
+            probe.validate()?;
+            if m.keys().any(|key| key != "x-hack-http") {
+                return Err(problem(
+                    "invalid_healthcheck",
+                    "Native HTTP cannot be combined with command health settings.",
+                ));
+            }
+            Ok(probe)
+        })
+        .transpose()?;
     let mut disabled = boolean(m.get("disable"), false)?;
     let test = match m.get("test") {
         Some(Value::String(text)) => Some(CommandPlan {
@@ -434,6 +452,7 @@ fn health(
         _ => return Err(problem("invalid_healthcheck", "Invalid health test form.")),
     };
     Ok(Some(HealthPlan {
+        native_http,
         disabled,
         test,
         interval_nanos: duration(m.get("interval"))?,

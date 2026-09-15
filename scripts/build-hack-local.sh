@@ -10,6 +10,6 @@ if [ -L "$repo/.hack-local" ] || [ -L "$repo/.hack-local/target" ] || \
 fi
 umask 077
 cd "$repo"
-exec cargo build --locked --release --jobs 2 \
+exec cargo build --locked --release --jobs 2 --features native-http-probe \
   --manifest-path "$repo/packages/runtime-core/Cargo.toml" \
   --target-dir "$repo/.hack-local/target"

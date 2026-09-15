@@ -56,7 +56,7 @@ pub(super) fn validate(
                 && !target
                     .healthcheck
                     .as_ref()
-                    .is_some_and(|h| !h.disabled && h.test.is_some())
+                    .is_some_and(|h| !h.disabled && (h.test.is_some() || h.native_http.is_some()))
             {
                 diagnostics.push(Diagnostic::error("missing_healthcheck",&field,"A healthy dependency needs an explicit enabled healthcheck; image health defaults are not assumed."));
             }

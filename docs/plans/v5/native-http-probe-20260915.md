@@ -1,13 +1,15 @@
 # Resident native HTTP probe — September 15
 
 The resident probe component is implemented and qualified locally and inside the owned ARM64 VM.
-Graph integration remains open: normal graphs still use their existing command health checks.
-The earlier persistent-Bun diagnostic CPU advantage is not yet a benchmark of this native path.
+Graph integration now supports explicitly declared native HTTP checks. Existing command checks
+retain their semantics.
+The [integrated benchmark](native-graph-performance-20260915.md) now measures this path against
+Compose command-health checks; the earlier persistent-Bun diagnostic remains separate.
 
 ## Implemented contract
 
 `native-http-probe` builds a static Linux ARM64 executable with pinned Zig 0.15.2 and embeds it for
-future publication. A host build of the same POSIX source exercises failure cases in Rust tests.
+owned, digest-verified guest publication. A host build of the same POSIX source exercises failure cases in Rust tests.
 The qualified guest executable is 33,264 bytes, SHA-256
 `2022a88e224b1ff5befcd15f6b9ab1c6ad80dc604584b23f08aed7cb0461ddda`.
 File size is not process footprint or a CPU measurement.
@@ -56,17 +58,53 @@ A bounded guest tmpfs bind mount solved that visibility issue. Evidence:
 This finding constrains the graph implementation; do not restore per-check container execs merely
 to read status.
 
-## Next integration unit
+## Graph integration
 
-1. Add an explicit native HTTP declaration to the reviewed project plan; do not reinterpret
-   arbitrary shell commands or silently replace image health semantics.
-2. Bind probe configuration, private tmpfs allocation, generation and exec identity to durable graph
-   intent before effects. Refuse replay after ambiguous creation/start and release only owned state.
-3. Start one probe per container incarnation. Read bounded archive status alongside exec/container
-   identity and use the existing graph readiness/dependency rules. Supervisor loss must be unhealthy.
-4. Cover graph driver loss, stop/restart, restore with fresh IDs, failed init, non-root delivery,
-   reserved mount conflicts and cleanup. Do not retain old healthy status across generations.
-5. Repeat the fixed completed-work comparison in both lane orders through that product path,
-   including status observation, startup/exit, CPU, process footprint and application response time.
+The private candidate build enables `native-http-probe`; pinned Zig 0.15.2 and a host C compiler
+are build prerequisites. A manual build without the feature can review declarations but refuses
+native probe allocation. Select the behavior explicitly in Compose:
 
-The native component is feature-gated and does not yet change candidate graph defaults.
+```yaml
+healthcheck:
+  x-hack-http:
+    port: 3000
+    path: /health
+    interval_ms: 1000
+    timeout_ms: 500
+    retries: 3
+    start_period_ms: 0
+```
+
+All six fields are required. The declaration cannot mix with command-health settings. Numeric
+UID/GID and long-running service readiness are required. Project mounts cannot replace reserved
+runtime paths. The engine command healthcheck is disabled only for this explicit declaration.
+The graph starts one resident probe after container start and reads bounded status through the
+archive API alongside independent container and exec identity checks. No process starts per read.
+
+The graph receipt records configuration, allocation, generation and exec identity. Durable intent
+precedes tmpfs creation, exec creation and start. An ambiguous acknowledgement refuses replay.
+Each allocation has a root-owned marker and bounded 64 KiB guest tmpfs. Restart verifies the old
+container is stopped and its probe terminated before replacing status and generation. Restore
+uses fresh allocation and container identities. Cleanup verifies ownership and termination before
+unmounting; repeated cleanup is idempotent. Retained incomplete binary publications remain intact.
+
+Live graph evidence: `.hack-local/review/wu07/graph-native-http-1789499758934310000/`.
+Three serial controls passed: non-root readiness, supervisor loss becoming unhealthy, same-container
+restart, fresh restore, failed init preventing dependent allocation, and driver interruption at
+three allocation/exec acknowledgement boundaries followed by owned cleanup. The VM stopped and
+protected installed executable/configuration hashes matched. Scoped non-root environment delivery
+and fresh managed values on restore also passed; all ten watchdog samples had normal pressure
+and unchanged swapouts. The integrated comparison also passes in both lane orders.
+
+The previous 24–25% CPU advantage belongs to the persistent-Bun diagnostic. The new integrated
+comparison observes 84.8–85.5% lower engine CPU and 68.5–68.6% lower physical footprint for this
+HTTP workload. Real-application acceptance remains separate.
+
+## Verification
+
+The integration passes 151 ordinary Rust tests without optional features and 156 with
+`environment-launcher,native-http-probe`, strict Clippy for both configurations, and the three
+serial live graph controls above. The CLI gates pass typecheck, lint/privacy and 940 tests with
+five skips. Relative documentation links and whitespace checks pass. The default private release
+build succeeds with Rust 1.97.1 and the pinned native toolchain. These checks do not establish
+hosted CI, release readiness or full Event Agent acceptance.

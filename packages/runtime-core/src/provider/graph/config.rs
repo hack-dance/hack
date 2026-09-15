@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 pub(super) struct Prepared {
     pub graph: Graph,
     pub configs: BTreeMap<String, Value>,
+    pub probes: BTreeMap<String, super::super::http_probe::HttpProbe>,
     pub resources: BTreeMap<String, Resource>,
     pub namespace: String,
     pub plan_id: String,
@@ -136,6 +137,7 @@ pub(super) fn prepare_delivery(
         }
     }
     let mut configs = BTreeMap::new();
+    let mut probes = BTreeMap::new();
     for (index, (name, service)) in plan.services.iter().filter(|(_, s)| s.active).enumerate() {
         let values = &inputs.services[name];
         let image = service.image.as_ref().expect("checked image");
@@ -217,7 +219,37 @@ pub(super) fn prepare_delivery(
                 .unwrap_or(10_000_000_000)
                 .div_ceil(1_000_000_000)
         );
-        if let Some(health) = &service.healthcheck {
+        if let Some(probe) = service
+            .healthcheck
+            .as_ref()
+            .and_then(|h| h.native_http.as_ref())
+        {
+            if !cfg!(feature = "native-http-probe") {
+                return Err(error(
+                    "native_http_unavailable",
+                    "Build the candidate with native-http-probe to run native HTTP checks.",
+                ));
+            }
+            probe.validate()?;
+            if readiness[name] == Condition::Completed {
+                return Err(error(
+                    "native_http_readiness",
+                    "Native HTTP requires a long-running service readiness goal.",
+                ));
+            }
+            launcher::identity(&config)?;
+            for mount in config["HostConfig"]["Mounts"].as_array().unwrap() {
+                let path = mount["Target"].as_str().unwrap_or("");
+                if path == "/" || path == "/run" || path.starts_with("/run/hack-http-probe") {
+                    return Err(error(
+                        "native_http_mount",
+                        "Mount overlaps a reserved HTTP probe path.",
+                    ));
+                }
+            }
+            probes.insert(name.clone(), probe.clone());
+            config["Healthcheck"] = json!({"Test":["NONE"]});
+        } else if let Some(health) = &service.healthcheck {
             let mut value = json!({});
             if let Some(test) = &values.health_test {
                 value["Test"] = json!(test);
@@ -243,6 +275,7 @@ pub(super) fn prepare_delivery(
     Ok(Prepared {
         graph,
         configs,
+        probes,
         resources,
         namespace: plan.namespace.clone(),
         plan_id: inputs.review.plan_id.clone(),

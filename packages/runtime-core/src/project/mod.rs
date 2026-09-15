@@ -101,6 +101,8 @@ pub struct DependencyPlan {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct HealthPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_http: Option<crate::provider::http_probe::HttpProbe>,
     pub disabled: bool,
     pub test: Option<CommandPlan>,
     pub interval_nanos: Option<u64>,

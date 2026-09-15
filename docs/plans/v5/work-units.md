@@ -378,8 +378,14 @@ its idle policy. That policy is now explicit and recorded per boot; no new defau
 memory improvement is claimed.
 The [native HTTP supervisor](native-http-probe-20260915.md) now passes host failure controls and
 owned ARM64 timeout/recovery/termination tests. A guest tmpfs bind mount makes its status observable
-without per-read execs; graph integration and integrated performance measurements remain open.
-Open work: persistent-probe graph lifecycle and health integration, automatic idle reclamation and real-application recovery,
+without per-read execs. Explicit native declarations now drive graph readiness with durable probe
+intent, supervisor-loss detection, same-container restart, fresh restore and owned cleanup. Three
+serial live controls pass, including scoped non-root environment delivery and driver interruption.
+The [integrated benchmark](native-graph-performance-20260915.md) passes both lane orders: 84.8–85.5%
+lower gross engine CPU and 68.5–68.6% lower footprint than Compose CMD health on this host.
+Startup/restore are faster in the two observations; cleanup is slightly slower. Counts and unequal
+VM capacities remain explicit caveats.
+Open work: automatic idle reclamation and real-application recovery,
 crun OCI/kernel compatibility, vCPU sweeps, launch profiling and the existing application gates.
 
 ## WU11 — Preserve compatibility and qualify distribution

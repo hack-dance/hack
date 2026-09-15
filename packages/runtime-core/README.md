@@ -8,6 +8,8 @@ experimental Apple Silicon SmolVM lifecycle. The installed Hack, existing Docker
 Build with `./scripts/build-hack-local.sh`, then run `./hack-local info` and
 `./hack-local runtime probe`. The [development guide](../../docs/plans/v5/development.md) describes
 pinned package preparation, ownership, resource admission, lifecycle commands, and manual tests.
+The default private build includes [native HTTP graph probes](../../docs/plans/v5/native-http-probe-20260915.md)
+and requires Zig 0.15.2 plus a host C compiler.
 [Provider pins](provider-pins.json) record the exact package inputs; the engine runs inside the VM.
 
 `provider/` separates bounded child processes, artifact verification, admission, private ownership,
@@ -16,7 +18,7 @@ connection to the existing socket; they cannot silently start or recover a VM. F
 retain their phase and receipts. Recovery preserves disks and labels an unclean exit explicitly.
 
 Protocol version 1 describes this development client. It is not a promised release API. This is
-not an application graph executor or native Linux container adapter yet. The checkout-owned `node serve`
+a bounded experimental application graph executor, not a qualified native Linux container adapter. The checkout-owned `node serve`
 service and independent supervisors implement the [WU04 contract](../../docs/plans/v5/wu04-contract.md).
 Its [versioned schema](node-protocol-v1.schema.json) precedes any TypeScript consumer. The
 [Compose subset](../../docs/plans/v5/compose-subset.md) defines the importer and refusal boundaries. The

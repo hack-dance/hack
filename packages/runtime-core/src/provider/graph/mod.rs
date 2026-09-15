@@ -6,6 +6,7 @@ mod environment;
 #[cfg(all(test, feature = "environment-launcher"))]
 mod environment_crash_test;
 mod launcher;
+mod probes;
 #[cfg(all(test, feature = "environment-launcher"))]
 mod startup_test;
 pub use environment::stage_environment;
@@ -79,6 +80,8 @@ pub struct Resource {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub probes: BTreeMap<String, probes::Probe>,
     pub version: u32,
     pub run: String,
     pub owner: String,
@@ -292,6 +295,7 @@ fn load(
             return Err(error("graph_receipt", "Malformed graph resource identity."));
         }
     }
+    probes::validate(&receipt)?;
     Ok((receipt, root))
 }
 
@@ -488,6 +492,7 @@ impl Driver for Session<'_> {
             if resource.phase != "start-intent" {
                 return Err(error("graph_replay_refused", "Restart intent is missing."));
             }
+            self.prepare_probe(service)?;
             let inspected = inspect_resource(&self.engine, &self.receipt, &resource)?
                 .ok_or_else(|| error("graph_resource_missing", "Restart resource is missing."))?;
             self.verify_config(service, &inspected)?;
@@ -499,6 +504,7 @@ impl Driver for Session<'_> {
             })?;
             self.engine
                 .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+            self.start_probe(service, id)?;
             return Ok(());
         }
         if resource.phase != "create-intent" || resource.id.is_some() {
@@ -513,6 +519,7 @@ impl Driver for Session<'_> {
                 "Fresh graph cannot adopt an existing container.",
             ));
         }
+        self.prepare_probe(service)?;
         if let Some(pending) = self.environments.remove(service) {
             self.receipt.environment_attached = true;
             self.save()?;
@@ -564,6 +571,7 @@ impl Driver for Session<'_> {
         }
         self.engine
             .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+        self.start_probe(service, &id)?;
         #[cfg(test)]
         self.fault_pause("after-start")?;
         Ok(())
@@ -572,7 +580,7 @@ impl Driver for Session<'_> {
         let resource = &self.receipt.resources[&format!("container:{service}")];
         let value = inspect_resource(&self.engine, &self.receipt, resource)?
             .ok_or_else(|| error("graph_resource_missing", "Owned service disappeared."))?;
-        observation(&value)
+        probes::observe(&self.engine, &self.receipt, service, &value)
     }
 }
 /// Explicit fresh attempt only. All commands must be non-secret until managed delivery is qualified.
@@ -712,7 +720,9 @@ fn run_inputs(
         .mode(0o700)
         .create(&root)
         .map_err(state::io)?;
+    let probe_states = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
     let receipt = Receipt {
+        probes: probe_states,
         version: 1,
         run: options.run_id.into(),
         owner: engine.guest().incarnation().into(),
@@ -755,7 +765,7 @@ pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateEr
         let value = match inspect_resource(&engine, &receipt, resource)? {
             None => json!({"state":"absent"}),
             Some(v) if resource.kind == Kind::Container => {
-                serde_json::to_value(observation(&v)?)
+                serde_json::to_value(probes::observe(&engine, &receipt, &resource.key, &v)?)
                     .map_err(|_| error("graph_state", "Cannot encode observation."))?
             }
             Some(_) => json!({"state":"present"}),
@@ -831,6 +841,7 @@ pub fn cleanup(
             fault_pause(&root, &receipt.run, "cleanup-after-remove")?;
         }
     }
+    probes::cleanup(&engine, &mut receipt)?;
     for slot in environment_slots {
         super::environment_recovery::retire(candidate, engine.guest(), &slot, None)?;
     }
@@ -928,6 +939,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
             "Restart resources differ from the reviewed graph.",
         ));
     }
+    probes::unchanged(&prepared.configs, &prepared.probes, &receipt)?;
     for resource in receipt.resources.values() {
         let value = inspect_resource(&engine, &receipt, resource)?.ok_or_else(|| {
             error(

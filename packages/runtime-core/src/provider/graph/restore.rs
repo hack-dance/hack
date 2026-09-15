@@ -120,6 +120,7 @@ fn restore_inputs(
         Some(launcher::publish(&engine)?)
     };
     retain_previous(&root, &receipt)?;
+    receipt.probes = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
     receipt.phase = "restoring".into();
     for (key, resource) in &mut receipt.resources {
         if resource.kind != Kind::Volume {
@@ -180,6 +181,7 @@ mod tests {
     fn restore_history_is_bounded_and_never_overwritten() {
         let fixture = super::super::tests::Fixture::new();
         let mut receipt = Receipt {
+            probes: BTreeMap::new(),
             version: 1,
             run: "a".repeat(32),
             owner: "b".repeat(32),

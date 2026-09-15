@@ -111,3 +111,10 @@ and recursive or oversized expansion fail before planning. See the
 [Compose fragment rules](https://docs.docker.com/reference/compose-file/fragments/).
 Interpolated/home-relative mount sources produce `unresolved_mount_source` diagnostics without
 looking up host environment values; they are not misclassified as named volumes.
+
+### Explicit native HTTP health checks
+
+The private graph executor supports the typed `healthcheck.x-hack-http` declaration documented in
+[native HTTP probes](native-http-probe-20260915.md). It requires all six bounded fields and cannot
+mix with command-health settings. Healthy dependencies recognize it; ordinary command checks retain
+their existing behavior. Graph allocation requires the `native-http-probe` build feature.

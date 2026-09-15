@@ -212,6 +212,55 @@ impl<'a> Engine<'a> {
         self.guest.verify()?;
         Ok(events)
     }
+    pub(super) fn probe_status(&self, id: &str) -> Result<Option<String>, CandidateError> {
+        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(failure("Invalid probe container identity."));
+        }
+        self.guest.verify()?;
+        let bytes = match self.transport.request_bytes(
+            Method::GET,
+            &format!("/v1.53/containers/{id}/archive?path=/run/hack-http-probe-state/status"),
+            None,
+        ) {
+            Ok(bytes) => bytes,
+            Err(e) if e.code == "engine_not_found" => {
+                self.guest.verify()?;
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        if bytes.len() > 32_768 {
+            return Err(failure("Probe archive exceeds its budget."));
+        }
+        let mut archive = tar::Archive::new(bytes.as_slice());
+        let mut entries = archive
+            .entries()
+            .map_err(|_| failure("Invalid probe archive."))?;
+        let mut entry = entries
+            .next()
+            .ok_or_else(|| failure("Empty probe archive."))?
+            .map_err(|_| failure("Invalid probe archive."))?;
+        if entry
+            .path()
+            .map_err(|_| failure("Invalid probe path."))?
+            .as_ref()
+            != Path::new("status")
+            || !entry.header().entry_type().is_file()
+            || entry.size() > 256
+        {
+            return Err(failure("Unexpected probe archive entry."));
+        }
+        let mut raw = String::new();
+        entry
+            .read_to_string(&mut raw)
+            .map_err(|_| failure("Invalid probe status."))?;
+        drop(entry);
+        if entries.next().is_some() {
+            return Err(failure("Multiple probe archive entries."));
+        }
+        self.guest.verify()?;
+        Ok(Some(raw))
+    }
     pub(super) fn logs(&self, id: &str) -> Result<(String, String, bool), CandidateError> {
         if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(failure("Invalid container log identity."));

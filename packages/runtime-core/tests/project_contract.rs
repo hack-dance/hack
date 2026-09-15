@@ -1501,3 +1501,35 @@ fn scoped_environment_preserves_empty_values_and_enforces_a_shared_budget() {
     assert_eq!(failure.code, "execution_plan_changed");
     assert!(!fixture.candidate.state_root.exists());
 }
+
+#[test]
+fn native_http_health_is_explicit_reviewed_and_rejects_mixed_semantics() {
+    let native = r#"{"port":3000,"path":"/health","interval_ms":1000,"timeout_ms":200,"retries":3,"start_period_ms":0}"#;
+    let document = |extra: &str| {
+        format!(
+            "services:\n  web:\n    image: alpine\n    healthcheck:\n      x-hack-http: {native}\n{extra}  client:\n    image: alpine\n    depends_on:\n      web:\n        condition: service_healthy\n"
+        )
+    };
+    let fixture = Fixture::new(&document(""));
+    let plan = fixture.plan();
+    assert!(
+        !plan
+            .plan
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "missing_healthcheck" || d.code == "compose_extension_metadata")
+    );
+    let probe = plan.plan.services["web"]
+        .healthcheck
+        .as_ref()
+        .unwrap()
+        .native_http
+        .as_ref()
+        .unwrap();
+    assert_eq!(probe.port, 3000);
+    assert_eq!(probe.interval_ms, 1000);
+    let malformed = Fixture::new(&document("      test: [CMD, /bin/true]\n"));
+    assert!(project::plan(&malformed.candidate, malformed.options()).is_err());
+    let malformed = Fixture::new(&document("").replace("/health", "/bad path"));
+    assert!(project::plan(&malformed.candidate, malformed.options()).is_err());
+}

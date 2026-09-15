@@ -973,3 +973,372 @@ fn driver_refuses_managed_inputs_even_when_public_environment_is_empty() {
     assert_eq!(failure.code, "graph_subset");
     assert!(!candidate.state_root.exists());
 }
+
+#[test]
+#[cfg(feature = "native-http-probe")]
+#[ignore = "Owned development VM, pinned Bun image and external watchdog required"]
+fn native_http_graph_readiness_restart_restore_and_supervisor_loss() -> Result<(), CandidateError> {
+    let candidate =
+        Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))?;
+    let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
+    let fixture = Fixture::new();
+    let run = token();
+    let failed = token();
+    let marker = token();
+    let mut document = compose(&image, &marker, false);
+    document["services"]["web"]["user"] = json!("1001:1001");
+    document["services"]["web"]["healthcheck"] = json!({"x-hack-http":{"port":3000,"path":"/","interval_ms":100,"timeout_ms":50,"retries":3,"start_period_ms":0}});
+    fs::write(
+        fixture.0.join("compose.yaml"),
+        serde_json::to_vec(&document).unwrap(),
+    )
+    .map_err(state::io)?;
+    let review = project::plan(&candidate, fixture.options())?;
+    let goals = goals();
+    let public = BTreeMap::new();
+    let options = |run_id| RunOptions {
+        project: fixture.options(),
+        expected_plan: &review.plan_id,
+        source_revision: None,
+        non_secret_values: &public,
+        readiness: &goals,
+        run_id,
+        timeout: Duration::from_secs(30),
+    };
+    let result = (|| {
+        let ready = super::run(&candidate, options(&run))?;
+        assert_eq!(ready.phase, "ready-observed");
+        let first = ready.probes["web"].clone();
+        let engine = Engine::connect(&candidate)?;
+        let id = ready.resources["container:web"].id.as_ref().unwrap();
+        let inspected =
+            inspect_resource(&engine, &ready, &ready.resources["container:web"])?.unwrap();
+        assert_eq!(inspected["Config"]["Healthcheck"]["Test"], json!(["NONE"]));
+        assert_eq!(
+            probes::observe(&engine, &ready, "web", &inspected)?,
+            Observation::Running {
+                health: Health::Healthy
+            }
+        );
+        let v = engine.request(
+            Method::GET,
+            &format!("/v1.53/exec/{}/json", first.exec_id.as_ref().unwrap()),
+            None,
+        )?;
+        let pid = v["Pid"]
+            .as_u64()
+            .filter(|p| *p > 1 && *p < i32::MAX as u64)
+            .unwrap()
+            .to_string();
+        engine.guest().execute_cleanup(
+            r#"
+test "$(readlink /proc/$1/exe)" = /run/hack-http-probe
+grep -F "$2" /proc/$1/cgroup >/dev/null
+kill -KILL "$1"
+"#,
+            &[&pid, id],
+        )?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if probes::observe(&engine, &ready, "web", &inspected)?
+                == (Observation::Running {
+                    health: Health::Unhealthy,
+                })
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        engine.request(
+            Method::POST,
+            &format!("/v1.53/containers/{id}/stop?t=1"),
+            None,
+        )?;
+        drop(engine);
+        let restarted = restart(&candidate, options(&run))?;
+        assert_eq!(
+            restarted.resources["container:web"].id,
+            ready.resources["container:web"].id
+        );
+        assert_ne!(restarted.probes["web"].generation, first.generation);
+        assert_ne!(restarted.probes["web"].exec_id, first.exec_id);
+        let stopped = cleanup(&candidate, &run, false)?;
+        assert_eq!(stopped.probes["web"].phase, "retired");
+        let restored = restore(&candidate, options(&run))?;
+        assert_ne!(restored.probes["web"].allocation, first.allocation);
+        assert_ne!(
+            restored.resources["container:web"].id,
+            ready.resources["container:web"].id
+        );
+        let snapshot = inspect(&candidate, &run)?;
+        assert_eq!(snapshot.observations["container:web"]["health"], "healthy");
+        Ok(())
+    })();
+    let cleaned = cleanup(&candidate, &run, true);
+    result?;
+    cleaned?;
+    cleanup(&candidate, &run, true)?;
+    document["services"]["init"]["entrypoint"] =
+        json!(["/usr/local/bin/bun", "-e", "process.exit(23)"]);
+    fs::write(
+        fixture.0.join("compose.yaml"),
+        serde_json::to_vec(&document).unwrap(),
+    )
+    .map_err(state::io)?;
+    let review = project::plan(&candidate, fixture.options())?;
+    let failed_result = super::run(
+        &candidate,
+        RunOptions {
+            project: fixture.options(),
+            expected_plan: &review.plan_id,
+            source_revision: None,
+            non_secret_values: &public,
+            readiness: &goals,
+            run_id: &failed,
+            timeout: Duration::from_secs(30),
+        },
+    );
+    assert!(failed_result.is_err());
+    let retained = inspect(&candidate, &failed)?;
+    assert!(retained.receipt.probes["web"].exec_id.is_none());
+    assert!(retained.receipt.resources["container:web"].id.is_none());
+    cleanup(&candidate, &failed, true)?;
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "native-http-probe")]
+#[ignore = "Owned VM, native probe build and external watchdog required"]
+fn native_http_driver_loss_retains_intents_and_cleans_owned_allocations()
+-> Result<(), CandidateError> {
+    use std::process::{Child, Stdio};
+    struct OwnedChild(Option<Child>);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            if let Some(child) = &mut self.0 {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    let candidate =
+        Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))?;
+    let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
+    for point in [
+        "probe-after-allocation",
+        "probe-after-exec-create",
+        "probe-after-exec-start",
+    ] {
+        let fixture = Fixture::new();
+        let run = token();
+        let mut document = compose(&image, &run, false);
+        document["services"]["web"]["healthcheck"] = json!({"x-hack-http":{"port":3000,"path":"/","interval_ms":100,"timeout_ms":50,"retries":3,"start_period_ms":0}});
+        state::write(&fixture.0.join("compose.yaml"), &document)?;
+        let child = Command::new(std::env::current_exe().map_err(state::io)?)
+            .args([
+                "--ignored",
+                "--exact",
+                "provider::graph::tests::fault_child",
+            ])
+            .env("HACK_LOCAL_GRAPH_FAULT", point)
+            .env("HACK_LOCAL_GRAPH_PROJECT", &fixture.0)
+            .env("HACK_LOCAL_GRAPH_RUN", &run)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(state::io)?;
+        let mut child = OwnedChild(Some(child));
+        let marker = directory(&candidate, &run)?.join(format!("fault-{point}.json"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !marker.exists() {
+            assert!(
+                child
+                    .0
+                    .as_mut()
+                    .unwrap()
+                    .try_wait()
+                    .map_err(state::io)?
+                    .is_none(),
+                "fault child exited early"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fault boundary was not reached"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.0.as_mut().unwrap().kill().map_err(state::io)?;
+        child.0.as_mut().unwrap().wait().map_err(state::io)?;
+        child.0 = None;
+        let retained = inspect(&candidate, &run)?;
+        let p = &retained.receipt.probes["web"];
+        assert_eq!(
+            p.phase,
+            match point {
+                "probe-after-allocation" => "allocation-intent",
+                "probe-after-exec-create" => "exec-intent",
+                _ => "starting",
+            }
+        );
+        assert_eq!(p.exec_id.is_some(), point == "probe-after-exec-start");
+        assert!(retained.receipt.resources["container:check"].id.is_none());
+        assert!(launch(&candidate, &fixture, &run, "run").is_err());
+        let cleaned = cleanup(&candidate, &run, true)?;
+        assert_eq!(cleaned.probes["web"].phase, "retired");
+        cleanup(&candidate, &run, true)?;
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "native-http-probe")]
+fn native_http_rejects_reserved_mounts_and_completed_readiness_before_allocation() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let mut document = compose(&format!("sha256:{}", "a".repeat(64)), "fixture", false);
+    document["services"]["web"]["healthcheck"] = json!({"x-hack-http":{"port":3000,"path":"/","interval_ms":1000,"timeout_ms":500,"retries":3,"start_period_ms":0}});
+    for target in [
+        "/run",
+        "/run/hack-http-probe",
+        "/run/hack-http-probe-state/nested",
+    ] {
+        document["services"]["web"]["volumes"] = json!([format!("data:{target}")]);
+        fs::write(
+            fixture.0.join("compose.yaml"),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+
+        assert!(
+            review
+                .plan
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "reserved_mount_target")
+        );
+        assert!(
+            project::inputs::compile(
+                &candidate,
+                fixture.options(),
+                &review.plan_id,
+                &BTreeMap::new()
+            )
+            .is_err()
+        );
+    }
+    document["services"]["web"]["volumes"] = json!(["data:/data"]);
+    fs::write(
+        fixture.0.join("compose.yaml"),
+        serde_json::to_vec(&document).unwrap(),
+    )
+    .unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    let inputs = project::inputs::compile(
+        &candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let mut goals = goals();
+    goals.insert("web".into(), Condition::Completed);
+    assert_eq!(
+        config::prepare(inputs, &goals, &token(), &token(), None)
+            .err()
+            .unwrap()
+            .code,
+        "native_http_readiness"
+    );
+    assert!(!candidate.state_root.join("run/graphs").exists());
+}
+
+#[test]
+#[cfg(all(feature = "native-http-probe", feature = "environment-launcher"))]
+#[ignore = "Owned VM, managed launcher, native probe and external watchdog required"]
+fn native_http_preserves_scoped_nonroot_delivery_and_fresh_restore() -> Result<(), CandidateError> {
+    let candidate =
+        Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))?;
+    let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
+    let fixture = Fixture::new();
+    let run = token();
+    let mut document = compose(&image, &run, false);
+    let init = document["services"]["init"]["entrypoint"][2]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    document["services"]["init"]["entrypoint"][2] = json!(format!(
+        "const f=Bun.file('/data/native-starts');await Bun.write('/data/native-starts',String((await f.exists()?Number(await f.text()):0)+1));{init}"
+    ));
+    let web = document["services"]["web"]["entrypoint"][2]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    document["services"]["web"]["entrypoint"][2] = json!(format!(
+        "if(process.getuid()!==1001||!process.env.TOKEN?.startsWith('synthetic-native-')||((await Bun.file('/data/native-starts').text())==='2')!==process.env.TOKEN.endsWith('-fresh'))process.exit(77);{web}"
+    ));
+    document["services"]["web"]["user"] = json!("1001:1001");
+    document["services"]["web"]["environment"] = json!({"TOKEN":null});
+    document["services"]["web"]["healthcheck"] = json!({"x-hack-http":{"port":3000,"path":"/","interval_ms":100,"timeout_ms":50,"retries":10,"start_period_ms":500}});
+    state::write(&fixture.0.join("compose.yaml"), &document)?;
+    let review = project::plan(&candidate, fixture.options())?;
+    let goals = goals();
+    let public = BTreeMap::new();
+    let options = || RunOptions {
+        project: fixture.options(),
+        expected_plan: &review.plan_id,
+        source_revision: None,
+        non_secret_values: &public,
+        readiness: &goals,
+        run_id: &run,
+        timeout: Duration::from_secs(30),
+    };
+    let values = |suffix: &str| {
+        BTreeMap::from([(
+            "web".into(),
+            BTreeMap::from([("TOKEN".into(), format!("synthetic-native-{suffix}"))]),
+        )])
+    };
+    let result = (|| {
+        let initial = run_with_environment(
+            &candidate,
+            options(),
+            &values("initial"),
+            Duration::from_secs(120),
+        )?;
+        assert!(initial.environment_attached);
+        cleanup(&candidate, &run, false)?;
+        let restored = restore_with_environment(
+            &candidate,
+            options(),
+            &values("restored-fresh"),
+            Duration::from_secs(120),
+        )?;
+        assert_ne!(
+            restored.probes["web"].generation,
+            initial.probes["web"].generation
+        );
+        let engine = Engine::connect(&candidate)?;
+        let value =
+            inspect_resource(&engine, &restored, &restored.resources["container:web"])?.unwrap();
+        assert!(
+            !value["Config"]["Env"]
+                .to_string()
+                .contains("synthetic-native")
+        );
+        assert_eq!(
+            probes::observe(&engine, &restored, "web", &value)?,
+            Observation::Running {
+                health: Health::Healthy
+            }
+        );
+        Ok(())
+    })();
+    let cleaned = cleanup(&candidate, &run, true);
+    result?;
+    cleaned?;
+    Ok(())
+}

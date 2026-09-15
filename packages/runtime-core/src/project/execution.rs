@@ -132,7 +132,7 @@ impl Graph {
                 && !service
                     .healthcheck
                     .as_ref()
-                    .is_some_and(|h| !h.disabled && h.test.is_some())
+                    .is_some_and(|h| !h.disabled && (h.test.is_some() || h.native_http.is_some()))
             {
                 return Err(error(
                     "graph_readiness",

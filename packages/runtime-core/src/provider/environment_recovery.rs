@@ -17,9 +17,16 @@ struct Intent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     graph: Option<GraphBinding>,
     service: String,
+    #[serde(default, skip_serializing_if = "zero")]
+    uid: u32,
+    #[serde(default, skip_serializing_if = "zero")]
+    gid: u32,
     slot: String,
     incarnation: String,
     boot: String,
+}
+fn zero(value: &u32) -> bool {
+    *value == 0
 }
 fn error() -> CandidateError {
     CandidateError::new(
@@ -94,6 +101,8 @@ pub(super) fn record(
         version: 1,
         graph: lease.graph.clone(),
         service: lease.service.clone(),
+        uid: lease.uid,
+        gid: lease.gid,
         slot: lease.slot.clone(),
         incarnation: lease.incarnation.clone(),
         boot: lease.boot.clone(),
@@ -144,7 +153,9 @@ fn read_mode(
         return Err(error());
     }
     if let Some(lease) = lease {
-        if lease.graph != intent.graph
+        if lease.uid != intent.uid
+            || lease.gid != intent.gid
+            || lease.graph != intent.graph
             || lease.service != intent.service
             || lease.boot != intent.boot
             || lease.incarnation != intent.incarnation
@@ -286,6 +297,8 @@ mod tests {
                 version: 1,
                 graph: None,
                 service: "web".into(),
+                uid: 0,
+                gid: 0,
                 slot: format!("hack-env-lease-{boot}-{}", "a".repeat(32)),
                 boot,
                 incarnation: "b".repeat(32),

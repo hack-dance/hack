@@ -1,9 +1,9 @@
 # Environment delivery audit — September 14
 
-The candidate now has a service-scoped input compiler, fixed-output delivery component and
-synthetic stdin/tmpfs probes. Managed
-credential delivery to graph services remains disabled. This checkpoint narrows the transport
-choice; it does not qualify a credential provider, lease lifecycle, or application integration.
+The candidate has a service-scoped input compiler, fixed-output delivery, graph-owned cleanup and
+an experimental native startup adapter. Explicit in-memory delivery is available through the
+`environment-launcher` build feature. Native credential-provider delivery and CLI exposure remain
+gated; the checkpoints below distinguish component controls from real application qualification.
 
 ## Pinned source findings
 
@@ -221,18 +221,75 @@ An initial regression correctly caught the false marker changing legacy serializ
 marker now omits itself when false and that compatibility test passes. No performance improvement
 is claimed by this checkpoint.
 
+## Native startup, non-root identity and signals
+
+The opt-in Cargo feature `environment-launcher` builds a static Linux ARM64 launcher with Zig
+0.15.2 and embeds it in the candidate. Default builds do not invoke Zig and keep managed startup
+unavailable. Build the experimental candidate with `cargo +1.97.1 build --release --locked
+--features environment-launcher --manifest-path packages/runtime-core/Cargo.toml
+--target-dir .hack-local/target --jobs 2` (as one shell command).
+
+`graph::run_with_environment` feeds explicit, service-scoped in-memory inputs into the normal graph
+executor. The compiler keeps them out of executable configuration; the 8 KiB encoded limit is
+checked before provider allocation. Each selected service stages under the engine mutation guard,
+records graph ownership before effects, and revalidates the lease before create and start. It does
+not choose or invoke a native credential provider, and the existing CLI path remains gated.
+
+The adapter requires an explicit absolute entrypoint and numeric UID:GID (default `0:0`). It
+preserves entrypoint/command argument boundaries and explicitly sets the container user. Payload
+and expiry files remain mode 0400 and are owned by that UID:GID; slot directories and service
+metadata remain root-owned. Files and launcher are bound read-only at reserved paths, with mount
+collisions rejected. Named users are refused until image account resolution is qualified.
+
+The launcher verifies regular, single-link files, permissions, effective UID/GID, payload size and
+guest boot-time expiry. It rejects duplicate JSON keys, invalid environment names, non-string
+values and NUL. It sets the core-dump limit to zero, combines supplied values with the image's
+inherited process environment, and calls exec to replace itself with the explicit application.
+It prints nothing on failure and exits 125. There is no resident launcher process. This does not
+prevent an application from deliberately logging or persisting its environment.
+
+Direct PID 1 execution and the existing Docker init option are both supported. The adapter does
+not implement its own signal-forwarding supervisor. Separate health execs are refused, and inherited
+image health checks are explicitly disabled for attached services. Such checks require their own
+qualified delivery rather than silently running without the supplied values.
+
+Launcher publication uses a capped, compressed stdin transfer, verifies the decompressed SHA-256
+and root-owned executable metadata, and retains uncertain pending files. The first live pilot
+exceeded the 64 KiB transport frame before launcher or environment allocation. Compression brought the compiled
+launcher below that limit; oversized compressed artifacts refuse rather than truncating. No values
+are part of this code artifact or its hash.
+
+Live run `environment-startup-1789433610282575000` passed the normal graph scheduling path with
+three services and scoped synthetic values including quotes, newlines, carriage return and Unicode.
+The root application confirmed PID 1 after exec. Services with UIDs/GIDs 1001 and 1002 confirmed their
+identities and exact values; Docker init forwarded SIGTERM/SIGINT and preserved exit codes 42/43.
+Engine environment metadata contained no injected entries; inspection was also checked against
+JSON-escaped payloads. A deliberate direct engine restart with an expired file bypassed the host
+check and was refused independently by the launcher with exit 125 and no new stdout/stderr.
+
+The full live run also passed the prior attachment, independent-process cleanup, shared-lock,
+admission-refusal and actual VM-restart recovery controls. The owned VM was stopped, host pressure
+stayed normal, swapouts were unchanged, and installed Hack/global configuration hashes matched.
+Validation: 146 regular Rust tests with and without the feature, eight live controls, 940 CLI tests,
+typecheck, lint, privacy, Zig formatting and the feature-enabled release build. The default build
+continues to reject managed startup without the feature. These checks do not qualify named users,
+arbitrary application process trees, native authorization or redelivery. No new performance
+comparison is claimed; exec removes the launcher process rather than retaining a wrapper.
+
 ## Remaining implementation and acceptance
 
-- Wire qualified attachment into normal graph startup. Define the entrypoint adapter, non-root
-  ownership and signal/exit handling before enabling managed input execution; the finite Bun fixture
-  does not supply a general wrapper.
+- Qualify native provider authorization before exposing managed delivery through the CLI. The
+  explicit in-memory API is experimental; only the tested numeric-user and absolute-entrypoint
+  subset is enabled by its build feature.
 - Bind native provider authorization and expiry to the existing service/incarnation/boot guards.
   The cleanup intent alone must never authorize reading values or renewing a lease.
 - Qualify pruning of retired cleanup intents without losing retry or ownership evidence.
-- Apply the stricter 8 KiB delivery admission at the graph boundary; the input compiler still
-  accepts a 1 MiB aggregate. Larger delivery and chunking remain unsupported.
-- Integrate service startup and non-root/entrypoint behavior, health checks, restart/redelivery and
-  crash recovery. A wrapper's environment is not automatically inherited by separate health execs.
+- Qualify larger payload delivery if needed. The general input compiler accepts a 1 MiB aggregate,
+  but the experimental startup API now applies the stricter 8 KiB per-service encoded limit before
+  allocation. Larger payload delivery and chunking remain unsupported.
+- Qualify named image users, separate health exec delivery, application-level restart/redelivery
+  and crash recovery. Restart/restore of attached graphs remains refused; ordinary init signal
+  forwarding is not proof of every application's process-tree shutdown behavior.
 - Qualify native provider authorization and real application behavior. Keep values and their hashes
   out of persisted manifests, journals, receipts and public logs.
 

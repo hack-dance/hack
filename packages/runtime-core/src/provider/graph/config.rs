@@ -22,7 +22,17 @@ pub(super) fn prepare(
     owner: &str,
     source: Option<&source::Inputs>,
 ) -> Result<Prepared, CandidateError> {
-    if inputs.requires_managed_environment() {
+    prepare_delivery(inputs, readiness, run, owner, source, false)
+}
+pub(super) fn prepare_delivery(
+    inputs: ExecutionInputs,
+    readiness: &BTreeMap<String, Condition>,
+    run: &str,
+    owner: &str,
+    source: Option<&source::Inputs>,
+    delivery: bool,
+) -> Result<Prepared, CandidateError> {
+    if inputs.requires_managed_environment() && !delivery {
         return Err(unsupported());
     }
     let graph = Graph::from_plan(&inputs.review.plan, readiness)?;

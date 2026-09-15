@@ -93,6 +93,9 @@ pub fn restore(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         receipt,
         configs: prepared.configs,
         restarting: false,
+        environments: BTreeMap::new(),
+        leases: BTreeMap::new(),
+        launcher: None,
     };
     session.save()?;
     #[cfg(test)]

@@ -37,6 +37,8 @@ fn key(value: &str) -> bool {
 pub struct PendingEnvironment {
     service: String,
     payload: String,
+    uid: u32,
+    gid: u32,
     deadline: Instant,
 }
 /// An in-memory handle, not a durable receipt or native provider lease.
@@ -44,12 +46,20 @@ pub struct PendingEnvironment {
 pub struct EnvironmentLease {
     pub(super) graph: Option<super::environment_recovery::GraphBinding>,
     pub(super) service: String,
+    pub(super) uid: u32,
+    pub(super) gid: u32,
     pub(super) slot: String,
     pub(super) incarnation: String,
     pub(super) boot: String,
     deadline: Instant,
 }
 impl PendingEnvironment {
+    pub(super) fn with_identity(mut self, uid: u32, gid: u32) -> Self {
+        self.uid = uid;
+        self.gid = gid;
+        self
+    }
+
     pub(super) fn service(&self) -> &str {
         &self.service
     }
@@ -88,6 +98,8 @@ impl PendingEnvironment {
         Ok(Self {
             service: service.into(),
             payload,
+            uid: 0,
+            gid: 0,
             deadline: Instant::now() + lifetime,
         })
     }
@@ -118,6 +130,8 @@ impl PendingEnvironment {
         let token: String = random.iter().map(|b| format!("{b:02x}")).collect();
         let lease = EnvironmentLease {
             graph,
+            uid: self.uid,
+            gid: self.gid,
             service: self.service,
             slot: format!("hack-env-lease-{}-{token}", guest.boot_id()),
             incarnation: guest.incarnation().into(),
@@ -128,7 +142,13 @@ impl PendingEnvironment {
         let seconds = remaining(lease.deadline)?;
         let result = guest.execute(
             STAGE,
-            &[&lease.slot, &lease.service, &seconds.to_string()],
+            &[
+                &lease.slot,
+                &lease.service,
+                &seconds.to_string(),
+                &lease.uid.to_string(),
+                &lease.gid.to_string(),
+            ],
             Some(&self.payload),
         );
         if !result
@@ -194,7 +214,16 @@ impl EnvironmentLease {
             return Err(error("environment_service"));
         }
         remaining(self.deadline)?;
-        let result = guest.execute(VERIFY, &[&self.slot, &self.service], None)?;
+        let result = guest.execute(
+            VERIFY,
+            &[
+                &self.slot,
+                &self.service,
+                &self.uid.to_string(),
+                &self.gid.to_string(),
+            ],
+            None,
+        )?;
         if result != "environment-verified-v1\n" {
             return Err(error("environment_verification"));
         }
@@ -245,6 +274,7 @@ printf '%s' "$((now + $3))" > "$root/expires"
 cat > "$root/values.json"
 test "$(stat -c %s "$root/values.json")" -le 8192
 chmod 400 "$root/service" "$root/expires" "$root/values.json"
+chown "$4:$5" "$root/expires" "$root/values.json"
 ) >/dev/null 2>&1
 printf 'environment-staged-v1\n'
 "#;
@@ -259,7 +289,11 @@ test "$(stat -c %u:%g:%a "$root")" = 0:0:700
 for name in service expires values.json; do
  test ! -L "$root/$name"
  test -f "$root/$name"
- test "$(stat -c %u:%g:%a:%h "$root/$name")" = 0:0:400:1
+ if test "$name" = service; then
+  test "$(stat -c %u:%g:%a:%h "$root/$name")" = 0:0:400:1
+ else
+  test "$(stat -c %u:%g:%a:%h "$root/$name")" = "$3:$4:400:1"
+ fi
 done
 test "$(cat "$root/service")" = "$2"
 test "$(cut -d. -f1 /proc/uptime)" -lt "$(cat "$root/expires")"

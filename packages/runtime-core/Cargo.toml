@@ -6,6 +6,9 @@ rust-version = "1.85"
 publish = false
 description = "Private Hack v5 candidate runtime contracts and local planning"
 
+[features]
+environment-launcher = []
+
 [lib]
 name = "hack_runtime_core"
 

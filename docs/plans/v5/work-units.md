@@ -245,11 +245,20 @@ and restart readback proving deleted owned resources stay deleted. No production
    Experimental attachment now records graph/container ownership before staging. Graph cleanup
    validates those bindings and removes containers before retiring their slots; container existence
    blocks standalone retirement. Attached graphs refuse restart, restore and export pending qualified
-   redelivery. Normal managed-input startup, entrypoint/non-root behavior and native authorization
-   remain open. Live attachment and independent-process cleanup pass
+   redelivery. The next checkpoint addresses startup and numeric non-root behavior; native
+   authorization remains open. Live attachment and independent-process cleanup pass
    `environment-attachment-1789431561987618000`, including mismatched-binding refusal, exact
    synthetic child values, metadata omission and read-only mounting. These are retained phase
    snapshots, not SIGKILL injection. Validation: 144 Rust tests, 940 CLI tests and required checks.
+   The `environment-launcher` build feature now connects explicit scoped values to normal graph
+   scheduling through `run_with_environment`. The static launcher replaces itself with the app,
+   supports explicit numeric non-root UID:GID, and leaves values out of engine metadata. Separate
+   health execs and inherited health checks cannot silently bypass delivery. Native credential
+   authorization, CLI exposure, named users and attached-graph redelivery remain open.
+   Live `environment-startup-1789433610282575000` passes root exec, UID/GID 1001/1002 delivery,
+   Docker-init SIGTERM/SIGINT forwarding, exit-code preservation and native expiry refusal, plus
+   all prior delivery/recovery controls. Validation: 146 Rust tests in both build configurations,
+   eight live controls, 940 CLI tests and required checks. No new performance comparison is claimed.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,
    failures and owned cleanup. The synthetic SQLite probe does not replace this gate.
 5. Qualify the guest base and networking package versions for distribution in WU11; the current

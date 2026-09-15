@@ -3,6 +3,9 @@ mod archive;
 pub use archive::archive;
 mod config;
 mod environment;
+mod launcher;
+#[cfg(all(test, feature = "environment-launcher"))]
+mod startup_test;
 pub use environment::stage_environment;
 mod export;
 pub use export::{Export, export};
@@ -305,6 +308,9 @@ struct Session<'a> {
     receipt: Receipt,
     configs: BTreeMap<String, Value>,
     restarting: bool,
+    environments: BTreeMap<String, super::environment::PendingEnvironment>,
+    leases: BTreeMap<String, super::environment::EnvironmentLease>,
+    launcher: Option<String>,
 }
 impl Session<'_> {
     #[cfg(test)]
@@ -497,6 +503,25 @@ impl Driver for Session<'_> {
                 "Fresh graph cannot adopt an existing container.",
             ));
         }
+        if let Some(pending) = self.environments.remove(service) {
+            self.receipt.environment_attached = true;
+            self.save()?;
+            let (uid, gid) = launcher::identity(&self.configs[service])?;
+            let lease = pending.with_identity(uid, gid).stage_bound(
+                self.engine.guest(),
+                Some(super::environment_recovery::GraphBinding {
+                    run: self.receipt.run.clone(),
+                    container: resource.name.clone(),
+                }),
+            )?;
+            let path = lease.verified_path_with_guest(self.engine.guest(), service)?;
+            self.leases.insert(service.into(), lease);
+            launcher::attach(
+                self.configs.get_mut(service).expect("service"),
+                &path,
+                self.launcher.as_deref().expect("prepared launcher"),
+            )?;
+        }
         let config = &self.configs[service];
         let value = self.engine.request(
             Method::POST,
@@ -522,6 +547,9 @@ impl Driver for Session<'_> {
                 .ok_or_else(|| error("graph_resource_missing", "Created container is missing."))?;
         self.verify_config(service, &inspected)?;
         self.reserve(&key, "start-intent")?;
+        if let Some(lease) = self.leases.get(service) {
+            lease.verified_path_with_guest(self.engine.guest(), service)?;
+        }
         self.engine
             .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
         #[cfg(test)]
@@ -537,6 +565,58 @@ impl Driver for Session<'_> {
 }
 /// Explicit fresh attempt only. All commands must be non-secret until managed delivery is qualified.
 pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, CandidateError> {
+    let inputs = project::inputs::compile(
+        candidate,
+        PlanOptions {
+            project: options.project.project,
+            compose_file: options.project.compose_file,
+            profiles: options.project.profiles,
+        },
+        options.expected_plan,
+        options.non_secret_values,
+    )?;
+    run_inputs(candidate, options, inputs, BTreeMap::new())
+}
+/// Experimental explicit in-memory delivery. No native provider is selected or called.
+pub fn run_with_environment(
+    candidate: &Candidate,
+    options: RunOptions<'_>,
+    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    lifetime: Duration,
+) -> Result<Receipt, CandidateError> {
+    if !cfg!(feature = "environment-launcher") {
+        return Err(error(
+            "environment_launcher_disabled",
+            "Build with the environment-launcher feature for experimental delivery.",
+        ));
+    }
+    let scoped = project::inputs::compile_scoped(
+        candidate,
+        PlanOptions {
+            project: options.project.project,
+            compose_file: options.project.compose_file,
+            profiles: options.project.profiles,
+        },
+        options.expected_plan,
+        options.non_secret_values,
+        managed,
+    )?;
+    let environments = scoped
+        .managed_environment
+        .iter()
+        .map(|(name, values)| {
+            super::environment::PendingEnvironment::new(name, values, lifetime)
+                .map(|p| (name.clone(), p))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    run_inputs(candidate, options, scoped.executable, environments)
+}
+fn run_inputs(
+    candidate: &Candidate,
+    options: RunOptions<'_>,
+    inputs: project::inputs::ExecutionInputs,
+    environments: BTreeMap<String, super::environment::PendingEnvironment>,
+) -> Result<Receipt, CandidateError> {
     let root = directory(candidate, options.run_id)?;
     if options.timeout.is_zero() || options.timeout > Duration::from_secs(600) {
         return Err(error(
@@ -544,12 +624,6 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
             "Graph timeout is outside the bounded profile.",
         ));
     }
-    let inputs = project::inputs::compile(
-        candidate,
-        options.project,
-        options.expected_plan,
-        options.non_secret_values,
-    )?;
     source::requested(&inputs.review.plan, options.source_revision)?;
     let _source_admission = options
         .source_revision
@@ -590,14 +664,29 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
         &inputs.review.plan,
         options.source_revision,
     )?;
-    let prepared = config::prepare(
+    let prepared = config::prepare_delivery(
         inputs,
         options.readiness,
         options.run_id,
         engine.guest().incarnation(),
         source.as_ref(),
+        !environments.is_empty(),
     )?;
+    for name in environments.keys() {
+        launcher::validate(&prepared.configs[name])?;
+        if options.readiness.get(name) == Some(&Condition::Healthy) {
+            return Err(error(
+                "environment_health",
+                "Environment delivery does not yet support separate health execs.",
+            ));
+        }
+    }
     verify_images(&engine, &prepared.resources)?;
+    let launcher = if environments.is_empty() {
+        None
+    } else {
+        Some(launcher::publish(&engine)?)
+    };
     state::private_directory(root.parent().expect("graph parent"))?;
     fs::DirBuilder::new()
         .mode(0o700)
@@ -621,6 +710,9 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
         receipt,
         configs: prepared.configs,
         restarting: false,
+        environments,
+        leases: BTreeMap::new(),
+        launcher,
     };
     session.save()?;
     let result = (|| {
@@ -845,6 +937,9 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         receipt,
         configs: prepared.configs,
         restarting: true,
+        environments: BTreeMap::new(),
+        leases: BTreeMap::new(),
+        launcher: None,
     };
     session.save()?;
     if let Err(failure) = execution::run(&prepared.graph, &mut session, options.timeout) {

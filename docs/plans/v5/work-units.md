@@ -404,8 +404,12 @@ visits each and 24 measured lifecycles. Two vCPUs/4 GiB reduced combined lifecyc
 time 10.9%, and footprint 8.5–11.9% for the small fixture. Existing capacity remains unchanged pending
 larger-application/load acceptance. First-boot versus restarted footprint differed substantially,
 so image/cache effects remain separate from sizing gains.
+The [heavier load control](capacity-load-20260915.md) also passes: eight measured lifecycles with
+parallel SHA-256 workers and 1.25 GiB of filled application buffers. Smaller capacity reduced combined
+CPU 6.0% and post-load footprint 19.1–25.5%; compute-batch wall time was 2.3% slower. The registered
+Event Agent plan now has 12 services and 21 compatibility errors, so application acceptance stays open.
 Open work: automatic idle reclamation and real-application recovery, crun OCI/kernel compatibility,
-smaller-capacity application/load acceptance and the existing application gates.
+application networking/routing and scoped credential delivery, and the existing application gates.
 
 ## WU11 — Preserve compatibility and qualify distribution
 

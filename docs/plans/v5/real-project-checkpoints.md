@@ -699,3 +699,16 @@ read-only/digest checks, replacement refusal and recovery after VM restart.
 The CPU pilot measures the same synthetic graph and does not establish full-application CPU or
 throughput. The last captured Event Agent plan remains incompatible at 14 services, 22 errors and
 two warnings; this checkpoint does not change its source, routing, credentials or admission gates.
+
+## September 15 — Registered application refresh and smaller-capacity load
+
+The [current checkpoint](capacity-load-20260915.md) plans the registered Event Agent checkout: 12
+services, 21 errors and one warning. External network ownership, existing routing labels and unresolved
+mount sources still block application enrollment/startup. No hooks or credential mounts were executed;
+source, dirty-state fingerprint and configuration hashes were unchanged. The older 14-service copy
+is historical evidence, not the current registered application inventory.
+
+The independent heavier synthetic load passes on 2 vCPUs/4 GiB with lower lifecycle CPU and footprint,
+but slightly slower compute-batch timing. It does not establish application startup, reload, routing,
+credential delivery or automatic idle-reclamation recovery. Those acceptance rows remain blocked or
+not exercised.

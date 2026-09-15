@@ -99,6 +99,6 @@ its selected checkout, and cloned provider trees must preserve symlink modes as 
 and directory modes. Digest verification correctly refused the altered copies before VM creation.
 The measured run started only after complete copied-tree hashes matched the pinned manifests.
 
-Next qualify the 2-vCPU/4-GiB pool with a larger application and CPU/memory load before changing a
-capacity default. Separately test automatic idle reclamation and recovery, including the larger
+The [heavier CPU/memory load control](capacity-load-20260915.md) now passes with explicit throughput
+tradeoffs. Larger-application acceptance remains required before changing a capacity default. Separately test automatic idle reclamation and recovery, including the larger
 post-import footprint observed here. The full Event Agent application gates remain open.

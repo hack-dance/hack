@@ -13,6 +13,8 @@ Every checkpoint must also complete a [real-project attempt and gap review](real
 [Checkpoint 02](checkpoint-02.md) tracks the private lifecycle implementation and its live gates.
 [Checkpoint 03](checkpoint-03.md) records Compose review and real-project enrollment.
 [Checkpoint 04](checkpoint-04.md) records durable fixture jobs and owned cancellation.
+The [current performance refresh](performance-refresh-20260914.md) repeats the latency cohort and
+compares both engines at matched health-check cadences with complete selected process trees.
 The [September 14 benchmark and review](benchmark-20260914.md) compares the owned graph executor
 with direct Docker Compose and stable Hack 4.1.1/4.2.0, including the remaining acceptance gates.
 The [resource and health-cadence checkpoint](resources-20260914.md) adds native CPU/footprint

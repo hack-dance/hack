@@ -27,7 +27,7 @@ not satisfy application acceptance. Carry every gap into the next checkpoint's a
 | WU07 | Real graph, persistent data, and loopback endpoints | WU03–06 | In progress; owned graph, persistent restore, process-loss recovery, evidence retention and [immutable source mounts](source-graphs-20260914.md) pass; real application acceptance open |
 | WU08 | Durable terminals and bounded event/log streams | WU04, WU07 | Planned |
 | WU09 | Native Linux and private SSH parity | WU05–08 | Planned; Hetzner fixture host selected and access verified; adapter qualification open |
-| WU10 | Measured speed, footprint, and reclamation | WU07–09 | In progress; [32-trial graph comparison](benchmark-20260914.md) and [idle/resource/cadence checkpoint](resources-20260914.md) complete; full application, complete external accounting and remote qualification open |
+| WU10 | Measured speed, footprint, and reclamation | WU07–09 | In progress; [current latency and matched-resource comparison](performance-refresh-20260914.md) extends the earlier cohorts; full application, transient-helper accounting and remote qualification open |
 | WU11 | Env/TLS/slim compatibility and migration packaging | WU07–10 | Planned; not a release authorization |
 
 The sequence starts with Mac runtime mechanics, but protocol and source decisions must accommodate
@@ -339,9 +339,14 @@ the ten-minute empty-pool window and matched 100 ms health-check graphs show low
 footprint/CPU but higher graph CPU. An explicit startup-fast/steady-slow cadence reduced candidate
 graph CPU by 76.6% in an A/B/A control, with readiness inside the observed control range. Graph
 cleanup returns CPU close to idle but retains VM footprint until pool stop. See the
-[resource report and caveats](resources-20260914.md). Next measure all external daemon descendants
-from the first sample, reduce observer cost, investigate equal-cadence CPU overhead, and qualify
-idle reclamation against active-work/data and restart-latency requirements. User defaults remain unchanged.
+[resource report and caveats](resources-20260914.md). The
+[current refresh](performance-refresh-20260914.md) repeats the frozen 32-trial latency protocol and
+integrates the persistent sampler into matched candidate/Compose health-cadence windows, including
+selected daemon descendants from their first samples. Remaining work: profile container/guest CPU
+against host VM CPU per completed probe, account for transient helpers and safety-observer cost,
+and qualify idle reclamation against active-work/data and restart-latency requirements. The
+higher candidate CPU at matched requested cadence is an optimization target, not a closed gate.
+User defaults remain unchanged.
 
 ## WU11 — Preserve compatibility and qualify distribution
 

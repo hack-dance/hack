@@ -672,3 +672,16 @@ A fresh captured Event Agent plan remains at 14 services, 22 errors (12 unresolv
 nine external route/owner-label conflicts and one external network) and two metadata warnings.
 Protected application inputs are unchanged. Managed environment, lifecycle/routing, reload,
 application-size admission and matched real-application resource measurements remain required.
+
+## September 14 — Current performance and matched-cadence refresh
+
+The [performance refresh](performance-refresh-20260914.md) repeats all 32 latency trials on
+`a0ed1fc0` and completes nine native resource windows, including matched health cadences on both
+engines. The candidate retains faster graph readiness and lower observed footprint, while direct
+Compose retains faster cleanup and lower graph CPU. One transient daemon child prevents a valid
+daemon CPU total in one window; those observations remain recorded.
+
+A fresh captured Event Agent plan still reports 14 services, 22 errors and two warnings. The error
+classes remain 12 unresolved mount sources, nine external route/owner-label conflicts and one
+external network. Protected inputs were unchanged during measurement. Actual application startup,
+reload, lifecycle/routing, native credentials and full-application resource comparison remain open.

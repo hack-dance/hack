@@ -54,10 +54,27 @@ fn wait_exit(
 #[test]
 #[ignore = "Manual owned VM, pinned Bun image, launcher feature and external watchdog"]
 fn graph_startup_delivers_nonroot_values_and_preserves_exec_signals_and_exit_codes() {
+    startup_recovery(false);
+}
+#[test]
+#[ignore = "Owned reclamation VM, launcher feature and external watchdog required"]
+fn graph_reclamation_preserves_live_memory_scoped_delivery_and_fresh_restore() {
+    startup_recovery(true);
+}
+fn startup_recovery(reclaim: bool) {
     let candidate = Candidate::discover(Path::new(
         &std::env::var("HACK_LOCAL_TEST_ROOT").expect("explicit root"),
     ))
     .unwrap();
+    if reclaim {
+        assert!(
+            super::super::lifecycle::status(&candidate)
+                .unwrap()
+                .reclamation
+                .unwrap()
+                .enabled
+        );
+    }
     let image = std::env::var("HACK_LOCAL_TEST_IMAGE").expect("pinned image");
     let fixture = super::tests::Fixture::new();
     let nonce = token();
@@ -76,13 +93,22 @@ fn graph_startup_delivers_nonroot_values_and_preserves_exec_signals_and_exit_cod
         let check = format!(
             "const v=await Bun.file('/run/hack-environment.json').json();if(process.getuid()!=={uid}||process.getgid()!=={uid}||{pid_check}||process.env.TOKEN!==v.TOKEN||!process.env.TOKEN.startsWith('synthetic-startup-{uid}-'))process.exit(71);"
         );
+        let memory_check = if reclaim && uid != 0 {
+            format!(
+                "const retained=Buffer.alloc(64*1024*1024,{});process.on('SIGUSR1',()=>{{for(const b of retained)if(b!=={})process.exit(75);console.log('memory-ok')}});",
+                uid % 251,
+                uid % 251
+            )
+        } else {
+            String::new()
+        };
         let program = if uid == 0 {
             format!(
                 "{check}const f=Bun.file('/data/counter');const n=(await f.exists()?Number(await f.text()):0)+1;if((n===2)!==process.env.TOKEN.endsWith('-fresh'))process.exit(74);await Bun.write('/data/counter',String(n));console.log('root-exec-ok');console.log('counter='+n)"
             )
         } else {
             format!(
-                "{check}process.on('{signal}',()=>{{console.log('signal-ok');process.exit({exit})}});console.log('ready');setInterval(()=>{{}},1000)"
+                "{check}{memory_check}process.on('{signal}',()=>{{console.log('signal-ok');process.exit({exit})}});console.log('ready');setInterval(()=>{{}},1000)"
             )
         };
         let mut service = json!({"image":image,"read_only":true,"network_mode":"none","init":uid!=0,"user":format!("{uid}:{uid}"),"entrypoint":["/usr/local/bin/bun","-e",program],"command":[],"environment":{"TOKEN":null}});
@@ -182,6 +208,14 @@ fn graph_startup_delivers_nonroot_values_and_preserves_exec_signals_and_exit_cod
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
+        if reclaim {
+            exercise_reclamation(&candidate, &engine, &receipt);
+        }
+        let signal_log = if reclaim {
+            "ready\nmemory-ok\nmemory-ok\nmemory-ok\nsignal-ok\n"
+        } else {
+            "ready\nsignal-ok\n"
+        };
         // Health output deliberately prints the synthetic value; none may reach engine history.
         let term = &receipt.resources["container:term"];
         let inspected = inspect_resource(&engine, &receipt, term)?.unwrap();
@@ -230,7 +264,7 @@ fn graph_startup_delivers_nonroot_values_and_preserves_exec_signals_and_exit_cod
                 None,
             )?;
             wait_exit(&engine, &receipt, name, exit)?;
-            assert_eq!(engine.logs(id)?.0, "ready\nsignal-ok\n");
+            assert_eq!(engine.logs(id)?.0, signal_log);
         }
         // Bypass host revalidation only in this owned negative control: the guest must also refuse expiry.
         let slots =
@@ -251,7 +285,7 @@ fn graph_startup_delivers_nonroot_values_and_preserves_exec_signals_and_exit_cod
         let id = receipt.resources["container:term"].id.as_deref().unwrap();
         engine.request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
         wait_exit(&engine, &receipt, "term", 125)?;
-        assert_eq!(engine.logs(id)?.0, "ready\nsignal-ok\n");
+        assert_eq!(engine.logs(id)?.0, signal_log);
         assert!(engine.logs(id)?.1.is_empty());
         let prior_ids = receipt
             .resources
@@ -308,6 +342,9 @@ fn graph_startup_delivers_nonroot_values_and_preserves_exec_signals_and_exit_cod
                 assert_eq!(resource.id, prior_ids[key]);
             }
         }
+        if reclaim {
+            exercise_reclamation(&candidate, &engine, &restored);
+        }
         let fresh_slots =
             super::super::environment_recovery::graph_slots(&candidate, engine.guest(), &run_id)?;
         assert_eq!(fresh_slots.len(), slots.len() + managed.len());
@@ -339,4 +376,99 @@ fn graph_startup_delivers_nonroot_values_and_preserves_exec_signals_and_exit_cod
     outcome.unwrap();
     cleaned.unwrap();
     cleanup(&candidate, &run_id, true).unwrap();
+}
+
+fn exercise_reclamation(candidate: &Candidate, engine: &Engine<'_>, receipt: &Receipt) {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    let status = super::super::lifecycle::status(candidate).unwrap();
+    assert_eq!(status.process_alive, Some(true));
+    let socket = Path::new(
+        status
+            .engine_socket
+            .as_ref()
+            .unwrap()
+            .trim_start_matches("unix://"),
+    )
+    .with_file_name("control.sock");
+    let control = |command: &str| {
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writeln!(stream, "{command}").unwrap();
+        let mut reply = Vec::new();
+        loop {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            if byte[0] == b'\n' {
+                break;
+            }
+            assert!(reply.len() < 1024);
+            reply.push(byte[0]);
+        }
+        let reply = String::from_utf8(reply).unwrap();
+        assert!(reply.starts_with("OK"));
+        reply
+    };
+    for cycle in 1..=3 {
+        for target in [1024, 0] {
+            control(&format!("BALLOON {target}"));
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if control("BALLOON")
+                    .split_whitespace()
+                    .any(|v| v == format!("actual={target}"))
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "balloon target not reached");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        for name in ["term", "int"] {
+            let resource = &receipt.resources[&format!("container:{name}")];
+            let id = resource.id.as_deref().unwrap();
+            engine
+                .request(
+                    Method::POST,
+                    &format!("/v1.53/containers/{id}/kill?signal=SIGUSR1"),
+                    None,
+                )
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let inspected = inspect_resource(engine, receipt, resource)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(inspected["State"]["Running"], true);
+                assert_eq!(inspected["State"]["OOMKilled"], false);
+                let (out, err, truncated) = engine.logs(id).unwrap();
+                assert!(err.is_empty() && !truncated);
+                if out.lines().filter(|line| *line == "memory-ok").count() == cycle {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "application memory check did not complete"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        assert_eq!(
+            inspect_resource(engine, receipt, &receipt.resources["container:term"])
+                .unwrap()
+                .unwrap()["State"]["Health"]["Status"],
+            "healthy"
+        );
+    }
+    assert_eq!(
+        super::super::lifecycle::status(candidate)
+            .unwrap()
+            .guest_boot_id,
+        status.guest_boot_id
+    );
 }

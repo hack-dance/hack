@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 pub struct RuntimeStatus {
     pub phase: String,
     pub profile: Option<super::Profile>,
+    pub reclamation: Option<state::ReclamationPolicy>,
     pub guest_memory_mib: Option<u32>,
     pub provider_memory: Option<identity::MemoryUsage>,
     pub provider_resources: Option<super::resources::ResourceTree>,
@@ -44,16 +45,29 @@ fn command(candidate: &Candidate, owner: &Owner) -> std::process::Command {
         .env("DOCKER_CONFIG", root(candidate).join("docker-config"))
         .env("SMOLVM_AGENT_ROOTFS", root(candidate).join("rootfs"))
         .env("DYLD_LIBRARY_PATH", artifact::root(candidate).join("lib"));
-    // Explicit ignored-test driver only. Production launches retain the pinned defaults.
+    let policy = owner.reclamation.unwrap_or_default();
+    command
+        .env(
+            "SMOLVM_BALLOON_RECLAIM",
+            if policy.enabled { "1" } else { "0" },
+        )
+        .env(
+            "SMOLVM_IDLE_RECLAIM",
+            policy.idle_minutes.unwrap_or(0).to_string(),
+        );
+    command
+}
+fn boot_reclamation_policy() -> state::ReclamationPolicy {
     #[cfg(test)]
     if let Ok(value) = std::env::var("HACK_LOCAL_TEST_RECLAIM") {
         if value == "0" || value == "1" {
-            command
-                .env("SMOLVM_BALLOON_RECLAIM", value)
-                .env("SMOLVM_IDLE_RECLAIM", "0");
+            return state::ReclamationPolicy {
+                enabled: value == "1",
+                idle_minutes: None,
+            };
         }
     }
-    command
+    state::ReclamationPolicy::default()
 }
 fn invoke(candidate: &Candidate, owner: &Owner, args: &[&str]) -> Result<String, CandidateError> {
     process::run(
@@ -508,6 +522,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         return Ok(RuntimeStatus {
             phase: "uninitialized".into(),
             profile: None,
+            reclamation: None,
             guest_memory_mib: None,
             provider_memory: None,
             provider_resources: None,
@@ -551,6 +566,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             None
         },
         profile: Some(owner.profile),
+        reclamation: owner.reclamation,
         guest_memory_mib: Some(owner.profile.memory_mib()),
         phase: if alive == Some(false) && owner.phase == "running" {
             "process-exited".into()
@@ -696,6 +712,7 @@ pub fn up_with_profile(
         ));
     }
     let previous_boot = owner.begin_boot();
+    owner.reclamation = Some(boot_reclamation_policy());
     phase(candidate, &mut owner, "booting")?;
     invoke(
         candidate,
@@ -1284,6 +1301,41 @@ pub(super) fn kill_owned_vm_for_test(candidate: &Candidate) -> Result<(), Candid
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_command_uses_recorded_reclamation_policy() {
+        let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut owner: Owner = serde_json::from_value(json!({
+            "version":1, "checkout":"/fixture", "token":"fixture", "machine":"fixture",
+            "short_home":"/fixture", "created":true, "phase":"stopped", "process":null,
+            "storage":null, "overlay":null, "guest_boot_id":null,
+            "daemon_pid":null, "daemon_start":null, "rootfs_digest":null
+        }))
+        .unwrap();
+        for policy in [
+            state::ReclamationPolicy::default(),
+            state::ReclamationPolicy {
+                enabled: false,
+                idle_minutes: None,
+            },
+        ] {
+            owner.reclamation = Some(policy);
+            let cmd = command(&candidate, &owner);
+            let env: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();
+            assert_eq!(
+                env[std::ffi::OsStr::new("SMOLVM_BALLOON_RECLAIM")],
+                Some(std::ffi::OsStr::new(if policy.enabled { "1" } else { "0" }))
+            );
+            assert_eq!(
+                env[std::ffi::OsStr::new("SMOLVM_IDLE_RECLAIM")],
+                Some(std::ffi::OsStr::new(if policy.enabled {
+                    "10"
+                } else {
+                    "0"
+                }))
+            );
+        }
+    }
 
     #[test]
     #[ignore = "Owned reclamation experiment boot helper; external watchdog and teardown required"]

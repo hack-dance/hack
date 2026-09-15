@@ -14,7 +14,7 @@ submodule is `5de9ab51c1bb166af2324de3c9413d00022eb178`. No provider defaults ch
 | Application data | Guest ext4 storage for Docker/containerd; source generations copied into guest storage | Keep hot runtime/application data off host shared filesystems. Read-only `runc` tmpfs cache already qualified. Profile remaining virtiofs activity before caching more binaries. |
 | virtiofs DAX | Architecture-dependent upstream default | Pinned source returns a zero DAX window on ARM64 because the bundled guest lacks the required support. Enabling an environment flag cannot provide DAX here. |
 | Block I/O | Upstream synchronous default | Pinned asynchronous mode uses Linux io_uring and rejects non-Linux hosts. It is not a missing Mac switch. Retain durability semantics. |
-| Idle memory | Upstream ten-minute idle balloon policy; clean environment does not pass reclaim overrides | macOS stage-2 unmap reclamation is opt-in (`SMOLVM_BALLOON_RECLAIM=1`) and currently absent. The default still uses a madvise fallback; do not call this proof of effective host reclamation. Qualify actual release and subsequent reuse. |
+| Idle memory | Explicit reclamation enabled and ten-minute idle policy, recorded per boot | Corrected September 15: the pinned manager already injects `SMOLVM_BALLOON_RECLAIM=1` when idle reclamation is enabled. The earlier claim that normal boots lacked it was incorrect. Disabled/enabled controls prove release and reuse; repeated graph cycles pass, while automatic idle-trigger and real-application qualification remain open. |
 | VM control | Upstream control socket supports balloon, pause, checkpoint and restore when available | Availability is not application-safe snapshot proof. Preserve fresh credentials, disk ownership, boot identity and graph recovery semantics. |
 | Networking / GPU / translation | No general guest networking, GPU, CUDA or Rosetta enabled for this native ARM64 fixture | These capabilities do not target the measured local no-op exec cost. Network variants need a separate workload before selection. |
 | Lower-level access | Pinned CLI process adapter with controlled guest setup | Enough for allocation, locality and reclaim experiments. VMM internals or kernel changes require a separately pinned provider build; direct libkrun integration remains contingent on a measured gap. |
@@ -22,6 +22,7 @@ submodule is `5de9ab51c1bb166af2324de3c9413d00022eb178`. No provider defaults ch
 Source: [virtiofs policy](https://github.com/smol-machines/smolvm/blob/f233d46e8cc34e51543c4f463c2cea7622827093/src/agent/virtiofs.rs),
 [resource validation](https://github.com/smol-machines/smolvm/blob/f233d46e8cc34e51543c4f463c2cea7622827093/src/data/resources.rs),
 [vsock bridge](https://github.com/smol-machines/smolvm/blob/f233d46e8cc34e51543c4f463c2cea7622827093/src/agent/vsock_service.rs),
+[manager boot environment](https://github.com/smol-machines/smolvm/blob/f233d46e8cc34e51543c4f463c2cea7622827093/src/agent/manager.rs#L2118),
 [launcher and idle policy](https://github.com/smol-machines/smolvm/blob/f233d46e8cc34e51543c4f463c2cea7622827093/src/agent/launcher.rs),
 [macOS reclamation](https://github.com/smol-machines/libkrun/blob/5de9ab51c1bb166af2324de3c9413d00022eb178/src/hvf/src/lib.rs#L833).
 The bundled dylib contains the reclamation setting, which corroborates availability but does not
@@ -40,7 +41,7 @@ prove activation or correctness under load.
    the result supports investigating process-launch work before replacing HTTP.
    Attribute host CPU to guest runtime, shared filesystem workers and vCPU activity before a
    protocol or provider replacement. A cheap GET is a transport lower bound, not an exec endpoint.
-2. Qualify opt-in macOS reclamation in an owned test VM: allocate and touch memory, release it,
+2. Qualify macOS reclamation in an owned test VM: allocate and touch memory, release it,
    observe host physical footprint and balloon state, then reallocate and verify contents and
    application persistence. Measure refault CPU and resumed latency as well as idle footprint;
    retain the original default unless a repeatable net benefit passes recovery controls.
@@ -58,5 +59,6 @@ which engine is cheaper for that operation. Full application and remote qualific
 
 September 15 follow-up: the [runtime alternatives checkpoint](runtime-alternatives-20260915.md)
 records crun compatibility failures, a repeated persistent-probe CPU advantage, and successful
-synthetic opt-in memory release/reuse. Product probe supervision and application reclamation
-qualification remain open; production runtime defaults have not changed.
+synthetic disabled/enabled memory release/reuse and repeated live graph reclamation. Product probe
+supervision, automatic idle-trigger and real-application qualification remain open. The existing
+reclamation policy is now explicit and recorded, rather than a newly discovered default gain.

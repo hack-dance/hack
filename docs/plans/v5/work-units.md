@@ -371,8 +371,12 @@ exported 247 standalone intents, preserving evidence and consumed IDs; the activ
 is empty. Fixed-work diagnostics now count completed operations. The
 [runtime alternatives checkpoint](runtime-alternatives-20260915.md) demonstrates 24–25% lower
 candidate gross engine CPU than OrbStack for persistent HTTP probing in both lane orders, and
-successful opt-in synthetic memory release/reuse. Neither is enabled as a product default.
-Open work: persistent-probe supervisor and health semantics, application reclamation/recovery,
+successful disabled/enabled synthetic memory release/reuse. Persistent probing remains diagnostic.
+Six live graph reclamation cycles also pass scoped delivery, signals and fresh data restore.
+The launch-path audit corrected the prior default claim: SmolVM already enabled reclamation with
+its idle policy. That policy is now explicit and recorded per boot; no new default-to-default
+memory improvement is claimed.
+Open work: persistent-probe supervisor and health semantics, automatic idle reclamation and real-application recovery,
 crun OCI/kernel compatibility, vCPU sweeps, launch profiling and the existing application gates.
 
 ## WU11 — Preserve compatibility and qualify distribution

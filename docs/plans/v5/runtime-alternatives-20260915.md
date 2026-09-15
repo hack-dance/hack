@@ -3,6 +3,23 @@
 Keep the working Docker/containerd/runc path while qualifying alternatives independently. A runtime
 must first run the same workload with the same effective limits; failed startup is not a benchmark.
 
+## Candidate defaults and remaining integration
+
+The user requested retaining every verified performance improvement as the candidate default.
+The status below separates implemented behavior from diagnostic results requiring integration.
+
+| Change | Candidate status | Evidence / remaining work |
+| --- | --- | --- |
+| Pinned guest-memory runc cache | Default | A/B/A launch study reduced host CPU 13.5% against the two original-file controls; digest, read-only mount and replacement refusal verified. |
+| Cleanup journal batching | Default | Durability and recovery checks pass; no standalone CPU improvement is attributed to this change. |
+| Removed graph and retired intent retention cleanup | Implemented; historical sweep complete | Archives preserve evidence and consumed slot IDs; 181 graph records and 247 standalone intents handled. |
+| Host memory reclamation | Explicit enabled policy, ten-minute idle window | Existing upstream default made visible per boot; disabled/enabled memory controls and two live graph runs pass. Automatic idle-trigger and real-application qualification remain open. |
+| Persistent native HTTP probes | Diagnostic win; product integration open | 24–25% lower gross candidate engine CPU than OrbStack in both lane orders. Implement supervisor, freshness, retry and cleanup semantics, then benchmark that product path. |
+| crun / reduced runc parallelism | Not adopted | crun cannot start the fixture; the parallelism A/B/A experiment was inconclusive. Neither is a verified gain. |
+
+The [cleanup and launch report](cleanup-cpu-20260914.md) and
+[intent retention report](cpu-launch-retention-20260914.md) retain prior implementation evidence.
+
 ## crun compatibility
 
 The first A/B/A attempt completed its original-runc window, then failed at the first crun graph
@@ -85,13 +102,13 @@ the same comparison through that product path before claiming the reduction for 
 
 ## macOS reclamation capability
 
-An ignored-test-only boot helper enables `SMOLVM_BALLOON_RECLAIM=1`; production launches are
-unchanged. Both test modes disable automatic idle reclamation and use the same explicit 1024 MiB
+An ignored-test-only boot helper compares `SMOLVM_BALLOON_RECLAIM=0` and `1`.
+Both test modes disable automatic idle reclamation and use the same explicit 1024 MiB
 balloon inflation/deflation. Each retains a 128 MiB known nonzero pattern, allocates and frees a
 second 384 MiB pattern, then reallocates and checks both. Independent host hashing confirms the
 full expected pattern sizes, not just agreement between two potentially incomplete writes.
 
-| Stage | Default host footprint | Opt-in host footprint |
+| Stage | Reclamation disabled | Reclamation enabled |
 | --- | --- | --- |
 | Before allocation | 695.8 MiB | 648.4 MiB |
 | Both patterns allocated | 1245.5 MiB | 1223.5 MiB |
@@ -101,17 +118,34 @@ full expected pattern sizes, not just agreement between two potentially incomple
 | Files and test mount removed | 1650.5 MiB | 861.0 MiB |
 
 Each stage is the median of five native observations. Selected-process CPU from the final before
-sample to the final cleaned sample was 8.005 seconds default versus 7.886 seconds opt-in. That
+sample to the final cleaned sample was 8.005 seconds disabled versus 7.886 seconds enabled. That
 includes allocation, hashing, balloon handling, reuse, cleanup and observation waits; two boots do
 not establish a CPU improvement or production latency bound. Both modes kept one stable provider
 identity, all 66 watchdog observations had normal pressure and unchanged swapouts, protected hashes
 matched, and both VMs stopped. The [scalar observations](reclamation-20260915.csv) retain the data.
 Evidence: `.hack-local/review/wu07/reclamation-1789443409797638000/verified-reclamation.json`.
 
-This proves a useful memory-release/reuse capability on the pinned M3 provider, not full application
-qualification. Next, test active graph persistence, scoped environment delivery, pressure and
-recovery under reclamation, including resumed latency and repeated cycles, before enabling it in
-normal launches. The default ten-minute idle policy itself was not exercised here.
+A subsequent launch-path audit corrected the earlier default attribution: `machine start` calls
+`start_vm_named`, then `ensure_running_with_full_config`; the pinned manager sets
+`SMOLVM_BALLOON_RECLAIM=1` whenever idle reclamation is enabled. Normal candidate boots already
+inherited that policy. The disabled experimental control is therefore not the previous normal
+candidate default, and the table does not establish an additional default-to-default memory win.
+The candidate now explicitly requests reclamation with the same ten-minute idle window and records
+that policy before boot. Runtime status reports the recorded policy; legacy receipts report null
+until a fresh boot rather than claiming a retroactive upgrade.
 
-The remaining provider work is the [SmolVM audit](smolvm-optimization-audit-20260914.md): application
-reclamation qualification, allocation sweeps and profiling of the remaining launch path.
+The live graph regression passed six 1024 MiB inflation/deflation cycles across initial startup and
+fresh restore. Two non-root services retained and checked 64 MiB each after every pulse. Scoped
+health and expiry, PID1 signal forwarding and exit codes, persistent volume counter 1 to 2, fresh
+container/slot identities, and cleanup all passed. Evidence:
+`.hack-local/review/wu07/graph-reclamation-1789444306861555000/`.
+The same six cycles also passed through the rebuilt normal CLI boot, with recorded policy
+`enabled=true, idle_minutes=10` and no experimental boot override:
+`.hack-local/review/wu07/graph-default-reclamation-1789444548254892000/`.
+Both external watchdogs retained normal pressure and unchanged swapouts; the candidate stopped
+and protected stable executable/configuration hashes matched after each run.
+This extends synthetic memory correctness to the owned graph fixture. It does not qualify the real
+application, the automatic ten-minute idle trigger, or a resumed-latency bound.
+
+The remaining provider work is the [SmolVM audit](smolvm-optimization-audit-20260914.md): automatic
+idle-cycle qualification, allocation sweeps and profiling of the remaining launch path.

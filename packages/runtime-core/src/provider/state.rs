@@ -140,6 +140,21 @@ pub fn write(path: &Path, value: &impl Serialize) -> Result<(), CandidateError> 
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReclamationPolicy {
+    pub enabled: bool,
+    pub idle_minutes: Option<u64>,
+}
+impl Default for ReclamationPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            idle_minutes: Some(10),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Owner {
@@ -161,6 +176,8 @@ pub struct Owner {
     pub rootfs_digest: Option<String>,
     #[serde(default)]
     pub profile: super::Profile,
+    #[serde(default)]
+    pub reclamation: Option<ReclamationPolicy>,
 }
 impl Owner {
     pub fn load(candidate: &Candidate) -> Result<Self, CandidateError> {
@@ -233,6 +250,7 @@ impl Owner {
             overlay: None,
             guest_boot_id: None,
             previous_guest_boot_id: None,
+            reclamation: None,
             daemon_pid: None,
             daemon_start: None,
             rootfs_digest: None,
@@ -304,12 +322,15 @@ mod tests {
             "daemon_pid":42, "daemon_start":99, "rootfs_digest":null
         }))
         .unwrap();
+        assert!(owner.reclamation.is_none());
+        owner.reclamation = Some(ReclamationPolicy::default());
         assert_eq!(owner.begin_boot().as_deref(), Some("previous-boot"));
         assert!(owner.guest_boot_id.is_none());
         assert!(owner.daemon_pid.is_none());
         assert!(owner.daemon_start.is_none());
         let mut restored: Owner =
             serde_json::from_slice(&serde_json::to_vec(&owner).unwrap()).unwrap();
+        assert_eq!(restored.reclamation, Some(ReclamationPolicy::default()));
         assert_eq!(restored.begin_boot().as_deref(), Some("previous-boot"));
         // A later successful boot becomes the predecessor on the next restart.
         restored.guest_boot_id = Some("next-boot".into());

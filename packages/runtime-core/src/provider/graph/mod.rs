@@ -315,7 +315,11 @@ struct Session<'a> {
     launcher: Option<String>,
 }
 #[cfg(test)]
-fn fault_pause(root: &std::path::Path, run: &str, point: &str) -> Result<(), CandidateError> {
+pub(super) fn fault_pause(
+    root: &std::path::Path,
+    run: &str,
+    point: &str,
+) -> Result<(), CandidateError> {
     if std::env::var("HACK_LOCAL_GRAPH_FAULT").as_deref() == Ok(point) {
         state::write(
             &root.join(format!("fault-{point}.json")),

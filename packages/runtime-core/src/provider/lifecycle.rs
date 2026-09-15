@@ -44,6 +44,15 @@ fn command(candidate: &Candidate, owner: &Owner) -> std::process::Command {
         .env("DOCKER_CONFIG", root(candidate).join("docker-config"))
         .env("SMOLVM_AGENT_ROOTFS", root(candidate).join("rootfs"))
         .env("DYLD_LIBRARY_PATH", artifact::root(candidate).join("lib"));
+    // Explicit ignored-test driver only. Production launches retain the pinned defaults.
+    #[cfg(test)]
+    if let Ok(value) = std::env::var("HACK_LOCAL_TEST_RECLAIM") {
+        if value == "0" || value == "1" {
+            command
+                .env("SMOLVM_BALLOON_RECLAIM", value)
+                .env("SMOLVM_IDLE_RECLAIM", "0");
+        }
+    }
     command
 }
 fn invoke(candidate: &Candidate, owner: &Owner, args: &[&str]) -> Result<String, CandidateError> {
@@ -1275,6 +1284,23 @@ pub(super) fn kill_owned_vm_for_test(candidate: &Candidate) -> Result<(), Candid
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "Owned reclamation experiment boot helper; external watchdog and teardown required"]
+    fn start_reclamation_experiment() {
+        assert!(matches!(
+            std::env::var("HACK_LOCAL_TEST_RECLAIM").as_deref(),
+            Ok("0" | "1")
+        ));
+        let candidate = Candidate::discover(Path::new(
+            &std::env::var("HACK_LOCAL_TEST_ROOT").expect("explicit candidate root"),
+        ))
+        .unwrap();
+        assert_eq!(status(&candidate).unwrap().phase, "stopped");
+        let running = up_with_profile(&candidate, super::super::Profile::Development).unwrap();
+        assert_eq!(running.process_alive, Some(true));
+        println!("{}", serde_json::to_string(&running).unwrap());
+    }
 
     #[test]
     #[ignore = "Manual owned VM and external watchdog required"]

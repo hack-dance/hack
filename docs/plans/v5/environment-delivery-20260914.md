@@ -300,6 +300,11 @@ is read as credential authority. Restore then creates new containers around the 
 In-place restart and export of attached graphs remain gated. Failed or interrupted restore still
 requires explicit reconciliation/cleanup; it is never automatically replayed.
 
+Subsequent [intent-retention qualification](cpu-launch-retention-20260914.md) permits export after
+confirmed graph removal, retaining validated graph-bound intent bytes with the archive. It does
+not permit export of a live attached graph or in-place redelivery. Standalone export likewise
+requires an already-absent slot and preserves its ID reservation.
+
 Live `environment-redelivery-1789434460004136000` passes the combined startup/health/restore
 control. Restore supplied a changed value, created three new container IDs and three new immutable
 slots, and preserved a named-volume counter from 1 to 2. The root app independently required the

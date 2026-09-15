@@ -32,7 +32,8 @@ pub fn export(candidate: &Candidate, run: &str) -> Result<Export, CandidateError
             "Archive identity differs from the owned removed attempt.",
         ));
     }
-    environment::require_replay_supported(&receipt)?;
+    archive::verify_removed(&engine, &receipt)?;
+    environment::archive_slots(candidate, &engine, &receipt, &root)?;
     let (bytes, files) = bundle(&root)?;
     let parent = candidate.state_root.join("exports/graphs");
     state::private_directory(&parent)?;

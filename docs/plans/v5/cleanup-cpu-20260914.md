@@ -204,6 +204,11 @@ owned VM stopped. The release hash matches the final latency build.
 
 ## Remaining work
 
+Subsequent [intent retention and fixed-work evidence](cpu-launch-retention-20260914.md) closes the
+historical intent/export backlog and counts completed probes. The
+[runtime alternatives checkpoint](runtime-alternatives-20260915.md) records the later persistent
+probe and synthetic reclamation results. The items below describe this checkpoint's original gaps.
+
 - Count completed health probes and attribute cumulative guest/runtime-helper CPU before tuning
   the remaining engine/virtualization cost. Matching requested intervals alone is insufficient
   for a per-probe comparison. The lower-than-OrbStack CPU goal remains open.

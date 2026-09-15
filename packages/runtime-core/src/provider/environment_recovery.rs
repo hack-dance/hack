@@ -1,6 +1,8 @@
 //! Immutable, value-free allocation intent. Recovery grants cleanup, never renewed delivery.
+mod retention;
 use super::{environment::EnvironmentLease, lifecycle::OwnedGuest, state};
 use crate::{Candidate, CandidateError};
+pub use retention::{RetiredExport, export_retired};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
@@ -89,6 +91,9 @@ pub(super) fn record(
     candidate: &Candidate,
     lease: &EnvironmentLease,
 ) -> Result<(), CandidateError> {
+    if retention::reserved(candidate, &lease.slot)? {
+        return Err(error());
+    }
     let directory = root(candidate);
     state::private_directory(&directory)?;
     for (index, entry) in fs::read_dir(&directory).map_err(state::io)?.enumerate() {
@@ -219,6 +224,80 @@ pub(super) fn graph_slots(
     }
     Ok(bindings)
 }
+/// Move retired, value-free intents into a removed graph's retained evidence. The graph ID
+/// stays reserved by its active/archive directory, then by the verified-prune consumed record.
+/// A rename interrupted before final graph archival is recovered by validating both inventories.
+pub(super) fn archive_graph(
+    candidate: &Candidate,
+    guest: &OwnedGuest<'_>,
+    run: &str,
+    containers: &std::collections::BTreeMap<String, String>,
+    directory: &std::path::Path,
+) -> Result<(), CandidateError> {
+    state::private_directory(directory)?;
+    let matches = |intent: &Intent| -> Result<(), CandidateError> {
+        validate(intent, &intent.slot)?;
+        if intent.incarnation != guest.incarnation()
+            || !intent.graph.as_ref().is_some_and(|binding| {
+                binding.run == run && containers.get(&intent.service) == Some(&binding.container)
+            })
+        {
+            return Err(error());
+        }
+        Ok(())
+    };
+    let mut archived = std::collections::BTreeMap::new();
+    for (index, entry) in fs::read_dir(directory).map_err(state::io)?.enumerate() {
+        if index >= 72 {
+            return Err(error());
+        }
+        let entry = entry.map_err(state::io)?;
+        let name = entry.file_name().into_string().map_err(|_| error())?;
+        let slot = name.strip_suffix(".json").ok_or_else(error)?;
+        let intent: Intent = state::read_bounded(&entry.path(), 2048)?;
+        matches(&intent)?;
+        if slot != intent.slot || archived.insert(intent.slot.clone(), intent).is_some() {
+            return Err(error());
+        }
+    }
+    let mut active = Vec::new();
+    for (slot, _, _) in graph_slots(candidate, guest, run)? {
+        let intent = read_mode(candidate, &slot, guest.incarnation(), None, false)?;
+        matches(&intent)?;
+        if archived.contains_key(&slot) || active.len() + archived.len() >= 72 {
+            return Err(error());
+        }
+        active.push(intent);
+    }
+    // Validate the complete inventory before retirement or movement. Reinspection precedes every
+    // retry; moved records are never interpreted as renewed delivery authority.
+    for intent in archived.values().chain(active.iter()) {
+        retire_intent(guest, intent)?;
+    }
+    for intent in active {
+        let slot = &intent.slot;
+        read(candidate, slot, guest.incarnation(), None)?; // Promote only a complete retained intent.
+        let source = root(candidate).join(format!("{slot}.json"));
+        let target = directory.join(format!("{slot}.json"));
+        if target.symlink_metadata().is_ok() {
+            return Err(error());
+        }
+        fs::rename(&source, &target).map_err(state::io)?;
+        for parent in [directory, root(candidate).as_path()] {
+            fs::File::open(parent)
+                .and_then(|f| f.sync_all())
+                .map_err(state::io)?;
+        }
+        #[cfg(test)]
+        super::graph::fault_pause(
+            directory.parent().expect("graph evidence"),
+            run,
+            "archive-after-environment-move",
+        )?;
+    }
+    Ok(())
+}
+
 /// Explicitly retires a recorded allocation. It may still be live: the caller must own its lifecycle.
 /// Same-boot partial tmpfs allocations are removable. An older boot permits only absent/empty,
 /// unmounted directories. Foreign incarnations, symlinks and unexpected mounts are refused.
@@ -232,7 +311,14 @@ pub(super) fn retire(
     slot: &str,
     lease: Option<&EnvironmentLease>,
 ) -> Result<(), CandidateError> {
+    if retention::reserved(candidate, slot)? {
+        return retention::verify_retired(candidate, guest, slot, lease);
+    }
     let intent = read(candidate, slot, guest.incarnation(), lease)?;
+    retire_intent(guest, &intent)
+}
+fn retire_intent(guest: &OwnedGuest<'_>, intent: &Intent) -> Result<(), CandidateError> {
+    let slot = &intent.slot;
     if let Some(binding) = &intent.graph {
         super::engine::require_container_absent(guest, &binding.container)?;
     }

@@ -35,6 +35,14 @@ Linux from WU01 onward. Performance instrumentation starts with each unit; WU10 
 matched end-to-end qualification. A narrow improvement can be reviewed and used before every
 release capability exists, provided the CLI advertises the actual supported checkpoint.
 
+WU10's next provider-specific controls are captured in the
+[pinned SmolVM optimization audit](smolvm-optimization-audit-20260914.md): API-only attribution,
+macOS memory reclamation with reuse verification, a controlled vCPU sweep and launch-path profiling.
+These remain qualification work; no unmeasured provider setting is adopted as a performance win.
+The [runtime alternatives checkpoint](runtime-alternatives-20260915.md) adds a bounded crun
+comparison and persistent HTTP probing. crun performance is gated on OCI/kernel compatibility;
+probe batching requires explicit health semantics and supervisor recovery before product adoption.
+
 ## WU00 — Agree on the product and evidence
 
 **Goal:** make speed, resource cost, local/remote ergonomics, and compatibility drive the design.
@@ -356,6 +364,16 @@ CPU by 13.5% against the two original-file controls. The implementation now prov
 read-only 32 MiB execution cache before starting Docker. Eleven live controls pass, including
 cache digest/replacement refusal and prior-boot recovery; completed-probe normalization, transient
 helper accounting, full-application load and further CPU reduction remain open.
+
+September 15 update: [intent retention](cpu-launch-retention-20260914.md) is qualified for removed
+graphs and already-retired standalone slots. The historical sweep exported/pruned 181 graphs and
+exported 247 standalone intents, preserving evidence and consumed IDs; the active intent inventory
+is empty. Fixed-work diagnostics now count completed operations. The
+[runtime alternatives checkpoint](runtime-alternatives-20260915.md) demonstrates 24–25% lower
+candidate gross engine CPU than OrbStack for persistent HTTP probing in both lane orders, and
+successful opt-in synthetic memory release/reuse. Neither is enabled as a product default.
+Open work: persistent-probe supervisor and health semantics, application reclamation/recovery,
+crun OCI/kernel compatibility, vCPU sweeps, launch profiling and the existing application gates.
 
 ## WU11 — Preserve compatibility and qualify distribution
 

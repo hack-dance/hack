@@ -89,10 +89,35 @@ pub(super) fn require_replay_supported(receipt: &Receipt) -> Result<(), Candidat
     if receipt.environment_attached {
         return Err(error(
             "graph_environment_redelivery_required",
-            "Environment-bound graphs require qualified redelivery; restart, restore and export remain gated.",
+            "Environment-bound graphs require fresh scoped delivery; in-place restart and ordinary restore remain gated.",
         ));
     }
     Ok(())
 }
 #[cfg(test)]
 mod tests;
+
+/// Archive only after the caller has verified complete graph/data removal under the engine guard.
+pub(super) fn archive_slots(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    root: &std::path::Path,
+) -> Result<(), CandidateError> {
+    if !receipt.environment_attached {
+        return Ok(());
+    }
+    let containers = receipt
+        .resources
+        .values()
+        .filter(|r| r.kind == Kind::Container)
+        .map(|r| (r.key.clone(), r.name.clone()))
+        .collect();
+    environment_recovery::archive_graph(
+        candidate,
+        engine.guest(),
+        &receipt.run,
+        &containers,
+        &root.join("environment-intents"),
+    )
+}

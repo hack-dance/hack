@@ -15,6 +15,10 @@ Every checkpoint must also complete a [real-project attempt and gap review](real
 [Checkpoint 04](checkpoint-04.md) records durable fixture jobs and owned cancellation.
 The [cleanup and CPU checkpoint](cleanup-cpu-20260914.md) qualifies journal batching with driver
 crash recovery and repeats the frozen latency comparison.
+The [SmolVM optimization audit](smolvm-optimization-audit-20260914.md) identifies applicable
+provider controls and the remaining transport, reclamation and CPU qualification work.
+The [runtime alternatives checkpoint](runtime-alternatives-20260915.md) records crun compatibility
+findings and the persistent HTTP-probe experiment.
 The [current performance refresh](performance-refresh-20260914.md) repeats the latency cohort and
 compares both engines at matched health-check cadences with complete selected process trees.
 The [September 14 benchmark and review](benchmark-20260914.md) compares the owned graph executor

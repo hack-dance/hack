@@ -86,7 +86,7 @@ lint/privacy and the CLI test gate pass (940 passing tests, five skips; the fina
 unchanged task-cache results). Documentation links, scalar rows and whitespace checks pass.
 This is candidate-branch evidence, not hosted CI or release qualification.
 
-Bounded concurrent container cleanup is next. Preserve full durable cleanup intent, fresh ownership
-checks, confirmed container absence before network/volume removal, and interruption/partial-failure
-recovery. The existing CPU/footprint defaults remain intact; resource-size sweeps and real-application
+[Bounded concurrent cleanup](concurrent-cleanup-20260915.md) passed correctness controls but did
+not qualify across the lifecycle; sequential deletion remains the default. A follow-up must isolate
+phase/order effects and include CLI CPU before reconsidering adoption. The existing CPU/footprint defaults remain intact; resource-size sweeps and real-application
 idle reclamation/recovery remain separate open work.

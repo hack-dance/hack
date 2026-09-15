@@ -712,3 +712,12 @@ The independent heavier synthetic load passes on 2 vCPUs/4 GiB with lower lifecy
 but slightly slower compute-batch timing. It does not establish application startup, reload, routing,
 credential delivery or automatic idle-reclamation recovery. Those acceptance rows remain blocked or
 not exercised.
+
+September 15 follow-up: the [larger graph control](larger-graphs-20260915.md) qualifies 32 live
+services/probes through cleanup, fresh restore and archive/export, and removes the earlier
+eight-service limitation. A runtime metadata ENOSPC failure was traced to the 1-MiB tmpfs and fixed
+with a bounded 16-MiB/4096-inode mount. [Automatic idle reclamation](automatic-idle-20260915.md)
+triggered normally in a separate memory fixture, preserved live bytes and allowed reuse; it showed
+negligible additional footprint reduction. Neither control closes the actual application rows.
+The [compatibility inventory](application-compatibility-20260915.md) lists the remaining supported
+replacements. Original application configuration and dirty-state fingerprints are unchanged.

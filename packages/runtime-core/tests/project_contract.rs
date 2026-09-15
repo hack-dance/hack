@@ -360,6 +360,72 @@ fn unsupported_privileged_external_and_unknown_fields_block_enrollment() {
 }
 
 #[test]
+fn explicit_external_network_replacement_is_owned_internal_and_review_bound() {
+    let original =
+        format!("{BASIC}    networks: [legacy]\nnetworks:\n  legacy: {{external: true}}\n");
+    let fixture = Fixture::new(&original);
+    let blocked = fixture.plan();
+    assert!(!blocked.plan.enrollment_compatible);
+    let replacement = original.replace("external: true", "external: true, x-hack-isolated: true");
+    fs::write(fixture.project.join("compose.yaml"), &replacement).unwrap();
+    let review = fixture.plan();
+    assert!(review.plan.enrollment_compatible);
+    assert_ne!(blocked.plan_id, review.plan_id);
+    assert_eq!(review.plan.services["web"].networks, ["legacy"]);
+    assert!(review.plan.networks["legacy"].internal);
+    assert_eq!(review.plan.networks["legacy"].driver, "bridge");
+    assert!(
+        review
+            .plan
+            .diagnostics
+            .iter()
+            .any(|d| { d.code == "isolated_network_replacement" && d.severity == "warning" })
+    );
+    assert!(!fixture.candidate.state_root.exists());
+    project::enroll(&fixture.candidate, fixture.options(), &review.plan_id).unwrap();
+    assert_eq!(
+        fs::read_to_string(fixture.project.join("compose.yaml")).unwrap(),
+        replacement
+    );
+    fs::write(fixture.project.join("compose.yaml"), original).unwrap();
+    assert!(project::enroll(&fixture.candidate, fixture.options(), &review.plan_id).is_err());
+}
+
+#[test]
+fn network_replacement_does_not_waive_other_compatibility_errors() {
+    let fixture = Fixture::new(&format!(
+        "{BASIC}    labels: {{caddy: private.example}}\n    volumes: ['${{HOME}}/.aws:/root/.aws:ro']\n    networks: [legacy]\nnetworks:\n  legacy: {{external: true, x-hack-isolated: true}}\nvolumes:\n  old: {{external: true}}\n"
+    ));
+    let codes = fixture.codes();
+    assert!(!codes.contains(&"external_network".into()));
+    for code in [
+        "external_route_or_owner_label",
+        "unresolved_mount_source",
+        "external_volume",
+    ] {
+        assert!(codes.contains(&code.into()));
+    }
+    assert!(!fixture.plan().plan.enrollment_compatible);
+    for declaration in [
+        "external: true, x-hack-isolated: false",
+        "external: true, x-hack-isolated: true, driver: overlay",
+    ] {
+        let fixture = Fixture::new(&format!("{BASIC}networks:\n  legacy: {{{declaration}}}\n"));
+        assert!(!fixture.plan().plan.enrollment_compatible);
+    }
+    for declaration in [
+        "x-hack-isolated: true",
+        "external: false, x-hack-isolated: true",
+        "external: true, x-hack-isolated: 'true'",
+        "external: true, internal: 'true', x-hack-isolated: true",
+    ] {
+        let fixture = Fixture::new(&format!("{BASIC}networks:\n  legacy: {{{declaration}}}\n"));
+        assert!(project::plan(&fixture.candidate, fixture.options()).is_err());
+        assert!(!fixture.candidate.state_root.exists());
+    }
+}
+
+#[test]
 fn environment_values_are_never_resolved_returned_or_persisted() {
     let fixture = Fixture::new(
         "services:\n  web:\n    image: alpine:3.21\n    command: [echo, 'INLINE_COMMAND_CANARY', '${FROM_HOST}', '$$ESCAPED']\n    environment:\n      PASSWORD: INLINE_ENV_CANARY\n      FROM_HOST:\n      DATABASE_URL: '${DATABASE_URL:-INLINE_DEFAULT_CANARY}'\n    env_file: settings\n    labels: {note: INLINE_LABEL_CANARY}\n",

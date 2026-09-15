@@ -408,7 +408,14 @@ The [heavier load control](capacity-load-20260915.md) also passes: eight measure
 parallel SHA-256 workers and 1.25 GiB of filled application buffers. Smaller capacity reduced combined
 CPU 6.0% and post-load footprint 19.1–25.5%; compute-batch wall time was 2.3% slower. The registered
 Event Agent plan now has 12 services and 21 compatibility errors, so application acceptance stays open.
-Open work: automatic idle reclamation and real-application recovery, crun OCI/kernel compatibility,
+The [automatic idle control](automatic-idle-20260915.md) observed one normal ten-minute pulse,
+preserved live bytes and verified reuse, with negligible additional footprint reduction. Automatic
+rearming and application-sized recovery remain open. [Larger graph qualification](larger-graphs-20260915.md)
+extends the driver to 32 services/probes and fixes a 1-MiB runtime metadata limit exposed by the live
+cohort. Thirty-two healthy services passed cleanup, fresh restore and archive/export verification.
+The [compatibility inventory](application-compatibility-20260915.md) records the remaining actual
+application replacements; its working configuration remains unchanged.
+Open work: automatic idle rearming and real-application recovery, crun OCI/kernel compatibility,
 application networking/routing and scoped credential delivery, and the existing application gates.
 
 ## WU11 — Preserve compatibility and qualify distribution

@@ -118,6 +118,79 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
     assert!(!candidate.state_root.exists());
 }
 #[test]
+fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    for (count, cpus, memory, accepted) in [
+        (12, 0.1, "32m", true),
+        (32, 0.1, "32m", true),
+        (33, 0.1, "32m", false),
+        (12, 0.5, "32m", false),
+        (32, 0.1, "256m", false),
+    ] {
+        let services: serde_json::Map<String, Value> = (0..count)
+            .map(|i| (format!("job-{i}"), json!({"image":image,"read_only":true,"network_mode":"none","cpus":cpus,"mem_limit":memory,"command":["true"]})))
+            .collect();
+        let goals = services
+            .keys()
+            .map(|name| (name.clone(), Condition::Completed))
+            .collect();
+        state::write(
+            &fixture.0.join("compose.yaml"),
+            &json!({"services":services}),
+        )
+        .unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let result = config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None);
+        if !accepted {
+            assert_eq!(result.err().unwrap().code, "graph_budget");
+            continue;
+        }
+        let prepared = result.unwrap();
+        assert_eq!(prepared.configs.len(), count);
+        assert!(resource_counts_fit(&prepared.resources));
+        if count == MAX_SERVICES {
+            let mut resources = prepared.resources.clone();
+            let template = resources.values().next().unwrap().clone();
+            for (kind, maximum) in [(Kind::Network, MAX_NETWORKS), (Kind::Volume, MAX_VOLUMES)] {
+                for index in 0..maximum {
+                    let key = format!("{}:{index}", kind.word());
+                    resources.insert(
+                        key,
+                        Resource {
+                            kind,
+                            ..template.clone()
+                        },
+                    );
+                }
+            }
+            assert!(resource_counts_fit(&resources));
+            for kind in [Kind::Container, Kind::Network, Kind::Volume] {
+                let mut overflow = resources.clone();
+                overflow.insert(
+                    "excess".into(),
+                    Resource {
+                        kind,
+                        ..template.clone()
+                    },
+                );
+                assert!(!resource_counts_fit(&overflow));
+            }
+        }
+    }
+    assert!(!candidate.state_root.exists());
+}
+
+#[test]
 fn config_projection_allows_engine_defaults_but_detects_drift() {
     assert!(contains_request(
         &json!({"Cmd":[],"HostConfig":{"Memory":123}}),

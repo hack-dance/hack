@@ -552,7 +552,8 @@ edits is not supported. Cleanup does not require readable source and never remov
 Publication retention/GC, writable build outputs and live reload remain separate work.
 
 The initial driver requires the explicit development VM profile, pinned local `sha256:` image IDs,
-read-only roots, at most eight services, one internal bridge and eight named volumes. Defaults are
+read-only roots, at most 32 services, one internal bridge and eight named volumes. The runtime metadata
+tmpfs is bounded to 16 MiB and 4096 inodes; capacity is consumed on demand. Defaults are
 0.5 CPU, 256 MiB RAM and 64 PIDs per service; total requested limits cannot exceed four CPUs or
 4 GiB RAM. Container logs are limited to one 1 MiB file and `/tmp` to a 16 MiB tmpfs. It rejects
 builds, unbound or writable source mounts, port publication, environment delivery, automatic restart, and

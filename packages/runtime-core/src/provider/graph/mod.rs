@@ -32,6 +32,10 @@ use serde_json::{Value, json};
 pub use source::SourceBinding;
 use std::{collections::BTreeMap, fs, os::unix::fs::DirBuilderExt, path::PathBuf, time::Duration};
 
+const MAX_SERVICES: usize = 32;
+const MAX_NETWORKS: usize = 1;
+const MAX_VOLUMES: usize = 8;
+
 fn error(code: &'static str, message: &str) -> CandidateError {
     CandidateError::new(code, message)
 }
@@ -220,6 +224,22 @@ fn observation(value: &Value) -> Result<Observation, CandidateError> {
         _ => Err(error("graph_state", "Unexpected owned service state.")),
     }
 }
+fn resource_counts_fit(resources: &BTreeMap<String, Resource>) -> bool {
+    [
+        (Kind::Container, MAX_SERVICES),
+        (Kind::Network, MAX_NETWORKS),
+        (Kind::Volume, MAX_VOLUMES),
+    ]
+    .into_iter()
+    .all(|(kind, limit)| {
+        resources
+            .values()
+            .filter(|resource| resource.kind == kind)
+            .count()
+            <= limit
+    })
+}
+
 fn load(
     candidate: &Candidate,
     engine: &Engine<'_>,
@@ -235,7 +255,7 @@ fn load(
         || !hex(&receipt.plan_id, 64)
         || receipt.source.as_ref().is_some_and(|s| !s.valid())
         || receipt.resources.is_empty()
-        || receipt.resources.len() > 24
+        || !resource_counts_fit(&receipt.resources)
         || ![
             "preparing",
             "ready-observed",

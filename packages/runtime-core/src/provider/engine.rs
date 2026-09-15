@@ -110,6 +110,7 @@ fn response_bytes(mut response: reqwest::blocking::Response) -> Result<Vec<u8>, 
 fn rejection_category(bytes: &[u8]) -> &'static str {
     let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
     for (needle, category) in [
+        ("no space left on device", "storage-exhausted"),
         ("apparmor", "apparmor-unavailable"),
         ("seccomp", "seccomp-rejected"),
         ("cgroup", "cgroup-rejected"),
@@ -491,6 +492,12 @@ mod tests {
             "permission-denied"
         );
         assert_eq!(rejection_category(b"DO_NOT_RETURN"), "unclassified");
+        assert_eq!(
+            rejection_category(
+                br#"{"message":"symlink /secret/DO_NOT_RETURN: no space left on device"}"#
+            ),
+            "storage-exhausted"
+        );
     }
 
     fn exchange(response: &'static [u8]) -> Result<Value, CandidateError> {

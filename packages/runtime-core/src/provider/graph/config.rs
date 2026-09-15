@@ -38,10 +38,10 @@ pub(super) fn prepare_delivery(
     }
     let graph = Graph::from_plan(&inputs.review.plan, readiness)?;
     let plan = &inputs.review.plan;
-    if graph.services.len() > 8 {
+    if graph.services.len() > MAX_SERVICES {
         return Err(error(
             "graph_budget",
-            "At most eight services fit this driver profile.",
+            "At most 32 services fit this driver profile; aggregate resource limits also apply.",
         ));
     }
     let mut networks = BTreeSet::new();
@@ -112,8 +112,8 @@ pub(super) fn prepare_delivery(
         total_memory += memory;
         total_cpus += cpus;
     }
-    if networks.len() > 1
-        || volumes.len() > 8
+    if networks.len() > MAX_NETWORKS
+        || volumes.len() > MAX_VOLUMES
         || total_memory > 4 * 1024 * 1024 * 1024
         || total_cpus > 4.0
     {

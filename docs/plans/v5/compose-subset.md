@@ -51,7 +51,29 @@ and network drivers, and existing router/runtime ownership labels. Invalid scala
 resource limits and malformed YAML return typed errors without source values or YAML snippets.
 
 Fields prefixed with `x-` are recorded as extension-metadata warnings after mapping merges.
-Their provider-specific behavior is not executed. This follows the [Compose extension convention](https://docs.docker.com/reference/compose-file/extension/).
+Their provider-specific behavior is not executed unless explicitly documented below. This follows the [Compose extension convention](https://docs.docker.com/reference/compose-file/extension/).
+
+### Explicit isolated replacement for an external network
+
+An external network may opt into a **new candidate-owned internal bridge**:
+
+```yaml
+networks:
+  legacy:
+    external: true
+    x-hack-isolated: true
+```
+
+The candidate preserves service references to `legacy` but records an internal bridge in the
+review. It emits `isolated_network_replacement` and binds this choice to the plan digest.
+Enrollment never joins or changes the existing external network. Ordinary Compose ignores the
+extension and retains its external-network behavior. The option requires `external: true` and
+does not enable custom drivers. False or absent retains the original external-network refusal.
+
+This replacement deliberately has no outbound access or shared v4 routing. Use it for an isolated
+candidate cohort; applications needing external dependencies still need a separately supported
+network path. Router labels, credential-directory mounts, external volumes and graph execution
+limits retain their existing gates. Planning and enrollment alone do not create the bridge.
 
 Structural interpolation, port ranges and optional/restart-propagating dependencies
 are outside this subset. A healthy dependency needs an explicit enabled health

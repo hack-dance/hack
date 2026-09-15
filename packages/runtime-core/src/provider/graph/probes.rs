@@ -64,7 +64,7 @@ pub(super) fn fresh(
         .collect()
 }
 pub(super) fn validate(receipt: &Receipt) -> Result<(), CandidateError> {
-    if receipt.probes.len() > 8 {
+    if receipt.probes.len() > MAX_SERVICES {
         return Err(error("graph_probe_receipt", "Probe budget exceeded."));
     }
     let mut allocations = std::collections::BTreeSet::new();

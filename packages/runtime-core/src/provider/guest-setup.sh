@@ -28,7 +28,7 @@ mkdir -p /storage/docker /storage/containerd /var/lib/docker /var/lib/containerd
 if findmnt -n --mountpoint /run/hack-local >/dev/null; then exit 41; fi
 mount --bind /storage/docker /var/lib/docker
 mount --bind /storage/containerd /var/lib/containerd
-mount -t tmpfs -o size=1m,mode=700 tmpfs /run/hack-local
+mount -t tmpfs -o size=16m,nr_inodes=4096,mode=700 tmpfs /run/hack-local
 test "$(findmnt -n -o FSTYPE --mountpoint /var/lib/docker)" = ext4
 test "$(findmnt -n -o FSTYPE --mountpoint /var/lib/containerd)" = ext4
 if test -L /var/run/docker.sock; then

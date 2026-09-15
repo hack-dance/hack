@@ -76,15 +76,30 @@ pub(super) fn compile(
             };
             keys(
                 v,
-                &["driver", "internal", "external"],
+                &["driver", "internal", "external", "x-hack-isolated"],
                 &field,
                 &mut diagnostics,
             );
-            if boolean(v.get("external"), false)? {
+            let external = boolean(v.get("external"), false)?;
+            let isolated = boolean(v.get("x-hack-isolated"), false)?;
+            if isolated && !external {
+                return Err(problem(
+                    "invalid_network_replacement",
+                    "x-hack-isolated requires an external network declaration to replace.",
+                ));
+            }
+            if external && !isolated {
                 diagnostics.push(Diagnostic::error(
                     "external_network",
                     &field,
                     "External/global networks cannot be adopted by candidate enrollment.",
+                ));
+            }
+            if isolated {
+                diagnostics.push(Diagnostic::warning(
+                    "isolated_network_replacement",
+                    &field,
+                    "The candidate creates a new owned internal bridge under this logical name. It does not join the external network, expose existing routes, or provide outbound access.",
                 ));
             }
             let driver = v.get("driver").map(string).transpose()?.unwrap_or("bridge");
@@ -99,7 +114,7 @@ pub(super) fn compile(
                     } else {
                         "[unsupported]".into()
                     },
-                    internal: boolean(v.get("internal"), false)?,
+                    internal: boolean(v.get("internal"), false)? || isolated,
                 },
             );
         }

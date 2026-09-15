@@ -1,5 +1,9 @@
 use std::{env, path::PathBuf, process::Command};
 fn main() {
+    println!("cargo:rerun-if-changed=guest/http-probe.c");
+    if env::var_os("CARGO_FEATURE_NATIVE_HTTP_PROBE").is_some() {
+        build_http_probe();
+    }
     println!("cargo:rerun-if-changed=guest/environment-launcher.zig");
     if env::var_os("CARGO_FEATURE_ENVIRONMENT_LAUNCHER").is_none() {
         return;
@@ -29,4 +33,49 @@ fn main() {
         .status()
         .expect("launch Zig");
     assert!(status.success(), "guest environment launcher build failed");
+}
+
+fn build_http_probe() {
+    let version = Command::new("zig")
+        .arg("version")
+        .output()
+        .expect("native-http-probe requires Zig 0.15.2");
+    assert!(
+        version.status.success() && version.stdout == b"0.15.2\n",
+        "native-http-probe requires Zig 0.15.2"
+    );
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let result = Command::new("zig")
+        .args([
+            "cc",
+            "-target",
+            "aarch64-linux-musl",
+            "-Os",
+            "-static",
+            "-s",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "guest/http-probe.c",
+            "-o",
+        ])
+        .arg(out.join("http-probe"))
+        .status()
+        .expect("build guest HTTP probe");
+    assert!(result.success(), "guest HTTP probe build failed");
+    // The same POSIX source runs locally for adversarial network and process tests.
+    let result = Command::new("cc")
+        .args([
+            "-std=c11",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "guest/http-probe.c",
+            "-o",
+        ])
+        .arg(out.join("http-probe-host"))
+        .status()
+        .expect("build host HTTP probe test driver");
+    assert!(result.success(), "host HTTP probe build failed");
 }

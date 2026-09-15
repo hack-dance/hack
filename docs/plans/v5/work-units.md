@@ -376,7 +376,10 @@ Six live graph reclamation cycles also pass scoped delivery, signals and fresh d
 The launch-path audit corrected the prior default claim: SmolVM already enabled reclamation with
 its idle policy. That policy is now explicit and recorded per boot; no new default-to-default
 memory improvement is claimed.
-Open work: persistent-probe supervisor and health semantics, automatic idle reclamation and real-application recovery,
+The [native HTTP supervisor](native-http-probe-20260915.md) now passes host failure controls and
+owned ARM64 timeout/recovery/termination tests. A guest tmpfs bind mount makes its status observable
+without per-read execs; graph integration and integrated performance measurements remain open.
+Open work: persistent-probe graph lifecycle and health integration, automatic idle reclamation and real-application recovery,
 crun OCI/kernel compatibility, vCPU sweeps, launch profiling and the existing application gates.
 
 ## WU11 — Preserve compatibility and qualify distribution

@@ -14,7 +14,7 @@ The status below separates implemented behavior from diagnostic results requirin
 | Cleanup journal batching | Default | Durability and recovery checks pass; no standalone CPU improvement is attributed to this change. |
 | Removed graph and retired intent retention cleanup | Implemented; historical sweep complete | Archives preserve evidence and consumed slot IDs; 181 graph records and 247 standalone intents handled. |
 | Host memory reclamation | Explicit enabled policy, ten-minute idle window | Existing upstream default made visible per boot; disabled/enabled memory controls and two live graph runs pass. Automatic idle-trigger and real-application qualification remain open. |
-| Persistent native HTTP probes | Diagnostic win; product integration open | 24–25% lower gross candidate engine CPU than OrbStack in both lane orders. Implement supervisor, freshness, retry and cleanup semantics, then benchmark that product path. |
+| Persistent native HTTP probes | [Native supervisor qualified](native-http-probe-20260915.md); graph integration open | 24–25% lower gross candidate engine CPU than OrbStack in both lane orders. Integrate the qualified supervisor with graph readiness and cleanup, then benchmark that product path. |
 | crun / reduced runc parallelism | Not adopted | crun cannot start the fixture; the parallelism A/B/A experiment was inconclusive. Neither is a verified gain. |
 
 The [cleanup and launch report](cleanup-cpu-20260914.md) and

@@ -77,7 +77,9 @@ No Docker/containerd replacement is needed for this measured improvement. The re
 with avoiding repeated health-command process launches, though this comparison does not isolate
 every component of the runtime difference.
 
-Next bounded units are launch/cleanup profiling, vCPU and memory sweeps with the same workload,
+[Launch/cleanup profiling](graph-phase-profile-20260915.md) is complete and includes a normal-build
+lifecycle CPU cohort. Next bounded units are progress-aware scheduling, bounded concurrent cleanup,
+vCPU and memory sweeps with the same workload,
 and automatic ten-minute idle reclamation with real-application recovery. The full Event Agent
 compatibility and acceptance gates remain open. Historical Hack 4.1.1/4.2.0 comparisons remain in
 [the earlier benchmark](benchmark-20260914.md); those versions were not remeasured here.

@@ -259,6 +259,16 @@ and restart readback proving deleted owned resources stay deleted. No production
    Docker-init SIGTERM/SIGINT forwarding, exit-code preservation and native expiry refusal, plus
    all prior delivery/recovery controls. Validation: 146 Rust tests in both build configurations,
    eight live controls, 940 CLI tests and required checks. No new performance comparison is claimed.
+   Explicit absolute CMD health checks now receive scoped values with silent output and independent
+   expiry validation. Live `environment-startup-1789434169172839000` passes non-root health readiness,
+   output suppression and expiry-to-unhealthy while the application remains running.
+   `restore_with_environment` adds fresh explicit delivery after completed cleanup, retaining named
+   data and requiring new container allocations. Native provider tools are unavailable in this
+   session; native authorization and CLI credential exposure remain unverified.
+   Live `environment-redelivery-1789434460004136000` verifies fresh container IDs and slots, changed
+   values, preserved named-volume data and refusal of restore while running. Validation: 147 Rust
+   tests in both configurations, 940 CLI tests and required checks. In-place restart,
+   shell health checks and real-application/crash acceptance remain open.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,
    failures and owned cleanup. The synthetic SQLite probe does not replace this gate.
 5. Qualify the guest base and networking package versions for distribution in WU11; the current

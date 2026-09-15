@@ -77,15 +77,23 @@ fn graph_startup_delivers_nonroot_values_and_preserves_exec_signals_and_exit_cod
             "const v=await Bun.file('/run/hack-environment.json').json();if(process.getuid()!=={uid}||process.getgid()!=={uid}||{pid_check}||process.env.TOKEN!==v.TOKEN||!process.env.TOKEN.startsWith('synthetic-startup-{uid}-'))process.exit(71);"
         );
         let program = if uid == 0 {
-            format!("{check}console.log('root-exec-ok')")
+            format!(
+                "{check}const f=Bun.file('/data/counter');const n=(await f.exists()?Number(await f.text()):0)+1;if((n===2)!==process.env.TOKEN.endsWith('-fresh'))process.exit(74);await Bun.write('/data/counter',String(n));console.log('root-exec-ok');console.log('counter='+n)"
+            )
         } else {
             format!(
                 "{check}process.on('{signal}',()=>{{console.log('signal-ok');process.exit({exit})}});console.log('ready');setInterval(()=>{{}},1000)"
             )
         };
         let mut service = json!({"image":image,"read_only":true,"network_mode":"none","init":uid!=0,"user":format!("{uid}:{uid}"),"entrypoint":["/usr/local/bin/bun","-e",program],"command":[],"environment":{"TOKEN":null}});
+        if uid == 0 {
+            service["volumes"] = json!(["data:/data"]);
+        }
         if uid != 0 {
             service["depends_on"] = json!({"root":{"condition":"service_completed_successfully"}});
+        }
+        if name == "term" {
+            service["healthcheck"] = json!({"test":["CMD","/usr/local/bin/bun","-e","const v=await Bun.file('/run/hack-environment.json').json();console.log(process.env.TOKEN);console.error(process.env.TOKEN);process.exit(process.getuid()===1001&&process.env.TOKEN===v.TOKEN?0:73)"],"interval":"1s","timeout":"2s","retries":1});
         }
         services.insert(name.into(), service);
         managed.insert(
@@ -98,7 +106,7 @@ fn graph_startup_delivers_nonroot_values_and_preserves_exec_signals_and_exit_cod
     }
     state::write(
         &fixture.0.join("compose.yaml"),
-        &json!({"services":services}),
+        &json!({"services":services,"volumes":{"data":{}}}),
     )
     .unwrap();
     let plan = project::plan(
@@ -113,7 +121,7 @@ fn graph_startup_delivers_nonroot_values_and_preserves_exec_signals_and_exit_cod
     assert!(plan.plan.enrollment_compatible);
     let readiness = BTreeMap::from([
         ("root".into(), Condition::Completed),
-        ("term".into(), Condition::Started),
+        ("term".into(), Condition::Healthy),
         ("int".into(), Condition::Started),
     ]);
     let public = BTreeMap::new();
@@ -160,7 +168,7 @@ fn graph_startup_delivers_nonroot_values_and_preserves_exec_signals_and_exit_cod
                 assert!(err.is_empty() && !truncated);
                 if out
                     == if name == "root" {
-                        "root-exec-ok\n"
+                        "root-exec-ok\ncounter=1\n"
                     } else {
                         "ready\n"
                     }
@@ -173,6 +181,43 @@ fn graph_startup_delivers_nonroot_values_and_preserves_exec_signals_and_exit_cod
                 );
                 std::thread::sleep(Duration::from_millis(50));
             }
+        }
+        // Health output deliberately prints the synthetic value; none may reach engine history.
+        let term = &receipt.resources["container:term"];
+        let inspected = inspect_resource(&engine, &receipt, term)?.unwrap();
+        assert_eq!(inspected["State"]["Health"]["Status"], "healthy");
+        let slots =
+            super::super::environment_recovery::graph_slots(&candidate, engine.guest(), &run_id)?;
+        let slot = &slots
+            .iter()
+            .find(|(_, service, _)| service == "term")
+            .unwrap()
+            .0;
+        engine.guest().execute(
+            "(printf 0 > \"/run/$1/expires\") >/dev/null 2>&1; printf 'expired\\n'",
+            &[slot],
+            None,
+        )?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let inspected = inspect_resource(&engine, &receipt, term)?.unwrap();
+            assert_eq!(inspected["State"]["Running"], true);
+            let health = &inspected["State"]["Health"];
+            for entry in health["Log"].as_array().unwrap() {
+                assert_eq!(entry["Output"], "");
+            }
+            if health["Status"] == "unhealthy" {
+                assert_eq!(
+                    health["Log"].as_array().unwrap().last().unwrap()["ExitCode"],
+                    125
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "expired health delivery was not refused"
+            );
+            std::thread::sleep(Duration::from_millis(100));
         }
         for (name, signal, exit) in [("term", "SIGTERM", 42), ("int", "SIGINT", 43)] {
             let id = receipt.resources[&format!("container:{name}")]
@@ -208,6 +253,85 @@ fn graph_startup_delivers_nonroot_values_and_preserves_exec_signals_and_exit_cod
         wait_exit(&engine, &receipt, "term", 125)?;
         assert_eq!(engine.logs(id)?.0, "ready\nsignal-ok\n");
         assert!(engine.logs(id)?.1.is_empty());
+        let prior_ids = receipt
+            .resources
+            .iter()
+            .map(|(key, value)| (key.clone(), value.id.clone()))
+            .collect::<BTreeMap<_, _>>();
+        drop(engine);
+        cleanup(&candidate, &run_id, false)?;
+        let renewed = managed
+            .iter()
+            .map(|(service, values)| {
+                (
+                    service.clone(),
+                    values
+                        .iter()
+                        .map(|(key, value)| (key.clone(), format!("{value}-fresh")))
+                        .collect(),
+                )
+            })
+            .collect();
+        let restored = restore_with_environment(
+            &candidate,
+            options(&fixture.0, &plan.plan_id, &run_id, &readiness, &public),
+            &renewed,
+            Duration::from_secs(120),
+        )?;
+        assert_eq!(restored.phase, "ready-observed");
+        assert!(restored.environment_attached);
+        for (key, resource) in &restored.resources {
+            if resource.kind == Kind::Container {
+                assert_ne!(resource.id, prior_ids[key]);
+            }
+        }
+        assert_eq!(
+            restore_with_environment(
+                &candidate,
+                options(&fixture.0, &plan.plan_id, &run_id, &readiness, &public),
+                &renewed,
+                Duration::from_secs(120),
+            )
+            .unwrap_err()
+            .code,
+            "graph_restore_refused"
+        );
+        let engine = Engine::connect(&candidate)?;
+        assert_eq!(
+            engine
+                .logs(restored.resources["container:root"].id.as_deref().unwrap())?
+                .0,
+            "root-exec-ok\ncounter=2\n"
+        );
+        for (key, resource) in &restored.resources {
+            if resource.kind == Kind::Volume {
+                assert_eq!(resource.id, prior_ids[key]);
+            }
+        }
+        let fresh_slots =
+            super::super::environment_recovery::graph_slots(&candidate, engine.guest(), &run_id)?;
+        assert_eq!(fresh_slots.len(), slots.len() + managed.len());
+        for (old, _, _) in &slots {
+            // Old cleanup authority cannot retire a fresh allocation while its container exists.
+            assert!(
+                super::super::environment_recovery::retire(&candidate, engine.guest(), old, None)
+                    .is_err()
+            );
+        }
+        for resource in restored
+            .resources
+            .values()
+            .filter(|r| r.kind == Kind::Container)
+        {
+            let inspected = inspect_resource(&engine, &restored, resource)?.unwrap();
+            let text = serde_json::to_string(&inspected).unwrap();
+            for values in renewed.values() {
+                for value in values.values() {
+                    let encoded = serde_json::to_string(value).unwrap();
+                    assert!(!text.contains(&encoded[1..encoded.len() - 1]));
+                }
+            }
+        }
         drop(engine);
         Ok(())
     })();

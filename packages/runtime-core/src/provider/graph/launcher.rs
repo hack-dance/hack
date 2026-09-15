@@ -90,16 +90,16 @@ pub(super) fn validate(config: &Value) -> Result<(), CandidateError> {
             )
         })?;
     if !entry[0].as_str().is_some_and(|s| s.starts_with('/'))
-        || config.get("Healthcheck").is_some()
         || config["StopSignal"]
             .as_str()
             .is_some_and(|s| !["SIGTERM", "SIGINT", "SIGQUIT", "SIGKILL"].contains(&s))
     {
         return Err(error(
             "environment_entrypoint",
-            "Environment delivery requires an absolute entrypoint and no separate health exec; unsupported stop signals remain gated.",
+            "Environment delivery requires an absolute entrypoint ; unsupported stop signals remain gated.",
         ));
     }
+    validate_health(config)?;
     for mount in config["HostConfig"]["Mounts"]
         .as_array()
         .into_iter()
@@ -115,11 +115,52 @@ pub(super) fn validate(config: &Value) -> Result<(), CandidateError> {
     }
     Ok(())
 }
+fn validate_health(config: &Value) -> Result<(), CandidateError> {
+    let Some(health) = config.get("Healthcheck") else {
+        return Ok(());
+    };
+    let test = health["Test"].as_array().ok_or_else(|| {
+        error(
+            "environment_health",
+            "An explicit CMD health check is required.",
+        )
+    })?;
+    if test == &vec![json!("NONE")] {
+        return Ok(());
+    }
+    if test.len() < 2
+        || test[0] != "CMD"
+        || !test[1].as_str().is_some_and(|s| s.starts_with('/'))
+        || !test.iter().all(Value::is_string)
+    {
+        return Err(error(
+            "environment_health",
+            "Environment health delivery requires CMD with an absolute executable.",
+        ));
+    }
+    Ok(())
+}
 pub(super) fn attach(config: &mut Value, path: &str, launcher: &str) -> Result<(), CandidateError> {
     validate(config)?;
     let (uid, gid) = identity(config)?;
     config["User"] = json!(format!("{uid}:{gid}"));
-    config["Healthcheck"] = json!({"Test":["NONE"]});
+    if config["Healthcheck"]["Test"][0] == "CMD" {
+        let mut test = vec![
+            json!("CMD"),
+            json!("/run/hack-environment-launcher"),
+            json!("--health"),
+            json!("/run/hack-environment.json"),
+            json!("/run/hack-environment.expires"),
+        ];
+        test.extend(
+            config["Healthcheck"]["Test"].as_array().unwrap()[1..]
+                .iter()
+                .cloned(),
+        );
+        config["Healthcheck"]["Test"] = json!(test);
+    } else {
+        config["Healthcheck"] = json!({"Test":["NONE"]});
+    }
     let mut command = config["Entrypoint"].as_array().unwrap().clone();
     command.extend(config["Cmd"].as_array().into_iter().flatten().cloned());
     let mut entry = vec![
@@ -187,6 +228,35 @@ mod tests {
                 .iter()
                 .all(|m| m["ReadOnly"] == true)
         );
+    }
+    #[test]
+    fn health_delivery_preserves_command_and_timing_and_refuses_shells() {
+        let mut value = config();
+        value["Healthcheck"] = json!({"Test":["CMD","/bin/check","space argument"],"Interval":1000000000,"Timeout":2000000000,"Retries":3});
+        attach(&mut value, "/run/slot/values.json", "/storage/launcher").unwrap();
+        assert_eq!(
+            value["Healthcheck"]["Test"],
+            json!([
+                "CMD",
+                "/run/hack-environment-launcher",
+                "--health",
+                "/run/hack-environment.json",
+                "/run/hack-environment.expires",
+                "/bin/check",
+                "space argument"
+            ])
+        );
+        assert_eq!(value["Healthcheck"]["Interval"], 1000000000);
+        assert_eq!(value["Healthcheck"]["Timeout"], 2000000000);
+        assert_eq!(value["Healthcheck"]["Retries"], 3);
+        for test in [
+            json!(["CMD-SHELL", "echo ok"]),
+            json!(["CMD"]),
+            json!(["CMD", "/bin/check", 5]),
+        ] {
+            value["Healthcheck"]["Test"] = test;
+            assert!(validate(&value).is_err());
+        }
     }
     #[test]
     fn ambiguous_users_health_exec_and_mount_collisions_refuse_before_attachment() {

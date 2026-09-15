@@ -18,7 +18,16 @@ fn keyValid(key: []const u8) bool {
 }
 fn run() !void {
     try std.posix.setrlimit(.CORE, .{ .cur = 0, .max = 0 });
-    const args = try std.process.argsAlloc(allocator);
+    const raw = try std.process.argsAlloc(allocator);
+    const health = raw.len > 1 and std.mem.eql(u8, raw[1], "--health");
+    if (health) {
+        const null_fd = try std.posix.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
+        defer if (null_fd > 2) std.posix.close(null_fd);
+        try std.posix.dup2(null_fd, 0);
+        try std.posix.dup2(null_fd, 1);
+        try std.posix.dup2(null_fd, 2);
+    }
+    const args = if (health) raw[1..] else raw;
     if (args.len < 4 or args.len > 4100 or !std.fs.path.isAbsolute(args[3])) return error.Arguments;
     const payload = try privateFile(args[1], 8192);
     const expiry = try privateFile(args[2], 32);

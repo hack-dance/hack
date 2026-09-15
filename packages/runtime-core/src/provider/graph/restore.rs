@@ -3,15 +3,39 @@ use super::*;
 /// Recreate acknowledged, removed compute around the same verified named data. This is explicit
 /// execution of the unchanged reviewed graph, not replay of an interrupted attempt.
 pub fn restore(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, CandidateError> {
-    if options.timeout.is_zero() || options.timeout > Duration::from_secs(600) {
-        return Err(error("graph_budget", "Invalid restore timeout."));
-    }
     let inputs = project::inputs::compile(
         candidate,
-        options.project,
+        PlanOptions {
+            project: options.project.project,
+            compose_file: options.project.compose_file,
+            profiles: options.project.profiles,
+        },
         options.expected_plan,
         options.non_secret_values,
     )?;
+    restore_inputs(candidate, options, inputs, BTreeMap::new(), false)
+}
+/// Explicit fresh delivery after completed cleanup; retained intents never supply or renew values.
+pub fn restore_with_environment(
+    candidate: &Candidate,
+    options: RunOptions<'_>,
+    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    lifetime: Duration,
+) -> Result<Receipt, CandidateError> {
+    let (inputs, environments) =
+        compile_environment_inputs(candidate, &options, managed, lifetime)?;
+    restore_inputs(candidate, options, inputs, environments, true)
+}
+fn restore_inputs(
+    candidate: &Candidate,
+    options: RunOptions<'_>,
+    inputs: project::inputs::ExecutionInputs,
+    environments: BTreeMap<String, super::super::environment::PendingEnvironment>,
+    redelivery: bool,
+) -> Result<Receipt, CandidateError> {
+    if options.timeout.is_zero() || options.timeout > Duration::from_secs(600) {
+        return Err(error("graph_budget", "Invalid restore timeout."));
+    }
     let engine = Engine::connect(candidate)?;
     if engine.guest().profile() != super::super::Profile::Development {
         return Err(error(
@@ -20,7 +44,9 @@ pub fn restore(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         ));
     }
     let (mut receipt, root) = load(candidate, &engine, options.run_id)?;
-    environment::require_replay_supported(&receipt)?;
+    if !redelivery {
+        environment::require_replay_supported(&receipt)?;
+    }
     if root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()
         || receipt.phase != "stopped-data-retained"
@@ -41,12 +67,13 @@ pub fn restore(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         options.source_revision,
     )?;
     source::unchanged(&source, &receipt)?;
-    let prepared = config::prepare(
+    let prepared = config::prepare_delivery(
         inputs,
         options.readiness,
         options.run_id,
         engine.guest().incarnation(),
         source.as_ref(),
+        !environments.is_empty(),
     )?;
     if prepared.namespace != receipt.namespace
         || prepared.resources.keys().ne(receipt.resources.keys())
@@ -80,6 +107,18 @@ pub fn restore(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
             }
         }
     }
+    for name in environments.keys() {
+        launcher::validate(&prepared.configs[name])?;
+    }
+    // Recheck retirement under the same engine guard before creating fresh allocations.
+    for slot in environment::cleanup_slots(candidate, &engine, &receipt)? {
+        super::super::environment_recovery::retire(candidate, engine.guest(), &slot, None)?;
+    }
+    let launcher = if environments.is_empty() {
+        None
+    } else {
+        Some(launcher::publish(&engine)?)
+    };
     retain_previous(&root, &receipt)?;
     receipt.phase = "restoring".into();
     for (key, resource) in &mut receipt.resources {
@@ -93,9 +132,9 @@ pub fn restore(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         receipt,
         configs: prepared.configs,
         restarting: false,
-        environments: BTreeMap::new(),
+        environments,
         leases: BTreeMap::new(),
-        launcher: None,
+        launcher,
     };
     session.save()?;
     #[cfg(test)]

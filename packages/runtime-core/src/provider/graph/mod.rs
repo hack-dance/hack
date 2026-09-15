@@ -23,7 +23,7 @@ use crate::{
     },
 };
 use reqwest::Method;
-pub use restore::restore;
+pub use restore::{restore, restore_with_environment};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 pub use source::SourceBinding;
@@ -584,6 +584,20 @@ pub fn run_with_environment(
     managed: &BTreeMap<String, BTreeMap<String, String>>,
     lifetime: Duration,
 ) -> Result<Receipt, CandidateError> {
+    let (inputs, environments) =
+        compile_environment_inputs(candidate, &options, managed, lifetime)?;
+    run_inputs(candidate, options, inputs, environments)
+}
+type EnvironmentInputs = (
+    project::inputs::ExecutionInputs,
+    BTreeMap<String, super::environment::PendingEnvironment>,
+);
+fn compile_environment_inputs(
+    candidate: &Candidate,
+    options: &RunOptions<'_>,
+    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    lifetime: Duration,
+) -> Result<EnvironmentInputs, CandidateError> {
     if !cfg!(feature = "environment-launcher") {
         return Err(error(
             "environment_launcher_disabled",
@@ -609,7 +623,7 @@ pub fn run_with_environment(
                 .map(|p| (name.clone(), p))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
-    run_inputs(candidate, options, scoped.executable, environments)
+    Ok((scoped.executable, environments))
 }
 fn run_inputs(
     candidate: &Candidate,
@@ -674,12 +688,6 @@ fn run_inputs(
     )?;
     for name in environments.keys() {
         launcher::validate(&prepared.configs[name])?;
-        if options.readiness.get(name) == Some(&Condition::Healthy) {
-            return Err(error(
-                "environment_health",
-                "Environment delivery does not yet support separate health execs.",
-            ));
-        }
     }
     verify_images(&engine, &prepared.resources)?;
     let launcher = if environments.is_empty() {

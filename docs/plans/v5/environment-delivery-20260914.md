@@ -249,9 +249,9 @@ It prints nothing on failure and exits 125. There is no resident launcher proces
 prevent an application from deliberately logging or persisting its environment.
 
 Direct PID 1 execution and the existing Docker init option are both supported. The adapter does
-not implement its own signal-forwarding supervisor. Separate health execs are refused, and inherited
-image health checks are explicitly disabled for attached services. Such checks require their own
-qualified delivery rather than silently running without the supplied values.
+not implement its own signal-forwarding supervisor. At this startup checkpoint, separate health
+execs were refused and inherited image checks were disabled. The following checkpoint adds
+explicit CMD health delivery; inherited checks remain disabled.
 
 Launcher publication uses a capped, compressed stdin transfer, verifies the decompressed SHA-256
 and root-owned executable metadata, and retains uncertain pending files. The first live pilot
@@ -276,6 +276,44 @@ continues to reject managed startup without the feature. These checks do not qua
 arbitrary application process trees, native authorization or redelivery. No new performance
 comparison is claimed; exec removes the launcher process rather than retaining a wrapper.
 
+## Explicit health checks and fresh restore delivery
+
+The experimental adapter now accepts explicit `CMD` health checks with an absolute executable.
+Each health invocation reads and validates the same service-scoped payload and expiry as startup.
+The launcher redirects stdin, stdout and stderr to `/dev/null` before reading values and replacing
+itself with the health command. This intentionally removes health output diagnostics: exit status
+and Docker health state remain available, but application output does not enter health history.
+Timing, retries and argument boundaries are preserved. `CMD-SHELL`, relative executables and
+implicit inherited health checks remain unsupported for managed delivery.
+
+Live health checkpoint `environment-startup-1789434169172839000` confirmed non-root healthy
+readiness even when the check printed its synthetic value to both output streams. Docker health
+history remained empty. Expiring the owned lease produced health exit 125 and unhealthy status
+while the main application remained running. All eight delivery/recovery controls passed and the
+owned VM stopped with unchanged swapouts and protected host hashes.
+
+`restore_with_environment` accepts newly supplied scoped values after completed ordinary cleanup.
+It shares the existing unchanged-plan, source, readiness, retained-volume, resource-absence and
+bounded-history checks. Old slots are rechecked and retired under the existing engine guard before
+fresh allocations. Every supplied service receives a new immutable slot; no old intent or payload
+is read as credential authority. Restore then creates new containers around the retained volumes.
+In-place restart and export of attached graphs remain gated. Failed or interrupted restore still
+requires explicit reconciliation/cleanup; it is never automatically replayed.
+
+Live `environment-redelivery-1789434460004136000` passes the combined startup/health/restore
+control. Restore supplied a changed value, created three new container IDs and three new immutable
+slots, and preserved a named-volume counter from 1 to 2. The root app independently required the
+fresh value on its second execution. A second restore while running was refused; retained old
+intents could not retire allocations while their bound container names existed. Restored inspection
+metadata contained none of the supplied values. Validation: 147 Rust tests in each build
+configuration, 940 CLI tests, typecheck, lint, privacy, formatting, both Clippy configurations and
+feature release build. All eight live controls passed, including real VM-restart recovery. The VM
+was stopped afterward; host pressure stayed normal, swapouts and protected host hashes were unchanged.
+
+This session exposes no callable 1Password Environment tool. Native provider authorization is
+therefore unverified; the APIs remain feature-gated and the qualification uses synthetic values.
+CLI credential delivery is not enabled by these component changes.
+
 ## Remaining implementation and acceptance
 
 - Qualify native provider authorization before exposing managed delivery through the CLI. The
@@ -287,8 +325,8 @@ comparison is claimed; exec removes the launcher process rather than retaining a
 - Qualify larger payload delivery if needed. The general input compiler accepts a 1 MiB aggregate,
   but the experimental startup API now applies the stricter 8 KiB per-service encoded limit before
   allocation. Larger payload delivery and chunking remain unsupported.
-- Qualify named image users, separate health exec delivery, application-level restart/redelivery
-  and crash recovery. Restart/restore of attached graphs remains refused; ordinary init signal
+- Qualify named image users, shell health checks, in-place application restart and crash recovery.
+  Ordinary restart and restore without fresh values remain refused for attached graphs; init signal
   forwarding is not proof of every application's process-tree shutdown behavior.
 - Qualify native provider authorization and real application behavior. Keep values and their hashes
   out of persisted manifests, journals, receipts and public logs.

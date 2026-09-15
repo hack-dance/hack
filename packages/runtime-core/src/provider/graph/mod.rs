@@ -3,6 +3,8 @@ mod archive;
 pub use archive::archive;
 mod config;
 mod environment;
+#[cfg(all(test, feature = "environment-launcher"))]
+mod environment_crash_test;
 mod launcher;
 #[cfg(all(test, feature = "environment-launcher"))]
 mod startup_test;
@@ -514,6 +516,8 @@ impl Driver for Session<'_> {
                     container: resource.name.clone(),
                 }),
             )?;
+            #[cfg(test)]
+            self.fault_pause("after-environment-stage")?;
             let path = lease.verified_path_with_guest(self.engine.guest(), service)?;
             self.leases.insert(service.into(), lease);
             launcher::attach(

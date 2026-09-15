@@ -269,6 +269,11 @@ and restart readback proving deleted owned resources stay deleted. No production
    values, preserved named-volume data and refusal of restore while running. Validation: 147 Rust
    tests in both configurations, 940 CLI tests and required checks. In-place restart,
    shell health checks and real-application/crash acceptance remain open.
+   Managed driver-loss controls now kill an owned helper at seven startup/restore boundaries,
+   including staged leases without containers and unacknowledged create/start replies.
+   Live `environment-crash-1789434858915391000` passes replay refusal, unchanged refusal receipts,
+   repeated cleanup and fresh restore after each actual SIGKILL. This closes those driver-process
+   interruption controls; application crash and host power-loss acceptance remain open.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,
    failures and owned cleanup. The synthetic SQLite probe does not replace this gate.
 5. Qualify the guest base and networking package versions for distribution in WU11; the current

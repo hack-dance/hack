@@ -314,6 +314,28 @@ This session exposes no callable 1Password Environment tool. Native provider aut
 therefore unverified; the APIs remain feature-gated and the qualification uses synthetic values.
 CLI credential delivery is not enabled by these component changes.
 
+## Managed driver interruption controls
+
+The feature-enabled live suite now includes an owned subprocess driver killed with SIGKILL at
+seven boundaries: startup after environment staging, after container creation and after start;
+restore after durable intent and at each of those three boundaries. The fault markers contain only
+the graph identity and boundary name. Synthetic values are generated inside the child, not passed
+through its argv or written into fixture files.
+
+The parent verifies the actual signal, recorded slot count, expected container presence and
+acknowledgement state. It requires fresh restore to refuse the interrupted graph without changing
+its receipt. It then performs repeated explicit cleanup, fresh restore and final removal. Panic
+unwinding also attempts owned graph cleanup. These controls address driver-process loss; they do
+not qualify arbitrary application crashes, host power loss, native credential authorization or
+forensic removal of values from memory.
+
+Live `environment-crash-1789434858915391000` passes all seven managed driver SIGKILL boundaries.
+Validation includes 147 regular Rust tests in both build configurations, 940 CLI tests, typecheck,
+lint, privacy, Rust formatting, both Clippy configurations and a rebuilt feature-enabled release
+candidate. All nine live controls passed, including prior health/redelivery and actual VM-restart
+recovery. The VM stopped afterward with normal pressure, unchanged swapouts and matching protected
+host hashes. No new performance comparison is claimed.
+
 ## Remaining implementation and acceptance
 
 - Qualify native provider authorization before exposing managed delivery through the CLI. The

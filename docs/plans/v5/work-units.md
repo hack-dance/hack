@@ -393,10 +393,12 @@ with essentially unchanged median engine CPU. The immediate-pass alternative was
 higher startup CPU. [Concurrent cleanup](concurrent-cleanup-20260915.md) passed five live controls,
 but two measured policies failed lifecycle qualification. Retained-data cleanup improved; full-removal
 CPU remained higher even with its original sequential path. The experiment is preserved privately
-and sequential deletion remains the default. Before retrying, isolate phase/order effects and measure
-CLI CPU as well as engine CPU.
+and sequential deletion remains the default. [Phase-isolated crossover and CLI CPU attribution](cleanup-cpu-attribution-20260915.md) now show
+order-sensitive results without a repeatable combined CPU win. The read-only disk audit subprocess
+uses about 60 ms CPU per invocation; next evaluate a bounded native descriptor audit with equivalent
+ownership, process-identity and failure controls.
 Open work: automatic idle reclamation and real-application recovery,
-crun OCI/kernel compatibility, vCPU/memory sweeps, CLI CPU attribution and the existing application gates.
+crun OCI/kernel compatibility, vCPU/memory sweeps, native disk-audit qualification and the existing application gates.
 
 ## WU11 — Preserve compatibility and qualify distribution
 

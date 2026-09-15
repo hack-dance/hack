@@ -80,7 +80,8 @@ every component of the runtime difference.
 [Launch/cleanup profiling](graph-phase-profile-20260915.md) is complete and includes a normal-build
 lifecycle CPU cohort. [Dependency-ordered scheduling](dependency-scheduler-20260915.md) is also
 qualified for lower startup/restore latency with essentially flat median CPU. [Concurrent cleanup](concurrent-cleanup-20260915.md) was evaluated and left disabled after mixed
-lifecycle results. Next units include CLI CPU attribution, vCPU and memory sweeps with the same workload,
+lifecycle results. [CLI CPU attribution](cleanup-cpu-attribution-20260915.md) identifies the disk audit as a measured
+optimization target. Next units include native disk-audit qualification, vCPU and memory sweeps with the same workload,
 and automatic ten-minute idle reclamation with real-application recovery. The full Event Agent
 compatibility and acceptance gates remain open. Historical Hack 4.1.1/4.2.0 comparisons remain in
 [the earlier benchmark](benchmark-20260914.md); those versions were not remeasured here.

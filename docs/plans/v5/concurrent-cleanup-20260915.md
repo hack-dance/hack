@@ -73,8 +73,9 @@ Private evidence:
 
 ## Follow-up
 
-Before reconsidering concurrent cleanup, isolate fresh lifecycle phases and alternate trial order,
-then measure CLI CPU alongside engine CPU to distinguish moved work from eliminated work. Keep the
-current default while that question is open. Resource-size sweeps and real-application automatic idle
-reclamation/recovery remain separate acceptance work; this experiment closes the initial bounded
-cleanup evaluation, not those broader gates.
+The [phase-isolated crossover and CLI CPU attribution](cleanup-cpu-attribution-20260915.md) are now
+complete. Reversed trial order did not produce a repeatable overall concurrency win, and the
+unchanged full-removal path still varied. Sequential deletion remains the default. The measured
+next target is the disk-handle audit subprocess, subject to equivalent ownership/identity controls.
+Resource-size sweeps and real-application automatic idle reclamation/recovery remain separate
+acceptance work; these experiments do not close those broader gates.

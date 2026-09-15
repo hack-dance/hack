@@ -89,6 +89,16 @@ impl PendingEnvironment {
     pub fn stage(self, candidate: &Candidate) -> Result<EnvironmentLease, CandidateError> {
         remaining(self.deadline)?;
         let guest = OwnedGuest::connect(candidate)?;
+        self.stage_with_guest(&guest)
+    }
+    /// Borrows the graph engine's mutation guard; never reacquires or releases its lock.
+    pub(super) fn stage_with_guest(
+        self,
+        guest: &OwnedGuest<'_>,
+    ) -> Result<EnvironmentLease, CandidateError> {
+        guest.require_allocation()?;
+        remaining(self.deadline)?;
+        let candidate = guest.candidate();
         let mut random = [0u8; 16];
         File::open("/dev/urandom")
             .and_then(|mut f| f.read_exact(&mut random))
@@ -114,7 +124,7 @@ impl PendingEnvironment {
         {
             // Identity-checked removal also handles a partially written payload. Never expose output.
             let _ =
-                super::environment_recovery::retire(candidate, &guest, &lease.slot, Some(&lease));
+                super::environment_recovery::retire(candidate, guest, &lease.slot, Some(&lease));
             return Err(CandidateError::new(
                 "environment_stage_uncertain",
                 format!(
@@ -125,7 +135,7 @@ impl PendingEnvironment {
         }
         if remaining(lease.deadline).is_err() {
             let _ =
-                super::environment_recovery::retire(candidate, &guest, &lease.slot, Some(&lease));
+                super::environment_recovery::retire(candidate, guest, &lease.slot, Some(&lease));
             return Err(error("environment_expired"));
         }
         Ok(lease)
@@ -150,15 +160,27 @@ impl EnvironmentLease {
         } else {
             OwnedGuest::connect(candidate)?
         };
-        if guest.incarnation() != self.incarnation || guest.boot_id() != self.boot {
-            return Err(error("environment_boot_changed"));
-        }
+        self.matches_guest(&guest)?;
         Ok(guest)
     }
     /// Revalidates the lease before exposing its guest file path. Callers must not cache this as authority.
     pub fn verified_path(&self, candidate: &Candidate) -> Result<String, CandidateError> {
         remaining(self.deadline)?;
         let guest = self.guest(candidate, false)?;
+        self.verified_path_with_guest(&guest, &self.service)
+    }
+    /// The service selected by the caller must match; a path alone is not delivery authority.
+    pub(super) fn verified_path_with_guest(
+        &self,
+        guest: &OwnedGuest<'_>,
+        service: &str,
+    ) -> Result<String, CandidateError> {
+        guest.require_allocation()?;
+        self.matches_guest(guest)?;
+        if service != self.service {
+            return Err(error("environment_service"));
+        }
+        remaining(self.deadline)?;
         let result = guest.execute(VERIFY, &[&self.slot, &self.service], None)?;
         if result != "environment-verified-v1\n" {
             return Err(error("environment_verification"));
@@ -169,7 +191,17 @@ impl EnvironmentLease {
     /// Cleanup is permitted after expiry and is retry-safe for an absent slot on the same boot.
     pub fn remove(&self, candidate: &Candidate) -> Result<(), CandidateError> {
         let guest = self.guest(candidate, true)?;
-        super::environment_recovery::retire(candidate, &guest, &self.slot, Some(self))
+        self.remove_with_guest(&guest)
+    }
+    pub(super) fn remove_with_guest(&self, guest: &OwnedGuest<'_>) -> Result<(), CandidateError> {
+        self.matches_guest(guest)?;
+        super::environment_recovery::retire(guest.candidate(), guest, &self.slot, Some(self))
+    }
+    fn matches_guest(&self, guest: &OwnedGuest<'_>) -> Result<(), CandidateError> {
+        if guest.incarnation() != self.incarnation || guest.boot_id() != self.boot {
+            return Err(error("environment_boot_changed"));
+        }
+        Ok(())
     }
 }
 
@@ -274,6 +306,83 @@ mod tests {
             pending.stage(&candidate).err().unwrap().code,
             "environment_expired"
         );
+    }
+    #[test]
+    #[ignore = "Manual owned development VM; HACK_LOCAL_TEST_ROOT and external watchdog required"]
+    fn engine_guard_handoff_preserves_lock_scope_and_cleanup_authority() {
+        use super::super::{engine::Engine, environment_recovery::recorded_slots};
+        let root = std::env::var("HACK_LOCAL_TEST_ROOT").expect("explicit candidate root");
+        let candidate = Candidate::discover(std::path::Path::new(&root)).unwrap();
+        let values =
+            BTreeMap::from([("TOKEN".into(), "synthetic-guard-only\n'\"$UNCHANGED".into())]);
+        let pending = || PendingEnvironment::new("web", &values, Duration::from_secs(120)).unwrap();
+        let engine = Engine::connect(&candidate).unwrap();
+        assert_eq!(
+            pending().stage(&candidate).err().unwrap().code,
+            "provider_busy"
+        );
+        let lease = pending().stage_with_guest(engine.guest()).unwrap();
+        let result = (|| -> Result<(), CandidateError> {
+            let path = lease.verified_path_with_guest(engine.guest(), "web")?;
+            assert_eq!(
+                lease
+                    .verified_path_with_guest(engine.guest(), "worker")
+                    .err()
+                    .unwrap()
+                    .code,
+                "environment_service"
+            );
+            let output = engine.guest().execute(
+                "(cmp - \"$1\") >/dev/null 2>&1 || exit 1; printf 'matched\\n'",
+                &[&path],
+                Some(&serde_json::to_string(&values).unwrap()),
+            )?;
+            assert_eq!(output, "matched\n");
+            engine.request(reqwest::Method::GET, "/v1.53/info", None)?;
+            assert_eq!(
+                OwnedGuest::connect_cleanup(&candidate).err().unwrap().code,
+                "provider_busy"
+            );
+            Ok(())
+        })();
+        lease.remove_with_guest(engine.guest()).unwrap();
+        lease.remove_with_guest(engine.guest()).unwrap();
+        assert_eq!(
+            OwnedGuest::connect(&candidate).err().unwrap().code,
+            "provider_busy"
+        );
+        result.unwrap();
+        // Retain one allocation to exercise removal under cleanup-only admission.
+        let lease = pending().stage_with_guest(engine.guest()).unwrap();
+        drop(engine);
+        let cleanup = Engine::connect_cleanup(&candidate).unwrap();
+        let before = recorded_slots(&candidate).unwrap();
+        assert_eq!(
+            pending()
+                .stage_with_guest(cleanup.guest())
+                .err()
+                .unwrap()
+                .code,
+            "cleanup_only"
+        );
+        assert_eq!(
+            lease
+                .verified_path_with_guest(cleanup.guest(), "web")
+                .err()
+                .unwrap()
+                .code,
+            "cleanup_only"
+        );
+        assert_eq!(recorded_slots(&candidate).unwrap(), before);
+        lease.remove_with_guest(cleanup.guest()).unwrap();
+        lease.remove_with_guest(cleanup.guest()).unwrap();
+        assert_eq!(
+            OwnedGuest::connect(&candidate).err().unwrap().code,
+            "provider_busy"
+        );
+        drop(cleanup);
+        // Dropping the owning engine, rather than any borrowed delivery operation, releases the lock.
+        OwnedGuest::connect_cleanup(&candidate).unwrap();
     }
     #[test]
     #[ignore = "Manual owned development VM; HACK_LOCAL_TEST_ROOT and external watchdog required"]

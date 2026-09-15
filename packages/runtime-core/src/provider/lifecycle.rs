@@ -239,10 +239,25 @@ pub(super) struct OwnedGuest<'a> {
     candidate: &'a Candidate,
     owner: Owner,
     _lock: state::Lock,
+    allocation_allowed: bool,
     guard: Option<(u64, std::cell::Cell<Instant>)>,
 }
 
 impl<'a> OwnedGuest<'a> {
+    pub(super) fn candidate(&self) -> &'a Candidate {
+        self.candidate
+    }
+
+    pub(super) fn require_allocation(&self) -> Result<(), CandidateError> {
+        if !self.allocation_allowed {
+            return Err(CandidateError::new(
+                "cleanup_only",
+                "A cleanup connection cannot allocate or authorize environment use.",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn engine_socket(&self) -> Result<std::path::PathBuf, CandidateError> {
         self.verify()?;
         socket(self.candidate, &self.owner, "docker.sock")
@@ -333,6 +348,7 @@ impl<'a> OwnedGuest<'a> {
             candidate,
             owner: current,
             _lock: lock,
+            allocation_allowed: enforce_budget,
             guard,
         })
     }
@@ -358,8 +374,29 @@ impl<'a> OwnedGuest<'a> {
         arguments: &[&str],
         input: Option<&str>,
     ) -> Result<String, CandidateError> {
+        self.execute_mode(script, arguments, input, true)
+    }
+
+    /// Retains the existing mutation lock and identity checks without allocation admission.
+    pub(super) fn execute_cleanup(
+        &self,
+        script: &str,
+        arguments: &[&str],
+    ) -> Result<String, CandidateError> {
+        self.execute_mode(script, arguments, None, false)
+    }
+
+    fn execute_mode(
+        &self,
+        script: &str,
+        arguments: &[&str],
+        input: Option<&str>,
+        allocation: bool,
+    ) -> Result<String, CandidateError> {
         verify_live(self.candidate, &self.owner)?;
-        self.before_effect()?;
+        if allocation {
+            self.before_effect()?;
+        }
         let script = format!(
             "set -eu\ntest \"$(cat /proc/sys/kernel/random/boot_id)\" = \"$1\"\ntest \"$(cat /storage/.hack-local-owner)\" = \"$2\"\ntest \"$(findmnt -n -o FSTYPE --mountpoint /storage)\" = ext4\nshift 2\n{script}"
         );
@@ -1221,6 +1258,50 @@ pub(super) fn kill_owned_vm_for_test(candidate: &Candidate) -> Result<(), Candid
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    #[ignore = "Manual owned development VM; HACK_LOCAL_TEST_ROOT and external watchdog required"]
+    fn environment_cleanup_retains_lock_when_allocation_admission_refuses() {
+        use super::super::environment::PendingEnvironment;
+        let root = std::env::var("HACK_LOCAL_TEST_ROOT").expect("explicit candidate root");
+        let candidate = Candidate::discover(Path::new(&root)).unwrap();
+        let mut guest = OwnedGuest::connect(&candidate).unwrap();
+        assert_eq!(guest.profile(), super::super::Profile::Development);
+        let values = std::collections::BTreeMap::from([(
+            "TOKEN".into(),
+            "synthetic-pressure-control".into(),
+        )]);
+        let lease = PendingEnvironment::new("web", &values, Duration::from_secs(120))
+            .unwrap()
+            .stage_with_guest(&guest)
+            .unwrap();
+        // Force a baseline mismatch without creating real host pressure or changing global state.
+        guest.guard = Some((
+            u64::MAX,
+            std::cell::Cell::new(Instant::now() - Duration::from_secs(3)),
+        ));
+        assert_eq!(
+            lease
+                .verified_path_with_guest(&guest, "web")
+                .err()
+                .unwrap()
+                .code,
+            "runtime_pressure"
+        );
+        lease.remove_with_guest(&guest).unwrap();
+        lease.remove_with_guest(&guest).unwrap();
+        assert_eq!(
+            guest.before_effect().err().unwrap().code,
+            "runtime_pressure"
+        );
+        assert_eq!(
+            OwnedGuest::connect_cleanup(&candidate).err().unwrap().code,
+            "provider_busy"
+        );
+        drop(guest);
+        OwnedGuest::connect_cleanup(&candidate).unwrap();
+    }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]

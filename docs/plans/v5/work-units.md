@@ -236,6 +236,12 @@ and restart readback proving deleted owned resources stay deleted. No production
    Validation: 142 regular Rust tests, 940 CLI tests, typecheck, lint, privacy and release build pass.
    The Rust gate also exposed an enrollment lock lifetime defect; explicit unlock now passes a
    regression that retained a duplicated descriptor and failed under the previous close-only release.
+   Delivery can now borrow the graph engine's existing mutation guard, with service matching and
+   cleanup-only refusal. Retirement bypasses allocation admission without releasing that lock.
+   Live run `environment-handoff-1789430822574659000` passes engine/lease interleaving, retained lock
+   exclusion, forced admission-refusal cleanup and the prior lease/restart recovery controls.
+   Container attachment, graph-to-slot recovery ownership and native authorization remain open;
+   the graph executor still refuses managed environment inputs.
 4. Run the managed Event Agent application, edit/reload it, and verify data across restart/down/up,
    failures and owned cleanup. The synthetic SQLite probe does not replace this gate.
 5. Qualify the guest base and networking package versions for distribution in WU11; the current

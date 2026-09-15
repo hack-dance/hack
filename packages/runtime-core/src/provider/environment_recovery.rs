@@ -182,7 +182,7 @@ pub(super) fn retire(
     } else {
         "old"
     };
-    let result = guest.execute(RETIRE, &[slot, mode], None)?;
+    let result = guest.execute_cleanup(RETIRE, &[slot, mode])?;
     if result != "environment-removed-v1\n" {
         return Err(error());
     }

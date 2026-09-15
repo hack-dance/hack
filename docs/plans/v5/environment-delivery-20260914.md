@@ -143,9 +143,43 @@ test retains a duplicated descriptor: it fails with close-only release and passe
 unlock. This proves the descriptor-lifetime mechanism; the exact inheritance timing of the original
 suite failure was not traced. All 142 regular Rust tests and Clippy pass after the correction.
 
+## Borrowing the graph engine's mutation guard
+
+Environment staging, path verification and removal now have internal operations that borrow the
+`OwnedGuest` already held by the graph engine. They derive the candidate from that guard rather
+than accepting a second candidate root, and neither reacquire nor release its mutation lock.
+Standalone delivery calls use the same implementation after acquiring their own guard.
+Verification also requires the caller's selected service to match the lease.
+
+Cleanup-only connections refuse staging and path authorization before writing allocation intent.
+Retirement under a normal engine guard bypasses allocation admission while retaining provider,
+boot, mount and ownership checks. This lets the holder clean up after a pressure refusal without
+releasing its lock or temporarily allowing another mutation. Cleanup does not refresh expiry or
+grant permission to use a payload.
+
+The opt-in engine handoff test checks exact synthetic bytes, engine HTTP observation between lease
+operations, wrong-service refusal, repeated removal, and continued exclusion of a second provider
+connection until the engine is dropped. A separate test injects a swap-baseline mismatch into the
+in-memory guard: verification refuses with `runtime_pressure`, removal succeeds, allocation
+admission remains refused, and the mutation lock remains held. It creates no actual host pressure.
+These tests require an owned development VM and external watchdog.
+
+Live run `environment-handoff-1789430822574659000` passed both new controls, the existing lease
+checks, interrupted-stage cleanup and recovery across a real VM restart. The owned VM was stopped;
+host pressure stayed normal, swapouts and installed Hack/global configuration hashes were unchanged.
+The observed console contained lease-slot logging but neither new synthetic payload in plaintext,
+JSON, base64 or byte-vector form. This is evidence for the observed logging configuration only.
+Validation passed 142 regular Rust tests, 940 CLI tests, typecheck, lint, privacy and release build.
+There is no new CPU, memory or latency comparison in this checkpoint.
+
+This closes the mutation-guard borrowing prerequisite only. The graph executor still refuses
+managed environment inputs: container attachment, entrypoint behavior, durable graph-to-slot
+ownership and native authorization are not enabled by these internal methods.
+
 ## Remaining implementation and acceptance
 
-- Integrate the fixed-output delivery component with graph allocation and its mutation lock.
+- Integrate container attachment and graph-to-slot recovery ownership using the borrowed mutation
+  guard; keep value delivery out of executable configs and engine metadata.
 - Bind native provider authorization and expiry to the existing service/incarnation/boot guards.
   The cleanup intent alone must never authorize reading values or renewing a lease.
 - Qualify pruning of retired cleanup intents without losing retry or ownership evidence.

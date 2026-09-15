@@ -82,7 +82,8 @@ lifecycle CPU cohort. [Dependency-ordered scheduling](dependency-scheduler-20260
 qualified for lower startup/restore latency with essentially flat median CPU. [Concurrent cleanup](concurrent-cleanup-20260915.md) was evaluated and left disabled after mixed
 lifecycle results. [CLI CPU attribution](cleanup-cpu-attribution-20260915.md) identifies the disk audit as a measured
 optimization target. The [native disk audit](native-disk-audit-20260915.md) is now qualified for lower
-lifecycle CLI and combined CPU. Next units include vCPU and memory sweeps with the same workload,
-and automatic ten-minute idle reclamation with real-application recovery. The full Event Agent
+lifecycle CLI and combined CPU. The [initial vCPU/memory sweep](capacity-sweep-20260915.md) is complete. Next units include
+smaller-capacity application/load acceptance and automatic ten-minute idle reclamation with
+real-application recovery. The full Event Agent
 compatibility and acceptance gates remain open. Historical Hack 4.1.1/4.2.0 comparisons remain in
 [the earlier benchmark](benchmark-20260914.md); those versions were not remeasured here.

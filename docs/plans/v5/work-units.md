@@ -399,8 +399,13 @@ uses about 60 ms CPU per invocation. The [native disk audit](native-disk-audit-2
 passes ownership/identity controls and live graph recovery. Across both trial orders it cuts total
 lifecycle CLI CPU by 69.5% and combined CLI-plus-engine CPU by 10.8–11.1%; restore and engine-only
 results remain mixed. The native audit is the qualified default.
-Open work: automatic idle reclamation and real-application recovery,
-crun OCI/kernel compatibility, vCPU/memory sweeps and the existing application gates.
+[The initial capacity sweep](capacity-sweep-20260915.md) is complete: four isolated shapes, two
+visits each and 24 measured lifecycles. Two vCPUs/4 GiB reduced combined lifecycle CPU 13.9%, command
+time 10.9%, and footprint 8.5–11.9% for the small fixture. Existing capacity remains unchanged pending
+larger-application/load acceptance. First-boot versus restarted footprint differed substantially,
+so image/cache effects remain separate from sizing gains.
+Open work: automatic idle reclamation and real-application recovery, crun OCI/kernel compatibility,
+smaller-capacity application/load acceptance and the existing application gates.
 
 ## WU11 — Preserve compatibility and qualify distribution
 

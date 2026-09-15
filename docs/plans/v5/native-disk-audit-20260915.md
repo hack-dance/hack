@@ -85,6 +85,7 @@ container deletion stayed sequential in both builds. The public scalar file uses
 
 ## Remaining work
 
-Resource-size sweeps and automatic idle reclamation with real-application recovery remain open.
-Use the newly qualified baseline for those comparisons. Concurrent cleanup remains disabled after
+The [initial resource-size sweep](capacity-sweep-20260915.md) is complete using this baseline.
+The smaller 2-vCPU/4-GiB pool needs larger-application/load acceptance; automatic idle reclamation
+with real-application recovery remains open. Concurrent cleanup remains disabled after
 its separate unsuccessful qualification; this CPU gain does not qualify that experiment.

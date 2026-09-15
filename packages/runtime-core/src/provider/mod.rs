@@ -2,6 +2,7 @@
 pub mod admission;
 mod agent;
 mod artifact;
+mod disk_audit;
 mod engine;
 pub mod environment;
 #[cfg(test)]

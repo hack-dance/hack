@@ -395,10 +395,12 @@ but two measured policies failed lifecycle qualification. Retained-data cleanup 
 CPU remained higher even with its original sequential path. The experiment is preserved privately
 and sequential deletion remains the default. [Phase-isolated crossover and CLI CPU attribution](cleanup-cpu-attribution-20260915.md) now show
 order-sensitive results without a repeatable combined CPU win. The read-only disk audit subprocess
-uses about 60 ms CPU per invocation; next evaluate a bounded native descriptor audit with equivalent
-ownership, process-identity and failure controls.
+uses about 60 ms CPU per invocation. The [native disk audit](native-disk-audit-20260915.md) now
+passes ownership/identity controls and live graph recovery. Across both trial orders it cuts total
+lifecycle CLI CPU by 69.5% and combined CLI-plus-engine CPU by 10.8–11.1%; restore and engine-only
+results remain mixed. The native audit is the qualified default.
 Open work: automatic idle reclamation and real-application recovery,
-crun OCI/kernel compatibility, vCPU/memory sweeps, native disk-audit qualification and the existing application gates.
+crun OCI/kernel compatibility, vCPU/memory sweeps and the existing application gates.
 
 ## WU11 — Preserve compatibility and qualify distribution
 

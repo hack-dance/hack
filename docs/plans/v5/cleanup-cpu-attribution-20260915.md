@@ -72,17 +72,9 @@ Private evidence:
 - `.hack-local/review/wu05/audit-attribution-1789506825204015000/`: frozen audit protocol, eight
   alternating pairs, analysis and cleanup/watchdog evidence.
 
-## Next bounded implementation
+## Follow-up completed
 
-Evaluate native enumeration of the owned VM's file descriptors for the boot audit. Preserve fresh
-process identity checks around observation, exact expected disk checks and fail-closed behavior on
-incomplete/truncated enumeration, permission failure, disappearance or PID reuse. Bound allocations
-and descriptor counts; do not weaken the separate shutdown check for handles held by other processes.
-Require owned/missing-disk and identity/race controls, then matched normal-build command latency and
-CLI-plus-engine CPU measurements before adoption. Native enumeration is a candidate approach, not
-yet an implemented or qualified improvement.
-
-The qualified baseline executable hash was restored and verified. The installed Hack daemon remains
-running and API-compatible. No source behavior changed, so this checkpoint uses scalar/protocol,
-link, privacy and whitespace checks rather than rerunning unrelated runtime suites. Resource-size
-sweeps and full-application idle reclamation/recovery remain open.
+The [native disk-handle audit](native-disk-audit-20260915.md) is implemented and qualified. It preserves
+fresh process/file checks and bounded fail-closed enumeration, and leaves the separate shutdown
+check intact. Both trial orders show lower lifecycle CLI and combined CPU; per-phase limitations
+remain explicit. Resource-size sweeps and full-application idle reclamation/recovery remain open.

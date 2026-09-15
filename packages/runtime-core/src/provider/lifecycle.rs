@@ -475,39 +475,11 @@ fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError
         .process
         .as_ref()
         .expect("process retained before audit");
-    let output = process::run(
-        process::clean_command(Path::new("/usr/sbin/lsof")).args([
-            "-n",
-            "-P",
-            "-p",
-            &process.pid.to_string(),
-            "-F",
-            "n",
-        ]),
-        Duration::from_secs(5),
-    )?;
-    let opened: Vec<_> = output
-        .lines()
-        .filter_map(|line| line.strip_prefix('n'))
-        .filter_map(|name| Path::new(name).canonicalize().ok())
-        .collect();
     let directory = owner.real_data_dir(candidate)?;
-    for expected in [directory.join("storage.raw"), directory.join("overlay.raw")] {
-        if !opened.contains(&expected) {
-            return Err(CandidateError::new(
-                "unaudited_provider_config",
-                format!(
-                    "Provider does not hold the expected disk: {}",
-                    expected.display()
-                ),
-            ));
-        }
-    }
-    identity::verify(
+    super::disk_audit::verify(
         process,
-        &identity::observe(process.pid)?,
         &binary(candidate),
-        unsafe { libc::geteuid() },
+        &[directory.join("storage.raw"), directory.join("overlay.raw")],
     )?;
     Ok(())
 }

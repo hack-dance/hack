@@ -505,8 +505,8 @@ choose policies only after measured resource return and application recovery.
 
 Continue the known units and bounded experiments until supported local Hack workflows have real
 application parity with the working Docker/Compose setup and demonstrated resource/performance
-improvements. Keep the active sequence: WU07 post-fork/fence-journal recovery controls → loopback
-publication/TLS and scoped QA delivery → application/source/terminal parity, alongside WU12 disk
+improvements. Keep the active sequence: WU07 generation-bound loopback publication → TLS and scoped QA
+delivery → application/source/terminal parity, alongside WU12 disk
 accounting. WU13 suspension depends on reliable routing, activity leases and recovery.
 
 Use a per-workflow parity and benchmark matrix for setup, cold/warm start, branch creation/switch,
@@ -530,7 +530,11 @@ now force a private child umask independent of the caller. The failed boot recov
 pending fixture archive/export completed. [Complete same-generation fence publication recovery](relay-fence-recovery-20260916.md)
 now passes live positive/negative controls, including complete first/new-generation cancellation.
 Required shell guards also fail immediately instead of relying on `&&` with `set -e`. Partial
-fence writes and missing process/socket identity recovery remain open.
+fence writes and missing process/socket identity retain safe same-boot refusals.
+[Explicit VM restart recovery](relay-restart-fallback-20260916.md) now preserves a fixture token,
+the complete volume record and container identity across all three ambiguous-state cases. It also
+fixes missing HTTP probe tmpfs reconstruction. Same-boot recovery remains tracked follow-up; the
+next bounded unit is loopback publication with no stale routing across slot reuse.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

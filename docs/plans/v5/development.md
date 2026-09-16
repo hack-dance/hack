@@ -714,3 +714,7 @@ startup, failed-boot recovery and lifecycle controls.
 Cleanup can resume complete, canonical, same-generation relay fence writes under the slot lock.
 [Recovery qualification](relay-fence-recovery-20260916.md) documents retained refusals for partial,
 foreign-generation and invalid-transition records. No launch replay is permitted.
+
+[Explicit relay restart recovery](relay-restart-fallback-20260916.md) qualifies partial-fence and
+missing-identity fallback with persistent application data. Graph restart recreates missing temporary
+HTTP probe storage after confirming the recorded container and old probe are stopped.

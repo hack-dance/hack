@@ -350,7 +350,9 @@ test ! -L "$parent"
 if test ! -e "$parent"; then mkdir -m 700 "$parent"; fi
 test "$(stat -c %u:%g:%a "$parent")" = 0:0:700
 test ! -L "$root"
-if test "$action" = create; then
+# Restart has already verified the recorded container is stopped and no prior probe runs.
+# Only reconstructible tmpfs state may be recreated; existing paths still need exact ownership.
+if test "$action" = create || { test "$action" = reset && test ! -e "$root"; }; then
  test ! -e "$root"
  mkdir -m 700 "$root"
  printf %s "$marker" > "$root/owner"
@@ -467,4 +469,53 @@ pub(super) fn unchanged(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::STORAGE;
+    use std::{fs, process::Command};
+
+    #[test]
+    fn reset_recreates_missing_probe_storage_without_overwriting_existing_state() {
+        let branch = STORAGE
+            .split("if test \"$action\" = create ||")
+            .nth(1)
+            .unwrap()
+            .split("test \"$(stat -c %u:%g:%a \"$root\")\"")
+            .next()
+            .unwrap();
+        let script = format!(
+            "set -eu\numask 077\nroot=$1; action=$2; marker=probe-fixture\nif test \"$action\" = create ||{branch}"
+        );
+        let parent = std::env::temp_dir().join(format!("probe-reset-{}", std::process::id()));
+        fs::create_dir(&parent).unwrap();
+        let root = parent.join("allocation");
+        let invoke = |action: &str| {
+            Command::new("/bin/sh")
+                .args(["-c", &script, "probe-storage-test"])
+                .arg(&root)
+                .arg(action)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        assert!(invoke("reset"));
+        assert!(root.join("state").is_dir());
+        assert_eq!(
+            fs::read_to_string(root.join("owner")).unwrap(),
+            "probe-fixture"
+        );
+        fs::write(root.join("state/sentinel"), "retained").unwrap();
+        assert!(invoke("reset"));
+        assert!(!invoke("create"));
+        assert_eq!(
+            fs::read_to_string(root.join("state/sentinel")).unwrap(),
+            "retained"
+        );
+        // This test covers the allocation branch; the full guest path additionally checks
+        // ownership and mount identity before reset can touch an existing allocation.
+        fs::remove_dir_all(parent).unwrap();
+    }
 }

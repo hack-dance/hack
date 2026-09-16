@@ -1136,6 +1136,29 @@ kill -KILL "$1"
         );
         assert_ne!(restarted.probes["web"].generation, first.generation);
         assert_ne!(restarted.probes["web"].exec_id, first.exec_id);
+        // A boot loses tmpfs probe storage. Reproduce its absence with owned cleanup,
+        // keeping the stopped container and persistent graph resources unchanged.
+        let engine = Engine::connect(&candidate)?;
+        engine.request(
+            Method::POST,
+            &format!("/v1.53/containers/{id}/stop?t=1"),
+            None,
+        )?;
+        probes::cleanup(&engine, &mut restarted.clone())?;
+        drop(engine);
+        let rebuilt = restart(&candidate, options(&run))?;
+        assert_eq!(
+            rebuilt.resources["container:web"].id,
+            restarted.resources["container:web"].id
+        );
+        assert_eq!(
+            rebuilt.probes["web"].allocation,
+            restarted.probes["web"].allocation
+        );
+        assert_ne!(
+            rebuilt.probes["web"].generation,
+            restarted.probes["web"].generation
+        );
         let stopped = cleanup(&candidate, &run, false)?;
         assert_eq!(stopped.probes["web"].phase, "retired");
         let restored = restore(&candidate, options(&run))?;

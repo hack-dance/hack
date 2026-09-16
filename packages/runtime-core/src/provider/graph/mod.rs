@@ -1,7 +1,9 @@
 //! Fresh owned graph attempts. Recovery only observes or cleans recorded resources; never replay.
 mod archive;
 pub use archive::archive;
+mod bridge_recovery;
 mod bridges;
+pub use bridge_recovery::{export_bridge_recovery, inspect_bridge_recovery};
 mod config;
 mod endpoints;
 mod relay;

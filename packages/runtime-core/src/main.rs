@@ -21,6 +21,8 @@ Usage:
   hack-local graph inspect|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
   hack-local runtime probe [--json]
+  hack-local runtime bridge-recovery [--json]
+  hack-local runtime export-bridge-recovery --slot <1..8> --expect-sha256 <sha256> [--json]
   hack-local runtime engine-info [--json]
   hack-local graph reserve-bridge --run-id <32-hex> --service <name> --slot <index> --expect-generation <sha256> [--json]
   hack-local graph start-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> [--json]
@@ -269,6 +271,39 @@ fn run() -> Result<(), CandidateError> {
             } else {
                 print_json(&provider::up_with_profile(&candidate, profile)?)?;
             }
+        }
+        ["runtime", "bridge-recovery"] | ["runtime", "bridge-recovery", "--json"] => {
+            print_json(
+                &hack_runtime_core::provider::graph::inspect_bridge_recovery(
+                    &Candidate::discover(&requested)?,
+                )?,
+            )?;
+        }
+        [
+            "runtime",
+            "export-bridge-recovery",
+            "--slot",
+            slot,
+            "--expect-sha256",
+            hash,
+        ]
+        | [
+            "runtime",
+            "export-bridge-recovery",
+            "--slot",
+            slot,
+            "--expect-sha256",
+            hash,
+            "--json",
+        ] => {
+            let slot = slot.parse::<u8>().map_err(|_| {
+                CandidateError::new("invalid_arguments", "Recovery slot must be 1..8.")
+            })?;
+            print_json(&hack_runtime_core::provider::graph::export_bridge_recovery(
+                &Candidate::discover(&requested)?,
+                slot,
+                hash,
+            )?)?;
         }
         ["runtime", "engine-info"] | ["runtime", "engine-info", "--json"] => {
             print_json(&hack_runtime_core::provider::engine_info(

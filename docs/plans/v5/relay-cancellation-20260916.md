@@ -74,3 +74,6 @@ Default/all-feature Rust tests, strict Clippy, the default release build and rep
 typecheck/check/test passed (940 CLI passes, five skips). Focused bridge tests also verified
 legacy receipt decoding, counter retention with empty slots, duplicate serial refusal and bounds.
 Shell syntax, changed-document links and whitespace/privacy checks passed.
+
+The subsequent [offline bridge recovery export](bridge-recovery-export-20260916.md) provides
+a supported preservation/slot-retirement path without starting the VM.

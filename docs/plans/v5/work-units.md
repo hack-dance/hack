@@ -471,9 +471,9 @@ restart. Exercise disk-full and retention-budget exhaustion before admission. Me
 allocation after guest cleanup and any supported discard/compaction, including temporary headroom
 and latency. Unexported recovery evidence cannot be silently evicted to satisfy a budget.
 
-**Next slices:** explicit manifest-backed bridge recovery export/retirement (the eight-record
-limit was reached during repeated fault injection; preserve evidence without replay or silent
-eviction); read-only ownership/accounting inventory; immutable cache reference model; bounded
+**Next slices:** [offline bridge recovery export](bridge-recovery-export-20260916.md) now frees
+retained journal slots after verified preservation. External archival/reviewed retirement of the
+bounded export store remains open; read-only ownership/accounting inventory; immutable cache reference model; bounded
 collection preview and explicit application; host allocation reclamation control. Apply the same
 rules to qualification fixtures so experiments do not become a separate accumulation problem.
 

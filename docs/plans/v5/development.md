@@ -696,3 +696,8 @@ unlaunched request from arriving after cancellation or slot reuse, allowing the 
 startup interruption to recover without VM restart. See
 [same-boot cancellation](relay-cancellation-20260916.md) for controls and remaining partial-start
 recovery limits. Existing serial-zero receipts retain their conservative recovery behavior.
+
+`runtime bridge-recovery` inspects retained host bridge journals while the VM is stopped.
+`runtime export-bridge-recovery --slot <1..8> --expect-sha256 <digest>` preserves a verified,
+content-addressed export before freeing the selected source slot. See
+[offline recovery export](bridge-recovery-export-20260916.md) for interruption and retention bounds.

@@ -546,6 +546,8 @@ connect verified volume observations to durable restore intent. This is a single
 classification, not complete cross-branch collection authority.
 [Retained graph volume inventory](graph-storage-inventory-20260916.md) joins the
 bounded graph store with engine volume usage; unmatched volumes remain retained.
+[Image validation reuse](image-validation-reuse-20260916.md) removes repeated layer
+expansion only after exact completed validation and fresh engine identity checks.
 
 **Next slices:** [offline bridge recovery export](bridge-recovery-export-20260916.md) now frees
 retained journal slots after verified preservation. External archival/reviewed retirement of the

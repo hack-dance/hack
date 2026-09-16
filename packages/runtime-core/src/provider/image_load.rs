@@ -183,12 +183,23 @@ fn validate_archive(bytes: &[u8], image: &str, max_expanded: u64) -> Result<(), 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageReceipt {
+    #[serde(default)]
+    validation_version: u32,
     checkout: PathBuf,
     provider_incarnation: String,
     provider_boot_id: String,
     pub archive_sha256: String,
     pub image_id: String,
     pub phase: String,
+}
+
+fn reusable_validation(previous: &ImageReceipt, requested: &ImageReceipt) -> bool {
+    previous.validation_version == 1
+        && previous.phase == "content-id-verified"
+        && previous.checkout == requested.checkout
+        && previous.provider_incarnation == requested.provider_incarnation
+        && previous.archive_sha256 == requested.archive_sha256
+        && previous.image_id == requested.image_id
 }
 
 fn inspect(engine: &Engine<'_>, image: &str) -> Result<bool, CandidateError> {
@@ -235,12 +246,12 @@ pub fn load(
     if bytes.len() as u64 > MAX_ARCHIVE || hash(&bytes) != expected_sha {
         return Err(error("Image archive digest mismatch."));
     }
-    validate_archive(&bytes, image, MAX_EXPANDED)?;
     let engine = Engine::connect(candidate)?;
     let directory = candidate.state_root.join("run/image-loads");
     state::private_directory(&directory)?;
     let path = directory.join(format!("{expected_sha}.json"));
     let mut receipt = ImageReceipt {
+        validation_version: 1,
         checkout: candidate.checkout.clone(),
         provider_incarnation: engine.guest().incarnation().into(),
         provider_boot_id: engine.guest().boot_id().into(),
@@ -258,6 +269,17 @@ pub fn load(
         {
             return Err(error("Foreign image-load intent."));
         }
+        // The complete archive hash was checked above. Only this validator's completed,
+        // identity-bound receipt can avoid expanding the same layers again; engine presence
+        // and architecture are still checked on every invocation, including after reboot.
+        if reusable_validation(&old, &receipt) && inspect(&engine, image)? {
+            if old.provider_boot_id == receipt.provider_boot_id {
+                return Ok(old);
+            }
+            receipt.phase = "content-id-verified".into();
+            state::write(&path, &receipt)?;
+            return Ok(receipt);
+        }
         if old.phase == "loading"
             && old.provider_boot_id == receipt.provider_boot_id
             && !inspect(&engine, image)?
@@ -268,6 +290,7 @@ pub fn load(
             ));
         }
     }
+    validate_archive(&bytes, image, MAX_EXPANDED)?;
     if !inspect(&engine, image)? {
         state::write(&path, &receipt)?;
         let result = engine.load_image_archive(bytes);
@@ -329,6 +352,42 @@ mod tests {
                 .unwrap();
         }
         (archive.into_inner().unwrap(), image)
+    }
+
+    #[test]
+    fn validation_cache_requires_completed_versioned_exact_identity() {
+        let value = serde_json::json!({
+            "validation_version":1,"checkout":"/candidate","provider_incarnation":"owner",
+            "provider_boot_id":"boot","archive_sha256":"archive","image_id":"image",
+            "phase":"content-id-verified"
+        });
+        let requested: ImageReceipt = serde_json::from_value(value.clone()).unwrap();
+        for (field, replacement) in [
+            ("validation_version", serde_json::json!(0)),
+            ("validation_version", serde_json::json!(2)),
+            ("checkout", serde_json::json!("/other")),
+            ("provider_incarnation", serde_json::json!("other")),
+            ("archive_sha256", serde_json::json!("other")),
+            ("image_id", serde_json::json!("other")),
+            ("phase", serde_json::json!("loading")),
+        ] {
+            let mut altered = value.clone();
+            altered[field] = replacement;
+            let previous = serde_json::from_value(altered).unwrap();
+            assert!(!reusable_validation(&previous, &requested), "{field}");
+        }
+        let mut legacy = value.clone();
+        legacy.as_object_mut().unwrap().remove("validation_version");
+        assert!(!reusable_validation(
+            &serde_json::from_value(legacy).unwrap(),
+            &requested
+        ));
+        let mut rebooted = value;
+        rebooted["provider_boot_id"] = serde_json::json!("earlier-boot");
+        assert!(reusable_validation(
+            &serde_json::from_value(rebooted).unwrap(),
+            &requested
+        ));
     }
 
     #[test]

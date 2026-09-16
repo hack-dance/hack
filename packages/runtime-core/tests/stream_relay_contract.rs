@@ -270,3 +270,28 @@ fn inherited_descriptors_do_not_keep_parent_channels_alive() {
     assert_eq!(reader.read(&mut [0]).unwrap(), 0);
     assert!(relay.child.try_wait().unwrap().is_none());
 }
+
+#[test]
+fn namespace_requests_reject_invalid_identity_before_publishing() {
+    let root = PathBuf::from(format!("/tmp/hkr-netns-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = root.join("app.sock");
+    for (address, option, pid, start, code) in [
+        ("127.0.0.1", "--wrong", "2", "1", 64),
+        ("172.17.0.2", "--netns", "2", "1", 64),
+        ("127.0.0.1", "--netns", "0", "1", 64),
+        ("127.0.0.1", "--netns", "2", "0", 64),
+        ("127.0.0.1", "--netns", "2", "999999999999999999999999", 64),
+        ("127.0.0.1", "--netns", "1", "1", 78),
+    ] {
+        let status = Command::new(BINARY)
+            .arg(&path)
+            .args([address, "3000", "1000", option, pid, start])
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(code));
+        assert!(!path.exists());
+    }
+    fs::remove_dir_all(root).unwrap();
+}

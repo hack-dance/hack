@@ -503,7 +503,7 @@ choose policies only after measured resource return and application recovery.
 
 Continue the known units and bounded experiments until supported local Hack workflows have real
 application parity with the working Docker/Compose setup and demonstrated resource/performance
-improvements. Keep the active sequence: WU07 bridge intent and stale-target invalidation → loopback
+improvements. Keep the active sequence: WU07 automatic relay ownership/recovery → loopback
 publication/TLS and scoped QA delivery → application/source/terminal parity, alongside WU12 disk
 accounting. WU13 suspension depends on reliable routing, activity leases and recovery.
 
@@ -513,6 +513,8 @@ Compare current Compose/OrbStack, preserved Hack 4.1.1, working 4.2.0 and the ex
 available, with matched workloads/capacities and attributable helpers. Faster component results do
 not close slower or untested workflows. Resource wins must include retained disk, not only RAM.
 Record tradeoffs and unresolved gates rather than declaring an across-the-board winner prematurely.
+The optional native relay now has live-qualified namespace pinning and process-exit invalidation
+([evidence and boundaries](namespace-relay-20260916.md)); its graph supervisor remains open.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

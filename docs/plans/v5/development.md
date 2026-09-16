@@ -673,3 +673,9 @@ qualification and remaining graph routing gates. The default pool/build remains 
 [graph-owned slot reservations](graph-bridge-reservations-20260916.md). They require an exact observed
 endpoint generation and do not start relays or expose TCP ports. Cleanup releases reservations;
 interrupted journals require explicit preservation/reconciliation before reuse.
+
+The relay's optional Linux `--netns PID START_TICKS` mode pins a distinct target network namespace,
+connects only to its loopback address and watches the original process with a pidfd. Target exit
+closes streams and removes the owned socket without a periodic idle timer. See the
+[namespace lifetime qualification](namespace-relay-20260916.md). Graph-owned automatic start/stop
+and durable relay recovery remain unimplemented.

@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <errno.h>
@@ -15,6 +16,10 @@
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sched.h>
+#include <sys/syscall.h>
+#endif
 
 #define CONNECTIONS 32
 #define CAPACITY 16384
@@ -26,6 +31,7 @@ struct flow {
 };
 static struct flow flows[CONNECTIONS];
 static volatile sig_atomic_t stopping;
+static int target_watch = -1;
 static int wakeup[2] = {-1, -1};
 static void stop(int signal_number) {
     (void)signal_number;
@@ -75,19 +81,73 @@ static int close_inherited(void) {
     }
     return closedir(directory);
 }
+#ifdef __linux__
+static void process_path(char path[64], long pid, const char *suffix) {
+    char digits[24];
+    size_t cursor = sizeof(digits)-1;
+    digits[cursor] = 0;
+    do { digits[--cursor] = (char)('0' + pid % 10); pid /= 10; } while (pid);
+    strcpy(path, "/proc/");
+    strcat(path, digits+cursor);
+    strcat(path, suffix);
+}
+static long process_start(long pid) {
+    char path[64], buffer[4096];
+    process_path(path, pid, "/stat");
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    ssize_t size = read(fd, buffer, sizeof(buffer)-1);
+    close(fd);
+    if (size <= 0 || size == (ssize_t)sizeof(buffer)-1) return -1;
+    buffer[size] = 0;
+    char *tail = strrchr(buffer, ')'), *save = NULL;
+    if (!tail) return -1;
+    char *field = strtok_r(tail+1, " \n", &save);
+    for (int index = 3; field && index < 22; index++) field = strtok_r(NULL, " \n", &save);
+    long value;
+    return field && !number(field, LONG_MAX, &value) ? value : -1;
+}
+#endif
+/* Pin a network namespace and watch its init process without an idle polling timer. */
+static int pin_target(long pid, long start) {
+#ifdef __linux__
+    if (pid <= 1 || process_start(pid) != start) return -1;
+    int watch = (int)syscall(SYS_pidfd_open, (pid_t)pid, 0);
+    if (watch < 0) return -1;
+    char path[64];
+    process_path(path, pid, "/ns/net");
+    int ns = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat target_ns, current_ns;
+    struct pollfd observed = {watch, POLLIN, 0};
+    int failed = ns < 0 || fstat(ns, &target_ns) || stat("/proc/self/ns/net", &current_ns) ||
+        (target_ns.st_dev == current_ns.st_dev && target_ns.st_ino == current_ns.st_ino) ||
+        process_start(pid) != start || poll(&observed, 1, 0) != 0 || setns(ns, CLONE_NEWNET);
+    if (ns >= 0) close(ns);
+    if (!failed) failed = process_start(pid) != start || poll(&observed, 1, 0) != 0;
+    if (failed) { close(watch); return -1; }
+    target_watch = watch;
+    return 0;
+#else
+    (void)pid; (void)start;
+    return -1;
+#endif
+}
 int main(int argc, char **argv) {
     struct sockaddr_un local = {0};
     struct sockaddr_in target = {0};
     struct stat owned, current;
-    long port, idle;
-    if (argc != 5 || argv[1][0] != '/' || strlen(argv[1]) >= sizeof(local.sun_path) ||
+    long port, idle, target_pid = 0, target_start = 0;
+    if ((argc != 5 && argc != 8) || argv[1][0] != '/' || strlen(argv[1]) >= sizeof(local.sun_path) ||
         number(argv[3], 65535, &port) || number(argv[4], 60000, &idle) ||
         inet_pton(AF_INET, argv[2], &target.sin_addr) != 1) return 64;
+    if (argc == 8 && (strcmp(argv[5], "--netns") || number(argv[6], INT_MAX, &target_pid) ||
+        number(argv[7], LONG_MAX, &target_start) || strcmp(argv[2], "127.0.0.1"))) return 64;
     target.sin_family = AF_INET;
     target.sin_port = htons((uint16_t)port);
     local.sun_family = AF_UNIX;
     memcpy(local.sun_path, argv[1], strlen(argv[1]) + 1);
     if (close_inherited()) return 70;
+    if (argc == 8 && pin_target(target_pid, target_start)) return 78;
     if (pipe(wakeup) || configure(wakeup[0]) || configure(wakeup[1])) return 70;
     struct sigaction action = {0};
     action.sa_handler = stop;
@@ -106,7 +166,8 @@ int main(int argc, char **argv) {
     int failed = listen(listener, CONNECTIONS) != 0;
     if (!failed) { puts("ready"); fflush(stdout); }
     while (!stopping && !failed) {
-        struct pollfd descriptors[2 + 2 * CONNECTIONS];
+        struct pollfd descriptors[3 + 2 * CONNECTIONS];
+        descriptors[2 + 2 * CONNECTIONS] = (struct pollfd){target_watch, POLLIN, 0};
         descriptors[1 + 2 * CONNECTIONS] = (struct pollfd){wakeup[0], POLLIN, 0};
         descriptors[0] = (struct pollfd){listener, POLLIN, 0};
         int timeout = -1;
@@ -131,9 +192,9 @@ int main(int argc, char **argv) {
                 descriptors[1 + i*2 + side] = (struct pollfd){events ? flow->fd[side] : -1, events, 0};
             }
         }
-        int result = poll(descriptors, 2 + 2*CONNECTIONS, timeout);
+        int result = poll(descriptors, 3 + 2*CONNECTIONS, timeout);
         if (result < 0) { if (errno == EINTR) continue; failed = 1; break; }
-        if (stopping) break;
+        if (stopping || descriptors[2 + 2*CONNECTIONS].revents) break;
         /* Process only descriptors from this poll before accepting new flows. */
         for (int i = 0; i < CONNECTIONS; i++) {
             struct flow *flow = &flows[i];
@@ -196,6 +257,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < CONNECTIONS; i++) release(&flows[i]);
     if (!lstat(argv[1], &current) && S_ISSOCK(current.st_mode) &&
         owned.st_dev == current.st_dev && owned.st_ino == current.st_ino) unlink(argv[1]);
+    if (target_watch >= 0) close(target_watch);
     close(wakeup[0]);
     close(wakeup[1]);
     return failed ? 70 : 0;

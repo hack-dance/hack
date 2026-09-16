@@ -18,6 +18,7 @@ pub mod http_probe;
 mod identity;
 mod image_load;
 pub mod resources;
+pub mod storage_usage;
 pub use image_load::load as load_image;
 mod lifecycle;
 mod network_tools;

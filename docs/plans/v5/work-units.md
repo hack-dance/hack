@@ -561,7 +561,9 @@ rules to qualification fixtures so experiments do not become a separate accumula
 
 **Current admission work:** [aggregate active graph admission](graph-aggregate-admission-20260916.md)
 replaces the single-graph exclusion with bounded combined CPU/memory/service accounting.
-Dozens-of-branches and idle/wake qualification remain open.
+[32 linked worktrees](worktrees-32-20260916.md) passed retained-data and two-active
+stop/restore qualification. Automatic idle/wake safety and full application qualification
+remain open; stopped compute left a measured retained working-set gap.
 
 **Goal:** many enrolled/retained branches should not require many permanently active working sets.
 Separate registered, running, idle, paused and stopped states with honest CPU/memory/disk accounting.

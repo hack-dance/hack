@@ -60,6 +60,7 @@
     "typecheck": "bun run turbo:typecheck",
     "uninstall:local": "bun run --cwd packages/cli uninstall:local",
     "test": "bun run turbo:test",
+    "test:models": "bun run scripts/check-tla-models.ts",
     "test:e2e:local": "bun tests/e2e/run.ts",
     "test:e2e:local:docker": "HACK_E2E_DOCKER=1 bun tests/e2e/run.ts",
     "test:e2e:gateway": "bun run scripts/gateway-e2e.ts",

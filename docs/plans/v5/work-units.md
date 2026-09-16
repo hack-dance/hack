@@ -562,8 +562,11 @@ than accepting any tool failure. Turn counterexamples into ordinary regression
 tests and retain live tests for behavior the model abstracts away. Review/update
 specs when the corresponding state machine changes; passing a model alone is not
 implementation or application-parity proof.
-**Status:** authorized follow-up; current private model runs are evidence, not yet
-a maintained CI gate.
+**Status:** graph admission is now a [repository-owned model](../../../tests/models/tla/README.md)
+with a pinned `bun run test:models` runner, positive/negative evidence checks and a
+dedicated CI job. Local model execution and regression tests qualify the runner;
+hosted CI execution remains separate evidence. Authority/recovery model promotion
+and future idle/wake specifications remain open.
 
 ## WU12 — Bound retained disk without losing application data
 

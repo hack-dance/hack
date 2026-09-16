@@ -700,6 +700,12 @@ explicit foreground managed endpoint and cooperative native-exit-verified shutdo
 before publication/VM teardown. Startup and down share the provider lock. Automatic
 proxy startup, certificate retention and real application route translation remain
 open; the refreshed application plan still has 22 compatibility errors.
+[Caddy-owned certificate permission transport](tls-owned-permission-20260916.md)
+qualifies a same-process loopback permission listener forwarding to private Unix
+authority, with a persisted two-name prototype budget across authority restart.
+Explicit IPv4 bind is mandatory: site-address syntax alone failed the occupied-port
+ownership control. Rust certificate admission, proxy restart/reuse and byte-bounded
+certificate retirement remain open.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

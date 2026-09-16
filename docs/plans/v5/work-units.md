@@ -589,6 +589,12 @@ private conditional updates and route removal, but expose that unrelated Caddy
 reloads disconnect active WebSockets. A bounded close delay only defers that effect.
 Next qualify stable shared TLS routing without per-branch proxy reloads, retaining
 custom-hostname parity and exact reservation fencing as acceptance requirements.
+[Stable reservation-host TLS routing](tls-stable-routing-20260916.md) now passes
+WebSocket survival across another branch start/stop and actual managed VM lifecycle
+controls with one unchanged proxy process/configuration and one wildcard certificate.
+CA-file existence was insufficient readiness; verified TLS handshake is now required.
+Next qualify normal/custom hostname ownership and bounded certificate issuance;
+managed proxy recovery and real-app parity remain open.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

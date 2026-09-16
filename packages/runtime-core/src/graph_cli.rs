@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed, plus --source-revision for source mounts; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed, plus --source-revision for source mounts; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Bridge reservation requires --run-id, --service, --slot and --expect-generation; release requires --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
@@ -26,6 +26,10 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "export",
         "reconcile-export",
         "prune",
+        "reserve-bridge",
+        "release-bridge",
+        "bridges",
+        "reconcile-bridges",
     ]
     .contains(action)
     {
@@ -69,7 +73,10 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             }
         } else if key == "--profile" && ["run", "restart", "restore"].contains(action) {
             profiles.push(value.to_owned());
-        } else if key == "--run-id"
+        } else if (["reserve-bridge", "release-bridge"].contains(action) && key == "--slot")
+            || (*action == "reserve-bridge" && ["--service", "--expect-generation"].contains(&key))
+            || (*action == "release-bridge" && key == "--expect-reservation")
+            || key == "--run-id"
             || (["run", "restart", "restore"].contains(action)
                 && [
                     "--project",
@@ -93,6 +100,38 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph receipt."))
     };
     match *action {
+        "reserve-bridge" => serde_json::to_value(graph::reserve_bridge(
+            candidate,
+            graph::ReserveBridgeOptions {
+                run,
+                service: singles.get("--service").copied().ok_or_else(invalid)?,
+                slot: singles
+                    .get("--slot")
+                    .ok_or_else(invalid)?
+                    .parse()
+                    .map_err(|_| invalid())?,
+                expected_generation: singles
+                    .get("--expect-generation")
+                    .copied()
+                    .ok_or_else(invalid)?,
+            },
+        )?)
+        .map_err(|_| invalid()),
+        "release-bridge" => graph::release_bridge(
+            candidate,
+            run,
+            singles
+                .get("--slot")
+                .ok_or_else(invalid)?
+                .parse()
+                .map_err(|_| invalid())?,
+            singles
+                .get("--expect-reservation")
+                .copied()
+                .ok_or_else(invalid)?,
+        ),
+        "bridges" => graph::inspect_bridges(candidate, run),
+        "reconcile-bridges" => graph::reconcile_bridges(candidate, run),
         "prune" => graph::prune(candidate, run),
         "reconcile-export" => graph::reconcile_export(candidate, run),
         "inspect" => serde_json::to_value(graph::inspect(candidate, run)?)

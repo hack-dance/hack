@@ -668,3 +668,8 @@ Fresh experimental pools built with `native-stream-relay` can reserve private tr
 `runtime up --profile development --bridge-sockets <1..32>`. Capacity is recorded before creation
 and cannot change in place. See [explicit bridge intent](application-bridge-intent-20260916.md) for
 qualification and remaining graph routing gates. The default pool/build remains unbridged.
+
+`graph reserve-bridge`, `bridges`, `release-bridge` and `reconcile-bridges` provide bounded
+[graph-owned slot reservations](graph-bridge-reservations-20260916.md). They require an exact observed
+endpoint generation and do not start relays or expose TCP ports. Cleanup releases reservations;
+interrupted journals require explicit preservation/reconciliation before reuse.

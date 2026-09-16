@@ -1,8 +1,12 @@
 //! Fresh owned graph attempts. Recovery only observes or cleans recorded resources; never replay.
 mod archive;
 pub use archive::archive;
+mod bridges;
 mod config;
 mod endpoints;
+pub use bridges::{
+    ReserveBridgeOptions, inspect_bridges, reconcile_bridges, release_bridge, reserve_bridge,
+};
 mod environment;
 pub use endpoints::GuestEndpoint;
 #[cfg(all(test, feature = "environment-launcher"))]
@@ -782,7 +786,14 @@ fn run_inputs(
 /// Read-only recovery inspection; historical ready phase is not a current health assertion.
 pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
-    let (receipt, root) = load(candidate, &engine, run)?;
+    inspect_using(candidate, &engine, run)
+}
+fn inspect_using(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    run: &str,
+) -> Result<Snapshot, CandidateError> {
+    let (receipt, root) = load(candidate, engine, run)?;
     let mut observations = BTreeMap::new();
     let journal_incomplete =
         root.join("state.pending").exists() || root.join("state.pending").is_symlink();
@@ -792,19 +803,19 @@ pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateEr
         .iter()
         .filter(|(_, r)| r.kind == Kind::Network)
     {
-        networks.insert(key.clone(), inspect_resource(&engine, &receipt, resource)?);
+        networks.insert(key.clone(), inspect_resource(engine, &receipt, resource)?);
     }
     let mut guest_endpoints = BTreeMap::new();
     for (key, resource) in &receipt.resources {
         let inspected = if resource.kind == Kind::Network {
             networks.get(key).expect("network inspected").clone()
         } else {
-            inspect_resource(&engine, &receipt, resource)?
+            inspect_resource(engine, &receipt, resource)?
         };
         let value = match inspected {
             None => json!({"state":"absent"}),
             Some(v) if resource.kind == Kind::Container => {
-                let observation = probes::observe(&engine, &receipt, &resource.key, &v)?;
+                let observation = probes::observe(engine, &receipt, &resource.key, &v)?;
                 if !journal_incomplete
                     && receipt.phase == "ready-observed"
                     && resource.id.is_some()
@@ -819,7 +830,16 @@ pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateEr
                 {
                     guest_endpoints.insert(
                         resource.key.clone(),
-                        endpoints::resolve(&v, network, probe.config.port)?,
+                        endpoints::resolve(
+                            &v,
+                            network,
+                            probe.config.port,
+                            &endpoints::EndpointScope {
+                                receipt: &receipt,
+                                boot: engine.guest().boot_id(),
+                                service: &resource.key,
+                            },
+                        )?,
                     );
                 }
                 serde_json::to_value(observation)
@@ -850,6 +870,7 @@ pub fn cleanup(
             "Pending graph journal is retained; cleanup is blocked until journal reconciliation.",
         ));
     }
+    bridges::release_run(candidate, &engine, &receipt)?;
     let environment_slots = environment::cleanup_slots(candidate, &engine, &receipt)?;
     receipt.phase = "cleanup-intent".into();
     state::write(&root.join("state.json"), &receipt)?;

@@ -43,3 +43,7 @@ the pinned provider. The current candidate boot contract does not configure an a
 with provider-config auditing, port-conflict refusal, stale-destination invalidation, teardown and
 restore tests. TLS, hostname routing and the application's nine Caddy declarations remain open.
 The actual application has not been started or silently converted to candidate routes.
+
+Endpoints now also include a [generation fingerprint](graph-bridge-reservations-20260916.md) covering
+VM boot and container start, so same-container restart is distinguishable. This remains an observation,
+not a reachability guarantee or a long-lived connection lease.

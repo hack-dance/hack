@@ -22,6 +22,9 @@ Usage:
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
   hack-local runtime probe [--json]
   hack-local runtime engine-info [--json]
+  hack-local graph reserve-bridge --run-id <32-hex> --service <name> --slot <index> --expect-generation <sha256> [--json]
+  hack-local graph release-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> [--json]
+  hack-local graph bridges|reconcile-bridges --run-id <32-hex> [--json]
   hack-local runtime probe|up --profile research|development [--json]
   hack-local runtime up --profile research|development --bridge-sockets <1..32> [--json]
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>

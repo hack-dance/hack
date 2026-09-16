@@ -18,7 +18,7 @@ pub struct Probe {
     pub started_ms: u64,
     pub phase: String,
 }
-fn token() -> Result<String, CandidateError> {
+pub(super) fn token() -> Result<String, CandidateError> {
     use std::io::Read;
     let mut bytes = [0u8; 16];
     fs::File::open("/dev/urandom")

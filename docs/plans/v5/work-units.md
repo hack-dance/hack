@@ -424,7 +424,10 @@ restore and refusal after explicit relay stop. Durable bridge ownership, stale-t
 loopback publication and TLS routing remain open. The [persisted provider audit](provider-config-audit-20260915.md)
 now closes the boot-snapshot capability gap and refuses unexpected socket declarations before boot.
 [Explicit bridge capacity](application-bridge-intent-20260916.md) now records and audits immutable,
-opt-in pool socket mappings; graph slot ownership and stale-target invalidation remain open.
+opt-in pool socket mappings. [Graph slot reservations](graph-bridge-reservations-20260916.md) now
+bind observed generations, detect same-container restart, reject stale release tokens and participate
+in cleanup/journal reconciliation. Automatic relay lifetime, connection-time stale-target prevention
+and loopback publication remain open.
 QA SSO identity is verified; guest credential
 delivery and application-specific permissions remain unqualified.
 Open work: automatic idle rearming and real-application recovery, crun OCI/kernel compatibility,

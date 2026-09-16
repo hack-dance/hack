@@ -382,6 +382,10 @@ impl<'a> OwnedGuest<'a> {
         self.owner.profile
     }
 
+    pub(super) fn bridge_intent(&self) -> Option<super::BridgeIntent> {
+        self.owner.application_bridge
+    }
+
     pub(super) fn incarnation(&self) -> &str {
         &self.owner.token
     }

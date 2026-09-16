@@ -65,3 +65,7 @@ A fresh actual-application plan found 14 services, 22 errors and two warnings; s
 The existing ordinary pool also refused adding capacity with `bridge_conflict`, without altering
 its owner receipt. Default/all-feature Rust tests, strict Clippy, release builds and repository
 typecheck/check/test passed. CLI reference regeneration produced no stable-v4 reference changes.
+
+[Graph-owned reservations](graph-bridge-reservations-20260916.md) now assign slots to observed
+endpoint generations and release them during graph cleanup. They remain reservation-only; automatic
+relay lifetime, connection-time stale-target prevention and loopback publication are still open.

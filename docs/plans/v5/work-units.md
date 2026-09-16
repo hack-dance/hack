@@ -547,7 +547,9 @@ released the launch lock in the controlled experiment. Managed stop/cleanup auth
 integration remain the next work, including offline and VM-down behavior.
 The [private native stop channel](publisher-private-control-20260916.md) adds token-bound
 Unix datagram shutdown with exact socket cleanup and no idle timer. Managed publication
-intent, termination observation and lifecycle integration remain open.
+intent and lifecycle integration remain open. The [native exit observer](publisher-exit-proof-20260916.md)
+now requires actual process exit after private stop, including a separate controller
+process; a queued wrong token remains an explicit unconfirmed cleanup result.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

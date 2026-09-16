@@ -24,6 +24,7 @@ mod process;
 mod profile;
 pub use profile::Profile;
 mod publication_stage;
+pub mod publisher;
 #[cfg(test)]
 mod source_failure_test;
 mod source_job;

@@ -616,6 +616,9 @@ replaces the single-graph exclusion with bounded combined CPU/memory/service acc
 [32 linked worktrees](worktrees-32-20260916.md) passed retained-data and two-active
 stop/restore qualification. Automatic idle/wake safety and full application qualification
 remain open; stopped compute left a measured retained working-set gap.
+[Memory attribution](worktree-memory-attribution-20260916.md) found that guest cache
+eviction and a 4 GiB balloon did not materially recover it; host VM-region attribution
+and a separately admitted larger balloon control are next, with no default change.
 
 **Goal:** many enrolled/retained branches should not require many permanently active working sets.
 Separate registered, running, idle, paused and stopped states with honest CPU/memory/disk accounting.

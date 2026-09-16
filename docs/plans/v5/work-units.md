@@ -544,6 +544,8 @@ and latency. Unexported recovery evidence cannot be silently evicted to satisfy 
 **Current reference work:** [per-graph storage references](graph-storage-references-20260916.md)
 connect verified volume observations to durable restore intent. This is a single-graph
 classification, not complete cross-branch collection authority.
+[Retained graph volume inventory](graph-storage-inventory-20260916.md) joins the
+bounded graph store with engine volume usage; unmatched volumes remain retained.
 
 **Next slices:** [offline bridge recovery export](bridge-recovery-export-20260916.md) now frees
 retained journal slots after verified preservation. External archival/reviewed retirement of the

@@ -15,6 +15,13 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let Some((action, args)) = args.split_first() else {
         return Err(invalid());
     };
+    if *action == "storage-inventory" {
+        return if args.is_empty() || *args == ["--json"] {
+            graph::storage_inventory(candidate)
+        } else {
+            Err(invalid())
+        };
+    }
     if ![
         "run",
         "restart",

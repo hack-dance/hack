@@ -34,7 +34,7 @@ fn identity(v: &Value, key: &str) -> Result<String, CandidateError> {
     }
     Ok(id.into())
 }
-fn decode(value: Value) -> Result<Value, CandidateError> {
+pub(super) fn decode(value: Value) -> Result<Value, CandidateError> {
     let mut categories = serde_json::Map::new();
     for (field, kind) in [
         ("ImageUsage", "images"),

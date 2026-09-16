@@ -516,6 +516,55 @@ readback of effective aliases plus dependency completeness. Add the source/hook
 ordering checks to the worktree-inheritance follow-up. No Event Agent PR/config
 changes or stable Hack behavior changes are authorized or made by this queue entry.
 
+### Queued follow-up — Dependency-cache parity for one-off commands
+
+**User report (September 16):** Event Agent's CLI fallback and documented Prisma/
+db-ops recipes use `hack run`; the reported Hack 4.2.0 path omits the dependency
+cache override and can mount an empty or stale per-instance dependency volume.
+**Current-source evidence:** `handleRun` in `src/commands/project.ts` assembles
+internal, runtime-host and environment overrides without calling
+`resolveDependencyCacheOverride`. Audit the whole command matrix: the current
+`handleExec` also omits that resolver, although exec operates in an existing
+container and therefore does not select a new mount itself. Do not infer identical
+effects or claim the installed 4.2.0 binary has been reproduced from this source
+inspection. Existing dependency-cache setup calls elsewhere are not proof of
+one-off command parity.
+
+**Acceptance:** one-off services and any dependencies they start must resolve the
+same compatible cache volume as ordinary startup, in primary and linked worktrees.
+Reuse shared override assembly where appropriate to prevent command-path drift;
+preserve branch/profile/env precedence, service targeting and dependency-skip
+behavior. Diagnose incompatible existing containers rather than implying that
+adding an override to exec changes their mounts. Update affected command docs.
+
+**Verification:** compare effective mounts and read/write a dependency marker via
+up/run/exec/restart; cover a running stack and a cold one-off start, matching and
+changed lock/runtime inputs, no-cache services, branch isolation and failed or
+concurrent installers. Exercise the reported wrapper fallback and Prisma-style
+one-off workflow in an isolated fixture. Cache labels alone do not prove complete
+dependencies or justify skipping generation/install steps.
+**Status:** queued for v5; no Event Agent configuration or runtime behavior changed.
+
+### Verification follow-up — Maintain useful state-machine specifications
+
+**User direction (September 16):** use TLA+ more where it helps, and make useful
+specifications part of the maintained test suite. Prioritize admission/ownership,
+cleanup and recovery, retention, and future idle/wake leases; do not model routine
+configuration plumbing merely to increase model coverage.
+
+**Acceptance:** promote the useful graph-admission and authority-lifetime models
+from private experiments into repository-owned specs after mapping their actions
+and invariants to concrete implementation boundaries. Add a reproducible pinned
+TLC check to the relevant test/CI path, with documented finite bounds and runtime.
+Keep tool installation isolated; do not change a developer's global Java setup.
+Include a negative control that fails for the intended invariant violation, rather
+than accepting any tool failure. Turn counterexamples into ordinary regression
+tests and retain live tests for behavior the model abstracts away. Review/update
+specs when the corresponding state machine changes; passing a model alone is not
+implementation or application-parity proof.
+**Status:** authorized follow-up; current private model runs are evidence, not yet
+a maintained CI gate.
+
 ## WU12 — Bound retained disk without losing application data
 
 **Goal:** repeated builds, branch creation, cancellation and removal must not silently accumulate

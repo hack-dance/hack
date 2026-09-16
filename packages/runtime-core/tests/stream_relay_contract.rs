@@ -25,12 +25,26 @@ impl Relay {
         Self::start_with_inherited_fd(port, idle, None)
     }
     fn start_with_inherited_fd(port: u16, idle: u32, inherited: Option<i32>) -> Self {
-        let root = PathBuf::from(format!(
-            "/tmp/hkr-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&root).unwrap();
+        Self::start_options(port, idle, inherited, None, None)
+    }
+    fn start_options(
+        port: u16,
+        idle: u32,
+        inherited: Option<i32>,
+        reservation: Option<&str>,
+        existing: Option<PathBuf>,
+    ) -> Self {
+        let reuse = existing.is_some();
+        let root = existing.unwrap_or_else(|| {
+            PathBuf::from(format!(
+                "/tmp/hkr-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ))
+        });
+        if !reuse {
+            fs::create_dir(&root).unwrap();
+        }
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let socket = root.join("app.sock");
         let mut command = Command::new(BINARY);
@@ -44,11 +58,15 @@ impl Relay {
                 });
             }
         }
-        let mut child = command
+        command
             .arg(&socket)
             .arg("127.0.0.1")
             .arg(port.to_string())
-            .arg(idle.to_string())
+            .arg(idle.to_string());
+        if let Some(reservation) = reservation {
+            command.args(["--reservation", reservation]);
+        }
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()
@@ -356,4 +374,107 @@ fn pidfd_stop_preserves_wrong_identity_and_closes_owned_listener() {
             .code(),
         Some(78)
     );
+}
+
+#[test]
+fn reservation_handshake_precedes_backend_connection_and_preserves_payload() {
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    let token = "0123456789abcdef0123456789abcdef";
+    let relay = Relay::start_options(
+        target.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(token),
+        None,
+    );
+    let mut client = relay.connect();
+    client.write_all(b"HKR1").unwrap();
+    let mut observed = libc::pollfd {
+        fd: target.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(unsafe { libc::poll(&mut observed, 1, 100) }, 0);
+    let worker = thread::spawn(move || {
+        let (mut stream, _) = target.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut data = Vec::new();
+        stream.read_to_end(&mut data).unwrap();
+        assert_eq!(data, b"application-payload");
+        stream.write_all(b"application-reply").unwrap();
+    });
+    client.write_all(&token.as_bytes()[..11]).unwrap();
+    client.write_all(&token.as_bytes()[11..]).unwrap();
+    client.write_all(b"application-payload").unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    assert_eq!(response, b"\x01application-reply");
+    worker.join().unwrap();
+}
+
+#[test]
+fn reused_socket_rejects_old_reservation_and_expiring_partial_handshakes() {
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    let old = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let new = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let port = target.local_addr().unwrap().port();
+    let mut previous = Relay::start_options(port, 10000, None, Some(old), None);
+    let socket = previous.socket.clone();
+    previous.stop();
+    let relay = Relay::start_options(port, 10000, None, Some(new), Some(previous.root.clone()));
+    assert_eq!(relay.socket, socket);
+    for header in [
+        format!("HKR1{old}"),
+        "GET / HTTP/1.1\r\n".into(),
+        "HKR1".into(),
+    ] {
+        let mut client = relay.connect();
+        let started = Instant::now();
+        client.write_all(header.as_bytes()).unwrap();
+        let mut byte = [0];
+        match client.read(&mut byte) {
+            Ok(0) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => (),
+            other => panic!("invalid handshake remained usable: {other:?}"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let mut observed = libc::pollfd {
+            fd: target.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut observed, 1, 0) }, 0);
+    }
+    let mut client = relay.connect();
+    client.write_all(format!("HKR1{new}").as_bytes()).unwrap();
+    let mut ack = [0];
+    client.read_exact(&mut ack).unwrap();
+    assert_eq!(ack, [1]);
+    let (_backend, _) = target.accept().unwrap();
+}
+
+#[test]
+fn malformed_reservations_refuse_before_socket_creation() {
+    let root = PathBuf::from(format!("/tmp/hkr-reservation-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let socket = root.join("app.sock");
+    for token in [
+        "",
+        "short",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "gggggggggggggggggggggggggggggggg",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        let status = Command::new(BINARY)
+            .arg(&socket)
+            .args(["127.0.0.1", "3000", "1000", "--reservation", token])
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(64));
+        assert!(!socket.exists());
+    }
+    fs::remove_dir_all(root).unwrap();
 }

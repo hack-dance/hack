@@ -718,3 +718,7 @@ foreign-generation and invalid-transition records. No launch replay is permitted
 [Explicit relay restart recovery](relay-restart-fallback-20260916.md) qualifies partial-fence and
 missing-identity fallback with persistent application data. Graph restart recreates missing temporary
 HTTP probe storage after confirming the recorded container and old probe are stopped.
+
+The optional native relay now has a [reservation-bound transport handshake](relay-reservation-handshake-20260916.md).
+It rejects stale publishers before connecting to an application; managed protocol selection and
+the loopback listener remain separate integration work.

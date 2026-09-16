@@ -24,7 +24,7 @@
 #define CONNECTIONS 32
 #define CAPACITY 16384
 struct flow {
-    int fd[2], connecting, eof[2], shut[2];
+    int fd[2], connecting, awaiting, eof[2], shut[2];
     size_t used[2];
     unsigned char data[2][CAPACITY];
     int64_t activity;
@@ -55,6 +55,14 @@ static void release(struct flow *flow) {
     for (int side = 0; side < 2; side++) if (flow->fd[side] >= 0) close(flow->fd[side]);
     memset(flow, 0, sizeof(*flow));
     flow->fd[0] = flow->fd[1] = -1;
+}
+static int connect_target(struct flow *flow, const struct sockaddr_in *target) {
+    flow->fd[1] = socket(AF_INET, SOCK_STREAM, 0);
+    if (flow->fd[1] < 0 || configure(flow->fd[1])) return -1;
+    int connected = connect(flow->fd[1], (const struct sockaddr *)target, sizeof(*target));
+    if (connected && errno != EINPROGRESS) return -1;
+    flow->connecting = connected != 0;
+    return 0;
 }
 static int number(const char *text, long limit, long *out) {
     char *end;
@@ -176,17 +184,30 @@ int main(int argc, char **argv) {
     struct sockaddr_in target = {0};
     struct stat owned, current;
     long port, idle, target_pid = 0, target_start = 0;
-    if ((argc != 5 && argc != 8) || argv[1][0] != '/' || strlen(argv[1]) >= sizeof(local.sun_path) ||
+    if (argc < 5 || argv[1][0] != '/' || strlen(argv[1]) >= sizeof(local.sun_path) ||
         number(argv[3], 65535, &port) || number(argv[4], 60000, &idle) ||
         inet_pton(AF_INET, argv[2], &target.sin_addr) != 1) return 64;
-    if (argc == 8 && (strcmp(argv[5], "--netns") || number(argv[6], INT_MAX, &target_pid) ||
-        number(argv[7], LONG_MAX, &target_start) || strcmp(argv[2], "127.0.0.1"))) return 64;
+    int option = 5;
+    if (argc >= 8 && !strcmp(argv[5], "--netns")) {
+        if (number(argv[6], INT_MAX, &target_pid) || number(argv[7], LONG_MAX, &target_start) ||
+            strcmp(argv[2], "127.0.0.1")) return 64;
+        option = 8;
+    }
+    unsigned char header[36] = {0};
+    int guarded = 0;
+    if (argc == option+2 && !strcmp(argv[option], "--reservation")) {
+        const char *token = argv[option+1];
+        if (strlen(token) != 32 || strspn(token, "0123456789abcdef") != 32) return 64;
+        memcpy(header, "HKR1", 4); memcpy(header+4, token, 32);
+        guarded = 1; option += 2;
+    }
+    if (argc != option) return 64;
     target.sin_family = AF_INET;
     target.sin_port = htons((uint16_t)port);
     local.sun_family = AF_UNIX;
     memcpy(local.sun_path, argv[1], strlen(argv[1]) + 1);
     if (close_inherited()) return 70;
-    if (argc == 8 && pin_target(target_pid, target_start)) return 78;
+    if (target_pid && pin_target(target_pid, target_start)) return 78;
     if (pipe(wakeup) || configure(wakeup[0]) || configure(wakeup[1])) return 70;
     struct sigaction action = {0};
     action.sa_handler = stop;
@@ -215,14 +236,16 @@ int main(int argc, char **argv) {
         for (int i = 0; i < CONNECTIONS; i++) {
             struct flow *flow = &flows[i];
             if (flow->fd[0] >= 0) {
-                int64_t remaining = idle - (now - flow->activity);
+                int64_t budget = flow->awaiting && idle > 1000 ? 1000 : idle;
+                int64_t remaining = budget - (now - flow->activity);
                 if (remaining <= 0) release(flow);
                 else if (timeout < 0 || remaining < timeout) timeout = (int)remaining;
             }
             for (int side = 0; side < 2; side++) {
                 short events = 0;
                 if (flow->fd[side] >= 0) {
-                    if (flow->connecting) events = side == 1 ? POLLOUT : 0;
+                    if (flow->awaiting) events = side == 0 ? POLLIN : 0;
+                    else if (flow->connecting) events = side == 1 ? POLLOUT : 0;
                     else {
                         if (!flow->eof[side] && flow->used[side] < CAPACITY) events |= POLLIN;
                         if (flow->used[1-side]) events |= POLLOUT;
@@ -241,6 +264,27 @@ int main(int argc, char **argv) {
             for (int side = 0; side < 2 && flow->fd[0] >= 0; side++) {
                 short events = descriptors[1 + i*2 + side].revents;
                 if (!events) continue;
+                if (flow->awaiting) {
+                    if (now_ms()-flow->activity >= (idle < 1000 ? idle : 1000)) { release(flow); break; }
+                    if (events & (POLLERR | POLLNVAL)) { release(flow); break; }
+                    if (side == 0 && (events & (POLLIN | POLLHUP))) {
+                        ssize_t n = recv(flow->fd[0], flow->data[0]+flow->used[0],
+                            sizeof(header)-flow->used[0], 0);
+                        if (n > 0) {
+                            flow->used[0] += (size_t)n;
+                            if (memcmp(flow->data[0], header, flow->used[0])) { release(flow); break; }
+                            if (flow->used[0] == sizeof(header)) {
+                                flow->awaiting = 0; flow->used[0] = 0;
+                                flow->data[1][0] = 1; flow->used[1] = 1;
+                                flow->activity = now_ms();
+                                if (connect_target(flow, &target)) { release(flow); break; }
+                            }
+                        } else if (!n || (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                            release(flow); break;
+                        }
+                    }
+                    continue;
+                }
                 if (flow->connecting && side == 1) {
                     int error = 0;
                     socklen_t length = sizeof(error);
@@ -283,11 +327,8 @@ int main(int argc, char **argv) {
                 if (index == CONNECTIONS || configure(client)) { close(client); continue; }
                 struct flow *flow = &flows[index];
                 flow->fd[0] = client;
-                flow->fd[1] = socket(AF_INET, SOCK_STREAM, 0);
-                if (flow->fd[1] < 0 || configure(flow->fd[1])) { release(flow); continue; }
-                int connected = connect(flow->fd[1], (struct sockaddr *)&target, sizeof(target));
-                if (connected && errno != EINPROGRESS) { release(flow); continue; }
-                flow->connecting = connected != 0;
+                flow->awaiting = guarded;
+                if (!guarded && connect_target(flow, &target)) { release(flow); continue; }
                 flow->activity = now_ms();
             }
         }

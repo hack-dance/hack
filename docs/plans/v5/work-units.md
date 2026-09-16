@@ -611,6 +611,11 @@ process, helper and both socket identities without cleanup effects. It explicitl
 returns a point-in-time host observation, not guest health or durable permission.
 Long-lived authority transport, exit/change invalidation and certificate lifecycle
 remain open; do not use per-request CLI spawning as the optimized data path.
+[Persistent private hostname authority](private-hostname-authority-20260916.md)
+now serves bounded Unix HTTP lookups without spawning a CLI per request. Owner-pipe
+EOF cleans its exact socket; abrupt-death receipts/recovery remain open. Certificate
+permission is not enabled. Provider-lock 503 behavior under unrelated branch churn
+requires availability qualification before selecting a default routing path.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

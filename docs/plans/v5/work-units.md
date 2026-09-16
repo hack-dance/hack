@@ -625,6 +625,11 @@ Reservation-specific frontend fencing remains mandatory for stale observations.
 private durable socket receipts, exact-fingerprint dead-owner cleanup and replacement
 preservation. Pre-receipt startup crashes and managed supervisor integration remain
 open; no process is signalled and no application data is removed.
+[Runtime-bound authority lifetime](managed-authority-lifetime-20260916.md) adds an
+explicit foreground managed endpoint and cooperative native-exit-verified shutdown
+before publication/VM teardown. Startup and down share the provider lock. Automatic
+proxy startup, certificate retention and real application route translation remain
+open; the refreshed application plan still has 22 compatibility errors.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

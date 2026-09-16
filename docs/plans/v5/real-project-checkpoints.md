@@ -721,3 +721,14 @@ triggered normally in a separate memory fixture, preserved live bytes and allowe
 negligible additional footprint reduction. Neither control closes the actual application rows.
 The [compatibility inventory](application-compatibility-20260915.md) lists the remaining supported
 replacements. Original application configuration and dirty-state fingerprints are unchanged.
+
+
+## September 16 — Managed authority lifetime
+
+The [managed-authority checkpoint](managed-authority-lifetime-20260916.md) adds
+native-exit-verified routing authority shutdown during pool down. The current actual
+application plan remains at 14 services, 22 errors and two warnings; source/config
+hashes and dirty-state fingerprint are unchanged. Its nine routing declarations,
+twelve unresolved mounts and one external network still block enrollment. This
+fixture lifecycle improvement does not establish application startup, credential
+injection, source reload, terminals or full-application performance parity.

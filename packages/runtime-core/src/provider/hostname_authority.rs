@@ -1,4 +1,6 @@
 //! Foreground private routing authority; its owner must retain a pipe on stdin.
+mod exit_watch;
+pub mod managed;
 pub mod ownership;
 use super::{publication, state};
 use crate::{Candidate, CandidateError};
@@ -50,13 +52,16 @@ fn response(code: u16, body: &[u8], endpoint: Option<&str>) -> Vec<u8> {
     bytes
 }
 fn parse(bytes: &[u8]) -> Result<(String, bool), ()> {
+    parse_request(bytes, false)
+}
+fn parse_request(bytes: &[u8], stop: bool) -> Result<(String, bool), ()> {
     let text = std::str::from_utf8(bytes).map_err(|_| ())?;
     if !text.is_ascii() || !text.ends_with("\r\n\r\n") {
         return Err(());
     }
     let mut lines = text[..text.len() - 4].split("\r\n");
     let first = lines.next().ok_or(())?.split(' ').collect::<Vec<_>>();
-    if first.len() != 3 || first[0] != "GET" || first[2] != "HTTP/1.1" {
+    if first.len() != 3 || first[0] != if stop { "POST" } else { "GET" } || first[2] != "HTTP/1.1" {
         return Err(());
     }
     let mut headers = std::collections::BTreeMap::new();
@@ -82,6 +87,17 @@ fn parse(bytes: &[u8]) -> Result<(String, bool), ()> {
         || headers.get("content-length").is_some_and(|n| *n != "0")
     {
         return Err(());
+    }
+    if stop {
+        let hash = first[1].strip_prefix("/stop?identity=").ok_or(())?;
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(());
+        }
+        return Ok((hash.into(), false));
     }
     let (name, route) = if first[1] == "/route" {
         let authority = headers.get("x-forwarded-host").ok_or(())?;
@@ -132,6 +148,13 @@ fn answer(candidate: &Candidate, bytes: &[u8]) -> Vec<u8> {
 }
 /// No background daemon, idle polling or implicit socket adoption. EOF revokes this service.
 pub fn serve(candidate: &Candidate, socket: &Path) -> Result<(), CandidateError> {
+    serve_locked(candidate, socket, None)
+}
+fn serve_locked(
+    candidate: &Candidate,
+    socket: &Path,
+    startup_lock: Option<state::Lock>,
+) -> Result<(), CandidateError> {
     let mut input = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(0, input.as_mut_ptr()) } != 0 {
         return Err(error());
@@ -154,7 +177,8 @@ pub fn serve(candidate: &Candidate, socket: &Path) -> Result<(), CandidateError>
     let mut owned = ownership::Owner::new(socket, &m);
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600)).map_err(state::io)?;
     listener.set_nonblocking(true).map_err(state::io)?;
-    owned.record(candidate)?;
+    let fingerprint = owned.record(candidate)?;
+    drop(startup_lock);
     let mut clients: Vec<Client> = Vec::new();
     println!("ready");
     std::io::stdout().flush().map_err(state::io)?;
@@ -224,6 +248,12 @@ pub fn serve(candidate: &Candidate, socket: &Path) -> Result<(), CandidateError>
                         } else if let Some(end) =
                             c.request.windows(4).position(|b| b == b"\r\n\r\n")
                         {
+                            if end + 4 == c.request.len()
+                                && parse_request(&c.request, true)
+                                    .is_ok_and(|(hash, _)| hash == fingerprint)
+                            {
+                                return Ok(());
+                            }
                             c.response = Some(if end + 4 == c.request.len() {
                                 answer(candidate, &c.request)
                             } else {

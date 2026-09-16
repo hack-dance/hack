@@ -71,7 +71,7 @@ impl Owner {
             receipt: None,
         }
     }
-    pub(super) fn record(&mut self, c: &Candidate) -> Result<(), CandidateError> {
+    pub(super) fn record(&mut self, c: &Candidate) -> Result<String, CandidateError> {
         let directory = parent(&self.socket)?;
         let value = Receipt {
             version: 1,
@@ -100,7 +100,8 @@ impl Owner {
         File::open(self.socket.parent().ok_or_else(error)?)
             .map_err(state::io)?
             .sync_all()
-            .map_err(state::io)
+            .map_err(state::io)?;
+        Ok(format!("{:x}", Sha256::digest(&bytes)))
     }
 }
 impl Drop for Owner {
@@ -249,4 +250,45 @@ pub fn recover(
         .sync_all()
         .map_err(state::io)?;
     Ok(serde_json::json!({"recovered":true,"already_absent":false}))
+}
+
+/// Cooperative shutdown is acknowledged by native process exit, never by HTTP status.
+pub fn stop(
+    c: &Candidate,
+    socket: &Path,
+    expected: &str,
+) -> Result<serde_json::Value, CandidateError> {
+    let original = read(c, socket)?;
+    if format!("{:x}", Sha256::digest(&original.bytes)) != expected {
+        return Err(error());
+    }
+    if !identity::alive(original.value.process.pid)? {
+        return recover(c, socket, expected);
+    }
+    let watch = super::exit_watch::ExitWatch::new(&original.value.process)?;
+    let m = fs::symlink_metadata(socket).map_err(state::io)?;
+    if !m.file_type().is_socket()
+        || (m.dev(), m.ino()) != original.value.endpoint
+        || m.uid() != original.value.process.uid
+        || m.mode() & 0o077 != 0
+    {
+        return Err(error());
+    }
+    let client = reqwest::blocking::Client::builder()
+        .unix_socket(socket)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .connect_timeout(std::time::Duration::from_secs(1))
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .map_err(|_| error())?;
+    let _ = client
+        .post(format!("http://localhost/stop?identity={expected}"))
+        .send();
+    watch.wait()?;
+    if present(socket) || present(&receipt(socket)) {
+        return Err(error());
+    }
+    Ok(serde_json::json!({"stopped":true,"process_exit_observed":true}))
 }

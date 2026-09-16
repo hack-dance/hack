@@ -24,6 +24,9 @@ Usage:
   hack-local runtime publication-hostnames [--json]
   hack-local runtime hostname-authority --socket <path> [--json]
   hack-local runtime recover-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
+  hack-local runtime managed-hostname-authority [--json]
+  hack-local runtime serve-managed-hostnames (owner pipe on stdin)
+  hack-local runtime stop-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
   hack-local runtime serve-hostnames --socket <private-unix-path> (owner pipe on stdin)
   hack-local runtime lookup-hostname --hostname <name> [--json]
   hack-local runtime publication-recovery [--json]
@@ -315,6 +318,44 @@ fn run() -> Result<(), CandidateError> {
         ] => {
             print_json(
                 &hack_runtime_core::provider::hostname_authority::ownership::recover(
+                    &Candidate::discover(&requested)?,
+                    std::path::Path::new(socket),
+                    hash,
+                )?,
+            )?;
+        }
+        ["runtime", "managed-hostname-authority"]
+        | ["runtime", "managed-hostname-authority", "--json"] => {
+            print_json(
+                &hack_runtime_core::provider::hostname_authority::managed::inspect(
+                    &Candidate::discover(&requested)?,
+                )?,
+            )?;
+        }
+        ["runtime", "serve-managed-hostnames"] => {
+            hack_runtime_core::provider::hostname_authority::managed::serve(&Candidate::discover(
+                &requested,
+            )?)?;
+        }
+        [
+            "runtime",
+            "stop-hostname-authority",
+            "--socket",
+            socket,
+            "--expect-sha256",
+            hash,
+        ]
+        | [
+            "runtime",
+            "stop-hostname-authority",
+            "--socket",
+            socket,
+            "--expect-sha256",
+            hash,
+            "--json",
+        ] => {
+            print_json(
+                &hack_runtime_core::provider::hostname_authority::ownership::stop(
                     &Candidate::discover(&requested)?,
                     std::path::Path::new(socket),
                     hash,

@@ -137,11 +137,29 @@ fn owner_eof_bounds_slow_clients_and_preserves_foreign_paths() {
     let mut b = Authority::start();
     fs::remove_file(&b.socket).unwrap();
     fs::write(&b.socket, b"foreign").unwrap();
+    let hash = fingerprint(&b.socket);
+    assert!(
+        !operation(&b.socket, Some(&hash), "stop-hostname-authority")
+            .status
+            .success()
+    );
+    assert!(b.child.try_wait().unwrap().is_none());
     b.stop();
     assert_eq!(fs::read(&b.socket).unwrap(), b"foreign");
 }
 
 fn maintenance(socket: &Path, expected: Option<&str>) -> Output {
+    operation(
+        socket,
+        expected,
+        if expected.is_some() {
+            "recover-hostname-authority"
+        } else {
+            "hostname-authority"
+        },
+    )
+}
+fn operation(socket: &Path, expected: Option<&str>, action: &str) -> Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_hack-runtime-candidate"));
     c.arg("--candidate-root").arg(
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -149,16 +167,7 @@ fn maintenance(socket: &Path, expected: Option<&str>) -> Output {
             .canonicalize()
             .unwrap(),
     );
-    c.args([
-        "runtime",
-        if expected.is_some() {
-            "recover-hostname-authority"
-        } else {
-            "hostname-authority"
-        },
-        "--socket",
-    ])
-    .arg(socket);
+    c.args(["runtime", action, "--socket"]).arg(socket);
     if let Some(hash) = expected {
         c.args(["--expect-sha256", hash]);
     }
@@ -218,4 +227,36 @@ fn crash_recovery_requires_dead_owner_exact_receipt_and_original_endpoint() {
     assert!(a.connect().peer_addr().is_ok());
     a.stop();
     assert!(!a.socket.exists() && !receipt.exists());
+}
+
+#[test]
+fn cooperative_stop_requires_exact_generation_and_observed_exit() {
+    let mut a = Authority::start();
+    let hash = fingerprint(&a.socket);
+    assert!(
+        !operation(&a.socket, Some(&"0".repeat(64)), "stop-hostname-authority")
+            .status
+            .success()
+    );
+    let mut unauthorized = a.connect();
+    write!(
+        unauthorized,
+        "POST /stop?identity={} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        "0".repeat(64)
+    )
+    .unwrap();
+    let mut reply = String::new();
+    unauthorized.read_to_string(&mut reply).unwrap();
+    assert!(reply.starts_with("HTTP/1.1 400"));
+    assert!(a.child.try_wait().unwrap().is_none());
+    let out = operation(&a.socket, Some(&hash), "stop-hostname-authority");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["process_exit_observed"], true);
+    assert!(a.child.wait().unwrap().success());
+    assert!(!a.socket.exists() && !a.socket.with_extension("identity").exists());
 }

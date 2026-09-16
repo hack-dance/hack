@@ -488,6 +488,15 @@ fn controlled_publisher(
     port: u16,
     control_token: Option<&str>,
 ) -> Relay {
+    frontend_publisher(socket, token, port, control_token, false)
+}
+fn frontend_publisher(
+    socket: &std::path::Path,
+    token: &str,
+    port: u16,
+    control_token: Option<&str>,
+    unix: bool,
+) -> Relay {
     let root = PathBuf::from(format!(
         "/tmp/hkp-{}-{}",
         std::process::id(),
@@ -497,8 +506,12 @@ fn controlled_publisher(
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let mut command = Command::new(BINARY);
     command
-        .arg("--publish")
-        .arg(port.to_string())
+        .arg(if unix { "--publish-unix" } else { "--publish" })
+        .arg(if unix {
+            root.join("frontend.sock").into_os_string()
+        } else {
+            port.to_string().into()
+        })
         .arg(socket)
         .args([token, "10000"]);
     if let Some(control_token) = control_token {
@@ -520,7 +533,7 @@ fn controlled_publisher(
     assert_eq!(line, "ready\n");
     Relay {
         child,
-        socket: root.join("unused"),
+        socket: root.join(if unix { "frontend.sock" } else { "unused" }),
         root,
     }
 }
@@ -808,4 +821,82 @@ fn control_startup_refuses_occupied_and_nonprivate_paths_without_leaking_port() 
         assert_eq!(fs::read(&control).unwrap(), b"foreign");
     }
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unix_publication_streams_and_preserves_occupied_or_replaced_frontend() {
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let token = "abababababababababababababababab";
+    let guard = Relay::start_options(
+        backend.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(token),
+        None,
+    );
+    let mut publication = frontend_publisher(&guard.socket, token, 0, None, true);
+    assert_eq!(
+        fs::metadata(&publication.socket)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    let conflict = Command::new(BINARY)
+        .arg("--publish-unix")
+        .arg(&publication.socket)
+        .arg(&guard.socket)
+        .args([token, "10000"])
+        .output()
+        .unwrap();
+    assert_eq!(conflict.status.code(), Some(73));
+    let server = thread::spawn(move || {
+        let (mut socket, _) = backend.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        socket.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, vec![0x5a; 2 * 1024 * 1024]);
+        socket.write_all(&bytes).unwrap();
+    });
+    let mut client = publication.connect();
+    client.write_all(&vec![0x5a; 2 * 1024 * 1024]).unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut echoed = Vec::new();
+    client.read_to_end(&mut echoed).unwrap();
+    assert_eq!(echoed, vec![0x5a; 2 * 1024 * 1024]);
+    server.join().unwrap();
+    fs::remove_file(&publication.socket).unwrap();
+    fs::write(&publication.socket, b"foreign").unwrap();
+    publication.stop();
+    assert_eq!(fs::read(&publication.socket).unwrap(), b"foreign");
+    assert!(guard.socket.exists());
+    let mut fresh = frontend_publisher(&guard.socket, token, 0, None, true);
+    fresh.stop();
+    assert!(!fresh.socket.exists());
+    assert!(guard.socket.exists());
+    fs::set_permissions(&fresh.root, fs::Permissions::from_mode(0o755)).unwrap();
+    let exposed = Command::new(BINARY)
+        .arg("--publish-unix")
+        .arg(&fresh.socket)
+        .arg(&guard.socket)
+        .args([token, "10000"])
+        .output()
+        .unwrap();
+    assert_eq!(exposed.status.code(), Some(78));
+    assert!(!fresh.socket.exists());
+    fs::set_permissions(&fresh.root, fs::Permissions::from_mode(0o700)).unwrap();
+    let alias = publication.root.join("alias");
+    std::os::unix::fs::symlink(&fresh.root, &alias).unwrap();
+    let aliased = Command::new(BINARY)
+        .arg("--publish-unix")
+        .arg(alias.join("frontend.sock"))
+        .arg(&guard.socket)
+        .args([token, "10000"])
+        .output()
+        .unwrap();
+    assert_eq!(aliased.status.code(), Some(78));
+    assert!(!fresh.socket.exists());
 }

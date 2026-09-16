@@ -572,6 +572,11 @@ and missing-identity cases remain open.
 fingerprinted, bounded evidence retention before candidate-wide host publication
 cleanup. It refuses unknown staging resources and never removes guest data. Evidence
 retention/export retirement and missing resource identities remain open.
+[Reservation-specific TLS upstream controls](tls-reservation-endpoint-20260916.md)
+reproduce stale routing through a reused TCP port and qualify a private native Unix
+frontend with scoped TLS, preserved Host/protocol, old-route refusal and full fixture
+cleanup. Managed frontend crash receipts, TLS route lifetime/retention and actual-app
+qualification remain open; existing TCP publication and defaults are unchanged.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

@@ -34,7 +34,8 @@ struct flow {
 static struct flow flows[CONNECTIONS];
 static volatile sig_atomic_t stopping;
 static int target_watch = -1;
-static int publish_mode;
+static int publish_mode, publish_unix;
+static struct sockaddr_un frontend;
 static struct sockaddr_un upstream;
 static int wakeup[2] = {-1, -1};
 static void stop(int signal_number) {
@@ -63,6 +64,17 @@ static void release(struct flow *flow) {
 static int private_upstream(struct stat *value) {
     return lstat(upstream.sun_path, value) || !S_ISSOCK(value->st_mode) ||
         value->st_uid != geteuid() || (value->st_mode & 0077) || value->st_nlink != 1 ? -1 : 0;
+}
+static int private_parent(const char *path) {
+    char parent[PATH_MAX];
+    if (path[0] != '/' || strlen(path) >= sizeof(parent)) return -1;
+    strcpy(parent, path);
+    char *slash = strrchr(parent, '/');
+    if (slash == parent || !slash[1]) return -1;
+    *slash = 0;
+    struct stat directory;
+    return lstat(parent, &directory) || !S_ISDIR(directory.st_mode) ||
+        directory.st_uid != geteuid() || (directory.st_mode & 0077) ? -1 : 0;
 }
 static int connect_target(struct flow *flow, const struct sockaddr_in *target) {
     struct stat before, after;
@@ -194,7 +206,8 @@ int main(int argc, char **argv) {
     int receipt_bound = 0;
     unsigned char stop_message[39] = {0};
     int control_fd = -1, control_bound = 0;
-    if (argc >= 2 && !strcmp(argv[1], "--publish")) {
+    if (argc >= 2 && (!strcmp(argv[1], "--publish") || !strcmp(argv[1], "--publish-unix"))) {
+        publish_unix = !strcmp(argv[1], "--publish-unix");
         if (argc != 6 && argc != 9) return 64;
         if (argc == 9) {
             if (strcmp(argv[6], "--control") || argv[7][0] != '/' ||
@@ -212,9 +225,14 @@ int main(int argc, char **argv) {
                 directory.st_uid != geteuid() || (directory.st_mode & 0077)) return 78;
             memcpy(stop_message, "HKSTOP1", 7); memcpy(stop_message+7, argv[8], 32);
         }
-        /* --publish PORT PRIVATE_UNIX_SOCKET RESERVATION IDLE_MS; loopback is fixed. */
+        if (publish_unix) {
+            if (argv[2][0] != '/' || strlen(argv[2]) >= sizeof(frontend.sun_path)) return 64;
+            if (private_parent(argv[2])) return 78;
+            frontend.sun_family = AF_UNIX; strcpy(frontend.sun_path, argv[2]);
+        }
+        /* Both publishers share upstream parsing; the Unix frontend has no TCP port. */
         publish_args[0] = argv[0]; publish_args[1] = argv[3];
-        publish_args[2] = "127.0.0.1"; publish_args[3] = argv[2];
+        publish_args[2] = "127.0.0.1"; publish_args[3] = publish_unix ? "1" : argv[2];
         publish_args[4] = argv[5]; publish_args[5] = "--reservation";
         publish_args[6] = argv[4]; publish_args[7] = NULL;
         argv = publish_args; argc = 7; publish_mode = 1;
@@ -261,18 +279,20 @@ int main(int argc, char **argv) {
     if (sigaction(SIGTERM, &action, NULL) || sigaction(SIGINT, &action, NULL)) return 70;
     signal(SIGPIPE, SIG_IGN);
     for (int i = 0; i < CONNECTIONS; i++) flows[i].fd[0] = flows[i].fd[1] = -1;
-    int listener = socket(publish_mode ? AF_INET : AF_UNIX, SOCK_STREAM, 0);
+    int listener = socket(publish_mode && !publish_unix ? AF_INET : AF_UNIX, SOCK_STREAM, 0);
+    const char *listen_path = publish_unix ? frontend.sun_path : (publish_mode ? NULL : argv[1]);
     if (listener < 0) return 70;
     umask(0077);
     int reuse = 1;
-    if (publish_mode && setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse))) { close(listener); return 70; }
-    const struct sockaddr *address = publish_mode ? (struct sockaddr *)&target : (struct sockaddr *)&local;
-    socklen_t address_size = publish_mode ? sizeof(target) : sizeof(local);
+    if (publish_mode && !publish_unix && setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse))) { close(listener); return 70; }
+    const struct sockaddr *address = publish_unix ? (struct sockaddr *)&frontend :
+        (publish_mode ? (struct sockaddr *)&target : (struct sockaddr *)&local);
+    socklen_t address_size = publish_mode && !publish_unix ? sizeof(target) : sizeof(local);
     if (configure(listener) || bind(listener, address, address_size)) {
         close(listener);
         return 73;
     }
-    if (!publish_mode && lstat(argv[1], &owned)) { close(listener); return 73; }
+    if (listen_path && lstat(listen_path, &owned)) { close(listener); return 73; }
     int failed = listen(listener, CONNECTIONS) != 0;
     if (!failed && control.sun_family) {
         control_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -443,8 +463,8 @@ int main(int argc, char **argv) {
     if (receipt_bound && !lstat(receipt_path, &current) && S_ISREG(current.st_mode) &&
         current.st_dev == receipt_owned.st_dev && current.st_ino == receipt_owned.st_ino) unlink(receipt_path);
     for (int i = 0; i < CONNECTIONS; i++) release(&flows[i]);
-    if (!publish_mode && !lstat(argv[1], &current) && S_ISSOCK(current.st_mode) &&
-        owned.st_dev == current.st_dev && owned.st_ino == current.st_ino) unlink(argv[1]);
+    if (listen_path && !lstat(listen_path, &current) && S_ISSOCK(current.st_mode) &&
+        owned.st_dev == current.st_dev && owned.st_ino == current.st_ino) unlink(listen_path);
     if (target_watch >= 0) close(target_watch);
     close(wakeup[0]);
     close(wakeup[1]);

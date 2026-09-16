@@ -548,6 +548,8 @@ classification, not complete cross-branch collection authority.
 bounded graph store with engine volume usage; unmatched volumes remain retained.
 [Image validation reuse](image-validation-reuse-20260916.md) removes repeated layer
 expansion only after exact completed validation and fresh engine identity checks.
+[Streaming image verification](image-streaming-verification-20260916.md) bounds the
+warm-path hash buffer while preserving revalidation of actual import bytes.
 
 **Next slices:** [offline bridge recovery export](bridge-recovery-export-20260916.md) now frees
 retained journal slots after verified preservation. External archival/reviewed retirement of the

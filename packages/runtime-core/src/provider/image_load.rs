@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs::OpenOptions,
-    io::{Cursor, Read},
+    io::{Cursor, Read, Seek},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Component, Path, PathBuf},
 };
@@ -27,6 +27,52 @@ fn hex(value: &str) -> bool {
 }
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn verify_digest(
+    reader: &mut impl Read,
+    expected: &str,
+    limit: u64,
+) -> Result<u64, CandidateError> {
+    let mut reader = reader.take(limit + 1);
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let n = reader
+            .read(&mut buffer)
+            .map_err(|_| error("Cannot read the image archive."))?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        if total > limit {
+            return Err(error("Image archive exceeds its byte limit."));
+        }
+        digest.update(&buffer[..n]);
+    }
+    if format!("{:x}", digest.finalize()) != expected {
+        return Err(error("Image archive digest mismatch."));
+    }
+    Ok(total)
+}
+
+fn read_verified_archive(
+    file: &mut (impl Read + Seek),
+    expected: &str,
+) -> Result<Vec<u8>, CandidateError> {
+    file.rewind()
+        .map_err(|_| error("Cannot rewind the image archive."))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_ARCHIVE + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| error("Cannot read the image archive."))?;
+    // Retain the original descriptor and verify the bytes actually being validated/imported.
+    // A changed file between the streaming check and this read cannot reuse the earlier hash.
+    if bytes.len() as u64 > MAX_ARCHIVE || hash(&bytes) != expected {
+        return Err(error("Image archive digest mismatch."));
+    }
+    Ok(bytes)
 }
 
 #[derive(Deserialize)]
@@ -226,7 +272,7 @@ pub fn load(
     if !hex(expected_sha) || !image.strip_prefix("sha256:").is_some_and(hex) {
         return Err(error("Expected archive and image hashes are required."));
     }
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
@@ -239,12 +285,8 @@ pub fn load(
             "Image input must be a singly linked regular file no larger than 256 MiB.",
         ));
     }
-    let mut bytes = Vec::new();
-    file.take(MAX_ARCHIVE + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| error("Cannot read the image archive."))?;
-    if bytes.len() as u64 > MAX_ARCHIVE || hash(&bytes) != expected_sha {
-        return Err(error("Image archive digest mismatch."));
+    if verify_digest(&mut file, expected_sha, MAX_ARCHIVE)? != metadata.len() {
+        return Err(error("Image archive size changed during verification."));
     }
     let engine = Engine::connect(candidate)?;
     let directory = candidate.state_root.join("run/image-loads");
@@ -290,6 +332,7 @@ pub fn load(
             ));
         }
     }
+    let bytes = read_verified_archive(&mut file, expected_sha)?;
     validate_archive(&bytes, image, MAX_EXPANDED)?;
     if !inspect(&engine, image)? {
         state::write(&path, &receipt)?;
@@ -352,6 +395,49 @@ mod tests {
                 .unwrap();
         }
         (archive.into_inner().unwrap(), image)
+    }
+
+    #[test]
+    fn streamed_verification_bounds_reads_and_detects_changed_import_bytes() {
+        struct Chunked {
+            inner: Cursor<Vec<u8>>,
+            largest_request: usize,
+        }
+        impl Read for Chunked {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.largest_request = self.largest_request.max(buffer.len());
+                let len = buffer.len().min(31);
+                self.inner.read(&mut buffer[..len])
+            }
+        }
+        let bytes = vec![7; 200_000];
+        let expected = hash(&bytes);
+        let mut reader = Chunked {
+            inner: Cursor::new(bytes.clone()),
+            largest_request: 0,
+        };
+        assert_eq!(
+            verify_digest(&mut reader, &expected, 200_000).unwrap(),
+            200_000
+        );
+        assert!(reader.largest_request <= 64 * 1024);
+        assert!(verify_digest(&mut Cursor::new(&bytes), &expected, 199_999).is_err());
+        assert!(verify_digest(&mut Cursor::new(&bytes), &"0".repeat(64), 200_000).is_err());
+        let mut cursor = reader.inner;
+        assert_eq!(
+            read_verified_archive(&mut cursor, &expected).unwrap(),
+            bytes
+        );
+        cursor.get_mut()[0] = 8;
+        assert!(read_verified_archive(&mut cursor, &expected).is_err());
+        cursor.get_mut().truncate(10);
+        assert!(read_verified_archive(&mut cursor, &expected).is_err());
+        let (archive, image) = fixture("arm64", false, false);
+        let expected = hash(&archive);
+        let mut input = Cursor::new(archive);
+        verify_digest(&mut input, &expected, MAX_ARCHIVE).unwrap();
+        let verified = read_verified_archive(&mut input, &expected).unwrap();
+        validate_archive(&verified, &image, MAX_EXPANDED).unwrap();
     }
 
     #[test]

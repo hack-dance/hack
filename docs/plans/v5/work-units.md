@@ -559,6 +559,10 @@ rules to qualification fixtures so experiments do not become a separate accumula
 
 ## WU13 — Keep dozens of branch instances affordable
 
+**Current admission work:** [aggregate active graph admission](graph-aggregate-admission-20260916.md)
+replaces the single-graph exclusion with bounded combined CPU/memory/service accounting.
+Dozens-of-branches and idle/wake qualification remain open.
+
 **Goal:** many enrolled/retained branches should not require many permanently active working sets.
 Separate registered, running, idle, paused and stopped states with honest CPU/memory/disk accounting.
 

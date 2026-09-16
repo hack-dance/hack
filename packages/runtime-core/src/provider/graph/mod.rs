@@ -1,4 +1,5 @@
 //! Fresh owned graph attempts. Recovery only observes or cleans recorded resources; never replay.
+mod admission;
 mod archive;
 pub use archive::archive;
 mod bridge_recovery;
@@ -725,7 +726,6 @@ fn run_inputs(
             "A graph attempt directory already exists; inspect or clean it explicitly.",
         ));
     }
-    check_reservations(candidate, &engine, None)?;
     super::source_job::check_reservations(&engine)?;
     let source = source::prepare(
         candidate,
@@ -741,6 +741,7 @@ fn run_inputs(
         source.as_ref(),
         !environments.is_empty(),
     )?;
+    admission::check(candidate, &engine, None, &prepared.configs)?;
     for name in environments.keys() {
         launcher::validate(&prepared.configs[name])?;
     }
@@ -1003,7 +1004,6 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
             "Only a completely acknowledged ready graph with an unchanged plan can explicitly restart.",
         ));
     }
-    check_reservations(candidate, &engine, Some(options.run_id))?;
     super::source_job::check_reservations(&engine)?;
     let source = source::prepare(
         candidate,
@@ -1027,6 +1027,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
             "Restart resources differ from the reviewed graph.",
         ));
     }
+    admission::check(candidate, &engine, Some(options.run_id), &prepared.configs)?;
     probes::unchanged(&prepared.configs, &prepared.probes, &receipt)?;
     for resource in receipt.resources.values() {
         let value = inspect_resource(&engine, &receipt, resource)?.ok_or_else(|| {
@@ -1035,6 +1036,9 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
                 "Restart requires every recorded resource.",
             )
         })?;
+        if resource.kind == Kind::Container {
+            admission::unchanged(&value, &prepared.configs[&resource.key])?;
+        }
         if resource.kind == Kind::Container
             && (resource.phase != "started"
                 || resource.id.is_none()

@@ -58,7 +58,6 @@ fn restore_inputs(
             "Restore requires completed ordinary cleanup and the unchanged plan and readiness goals.",
         ));
     }
-    check_reservations(candidate, &engine, Some(options.run_id))?;
     super::super::source_job::check_reservations(&engine)?;
     let source = source::prepare(
         candidate,
@@ -83,6 +82,7 @@ fn restore_inputs(
             "Restore resources differ from the reviewed graph.",
         ));
     }
+    admission::check(candidate, &engine, Some(options.run_id), &prepared.configs)?;
     verify_images(&engine, &prepared.resources)?;
     for resource in receipt.resources.values() {
         let present = inspect_resource(&engine, &receipt, resource)?.is_some();

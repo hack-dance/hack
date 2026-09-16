@@ -2,7 +2,7 @@
 use super::*;
 use std::{path::Path, time::Instant};
 
-fn runs(parent: &Path) -> Result<Vec<String>, CandidateError> {
+pub(super) fn runs(parent: &Path) -> Result<Vec<String>, CandidateError> {
     if !parent.exists() && !parent.is_symlink() {
         return Ok(Vec::new());
     }

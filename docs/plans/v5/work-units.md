@@ -622,8 +622,8 @@ eviction and a 4 GiB balloon did not materially recover it, with no default chan
 and no additional recovery at a 5 GiB balloon target. Pinned-source inspection exposed
 PFN ordering/alignment loss and unchecked host-discard results as instrumentation
 targets. [Live instrumentation](balloon-pfn-order-20260916.md) now confirms 99.887%
-alignment loss during a synthetic 1 GiB inflation, with no discard failures. Next
-[bounded PFN coalescing](balloon-coalescing-20260916.md) passed synthetic and two
+alignment loss during a synthetic 1 GiB inflation, with no discard failures.
+[Bounded PFN coalescing](balloon-coalescing-20260916.md) passed synthetic and two
 32-worktree controls, with roughly 265 MiB lower final footprint in the warm run
 than the earlier baseline. Promotion remains gated on whole-range host-mapping
 validation and matched instrumented CPU/memory comparisons; no CPU win is claimed.

@@ -61,3 +61,32 @@ owner removal but before final directory removal, and ambiguous process/socket p
 fork still need dedicated recovery controls. An owned VM restart remains the conservative fallback
 for those cases; the command does not restart it automatically. Loopback/TLS routing and actual
 application parity remain open.
+
+## Follow-up: live process with incomplete socket receipt
+
+The next bounded control used the same optional-feature binary above, from candidate commit
+`acc012a4`, in `.hack-local/review/wu07/relay-postfork-1789579521221759000/`.
+For two fresh reservations, it started a relay and proved HTTP delivery, then removed the owned
+socket receipt or truncated it to zero bytes. The socket itself and the recorded live process
+remained intact; another HTTP request succeeded before release. These are injected receipt states,
+not proof of an actual startup interruption at those instruction boundaries.
+
+Both ordinary `graph release-bridge` calls succeeded without a VM restart. The verified native
+process removed its own socket on shutdown, after which the managed cleanup retired its allocation.
+Each allocation and guest socket was absent afterward; the application remained running and the
+boot ID was unchanged. This qualifies recovery of missing/empty socket receipts with a live,
+verifiable relay process. It does not justify deleting a socket belonging to an unknown process.
+No runtime change was needed for these cases.
+
+The same run repeated staging/cancellation and managed lifecycle controls, passed all 18 resource
+watchdog samples, then cleaned, archived and exported the graph. Shutdown, reboot audit and final
+shutdown passed. The injected host journal was exported with the supported offline command; no
+source recovery slots remained occupied. Protected global configuration was unchanged. Raw protocol,
+original process/socket identities, release results and recovery readbacks are in that evidence
+folder. This qualification did not rerun compilation gates or comparative application benchmarks;
+the tested binary is exactly the one from the preceding staging unit.
+
+Remaining post-fork controls must separately cover a missing/partial process receipt, relay death
+before socket cleanup, and an interrupted guest fence publication. A missing socket receipt alone
+is no longer a blocker when the live process identity can be verified and graceful shutdown
+removes the socket.

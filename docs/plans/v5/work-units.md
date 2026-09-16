@@ -521,7 +521,9 @@ and durably track allocation lifetime. Real CLI interruption now proves stop ret
 [same-boot cancellation implementation](relay-cancellation-20260916.md) now handles unlaunched
 new intents and rejects delayed requests after reuse with bounded per-slot retention.
 [Pre-fork executable staging recovery](relay-staging-recovery-20260916.md) is also live-qualified
-without a VM restart. Post-fork/fence-journal crash windows, unknown identity recovery and
+without a VM restart. The same report now also qualifies missing/empty socket receipt cleanup
+with a verified live relay, without a runtime code change. Missing process identity, abrupt relay
+death with a stale socket, fence-journal crash windows, unknown identity recovery and
 unhealthy-but-running target policy remain open before normal publication.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.

@@ -67,3 +67,7 @@ A bounded CPU follow-up is now identified in `release`: every connection clears 
 flow buffers. Compare that baseline with state-only reset under matched short-request and large-stream
 loads, checking cross-connection byte isolation, half-close, failure paths and memory accounting.
 This is an unmeasured optimization hypothesis; no buffer-clearing behavior changed in this unit.
+
+The [paired buffer-reset experiment](publisher-ownership-cpu-20260916.md) is complete: state-only
+reset did not demonstrate a CPU improvement, so full-buffer clearing remains unchanged. The same
+report qualifies foreground exec identity/lock behavior as a managed-startup building block.

@@ -541,8 +541,10 @@ relay intent now persists `reservation-v1`; CLI startup/inspection, raw and stal
 reboot recovery and data preservation pass. The [native loopback listener](native-loopback-publication-20260916.md)
 now passes host and actual VM HTTP/port-conflict/stale-slot/cleanup controls. It remains an explicit
 foreground helper; managed publication intent, process ownership and recovery are next. A bounded
-CPU experiment will compare full-buffer clearing on connection release with state-only reset,
-retaining byte-isolation/half-close controls and matched accounting before selecting a default.
+CPU experiment has now [completed without a demonstrated improvement](publisher-ownership-cpu-20260916.md):
+full-buffer clearing remains the default. Foreground exec preserved PID/UID/start identity and
+released the launch lock in the controlled experiment. Managed stop/cleanup authority and CLI
+integration remain the next work, including offline and VM-down behavior.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

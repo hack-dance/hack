@@ -21,6 +21,8 @@ Usage:
   hack-local graph inspect|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
   hack-local runtime probe [--json]
+  hack-local runtime publication-recovery [--json]
+  hack-local runtime recover-publications --expect-sha256 <sha256> [--json]
   hack-local runtime bridge-recovery [--json]
   hack-local runtime export-bridge-recovery --slot <1..8> --expect-sha256 <sha256> [--json]
   hack-local runtime engine-info [--json]
@@ -273,6 +275,28 @@ fn run() -> Result<(), CandidateError> {
             } else {
                 print_json(&provider::up_with_profile(&candidate, profile)?)?;
             }
+        }
+        ["runtime", "publication-recovery"] | ["runtime", "publication-recovery", "--json"] => {
+            print_json(
+                &hack_runtime_core::provider::publication::recovery::inspect(
+                    &Candidate::discover(&requested)?,
+                )?,
+            )?;
+        }
+        ["runtime", "recover-publications", "--expect-sha256", hash]
+        | [
+            "runtime",
+            "recover-publications",
+            "--expect-sha256",
+            hash,
+            "--json",
+        ] => {
+            print_json(
+                &hack_runtime_core::provider::publication::recovery::recover(
+                    &Candidate::discover(&requested)?,
+                    hash,
+                )?,
+            )?;
         }
         ["runtime", "bridge-recovery"] | ["runtime", "bridge-recovery", "--json"] => {
             print_json(

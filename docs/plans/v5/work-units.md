@@ -568,6 +568,10 @@ remain refused; no raw-journal discard is authorized by this path. Actual interr
 receipt retirement now also passes, including malformed-journal and reoccupied-path
 preservation controls; final readback is empty. Bounded malformed-journal recovery
 and missing-identity cases remain open.
+[Explicit raw publication recovery](publication-raw-recovery-20260916.md) adds
+fingerprinted, bounded evidence retention before candidate-wide host publication
+cleanup. It refuses unknown staging resources and never removes guest data. Evidence
+retention/export retirement and missing resource identities remain open.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

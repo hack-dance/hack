@@ -1,4 +1,5 @@
 //! Foreground host publications. Intent precedes staging/exec; cleanup never adopts unknown files.
+pub mod recovery;
 use super::{identity, publisher, state};
 use crate::{Candidate, CandidateError};
 use serde::{Deserialize, Serialize};

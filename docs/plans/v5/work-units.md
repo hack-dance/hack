@@ -606,6 +606,11 @@ now attach bounded, normalized exclusive names to managed Unix publication inten
 Cleanup retains claims on uncertain identity; inspection reports ownership only.
 Live authority verification, private transport, certificate lifetime management and
 Compose hostname/metadata translation remain open.
+[Live hostname lookup](hostname-live-lookup-20260916.md) now verifies recorded
+process, helper and both socket identities without cleanup effects. It explicitly
+returns a point-in-time host observation, not guest health or durable permission.
+Long-lived authority transport, exit/change invalidation and certificate lifecycle
+remain open; do not use per-request CLI spawning as the optimized data path.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

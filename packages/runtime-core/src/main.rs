@@ -22,6 +22,7 @@ Usage:
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
   hack-local runtime probe [--json]
   hack-local runtime publication-hostnames [--json]
+  hack-local runtime lookup-hostname --hostname <name> [--json]
   hack-local runtime publication-recovery [--json]
   hack-local runtime recover-publications --expect-sha256 <sha256> [--json]
   hack-local runtime bridge-recovery [--json]
@@ -276,6 +277,13 @@ fn run() -> Result<(), CandidateError> {
             } else {
                 print_json(&provider::up_with_profile(&candidate, profile)?)?;
             }
+        }
+        ["runtime", "lookup-hostname", "--hostname", name]
+        | ["runtime", "lookup-hostname", "--hostname", name, "--json"] => {
+            print_json(&hack_runtime_core::provider::publication::lookup_hostname(
+                &Candidate::discover(&requested)?,
+                name,
+            )?)?;
         }
         ["runtime", "publication-hostnames"] | ["runtime", "publication-hostnames", "--json"] => {
             print_json(&hack_runtime_core::provider::publication::inspect_claims(

@@ -280,13 +280,19 @@ fn verify_directory(e: &Entry) -> Result<bool, CandidateError> {
     }
     Ok(true)
 }
-fn retire_socket(e: &Entry, name: &str, kind: &str, token: &str) -> Result<(), CandidateError> {
+fn check_socket(
+    e: &Entry,
+    name: &str,
+    kind: &str,
+    token: &str,
+    retire: bool,
+) -> Result<(), CandidateError> {
     let dir = directory(e);
     let control = dir.join(name);
     let receipt = dir.join(format!("{name}.identity"));
     let present = |p: &Path| p.exists() || p.is_symlink();
     if !present(&receipt) {
-        return if present(&control) {
+        return if !retire || present(&control) {
             Err(error())
         } else {
             Ok(())
@@ -329,11 +335,18 @@ fn retire_socket(e: &Entry, name: &str, kind: &str, token: &str) -> Result<(), C
         {
             return Err(error());
         }
-        fs::remove_file(control).map_err(state::io)?;
+        if retire {
+            fs::remove_file(control).map_err(state::io)?;
+        }
+    } else if !retire {
+        return Err(error());
     }
     let current = fs::symlink_metadata(&receipt).map_err(state::io)?;
     if current.dev() != m.dev() || current.ino() != m.ino() {
         return Err(error());
+    }
+    if !retire {
+        return Ok(());
     }
     fs::remove_file(receipt).map_err(state::io)?;
     File::open(dir)
@@ -417,9 +430,9 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
         }
     }
     if e.unix {
-        retire_socket(e, "frontend", "HKPF1", &e.reservation)?;
+        check_socket(e, "frontend", "HKPF1", &e.reservation, true)?;
     }
-    retire_socket(e, "control", "HKPC1", &e.token)?;
+    check_socket(e, "control", "HKPC1", &e.token, true)?;
     let binary = dir.join("publisher");
     if binary.exists() {
         fs::remove_file(binary).map_err(state::io)?;
@@ -477,6 +490,64 @@ pub fn inspect_claims(c: &Candidate) -> Result<serde_json::Value, CandidateError
         })
         .collect::<Vec<_>>();
     Ok(serde_json::json!({"scope":"durable-ownership-only","claims":claims}))
+}
+
+fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
+    let observed = identity::observe(e.process.pid)?;
+    identity::verify(&e.process, &observed, &e.process.executable, unsafe {
+        libc::geteuid()
+    })?;
+    if !e.unix || !verify_directory(e)? || !e.binary.as_ref().is_some_and(|b| b.ready) {
+        return Err(error());
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&e.process.executable)
+        .map_err(state::io)?;
+    let m = file.metadata().map_err(state::io)?;
+    let staged = e.binary.as_ref().expect("verified stage");
+    if !m.is_file()
+        || m.nlink() != 1
+        || m.uid() != e.process.uid
+        || m.mode() & 0o077 != 0
+        || m.len() > 512 * 1024
+        || m.dev() != staged.device
+        || m.ino() != staged.inode
+    {
+        return Err(error());
+    }
+    let mut bytes = Vec::new();
+    file.take(512 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(state::io)?;
+    if format!("{:x}", Sha256::digest(bytes)) != e.digest {
+        return Err(error());
+    }
+    check_socket(e, "frontend", "HKPF1", &e.reservation, false)?;
+    check_socket(e, "control", "HKPC1", &e.token, false)?;
+    // A second observation refuses death or identity change during filesystem checks.
+    let after = identity::observe(e.process.pid)?;
+    identity::verify(&e.process, &after, &e.process.executable, unsafe {
+        libc::geteuid()
+    })
+}
+/// A point-in-time observation, not a persistent capability or guest health claim.
+pub fn lookup_hostname(c: &Candidate, value: &str) -> Result<serde_json::Value, CandidateError> {
+    let name = normalize_hostname(value)?;
+    let _lock = state::Lock::acquire(&c.state_root.join("run/smolvm"))?;
+    let owner = state::Owner::load(c)?;
+    let entries = load(c, &owner.token)?;
+    let entry = entries
+        .values()
+        .find(|e| e.hostnames.contains(&name))
+        .ok_or_else(error)?;
+    observe_publication(entry)?;
+    Ok(
+        serde_json::json!({"hostname":name,"run":entry.run,"reservation":entry.reservation,
+        "endpoint":directory(entry).join("frontend"),"state":"publication-observed",
+        "scope":"point-in-time-host-publication"}),
+    )
 }
 
 pub(super) struct Launch<'a> {
@@ -771,7 +842,7 @@ mod tests {
     fn stale_control_requires_matching_native_receipt_and_preserves_replacements() {
         use std::os::unix::net::UnixDatagram;
         for unix in [false, true] {
-            for mismatch in ["none", "token", "replacement", "missing"] {
+            for mismatch in ["none", "token", "replacement", "missing", "partial"] {
                 let (c, mut e) = fixture();
                 e.unix = unix;
                 e.port = if unix { 0 } else { 3000 };
@@ -808,6 +879,9 @@ mod tests {
                     .unwrap();
                     fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
                 }
+                if mismatch == "partial" {
+                    fs::write(&receipt, b"HK").unwrap();
+                }
                 let replacement = if mismatch == "replacement" {
                     fs::remove_file(&control).unwrap();
                     let other = UnixDatagram::bind(&control).unwrap();
@@ -820,7 +894,14 @@ mod tests {
                 } else {
                     None
                 };
+                let expected_token = if unix { &e.reservation } else { &e.token };
+                assert_eq!(
+                    check_socket(&e, name, kind, expected_token, false).is_ok(),
+                    mismatch == "none"
+                );
+                assert!(control.exists());
                 if mismatch == "none" {
+                    assert!(receipt.exists());
                     cleanup(&e).unwrap();
                     assert!(!dir.exists());
                 } else {

@@ -217,6 +217,7 @@ mod tests {
             thread,
             time::{Duration, Instant, SystemTime, UNIX_EPOCH},
         };
+        static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
         struct Fixture {
             root: PathBuf,
             process: Option<Child>,
@@ -276,12 +277,13 @@ mod tests {
                     }
                 });
                 let root = std::env::temp_dir().join(format!(
-                    "hack-native-probe-{}-{}",
+                    "hack-native-probe-{}-{}-{}",
                     std::process::id(),
                     SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
-                        .as_nanos()
+                        .as_nanos(),
+                    NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
                 ));
                 fs::create_dir(&root).unwrap();
                 fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();

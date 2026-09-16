@@ -29,6 +29,8 @@ not satisfy application acceptance. Carry every gap into the next checkpoint's a
 | WU09 | Native Linux and private SSH parity | WU05–08 | Planned; Hetzner fixture host selected and access verified; adapter qualification open |
 | WU10 | Measured speed, footprint, and reclamation | WU07–09 | In progress; [current latency and matched-resource comparison](performance-refresh-20260914.md) extends the earlier cohorts; full application, transient-helper accounting and remote qualification open |
 | WU11 | Env/TLS/slim compatibility and migration packaging | WU07–10 | Planned; not a release authorization |
+| WU12 | Disk accounting, safe reuse and bounded retention | WU06–07 | Planned; explicit acceptance added September 16 |
+| WU13 | Many-branch resource budgets and configurable idle suspension | WU07–08, WU12 | Planned; pause/resume experiments precede default policy |
 
 The sequence starts with Mac runtime mechanics, but protocol and source decisions must accommodate
 Linux from WU01 onward. Performance instrumentation starts with each unit; WU10 consolidates the
@@ -438,6 +440,76 @@ native signatures, ABI, assets, protocol, and exact installed executable verifie
 migration, stale state backup, data rollback incompatibility, CA rotation with existing mounts.
 **Evidence:** packaged end-to-end workflows, full gates, migration data readback, explicit unsupported
 platform/capability list. Publishing and changes to the user's official installation are separate.
+
+## WU12 — Bound retained disk without losing application data
+
+**Goal:** repeated builds, branch creation, cancellation and removal must not silently accumulate
+unbounded images, layers, volumes, VM disks, exports or logs. The September 16 user request makes
+this a product acceptance gate, not incidental housekeeping.
+
+**Output:** ownership-aware disk inventory and dry-run retention plan; reference-aware reuse;
+configurable byte/age/count budgets for disposable caches and evidence; reconciled cleanup with
+before/after resource readback. Report guest logical use and actual host allocation separately.
+Sparse-file apparent size, APFS sharing and free guest blocks are not proof of host disk recovery.
+
+**Acceptance:** distinguish persistent data, reconstructible caches, active references, recoverable
+partial operations and unknown ownership. Never infer that a named volume is disposable from age,
+branch inactivity, missing checkout or zero running containers. Persistent deletion needs explicit
+policy/authorization with reviewed scope. Dry runs name exact owned IDs, reason, expected savings
+and retained references. Active leases and cross-branch users prevent collection. No broad engine
+prune. Reuse immutable artifacts only after content/ownership verification; writes stay isolated.
+
+**Controls:** repeated create/build/cancel/restore/remove cycles reach a bounded retained plateau;
+cleanup interruption is resumable; foreign/replaced/shared resources remain untouched; database
+markers survive ordinary down and cache reclamation; deleted owned resources stay absent after
+restart. Exercise disk-full and retention-budget exhaustion before admission. Measure actual host
+allocation after guest cleanup and any supported discard/compaction, including temporary headroom
+and latency. Unexported recovery evidence cannot be silently evicted to satisfy a budget.
+
+**Next slices:** read-only ownership/accounting inventory; immutable cache reference model; bounded
+collection preview and explicit application; host allocation reclamation control. Apply the same
+rules to qualification fixtures so experiments do not become a separate accumulation problem.
+
+## WU13 — Keep dozens of branch instances affordable
+
+**Goal:** many enrolled/retained branches should not require many permanently active working sets.
+Separate registered, running, idle, paused and stopped states with honest CPU/memory/disk accounting.
+
+**Output:** branch-level budgets, explicit keep-awake leases, configurable idle eligibility and a
+verified wake/resume path. Idle pausing begins opt-in. Pausing, memory reclamation, graceful stop,
+compute removal and persistent-data deletion are distinct operations and policies. Suspension alone
+must not be advertised as returning resident memory or host disk space.
+
+**Acceptance:** active commands, terminals, jobs, startup, migrations, in-flight requests and declared
+background workers exclude suspension unless their contract explicitly permits it. Do not rely only
+on absence of HTTP requests. Account for shared dependencies and all dependent branch leases.
+Wakeup must revalidate routes, credentials and resource identity; expire stale leases safely.
+Persistent data survives pause/resume and ordinary stop. No automatic data removal for idle branches.
+
+**Controls:** qualify at least 32 registered branch instances with a bounded active subset under
+host admission, rather than booting 32 full-capacity VMs. Exercise concurrent wakes, port conflicts,
+long-lived sockets, timers, active database transactions, missed activity, expired QA credentials,
+interrupted pause and failed resume. Compare idle CPU/working set, retained host bytes, wake latency
+and post-resume correctness. Test workload isolation and cleanup after a branch checkout disappears.
+Investigate container freeze versus graceful stop and provider-supported suspension separately;
+choose policies only after measured resource return and application recovery.
+
+## Ongoing completion goal — September 16
+
+Continue the known units and bounded experiments until supported local Hack workflows have real
+application parity with the working Docker/Compose setup and demonstrated resource/performance
+improvements. Keep the active sequence: WU07 bridge intent and stale-target invalidation → loopback
+publication/TLS and scoped QA delivery → application/source/terminal parity, alongside WU12 disk
+accounting. WU13 suspension depends on reliable routing, activity leases and recovery.
+
+Use a per-workflow parity and benchmark matrix for setup, cold/warm start, branch creation/switch,
+edit/reload, build/test, execution, logs/terminals, restart/recovery, cleanup, idle/load and wake.
+Compare current Compose/OrbStack, preserved Hack 4.1.1, working 4.2.0 and the exact candidate where
+available, with matched workloads/capacities and attributable helpers. Faster component results do
+not close slower or untested workflows. Resource wins must include retained disk, not only RAM.
+Record tradeoffs and unresolved gates rather than declaring an across-the-board winner prematurely.
+New actionable work joins this ledger with acceptance and a bounded verification path. Release,
+production migration and unrelated global configuration remain separate from this development goal.
 
 ## Review record for each completed unit
 

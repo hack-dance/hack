@@ -1,5 +1,8 @@
 # Namespace-pinned relay lifetime
 
+The subsequent [managed graph relay](graph-relay-lifecycle-20260916.md) uses these native controls.
+This report preserves their earlier standalone qualification and its boundaries.
+
 The optional native stream relay accepts a Linux-only target mode:
 
 ```text

@@ -1,5 +1,10 @@
 # Graph-owned bridge reservations
 
+This report records the reservation-only qualification. The subsequent
+[managed relay lifecycle](graph-relay-lifecycle-20260916.md) extends the receipt phases and adds
+explicit startup plus owned stop/removal to release and graph cleanup. The boundaries below
+describe the earlier reservation-only version, not the current optional-feature integration.
+
 Healthy guest endpoints now expose a generation fingerprint that includes pool ownership, graph
 attempt/plan/service, VM boot identity, container ID and start time, network/endpoint IDs, address
 and port. Restarting the same container changes this generation even when its ID/address remain.

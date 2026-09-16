@@ -1,4 +1,4 @@
-//! Durable reservations only. No relay may be launched from these receipts yet.
+//! Durable graph bridge ownership, with explicit relay intent and cleanup phases.
 use super::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -12,6 +12,8 @@ pub struct Assignment {
     pub network_id: String,
     pub boot_id: String,
     pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<relay::Relay>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,12 +53,21 @@ fn validate(store: &Store, owner: &str, capacity: u8) -> Result<(), CandidateErr
                 .boot_id
                 .bytes()
                 .all(|c| c.is_ascii_hexdigit() || c == b'-')
-            || a.phase != "reserved"
+            || !["reserved", "starting", "running", "stopping", "stopped"]
+                .contains(&a.phase.as_str())
+            || (a.phase == "reserved") != a.relay.is_none()
+            || a.relay.as_ref().is_some_and(|r| !r.valid())
         {
             return Err(invalid());
         }
     }
     Ok(())
+}
+fn matches_endpoint(a: &Assignment, e: &GuestEndpoint, boot: &str) -> bool {
+    a.boot_id == boot
+        && a.generation == e.generation
+        && a.container_id == e.container_id
+        && a.network_id == e.network_id
 }
 fn load_store(
     candidate: &Candidate,
@@ -170,10 +181,118 @@ pub fn reserve_bridge(
         network_id: endpoint.network_id.clone(),
         boot_id: engine.guest().boot_id().into(),
         phase: "reserved".into(),
+        relay: None,
     };
     store.slots.insert(options.slot, assignment.clone());
     save(candidate, &store)?;
     Ok(assignment)
+}
+pub fn start_bridge(
+    candidate: &Candidate,
+    run: &str,
+    slot: u8,
+    reservation: &str,
+) -> Result<Assignment, CandidateError> {
+    if !hex(reservation, 32) {
+        return Err(invalid());
+    }
+    let (digest, input) = relay::payload()?;
+    let engine = Engine::connect(candidate)?;
+    let mut store = load_store(candidate, &engine, false)?;
+    let a = store
+        .slots
+        .get(&slot)
+        .filter(|a| a.run == run && a.reservation == reservation && a.phase == "reserved")
+        .ok_or_else(|| {
+            error(
+                "bridge_reservation_changed",
+                "Expected an exact reserved slot; no launch was replayed.",
+            )
+        })?
+        .clone();
+    let snapshot = inspect_using(candidate, &engine, run)?;
+    let endpoint = snapshot
+        .guest_endpoints
+        .get(&a.service)
+        .filter(|e| matches_endpoint(&a, e, engine.guest().boot_id()))
+        .ok_or_else(|| {
+            error(
+                "bridge_generation_stale",
+                "Endpoint changed before relay startup.",
+            )
+        })?;
+    let container = engine.request(
+        Method::GET,
+        &format!("/containers/{}/json", a.container_id),
+        None,
+    )?;
+    let pid = container["State"]["Pid"]
+        .as_u64()
+        .filter(|p| (2..=i32::MAX as u64).contains(p))
+        .ok_or_else(|| error("bridge_target", "Target has no live process identity."))?
+        as u32;
+    let start = relay::target_start(&engine, pid)?;
+    let checked = inspect_using(candidate, &engine, run)?;
+    if !checked
+        .guest_endpoints
+        .get(&a.service)
+        .is_some_and(|e| matches_endpoint(&a, e, engine.guest().boot_id()))
+    {
+        return Err(error(
+            "bridge_generation_stale",
+            "Endpoint changed during target verification.",
+        ));
+    }
+    let entry = store.slots.get_mut(&slot).expect("checked slot");
+    entry.relay = Some(relay::Relay {
+        binary_sha256: digest,
+        target_pid: pid,
+        target_start: start,
+        port: endpoint.port,
+    });
+    entry.phase = "starting".into();
+    save(candidate, &store)?;
+    relay::operate(&engine, slot, &store.slots[&slot], "start", Some(&input))?;
+    let checked = inspect_using(candidate, &engine, run)?;
+    if !checked
+        .guest_endpoints
+        .get(&a.service)
+        .is_some_and(|e| matches_endpoint(&a, e, engine.guest().boot_id()))
+    {
+        stop_slot(candidate, &engine, &mut store, slot)?;
+        return Err(error(
+            "bridge_generation_stale",
+            "Endpoint changed during startup; relay was stopped.",
+        ));
+    }
+    store.slots.get_mut(&slot).expect("checked slot").phase = "running".into();
+    save(candidate, &store)?;
+    Ok(store.slots[&slot].clone())
+}
+fn stop_slot(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    store: &mut Store,
+    slot: u8,
+) -> Result<(), CandidateError> {
+    let a = store.slots.get(&slot).expect("selected slot");
+    if a.relay.is_none() {
+        return Ok(());
+    }
+    if a.boot_id != engine.guest().boot_id() {
+        // Guest allocations are boot-local tmpfs; an audited new boot has no old processes.
+        store.slots.get_mut(&slot).expect("selected slot").phase = "stopped".into();
+        return save(candidate, store);
+    }
+    if a.phase != "stopped" {
+        store.slots.get_mut(&slot).expect("selected slot").phase = "stopping".into();
+        save(candidate, store)?;
+        relay::operate(engine, slot, &store.slots[&slot], "stop", None)?;
+        store.slots.get_mut(&slot).expect("selected slot").phase = "stopped".into();
+        save(candidate, store)?;
+    }
+    relay::operate(engine, slot, &store.slots[&slot], "remove", None)?;
+    Ok(())
 }
 pub fn inspect_bridges(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
@@ -184,19 +303,15 @@ pub fn inspect_bridges(candidate: &Candidate, run: &str) -> Result<Value, Candid
         .iter()
         .filter(|(_, a)| a.run == run)
         .map(|(slot, a)| {
-            let current = a.boot_id == engine.guest().boot_id()
-                && snapshot.guest_endpoints.get(&a.service).is_some_and(|e| {
-                    e.generation == a.generation
-                        && e.container_id == a.container_id
-                        && e.network_id == a.network_id
-                });
-            (
-                slot.to_string(),
-                json!({"assignment":a,"current":current,"relay_started":false}),
-            )
+            let current = snapshot.guest_endpoints.get(&a.service)
+                .is_some_and(|e| matches_endpoint(a, e, engine.guest().boot_id()));
+            let status = if a.relay.is_some() && a.boot_id == engine.guest().boot_id() && a.phase != "stopped" {
+                relay::operate(&engine, *slot, a, "inspect", None)?
+            } else { "not-running".into() };
+            Ok((slot.to_string(), json!({"assignment":a,"current":current,"relay_started":status == "running","relay_status":status})))
         })
-        .collect::<BTreeMap<_, _>>();
-    Ok(json!({"run":run,"slots":slots,"scope":"reservation-only"}))
+        .collect::<Result<BTreeMap<_, _>, CandidateError>>()?;
+    Ok(json!({"run":run,"slots":slots,"scope":"graph-owned-guest-relay"}))
 }
 pub fn release_bridge(
     candidate: &Candidate,
@@ -220,6 +335,7 @@ pub fn release_bridge(
             "The selected reservation is absent or has changed; nothing was released.",
         ));
     }
+    stop_slot(candidate, &engine, &mut store, slot)?;
     store.slots.remove(&slot);
     save(candidate, &store)?;
     Ok(json!({"run":run,"slot":slot,"released":reservation,"relay_started":false}))
@@ -230,9 +346,15 @@ pub(super) fn release_run(
     receipt: &Receipt,
 ) -> Result<(), CandidateError> {
     let mut store = load_store(candidate, engine, false)?;
-    let before = store.slots.len();
-    store.slots.retain(|_, a| a.run != receipt.run);
-    if store.slots.len() != before {
+    let selected = store
+        .slots
+        .iter()
+        .filter(|(_, a)| a.run == receipt.run)
+        .map(|(slot, _)| *slot)
+        .collect::<Vec<_>>();
+    for slot in selected {
+        stop_slot(candidate, engine, &mut store, slot)?;
+        store.slots.remove(&slot);
         save(candidate, &store)?;
     }
     Ok(())
@@ -247,7 +369,7 @@ pub fn reconcile_bridges(candidate: &Candidate, run: &str) -> Result<Value, Cand
     } else {
         None
     };
-    Ok(json!({"retained":retained,"replayed":false,"scope":"reservation-only"}))
+    Ok(json!({"retained":retained,"replayed":false,"scope":"journal-preservation-only"}))
 }
 
 #[cfg(test)]
@@ -268,9 +390,61 @@ mod tests {
                     network_id: "e".repeat(64),
                     boot_id: "12345678-1234-1234-1234-123456789abc".into(),
                     phase: "reserved".into(),
+                    relay: None,
                 },
             )]),
         }
+    }
+    #[test]
+    fn matching_generation_cannot_authorize_a_different_container_or_network() {
+        let a = fixture().slots.remove(&0).unwrap();
+        let mut endpoint = GuestEndpoint {
+            generation: a.generation.clone(),
+            container_id: a.container_id.clone(),
+            network_id: a.network_id.clone(),
+            address: "172.17.0.2".parse().unwrap(),
+            port: 3000,
+            scope: "guest-only",
+            reachability: "not-probed",
+        };
+        assert!(matches_endpoint(&a, &endpoint, &a.boot_id));
+        endpoint.container_id = "f".repeat(64);
+        assert!(!matches_endpoint(&a, &endpoint, &a.boot_id));
+        endpoint.container_id = a.container_id.clone();
+        endpoint.network_id = "f".repeat(64);
+        assert!(!matches_endpoint(&a, &endpoint, &a.boot_id));
+        endpoint.network_id = a.network_id.clone();
+        assert!(!matches_endpoint(&a, &endpoint, "other-boot"));
+    }
+    #[test]
+    fn relay_phases_require_complete_bounded_identity() {
+        let mut store = fixture();
+        let relay = relay::Relay {
+            binary_sha256: "f".repeat(64),
+            target_pid: 42,
+            target_start: 123,
+            port: 3000,
+        };
+        store.slots.get_mut(&0).unwrap().relay = Some(relay.clone());
+        assert!(validate(&store, "owner", 1).is_err());
+        for phase in ["starting", "running", "stopping", "stopped"] {
+            store.slots.get_mut(&0).unwrap().phase = phase.into();
+            validate(&store, "owner", 1).unwrap();
+        }
+        for case in 0..5 {
+            let mut broken = relay.clone();
+            match case {
+                0 => broken.target_pid = 1,
+                1 => broken.target_start = 0,
+                2 => broken.target_start = u64::MAX,
+                3 => broken.port = 0,
+                _ => broken.binary_sha256 = "bad".into(),
+            }
+            store.slots.get_mut(&0).unwrap().relay = Some(broken);
+            assert!(validate(&store, "owner", 1).is_err());
+        }
+        store.slots.get_mut(&0).unwrap().relay = None;
+        assert!(validate(&store, "owner", 1).is_err());
     }
     #[test]
     fn assignments_require_ownership_capacity_unique_identity_and_reserved_phase() {

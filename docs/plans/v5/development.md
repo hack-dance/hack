@@ -655,7 +655,8 @@ health serialization, so adding support does not change their identity by insert
 ## Experimental application socket relay
 
 The optional `native-stream-relay` feature builds a bounded single-process Unix-to-TCP relay.
-It is absent from the default build and has no route CLI or automatic lifecycle integration.
+It is absent from the default build. Graph-managed Unix relay startup is experimental; host
+TCP/hostname routing is not yet implemented.
 The [isolated socket bridge qualification](socket-bridge-20260915.md) proves HTTP transport through
 SmolVM without enabling general guest networking; it records ownership, recovery and credential
 delivery gates before actual application use.
@@ -671,14 +672,18 @@ qualification and remaining graph routing gates. The default pool/build remains 
 
 `graph reserve-bridge`, `bridges`, `release-bridge` and `reconcile-bridges` provide bounded
 [graph-owned slot reservations](graph-bridge-reservations-20260916.md). They require an exact observed
-endpoint generation and do not start relays or expose TCP ports. Cleanup releases reservations;
-interrupted journals require explicit preservation/reconciliation before reuse.
+endpoint generation. `graph start-bridge --run-id <run> --slot <index> --expect-reservation <token>`
+starts the embedded relay under durable graph ownership. Explicit release and graph cleanup stop
+owned relays before removing their allocations and freeing slots. See the
+[managed relay lifecycle](graph-relay-lifecycle-20260916.md) for crash boundaries and qualification.
+These commands do not expose host TCP ports; interrupted journals require explicit preservation
+before cleanup can resume.
 
 The relay's optional Linux `--netns PID START_TICKS` mode pins a distinct target network namespace,
 connects only to its loopback address and watches the original process with a pidfd. Target exit
 closes streams and removes the owned socket without a periodic idle timer. See the
-[namespace lifetime qualification](namespace-relay-20260916.md). Graph-owned automatic start/stop
-and durable relay recovery remain unimplemented.
+[namespace lifetime qualification](namespace-relay-20260916.md). Graph launch is explicit; service
+restart does not silently recreate a stale reservation or relay.
 
 The native Linux helper also accepts `--stop PID START_TICKS`: it opens a pidfd, verifies start
 time and executable device/inode against itself, sends SIGTERM through that handle and waits

@@ -4,8 +4,10 @@ pub use archive::archive;
 mod bridges;
 mod config;
 mod endpoints;
+mod relay;
 pub use bridges::{
     ReserveBridgeOptions, inspect_bridges, reconcile_bridges, release_bridge, reserve_bridge,
+    start_bridge,
 };
 mod environment;
 pub use endpoints::GuestEndpoint;

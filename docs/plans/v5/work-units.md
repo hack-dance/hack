@@ -503,7 +503,7 @@ choose policies only after measured resource return and application recovery.
 
 Continue the known units and bounded experiments until supported local Hack workflows have real
 application parity with the working Docker/Compose setup and demonstrated resource/performance
-improvements. Keep the active sequence: WU07 automatic relay ownership/recovery → loopback
+improvements. Keep the active sequence: WU07 interrupted relay start/stop controls → loopback
 publication/TLS and scoped QA delivery → application/source/terminal parity, alongside WU12 disk
 accounting. WU13 suspension depends on reliable routing, activity leases and recovery.
 
@@ -514,9 +514,9 @@ available, with matched workloads/capacities and attributable helpers. Faster co
 not close slower or untested workflows. Resource wins must include retained disk, not only RAM.
 Record tradeoffs and unresolved gates rather than declaring an across-the-board winner prematurely.
 The optional native relay now has live-qualified namespace pinning and process-exit invalidation
-([evidence and boundaries](namespace-relay-20260916.md)); its graph supervisor remains open. Exact-executable pidfd graceful stop is also live-qualified;
-the next slice must embed/stage the relay, record start/stop intent and reconcile guest allocation
-identity before reusing a slot.
+([evidence and boundaries](namespace-relay-20260916.md)); [graph-managed startup and cleanup](graph-relay-lifecycle-20260916.md) now embed/stage the relay
+and durably track allocation lifetime. Abrupt-launch/stop interruption controls, unknown guest
+identity recovery and unhealthy-but-running target policy remain open before normal publication.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

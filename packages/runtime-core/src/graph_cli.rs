@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed, plus --source-revision for source mounts; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Bridge reservation requires --run-id, --service, --slot and --expect-generation; release requires --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed, plus --source-revision for source mounts; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
@@ -28,6 +28,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "prune",
         "reserve-bridge",
         "release-bridge",
+        "start-bridge",
         "bridges",
         "reconcile-bridges",
     ]
@@ -73,9 +74,11 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             }
         } else if key == "--profile" && ["run", "restart", "restore"].contains(action) {
             profiles.push(value.to_owned());
-        } else if (["reserve-bridge", "release-bridge"].contains(action) && key == "--slot")
+        } else if (["reserve-bridge", "release-bridge", "start-bridge"].contains(action)
+            && key == "--slot")
             || (*action == "reserve-bridge" && ["--service", "--expect-generation"].contains(&key))
-            || (*action == "release-bridge" && key == "--expect-reservation")
+            || (["release-bridge", "start-bridge"].contains(action)
+                && key == "--expect-reservation")
             || key == "--run-id"
             || (["run", "restart", "restore"].contains(action)
                 && [
@@ -115,6 +118,20 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                     .copied()
                     .ok_or_else(invalid)?,
             },
+        )?)
+        .map_err(|_| invalid()),
+        "start-bridge" => serde_json::to_value(graph::start_bridge(
+            candidate,
+            run,
+            singles
+                .get("--slot")
+                .ok_or_else(invalid)?
+                .parse()
+                .map_err(|_| invalid())?,
+            singles
+                .get("--expect-reservation")
+                .copied()
+                .ok_or_else(invalid)?,
         )?)
         .map_err(|_| invalid()),
         "release-bridge" => graph::release_bridge(

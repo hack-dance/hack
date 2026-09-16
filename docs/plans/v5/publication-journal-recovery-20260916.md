@@ -44,8 +44,8 @@ identity, file identity and readiness. For each, the harness paused its own laun
 after a complete pending write, killed and reaped it without editing the receipt,
 and verified startup refused the unchanged journal. CLI unpublish then recovered
 that journal and reclaimed the recorded resources. A new publisher served the same
-token on the same port afterward. Completed-removal and identical-map recovery have
-regression coverage; they were not separately interrupted in this live fixture.
+token on the same port afterward. Completed-removal recovery was subsequently qualified in the live fixture below.
+Identical-map recovery retains regression coverage without a separate live interruption.
 
 Private evidence: `.hack-local/review/wu07/publication-journal-1789586539134644000/`.
 Candidate SHA-256: `b3b811529ddf9c99460b849c937bbb4af002d5aad8b0f1e0acd1b4fc31d7d329`.
@@ -58,3 +58,32 @@ All six publication tests, default/all-feature Rust suites, strict Clippy, defau
 native-HTTP release and Bun typecheck/check/tests passed (940 pass, 5 skip).
 Malformed or partial journals and identity lost before a complete write remain
 open; none were discarded by this recovery path.
+
+
+## Interrupted retirement control
+
+A later live control caught the real cleanup command on attempt
+1, after it removed the host publisher's resources but before
+committing the empty publication map. The harness stopped, killed and reaped that
+owned CLI process and reaped the already-exited publisher. The original pending
+journal was captured without editing it.
+
+Two negative fixtures then verified preservation: a one-byte malformed pending
+journal and a new private directory with a sentinel at the previous staging path.
+Both refused recovery while preserving the committed receipt and injected state.
+Only the harness restored its captured journal bytes and removed its own verified
+replacement directory. CLI unpublish then completed retirement. This confirms safe
+refusal of partial journals; it does not implement their export/discard recovery.
+
+Private evidence: `.hack-local/review/wu07/publication-retirement-1789586699082935000/`.
+Candidate SHA-256: `b3b811529ddf9c99460b849c937bbb4af002d5aad8b0f1e0acd1b4fc31d7d329` (unchanged implementation).
+Fresh publication on the same port worked afterward, with unchanged token and
+volume record. Graph cleanup, archive/export and final VM down passed. All 5
+watchdog samples and protected global hashes passed. Final readback found no
+publisher entries, pending journal or candidate staging directories.
+
+This evidence-only follow-up changes no runtime code; prior required checks remain
+the code qualification, supplemented by this live retirement control. The next
+recovery work is a bounded, explicit path for retaining malformed journal evidence
+without replaying startup or discarding ownership that is absent from committed
+state. Unknown directory/file identity remains a refusal until independently proved.

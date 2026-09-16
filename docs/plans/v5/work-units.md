@@ -564,7 +564,10 @@ and create-before-identity windows remain open.
 [Complete publication journal recovery](publication-journal-recovery-20260916.md)
 permits only validated single-step metadata completion during cleanup, with changed
 launchers absent. Startup replay, malformed/partial journals and unknown identity
-remain refused; no raw-journal discard is authorized by this path.
+remain refused; no raw-journal discard is authorized by this path. Actual interrupted
+receipt retirement now also passes, including malformed-journal and reoccupied-path
+preservation controls; final readback is empty. Bounded malformed-journal recovery
+and missing-identity cases remain open.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

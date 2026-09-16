@@ -619,6 +619,10 @@ remain open; stopped compute left a measured retained working-set gap.
 [Memory attribution](worktree-memory-attribution-20260916.md) found that guest cache
 eviction and a 4 GiB balloon did not materially recover it; host VM-region attribution
 and a separately admitted larger balloon control are next, with no default change.
+[VM-region attribution](vm-memory-regions-20260916.md) found little allocator growth
+and no additional recovery at a 5 GiB balloon target. Pinned-source inspection exposed
+PFN ordering/alignment loss and unchecked host-discard results as instrumentation
+targets; neither is yet established as the live cause.
 
 **Goal:** many enrolled/retained branches should not require many permanently active working sets.
 Separate registered, running, idle, paused and stopped states with honest CPU/memory/disk accounting.

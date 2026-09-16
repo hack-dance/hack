@@ -4,6 +4,8 @@ use super::*;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Relay {
+    #[serde(default)]
+    pub launch_serial: u64,
     pub binary_sha256: String,
     pub target_pid: u32,
     pub target_start: u64,
@@ -11,7 +13,8 @@ pub struct Relay {
 }
 impl Relay {
     pub(super) fn valid(&self) -> bool {
-        hex(&self.binary_sha256, 64)
+        self.launch_serial <= i64::MAX as u64
+            && hex(&self.binary_sha256, 64)
             && (2..=i32::MAX as u32).contains(&self.target_pid)
             && (1..=i64::MAX as u64).contains(&self.target_start)
             && self.port != 0
@@ -81,16 +84,15 @@ pub(super) fn operate(
         relay.target_pid.to_string(),
         relay.target_start.to_string(),
         relay.port.to_string(),
+        relay.launch_serial.to_string(),
+        slot.to_string(),
     ];
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let script = include_str!("relay.sh").replace("# RELAY_FENCE", include_str!("relay-fence.sh"));
     let result = if action == "start" {
-        engine
-            .guest()
-            .execute(include_str!("relay.sh"), &args, input)?
+        engine.guest().execute(&script, &args, input)?
     } else {
-        engine
-            .guest()
-            .execute_cleanup(include_str!("relay.sh"), &args)?
+        engine.guest().execute_cleanup(&script, &args)?
     };
     let confirmed = match action {
         "start" => result == "running\n",

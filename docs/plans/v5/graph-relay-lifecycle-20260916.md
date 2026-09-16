@@ -92,3 +92,6 @@ resolve those application mount/routing compatibility gates.
 The subsequent [interruption controls](graph-relay-interruption-20260916.md) qualify real CLI
 termination at committed start/stop intent. Stop retry passes; an unlaunched start still requires
 new-boot recovery. A bounded guest cancellation fence is the next recovery slice.
+
+[Same-boot cancellation](relay-cancellation-20260916.md) now resolves the qualified pre-launch
+interruption for new serial-bearing intents. Later guest-side crash windows remain conservative.

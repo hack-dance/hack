@@ -33,6 +33,7 @@ alive() {
  test "$(start_ticks "$pid")" = "$born" || return 1
  test "$(sed 's/.*) //' "/proc/$pid/stat" | cut -d' ' -f1)" != Z
 }
+# RELAY_FENCE
 if test "$action" = start; then
  test ! -L "$base"
  if test ! -e "$base"; then mkdir -m 700 "$base"; fi
@@ -92,4 +93,5 @@ elif test "$action" = inspect; then
 fi
 test "$action" = stop
 if test -e "$socket" || test -L "$socket"; then check_socket; rm "$socket"; fi
+if test "$serial" -ne 0; then fence_write stopped; fi
 printf 'stopped\n'

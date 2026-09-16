@@ -690,3 +690,9 @@ time and executable device/inode against itself, sends SIGTERM through that hand
 up to five seconds for exit. Unsupported kernels/identities refuse; timeout does not trigger
 SIGKILL. A supervisor must retain per-allocation executable identity and boot ownership before
 using this primitive; it is not graph authorization on its own.
+
+New relay intents carry a monotonic launch serial. A bounded per-slot guest record prevents an
+unlaunched request from arriving after cancellation or slot reuse, allowing the qualified early
+startup interruption to recover without VM restart. See
+[same-boot cancellation](relay-cancellation-20260916.md) for controls and remaining partial-start
+recovery limits. Existing serial-zero receipts retain their conservative recovery behavior.

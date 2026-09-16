@@ -20,6 +20,8 @@ pub struct Assignment {
 struct Store {
     version: u32,
     owner: String,
+    #[serde(default)]
+    next_launch_serial: u64,
     slots: BTreeMap<u8, Assignment>,
 }
 fn root(candidate: &Candidate) -> PathBuf {
@@ -32,11 +34,16 @@ fn invalid() -> CandidateError {
     )
 }
 fn validate(store: &Store, owner: &str, capacity: u8) -> Result<(), CandidateError> {
-    if store.version != 1 || store.owner != owner || store.slots.len() > capacity as usize {
+    if store.version != 1
+        || store.owner != owner
+        || store.slots.len() > capacity as usize
+        || store.next_launch_serial > i64::MAX as u64
+    {
         return Err(invalid());
     }
     let mut services = std::collections::BTreeSet::new();
     let mut reservations = std::collections::BTreeSet::new();
+    let mut serials = std::collections::BTreeSet::new();
     for (slot, a) in &store.slots {
         if *slot >= capacity
             || !hex(&a.reservation, 32)
@@ -56,7 +63,11 @@ fn validate(store: &Store, owner: &str, capacity: u8) -> Result<(), CandidateErr
             || !["reserved", "starting", "running", "stopping", "stopped"]
                 .contains(&a.phase.as_str())
             || (a.phase == "reserved") != a.relay.is_none()
-            || a.relay.as_ref().is_some_and(|r| !r.valid())
+            || a.relay.as_ref().is_some_and(|r| {
+                !r.valid()
+                    || r.launch_serial > store.next_launch_serial
+                    || (r.launch_serial != 0 && !serials.insert(r.launch_serial))
+            })
         {
             return Err(invalid());
         }
@@ -79,6 +90,7 @@ fn load_store(
         version: 1,
         owner: engine.guest().incarnation().into(),
         slots: BTreeMap::new(),
+        next_launch_serial: 0,
     };
     if !root.try_exists().map_err(state::io)? && !root.is_symlink() {
         return Ok(empty());
@@ -243,8 +255,16 @@ pub fn start_bridge(
             "Endpoint changed during target verification.",
         ));
     }
+    if store.next_launch_serial == i64::MAX as u64 {
+        return Err(error(
+            "bridge_serial_exhausted",
+            "Bridge launch serials are exhausted; no launch was attempted.",
+        ));
+    }
+    store.next_launch_serial += 1;
     let entry = store.slots.get_mut(&slot).expect("checked slot");
     entry.relay = Some(relay::Relay {
+        launch_serial: store.next_launch_serial,
         binary_sha256: digest,
         target_pid: pid,
         target_start: start,
@@ -379,6 +399,7 @@ mod tests {
         Store {
             version: 1,
             owner: "owner".into(),
+            next_launch_serial: 0,
             slots: BTreeMap::from([(
                 0,
                 Assignment {
@@ -417,9 +438,48 @@ mod tests {
         assert!(!matches_endpoint(&a, &endpoint, "other-boot"));
     }
     #[test]
+    fn launch_serials_remain_monotonic_when_slots_are_empty_and_reject_reuse() {
+        let mut store = fixture();
+        store.next_launch_serial = 7;
+        let entry = store.slots.get_mut(&0).unwrap();
+        entry.phase = "starting".into();
+        entry.relay = Some(relay::Relay {
+            launch_serial: 7,
+            binary_sha256: "f".repeat(64),
+            target_pid: 42,
+            target_start: 123,
+            port: 3000,
+        });
+        validate(&store, "owner", 2).unwrap();
+        let mut legacy = serde_json::to_value(&store).unwrap();
+        legacy.as_object_mut().unwrap().remove("next_launch_serial");
+        legacy["slots"]["0"]["relay"]
+            .as_object_mut()
+            .unwrap()
+            .remove("launch_serial");
+        let legacy: Store = serde_json::from_value(legacy).unwrap();
+        validate(&legacy, "owner", 2).unwrap();
+        assert_eq!(legacy.slots[&0].relay.as_ref().unwrap().launch_serial, 0);
+        store.next_launch_serial = 6;
+        assert!(validate(&store, "owner", 2).is_err());
+        store.next_launch_serial = 7;
+        let mut other = store.slots[&0].clone();
+        other.reservation = "f".repeat(32);
+        other.service = "other".into();
+        store.slots.insert(1, other);
+        assert!(validate(&store, "owner", 2).is_err());
+        store.slots.clear();
+        let decoded: Store = serde_json::from_slice(&serde_json::to_vec(&store).unwrap()).unwrap();
+        validate(&decoded, "owner", 2).unwrap();
+        assert_eq!(decoded.next_launch_serial, 7);
+        store.next_launch_serial = u64::MAX;
+        assert!(validate(&store, "owner", 2).is_err());
+    }
+    #[test]
     fn relay_phases_require_complete_bounded_identity() {
         let mut store = fixture();
         let relay = relay::Relay {
+            launch_serial: 0,
             binary_sha256: "f".repeat(64),
             target_pid: 42,
             target_start: 123,

@@ -1,5 +1,8 @@
 # Relay interruption controls and remaining cancellation gap
 
+The subsequent [same-boot cancellation implementation](relay-cancellation-20260916.md) closes
+the pre-launch case below for new intents. This report preserves the original finding.
+
 Real CLI termination now qualifies two committed intent boundaries in the isolated ARM64 pool.
 The fixture starts a child CLI, watches its exact reservation in the committed registry, and kills
 only that child after observing the requested phase. Both child exit statuses were `-9`.

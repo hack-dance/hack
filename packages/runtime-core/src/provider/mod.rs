@@ -2,7 +2,9 @@
 pub mod admission;
 mod agent;
 mod artifact;
+mod bridge;
 mod config_audit;
+pub use bridge::BridgeIntent;
 mod disk_audit;
 mod engine;
 pub mod environment;
@@ -40,7 +42,7 @@ pub use source_job::{SourceJob, SourceJobEvent, reconcile_source_job, run_source
 pub use source_probe::{ProbeReceipt, verify as verify_source};
 pub use source_sync::{SyncReceipt, SyncSession, sync_status};
 mod state;
-pub use lifecycle::{down, recover, status, up, up_with_profile};
+pub use lifecycle::{down, recover, status, up, up_with_bridge, up_with_profile};
 pub use source_transfer::{
     TransferReceipt, publish as publish_source, reconcile as reconcile_source_publication,
 };

@@ -92,3 +92,34 @@ fn status_rejects_an_aliased_provider_directory_without_contacting_it() {
     );
     assert_eq!(std::fs::read_dir(foreign).unwrap().count(), 0);
 }
+
+#[test]
+fn invalid_or_unavailable_bridges_have_no_runtime_effects() {
+    let fixture = Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    assert_eq!(
+        provider::up_with_bridge(
+            &candidate,
+            provider::Profile::Development,
+            Some(provider::BridgeIntent { slots: 0 })
+        )
+        .unwrap_err()
+        .code,
+        "bridge_capacity"
+    );
+    assert!(!candidate.state_root.exists());
+    #[cfg(not(feature = "native-stream-relay"))]
+    {
+        assert_eq!(
+            provider::up_with_bridge(
+                &candidate,
+                provider::Profile::Development,
+                Some(provider::BridgeIntent::new(1).unwrap())
+            )
+            .unwrap_err()
+            .code,
+            "bridge_unavailable"
+        );
+        assert!(!candidate.state_root.exists());
+    }
+}

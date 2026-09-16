@@ -18,7 +18,12 @@ pub(super) fn verify(candidate: &Candidate, owner: &Owner) -> Result<(), Candida
     let database = home.join("Library/Application Support/smolvm/server/smolvm.db");
     #[cfg(not(target_os = "macos"))]
     let database = home.join(".local/share/smolvm/server/smolvm.db");
-    verify_database(&database, &owner.machine, &owner.token)
+    verify_database(
+        &database,
+        &owner.machine,
+        &owner.token,
+        owner.application_bridge,
+    )
 }
 
 fn metadata(path: &Path) -> Result<fs::Metadata, CandidateError> {
@@ -34,7 +39,12 @@ fn metadata(path: &Path) -> Result<fs::Metadata, CandidateError> {
     Ok(metadata)
 }
 
-fn verify_database(path: &Path, machine: &str, token: &str) -> Result<(), CandidateError> {
+fn verify_database(
+    path: &Path,
+    machine: &str,
+    token: &str,
+    bridge: Option<super::BridgeIntent>,
+) -> Result<(), CandidateError> {
     reject_aliased_state(path.parent().ok_or_else(invalid)?).map_err(|_| invalid())?;
     let before = metadata(path)?;
     for suffix in ["-wal", "-shm", "-journal"] {
@@ -74,7 +84,7 @@ fn verify_database(path: &Path, machine: &str, token: &str) -> Result<(), Candid
         return Err(invalid());
     }
     let record: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    verify_record(&record, machine, token)?;
+    verify_record(&record, machine, token, bridge)?;
     if rows.next().map_err(|_| invalid())?.is_some() {
         return Err(invalid());
     }
@@ -85,15 +95,20 @@ fn verify_database(path: &Path, machine: &str, token: &str) -> Result<(), Candid
     Ok(())
 }
 
-fn verify_record(record: &Value, machine: &str, token: &str) -> Result<(), CandidateError> {
+fn verify_record(
+    record: &Value,
+    machine: &str,
+    token: &str,
+    bridge: Option<super::BridgeIntent>,
+) -> Result<(), CandidateError> {
     if record["name"] != machine
         || record["labels"] != json!({"hack-local.owner": token})
         || record["ssh_agent"] != false
+        || record["published_sockets"] != super::BridgeIntent::mappings(bridge)
     {
         return Err(invalid());
     }
     for field in [
-        "published_sockets",
         "staged_mounts",
         "remote_volumes",
         "init",
@@ -138,7 +153,7 @@ mod tests {
     }
     #[test]
     fn refuses_hidden_capabilities_and_foreign_identity() {
-        verify_record(&fixture(), "owned", "token").unwrap();
+        verify_record(&fixture(), "owned", "token", None).unwrap();
         for field in [
             "published_sockets",
             "staged_mounts",
@@ -161,21 +176,48 @@ mod tests {
         ] {
             let mut record = fixture();
             record[field] = json!("private-sentinel");
-            let error = verify_record(&record, "owned", "token").unwrap_err();
+            let error = verify_record(&record, "owned", "token", None).unwrap_err();
             assert_eq!(error.code, "unaudited_provider_config");
             assert!(!error.message.contains("private-sentinel"));
         }
         let mut socket = fixture();
         socket["published_sockets"] =
             json!([{"direction":"expose", "guest_path":"/run/foreign.sock", "host_path":null}]);
-        assert!(verify_record(&socket, "owned", "token").is_err());
+        assert!(verify_record(&socket, "owned", "token", None).is_err());
         let mut ssh = fixture();
         ssh["ssh_agent"] = json!(true);
-        assert!(verify_record(&ssh, "owned", "token").is_err());
+        assert!(verify_record(&ssh, "owned", "token", None).is_err());
         for field in ["published_sockets", "ssh_agent", "labels"] {
             let mut record = fixture();
             record.as_object_mut().unwrap().remove(field);
-            assert!(verify_record(&record, "owned", "token").is_err());
+            assert!(verify_record(&record, "owned", "token", None).is_err());
+        }
+    }
+    #[test]
+    fn bridge_mapping_must_exactly_match_durable_intent() {
+        let intent = Some(super::super::BridgeIntent::new(2).unwrap());
+        let mut record = fixture();
+        record["published_sockets"] = json!([
+            {"direction":"expose","guest_path":"/run/hack-local/bridge-00.sock"},
+            {"direction":"expose","guest_path":"/run/hack-local/bridge-01.sock"}
+        ]);
+        verify_record(&record, "owned", "token", intent).unwrap();
+        assert!(verify_record(&record, "owned", "token", None).is_err());
+        for case in 0..5 {
+            let mut changed = record.clone();
+            match case {
+                0 => changed["published_sockets"][0]["direction"] = json!("mount"),
+                1 => changed["published_sockets"][0]["host_path"] = json!("/tmp/foreign.sock"),
+                2 => changed["published_sockets"][0]["guest_path"] = json!("/run/foreign.sock"),
+                3 => {
+                    changed["published_sockets"].as_array_mut().unwrap().pop();
+                }
+                _ => changed["published_sockets"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({})),
+            }
+            assert!(verify_record(&changed, "owned", "token", intent).is_err());
         }
     }
     #[test]
@@ -201,32 +243,32 @@ mod tests {
         let original = serde_json::to_vec(&fixture()).unwrap();
         connection.execute_batch("PRAGMA journal_mode=WAL").unwrap();
         insert("owned", original.clone());
-        verify_database(&path, "owned", "token").unwrap();
-        assert!(verify_database(&path, "foreign", "token").is_err());
+        verify_database(&path, "owned", "token", None).unwrap();
+        assert!(verify_database(&path, "foreign", "token", None).is_err());
         insert("extra", original.clone());
-        assert!(verify_database(&path, "owned", "token").is_err());
+        assert!(verify_database(&path, "owned", "token", None).is_err());
         connection
             .execute("DELETE FROM vms WHERE name='extra'", [])
             .unwrap();
         for bytes in [vec![b'x'; 65537], b"broken".to_vec()] {
             insert("owned", bytes);
-            assert!(verify_database(&path, "owned", "token").is_err());
+            assert!(verify_database(&path, "owned", "token", None).is_err());
         }
         insert("owned", original);
         fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
-        assert!(verify_database(&path, "owned", "token").is_err());
+        assert!(verify_database(&path, "owned", "token", None).is_err());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         connection
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE")
             .unwrap();
         let alias = root.join("alias.db");
         symlink(&path, &alias).unwrap();
-        assert!(verify_database(&alias, "owned", "token").is_err());
+        assert!(verify_database(&alias, "owned", "token", None).is_err());
         let sidecar = root.join("smolvm.db-wal");
         symlink(&path, &sidecar).unwrap();
-        assert!(verify_database(&path, "owned", "token").is_err());
+        assert!(verify_database(&path, "owned", "token", None).is_err());
         fs::remove_file(sidecar).unwrap();
-        verify_database(&path, "owned", "token").unwrap();
+        verify_database(&path, "owned", "token", None).unwrap();
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }

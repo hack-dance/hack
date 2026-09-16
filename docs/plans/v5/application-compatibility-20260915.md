@@ -1,6 +1,7 @@
-# Application compatibility work, September 15
+# Application compatibility work, September 15–16
 
-The registered application remains a 12-service plan with 21 errors. Its source configuration has
+The September 16 refresh of the registered application is a 14-service plan with 22 errors and two
+warnings, superseding the September 15 snapshot of 12 services and 21 errors. Its source configuration has
 not been changed and the candidate has not started it. These are concrete missing behaviors,
 not parser errors that can safely be ignored.
 
@@ -8,9 +9,9 @@ not parser errors that can safely be ignored.
 | --- | --- |
 | One external shared network | `x-hack-isolated: true` now provides an explicit candidate-owned internal bridge replacement for an isolated cohort. It does not supply the application's outbound dependencies or shared routing. |
 | Nine Caddy route declarations | [Verified guest endpoint discovery](guest-endpoints-20260915.md) now binds destinations to current container/network identities. [Isolated socket bridging](socket-bridge-20260915.md) proves fixture interface reachability. Durable host publication and TLS/hostname routing remain open; removing labels alone does not implement routes. |
-| Eleven AWS home-directory mounts | Obtain scoped, expiring credentials through a native provider and inject them through the environment launcher. Never mount the host credential directory or use an old receipt as authority. |
-| Two environment-file inputs shared by application services | The execution-input compiler still rejects `env_file`; integrate the managed environment resolver without returning values in plans, receipts or logs. |
-| Twelve services versus the original eight-service bound | The driver now allows 32 services, with matching probe and receipt bounds. The four-CPU/4-GiB aggregate guard remains; the actual application's resource declarations still need qualification. |
+| Twelve unresolved mount-source declarations | Resolve ordinary source paths explicitly; replace credential-directory mounts with scoped, expiring credentials through the native provider/environment launcher. Never mount the host credential directory or use an old receipt as authority. |
+| Environment-file inputs shared by application services | The execution-input compiler still rejects `env_file`; integrate the managed environment resolver without returning values in plans, receipts or logs. |
+| Fourteen services versus the original eight-service bound | The driver now allows 32 services, with matching probe and receipt bounds. The four-CPU/4-GiB aggregate guard remains; the actual application's resource declarations still need qualification. |
 | Editable source and application runtime | Qualify writable build outputs, dependency installation, lifecycle helpers and source updates. Existing filtered, read-only source primitives are not complete development-workflow acceptance. |
 
 The network replacement changes the reviewed network intent and plan identity, with an explicit
@@ -20,7 +21,7 @@ rewritten by planning or enrollment.
 
 The actual application needs outbound services, so the isolated option has not been inserted into
 its working configuration. Use the [real-project checkpoint matrix](real-project-checkpoints.md)
-to qualify the complete replacement; the original application still has all 21 errors until its
+to qualify the complete replacement; the original application still has all 22 errors until its
 selected configuration supplies the required supported behavior.
 
 The application also enables watcher-related environment names (`CHOKIDAR_USEPOLLING` and
@@ -31,3 +32,10 @@ changing them without edit/rebuild acceptance could reduce CPU by losing updates
 QA is selected for credential qualification. A fresh `livenation_qa` STS identity request passed
 after user SSO authorization; application permissions, scoped lease delivery and guest injection
 remain unqualified. No AWS home directory was mounted and no application cloud operation ran.
+
+The current errors are one external network, nine route declarations and twelve unresolved mount
+sources. The two warnings concern the candidate project namespace and Compose extension metadata.
+The new browser/crawler/simulation services also need resource, development-workflow and idle-policy
+qualification; earlier fixture results do not cover them. This checkpoint only planned the actual
+configuration and verified its files were unchanged; it did not start the application. Evidence:
+`.hack-local/review/wu07/bridge-intent-application-1789573592983740000/`.

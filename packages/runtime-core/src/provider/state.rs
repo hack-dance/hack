@@ -158,6 +158,8 @@ impl Default for ReclamationPolicy {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Owner {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_bridge: Option<super::BridgeIntent>,
     pub version: u32,
     pub checkout: PathBuf,
     pub token: String,
@@ -184,7 +186,10 @@ impl Owner {
         let root = candidate.state_root.join("run/smolvm");
         reject_aliased_state(&root)?;
         let owner: Self = read(&root.join("owner.json"))?;
-        if owner.version != 1
+        if owner
+            .application_bridge
+            .is_some_and(|bridge| super::BridgeIntent::new(bridge.slots).is_err())
+            || owner.version != 1
             || owner.checkout != candidate.checkout
             || owner.token.len() != 32
             || !owner.token.bytes().all(|b| b.is_ascii_hexdigit())
@@ -211,7 +216,11 @@ impl Owner {
         check_private_directory(&root.join("home"))?;
         Ok(owner)
     }
-    pub fn create(candidate: &Candidate, profile: super::Profile) -> Result<Self, CandidateError> {
+    pub fn create(
+        candidate: &Candidate,
+        profile: super::Profile,
+        application_bridge: Option<super::BridgeIntent>,
+    ) -> Result<Self, CandidateError> {
         let root = candidate.state_root.join("run/smolvm");
         let owner_path = root.join("owner.json");
         if owner_path.try_exists().map_err(io)? {
@@ -238,6 +247,7 @@ impl Owner {
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let owner = Self {
             profile,
+            application_bridge,
             version: 1,
             checkout: candidate.checkout.clone(),
             machine: format!("hack-{}", &token[..12]),
@@ -411,7 +421,7 @@ mod tests {
         let candidate = Candidate::discover(&root).unwrap();
         let directory = candidate.state_root.join("run/smolvm");
         let lock = Lock::acquire(&directory).unwrap();
-        let owner = Owner::create(&candidate, super::super::Profile::Research).unwrap();
+        let owner = Owner::create(&candidate, super::super::Profile::Research, None).unwrap();
         let receipt = directory.join("owner.json");
         let mut legacy: serde_json::Value = read(&receipt).unwrap();
         legacy.as_object_mut().unwrap().remove("profile");
@@ -436,11 +446,46 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn bridge_intent_is_durable_and_conflicts_do_not_write_state() {
+        let root = fixture();
+        let candidate = Candidate::discover(&root).unwrap();
+        let directory = candidate.state_root.join("run/smolvm");
+        let lock = Lock::acquire(&directory).unwrap();
+        let intent = super::super::BridgeIntent::new(2).unwrap();
+        let mut owner =
+            Owner::create(&candidate, super::super::Profile::Research, Some(intent)).unwrap();
+        assert_eq!(
+            Owner::load(&candidate).unwrap().application_bridge,
+            Some(intent)
+        );
+        let before = fs::read(directory.join("owner.json")).unwrap();
+        assert_eq!(
+            super::super::up_with_bridge(
+                &candidate,
+                super::super::Profile::Research,
+                Some(super::super::BridgeIntent::new(1).unwrap())
+            )
+            .unwrap_err()
+            .code,
+            "bridge_conflict"
+        );
+        assert_eq!(fs::read(directory.join("owner.json")).unwrap(), before);
+        assert!(!directory.join("admission.json").exists());
+        owner.application_bridge = Some(super::super::BridgeIntent { slots: 0 });
+        owner.save(&candidate).unwrap();
+        assert_eq!(Owner::load(&candidate).unwrap_err().code, "foreign_state");
+        fs::remove_file(&owner.short_home).unwrap();
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn replaced_short_alias_cannot_be_adopted() {
         let root = fixture();
         let candidate = Candidate::discover(&root).unwrap();
         let _lock = Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
-        let owner = Owner::create(&candidate, super::super::Profile::Research).unwrap();
+        let owner = Owner::create(&candidate, super::super::Profile::Research, None).unwrap();
         assert!(Owner::load(&candidate).is_ok());
         fs::remove_file(&owner.short_home).unwrap();
         let foreign = root.join("foreign");
@@ -458,7 +503,7 @@ mod tests {
         let root = fixture();
         let candidate = Candidate::discover(&root).unwrap();
         let _lock = Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
-        let mut owner = Owner::create(&candidate, super::super::Profile::Research).unwrap();
+        let mut owner = Owner::create(&candidate, super::super::Profile::Research, None).unwrap();
         owner.checkout = root.join("other");
         owner.save(&candidate).unwrap();
         assert_eq!(Owner::load(&candidate).unwrap_err().code, "foreign_state");

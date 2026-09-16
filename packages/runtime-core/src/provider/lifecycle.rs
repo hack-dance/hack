@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Serialize)]
 pub struct RuntimeStatus {
+    pub application_bridge: Option<super::BridgeIntent>,
     pub phase: String,
     pub profile: Option<super::Profile>,
     pub reclamation: Option<state::ReclamationPolicy>,
@@ -242,6 +243,7 @@ impl<'a> ObservedGuest<'a> {
             || current.guest_boot_id.is_none()
             || current.token != self.owner.token
             || current.guest_boot_id != self.owner.guest_boot_id
+            || current.application_bridge != self.owner.application_bridge
             || current.process != self.owner.process
         {
             return Err(CandidateError::new(
@@ -441,6 +443,9 @@ impl<'a> OwnedGuest<'a> {
 }
 fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
     super::config_audit::verify(candidate, owner)?;
+    if let Some(bridge) = owner.application_bridge {
+        super::bridge::verify_sockets(&owner.real_data_dir(candidate)?, bridge)?;
+    }
     // 1.14.3 consumes and removes boot-config.json. Its retained running config plus
     // independently observed disk descriptors form the host audit boundary.
     // Guest mount mode and executable digests are verified before engine startup.
@@ -493,6 +498,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         .map_err(io)?
     {
         return Ok(RuntimeStatus {
+            application_bridge: None,
             phase: "uninitialized".into(),
             profile: None,
             reclamation: None,
@@ -541,6 +547,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         profile: Some(owner.profile),
         reclamation: owner.reclamation,
         guest_memory_mib: Some(owner.profile.memory_mib()),
+        application_bridge: owner.application_bridge,
         phase: if alive == Some(false) && owner.phase == "running" {
             "process-exited".into()
         } else {
@@ -576,6 +583,35 @@ pub fn up_with_profile(
     candidate: &Candidate,
     profile: super::Profile,
 ) -> Result<RuntimeStatus, CandidateError> {
+    up_with_bridge(candidate, profile, None)
+}
+
+pub fn up_with_bridge(
+    candidate: &Candidate,
+    profile: super::Profile,
+    requested: Option<super::BridgeIntent>,
+) -> Result<RuntimeStatus, CandidateError> {
+    if let Some(intent) = requested {
+        super::BridgeIntent::new(intent.slots)?;
+    }
+    reject_aliased_state(&root(candidate))?;
+    let existing = if root(candidate)
+        .join("owner.json")
+        .try_exists()
+        .map_err(io)?
+    {
+        let owner = Owner::load(candidate)?;
+        super::bridge::check_request(owner.application_bridge, requested)?;
+        owner.application_bridge
+    } else {
+        requested
+    };
+    if existing.is_some() && !cfg!(feature = "native-stream-relay") {
+        return Err(CandidateError::new(
+            "bridge_unavailable",
+            "Application bridges require a native-stream-relay build.",
+        ));
+    }
     reject_aliased_state(&root(candidate))?;
     if root(candidate)
         .join("owner.json")
@@ -601,7 +637,14 @@ pub fn up_with_profile(
     artifact::verify_engine(candidate)?;
     let _lock = state::Lock::acquire(&root(candidate))?;
     state::write(&root(candidate).join("admission.json"), &samples)?;
-    let mut owner = Owner::create(candidate, profile)?;
+    let mut owner = Owner::create(candidate, profile, requested)?;
+    super::bridge::check_request(owner.application_bridge, requested)?;
+    if owner.application_bridge != existing {
+        return Err(CandidateError::new(
+            "bridge_conflict",
+            "Bridge ownership changed before the operation lock.",
+        ));
+    }
     if owner.profile != profile {
         return Err(CandidateError::new(
             "profile_conflict",
@@ -643,28 +686,34 @@ pub fn up_with_profile(
             "{}:/opt/hack-engine:ro",
             artifact::engine_root(candidate).display()
         );
+        let mut arguments = vec![
+            "machine".to_owned(),
+            "create".into(),
+            "--name".into(),
+            owner.machine.clone(),
+            "--label".into(),
+            format!("hack-local.owner={}", owner.token),
+            "--cpus".into(),
+            profile.cpus().to_string(),
+            "--mem".into(),
+            profile.memory_mib().to_string(),
+            "--storage".into(),
+            profile.storage_gib().to_string(),
+            "--overlay".into(),
+            profile.overlay_gib().to_string(),
+            "--docker-socket".into(),
+            "--volume".into(),
+            mount,
+        ];
+        if let Some(bridge) = owner.application_bridge {
+            for path in bridge.guest_paths() {
+                arguments.extend(["--expose-socket".into(), path]);
+            }
+        }
         invoke(
             candidate,
             &owner,
-            &[
-                "machine",
-                "create",
-                "--name",
-                &owner.machine,
-                "--label",
-                &format!("hack-local.owner={}", owner.token),
-                "--cpus",
-                &profile.cpus().to_string(),
-                "--mem",
-                &profile.memory_mib().to_string(),
-                "--storage",
-                &profile.storage_gib().to_string(),
-                "--overlay",
-                &profile.overlay_gib().to_string(),
-                "--docker-socket",
-                "--volume",
-                &mount,
-            ],
+            &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
         )?;
         owner.created = true;
         owner.save(candidate)?;
@@ -1193,7 +1242,17 @@ fn finish_stopped(
             &owner.real_data_dir(candidate)?.join("overlay.raw"),
         )?);
     }
-    for name in ["agent.sock", "docker.sock"] {
+    let mut sockets = vec!["agent.sock".to_owned(), "docker.sock".to_owned()];
+    if let Some(bridge) = owner.application_bridge {
+        sockets.extend(bridge.guest_paths().into_iter().map(|path| {
+            Path::new(&path)
+                .file_name()
+                .expect("fixed socket name")
+                .to_string_lossy()
+                .into_owned()
+        }));
+    }
+    for name in sockets {
         match UnixStream::connect(owner.data_dir().join(name)) {
             Ok(_) => {
                 return Err(CandidateError::new(

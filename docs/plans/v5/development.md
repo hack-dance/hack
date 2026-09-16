@@ -663,3 +663,8 @@ delivery gates before actual application use.
 The [persisted provider capability audit](provider-config-audit-20260915.md) supplements the boot
 snapshot before startup and guest access. Unexpected socket/SSH forwarding and hidden launch inputs
 are refused without returning their contents. Diagnostic status and owned shutdown remain available.
+
+Fresh experimental pools built with `native-stream-relay` can reserve private transport slots with
+`runtime up --profile development --bridge-sockets <1..32>`. Capacity is recorded before creation
+and cannot change in place. See [explicit bridge intent](application-bridge-intent-20260916.md) for
+qualification and remaining graph routing gates. The default pool/build remains unbridged.

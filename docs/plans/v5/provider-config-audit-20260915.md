@@ -6,11 +6,11 @@ or mutation. This closes a gap in pinned SmolVM 1.14.3: `agent.config.json` omit
 SSH forwarding and several launch-time inputs.
 
 The read-only SQLite query requires exactly one VM with the expected name and exact owner label.
-It rejects published sockets, SSH forwarding, staged/remote mounts, init commands/environment,
+It rejects unrecorded published sockets, SSH forwarding, staged/remote mounts, init commands/environment,
 secret references, workload image/command/user/workdir overrides, health commands, and network
 backend/name/DNS overrides. Ordinary mount, port, capacity and device checks remain in the retained
-boot audit. No socket forwarding is enabled by this change. A future bridge must add an explicit,
-durable owned intent and audit its exact mapping before it can be accepted.
+boot audit. No socket forwarding is enabled by default. The subsequent [explicit bridge capacity](application-bridge-intent-20260916.md)
+adds durable opt-in intent whose exact mappings are checked by this audit.
 
 The database and existing sidecars must be regular files owned by the current user, without group
 or world write permissions or hard links, and at most 16 MiB each. Parent symlinks and SQLite

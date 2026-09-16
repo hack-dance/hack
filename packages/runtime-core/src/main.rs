@@ -23,6 +23,7 @@ Usage:
   hack-local runtime probe [--json]
   hack-local runtime engine-info [--json]
   hack-local runtime probe|up --profile research|development [--json]
+  hack-local runtime up --profile research|development --bridge-sockets <1..32> [--json]
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
   hack-local runtime prepare-engine --archive <pinned-docker.tgz>
   hack-local runtime load-image --archive <flat-image.tar> --sha256 <archive-hash> --image-id <sha256:config-hash>
@@ -195,6 +196,46 @@ fn run() -> Result<(), CandidateError> {
         }
         ["project", arguments @ ..] => {
             project_command(&Candidate::discover(&requested)?, arguments)?;
+        }
+        [
+            "runtime",
+            "up",
+            "--profile",
+            profile,
+            "--bridge-sockets",
+            count,
+        ]
+        | [
+            "runtime",
+            "up",
+            "--profile",
+            profile,
+            "--bridge-sockets",
+            count,
+            "--json",
+        ] => {
+            use hack_runtime_core::provider::{self, BridgeIntent, Profile};
+            let profile = match *profile {
+                "research" => Profile::Research,
+                "development" => Profile::Development,
+                _ => {
+                    return Err(CandidateError::new(
+                        "invalid_arguments",
+                        "Profile must be research or development.",
+                    ));
+                }
+            };
+            let slots = count.parse::<u8>().map_err(|_| {
+                CandidateError::new(
+                    "bridge_capacity",
+                    "Bridge capacity must be between 1 and 32 sockets.",
+                )
+            })?;
+            print_json(&provider::up_with_bridge(
+                &Candidate::discover(&requested)?,
+                profile,
+                Some(BridgeIntent::new(slots)?),
+            )?)?;
         }
         ["runtime", action @ ("probe" | "up"), "--profile", profile]
         | [

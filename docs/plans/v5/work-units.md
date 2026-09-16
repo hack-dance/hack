@@ -476,6 +476,46 @@ precedence, not just file presence. Remove one worktree without changing shared
 settings or sibling behavior. Carry newly found omissions into this bounded audit.
 **Status:** queued; no runtime behavior or user configuration changed by this entry.
 
+### Queued follow-up — Startup preparation and dependency-cache reuse
+
+**User feedback (September 16):** Event Agent's OpenSearch alias PR #1030 is
+separate from its reported first-start timeout. Treat the PR's scope and timeout
+cause as reported context, not a reviewed/merged PR or a reproduced timing result.
+**Current-source evidence:** `src/commands/project.ts` builds the internal Compose
+override before calling `runLifecycleUpBeforeAndProcesses`; a hook that updates the
+extra-host map therefore cannot update that already-built override in the same up.
+`src/backends/runtime-backend.ts` applies a 90-second detached Compose startup
+budget. `src/lib/dependency-cache.ts` recognizes `hack.dependencies.cache-volume`,
+`hack.dependencies.lockfiles` and `hack.dependencies.runtime-files`, and generates a
+project/fingerprint-named volume override. It does not skip installer commands or
+prove cache completeness. The observed Event Agent deps command still runs
+`bun install --frozen-lockfile && bun run db:generate` and has no cache labels.
+
+**Acceptance, after the current runtime work:**
+
+- Define an explicit preparation boundary for hook-produced configuration. Verify
+  that an extra-host update intended for this startup appears in the effective
+  runtime configuration on that same first startup; preserve required environment
+  resolution, credential preflight and lifecycle failure/cleanup ordering.
+- Qualify compatible-worktree dependency reuse and explicit cold-install behavior.
+  Test actual populated-volume reuse, lockfile/runtime/image/platform changes,
+  generated outputs and any intended install-skip check; matching names alone do
+  not prove a complete or compatible cache. Include simultaneous first starts,
+  interrupted/failed installs and isolation from partially written dependencies.
+- Keep startup bounded while distinguishing active dependency preparation from a
+  hung process. Provide useful progress and resumable/reattachable status; do not
+  make users retry blindly or merely remove the timeout. Reproduce and measure the
+  actual cold/warm first starts before claiming the reported timeout is fixed.
+- Integrate with WU12 accounting and retention: reference-aware reuse/retirement,
+  visible bytes and age, no deletion of a cache used by another branch, and bounded
+  retention across lockfile churn. Persistent application volumes remain separate.
+
+**Verification:** fresh primary/linked-worktree starts with the same and changed
+inputs, parallel installers and crash injection, measured startup budgets, and
+readback of effective aliases plus dependency completeness. Add the source/hook
+ordering checks to the worktree-inheritance follow-up. No Event Agent PR/config
+changes or stable Hack behavior changes are authorized or made by this queue entry.
+
 ## WU12 — Bound retained disk without losing application data
 
 **Goal:** repeated builds, branch creation, cancellation and removal must not silently accumulate

@@ -60,3 +60,41 @@ must preserve balloon ownership, host-page alignment, acknowledgement ordering,
 refault safety and bounded metadata; qualify data preservation and host footprint
 before changing provider pins or defaults. The simple PFN control is retained as
 `pfn-order-control.json` beside the live evidence.
+
+## Native host discard control
+
+A separate 64 MiB native control on the same host touched anonymous private memory,
+registered it with Hypervisor.framework, unmapped it, and called
+`madvise(MADV_FREE_REUSABLE)`. Three plain-memory controls and three hypervisor
+controls all passed. This used a separately ad-hoc-signed executable with only the
+hypervisor entitlement; no candidate VM, global provider, or application data changed.
+
+| Control | Samples | Discard return / errno | Native footprint reduction |
+| --- | ---: | --- | ---: |
+| Anonymous private mapping | 3 | 0 / 0 in every sample | 64.000 MiB |
+| After successful HVF map/unmap | 3 | 0 / 0 in every sample | 63.984–64.000 MiB |
+
+Every control subsequently called `MADV_FREE_REUSE`, remapped through HVF where
+applicable, wrote and read back all 64 MiB, and released the owned mapping/VM.
+Compilation used the installed Apple clang with `-Wall -Wextra -Werror` and
+Hypervisor.framework; all six processes exited zero. No vCPU or guest workload ran.
+This validates the host primitive for this mapping, not live balloon processing,
+persistent guest data, immediate system-wide free memory, or the provider's refault
+path (which does not call `MADV_FREE_REUSE`). It is not a product performance gain.
+
+The normal pinned guest-memory construction uses anonymous mappings when forkable
+mode is disabled; source was checked in `src/vmm/src/builder.rs` and the vendored
+`vm-memory` implementation at the same pinned libkrun commit. The native control
+therefore narrows the next experiment toward actual submitted/aligned ranges,
+per-call return codes, and subsequent refaults rather than a blanket inability of
+HVF-mapped anonymous memory to leave the process footprint.
+
+Build preflight found that Homebrew reports expected LLVM/virglrenderer prefixes
+but the required library/directory is absent; Rust 1.97.1 has only the host target
+installed. A full instrumented pinned-provider build still needs isolated build
+dependencies. No global tool installation or provider override was performed.
+
+Evidence and reproducer: `.hack-local/reclaim-host-control/` (`control.c`,
+`entitlements.plist`, `results.json`).
+Source SHA-256: `a6002fd73163963db617cb8bbe19981df26afbf2ab35339e49df6b88fd06e5d2`.
+Binary SHA-256: `0ddf8f3f6d39c3600459f08923546903fad87ef3764cacd670b6bbdf99e499ad`.

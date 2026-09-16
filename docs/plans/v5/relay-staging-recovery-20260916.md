@@ -122,3 +122,7 @@ This newly observed bridge startup failure needs diagnosis before further public
 unknown socket or process was removed. The failed fixture has no running graph resources, but its
 retained graph receipt still needs archive/export. Comparative application performance remains
 unmeasured by this unit.
+
+The maintenance-boot follow-up is now closed by [provider child permissions](provider-child-permissions-20260916.md):
+the caller's umask caused non-private socket creation. Child-only enforcement passed live qualification
+under caller mask `022`, and the retained failed fixture was archived/exported successfully.

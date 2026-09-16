@@ -525,9 +525,9 @@ without a VM restart. The same report now also qualifies missing/empty socket re
 with a verified live relay, without a runtime code change. Abrupt relay death with intact process/socket receipts is also live-qualified. Missing process
 identity, dead relays without socket identity, fence-journal crash windows, unknown identity recovery and
 unhealthy-but-running target policy remain open before normal publication.
-The identity-control maintenance boot exposed `bridge_socket_identity` followed by
-`failed-boot-stopped`; diagnose bridge listener readiness/identity and finish the retained failed
-fixture archive/export before more publication work (see the staging recovery report).
+The identity-control maintenance boot failure is fixed and qualified: [provider child permissions](provider-child-permissions-20260916.md)
+now force a private child umask independent of the caller. The failed boot recovered and its
+pending fixture archive/export completed. Remaining identity/fence recovery work stays open.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

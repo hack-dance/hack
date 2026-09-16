@@ -706,3 +706,7 @@ The guest fence distinguishes pre-fork `preparing` from `launching`.
 [Interrupted executable staging](relay-staging-recovery-20260916.md) can now be retired in the same
 boot after owner/file checks, including bounded incomplete executable bytes. Unknown files and
 later process/socket ambiguity still refuse cleanup.
+
+Provider commands enforce a private child umask without changing the caller. See
+[creation-permission qualification](provider-child-permissions-20260916.md) for permissive-caller
+startup, failed-boot recovery and lifecycle controls.

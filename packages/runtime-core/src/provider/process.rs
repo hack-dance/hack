@@ -1,6 +1,7 @@
 //! Bounded, credential-blind child processes. A timed-out provider operation is uncertain.
 use crate::CandidateError;
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -90,9 +91,58 @@ pub fn run(command: &mut Command, timeout: Duration) -> Result<String, Candidate
 
 pub fn clean_command(binary: &std::path::Path) -> Command {
     let mut command = Command::new(binary);
+    // Child-only: changing the multithreaded parent's umask would race unrelated file creation.
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0o077);
+            Ok(())
+        });
+    }
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .env("LANG", "C");
     command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_child_mask_does_not_depend_on_or_change_parent_mask() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "provider::process::tests::permissive_parent_mask_probe",
+                "--nocapture",
+            ])
+            .env("HACK_TEST_PERMISSIVE_MASK_PROBE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("private-child-mask-verified"));
+    }
+
+    #[test]
+    fn permissive_parent_mask_probe() {
+        if std::env::var_os("HACK_TEST_PERMISSIVE_MASK_PROBE").is_none() {
+            return;
+        }
+        // This exact test runs alone in a subprocess; never mutate the suite's shared mask.
+        let previous = unsafe { libc::umask(0) };
+        let result = run(
+            clean_command(std::path::Path::new("/bin/sh")).args(["-c", "umask"]),
+            Duration::from_secs(5),
+        );
+        let parent = unsafe { libc::umask(previous) };
+        assert_eq!(parent, 0);
+        let mask = u32::from_str_radix(result.unwrap().trim(), 8).unwrap();
+        assert_eq!(mask, 0o077);
+        println!("private-child-mask-verified");
+    }
 }

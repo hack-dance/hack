@@ -446,6 +446,36 @@ migration, stale state backup, data rollback incompatibility, CA rotation with e
 **Evidence:** packaged end-to-end workflows, full gates, migration data readback, explicit unsupported
 platform/capability list. Publishing and changes to the user's official installation are separate.
 
+### Queued follow-up — Worktree inheritance of gitignored Hack settings
+
+**User request (September 16):** after the current runtime/routing work, fix missing
+worktree configuration inheritance in the next major version. Extra hosts are a
+reported example; audit the existing config/environment handling for other omissions.
+**Goal:** creating or using a linked worktree automatically resolves the necessary
+shared local Hack settings from its primary checkout, with explicit worktree values
+winning and no repeated manual copying.
+**Source pointers:** `src/lib/git-worktree.ts`, `src/lib/project.ts`,
+`src/lib/project-env-config.ts`, and the extra-host readers/writers in
+`src/commands/internal.ts`, `src/commands/project.ts`, and `src/lib/caddy-hosts.ts`.
+The extra-host commands currently address `.internal/extra-hosts.json` under their
+resolved project directory; trace project resolution and runtime generation before
+choosing inheritance versus materialization. Do not assume all ignored files are
+portable configuration.
+**Acceptance:** inventory each relevant ignored setting and its ownership/lifetime;
+reuse the existing worktree resolution rules; define precedence, explicit removal
+and opt-out semantics; preserve local overrides and primary-checkout values; make
+inherited origins visible in inspection/diagnostics. Regenerate branch-specific
+runtime output instead of copying stale generated overrides, addresses, process
+identities, leases or receipts. Environment inheritance must retain managed secret
+delivery and native authorization; do not bulk-copy credentials or `.internal`.
+**Verification:** actual linked-worktree fixtures cover missing local extra hosts,
+local overrides, intentional removal, primary changes after worktree creation,
+missing/moved primary checkout, non-worktree projects, and multiple simultaneous
+branches. Verify the effective runtime host mappings and existing config/env
+precedence, not just file presence. Remove one worktree without changing shared
+settings or sibling behavior. Carry newly found omissions into this bounded audit.
+**Status:** queued; no runtime behavior or user configuration changed by this entry.
+
 ## WU12 — Bound retained disk without losing application data
 
 **Goal:** repeated builds, branch creation, cancellation and removal must not silently accumulate

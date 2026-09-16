@@ -38,8 +38,8 @@ qualification, not a new performance comparison.
 
 ## Remaining route work
 
-The pinned provider can expose guest Unix sockets, but the current candidate boot contract does
-not configure an application bridge. Next is an explicitly owned bridge and loopback publisher,
+The [isolated socket bridge control](socket-bridge-20260915.md) now proves HTTP transport through
+the pinned provider. The current candidate boot contract does not configure an application bridge. Next is an explicitly owned bridge and loopback publisher,
 with provider-config auditing, port-conflict refusal, stale-destination invalidation, teardown and
 restore tests. TLS, hostname routing and the application's nine Caddy declarations remain open.
 The actual application has not been started or silently converted to candidate routes.

@@ -9,6 +9,7 @@ description = "Private Hack v5 candidate runtime contracts and local planning"
 [features]
 environment-launcher = []
 native-http-probe = []
+native-stream-relay = []
 
 [lib]
 name = "hack_runtime_core"

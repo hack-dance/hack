@@ -651,3 +651,11 @@ to Docker as `StartInterval`. For example, `start_period: 10s`, `start_interval:
 are explicit project inputs; the candidate does not rewrite existing defaults. A slower steady
 cadence also delays detection of later failures. Plans without this field keep their previous
 health serialization, so adding support does not change their identity by inserting a null field.
+
+## Experimental application socket relay
+
+The optional `native-stream-relay` feature builds a bounded single-process Unix-to-TCP relay.
+It is absent from the default build and has no route CLI or automatic lifecycle integration.
+The [isolated socket bridge qualification](socket-bridge-20260915.md) proves HTTP transport through
+SmolVM without enabling general guest networking; it records ownership, recovery and credential
+delivery gates before actual application use.

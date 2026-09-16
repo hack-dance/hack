@@ -26,6 +26,15 @@ struct Entry {
     process: identity::ProcessIdentity,
     digest: String,
     directory: Option<(u64, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binary: Option<BinaryStage>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BinaryStage {
+    device: u64,
+    inode: u64,
+    ready: bool,
 }
 fn error() -> CandidateError {
     CandidateError::new(
@@ -84,6 +93,9 @@ fn load(c: &Candidate, owner: &str) -> Result<BTreeMap<String, Entry>, Candidate
             || e.process.pid <= 1
             || e.process.start_micros == 0
             || e.process.uid != unsafe { libc::geteuid() }
+            || e.binary
+                .as_ref()
+                .is_some_and(|b| b.inode == 0 || e.directory.is_none())
             || e.process.executable != directory(e).join("publisher")
         {
             return Err(error());
@@ -179,6 +191,15 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
         return Ok(());
     }
     let dir = directory(e);
+    let staging = e.binary.as_ref().is_some_and(|b| !b.ready);
+    if staging
+        && ["control", "control.identity"].iter().any(|name| {
+            let path = dir.join(name);
+            path.exists() || path.is_symlink()
+        })
+    {
+        return Err(error());
+    }
     // Validate the complete directory before deleting any staged resource.
     for entry in fs::read_dir(&dir).map_err(state::io)? {
         let entry = entry.map_err(state::io)?;
@@ -211,7 +232,15 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
         file.take(512 * 1024 + 1)
             .read_to_end(&mut bytes)
             .map_err(state::io)?;
-        if bytes.len() > 512 * 1024 || format!("{:x}", Sha256::digest(bytes)) != e.digest {
+        if e.binary
+            .as_ref()
+            .is_some_and(|b| b.device != m.dev() || b.inode != m.ino())
+        {
+            return Err(error());
+        }
+        if bytes.len() > 512 * 1024
+            || (!staging && format!("{:x}", Sha256::digest(bytes)) != e.digest)
+        {
             return Err(error());
         }
     }
@@ -317,6 +346,7 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
         process,
         digest: format!("{:x}", Sha256::digest(bytes)),
         directory: None,
+        binary: None,
     };
     let dir = directory(&e);
     e.process.executable = dir.join("publisher");
@@ -344,6 +374,18 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
         .custom_flags(libc::O_NOFOLLOW)
         .open(&e.process.executable)
         .map_err(state::io)?;
+    let metadata = file.metadata().map_err(state::io)?;
+    File::open(&dir)
+        .map_err(state::io)?
+        .sync_all()
+        .map_err(state::io)?;
+    e.binary = Some(BinaryStage {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        ready: false,
+    });
+    entries.insert(e.reservation.clone(), e.clone());
+    save(c, &entries)?;
     file.write_all(bytes).map_err(state::io)?;
     file.sync_all().map_err(state::io)?;
     File::open(&dir)
@@ -351,6 +393,9 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
         .sync_all()
         .map_err(state::io)?;
     drop(file);
+    e.binary.as_mut().expect("recorded staged file").ready = true;
+    entries.insert(e.reservation.clone(), e.clone());
+    save(c, &entries)?;
     let failure = std::process::Command::new(&e.process.executable)
         .env_clear()
         .args(["--publish", &e.port.to_string()])
@@ -395,6 +440,7 @@ mod tests {
             process,
             digest: format!("{:x}", Sha256::digest(b"fixture")),
             directory: None,
+            binary: None,
         };
         e.process.executable = directory(&e).join("publisher");
         (candidate, e)
@@ -480,6 +526,45 @@ mod tests {
             }
             drop(replacement);
             drop(socket);
+            fs::remove_dir_all(c.checkout).unwrap();
+        }
+    }
+    #[test]
+    fn incomplete_helper_cleanup_requires_recorded_inode_and_pre_exec_phase() {
+        for variant in ["staging", "ready", "replaced", "legacy", "control"] {
+            let (c, mut e) = fixture();
+            let dir = directory(&e);
+            fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+            let m = fs::metadata(&dir).unwrap();
+            e.directory = Some((m.dev(), m.ino()));
+            fs::write(&e.process.executable, b"partial helper bytes").unwrap();
+            fs::set_permissions(&e.process.executable, fs::Permissions::from_mode(0o700)).unwrap();
+            let m = fs::metadata(&e.process.executable).unwrap();
+            if variant != "legacy" {
+                e.binary = Some(BinaryStage {
+                    device: m.dev(),
+                    inode: m.ino() + u64::from(variant == "replaced"),
+                    ready: variant == "ready",
+                });
+            }
+            if variant == "control" {
+                fs::write(dir.join("control.identity"), b"unexpected").unwrap();
+            }
+            let entries = BTreeMap::from([(e.reservation.clone(), e.clone())]);
+            save(&c, &entries).unwrap();
+            if variant == "staging" {
+                release(&c, &e.owner, None).unwrap();
+                assert!(!dir.exists());
+                assert!(load(&c, &e.owner).unwrap().is_empty());
+            } else {
+                assert!(release(&c, &e.owner, None).is_err());
+                assert_eq!(
+                    fs::read(&e.process.executable).unwrap(),
+                    b"partial helper bytes"
+                );
+                assert!(load(&c, &e.owner).unwrap().contains_key(&e.reservation));
+                fs::remove_dir_all(dir).unwrap();
+            }
             fs::remove_dir_all(c.checkout).unwrap();
         }
     }

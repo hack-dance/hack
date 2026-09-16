@@ -31,12 +31,14 @@ outside this cleanup path.
 ## Recovery limits
 
 Interrupted registry writes retain `state.pending` and refuse replay. An interruption
-between directory creation and its inode receipt, a partial helper write, a live
+between directory creation and its inode receipt, an unrecorded helper inode, a live
 launcher that has not execed, or an unexpected/replaced file is preserved and can
 require further recovery support. New helpers write a [native socket receipt](publication-socket-recovery-20260916.md)
 before readiness, allowing exact stale-socket cleanup after abrupt death. Missing
 or incomplete socket identity is still preserved rather than guessed safe to unlink. Such uncertainty can block normal publication cleanup and VM down. These
-are explicit follow-up gates, not claims of complete lifecycle parity. A normal
+are explicit follow-up gates, not claims of complete lifecycle parity.
+[Recorded pre-exec partial helpers](publication-staging-recovery-20260916.md) can now
+be reclaimed after the launcher is confirmed absent. A normal
 foreground interrupt exits the native helper and removes its socket; unpublish
 then retires its recorded staging files.
 

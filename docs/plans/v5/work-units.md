@@ -625,8 +625,11 @@ targets. [Live instrumentation](balloon-pfn-order-20260916.md) now confirms 99.8
 alignment loss during a synthetic 1 GiB inflation, with no discard failures.
 [Bounded PFN coalescing](balloon-coalescing-20260916.md) passed synthetic and two
 32-worktree controls, with roughly 265 MiB lower final footprint in the warm run
-than the earlier baseline. Promotion remains gated on whole-range host-mapping
-validation and matched instrumented CPU/memory comparisons; no CPU win is claimed.
+than the earlier baseline. A [guarded matched comparison](balloon-guarded-pair-20260916.md) passed range tests
+and workload controls but exposed missing `MADV_FREE_REUSE` on refault: apparent
+footprint reductions may be discounted live memory, not real RAM savings. The
+isolated reuse correction passes compilation; rebuild and requalify data/accounting
+and matched CPU/memory before promotion. No CPU or validated RAM win is claimed.
 Also preflight pinned guest-network archives before allocation and report missing
 inputs specifically, following the new diagnostic fixture's recovered first-boot failure.
 

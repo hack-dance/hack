@@ -1,5 +1,10 @@
 # Bounded balloon coalescing experiment — September 16
 
+**Later accounting control:** the [guarded matched comparison](balloon-guarded-pair-20260916.md)
+found that missing reuse advice can leave live rewritten memory discounted from
+footprint. The apparent reductions below are not proven RAM savings and must not
+be used to promote these experimental packages.
+
 An isolated provider patch sorts at most 256 surrendered PFNs at a time, removes
 in-batch duplicates, and emits consecutive ranges through the existing reclaim
 path. It uses a fixed 1 KiB page buffer and no allocation proportional to descriptor

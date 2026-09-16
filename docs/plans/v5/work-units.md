@@ -29,7 +29,7 @@ not satisfy application acceptance. Carry every gap into the next checkpoint's a
 | WU09 | Native Linux and private SSH parity | WU05–08 | Planned; Hetzner fixture host selected and access verified; adapter qualification open |
 | WU10 | Measured speed, footprint, and reclamation | WU07–09 | In progress; [current latency and matched-resource comparison](performance-refresh-20260914.md) extends the earlier cohorts; full application, transient-helper accounting and remote qualification open |
 | WU11 | Env/TLS/slim compatibility and migration packaging | WU07–10 | Planned; not a release authorization |
-| WU12 | Disk accounting, safe reuse and bounded retention | WU06–07 | In progress; [bounded host storage accounting](storage-accounting-20260916.md) qualified; guest inventories, active references and retention/reclaimability remain open |
+| WU12 | Disk accounting, safe reuse and bounded retention | WU06–07 | In progress; [bounded host storage accounting](storage-accounting-20260916.md) qualified; [guest engine inventories](guest-storage-inventory-20260916.md) qualified; durable reference classification and retention/reclaimability remain open |
 | WU13 | Many-branch resource budgets and configurable idle suspension | WU07–08, WU12 | Planned; pause/resume experiments precede default policy |
 
 The sequence starts with Mac runtime mechanics, but protocol and source decisions must accommodate
@@ -718,6 +718,12 @@ partial-scan reporting. Independent walks match both stopped checkout inventorie
 the development build tree needed a larger explicit entry budget. Sparse capacity
 is not occupied space, and measured bytes are not deletion candidates. Guest
 images/volumes, reference-aware retention and actual reclaimability remain open.
+[Private guest storage inventory](guest-storage-inventory-20260916.md) now reports
+allowlisted image/container/volume/build-cache usage through verified read-only
+engine transport. A retained zero-reference volume was restored with its original
+data, proving engine reclaimability is not cleanup authority. Join inventory to
+durable graph/branch references before proposing retirement; no prune policy is
+enabled. Actual application compatibility remains blocked at 22 errors.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

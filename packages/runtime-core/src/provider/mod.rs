@@ -13,6 +13,7 @@ mod environment_probe_test;
 pub mod environment_recovery;
 pub mod graph;
 pub use engine::{EngineInfo, info as engine_info};
+pub mod guest_storage;
 pub mod hostname_authority;
 pub mod http_probe;
 mod identity;

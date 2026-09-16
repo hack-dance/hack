@@ -27,6 +27,7 @@ Usage:
   hack-local runtime managed-hostname-authority [--json]
   hack-local runtime serve-managed-hostnames [--certificate-name-limit <1..4096>] (owner pipe on stdin)
   hack-local runtime certificate-admission [--json]
+  hack-local runtime guest-disk-usage [--json]
   hack-local runtime disk-usage [--scope all|runtime|build|evidence|artifacts] [--max-entries <1..1000000>] [--json]
   hack-local runtime stop-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
   hack-local runtime serve-hostnames --socket <private-unix-path> (owner pipe on stdin)
@@ -333,6 +334,11 @@ fn run() -> Result<(), CandidateError> {
                     &Candidate::discover(&requested)?,
                 )?,
             )?;
+        }
+        ["runtime", "guest-disk-usage"] | ["runtime", "guest-disk-usage", "--json"] => {
+            print_json(&hack_runtime_core::provider::guest_storage::inspect(
+                &Candidate::discover(&requested)?,
+            )?)?;
         }
         ["runtime", "disk-usage", rest @ ..] => {
             print_json(&hack_runtime_core::provider::storage_usage::inspect_args(

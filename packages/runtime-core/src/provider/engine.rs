@@ -360,6 +360,16 @@ impl<'a> Observer<'a> {
         Ok(Self { guest, transport })
     }
 
+    pub(super) fn storage_usage(&self) -> Result<Value, CandidateError> {
+        self.info()?;
+        self.guest.verify()?;
+        let value = self
+            .transport
+            .request(Method::GET, "/v1.53/system/df?verbose=true", None)?;
+        self.guest.verify()?;
+        Ok(value)
+    }
+
     fn info(&self) -> Result<EngineInfo, CandidateError> {
         self.guest.verify()?;
         let value = self.transport.request(Method::GET, "/version", None)?;

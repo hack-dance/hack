@@ -522,9 +522,12 @@ and durably track allocation lifetime. Real CLI interruption now proves stop ret
 new intents and rejects delayed requests after reuse with bounded per-slot retention.
 [Pre-fork executable staging recovery](relay-staging-recovery-20260916.md) is also live-qualified
 without a VM restart. The same report now also qualifies missing/empty socket receipt cleanup
-with a verified live relay, without a runtime code change. Missing process identity, abrupt relay
-death with a stale socket, fence-journal crash windows, unknown identity recovery and
+with a verified live relay, without a runtime code change. Abrupt relay death with intact process/socket receipts is also live-qualified. Missing process
+identity, dead relays without socket identity, fence-journal crash windows, unknown identity recovery and
 unhealthy-but-running target policy remain open before normal publication.
+The identity-control maintenance boot exposed `bridge_socket_identity` followed by
+`failed-boot-stopped`; diagnose bridge listener readiness/identity and finish the retained failed
+fixture archive/export before more publication work (see the staging recovery report).
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

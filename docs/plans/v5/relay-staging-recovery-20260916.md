@@ -90,3 +90,35 @@ Remaining post-fork controls must separately cover a missing/partial process rec
 before socket cleanup, and an interrupted guest fence publication. A missing socket receipt alone
 is no longer a blocker when the live process identity can be verified and graceful shutdown
 removes the socket.
+
+## Follow-up: abrupt death and missing identity controls
+
+The same binary passed `.hack-local/review/wu07/relay-identity-1789579762274875000/`.
+A private ARM64 failure injector opened a pidfd, verified process start time and the allocation's
+executable device/inode, sent SIGKILL through that handle, and waited for exit. The guest socket
+remained. With its original socket receipt intact, ordinary release removed the stale socket and
+allocation in the same boot while the application stayed running.
+
+Two negative controls removed the process receipt from a live relay, or removed the socket receipt
+before releasing an abruptly killed relay. Release refused both and preserved the allocation and
+socket. The live relay still served HTTP after refusal. The harness restored only the exact receipt
+bytes captured before injection, then ordinary release succeeded in the same boot. This test-only
+restoration proves retry behavior; it is not a supported recovery command or permission to reconstruct
+unknown identities. Missing/partial process identity and a dead relay without socket identity remain
+open implementation work. Abrupt relay death with intact identity receipts is qualified.
+
+All 19 resource-watchdog samples passed. Graph cleanup/archive/export, reboot audit and final shutdown
+passed. Both retained host fault-injection journals were exported with the supported offline command,
+leaving no occupied recovery source slots. The original process/socket receipts, injector source and
+binary, refusal/release results and readbacks are retained with the evidence. No runtime code changed.
+
+An earlier attempt in `relay-identity-1789579702123358000` failed before fault injection because an
+unstripped helper exceeded the guest command argument limit. It provides no abrupt-death evidence.
+The corrected helper was stripped and compressed to a 23,268-byte encoded payload. The first attempt
+cleaned its graph and stopped the VM; its remaining archive/export is still pending: a separately admitted maintenance boot failed
+`bridge_socket_identity`, and a subsequent down returned `process_identity_unavailable`. Status
+then reported `failed-boot-stopped`, `process_alive: false`, with no provider process observed.
+This newly observed bridge startup failure needs diagnosis before further publication work; no
+unknown socket or process was removed. The failed fixture has no running graph resources, but its
+retained graph receipt still needs archive/export. Comparative application performance remains
+unmeasured by this unit.

@@ -623,8 +623,10 @@ and no additional recovery at a 5 GiB balloon target. Pinned-source inspection e
 PFN ordering/alignment loss and unchecked host-discard results as instrumentation
 targets. [Live instrumentation](balloon-pfn-order-20260916.md) now confirms 99.887%
 alignment loss during a synthetic 1 GiB inflation, with no discard failures. Next
-compare bounded PFN coalescing against the same controls and retained-worktree
-workload; no performance improvement or explanation of the entire gap is claimed.
+[bounded PFN coalescing](balloon-coalescing-20260916.md) passed synthetic and two
+32-worktree controls, with roughly 265 MiB lower final footprint in the warm run
+than the earlier baseline. Promotion remains gated on whole-range host-mapping
+validation and matched instrumented CPU/memory comparisons; no CPU win is claimed.
 Also preflight pinned guest-network archives before allocation and report missing
 inputs specifically, following the new diagnostic fixture's recovered first-boot failure.
 

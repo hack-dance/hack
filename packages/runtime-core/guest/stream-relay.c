@@ -24,7 +24,7 @@
 #define CONNECTIONS 32
 #define CAPACITY 16384
 struct flow {
-    int fd[2], connecting, awaiting, eof[2], shut[2];
+    int fd[2], connecting, awaiting, publishing, eof[2], shut[2];
     size_t used[2];
     unsigned char data[2][CAPACITY];
     int64_t activity;
@@ -32,6 +32,8 @@ struct flow {
 static struct flow flows[CONNECTIONS];
 static volatile sig_atomic_t stopping;
 static int target_watch = -1;
+static int publish_mode;
+static struct sockaddr_un upstream;
 static int wakeup[2] = {-1, -1};
 static void stop(int signal_number) {
     (void)signal_number;
@@ -56,11 +58,20 @@ static void release(struct flow *flow) {
     memset(flow, 0, sizeof(*flow));
     flow->fd[0] = flow->fd[1] = -1;
 }
+static int private_upstream(struct stat *value) {
+    return lstat(upstream.sun_path, value) || !S_ISSOCK(value->st_mode) ||
+        value->st_uid != geteuid() || (value->st_mode & 0077) || value->st_nlink != 1 ? -1 : 0;
+}
 static int connect_target(struct flow *flow, const struct sockaddr_in *target) {
-    flow->fd[1] = socket(AF_INET, SOCK_STREAM, 0);
+    struct stat before, after;
+    if (publish_mode && private_upstream(&before)) return -1;
+    flow->fd[1] = socket(publish_mode ? AF_UNIX : AF_INET, SOCK_STREAM, 0);
     if (flow->fd[1] < 0 || configure(flow->fd[1])) return -1;
-    int connected = connect(flow->fd[1], (const struct sockaddr *)target, sizeof(*target));
+    int connected = publish_mode
+        ? connect(flow->fd[1], (const struct sockaddr *)&upstream, sizeof(upstream))
+        : connect(flow->fd[1], (const struct sockaddr *)target, sizeof(*target));
     if (connected && errno != EINPROGRESS) return -1;
+    if (publish_mode && (private_upstream(&after) || before.st_dev != after.st_dev || before.st_ino != after.st_ino)) return -1;
     flow->connecting = connected != 0;
     return 0;
 }
@@ -174,6 +185,16 @@ static int stop_owned(long pid, long start) {
 #endif
 }
 int main(int argc, char **argv) {
+    char *publish_args[8];
+    if (argc >= 2 && !strcmp(argv[1], "--publish")) {
+        if (argc != 6) return 64;
+        /* --publish PORT PRIVATE_UNIX_SOCKET RESERVATION IDLE_MS; loopback is fixed. */
+        publish_args[0] = argv[0]; publish_args[1] = argv[3];
+        publish_args[2] = "127.0.0.1"; publish_args[3] = argv[2];
+        publish_args[4] = argv[5]; publish_args[5] = "--reservation";
+        publish_args[6] = argv[4]; publish_args[7] = NULL;
+        argv = publish_args; argc = 7; publish_mode = 1;
+    }
     if (argc >= 2 && !strcmp(argv[1], "--stop")) {
         long pid, start;
         if (argc != 4 || number(argv[2], INT_MAX, &pid) || number(argv[3], LONG_MAX, &start)) return 64;
@@ -206,6 +227,7 @@ int main(int argc, char **argv) {
     target.sin_port = htons((uint16_t)port);
     local.sun_family = AF_UNIX;
     memcpy(local.sun_path, argv[1], strlen(argv[1]) + 1);
+    if (publish_mode) { upstream = local; if (private_upstream(&current)) return 78; }
     if (close_inherited()) return 70;
     if (target_pid && pin_target(target_pid, target_start)) return 78;
     if (pipe(wakeup) || configure(wakeup[0]) || configure(wakeup[1])) return 70;
@@ -215,14 +237,18 @@ int main(int argc, char **argv) {
     if (sigaction(SIGTERM, &action, NULL) || sigaction(SIGINT, &action, NULL)) return 70;
     signal(SIGPIPE, SIG_IGN);
     for (int i = 0; i < CONNECTIONS; i++) flows[i].fd[0] = flows[i].fd[1] = -1;
-    int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    int listener = socket(publish_mode ? AF_INET : AF_UNIX, SOCK_STREAM, 0);
     if (listener < 0) return 70;
     umask(0077);
-    if (configure(listener) || bind(listener, (struct sockaddr *)&local, sizeof(local))) {
+    int reuse = 1;
+    if (publish_mode && setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse))) { close(listener); return 70; }
+    const struct sockaddr *address = publish_mode ? (struct sockaddr *)&target : (struct sockaddr *)&local;
+    socklen_t address_size = publish_mode ? sizeof(target) : sizeof(local);
+    if (configure(listener) || bind(listener, address, address_size)) {
         close(listener);
         return 73;
     }
-    if (lstat(argv[1], &owned)) { close(listener); return 73; }
+    if (!publish_mode && lstat(argv[1], &owned)) { close(listener); return 73; }
     int failed = listen(listener, CONNECTIONS) != 0;
     if (!failed) { puts("ready"); fflush(stdout); }
     while (!stopping && !failed) {
@@ -236,7 +262,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < CONNECTIONS; i++) {
             struct flow *flow = &flows[i];
             if (flow->fd[0] >= 0) {
-                int64_t budget = flow->awaiting && idle > 1000 ? 1000 : idle;
+                int64_t budget = (flow->awaiting || flow->publishing) && idle > 1000 ? 1000 : idle;
                 int64_t remaining = budget - (now - flow->activity);
                 if (remaining <= 0) release(flow);
                 else if (timeout < 0 || remaining < timeout) timeout = (int)remaining;
@@ -246,6 +272,7 @@ int main(int argc, char **argv) {
                 if (flow->fd[side] >= 0) {
                     if (flow->awaiting) events = side == 0 ? POLLIN : 0;
                     else if (flow->connecting) events = side == 1 ? POLLOUT : 0;
+                    else if (flow->publishing) events = side == 1 ? (flow->publishing == 1 ? POLLOUT : POLLIN) : 0;
                     else {
                         if (!flow->eof[side] && flow->used[side] < CAPACITY) events |= POLLIN;
                         if (flow->used[1-side]) events |= POLLOUT;
@@ -292,6 +319,25 @@ int main(int argc, char **argv) {
                     else flow->connecting = 0;
                     continue;
                 }
+                if (flow->publishing) {
+                    int64_t checked = now_ms();
+                    if (checked < 0 || checked-flow->activity >= (idle < 1000 ? idle : 1000) ||
+                        (events & (POLLERR | POLLNVAL))) { release(flow); break; }
+                    if (flow->publishing == 1 && (events & POLLOUT)) {
+                        ssize_t n = send(flow->fd[1], flow->data[0], flow->used[0], 0);
+                        if (n > 0) {
+                            flow->used[0] -= (size_t)n;
+                            memmove(flow->data[0], flow->data[0]+n, flow->used[0]);
+                            if (!flow->used[0]) flow->publishing = 2;
+                        } else if (n < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) { release(flow); break; }
+                    } else if (flow->publishing == 2 && (events & (POLLIN | POLLHUP))) {
+                        unsigned char ack;
+                        ssize_t n = recv(flow->fd[1], &ack, 1, 0);
+                        if (n == 1 && ack == 1) { flow->publishing = 0; flow->activity = now_ms(); }
+                        else if (n >= 0 || (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)) { release(flow); break; }
+                    } else if (events & POLLHUP) { release(flow); break; }
+                    continue;
+                }
                 if (events & (POLLERR | POLLNVAL)) { release(flow); break; }
                 if ((events & POLLOUT) && flow->used[1-side]) {
                     ssize_t n = send(flow->fd[side], flow->data[1-side], flow->used[1-side], 0);
@@ -327,15 +373,16 @@ int main(int argc, char **argv) {
                 if (index == CONNECTIONS || configure(client)) { close(client); continue; }
                 struct flow *flow = &flows[index];
                 flow->fd[0] = client;
-                flow->awaiting = guarded;
-                if (!guarded && connect_target(flow, &target)) { release(flow); continue; }
+                flow->awaiting = guarded && !publish_mode;
+                if (publish_mode) { flow->publishing = 1; memcpy(flow->data[0], header, sizeof(header)); flow->used[0] = sizeof(header); }
+                if (!flow->awaiting && connect_target(flow, &target)) { release(flow); continue; }
                 flow->activity = now_ms();
             }
         }
     }
     close(listener);
     for (int i = 0; i < CONNECTIONS; i++) release(&flows[i]);
-    if (!lstat(argv[1], &current) && S_ISSOCK(current.st_mode) &&
+    if (!publish_mode && !lstat(argv[1], &current) && S_ISSOCK(current.st_mode) &&
         owned.st_dev == current.st_dev && owned.st_ino == current.st_ino) unlink(argv[1]);
     if (target_watch >= 0) close(target_watch);
     close(wakeup[0]);

@@ -722,3 +722,7 @@ HTTP probe storage after confirming the recorded container and old probe are sto
 The optional native relay now has a [reservation-bound transport handshake](relay-reservation-handshake-20260916.md).
 It rejects stale publishers before connecting to an application. New managed relay intent persists
 `reservation-v1`; old receipts remain explicitly raw. The loopback listener remains separate work.
+
+The [native loopback publisher](native-loopback-publication-20260916.md) binds only IPv4 loopback
+and completes the reservation handshake before forwarding application bytes. Its helper-level
+controls pass; managed CLI lifecycle/ownership integration remains open.

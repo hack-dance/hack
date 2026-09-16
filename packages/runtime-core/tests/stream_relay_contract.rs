@@ -478,3 +478,214 @@ fn malformed_reservations_refuse_before_socket_creation() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+fn publisher(socket: &std::path::Path, token: &str, port: u16) -> Relay {
+    let root = PathBuf::from(format!(
+        "/tmp/hkp-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).unwrap();
+    let mut child = Command::new(BINARY)
+        .arg("--publish")
+        .arg(port.to_string())
+        .arg(socket)
+        .args([token, "10000"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = child.stdout.take().unwrap();
+    let mut ready = libc::pollfd {
+        fd: output.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(unsafe { libc::poll(&mut ready, 1, 3000) }, 1);
+    let mut line = String::new();
+    BufReader::new(output).read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    Relay {
+        child,
+        socket: root.join("unused"),
+        root,
+    }
+}
+fn free_loopback_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+#[test]
+fn loopback_publication_streams_without_exposing_handshake_and_releases_port() {
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let token = "cccccccccccccccccccccccccccccccc";
+    let guard = Relay::start_options(
+        backend.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(token),
+        None,
+    );
+    let port = free_loopback_port();
+    let mut publication = publisher(&guard.socket, token, port);
+    let payload = vec![0x5a; 2 * 1024 * 1024];
+    let expected = payload.clone();
+    let worker = thread::spawn(move || {
+        let (mut stream, _) = backend.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).unwrap();
+        assert_eq!(received, expected);
+        stream.write_all(&received).unwrap();
+    });
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    client
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    client.write_all(&payload).unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut received = Vec::new();
+    client.read_to_end(&mut received).unwrap();
+    assert_eq!(received, payload);
+    worker.join().unwrap();
+    publication.stop();
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+    assert!(guard.socket.exists());
+}
+
+#[test]
+fn publisher_refuses_port_conflicts_and_stale_reused_upstream() {
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let old = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let new = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let mut guard = Relay::start_options(
+        backend.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(old),
+        None,
+    );
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy_port = occupied.local_addr().unwrap().port();
+    assert_eq!(
+        Command::new(BINARY)
+            .arg("--publish")
+            .arg(busy_port.to_string())
+            .arg(&guard.socket)
+            .args([old, "10000"])
+            .status()
+            .unwrap()
+            .code(),
+        Some(73)
+    );
+    assert!(std::net::TcpStream::connect(("127.0.0.1", busy_port)).is_ok());
+    let port = free_loopback_port();
+    let _publication = publisher(&guard.socket, old, port);
+    guard.stop();
+    let _replacement = Relay::start_options(
+        backend.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(new),
+        Some(guard.root.clone()),
+    );
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    client.write_all(b"must-not-reach-new-target").unwrap();
+    let mut byte = [0];
+    match client.read(&mut byte) {
+        Ok(0) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => (),
+        v => panic!("stale publisher accepted: {v:?}"),
+    }
+    let mut ready = libc::pollfd {
+        fd: backend.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(unsafe { libc::poll(&mut ready, 1, 100) }, 0);
+}
+
+#[test]
+fn publisher_requires_ack_before_forwarding_and_preserves_upstream_socket() {
+    use std::os::unix::net::UnixListener;
+    let root = PathBuf::from(format!("/tmp/hkp-ack-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let path = root.join("socket");
+    let upstream = UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let port = free_loopback_port();
+    let mut publication = publisher(&path, token, port);
+    let worker = thread::spawn(move || {
+        let (mut socket, _) = upstream.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut header = [0; 36];
+        socket.read_exact(&mut header).unwrap();
+        assert_eq!(&header, format!("HKR1{token}").as_bytes());
+        socket.write_all(&[2]).unwrap();
+        let mut extra = Vec::new();
+        socket.read_to_end(&mut extra).unwrap();
+        assert!(extra.is_empty());
+    });
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    client.write_all(b"private-application-bytes").unwrap();
+    let mut byte = [0];
+    match client.read(&mut byte) {
+        Ok(0) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => (),
+        v => panic!("bad ack accepted: {v:?}"),
+    }
+    worker.join().unwrap();
+    publication.stop();
+    assert!(path.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn publisher_refuses_nonprivate_or_aliased_upstream_before_listening() {
+    use std::os::unix::{fs::symlink, net::UnixListener};
+    let root = PathBuf::from(format!("/tmp/hkp-private-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let path = root.join("socket");
+    let _listener = UnixListener::bind(&path).unwrap();
+    let port = free_loopback_port();
+    let attempt = |upstream: &std::path::Path| {
+        let result = Command::new(BINARY)
+            .arg("--publish")
+            .arg(port.to_string())
+            .arg(upstream)
+            .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000"])
+            .status()
+            .unwrap();
+        assert_eq!(result.code(), Some(78));
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+    };
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
+    attempt(&path);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    let alias = root.join("alias");
+    symlink(&path, &alias).unwrap();
+    attempt(&alias);
+    let file = root.join("file");
+    fs::write(&file, b"foreign").unwrap();
+    attempt(&file);
+    assert!(path.exists());
+    assert_eq!(fs::read(&file).unwrap(), b"foreign");
+    fs::remove_dir_all(root).unwrap();
+}

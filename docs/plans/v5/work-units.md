@@ -595,6 +595,12 @@ controls with one unchanged proxy process/configuration and one wildcard certifi
 CA-file existence was insufficient readiness; verified TLS handshake is now required.
 Next qualify normal/custom hostname ownership and bounded certificate issuance;
 managed proxy recovery and real-app parity remain open.
+[Normal/custom hostname lookup controls](tls-hostname-lookup-20260916.md) now
+qualify an unchanged proxy configuration with conditional routing and certificate
+permission, conflict/spoofing refusal, cached-certificate retirement and a two-name
+fixture admission cap. The prototype is not durable managed routing. Next implement
+bounded hostname leases and authority identity/lifecycle; preserve existing branch
+rewriting and custom names, then measure lookup overhead and certificate retention.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

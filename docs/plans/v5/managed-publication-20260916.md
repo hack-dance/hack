@@ -30,7 +30,9 @@ outside this cleanup path.
 
 ## Recovery limits
 
-Interrupted registry writes retain `state.pending` and refuse replay. An interruption
+[Complete single-step registry journals](publication-journal-recovery-20260916.md)
+can now be completed during cleanup after the changed launcher is absent. Startup
+refuses replay; partial or invalid `state.pending` files remain preserved. An interruption
 between directory creation and its inode receipt, an unrecorded helper inode, a live
 launcher that has not execed, or an unexpected/replaced file is preserved and can
 require further recovery support. New helpers write a [native socket receipt](publication-socket-recovery-20260916.md)

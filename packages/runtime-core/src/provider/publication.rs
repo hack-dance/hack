@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Entry {
     owner: String,
@@ -29,7 +29,7 @@ struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     binary: Option<BinaryStage>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BinaryStage {
     device: u64,
@@ -73,12 +73,16 @@ fn load(c: &Candidate, owner: &str) -> Result<BTreeMap<String, Entry>, Candidate
     } else {
         BTreeMap::new()
     };
-    if entries.len() > 32 {
+    validate(&entries, owner)?;
+    Ok(entries)
+}
+fn validate(entries: &BTreeMap<String, Entry>, owner: &str) -> Result<(), CandidateError> {
+    if !hex(owner, 32) || entries.len() > 32 {
         return Err(error());
     }
     let mut ports = std::collections::BTreeSet::new();
     let mut slots = std::collections::BTreeSet::new();
-    for (key, e) in &entries {
+    for (key, e) in entries {
         if !hex(owner, 32)
             || e.owner != owner
             || key != &e.reservation
@@ -93,6 +97,7 @@ fn load(c: &Candidate, owner: &str) -> Result<BTreeMap<String, Entry>, Candidate
             || e.process.pid <= 1
             || e.process.start_micros == 0
             || e.process.uid != unsafe { libc::geteuid() }
+            || e.directory.is_some_and(|(_, inode)| inode == 0)
             || e.binary
                 .as_ref()
                 .is_some_and(|b| b.inode == 0 || e.directory.is_none())
@@ -101,7 +106,104 @@ fn load(c: &Candidate, owner: &str) -> Result<BTreeMap<String, Entry>, Candidate
             return Err(error());
         }
     }
-    Ok(entries)
+    Ok(())
+}
+/// Recover only complete, single-step publications while holding the provider lock.
+/// This runs on cleanup paths; startup never replays a pending journal.
+fn recover_pending(c: &Candidate, owner: &str) -> Result<(), CandidateError> {
+    let root = root(c);
+    let pending = root.join("state.pending");
+    if !pending.exists() && !pending.is_symlink() {
+        return Ok(());
+    }
+    state::check_private_directory(&root)?;
+    let path = root.join("state.json");
+    let before: BTreeMap<String, Entry> = if path.exists() || path.is_symlink() {
+        state::read_bounded(&path, 65536)?
+    } else {
+        BTreeMap::new()
+    };
+    let after: BTreeMap<String, Entry> = state::read_bounded(&pending, 65536)?;
+    validate(&before, owner)?;
+    validate(&after, owner)?;
+    let keys = before
+        .keys()
+        .chain(after.keys())
+        .collect::<std::collections::BTreeSet<_>>();
+    let changed = keys
+        .into_iter()
+        .filter(|key| before.get(*key) != after.get(*key))
+        .collect::<Vec<_>>();
+    if changed.len() > 1 {
+        return Err(error());
+    }
+    if let Some(key) = changed.first() {
+        let old = before.get(*key);
+        let new = after.get(*key);
+        let entry = new.or(old).expect("changed entry");
+        if identity::alive(entry.process.pid)? {
+            return Err(error());
+        }
+        match (old, new) {
+            (None, Some(e)) => {
+                if e.directory.is_some()
+                    || e.binary.is_some()
+                    || directory(e).exists()
+                    || directory(e).is_symlink()
+                {
+                    return Err(error());
+                }
+            }
+            (Some(e), None) => {
+                if directory(e).exists() || directory(e).is_symlink() {
+                    return Err(error());
+                }
+            }
+            (Some(old), Some(new)) => {
+                let mut expected = old.clone();
+                let allowed = match (&old.directory, &new.directory, &old.binary, &new.binary) {
+                    (None, Some(_), None, None) => {
+                        expected.directory = new.directory;
+                        true
+                    }
+                    (Some(a), Some(b), None, Some(stage)) if a == b && !stage.ready => {
+                        expected.binary = new.binary.clone();
+                        true
+                    }
+                    (Some(a), Some(b), Some(x), Some(y))
+                        if a == b
+                            && !x.ready
+                            && y.ready
+                            && x.device == y.device
+                            && x.inode == y.inode =>
+                    {
+                        expected.binary = new.binary.clone();
+                        true
+                    }
+                    _ => false,
+                };
+                if !allowed || expected != *new {
+                    return Err(error());
+                }
+                verify_directory(new)?;
+            }
+            _ => return Err(error()),
+        }
+    }
+    // read_bounded checked the private regular file; open again without following aliases
+    // and sync before completing the same rename used by the original writer.
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&pending)
+        .map_err(state::io)?
+        .sync_all()
+        .map_err(state::io)?;
+    fs::rename(&pending, &path).map_err(state::io)?;
+    File::open(root)
+        .map_err(state::io)?
+        .sync_all()
+        .map_err(state::io)
 }
 fn save(c: &Candidate, entries: &BTreeMap<String, Entry>) -> Result<(), CandidateError> {
     state::private_directory(&root(c))?;
@@ -261,6 +363,7 @@ pub(super) fn release(
     owner: &str,
     selected: Option<(&str, &str)>,
 ) -> Result<(), CandidateError> {
+    recover_pending(c, owner)?;
     let mut entries = load(c, owner)?;
     if selected.is_some_and(|(run, res)| entries.get(res).is_some_and(|e| e.run != run)) {
         return Err(error());
@@ -568,6 +671,150 @@ mod tests {
             fs::remove_dir_all(c.checkout).unwrap();
         }
     }
+    fn pending(c: &Candidate, entries: &BTreeMap<String, Entry>) {
+        let path = root(c).join("state.pending");
+        fs::write(&path, serde_json::to_vec(entries).unwrap()).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[test]
+    fn cleanup_recovers_complete_single_step_journals_without_launching() {
+        for phase in [
+            "initial",
+            "directory",
+            "binary",
+            "ready",
+            "removed",
+            "identical",
+        ] {
+            let (c, mut e) = fixture();
+            let dir = directory(&e);
+            let mut before = BTreeMap::new();
+            let mut after = BTreeMap::new();
+            if phase != "initial" {
+                if ["binary", "ready", "removed"].contains(&phase) {
+                    fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+                    let m = fs::metadata(&dir).unwrap();
+                    e.directory = Some((m.dev(), m.ino()));
+                }
+                if ["ready", "removed"].contains(&phase) {
+                    fs::write(&e.process.executable, b"fixture").unwrap();
+                    fs::set_permissions(&e.process.executable, fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                    let m = fs::metadata(&e.process.executable).unwrap();
+                    e.binary = Some(BinaryStage {
+                        device: m.dev(),
+                        inode: m.ino(),
+                        ready: false,
+                    });
+                }
+                before.insert(e.reservation.clone(), e.clone());
+            }
+            match phase {
+                "directory" => {
+                    fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+                    let m = fs::metadata(&dir).unwrap();
+                    e.directory = Some((m.dev(), m.ino()));
+                }
+                "binary" => {
+                    fs::write(&e.process.executable, b"partial").unwrap();
+                    fs::set_permissions(&e.process.executable, fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                    let m = fs::metadata(&e.process.executable).unwrap();
+                    e.binary = Some(BinaryStage {
+                        device: m.dev(),
+                        inode: m.ino(),
+                        ready: false,
+                    });
+                }
+                "ready" => {
+                    e.binary.as_mut().unwrap().ready = true;
+                }
+                "removed" => {
+                    fs::remove_dir_all(&dir).unwrap();
+                }
+                _ => {}
+            }
+            if phase != "removed" {
+                after.insert(e.reservation.clone(), e.clone());
+            }
+            save(&c, &before).unwrap();
+            pending(&c, &after);
+            assert!(load(&c, &e.owner).is_err()); // Startup remains fail-closed.
+            release(&c, &e.owner, None).unwrap();
+            assert!(!dir.exists());
+            assert!(!root(&c).join("state.pending").exists());
+            assert!(load(&c, &e.owner).unwrap().is_empty());
+            fs::remove_dir_all(c.checkout).unwrap();
+        }
+    }
+    #[test]
+    fn journal_recovery_refuses_immutable_changes_live_launchers_and_early_retirement() {
+        for variant in [
+            "token",
+            "pid",
+            "live",
+            "remove-owned",
+            "regress",
+            "multiple",
+        ] {
+            let (c, mut e) = fixture();
+            let dir = directory(&e);
+            fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+            let m = fs::metadata(&dir).unwrap();
+            e.directory = Some((m.dev(), m.ino()));
+            if variant == "live" {
+                e.process = identity::observe(std::process::id() as i32).unwrap();
+                e.process.executable = dir.join("publisher");
+            }
+            if variant == "regress" {
+                e.binary = Some(BinaryStage {
+                    device: m.dev(),
+                    inode: m.ino(),
+                    ready: true,
+                });
+            }
+            let before = BTreeMap::from([(e.reservation.clone(), e.clone())]);
+            let mut after = before.clone();
+            let entry = after.get_mut(&e.reservation).unwrap();
+            match variant {
+                "token" => entry.token = "f".repeat(32),
+                "pid" => entry.process.start_micros += 1,
+                "live" => {
+                    entry.binary = Some(BinaryStage {
+                        device: m.dev(),
+                        inode: m.ino(),
+                        ready: false,
+                    })
+                }
+                "remove-owned" => {
+                    after.clear();
+                }
+                "regress" => entry.binary.as_mut().unwrap().ready = false,
+                "multiple" => {
+                    after.clear();
+                    let mut other = e.clone();
+                    other.reservation = "f".repeat(32);
+                    other.process.executable = directory(&other).join("publisher");
+                    other.directory = None;
+                    after.insert(other.reservation.clone(), other);
+                }
+                _ => unreachable!(),
+            }
+            save(&c, &before).unwrap();
+            pending(&c, &after);
+            let original = fs::read(root(&c).join("state.json")).unwrap();
+            let pending_bytes = fs::read(root(&c).join("state.pending")).unwrap();
+            assert!(release(&c, &e.owner, None).is_err());
+            assert_eq!(fs::read(root(&c).join("state.json")).unwrap(), original);
+            assert_eq!(
+                fs::read(root(&c).join("state.pending")).unwrap(),
+                pending_bytes
+            );
+            assert!(dir.exists());
+            fs::remove_dir_all(dir).unwrap();
+            fs::remove_dir_all(c.checkout).unwrap();
+        }
+    }
     #[test]
     fn store_rejects_foreign_owner_rebound_path_and_pending_journal() {
         let (c, e) = fixture();
@@ -595,6 +842,11 @@ mod tests {
         entries.insert(e.reservation.clone(), e.clone());
         save(&c, &entries).unwrap();
         fs::write(root(&c).join("state.pending"), b"partial").unwrap();
+        fs::set_permissions(
+            root(&c).join("state.pending"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
         assert!(release(&c, &e.owner, None).is_err());
         assert!(root(&c).join("state.json").exists());
         fs::remove_dir_all(c.checkout).unwrap();

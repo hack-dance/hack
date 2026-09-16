@@ -561,6 +561,10 @@ after abrupt death. Incomplete/missing identity and startup journal recovery rem
 executable inode and readiness before exec, allowing owned partial payload cleanup
 after process absence while retaining ready/legacy digest checks. Pending journals
 and create-before-identity windows remain open.
+[Complete publication journal recovery](publication-journal-recovery-20260916.md)
+permits only validated single-step metadata completion during cleanup, with changed
+launchers absent. Startup replay, malformed/partial journals and unknown identity
+remain refused; no raw-journal discard is authorized by this path.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

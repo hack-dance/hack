@@ -98,3 +98,30 @@ Evidence and reproducer: `.hack-local/reclaim-host-control/` (`control.c`,
 `entitlements.plist`, `results.json`).
 Source SHA-256: `a6002fd73163963db617cb8bbe19981df26afbf2ab35339e49df6b88fd06e5d2`.
 Binary SHA-256: `0ddf8f3f6d39c3600459f08923546903fad87ef3764cacd670b6bbdf99e499ad`.
+
+## Instrumented-source preparation
+
+An isolated checkout of the exact libkrun provenance commit now has diagnostic
+counters for inflate PFNs and adjacent ascending/descending/other pairs, requested
+and aligned range bytes, alignment and overlap skips, unmap failures, successful
+and failed discard bytes/calls, last discard errno, and whole-range remapped bytes.
+Counters use relaxed atomics and constant-size storage. Snapshots are cumulative,
+non-atomic across fields, and emitted only from host balloon status queries; they
+contain no guest addresses or data. This is diagnostic overhead, not a proposed
+production default. The patch leaves reclaim decisions and acknowledgment ordering
+unchanged, including existing behavior after a failed discard.
+
+Both affected crates passed Rust 1.97.1 `cargo check --locked` (`krun-hvf` and
+`krun-devices`, two jobs, isolated target directory). This proves type/build checking
+for those crates with their default features; it does not prove the full packaged
+feature set, a linked provider, live counter accuracy, or reclamation improvement.
+The reproducible patch and check log are retained with the host-control evidence:
+`libkrun-reclaim-trace.patch`, `instrumentation.json`, `provider-check.log`.
+Patch SHA-256: `af42f593829a63f30859e0220a7aadf243d718368a0a1d9900e767263d2f4f2b`.
+
+Follow-up build inspection found usable libclang in Apple's installed command-line
+tools, and the pinned provider already supplies its graphics runtime libraries.
+The Homebrew preflight failure is therefore not proof that a new global installation
+is needed. Next resolve the remaining full-feature build/link and guest-init inputs,
+create an immutable experimental package, and run the counters in a fresh owned
+fixture. Existing provider artifacts, candidate pins, and global tools remain intact.

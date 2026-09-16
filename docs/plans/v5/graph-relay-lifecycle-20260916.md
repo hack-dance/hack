@@ -88,3 +88,7 @@ The final default build's read-only actual-application plan remains at 14 servic
 two warnings, with Compose source unchanged. Evidence:
 `.hack-local/review/wu07/graph-relay-application-1789576492029144000/`. Relay integration does not
 resolve those application mount/routing compatibility gates.
+
+The subsequent [interruption controls](graph-relay-interruption-20260916.md) qualify real CLI
+termination at committed start/stop intent. Stop retry passes; an unlaunched start still requires
+new-boot recovery. A bounded guest cancellation fence is the next recovery slice.

@@ -21,6 +21,7 @@ Usage:
   hack-local graph inspect|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
   hack-local runtime probe [--json]
+  hack-local runtime publication-hostnames [--json]
   hack-local runtime publication-recovery [--json]
   hack-local runtime recover-publications --expect-sha256 <sha256> [--json]
   hack-local runtime bridge-recovery [--json]
@@ -28,7 +29,7 @@ Usage:
   hack-local runtime engine-info [--json]
   hack-local graph reserve-bridge --run-id <32-hex> --service <name> --slot <index> --expect-generation <sha256> [--json]
   hack-local graph start-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> [--json]
-  hack-local graph publish-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> (--port <loopback-port> | --unix)
+  hack-local graph publish-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> (--port <loopback-port> | --unix [--hostname <name>]...)
   hack-local graph unpublish-bridge --run-id <32-hex> --expect-reservation <32-hex> [--json]
   hack-local graph release-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> [--json]
   hack-local graph bridges|reconcile-bridges --run-id <32-hex> [--json]
@@ -275,6 +276,11 @@ fn run() -> Result<(), CandidateError> {
             } else {
                 print_json(&provider::up_with_profile(&candidate, profile)?)?;
             }
+        }
+        ["runtime", "publication-hostnames"] | ["runtime", "publication-hostnames", "--json"] => {
+            print_json(&hack_runtime_core::provider::publication::inspect_claims(
+                &Candidate::discover(&requested)?,
+            )?)?;
         }
         ["runtime", "publication-recovery"] | ["runtime", "publication-recovery", "--json"] => {
             print_json(

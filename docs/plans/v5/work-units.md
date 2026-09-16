@@ -601,6 +601,11 @@ permission, conflict/spoofing refusal, cached-certificate retirement and a two-n
 fixture admission cap. The prototype is not durable managed routing. Next implement
 bounded hostname leases and authority identity/lifecycle; preserve existing branch
 rewriting and custom names, then measure lookup overhead and certificate retention.
+[Durable publication hostname claims](publication-hostname-claims-20260916.md)
+now attach bounded, normalized exclusive names to managed Unix publication intent.
+Cleanup retains claims on uncertain identity; inspection reports ownership only.
+Live authority verification, private transport, certificate lifetime management and
+Compose hostname/metadata translation remain open.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

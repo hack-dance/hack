@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed, plus --source-revision for source mounts; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); unpublish-bridge requires --run-id and --expect-reservation.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed, plus --source-revision for source mounts; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); --unix accepts up to eight --hostname claims; unpublish-bridge requires --run-id and --expect-reservation.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
@@ -44,6 +44,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let mut remove_data = false;
     let mut json = false;
     let mut unix = false;
+    let mut hostnames = Vec::new();
     let mut index = 0;
     while index < args.len() {
         let key = args[index];
@@ -71,7 +72,15 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         }
         let value = *args.get(index).ok_or_else(invalid)?;
         index += 1;
-        if key == "--ready" && ["run", "restart", "restore"].contains(action) {
+        if key == "--hostname" && *action == "publish-bridge" {
+            if hostnames.len() >= 8 {
+                return Err(invalid());
+            }
+            hostnames.push(
+                hack_runtime_core::provider::publication::normalize_hostname(value)
+                    .map_err(|_| invalid())?,
+            );
+        } else if key == "--ready" && ["run", "restart", "restore"].contains(action) {
             let (service, condition) = value.split_once('=').ok_or_else(invalid)?;
             let condition = match condition {
                 "started" => Condition::Started,
@@ -144,7 +153,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         )?)
         .map_err(|_| invalid()),
         "publish-bridge" => {
-            if json || unix == singles.contains_key("--port") {
+            if json || unix == singles.contains_key("--port") || (!unix && !hostnames.is_empty()) {
                 return Err(invalid());
             }
             graph::publish_bridge(
@@ -163,6 +172,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                     .get("--port")
                     .map(|value| value.parse().map_err(|_| invalid()))
                     .transpose()?,
+                &hostnames,
             )?;
             unreachable!("successful publication replaces the foreground process")
         }

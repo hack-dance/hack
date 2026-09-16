@@ -25,6 +25,8 @@ struct Entry {
     port: u16,
     #[serde(default)]
     unix: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    hostnames: Vec<String>,
     token: String,
     process: identity::ProcessIdentity,
     digest: String,
@@ -49,6 +51,42 @@ fn hex(s: &str, n: usize) -> bool {
     s.len() == n
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+/// Normalize a DNS name, never a URL, authority-with-port, wildcard or IP address.
+pub fn normalize_hostname(value: &str) -> Result<String, CandidateError> {
+    let name = value
+        .strip_suffix('.')
+        .unwrap_or(value)
+        .to_ascii_lowercase();
+    if name.is_empty()
+        || name.len() > 253
+        || !name.is_ascii()
+        || name.parse::<std::net::IpAddr>().is_ok()
+        || name.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+    {
+        return Err(error());
+    }
+    Ok(name)
+}
+fn names(values: &[String]) -> Result<Vec<String>, CandidateError> {
+    if values.len() > 8 {
+        return Err(error());
+    }
+    let mut result = std::collections::BTreeSet::new();
+    for value in values {
+        if !result.insert(normalize_hostname(value)?) {
+            return Err(error());
+        }
+    }
+    Ok(result.into_iter().collect())
 }
 fn directory(e: &Entry) -> PathBuf {
     PathBuf::from(format!(
@@ -85,7 +123,18 @@ fn validate(entries: &BTreeMap<String, Entry>, owner: &str) -> Result<(), Candid
     }
     let mut ports = std::collections::BTreeSet::new();
     let mut slots = std::collections::BTreeSet::new();
+    let mut hosts = std::collections::BTreeSet::new();
+    let mut host_bytes = 0usize;
     for (key, e) in entries {
+        if (!e.unix && !e.hostnames.is_empty()) || names(&e.hostnames)? != e.hostnames {
+            return Err(error());
+        }
+        for hostname in &e.hostnames {
+            host_bytes += hostname.len();
+            if !hosts.insert(hostname) || hosts.len() > 128 || host_bytes > 16384 {
+                return Err(error());
+            }
+        }
         if !hex(owner, 32)
             || e.owner != owner
             || key != &e.reservation
@@ -209,6 +258,13 @@ fn recover_pending(c: &Candidate, owner: &str) -> Result<(), CandidateError> {
         .map_err(state::io)
 }
 fn save(c: &Candidate, entries: &BTreeMap<String, Entry>) -> Result<(), CandidateError> {
+    if serde_json::to_vec_pretty(entries)
+        .map_err(|_| error())?
+        .len()
+        > 65536
+    {
+        return Err(error());
+    }
     state::private_directory(&root(c))?;
     state::write(&root(c).join("state.json"), entries)
 }
@@ -406,12 +462,30 @@ pub fn unpublish(c: &Candidate, run: &str, reservation: &str) -> Result<(), Cand
     release(c, &owner.token, Some((run, reservation)))
 }
 
+/// Durable claims only: consumers must independently verify live publication readiness.
+pub fn inspect_claims(c: &Candidate) -> Result<serde_json::Value, CandidateError> {
+    let _lock = state::Lock::acquire(&c.state_root.join("run/smolvm"))?;
+    let owner = state::Owner::load(c)?;
+    let entries = load(c, &owner.token)?;
+    let claims = entries
+        .values()
+        .flat_map(|e| {
+            e.hostnames.iter().map(|name| {
+                serde_json::json!({"hostname":name,"run":e.run,"reservation":e.reservation,
+            "endpoint":directory(e).join("frontend"),"state":"claimed"})
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({"scope":"durable-ownership-only","claims":claims}))
+}
+
 pub(super) struct Launch<'a> {
     pub owner: &'a str,
     pub run: &'a str,
     pub reservation: &'a str,
     pub slot: u8,
     pub port: Option<u16>,
+    pub hostnames: &'a [String],
     pub upstream: &'a Path,
 }
 #[cfg(feature = "native-stream-relay")]
@@ -431,11 +505,13 @@ fn payload() -> Result<&'static [u8], CandidateError> {
 /// The caller must retain its operation lock until exec closes inherited descriptors.
 pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), CandidateError> {
     let bytes = payload()?;
+    let hostnames = names(options.hostnames)?;
     if !hex(options.owner, 32)
         || !hex(options.run, 32)
         || !hex(options.reservation, 32)
         || options.slot >= 32
         || options.port == Some(0)
+        || (options.port.is_some() && !hostnames.is_empty())
         || bytes.len() > 512 * 1024
     {
         return Err(error());
@@ -463,6 +539,7 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
         slot: options.slot,
         port: options.port.unwrap_or(0),
         unix: options.port.is_none(),
+        hostnames,
         token,
         process,
         digest: format!("{:x}", Sha256::digest(bytes)),
@@ -475,6 +552,7 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
         return Err(error());
     }
     entries.insert(e.reservation.clone(), e.clone());
+    validate(&entries, options.owner)?;
     save(c, &entries)?;
     fs::DirBuilder::new()
         .mode(0o700)
@@ -574,6 +652,7 @@ mod tests {
             slot: 0,
             port: 3000,
             unix: false,
+            hostnames: vec![],
             token: "c".repeat(32),
             process,
             digest: format!("{:x}", Sha256::digest(b"fixture")),
@@ -608,6 +687,67 @@ mod tests {
         release(&c, &e.owner, None).unwrap();
         assert!(!directory(&e).exists());
         assert!(load(&c, &e.owner).unwrap().is_empty());
+        fs::remove_dir_all(c.checkout).unwrap();
+    }
+    #[test]
+    fn hostname_claims_normalize_conflict_bound_and_preserve_pending_changes() {
+        assert_eq!(
+            normalize_hostname("API.Feature-X.Demo.Hack.").unwrap(),
+            "api.feature-x.demo.hack"
+        );
+        for value in [
+            "",
+            ".",
+            "a..b",
+            "a/b",
+            "https://a.hack",
+            "a:443",
+            "*.hack",
+            "-a.hack",
+            "a-.hack",
+            "127.0.0.1",
+            "[::1]",
+            "a.hack..",
+            "é.hack",
+        ] {
+            assert!(normalize_hostname(value).is_err(), "{value}");
+        }
+        assert!(names(&["a.hack".into(), "A.HACK.".into()]).is_err());
+        assert!(names(&(0..9).map(|n| format!("a{n}.hack")).collect::<Vec<_>>()).is_err());
+        let (c, mut e) = fixture();
+        e.unix = true;
+        e.port = 0;
+        e.hostnames = vec!["api.feature-x.demo.hack".into()];
+        let mut entries = BTreeMap::from([(e.reservation.clone(), e.clone())]);
+        validate(&entries, &e.owner).unwrap();
+        save(&c, &entries).unwrap();
+        assert_eq!(
+            load(&c, &e.owner).unwrap()[&e.reservation].hostnames,
+            e.hostnames
+        );
+        let mut other = e.clone();
+        other.slot = 1;
+        other.reservation = "e".repeat(32);
+        other.process.executable = directory(&other).join("publisher");
+        entries.insert(other.reservation.clone(), other.clone());
+        assert!(validate(&entries, &e.owner).is_err());
+        entries.get_mut(&other.reservation).unwrap().hostnames = vec!["custom.example.test".into()];
+        validate(&entries, &e.owner).unwrap();
+        let mut pending = BTreeMap::from([(e.reservation.clone(), e.clone())]);
+        pending.get_mut(&e.reservation).unwrap().hostnames = vec!["changed.hack".into()];
+        state::write(&root(&c).join("state.pending"), &pending).unwrap();
+        assert!(recover_pending(&c, &e.owner).is_err());
+        assert!(root(&c).join("state.pending").exists());
+        let mut bounded = BTreeMap::new();
+        for index in 0..17u8 {
+            let mut entry = e.clone();
+            entry.slot = index;
+            entry.reservation = format!("{index:032x}");
+            entry.process.executable = directory(&entry).join("publisher");
+            entry.hostnames = (0..8).map(|n| format!("h{n}.p{index}.hack")).collect();
+            bounded.insert(entry.reservation.clone(), entry);
+            assert_eq!(validate(&bounded, &e.owner).is_ok(), index < 16);
+        }
         fs::remove_dir_all(c.checkout).unwrap();
     }
     #[test]

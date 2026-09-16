@@ -296,6 +296,7 @@ pub fn publish_bridge(
     slot: u8,
     reservation: &str,
     port: Option<u16>,
+    hostnames: &[String],
 ) -> Result<(), CandidateError> {
     let engine = Engine::connect(candidate)?;
     let store = load_store(candidate, &engine, false)?;
@@ -332,6 +333,7 @@ pub fn publish_bridge(
             reservation,
             slot,
             port,
+            hostnames,
             upstream: &upstream,
         },
     )

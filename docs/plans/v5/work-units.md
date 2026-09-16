@@ -584,6 +584,11 @@ including ambiguous partial receipts and replacement preservation.
 [Managed Unix publication](managed-unix-publication-20260916.md) now persists
 endpoint mode and consumes native frontend receipts through the managed cleanup
 path. TLS route/configuration lifecycle and real-app parity remain open.
+[TLS reload lifecycle controls](tls-reload-lifecycle-20260916.md) now prove
+private conditional updates and route removal, but expose that unrelated Caddy
+reloads disconnect active WebSockets. A bounded close delay only defers that effect.
+Next qualify stable shared TLS routing without per-branch proxy reloads, retaining
+custom-hostname parity and exact reservation fencing as acceptance requirements.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

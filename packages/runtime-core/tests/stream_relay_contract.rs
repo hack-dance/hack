@@ -295,3 +295,65 @@ fn namespace_requests_reject_invalid_identity_before_publishing() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn stop_refuses_malformed_or_protected_process_identity() {
+    for (args, expected) in [
+        (vec!["--stop"], 64),
+        (vec!["--stop", "0", "1"], 64),
+        (vec!["--stop", "2", "0"], 64),
+        (vec!["--stop", "2", "1", "extra"], 64),
+        (vec!["--stop", "1", "1"], 78),
+    ] {
+        assert_eq!(
+            Command::new(BINARY).args(args).status().unwrap().code(),
+            Some(expected)
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn pidfd_stop_preserves_wrong_identity_and_closes_owned_listener() {
+    let mut relay = Relay::start(1, 1000);
+    let pid = relay.child.id().to_string();
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let start: u64 = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let wrong = (start + 1).to_string();
+    assert_eq!(
+        Command::new(BINARY)
+            .args(["--stop", &pid, &wrong])
+            .status()
+            .unwrap()
+            .code(),
+        Some(78)
+    );
+    assert!(relay.child.try_wait().unwrap().is_none());
+    assert!(relay.socket.exists());
+    let start = start.to_string();
+    assert!(
+        Command::new(BINARY)
+            .args(["--stop", &pid, &start])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(relay.child.wait().unwrap().success());
+    assert!(!relay.socket.exists());
+    assert_eq!(
+        Command::new(BINARY)
+            .args(["--stop", &pid, &start])
+            .status()
+            .unwrap()
+            .code(),
+        Some(78)
+    );
+}

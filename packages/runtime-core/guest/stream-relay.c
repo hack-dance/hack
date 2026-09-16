@@ -132,7 +132,46 @@ static int pin_target(long pid, long start) {
     return -1;
 #endif
 }
+/* Never signal a numeric PID: retain the process handle through identity checks and exit. */
+static int stop_owned(long pid, long start) {
+#ifdef __linux__
+    if (pid <= 1 || pid == (long)getpid() || process_start(pid) != start) return 78;
+    int watch = (int)syscall(SYS_pidfd_open, (pid_t)pid, 0);
+    if (watch < 0) return 78;
+    char path[64];
+    process_path(path, pid, "/exe");
+    struct stat target_exe, self_exe;
+    struct pollfd observed = {watch, POLLIN, 0};
+    int refused = stat(path, &target_exe) || stat("/proc/self/exe", &self_exe) ||
+        target_exe.st_dev != self_exe.st_dev || target_exe.st_ino != self_exe.st_ino ||
+        process_start(pid) != start || poll(&observed, 1, 0) != 0;
+    if (refused) { close(watch); return 78; }
+    if (syscall(SYS_pidfd_send_signal, watch, SIGTERM, NULL, 0)) { close(watch); return 78; }
+    int64_t deadline = now_ms();
+    if (deadline < 0) { close(watch); return 70; }
+    deadline += 5000;
+    int result = 70;
+    for (;;) {
+        int64_t now = now_ms();
+        if (now < 0 || now >= deadline) break;
+        int ready = poll(&observed, 1, (int)(deadline-now));
+        if (ready > 0) { if (observed.revents & POLLIN) result = 0; break; }
+        if (ready == 0 || errno != EINTR) break;
+    }
+    close(watch);
+    return result;
+#else
+    (void)pid; (void)start;
+    return 78;
+#endif
+}
 int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "--stop")) {
+        long pid, start;
+        if (argc != 4 || number(argv[2], INT_MAX, &pid) || number(argv[3], LONG_MAX, &start)) return 64;
+        if (close_inherited()) return 70;
+        return stop_owned(pid, start);
+    }
     struct sockaddr_un local = {0};
     struct sockaddr_in target = {0};
     struct stat owned, current;

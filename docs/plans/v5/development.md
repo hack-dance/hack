@@ -679,3 +679,9 @@ connects only to its loopback address and watches the original process with a pi
 closes streams and removes the owned socket without a periodic idle timer. See the
 [namespace lifetime qualification](namespace-relay-20260916.md). Graph-owned automatic start/stop
 and durable relay recovery remain unimplemented.
+
+The native Linux helper also accepts `--stop PID START_TICKS`: it opens a pidfd, verifies start
+time and executable device/inode against itself, sends SIGTERM through that handle and waits
+up to five seconds for exit. Unsupported kernels/identities refuse; timeout does not trigger
+SIGKILL. A supervisor must retain per-allocation executable identity and boot ownership before
+using this primitive; it is not graph authorization on its own.

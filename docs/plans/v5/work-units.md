@@ -514,7 +514,9 @@ available, with matched workloads/capacities and attributable helpers. Faster co
 not close slower or untested workflows. Resource wins must include retained disk, not only RAM.
 Record tradeoffs and unresolved gates rather than declaring an across-the-board winner prematurely.
 The optional native relay now has live-qualified namespace pinning and process-exit invalidation
-([evidence and boundaries](namespace-relay-20260916.md)); its graph supervisor remains open.
+([evidence and boundaries](namespace-relay-20260916.md)); its graph supervisor remains open. Exact-executable pidfd graceful stop is also live-qualified;
+the next slice must embed/stage the relay, record start/stop intent and reconcile guest allocation
+identity before reusing a slot.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

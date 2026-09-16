@@ -63,3 +63,45 @@ A fresh read-only actual-application plan still has 14 services, 22 errors and t
 Compose source was unchanged. Evidence:
 `.hack-local/review/wu07/netns-application-1789575160837640000/`. These compatibility gates are
 not closed by the relay change.
+
+## Owned graceful stop primitive
+
+`stream-relay --stop PID START_TICKS` adds an explicit Linux shutdown path for future graph
+cleanup. The helper opens the target pidfd, verifies start ticks and executable device/inode
+against its own executable, checks that the target is still alive, and signals SIGTERM using
+`pidfd_send_signal`. It then waits on that same handle for at most five seconds. Numeric-PID
+signaling and automatic SIGKILL escalation are absent. Identity/capability refusal returns 78;
+invalid arguments return 64; timeout or an uncertain wait returns 70. A nonzero result never
+authorizes deleting a process receipt or reusing its slot.
+
+The caller must establish graph ownership and boot identity separately. A future supervisor
+should use a distinct, verified executable inode per allocation, retained until confirmed exit;
+this also distinguishes otherwise identical relay binaries. A pathname or matching binary digest
+alone is not process ownership. PID/start ticks alone must not replace the native executable
+check. The helper confirms process exit; the supervisor still has to verify socket/resource
+cleanup and preserve interrupted start/stop receipts before reassignment.
+
+The ARM64 live stop control passed in
+`.hack-local/review/wu07/netns-relay-1789575433247392000/` using relay SHA-256
+`34693e8e76acbf40b746cb3646c9baa5ca6649bcd0f1e69261d74ceb2c07ce66`. It refused a wrong start
+time, the running application PID, and a byte-identical relay copied to a different inode.
+Successful stop closed an active stream, removed the socket, refused new traffic and left the
+application container running. The restore lifecycle independently repeated automatic target-exit
+shutdown. Both lifecycles served 64 parallel HTTP requests before shutdown; relay RSS was
+464–496 KiB with one thread, seven descriptors and no CPU ticks recorded across five-second idle
+samples. These remain component observations.
+
+Owned graph cleanup, restore, reservation recovery, VM restart/audit and final shutdown passed;
+all 16 admission watchdog samples passed and protected global configuration was unchanged. An
+earlier fixture attempt passed the stop assertions but then correctly hit `graph_restart_running`;
+the corrected fixture stops the application only after proving relay-stop isolation. That failed
+fixture also completed owned cleanup and VM shutdown. The fixture stages the C binary separately;
+the Rust candidate executable hash therefore does not identify the relay payload.
+
+Eight portable relay contract tests pass on macOS. A Linux-only regression additionally exercises
+a real owned child through stale-start refusal, graceful stop and repeated-stop refusal; it is
+not part of the macOS test count. Linux behavior was exercised by the ARM64 live control above.
+
+After the stop change, default/all-feature Rust tests, strict Clippy in both configurations, the
+default release build, repository typecheck/check/test (940 CLI passes, five skips), and changed
+documentation links/whitespace checks passed. The default build remains without stream relays.

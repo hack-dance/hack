@@ -1,4 +1,5 @@
 //! Foreground private routing authority; its owner must retain a pipe on stdin.
+pub mod certificates;
 mod exit_watch;
 pub mod managed;
 pub mod ownership;
@@ -52,16 +53,30 @@ fn response(code: u16, body: &[u8], endpoint: Option<&str>) -> Vec<u8> {
     bytes
 }
 fn parse(bytes: &[u8]) -> Result<(String, bool), ()> {
-    parse_request(bytes, false)
+    parse_request(bytes, RequestMode::Read)
 }
-fn parse_request(bytes: &[u8], stop: bool) -> Result<(String, bool), ()> {
+#[derive(PartialEq, Eq)]
+enum RequestMode {
+    Read,
+    Stop,
+    Certificate,
+}
+fn parse_request(bytes: &[u8], mode: RequestMode) -> Result<(String, bool), ()> {
     let text = std::str::from_utf8(bytes).map_err(|_| ())?;
     if !text.is_ascii() || !text.ends_with("\r\n\r\n") {
         return Err(());
     }
     let mut lines = text[..text.len() - 4].split("\r\n");
     let first = lines.next().ok_or(())?.split(' ').collect::<Vec<_>>();
-    if first.len() != 3 || first[0] != if stop { "POST" } else { "GET" } || first[2] != "HTTP/1.1" {
+    if first.len() != 3
+        || first[0]
+            != if mode == RequestMode::Stop {
+                "POST"
+            } else {
+                "GET"
+            }
+        || first[2] != "HTTP/1.1"
+    {
         return Err(());
     }
     let mut headers = std::collections::BTreeMap::new();
@@ -88,7 +103,7 @@ fn parse_request(bytes: &[u8], stop: bool) -> Result<(String, bool), ()> {
     {
         return Err(());
     }
-    if stop {
+    if mode == RequestMode::Stop {
         let hash = first[1].strip_prefix("/stop?identity=").ok_or(())?;
         if hash.len() != 64
             || !hash
@@ -98,6 +113,13 @@ fn parse_request(bytes: &[u8], stop: bool) -> Result<(String, bool), ()> {
             return Err(());
         }
         return Ok((hash.into(), false));
+    }
+    if mode == RequestMode::Certificate {
+        let name = first[1].strip_prefix("/ask?domain=").ok_or(())?;
+        return Ok((
+            publication::normalize_hostname(name).map_err(|_| ())?,
+            false,
+        ));
     }
     let (name, route) = if first[1] == "/route" {
         let authority = headers.get("x-forwarded-host").ok_or(())?;
@@ -123,7 +145,26 @@ fn parse_request(bytes: &[u8], stop: bool) -> Result<(String, bool), ()> {
         route,
     ))
 }
-fn answer(candidate: &Candidate, bytes: &[u8]) -> Vec<u8> {
+fn answer(
+    candidate: &Candidate,
+    bytes: &[u8],
+    budget: &mut Option<certificates::Budget>,
+) -> Vec<u8> {
+    if let Some(budget) = budget
+        && let Ok((name, _)) = parse_request(bytes, RequestMode::Certificate)
+    {
+        let admitted = (|| -> Result<(), CandidateError> {
+            let before = publication::lookup_hostname(candidate, &name)?;
+            budget.admit(&name)?;
+            let after = publication::lookup_hostname(candidate, &name)?;
+            if before != after {
+                return Err(error());
+            }
+            Ok(())
+        })();
+        return response(if admitted.is_ok() { 200 } else { 403 }, b"", None);
+    }
+
     let Ok((hostname, route)) = parse(bytes) else {
         return response(400, b"{}", None);
     };
@@ -148,12 +189,13 @@ fn answer(candidate: &Candidate, bytes: &[u8]) -> Vec<u8> {
 }
 /// No background daemon, idle polling or implicit socket adoption. EOF revokes this service.
 pub fn serve(candidate: &Candidate, socket: &Path) -> Result<(), CandidateError> {
-    serve_locked(candidate, socket, None)
+    serve_locked(candidate, socket, None, None)
 }
 fn serve_locked(
     candidate: &Candidate,
     socket: &Path,
     startup_lock: Option<state::Lock>,
+    mut budget: Option<certificates::Budget>,
 ) -> Result<(), CandidateError> {
     let mut input = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(0, input.as_mut_ptr()) } != 0 {
@@ -249,13 +291,13 @@ fn serve_locked(
                             c.request.windows(4).position(|b| b == b"\r\n\r\n")
                         {
                             if end + 4 == c.request.len()
-                                && parse_request(&c.request, true)
+                                && parse_request(&c.request, RequestMode::Stop)
                                     .is_ok_and(|(hash, _)| hash == fingerprint)
                             {
                                 return Ok(());
                             }
                             c.response = Some(if end + 4 == c.request.len() {
-                                answer(candidate, &c.request)
+                                answer(candidate, &c.request, &mut budget)
                             } else {
                                 response(400, b"{}", None)
                             });

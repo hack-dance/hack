@@ -25,7 +25,8 @@ Usage:
   hack-local runtime hostname-authority --socket <path> [--json]
   hack-local runtime recover-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
   hack-local runtime managed-hostname-authority [--json]
-  hack-local runtime serve-managed-hostnames (owner pipe on stdin)
+  hack-local runtime serve-managed-hostnames [--certificate-name-limit <1..4096>] (owner pipe on stdin)
+  hack-local runtime certificate-admission [--json]
   hack-local runtime stop-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
   hack-local runtime serve-hostnames --socket <private-unix-path> (owner pipe on stdin)
   hack-local runtime lookup-hostname --hostname <name> [--json]
@@ -330,6 +331,27 @@ fn run() -> Result<(), CandidateError> {
                 &hack_runtime_core::provider::hostname_authority::managed::inspect(
                     &Candidate::discover(&requested)?,
                 )?,
+            )?;
+        }
+        ["runtime", "certificate-admission"] | ["runtime", "certificate-admission", "--json"] => {
+            print_json(
+                &hack_runtime_core::provider::hostname_authority::certificates::inspect(
+                    &Candidate::discover(&requested)?,
+                )?,
+            )?;
+        }
+        [
+            "runtime",
+            "serve-managed-hostnames",
+            "--certificate-name-limit",
+            limit,
+        ] => {
+            let limit = limit.parse::<usize>().map_err(|_| {
+                CandidateError::new("certificate_admission", "Invalid certificate name limit.")
+            })?;
+            hack_runtime_core::provider::hostname_authority::managed::serve_with_certificate_limit(
+                &Candidate::discover(&requested)?,
+                Some(limit),
             )?;
         }
         ["runtime", "serve-managed-hostnames"] => {

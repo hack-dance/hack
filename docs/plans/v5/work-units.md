@@ -706,6 +706,12 @@ authority, with a persisted two-name prototype budget across authority restart.
 Explicit IPv4 bind is mandatory: site-address syntax alone failed the occupied-port
 ownership control. Rust certificate admission, proxy restart/reuse and byte-bounded
 certificate retirement remain open.
+[Durable certificate-name admission](certificate-name-admission-20260916.md) adds
+opt-in Rust authority permissions with retained name limits, live-claim rechecks and
+inspection. Real VM controls pass authority/VM budget persistence, proxy restart
+certificate reuse, exhaustion and retired-name denial. Partial budget recovery,
+reviewed limit changes, certificate byte accounting/retirement and managed proxy
+activation remain open. The application still has 22 compatibility blockers.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

@@ -23,6 +23,12 @@ pub fn inspect(c: &Candidate) -> Result<serde_json::Value, CandidateError> {
     Ok(serde_json::json!({"socket":path,"authority":state,"automatic_start":false}))
 }
 pub fn serve(c: &Candidate) -> Result<(), CandidateError> {
+    serve_with_certificate_limit(c, None)
+}
+pub fn serve_with_certificate_limit(
+    c: &Candidate,
+    limit: Option<usize>,
+) -> Result<(), CandidateError> {
     let lock = state::Lock::acquire(&c.state_root.join("run/smolvm"))?;
     let current = status(c)?;
     if current.phase != "running" || current.process_alive != Some(true) {
@@ -31,7 +37,12 @@ pub fn serve(c: &Candidate) -> Result<(), CandidateError> {
     let owner = state::Owner::load(c)?;
     let path = socket(&owner);
     state::private_directory(path.parent().ok_or_else(super::error)?)?;
-    super::serve_locked(c, &path, Some(lock))
+    let budget = limit
+        .map(|limit| {
+            super::certificates::Budget::open(&super::certificates::root(c), &owner.token, limit)
+        })
+        .transpose()?;
+    super::serve_locked(c, &path, Some(lock), budget)
 }
 /// Caller holds the provider operation lock, fencing concurrent managed startup.
 pub(crate) fn stop(c: &Candidate, owner: &state::Owner) -> Result<(), CandidateError> {

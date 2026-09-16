@@ -446,6 +446,52 @@ migration, stale state backup, data rollback incompatibility, CA rotation with e
 **Evidence:** packaged end-to-end workflows, full gates, migration data readback, explicit unsupported
 platform/capability list. Publishing and changes to the user's official installation are separate.
 
+### Queued follow-up — Default to hack.local with parallel legacy names
+
+**User direction (September 16):** make `hack.local` the default local domain for
+v5, new projects, init, generated URLs/configuration and documentation. Preserve
+configurable custom domains and serve `hack.gy` names in parallel for compatibility.
+Provide an optional doctor-driven migration/repair for existing installations.
+This queues implementation; it does not change the working global resolver or TLS.
+
+**Current-source distinction:** `src/constants.ts` currently defaults the primary
+suffix to `hack`, with `hack.gy` as the OAuth alias root. Migrate both concepts
+explicitly: new names such as `api.project.hack.local` should coexist with the
+corresponding `api.project.hack.gy`; do not accidentally derive `hack.local.gy`.
+Preserve existing `.hack` routes during migration until their compatibility policy
+is explicit. Treat the user's isolated `hck.local` spelling as `hack.local`.
+
+**Acceptance:**
+- Centralize primary-domain and compatibility-alias generation across init, up,
+  branch/worktree instances, service/custom extra hosts, global service URLs,
+  daemon/runtime routing, doctor, CLI output and generated agent guidance/docs.
+- New default installations provide both local and legacy names for the same
+  intended instance, with working DNS and TLS, without forcing redirects that break
+  callbacks, origins or WebSockets. Keep explicit custom-domain choices and their
+  precedence; report collisions instead of replacing another route.
+- Doctor offers a reviewable, opt-in migration/repair plan, preserves user-owned
+  values and working legacy aliases, supports interrupted-run recovery and rollback,
+  and is idempotent. Ordinary diagnosis must not silently rewrite resolver, trust,
+  hosts, project configuration or application security policies.
+- Test fresh init, existing default/custom setups, multi-branch/worktree isolation,
+  both domains in parallel, TLS/SNI, HTTP/WebSockets, browser/CLI/container resolution,
+  and cold/offline/restart behavior. Check certificate/name budgets and alias cleanup
+  without counting two names as two independent service instances.
+- Verify OAuth callback and origin behavior separately; keep usable legacy callback
+  names rather than assuming `.local` satisfies providers' public-suffix rules.
+  Do not silently broaden CORS/CSRF/cookie/callback allowlists or migrate credentials.
+
+**DNS qualification:** `.local` is a special multicast-DNS namespace under
+[RFC 6762](https://www.rfc-editor.org/rfc/rfc6762#section-3). The requested default
+therefore needs actual macOS/Bonjour and supported Linux resolver tests, including
+coexistence with existing mDNS devices and split-DNS/Tailscale configuration. Do not
+assume changing a suffix makes ordinary unicast wildcard resolution work. If a
+supported platform cannot resolve it reliably, report the concrete conflict before
+promotion; retain the requested target and configurable domains in the plan.
+
+**Status:** queued in WU11, coordinated with WU07 routing/TLS; no default or global
+configuration changed.
+
 ### Queued follow-up — Worktree inheritance of gitignored Hack settings
 
 **User request (September 16):** after the current runtime/routing work, fix missing

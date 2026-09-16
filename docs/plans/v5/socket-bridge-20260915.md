@@ -70,3 +70,7 @@ inherited-descriptor regression), all six final relay contracts, strict Clippy f
 features, the isolated release build, and repository typecheck/check/test (940 pass, five skip).
 The final C-only hardening and added regression passed focused contracts and all-feature Clippy
 before the final live run. Documentation links and whitespace checks also passed.
+
+The subsequent [persisted provider audit](provider-config-audit-20260915.md) now rejects unowned
+socket declarations before boot. The earlier isolated bridge recipe intentionally no longer boots
+unmodified: a production bridge must first supply explicit durable intent that the audit accepts.

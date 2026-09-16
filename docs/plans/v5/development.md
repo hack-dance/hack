@@ -659,3 +659,7 @@ It is absent from the default build and has no route CLI or automatic lifecycle 
 The [isolated socket bridge qualification](socket-bridge-20260915.md) proves HTTP transport through
 SmolVM without enabling general guest networking; it records ownership, recovery and credential
 delivery gates before actual application use.
+
+The [persisted provider capability audit](provider-config-audit-20260915.md) supplements the boot
+snapshot before startup and guest access. Unexpected socket/SSH forwarding and hidden launch inputs
+are refused without returning their contents. Diagnostic status and owned shutdown remain available.

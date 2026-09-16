@@ -2,6 +2,7 @@
 pub mod admission;
 mod agent;
 mod artifact;
+mod config_audit;
 mod disk_audit;
 mod engine;
 pub mod environment;

@@ -440,6 +440,7 @@ impl<'a> OwnedGuest<'a> {
     }
 }
 fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
+    super::config_audit::verify(candidate, owner)?;
     // 1.14.3 consumes and removes boot-config.json. Its retained running config plus
     // independently observed disk descriptors form the host audit boundary.
     // Guest mount mode and executable digests are verified before engine startup.
@@ -609,6 +610,7 @@ pub fn up_with_profile(
     }
     if owner.phase == "running" {
         verify_live(candidate, &owner)?;
+        audit_boot(candidate, &owner)?;
         return status(candidate);
     }
     if ![
@@ -682,6 +684,10 @@ pub fn up_with_profile(
             "admission_rejected",
             "Swapouts changed after qualification; refusing boot.",
         ));
+    }
+    if let Err(error) = super::config_audit::verify(candidate, &owner) {
+        phase(candidate, &mut owner, "stopped-before-engine")?;
+        return Err(error);
     }
     let previous_boot = owner.begin_boot();
     owner.reclamation = Some(boot_reclamation_policy());

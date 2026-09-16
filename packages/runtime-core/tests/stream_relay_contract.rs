@@ -900,3 +900,70 @@ fn unix_publication_streams_and_preserves_occupied_or_replaced_frontend() {
     assert_eq!(aliased.status.code(), Some(78));
     assert!(!fresh.socket.exists());
 }
+
+#[test]
+fn unix_frontend_receipt_survives_crash_and_refuses_foreign_receipt() {
+    use std::os::unix::fs::MetadataExt;
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let token = "abababababababababababababababab";
+    let guard = Relay::start_options(
+        backend.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(token),
+        None,
+    );
+    let frontend = guard.root.join("frontend.sock");
+    let receipt = guard.root.join("frontend.sock.identity");
+    let start = || {
+        Command::new(BINARY)
+            .arg("--publish-unix")
+            .arg(&frontend)
+            .arg(&guard.socket)
+            .args([token, "10000"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    fs::write(&receipt, b"foreign").unwrap();
+    let failed = start().wait_with_output().unwrap();
+    assert_eq!(failed.status.code(), Some(70));
+    assert!(failed.stdout.is_empty());
+    assert!(!frontend.exists());
+    assert_eq!(fs::read(&receipt).unwrap(), b"foreign");
+    fs::remove_file(&receipt).unwrap();
+    let mut child = start();
+    let output = child.stdout.take().unwrap();
+    let mut descriptor = libc::pollfd {
+        fd: output.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 3000) }, 1);
+    let mut line = String::new();
+    BufReader::new(output).read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    let owned = fs::symlink_metadata(&frontend).unwrap();
+    let expected = format!(
+        "HKPF1 {} {} {} {token}\n",
+        child.id(),
+        owned.dev(),
+        owned.ino()
+    );
+    assert_eq!(fs::read_to_string(&receipt).unwrap(), expected);
+    assert_eq!(fs::metadata(&receipt).unwrap().mode() & 0o777, 0o600);
+    child.kill().unwrap();
+    assert!(!child.wait().unwrap().success());
+    assert_eq!(fs::read_to_string(&receipt).unwrap(), expected);
+    assert_eq!(fs::symlink_metadata(&frontend).unwrap().ino(), owned.ino());
+    // The harness owns these exact paths; managed retirement is a separate gate.
+    fs::remove_file(&frontend).unwrap();
+    fs::remove_file(&receipt).unwrap();
+    let mut normal = frontend_publisher(&guard.socket, token, 0, None, true);
+    let normal_receipt = normal.root.join("frontend.sock.identity");
+    assert!(normal_receipt.exists());
+    normal.stop();
+    assert!(!normal_receipt.exists());
+    assert!(!normal.socket.exists());
+}

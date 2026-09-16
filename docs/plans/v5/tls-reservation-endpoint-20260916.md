@@ -70,3 +70,30 @@ reload, shutdown and crash ordering. Same-user malicious path replacement is not
 security boundary established by this control. Actual VM/app TLS, WebSocket and
 streaming behavior, DNS/trust ownership, scoped QA and matched resource benchmarks
 remain open. No default feature or supported parity claim changes in this unit.
+
+## Durable frontend identity follow-up
+
+Unix frontend startup now creates `FRONTEND_SOCKET.identity` before reporting ready.
+The private, exclusive receipt contains `HKPF1 PID DEVICE INODE RESERVATION` followed
+by a newline; both receipt and parent directory are fsynced. A preexisting receipt
+blocks startup without overwriting it, and the newly bound frontend is removed.
+Graceful shutdown removes only the original receipt inode. Controlled TCP publisher
+receipts retain their existing `HKPC1` format through the shared writer.
+
+The added native contract kills and reaps the actual publisher after readiness,
+then verifies the exact socket identity and reservation receipt survived. It also
+checks occupied-receipt preservation, no false readiness on refusal, and graceful
+receipt/socket removal. The test harness removes only its own crash fixture; this
+is not proof that managed cleanup supports Unix endpoints yet. Incomplete receipt
+writes and a bind-before-receipt crash remain ambiguous and must fail closed.
+
+The next integration must persist frontend mode in managed intent, derive its path
+from the reservation, verify this receipt after observed process exit, and cover
+normal release, abrupt death, journal recovery, VM down and replacement preservation.
+The foreground primitive alone does not enable managed TLS.
+
+Follow-up verification: all 19 native contracts, default/all-feature Rust suites,
+strict Clippy, default native-HTTP release and Bun gates passed (940 pass, 5 skip).
+The TLS control was rerun with native SHA-256 `22ef923892726290834fb35b8cf40ec103699332807ec060919d83b3055d63ed`
+and again passed stale-route, replacement-route, scoped trust and cleanup checks.
+Evidence: `.hack-local/review/wu07/tls-unix-1789588384788359000/`.

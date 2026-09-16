@@ -577,6 +577,10 @@ reproduce stale routing through a reused TCP port and qualify a private native U
 frontend with scoped TLS, preserved Host/protocol, old-route refusal and full fixture
 cleanup. Managed frontend crash receipts, TLS route lifetime/retention and actual-app
 qualification remain open; existing TCP publication and defaults are unchanged.
+Unix frontend publishers now persist a private socket identity receipt before
+readiness; actual-process abrupt-death and occupied-receipt controls cover the
+native primitive. Managed intent/retirement integration remains the next gate,
+including ambiguous partial receipts and replacement preservation.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

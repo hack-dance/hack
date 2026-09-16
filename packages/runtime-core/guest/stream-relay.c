@@ -76,6 +76,31 @@ static int private_parent(const char *path) {
     return lstat(parent, &directory) || !S_ISDIR(directory.st_mode) ||
         directory.st_uid != geteuid() || (directory.st_mode & 0077) ? -1 : 0;
 }
+/* A receipt becomes authoritative only after both file and directory are durable. */
+static int socket_receipt(const char *socket_path, const char *kind,
+        const struct stat *socket_owned, const unsigned char *token,
+        char *path, struct stat *owned, int *bound) {
+    if (snprintf(path, PATH_MAX, "%s.identity", socket_path) >= PATH_MAX) return -1;
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return -1;
+    int failed = fstat(fd, owned) != 0;
+    if (!failed) {
+        *bound = 1;
+        char value[256];
+        int length = snprintf(value, sizeof(value), "%s %ld %" PRIuMAX " %" PRIuMAX " %.32s\n",
+            kind, (long)getpid(), (uintmax_t)socket_owned->st_dev,
+            (uintmax_t)socket_owned->st_ino, token);
+        if (length <= 0 || length >= (int)sizeof(value) ||
+            write(fd, value, (size_t)length) != length || fsync(fd)) failed = 1;
+        char parent[PATH_MAX];
+        strcpy(parent, socket_path); *strrchr(parent, '/') = 0;
+        int directory = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (directory < 0 || fsync(directory)) failed = 1;
+        if (directory >= 0) close(directory);
+    }
+    close(fd);
+    return failed ? -1 : 0;
+}
 static int connect_target(struct flow *flow, const struct sockaddr_in *target) {
     struct stat before, after;
     if (publish_mode && private_upstream(&before)) return -1;
@@ -201,9 +226,10 @@ static int stop_owned(long pid, long start) {
 int main(int argc, char **argv) {
     char *publish_args[8];
     struct sockaddr_un control = {0};
-    struct stat control_owned, receipt_owned;
+    struct stat control_owned, receipt_owned, frontend_receipt_owned;
     char receipt_path[PATH_MAX] = {0};
-    int receipt_bound = 0;
+    int receipt_bound = 0, frontend_receipt_bound = 0;
+    char frontend_receipt_path[PATH_MAX] = {0};
     unsigned char stop_message[39] = {0};
     int control_fd = -1, control_bound = 0;
     if (argc >= 2 && (!strcmp(argv[1], "--publish") || !strcmp(argv[1], "--publish-unix"))) {
@@ -294,6 +320,8 @@ int main(int argc, char **argv) {
     }
     if (listen_path && lstat(listen_path, &owned)) { close(listener); return 73; }
     int failed = listen(listener, CONNECTIONS) != 0;
+    if (!failed && publish_unix && socket_receipt(frontend.sun_path, "HKPF1", &owned,
+            header+4, frontend_receipt_path, &frontend_receipt_owned, &frontend_receipt_bound)) failed = 1;
     if (!failed && control.sun_family) {
         control_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
         if (control_fd < 0 || configure(control_fd) ||
@@ -301,22 +329,8 @@ int main(int argc, char **argv) {
         else if (lstat(control.sun_path, &control_owned)) failed = 1;
         else control_bound = 1;
         if (!failed) {
-            snprintf(receipt_path, sizeof(receipt_path), "%s.identity", control.sun_path);
-            int receipt = open(receipt_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-            if (receipt < 0 || fstat(receipt, &receipt_owned)) failed = 1;
-            else {
-                receipt_bound = 1;
-                char value[256];
-                int length = snprintf(value, sizeof(value), "HKPC1 %ld %" PRIuMAX " %" PRIuMAX " %.32s\n",
-                    (long)getpid(), (uintmax_t)control_owned.st_dev, (uintmax_t)control_owned.st_ino, stop_message+7);
-                if (length <= 0 || length >= (int)sizeof(value) || write(receipt, value, (size_t)length) != length || fsync(receipt)) failed = 1;
-                char parent[sizeof(control.sun_path)];
-                strcpy(parent, control.sun_path); *strrchr(parent, '/') = 0;
-                int directory = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-                if (directory < 0 || fsync(directory)) failed = 1;
-                if (directory >= 0) close(directory);
-            }
-            if (receipt >= 0) close(receipt);
+            if (socket_receipt(control.sun_path, "HKPC1", &control_owned, stop_message+7,
+                    receipt_path, &receipt_owned, &receipt_bound)) failed = 1;
         }
     }
     if (!failed) { puts("ready"); fflush(stdout); }
@@ -465,6 +479,9 @@ int main(int argc, char **argv) {
     for (int i = 0; i < CONNECTIONS; i++) release(&flows[i]);
     if (listen_path && !lstat(listen_path, &current) && S_ISSOCK(current.st_mode) &&
         owned.st_dev == current.st_dev && owned.st_ino == current.st_ino) unlink(listen_path);
+    if (frontend_receipt_bound && !lstat(frontend_receipt_path, &current) && S_ISREG(current.st_mode) &&
+        current.st_dev == frontend_receipt_owned.st_dev && current.st_ino == frontend_receipt_owned.st_ino)
+        unlink(frontend_receipt_path);
     if (target_watch >= 0) close(target_watch);
     close(wakeup[0]);
     close(wakeup[1]);

@@ -7,7 +7,7 @@ not parser errors that can safely be ignored.
 | Finding | Supported replacement or remaining implementation |
 | --- | --- |
 | One external shared network | `x-hack-isolated: true` now provides an explicit candidate-owned internal bridge replacement for an isolated cohort. It does not supply the application's outbound dependencies or shared routing. |
-| Nine Caddy route declarations | Candidate endpoint publication and routing must preserve each service's destination port, readiness, ownership and cleanup. Removing the labels alone does not implement those routes. |
+| Nine Caddy route declarations | [Verified guest endpoint discovery](guest-endpoints-20260915.md) now binds destinations to current container/network identities. Host publication, interface reachability and TLS/hostname routing remain open; removing labels alone does not implement routes. |
 | Eleven AWS home-directory mounts | Obtain scoped, expiring credentials through a native provider and inject them through the environment launcher. Never mount the host credential directory or use an old receipt as authority. |
 | Two environment-file inputs shared by application services | The execution-input compiler still rejects `env_file`; integrate the managed environment resolver without returning values in plans, receipts or logs. |
 | Twelve services versus the original eight-service bound | The driver now allows 32 services, with matching probe and receipt bounds. The four-CPU/4-GiB aggregate guard remains; the actual application's resource declarations still need qualification. |

@@ -551,6 +551,14 @@ selection currently requires a new review/attempt; restoring an old graph across
 edits is not supported. Cleanup does not require readable source and never removes its publication.
 Publication retention/GC, writable build outputs and live reload remain separate work.
 
+`graph inspect` also returns `guest_endpoints` for currently healthy native-HTTP-probed services
+in a committed ready graph. Each entry binds the probe port to the observed container ID, network ID
+and private IPv4 address, checking membership from both directions. Incomplete journals, stopped
+services and inactive receipts do not advertise destinations; inconsistent attachments fail closed.
+These destinations are **guest-only and not reachability-tested**. A successful loopback health
+probe does not prove that the application listens on its guest network interface. This observation
+does not bind a host port, create a Caddy route or authorize a later connection to a cached address.
+
 The initial driver requires the explicit development VM profile, pinned local `sha256:` image IDs,
 read-only roots, at most 32 services, one internal bridge and eight named volumes. The runtime metadata
 tmpfs is bounded to 16 MiB and 4096 inodes; capacity is consumed on demand. Defaults are

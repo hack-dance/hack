@@ -2,7 +2,9 @@
 mod archive;
 pub use archive::archive;
 mod config;
+mod endpoints;
 mod environment;
+pub use endpoints::GuestEndpoint;
 #[cfg(all(test, feature = "environment-launcher"))]
 mod environment_crash_test;
 mod launcher;
@@ -104,6 +106,7 @@ pub struct Snapshot {
     pub receipt: Receipt,
     pub journal_incomplete: bool,
     pub observations: BTreeMap<String, Value>,
+    pub guest_endpoints: BTreeMap<String, GuestEndpoint>,
 }
 fn labels(owner: &str, run: &str, namespace: &str, plan: &str, resource: &Resource) -> Value {
     json!({"io.hack-local.owner":owner,"io.hack-local.graph":run,"io.hack-local.namespace":namespace,"io.hack-local.plan":plan,"io.hack-local.kind":resource.kind.word(),"io.hack-local.resource":resource.key})
@@ -781,11 +784,45 @@ pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateEr
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
     let mut observations = BTreeMap::new();
+    let journal_incomplete =
+        root.join("state.pending").exists() || root.join("state.pending").is_symlink();
+    let mut networks = BTreeMap::new();
+    for (key, resource) in receipt
+        .resources
+        .iter()
+        .filter(|(_, r)| r.kind == Kind::Network)
+    {
+        networks.insert(key.clone(), inspect_resource(&engine, &receipt, resource)?);
+    }
+    let mut guest_endpoints = BTreeMap::new();
     for (key, resource) in &receipt.resources {
-        let value = match inspect_resource(&engine, &receipt, resource)? {
+        let inspected = if resource.kind == Kind::Network {
+            networks.get(key).expect("network inspected").clone()
+        } else {
+            inspect_resource(&engine, &receipt, resource)?
+        };
+        let value = match inspected {
             None => json!({"state":"absent"}),
             Some(v) if resource.kind == Kind::Container => {
-                serde_json::to_value(probes::observe(&engine, &receipt, &resource.key, &v)?)
+                let observation = probes::observe(&engine, &receipt, &resource.key, &v)?;
+                if !journal_incomplete
+                    && receipt.phase == "ready-observed"
+                    && resource.id.is_some()
+                    && observation
+                        == (Observation::Running {
+                            health: Health::Healthy,
+                        })
+                    && let Some(probe) = receipt.probes.get(&resource.key)
+                    && let Some(network) = networks.iter().find_map(|(key, value)| {
+                        receipt.resources[key].id.as_ref().and(value.as_ref())
+                    })
+                {
+                    guest_endpoints.insert(
+                        resource.key.clone(),
+                        endpoints::resolve(&v, network, probe.config.port)?,
+                    );
+                }
+                serde_json::to_value(observation)
                     .map_err(|_| error("graph_state", "Cannot encode observation."))?
             }
             Some(_) => json!({"state":"present"}),
@@ -794,9 +831,9 @@ pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateEr
     }
     Ok(Snapshot {
         receipt,
-        journal_incomplete: root.join("state.pending").exists()
-            || root.join("state.pending").is_symlink(),
+        journal_incomplete,
         observations,
+        guest_endpoints,
     })
 }
 /// Explicit owned cleanup. Ordinary cleanup preserves named data; removing it requires `remove_data`.

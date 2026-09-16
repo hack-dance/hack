@@ -415,6 +415,9 @@ extends the driver to 32 services/probes and fixes a 1-MiB runtime metadata limi
 cohort. Thirty-two healthy services passed cleanup, fresh restore and archive/export verification.
 The [compatibility inventory](application-compatibility-20260915.md) records the remaining actual
 application replacements; its working configuration remains unchanged.
+[Verified guest endpoints](guest-endpoints-20260915.md) now expose ownership-checked destinations
+through inspection. A 32-service detach/refusal, cleanup and fresh-restore control passes. Host
+socket bridging, loopback publication, interface reachability and TLS routing remain separate work.
 Open work: automatic idle rearming and real-application recovery, crun OCI/kernel compatibility,
 application networking/routing and scoped credential delivery, and the existing application gates.
 

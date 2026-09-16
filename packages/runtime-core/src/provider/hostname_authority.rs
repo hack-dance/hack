@@ -128,7 +128,9 @@ fn answer(candidate: &Candidate, bytes: &[u8]) -> Vec<u8> {
     };
     let found = match publication::lookup_hostname(candidate, &hostname) {
         Ok(found) => found,
-        Err(error) if error.code == "provider_busy" => return response(503, b"{}", None),
+        Err(error) if matches!(error.code, "provider_busy" | "publication_changed") => {
+            return response(503, b"{}", None);
+        }
         Err(_) => return response(403, b"{}", None),
     };
     if route {

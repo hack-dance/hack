@@ -532,10 +532,22 @@ fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
         libc::geteuid()
     })
 }
+fn verify_claim_snapshot(
+    entry: &Entry,
+    after: &BTreeMap<String, Entry>,
+    owner: &str,
+) -> Result<(), CandidateError> {
+    if entry.owner != owner || after.get(&entry.reservation) != Some(entry) {
+        return Err(CandidateError::new(
+            "publication_changed",
+            "Publication ownership changed during lookup; retry a fresh observation.",
+        ));
+    }
+    Ok(())
+}
 /// A point-in-time observation, not a persistent capability or guest health claim.
 pub fn lookup_hostname(c: &Candidate, value: &str) -> Result<serde_json::Value, CandidateError> {
     let name = normalize_hostname(value)?;
-    let _lock = state::Lock::acquire(&c.state_root.join("run/smolvm"))?;
     let owner = state::Owner::load(c)?;
     let entries = load(c, &owner.token)?;
     let entry = entries
@@ -543,6 +555,18 @@ pub fn lookup_hostname(c: &Candidate, value: &str) -> Result<serde_json::Value, 
         .find(|e| e.hostnames.contains(&name))
         .ok_or_else(error)?;
     observe_publication(entry)?;
+    // Writers retain the provider lock. Readers validate the selected immutable
+    // ownership record twice instead of blocking unrelated running applications.
+    let after_owner = state::Owner::load(c)?;
+    let after = load(c, &after_owner.token)?;
+    verify_claim_snapshot(entry, &after, &after_owner.token)?;
+    let process = identity::observe(entry.process.pid)?;
+    identity::verify(
+        &entry.process,
+        &process,
+        &entry.process.executable,
+        unsafe { libc::geteuid() },
+    )?;
     Ok(
         serde_json::json!({"hostname":name,"run":entry.run,"reservation":entry.reservation,
         "endpoint":directory(entry).join("frontend"),"state":"publication-observed",
@@ -758,6 +782,35 @@ mod tests {
         release(&c, &e.owner, None).unwrap();
         assert!(!directory(&e).exists());
         assert!(load(&c, &e.owner).unwrap().is_empty());
+        fs::remove_dir_all(c.checkout).unwrap();
+    }
+    #[test]
+    fn read_snapshot_refuses_changed_owner_or_claim_but_allows_unrelated_publication_changes() {
+        let (c, mut e) = fixture();
+        e.unix = true;
+        e.port = 0;
+        e.hostnames = vec!["demo.hack".into()];
+        let mut after = BTreeMap::from([(e.reservation.clone(), e.clone())]);
+        verify_claim_snapshot(&e, &after, &e.owner).unwrap();
+        let mut unrelated = e.clone();
+        unrelated.reservation = "f".repeat(32);
+        unrelated.hostnames = vec!["other.hack".into()];
+        after.insert(unrelated.reservation.clone(), unrelated);
+        verify_claim_snapshot(&e, &after, &e.owner).unwrap();
+        assert!(verify_claim_snapshot(&e, &after, &"d".repeat(32)).is_err());
+        for mutation in 0..4 {
+            let mut changed = after.clone();
+            let selected = changed.get_mut(&e.reservation).unwrap();
+            match mutation {
+                0 => selected.process.start_micros += 1,
+                1 => selected.hostnames = vec!["changed.hack".into()],
+                2 => selected.directory = Some((1, 2)),
+                _ => {
+                    changed.remove(&e.reservation);
+                }
+            }
+            assert!(verify_claim_snapshot(&e, &changed, &e.owner).is_err());
+        }
         fs::remove_dir_all(c.checkout).unwrap();
     }
     #[test]

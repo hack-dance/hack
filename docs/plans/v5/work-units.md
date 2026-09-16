@@ -616,6 +616,11 @@ now serves bounded Unix HTTP lookups without spawning a CLI per request. Owner-p
 EOF cleans its exact socket; abrupt-death receipts/recovery remain open. Certificate
 permission is not enabled. Provider-lock 503 behavior under unrelated branch churn
 requires availability qualification before selecting a default routing path.
+[Authority read snapshots](authority-read-snapshot-20260916.md) remove the global
+provider lock from lookup while rechecking the selected immutable ownership record
+and native process. Unrelated graph operations can retain routing availability;
+pending publication journals still refuse and remain a branch-churn limitation.
+Reservation-specific frontend fencing remains mandatory for stale observations.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

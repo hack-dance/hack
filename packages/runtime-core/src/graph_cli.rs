@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed, plus --source-revision for source mounts; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed, plus --source-revision for source mounts; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and --port (no --json); unpublish-bridge requires --run-id and --expect-reservation.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
@@ -29,6 +29,8 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "reserve-bridge",
         "release-bridge",
         "start-bridge",
+        "publish-bridge",
+        "unpublish-bridge",
         "bridges",
         "reconcile-bridges",
     ]
@@ -74,11 +76,24 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             }
         } else if key == "--profile" && ["run", "restart", "restore"].contains(action) {
             profiles.push(value.to_owned());
-        } else if (["reserve-bridge", "release-bridge", "start-bridge"].contains(action)
+        } else if ([
+            "reserve-bridge",
+            "release-bridge",
+            "start-bridge",
+            "publish-bridge",
+        ]
+        .contains(action)
             && key == "--slot")
             || (*action == "reserve-bridge" && ["--service", "--expect-generation"].contains(&key))
-            || (["release-bridge", "start-bridge"].contains(action)
+            || ([
+                "release-bridge",
+                "start-bridge",
+                "publish-bridge",
+                "unpublish-bridge",
+            ]
+            .contains(action)
                 && key == "--expect-reservation")
+            || (*action == "publish-bridge" && key == "--port")
             || key == "--run-id"
             || (["run", "restart", "restore"].contains(action)
                 && [
@@ -120,6 +135,41 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             },
         )?)
         .map_err(|_| invalid()),
+        "publish-bridge" => {
+            if json {
+                return Err(invalid());
+            }
+            graph::publish_bridge(
+                candidate,
+                run,
+                singles
+                    .get("--slot")
+                    .ok_or_else(invalid)?
+                    .parse()
+                    .map_err(|_| invalid())?,
+                singles
+                    .get("--expect-reservation")
+                    .copied()
+                    .ok_or_else(invalid)?,
+                singles
+                    .get("--port")
+                    .ok_or_else(invalid)?
+                    .parse()
+                    .map_err(|_| invalid())?,
+            )?;
+            unreachable!("successful publication replaces the foreground process")
+        }
+        "unpublish-bridge" => {
+            hack_runtime_core::provider::publication::unpublish(
+                candidate,
+                run,
+                singles
+                    .get("--expect-reservation")
+                    .copied()
+                    .ok_or_else(invalid)?,
+            )?;
+            Ok(serde_json::json!({"run":run,"unpublished":true}))
+        }
         "start-bridge" => serde_json::to_value(graph::start_bridge(
             candidate,
             run,

@@ -290,6 +290,52 @@ pub fn start_bridge(
     save(candidate, &store)?;
     Ok(store.slots[&slot].clone())
 }
+pub fn publish_bridge(
+    candidate: &Candidate,
+    run: &str,
+    slot: u8,
+    reservation: &str,
+    port: u16,
+) -> Result<(), CandidateError> {
+    let engine = Engine::connect(candidate)?;
+    let store = load_store(candidate, &engine, false)?;
+    let a = store
+        .slots
+        .get(&slot)
+        .filter(|a| {
+            a.run == run
+                && a.reservation == reservation
+                && a.phase == "running"
+                && a.relay
+                    .as_ref()
+                    .is_some_and(|r| r.transport == relay::Transport::ReservationV1)
+        })
+        .ok_or_else(invalid)?;
+    let snapshot = inspect_using(candidate, &engine, run)?;
+    if !snapshot
+        .guest_endpoints
+        .get(&a.service)
+        .is_some_and(|e| matches_endpoint(a, e, engine.guest().boot_id()))
+        || relay::operate(&engine, slot, a, "inspect", None)? != "running"
+    {
+        return Err(invalid());
+    }
+    let upstream = engine
+        .guest()
+        .engine_socket()?
+        .with_file_name(format!("bridge-{slot:02}.sock"));
+    super::super::publication::launch(
+        candidate,
+        super::super::publication::Launch {
+            owner: engine.guest().incarnation(),
+            run,
+            reservation,
+            slot,
+            port,
+            upstream: &upstream,
+        },
+    )
+}
 fn stop_slot(
     candidate: &Candidate,
     engine: &Engine<'_>,
@@ -297,6 +343,11 @@ fn stop_slot(
     slot: u8,
 ) -> Result<(), CandidateError> {
     let a = store.slots.get(&slot).expect("selected slot");
+    super::super::publication::release(
+        candidate,
+        engine.guest().incarnation(),
+        Some((&a.run, &a.reservation)),
+    )?;
     if a.relay.is_none() {
         return Ok(());
     }

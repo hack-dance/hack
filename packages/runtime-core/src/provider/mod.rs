@@ -23,6 +23,7 @@ mod network_tools;
 mod process;
 mod profile;
 pub use profile::Profile;
+pub mod publication;
 mod publication_stage;
 pub mod publisher;
 #[cfg(test)]

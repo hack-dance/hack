@@ -293,6 +293,33 @@ fn graph_cli_rejects_duplicate_and_cross_action_flags_before_runtime_access() {
             "x",
         ],
         vec!["graph", "start-bridge", "--run-id", "a", "--service", "web"],
+        vec!["graph", "publish-bridge", "--run-id", "a", "--slot", "0"],
+        vec![
+            "graph",
+            "publish-bridge",
+            "--run-id",
+            "a",
+            "--slot",
+            "0",
+            "--expect-reservation",
+            "x",
+            "--port",
+            "65536",
+        ],
+        vec![
+            "graph",
+            "publish-bridge",
+            "--run-id",
+            "a",
+            "--slot",
+            "0",
+            "--expect-reservation",
+            "x",
+            "--port",
+            "3000",
+            "--json",
+        ],
+        vec!["graph", "unpublish-bridge", "--run-id", "a", "--slot", "0"],
     ] {
         let fixture = Fixture::new();
         let output = invoke(&fixture, &args);

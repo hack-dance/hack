@@ -1065,6 +1065,7 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     artifact::verify(candidate)?;
     let _lock = state::Lock::acquire(&root(candidate))?;
     let mut owner = Owner::load(candidate)?;
+    super::publication::release(candidate, &owner.token, None)?;
     if [
         "stopped",
         "stopped-before-engine",

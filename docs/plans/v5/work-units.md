@@ -617,12 +617,16 @@ replaces the single-graph exclusion with bounded combined CPU/memory/service acc
 stop/restore qualification. Automatic idle/wake safety and full application qualification
 remain open; stopped compute left a measured retained working-set gap.
 [Memory attribution](worktree-memory-attribution-20260916.md) found that guest cache
-eviction and a 4 GiB balloon did not materially recover it; host VM-region attribution
-and a separately admitted larger balloon control are next, with no default change.
+eviction and a 4 GiB balloon did not materially recover it, with no default change.
 [VM-region attribution](vm-memory-regions-20260916.md) found little allocator growth
 and no additional recovery at a 5 GiB balloon target. Pinned-source inspection exposed
 PFN ordering/alignment loss and unchecked host-discard results as instrumentation
-targets; neither is yet established as the live cause.
+targets. [Live instrumentation](balloon-pfn-order-20260916.md) now confirms 99.887%
+alignment loss during a synthetic 1 GiB inflation, with no discard failures. Next
+compare bounded PFN coalescing against the same controls and retained-worktree
+workload; no performance improvement or explanation of the entire gap is claimed.
+Also preflight pinned guest-network archives before allocation and report missing
+inputs specifically, following the new diagnostic fixture's recovered first-boot failure.
 
 **Goal:** many enrolled/retained branches should not require many permanently active working sets.
 Separate registered, running, idle, paused and stopped states with honest CPU/memory/disk accounting.

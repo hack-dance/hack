@@ -32,19 +32,19 @@ if test "$serial" -ne 0; then
   test "$seen" -gt 0
   case "$previous" in *[!0-9a-f]*) exit 1;; esac
   test "${#previous}" = 32
-  case "$phase" in launching|closing|cancelled|stopped) :;; *) exit 1;; esac
+  case "$phase" in preparing|discarding|discarded|launching|closing|cancelled|stopped) :;; *) exit 1;; esac
  fi
  test "$serial" -ge "$seen"
  if test "$serial" -eq "$seen"; then test "$previous" = "$allocation"; fi
  case "$action" in
  start)
   test "$serial" -gt "$seen"
-  case "$phase" in empty|cancelled|stopped) :;; *) exit 1;; esac
-  fence_write launching
+  case "$phase" in empty|cancelled|stopped|discarded) :;; *) exit 1;; esac
+  fence_write preparing
   ;;
  stop)
   if test "$serial" -gt "$seen"; then
-   case "$phase" in empty|cancelled|stopped) :;; *) exit 1;; esac
+   case "$phase" in empty|cancelled|stopped|discarded) :;; *) exit 1;; esac
    test ! -e "$root" && test ! -L "$root"
    test ! -e "$socket" && test ! -L "$socket"
    fence_write cancelled
@@ -54,14 +54,25 @@ if test "$serial" -ne 0; then
    test ! -e "$root" && test ! -L "$root"
    printf 'stopped\n'; exit
   fi
+  case "$phase" in
+  preparing|discarding|discarded)
+   if test "$phase" != discarded; then fence_write discarding; fi
+   check_staging
+   fence_write discarded
+   printf 'stopped\n'; exit
+   ;;
+  esac
   fence_write closing
   ;;
  remove)
   test "$serial" -eq "$seen"
-  case "$phase" in cancelled|stopped) :;; *) exit 1;; esac
+  case "$phase" in cancelled|stopped|discarded) :;; *) exit 1;; esac
   ;;
  inspect)
   test "$serial" -eq "$seen"
+  case "$phase" in preparing|discarding|discarded)
+   check_staging; printf 'exited\n'; exit;;
+  esac
   if test "$phase" = cancelled; then
    test ! -e "$root" && test ! -L "$root"
    printf 'exited\n'; exit

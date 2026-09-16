@@ -505,7 +505,7 @@ choose policies only after measured resource return and application recovery.
 
 Continue the known units and bounded experiments until supported local Hack workflows have real
 application parity with the working Docker/Compose setup and demonstrated resource/performance
-improvements. Keep the active sequence: WU07 partial guest launch/fence recovery → loopback
+improvements. Keep the active sequence: WU07 post-fork/fence-journal recovery controls → loopback
 publication/TLS and scoped QA delivery → application/source/terminal parity, alongside WU12 disk
 accounting. WU13 suspension depends on reliable routing, activity leases and recovery.
 
@@ -520,8 +520,9 @@ The optional native relay now has live-qualified namespace pinning and process-e
 and durably track allocation lifetime. Real CLI interruption now proves stop retry and new-boot recovery; the
 [same-boot cancellation implementation](relay-cancellation-20260916.md) now handles unlaunched
 new intents and rejects delayed requests after reuse with bounded per-slot retention.
-Later guest crash windows, unknown identity recovery and unhealthy-but-running target policy
-remain open before normal publication.
+[Pre-fork executable staging recovery](relay-staging-recovery-20260916.md) is also live-qualified
+without a VM restart. Post-fork/fence-journal crash windows, unknown identity recovery and
+unhealthy-but-running target policy remain open before normal publication.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

@@ -701,3 +701,8 @@ recovery limits. Existing serial-zero receipts retain their conservative recover
 `runtime export-bridge-recovery --slot <1..8> --expect-sha256 <digest>` preserves a verified,
 content-addressed export before freeing the selected source slot. See
 [offline recovery export](bridge-recovery-export-20260916.md) for interruption and retention bounds.
+
+The guest fence distinguishes pre-fork `preparing` from `launching`.
+[Interrupted executable staging](relay-staging-recovery-20260916.md) can now be retired in the same
+boot after owner/file checks, including bounded incomplete executable bytes. Unknown files and
+later process/socket ambiguity still refuse cleanup.

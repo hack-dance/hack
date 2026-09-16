@@ -77,3 +77,6 @@ Shell syntax, changed-document links and whitespace/privacy checks passed.
 
 The subsequent [offline bridge recovery export](bridge-recovery-export-20260916.md) provides
 a supported preservation/slot-retirement path without starting the VM.
+
+The subsequent [staging recovery control](relay-staging-recovery-20260916.md) also handles
+interrupted executable transfer before fork authorization, while preserving unknown files.

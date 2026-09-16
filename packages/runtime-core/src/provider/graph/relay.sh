@@ -33,6 +33,25 @@ alive() {
  test "$(start_ticks "$pid")" = "$born" || return 1
  test "$(sed 's/.*) //' "/proc/$pid/stat" | cut -d' ' -f1)" != Z
 }
+# Only the pre-fork fence can authorize retirement of incomplete executable bytes.
+check_staging() {
+ test ! -e "$socket" && test ! -L "$socket"
+ if test ! -e "$root" && test ! -L "$root"; then return; fi
+ private_dir "$base"; private_dir "$root"
+ private_file "$root/owner"; test "$(cat "$root/owner")" = "$marker"
+ expected=1
+ for name in relay relay.pending; do
+  file="$root/$name"
+  if test -e "$file" || test -L "$file"; then
+   test ! -L "$file" && test -f "$file"
+   case "$(stat -c %u:%g:%a:%h "$file")" in 0:0:600:1|0:0:500:1) :;; *) return 1;; esac
+   test "$(stat -c %s "$file")" -le 262144
+   expected=$((expected+1))
+  fi
+ done
+ # Includes dotfiles and unexpected process/socket receipts; never recursively delete them.
+ test "$(find "$root" -mindepth 1 -maxdepth 1 | wc -l)" -eq "$expected"
+}
 # RELAY_FENCE
 if test "$action" = start; then
  test ! -L "$base"
@@ -46,6 +65,7 @@ if test "$action" = start; then
  chmod 500 "$root/relay.pending"
  mv "$root/relay.pending" "$root/relay"
  check_binary
+ if test "$serial" -ne 0; then fence_write launching; fi
  # This shell records its own PID before exec: no detached child can start after recorded exit.
  /bin/sh -c '
  set -eu; umask 077; set -C
@@ -70,6 +90,14 @@ if test "$action" = remove && test ! -e "$root" && test ! -L "$root"; then
 fi
 private_dir "$base"; private_dir "$root"
 private_file "$root/owner"; test "$(cat "$root/owner")" = "$marker"
+if test "$action" = remove && test "$serial" -ne 0 && test "$phase" = discarded; then
+ check_staging
+ for name in relay.pending relay; do
+  if test -e "$root/$name"; then rm "$root/$name"; fi
+ done
+ rm "$root/owner"; rmdir "$root"
+ printf 'removed\n'; exit
+fi
 if test "$action" = remove; then
  # Called only after the host has durably committed confirmed process exit.
  for file in process socket; do

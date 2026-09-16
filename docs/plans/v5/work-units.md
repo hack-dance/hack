@@ -621,6 +621,10 @@ provider lock from lookup while rechecking the selected immutable ownership reco
 and native process. Unrelated graph operations can retain routing availability;
 pending publication journals still refuse and remain a branch-churn limitation.
 Reservation-specific frontend fencing remains mandatory for stale observations.
+[Explicit authority crash recovery](authority-crash-recovery-20260916.md) adds
+private durable socket receipts, exact-fingerprint dead-owner cleanup and replacement
+preservation. Pre-receipt startup crashes and managed supervisor integration remain
+open; no process is signalled and no application data is removed.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

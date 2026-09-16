@@ -1,4 +1,5 @@
 //! Foreground private routing authority; its owner must retain a pipe on stdin.
+pub mod ownership;
 use super::{publication, state};
 use crate::{Candidate, CandidateError};
 use std::{
@@ -7,11 +8,11 @@ use std::{
     os::{
         fd::AsRawFd,
         unix::{
-            fs::{FileTypeExt, MetadataExt, PermissionsExt},
+            fs::PermissionsExt,
             net::{UnixListener, UnixStream},
         },
     },
-    path::{Path, PathBuf},
+    path::Path,
     time::{Duration, Instant},
 };
 const LIMIT: usize = 4096;
@@ -21,22 +22,6 @@ fn error() -> CandidateError {
         "hostname_authority",
         "Private authority transport refused; preserve unknown resources.",
     )
-}
-struct SocketOwner {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
-}
-impl Drop for SocketOwner {
-    fn drop(&mut self) {
-        if let Ok(m) = fs::symlink_metadata(&self.path)
-            && m.file_type().is_socket()
-            && m.dev() == self.device
-            && m.ino() == self.inode
-        {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
 }
 struct Client {
     stream: UnixStream,
@@ -163,15 +148,13 @@ pub fn serve(candidate: &Candidate, socket: &Path) -> Result<(), CandidateError>
     if !fs::symlink_metadata(parent).map_err(state::io)?.is_dir() {
         return Err(error());
     }
+    ownership::Owner::absent(socket)?;
     let listener = UnixListener::bind(socket).map_err(state::io)?;
     let m = fs::symlink_metadata(socket).map_err(state::io)?;
-    let _owned = SocketOwner {
-        path: socket.into(),
-        device: m.dev(),
-        inode: m.ino(),
-    };
+    let mut owned = ownership::Owner::new(socket, &m);
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600)).map_err(state::io)?;
     listener.set_nonblocking(true).map_err(state::io)?;
+    owned.record(candidate)?;
     let mut clients: Vec<Client> = Vec::new();
     println!("ready");
     std::io::stdout().flush().map_err(state::io)?;

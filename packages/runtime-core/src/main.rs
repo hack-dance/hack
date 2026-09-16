@@ -22,6 +22,8 @@ Usage:
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
   hack-local runtime probe [--json]
   hack-local runtime publication-hostnames [--json]
+  hack-local runtime hostname-authority --socket <path> [--json]
+  hack-local runtime recover-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
   hack-local runtime serve-hostnames --socket <private-unix-path> (owner pipe on stdin)
   hack-local runtime lookup-hostname --hostname <name> [--json]
   hack-local runtime publication-recovery [--json]
@@ -278,6 +280,46 @@ fn run() -> Result<(), CandidateError> {
             } else {
                 print_json(&provider::up_with_profile(&candidate, profile)?)?;
             }
+        }
+        ["runtime", "hostname-authority", "--socket", socket]
+        | [
+            "runtime",
+            "hostname-authority",
+            "--socket",
+            socket,
+            "--json",
+        ] => {
+            print_json(
+                &hack_runtime_core::provider::hostname_authority::ownership::inspect(
+                    &Candidate::discover(&requested)?,
+                    std::path::Path::new(socket),
+                )?,
+            )?;
+        }
+        [
+            "runtime",
+            "recover-hostname-authority",
+            "--socket",
+            socket,
+            "--expect-sha256",
+            hash,
+        ]
+        | [
+            "runtime",
+            "recover-hostname-authority",
+            "--socket",
+            socket,
+            "--expect-sha256",
+            hash,
+            "--json",
+        ] => {
+            print_json(
+                &hack_runtime_core::provider::hostname_authority::ownership::recover(
+                    &Candidate::discover(&requested)?,
+                    std::path::Path::new(socket),
+                    hash,
+                )?,
+            )?;
         }
         ["runtime", "serve-hostnames", "--socket", socket] => {
             hack_runtime_core::provider::hostname_authority::serve(

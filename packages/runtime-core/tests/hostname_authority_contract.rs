@@ -10,7 +10,7 @@ use std::{
         },
     },
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, Output, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
@@ -19,6 +19,7 @@ struct Authority {
     child: Child,
     root: PathBuf,
     socket: PathBuf,
+    killed: bool,
 }
 fn command(socket: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_hack-runtime-candidate"));
@@ -62,6 +63,7 @@ impl Authority {
             child,
             root,
             socket,
+            killed: false,
         }
     }
     fn connect(&self) -> UnixStream {
@@ -75,6 +77,9 @@ impl Authority {
         stream
     }
     fn stop(&mut self) {
+        if self.killed {
+            return;
+        }
         drop(self.child.stdin.take());
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
@@ -128,9 +133,89 @@ fn owner_eof_bounds_slow_clients_and_preserves_foreign_paths() {
     }
     a.stop();
     assert!(!a.socket.exists());
+    assert!(!a.socket.with_extension("identity").exists());
     let mut b = Authority::start();
     fs::remove_file(&b.socket).unwrap();
     fs::write(&b.socket, b"foreign").unwrap();
     b.stop();
     assert_eq!(fs::read(&b.socket).unwrap(), b"foreign");
+}
+
+fn maintenance(socket: &Path, expected: Option<&str>) -> Output {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_hack-runtime-candidate"));
+    c.arg("--candidate-root").arg(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap(),
+    );
+    c.args([
+        "runtime",
+        if expected.is_some() {
+            "recover-hostname-authority"
+        } else {
+            "hostname-authority"
+        },
+        "--socket",
+    ])
+    .arg(socket);
+    if let Some(hash) = expected {
+        c.args(["--expect-sha256", hash]);
+    }
+    c.arg("--json").output().unwrap()
+}
+fn fingerprint(socket: &Path) -> String {
+    let out = maintenance(socket, None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    value["sha256"].as_str().unwrap().to_owned()
+}
+#[test]
+fn crash_recovery_requires_dead_owner_exact_receipt_and_original_endpoint() {
+    let mut a = Authority::start();
+    let receipt = a.socket.with_extension("identity");
+    assert_eq!(fs::metadata(&receipt).unwrap().mode() & 0o777, 0o600);
+    let hash = fingerprint(&a.socket);
+    assert!(!maintenance(&a.socket, Some(&hash)).status.success());
+    assert!(a.connect().peer_addr().is_ok());
+    a.child.kill().unwrap();
+    a.child.wait().unwrap();
+    a.killed = true;
+    assert!(
+        !maintenance(&a.socket, Some(&"0".repeat(64)))
+            .status
+            .success()
+    );
+    assert!(a.socket.exists() && receipt.exists());
+    let saved_socket = a.root.join("saved-socket");
+    fs::rename(&a.socket, &saved_socket).unwrap();
+    fs::write(&a.socket, b"foreign").unwrap();
+    assert!(!maintenance(&a.socket, Some(&hash)).status.success());
+    assert_eq!(fs::read(&a.socket).unwrap(), b"foreign");
+    fs::remove_file(&a.socket).unwrap();
+    fs::rename(saved_socket, &a.socket).unwrap();
+    let bytes = fs::read(&receipt).unwrap();
+    fs::write(&receipt, b"{").unwrap();
+    assert!(!maintenance(&a.socket, Some(&hash)).status.success());
+    assert_eq!(fs::read(&receipt).unwrap(), b"{");
+    fs::write(&receipt, bytes).unwrap();
+    assert!(maintenance(&a.socket, Some(&hash)).status.success());
+    assert!(!a.socket.exists() && !receipt.exists());
+    assert!(maintenance(&a.socket, Some(&hash)).status.success());
+    a.child = command(&a.socket).spawn().unwrap();
+    a.killed = false;
+    let mut line = String::new();
+    BufReader::new(a.child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line, "ready\n");
+    assert_ne!(fingerprint(&a.socket), hash);
+    assert!(!maintenance(&a.socket, Some(&hash)).status.success());
+    assert!(a.connect().peer_addr().is_ok());
+    a.stop();
+    assert!(!a.socket.exists() && !receipt.exists());
 }

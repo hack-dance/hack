@@ -186,8 +186,28 @@ static int stop_owned(long pid, long start) {
 }
 int main(int argc, char **argv) {
     char *publish_args[8];
+    struct sockaddr_un control = {0};
+    struct stat control_owned;
+    unsigned char stop_message[39] = {0};
+    int control_fd = -1, control_bound = 0;
     if (argc >= 2 && !strcmp(argv[1], "--publish")) {
-        if (argc != 6) return 64;
+        if (argc != 6 && argc != 9) return 64;
+        if (argc == 9) {
+            if (strcmp(argv[6], "--control") || argv[7][0] != '/' ||
+                strlen(argv[7]) >= sizeof(control.sun_path) || strlen(argv[8]) != 32 ||
+                strspn(argv[8], "0123456789abcdef") != 32) return 64;
+            control.sun_family = AF_UNIX;
+            strcpy(control.sun_path, argv[7]);
+            char parent[sizeof(control.sun_path)];
+            strcpy(parent, argv[7]);
+            char *slash = strrchr(parent, '/');
+            if (slash == parent || !slash[1]) return 64;
+            *slash = 0;
+            struct stat directory;
+            if (lstat(parent, &directory) || !S_ISDIR(directory.st_mode) ||
+                directory.st_uid != geteuid() || (directory.st_mode & 0077)) return 78;
+            memcpy(stop_message, "HKSTOP1", 7); memcpy(stop_message+7, argv[8], 32);
+        }
         /* --publish PORT PRIVATE_UNIX_SOCKET RESERVATION IDLE_MS; loopback is fixed. */
         publish_args[0] = argv[0]; publish_args[1] = argv[3];
         publish_args[2] = "127.0.0.1"; publish_args[3] = argv[2];
@@ -250,9 +270,17 @@ int main(int argc, char **argv) {
     }
     if (!publish_mode && lstat(argv[1], &owned)) { close(listener); return 73; }
     int failed = listen(listener, CONNECTIONS) != 0;
+    if (!failed && control.sun_family) {
+        control_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+        if (control_fd < 0 || configure(control_fd) ||
+            bind(control_fd, (struct sockaddr *)&control, sizeof(control))) failed = 1;
+        else if (lstat(control.sun_path, &control_owned)) failed = 1;
+        else control_bound = 1;
+    }
     if (!failed) { puts("ready"); fflush(stdout); }
     while (!stopping && !failed) {
-        struct pollfd descriptors[3 + 2 * CONNECTIONS];
+        struct pollfd descriptors[4 + 2 * CONNECTIONS];
+        descriptors[3 + 2 * CONNECTIONS] = (struct pollfd){control_fd, POLLIN, 0};
         descriptors[2 + 2 * CONNECTIONS] = (struct pollfd){target_watch, POLLIN, 0};
         descriptors[1 + 2 * CONNECTIONS] = (struct pollfd){wakeup[0], POLLIN, 0};
         descriptors[0] = (struct pollfd){listener, POLLIN, 0};
@@ -281,9 +309,15 @@ int main(int argc, char **argv) {
                 descriptors[1 + i*2 + side] = (struct pollfd){events ? flow->fd[side] : -1, events, 0};
             }
         }
-        int result = poll(descriptors, 3 + 2*CONNECTIONS, timeout);
+        int result = poll(descriptors, 4 + 2*CONNECTIONS, timeout);
         if (result < 0) { if (errno == EINTR) continue; failed = 1; break; }
         if (stopping || descriptors[2 + 2*CONNECTIONS].revents) break;
+        if (descriptors[3 + 2*CONNECTIONS].revents & (POLLERR | POLLHUP | POLLNVAL)) { failed = 1; break; }
+        if (descriptors[3 + 2*CONNECTIONS].revents & POLLIN) {
+            unsigned char message[sizeof(stop_message)+1];
+            ssize_t size = recv(control_fd, message, sizeof(message), 0);
+            if (size == (ssize_t)sizeof(stop_message) && !memcmp(message, stop_message, sizeof(stop_message))) break;
+        }
         /* Process only descriptors from this poll before accepting new flows. */
         for (int i = 0; i < CONNECTIONS; i++) {
             struct flow *flow = &flows[i];
@@ -381,6 +415,9 @@ int main(int argc, char **argv) {
         }
     }
     close(listener);
+    if (control_fd >= 0) close(control_fd);
+    if (control_bound && !lstat(control.sun_path, &current) && S_ISSOCK(current.st_mode) &&
+        current.st_dev == control_owned.st_dev && current.st_ino == control_owned.st_ino) unlink(control.sun_path);
     for (int i = 0; i < CONNECTIONS; i++) release(&flows[i]);
     if (!publish_mode && !lstat(argv[1], &current) && S_ISSOCK(current.st_mode) &&
         owned.st_dev == current.st_dev && owned.st_ino == current.st_ino) unlink(argv[1]);

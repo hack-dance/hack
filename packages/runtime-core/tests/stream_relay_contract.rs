@@ -480,20 +480,34 @@ fn malformed_reservations_refuse_before_socket_creation() {
 }
 
 fn publisher(socket: &std::path::Path, token: &str, port: u16) -> Relay {
+    controlled_publisher(socket, token, port, None)
+}
+fn controlled_publisher(
+    socket: &std::path::Path,
+    token: &str,
+    port: u16,
+    control_token: Option<&str>,
+) -> Relay {
     let root = PathBuf::from(format!(
         "/tmp/hkp-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir(&root).unwrap();
-    let mut child = Command::new(BINARY)
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut command = Command::new(BINARY);
+    command
         .arg("--publish")
         .arg(port.to_string())
         .arg(socket)
-        .args([token, "10000"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .args([token, "10000"]);
+    if let Some(control_token) = control_token {
+        command
+            .arg("--control")
+            .arg(root.join("control.sock"))
+            .arg(control_token);
+    }
+    let mut child = command.stdout(Stdio::piped()).spawn().unwrap();
     let output = child.stdout.take().unwrap();
     let mut ready = libc::pollfd {
         fd: output.as_raw_fd(),
@@ -687,5 +701,111 @@ fn publisher_refuses_nonprivate_or_aliased_upstream_before_listening() {
     attempt(&file);
     assert!(path.exists());
     assert_eq!(fs::read(&file).unwrap(), b"foreign");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn private_control_stops_only_matching_publisher_and_preserves_replaced_path() {
+    use std::os::unix::net::{UnixDatagram, UnixListener};
+    let root = PathBuf::from(format!(
+        "/tmp/hkc-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).unwrap();
+    let upstream = root.join("upstream");
+    let _server = UnixListener::bind(&upstream).unwrap();
+    fs::set_permissions(&upstream, fs::Permissions::from_mode(0o700)).unwrap();
+    let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    for replace in [false, true] {
+        let port = free_loopback_port();
+        let mut publication = controlled_publisher(&upstream, token, port, Some(token));
+        let path = publication.root.join("control.sock");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let sender = UnixDatagram::unbound().unwrap();
+        sender.connect(&path).unwrap();
+        for invalid in [
+            b"HKSTOP1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".as_slice(),
+            b"HKSTOP1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX",
+            b"HKSTOP1",
+            b"",
+        ] {
+            sender.send(invalid).unwrap();
+        }
+        thread::sleep(Duration::from_millis(50));
+        assert!(publication.child.try_wait().unwrap().is_none());
+        let mut tcp = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        tcp.write_all(b"HKSTOP1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert!(publication.child.try_wait().unwrap().is_none());
+        if replace {
+            fs::remove_file(&path).unwrap();
+            fs::write(&path, b"foreign").unwrap();
+        }
+        sender
+            .send(b"HKSTOP1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(status) = publication.child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(Instant::now() < deadline, "private stop did not exit");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut byte = [0];
+        match tcp.read(&mut byte) {
+            Ok(0) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+            other => panic!("publisher left stream open: {other:?}"),
+        }
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+        assert!(upstream.exists());
+        if replace {
+            assert_eq!(fs::read(&path).unwrap(), b"foreign");
+        } else {
+            assert!(!path.exists());
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn control_startup_refuses_occupied_and_nonprivate_paths_without_leaking_port() {
+    use std::os::unix::net::UnixListener;
+    let root = PathBuf::from(format!(
+        "/tmp/hkcf-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let upstream = root.join("upstream");
+    let _server = UnixListener::bind(&upstream).unwrap();
+    fs::set_permissions(&upstream, fs::Permissions::from_mode(0o700)).unwrap();
+    let control = root.join("control");
+    fs::write(&control, b"foreign").unwrap();
+    for mode in [0o700, 0o755] {
+        fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
+        let port = free_loopback_port();
+        let output = Command::new(BINARY)
+            .args(["--publish", &port.to_string()])
+            .arg(&upstream)
+            .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000", "--control"])
+            .arg(&control)
+            .arg("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+        assert_eq!(fs::read(&control).unwrap(), b"foreign");
+    }
     fs::remove_dir_all(root).unwrap();
 }

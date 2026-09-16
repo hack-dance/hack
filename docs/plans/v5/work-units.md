@@ -536,8 +536,9 @@ the complete volume record and container identity across all three ambiguous-sta
 fixes missing HTTP probe tmpfs reconstruction. Same-boot recovery remains tracked follow-up; the
 next bounded unit is loopback publication with no stale routing across slot reuse.
 The [reservation handshake primitive](relay-reservation-handshake-20260916.md) now passes host
-and ARM64/provider-bridge controls, including stale-token refusal at a reused socket. Persisting
-that protocol in managed relay intent and binding the owned host listener remain open.
+and ARM64/provider-bridge controls, including stale-token refusal at a reused socket. New managed
+relay intent now persists `reservation-v1`; CLI startup/inspection, raw and stale client refusal,
+reboot recovery and data preservation pass. The next integration is the owned loopback listener.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

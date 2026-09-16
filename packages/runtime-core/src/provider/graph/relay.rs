@@ -1,9 +1,28 @@
 //! Guest allocations stay recorded until both process exit and allocation removal are confirmed.
 use super::*;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Transport {
+    #[default]
+    #[serde(rename = "raw")]
+    Raw,
+    #[serde(rename = "reservation-v1")]
+    ReservationV1,
+}
+impl Transport {
+    fn argument(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::ReservationV1 => "reservation-v1",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Relay {
+    #[serde(default)]
+    pub transport: Transport,
     #[serde(default)]
     pub launch_serial: u64,
     pub binary_sha256: String,
@@ -13,7 +32,8 @@ pub struct Relay {
 }
 impl Relay {
     pub(super) fn valid(&self) -> bool {
-        self.launch_serial <= i64::MAX as u64
+        (self.transport == Transport::Raw || self.launch_serial != 0)
+            && self.launch_serial <= i64::MAX as u64
             && hex(&self.binary_sha256, 64)
             && (2..=i32::MAX as u32).contains(&self.target_pid)
             && (1..=i64::MAX as u64).contains(&self.target_start)
@@ -86,6 +106,7 @@ pub(super) fn operate(
         relay.port.to_string(),
         relay.launch_serial.to_string(),
         slot.to_string(),
+        relay.transport.argument().to_owned(),
     ];
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     let script = include_str!("relay.sh").replace("# RELAY_FENCE", include_str!("relay-fence.sh"));
@@ -108,4 +129,32 @@ pub(super) fn operate(
         ));
     }
     Ok(result.trim().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn transport_receipts_preserve_legacy_raw_and_reject_unknown_protocols() {
+        let mut value = json!({
+            "launch_serial":7,"binary_sha256":"a".repeat(64),
+            "target_pid":2,"target_start":1,"port":3000
+        });
+        let legacy: Relay = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(legacy.transport, Transport::Raw);
+        assert!(legacy.valid());
+        value["transport"] = json!("reservation-v1");
+        let guarded: Relay = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(guarded.transport, Transport::ReservationV1);
+        assert!(guarded.valid());
+        assert_eq!(serde_json::to_value(&guarded).unwrap(), value);
+        value["launch_serial"] = json!(0);
+        assert!(
+            !serde_json::from_value::<Relay>(value.clone())
+                .unwrap()
+                .valid()
+        );
+        value["transport"] = json!("unknown");
+        assert!(serde_json::from_value::<Relay>(value).is_err());
+    }
 }

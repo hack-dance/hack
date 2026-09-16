@@ -720,5 +720,5 @@ missing-identity fallback with persistent application data. Graph restart recrea
 HTTP probe storage after confirming the recorded container and old probe are stopped.
 
 The optional native relay now has a [reservation-bound transport handshake](relay-reservation-handshake-20260916.md).
-It rejects stale publishers before connecting to an application; managed protocol selection and
-the loopback listener remain separate integration work.
+It rejects stale publishers before connecting to an application. New managed relay intent persists
+`reservation-v1`; old receipts remain explicitly raw. The loopback listener remains separate work.

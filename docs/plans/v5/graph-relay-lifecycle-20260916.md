@@ -95,3 +95,8 @@ new-boot recovery. A bounded guest cancellation fence is the next recovery slice
 
 [Same-boot cancellation](relay-cancellation-20260916.md) now resolves the qualified pre-launch
 interruption for new serial-bearing intents. Later guest-side crash windows remain conservative.
+
+New managed launches now use [reservation-v1 transport](relay-reservation-handshake-20260916.md).
+Clients must send the reservation handshake and consume its acknowledgement before application
+bytes. The earlier raw-stream measurements above describe the historical build, not the current
+wire contract. Receipts without a transport field remain explicitly raw.

@@ -10,8 +10,9 @@ application response bytes. The header and acknowledgement do not reach the appl
 This binds a host publisher to a specific relay reservation even when the provider reuses a Unix
 socket slot. It is a generation discriminator, not a general remote authentication protocol. The
 publisher must verify the acknowledgement before treating the stream as established. The existing
-unguarded primitive remains available; graph-managed relays have not yet switched to this protocol.
-Managed opt-in/persistence and the loopback listener remain the next integration steps.
+unguarded primitive remains available. New graph-managed relays now select and persist this protocol
+by default; the managed follow-up below records its compatibility and live controls. The loopback
+listener remains the next integration step.
 
 Handshake storage uses the existing bounded stream buffer. Partial handshakes have a fixed deadline
 of the smaller of one second and the configured stream idle limit; receiving more fragments does
@@ -53,7 +54,37 @@ and privacy checks passed. Full verification logs are retained with the live evi
 
 ## Next integration
 
-Persist the selected transport contract with graph relay intent and refuse to publish an old raw
-relay as guarded. Add an owned loopback publisher with exact reservation binding, local port
+Transport selection is now persisted as described below. Add an owned loopback publisher with exact reservation binding, local port
 collision refusal, bounded buffers/connections, stale-slot invalidation and listener/process
 cleanup. Verify this through the managed CLI, then extend routing/TLS and matched application tests.
+
+## Managed transport follow-up
+
+New `graph start-bridge` intent records `transport: "reservation-v1"` before guest effects. The
+guest child receives the exact reservation and transport and starts the guarded relay. Startup
+and later `graph bridges` inspection return that same typed transport. Existing receipts missing
+the field default to `raw`; no existing relay is silently upgraded or interpreted as guarded.
+Unknown protocol strings and guarded receipts without a nonzero launch serial are rejected.
+The guest script also rejects unknown transport arguments before allocation. Raw legacy cleanup
+keeps the existing process/binary identity checks. Legacy decoding is covered by schema tests;
+this unit did not boot an old-version raw receipt for a live upgrade test.
+
+Evidence: `.hack-local/review/wu07/managed-transport-1789582258237997000/`.
+Candidate SHA-256: `4c8ee74d0135a98f9bb1466902dfb0a28575f9dda4d558e7fcfd6dc8ebdafa16`.
+The CLI fixture checked both the start response and subsequently loaded assignment for
+`reservation-v1`, sent the exact handshake, verified the acknowledgement, and served HTTP. A raw
+HTTP client was refused. Each partial-fence/missing-process/dead-without-socket-receipt case retained
+its safe release refusal; after explicit VM restart, the fresh managed relay rejected the old
+reservation and accepted the new one. The named volume's complete engine record and persisted
+application token were unchanged through all three recovery cycles.
+
+All 17 resource-watchdog samples passed. Graph cleanup with explicit fixture-data removal,
+archive/export/reconciliation and final shutdown passed. Protected global configuration was
+unchanged. This integrates the handshake with managed startup and recovery; host TCP publication,
+port ownership and listener cleanup remain unimplemented. No whole-application performance
+comparison was made by this unit.
+
+Managed follow-up verification passed default/all-feature Rust suites (including legacy/unknown
+transport receipt controls), strict Clippy, default release, repository typecheck/check/test
+(940 passes, five skips), shell syntax, documentation links and privacy checks. Logs are retained
+with the managed live evidence.

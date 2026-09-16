@@ -1,5 +1,7 @@
 set -efu
 umask 077
+transport=${11:-raw}
+case "$transport" in raw|reservation-v1) :;; *) exit 1;; esac
 action=$1; allocation=$2; marker=$3; socket=$4; digest=$5; target=$6; ticks=$7; port=$8
 test "$(findmnt -n -o FSTYPE --target /run/hack-local)" = tmpfs
 base=/run/hack-local/graph-relays
@@ -70,8 +72,11 @@ if test "$action" = start; then
  /bin/sh -c '
  set -eu; umask 077; set -C
  printf "%s %s\n" "$$" "$(sed "s/.*) //" /proc/$$/stat | awk "{print \$20}")" > "$1/process"
+ if test "$6" = reservation-v1; then
+  exec "$1/relay" "$2" 127.0.0.1 "$3" 10000 --netns "$4" "$5" --reservation "$7"
+ fi
  exec "$1/relay" "$2" 127.0.0.1 "$3" 10000 --netns "$4" "$5"
- ' relay-child "$root" "$socket" "$port" "$target" "$ticks" </dev/null >/dev/null 2>&1 &
+ ' relay-child "$root" "$socket" "$port" "$target" "$ticks" "$transport" "$allocation" </dev/null >/dev/null 2>&1 &
  for i in $(seq 1 100); do
   if test -S "$socket" && test -f "$root/process"; then break; fi
   sleep .05

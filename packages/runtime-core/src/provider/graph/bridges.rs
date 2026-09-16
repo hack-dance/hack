@@ -264,6 +264,7 @@ pub fn start_bridge(
     store.next_launch_serial += 1;
     let entry = store.slots.get_mut(&slot).expect("checked slot");
     entry.relay = Some(relay::Relay {
+        transport: relay::Transport::ReservationV1,
         launch_serial: store.next_launch_serial,
         binary_sha256: digest,
         target_pid: pid,
@@ -444,6 +445,7 @@ mod tests {
         let entry = store.slots.get_mut(&0).unwrap();
         entry.phase = "starting".into();
         entry.relay = Some(relay::Relay {
+            transport: relay::Transport::Raw,
             launch_serial: 7,
             binary_sha256: "f".repeat(64),
             target_pid: 42,
@@ -479,6 +481,7 @@ mod tests {
     fn relay_phases_require_complete_bounded_identity() {
         let mut store = fixture();
         let relay = relay::Relay {
+            transport: relay::Transport::Raw,
             launch_serial: 0,
             binary_sha256: "f".repeat(64),
             target_pid: 42,

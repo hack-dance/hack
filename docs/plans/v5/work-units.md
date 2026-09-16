@@ -552,8 +552,11 @@ now requires actual process exit after private stop, including a separate contro
 process; a queued wrong token remains an explicit unconfirmed cleanup result.
 [Managed foreground publication](managed-publication-20260916.md) now implements durable
 pre-exec intent and host cleanup before bridge/graph/VM release. Interrupted staging,
-pending journals and abrupt-death socket recovery remain explicit follow-ups before
+pending journals and missing socket identity remain explicit follow-ups before
 complete lifecycle parity; TLS and actual-app parity remain open.
+[Publisher failure controls and native socket receipts](publication-socket-recovery-20260916.md)
+cover occupied-port recovery, unexpected-file preservation and exact socket identity
+after abrupt death. Incomplete/missing identity and startup journal recovery remain open.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

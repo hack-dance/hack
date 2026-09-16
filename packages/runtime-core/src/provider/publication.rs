@@ -8,7 +8,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::unix::{
-        fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+        fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt},
         process::CommandExt,
     },
     path::{Path, PathBuf},
@@ -107,6 +107,67 @@ fn verify_directory(e: &Entry) -> Result<bool, CandidateError> {
     }
     Ok(true)
 }
+fn retire_control(e: &Entry) -> Result<(), CandidateError> {
+    let dir = directory(e);
+    let control = dir.join("control");
+    let receipt = dir.join("control.identity");
+    let present = |p: &Path| p.exists() || p.is_symlink();
+    if !present(&receipt) {
+        return if present(&control) {
+            Err(error())
+        } else {
+            Ok(())
+        };
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&receipt)
+        .map_err(state::io)?;
+    let m = file.metadata().map_err(state::io)?;
+    if !m.is_file()
+        || m.nlink() != 1
+        || m.uid() != e.process.uid
+        || m.mode() & 0o077 != 0
+        || m.len() > 256
+    {
+        return Err(error());
+    }
+    let mut bytes = Vec::new();
+    file.take(257).read_to_end(&mut bytes).map_err(state::io)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| error())?;
+    let fields = text.split_ascii_whitespace().collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return Err(error());
+    }
+    let device = fields[2].parse::<u64>().map_err(|_| error())?;
+    let inode = fields[3].parse::<u64>().map_err(|_| error())?;
+    if inode == 0 || text != format!("HKPC1 {} {device} {inode} {}\n", e.process.pid, e.token) {
+        return Err(error());
+    }
+    if present(&control) {
+        let socket = fs::symlink_metadata(&control).map_err(state::io)?;
+        if !socket.file_type().is_socket()
+            || socket.uid() != e.process.uid
+            || socket.mode() & 0o077 != 0
+            || socket.nlink() != 1
+            || socket.dev() != device
+            || socket.ino() != inode
+        {
+            return Err(error());
+        }
+        fs::remove_file(control).map_err(state::io)?;
+    }
+    let current = fs::symlink_metadata(&receipt).map_err(state::io)?;
+    if current.dev() != m.dev() || current.ino() != m.ino() {
+        return Err(error());
+    }
+    fs::remove_file(receipt).map_err(state::io)?;
+    File::open(dir)
+        .map_err(state::io)?
+        .sync_all()
+        .map_err(state::io)
+}
 fn cleanup(e: &Entry) -> Result<(), CandidateError> {
     publisher::stop(publisher::StopOptions {
         process: &e.process,
@@ -118,9 +179,12 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
         return Ok(());
     }
     let dir = directory(e);
-    // A surviving socket after process absence has no retained inode proof. Preserve it.
+    // Validate the complete directory before deleting any staged resource.
     for entry in fs::read_dir(&dir).map_err(state::io)? {
         let entry = entry.map_err(state::io)?;
+        if entry.file_name() == "control" || entry.file_name() == "control.identity" {
+            continue;
+        }
         if entry.file_name() != "publisher" {
             return Err(error());
         }
@@ -151,6 +215,7 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
             return Err(error());
         }
     }
+    retire_control(e)?;
     let binary = dir.join("publisher");
     if binary.exists() {
         fs::remove_file(binary).map_err(state::io)?;
@@ -360,6 +425,63 @@ mod tests {
         assert!(!directory(&e).exists());
         assert!(load(&c, &e.owner).unwrap().is_empty());
         fs::remove_dir_all(c.checkout).unwrap();
+    }
+    #[test]
+    fn stale_control_requires_matching_native_receipt_and_preserves_replacements() {
+        use std::os::unix::net::UnixDatagram;
+        for mismatch in ["none", "token", "replacement", "missing"] {
+            let (c, mut e) = fixture();
+            let dir = directory(&e);
+            fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+            let m = fs::metadata(&dir).unwrap();
+            e.directory = Some((m.dev(), m.ino()));
+            let control = dir.join("control");
+            let socket = UnixDatagram::bind(&control).unwrap();
+            fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
+            let original = fs::symlink_metadata(&control).unwrap();
+            let receipt = dir.join("control.identity");
+            let token = if mismatch == "token" {
+                "f".repeat(32)
+            } else {
+                e.token.clone()
+            };
+            if mismatch != "missing" {
+                fs::write(
+                    &receipt,
+                    format!(
+                        "HKPC1 {} {} {} {token}\n",
+                        e.process.pid,
+                        original.dev(),
+                        original.ino()
+                    ),
+                )
+                .unwrap();
+                fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            let replacement = if mismatch == "replacement" {
+                fs::remove_file(&control).unwrap();
+                let other = UnixDatagram::bind(&control).unwrap();
+                fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
+                assert_ne!(
+                    original.ino(),
+                    fs::symlink_metadata(&control).unwrap().ino()
+                );
+                Some(other)
+            } else {
+                None
+            };
+            if mismatch == "none" {
+                cleanup(&e).unwrap();
+                assert!(!dir.exists());
+            } else {
+                assert!(cleanup(&e).is_err());
+                assert!(control.exists());
+                fs::remove_dir_all(&dir).unwrap();
+            }
+            drop(replacement);
+            drop(socket);
+            fs::remove_dir_all(c.checkout).unwrap();
+        }
     }
     #[test]
     fn store_rejects_foreign_owner_rebound_path_and_pending_journal() {

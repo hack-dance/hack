@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#define _DARWIN_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <errno.h>
@@ -8,6 +9,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -187,7 +189,9 @@ static int stop_owned(long pid, long start) {
 int main(int argc, char **argv) {
     char *publish_args[8];
     struct sockaddr_un control = {0};
-    struct stat control_owned;
+    struct stat control_owned, receipt_owned;
+    char receipt_path[PATH_MAX] = {0};
+    int receipt_bound = 0;
     unsigned char stop_message[39] = {0};
     int control_fd = -1, control_bound = 0;
     if (argc >= 2 && !strcmp(argv[1], "--publish")) {
@@ -276,6 +280,24 @@ int main(int argc, char **argv) {
             bind(control_fd, (struct sockaddr *)&control, sizeof(control))) failed = 1;
         else if (lstat(control.sun_path, &control_owned)) failed = 1;
         else control_bound = 1;
+        if (!failed) {
+            snprintf(receipt_path, sizeof(receipt_path), "%s.identity", control.sun_path);
+            int receipt = open(receipt_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+            if (receipt < 0 || fstat(receipt, &receipt_owned)) failed = 1;
+            else {
+                receipt_bound = 1;
+                char value[256];
+                int length = snprintf(value, sizeof(value), "HKPC1 %ld %" PRIuMAX " %" PRIuMAX " %.32s\n",
+                    (long)getpid(), (uintmax_t)control_owned.st_dev, (uintmax_t)control_owned.st_ino, stop_message+7);
+                if (length <= 0 || length >= (int)sizeof(value) || write(receipt, value, (size_t)length) != length || fsync(receipt)) failed = 1;
+                char parent[sizeof(control.sun_path)];
+                strcpy(parent, control.sun_path); *strrchr(parent, '/') = 0;
+                int directory = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                if (directory < 0 || fsync(directory)) failed = 1;
+                if (directory >= 0) close(directory);
+            }
+            if (receipt >= 0) close(receipt);
+        }
     }
     if (!failed) { puts("ready"); fflush(stdout); }
     while (!stopping && !failed) {
@@ -418,6 +440,8 @@ int main(int argc, char **argv) {
     if (control_fd >= 0) close(control_fd);
     if (control_bound && !lstat(control.sun_path, &current) && S_ISSOCK(current.st_mode) &&
         current.st_dev == control_owned.st_dev && current.st_ino == control_owned.st_ino) unlink(control.sun_path);
+    if (receipt_bound && !lstat(receipt_path, &current) && S_ISREG(current.st_mode) &&
+        current.st_dev == receipt_owned.st_dev && current.st_ino == receipt_owned.st_ino) unlink(receipt_path);
     for (int i = 0; i < CONNECTIONS; i++) release(&flows[i]);
     if (!publish_mode && !lstat(argv[1], &current) && S_ISSOCK(current.st_mode) &&
         owned.st_dev == current.st_dev && owned.st_ino == current.st_ino) unlink(argv[1]);

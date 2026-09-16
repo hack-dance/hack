@@ -23,6 +23,8 @@ struct Entry {
     reservation: String,
     slot: u8,
     port: u16,
+    #[serde(default)]
+    unix: bool,
     token: String,
     process: identity::ProcessIdentity,
     digest: String,
@@ -92,8 +94,8 @@ fn validate(entries: &BTreeMap<String, Entry>, owner: &str) -> Result<(), Candid
             || !hex(&e.token, 32)
             || !hex(&e.digest, 64)
             || e.slot >= 32
-            || e.port == 0
-            || !ports.insert(e.port)
+            || (e.unix != (e.port == 0))
+            || (!e.unix && !ports.insert(e.port))
             || !slots.insert(e.slot)
             || e.process.pid <= 1
             || e.process.start_micros == 0
@@ -222,10 +224,10 @@ fn verify_directory(e: &Entry) -> Result<bool, CandidateError> {
     }
     Ok(true)
 }
-fn retire_control(e: &Entry) -> Result<(), CandidateError> {
+fn retire_socket(e: &Entry, name: &str, kind: &str, token: &str) -> Result<(), CandidateError> {
     let dir = directory(e);
-    let control = dir.join("control");
-    let receipt = dir.join("control.identity");
+    let control = dir.join(name);
+    let receipt = dir.join(format!("{name}.identity"));
     let present = |p: &Path| p.exists() || p.is_symlink();
     if !present(&receipt) {
         return if present(&control) {
@@ -236,7 +238,7 @@ fn retire_control(e: &Entry) -> Result<(), CandidateError> {
     }
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(&receipt)
         .map_err(state::io)?;
     let m = file.metadata().map_err(state::io)?;
@@ -257,7 +259,7 @@ fn retire_control(e: &Entry) -> Result<(), CandidateError> {
     }
     let device = fields[2].parse::<u64>().map_err(|_| error())?;
     let inode = fields[3].parse::<u64>().map_err(|_| error())?;
-    if inode == 0 || text != format!("HKPC1 {} {device} {inode} {}\n", e.process.pid, e.token) {
+    if inode == 0 || text != format!("{kind} {} {device} {inode} {token}\n", e.process.pid) {
         return Err(error());
     }
     if present(&control) {
@@ -296,7 +298,14 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
     let dir = directory(e);
     let staging = e.binary.as_ref().is_some_and(|b| !b.ready);
     if staging
-        && ["control", "control.identity"].iter().any(|name| {
+        && [
+            "control",
+            "control.identity",
+            "frontend",
+            "frontend.identity",
+        ]
+        .iter()
+        .any(|name| {
             let path = dir.join(name);
             path.exists() || path.is_symlink()
         })
@@ -306,7 +315,11 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
     // Validate the complete directory before deleting any staged resource.
     for entry in fs::read_dir(&dir).map_err(state::io)? {
         let entry = entry.map_err(state::io)?;
-        if entry.file_name() == "control" || entry.file_name() == "control.identity" {
+        if entry.file_name() == "control"
+            || entry.file_name() == "control.identity"
+            || (e.unix
+                && (entry.file_name() == "frontend" || entry.file_name() == "frontend.identity"))
+        {
             continue;
         }
         if entry.file_name() != "publisher" {
@@ -347,7 +360,10 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
             return Err(error());
         }
     }
-    retire_control(e)?;
+    if e.unix {
+        retire_socket(e, "frontend", "HKPF1", &e.reservation)?;
+    }
+    retire_socket(e, "control", "HKPC1", &e.token)?;
     let binary = dir.join("publisher");
     if binary.exists() {
         fs::remove_file(binary).map_err(state::io)?;
@@ -395,7 +411,7 @@ pub(super) struct Launch<'a> {
     pub run: &'a str,
     pub reservation: &'a str,
     pub slot: u8,
-    pub port: u16,
+    pub port: Option<u16>,
     pub upstream: &'a Path,
 }
 #[cfg(feature = "native-stream-relay")]
@@ -419,7 +435,7 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
         || !hex(options.run, 32)
         || !hex(options.reservation, 32)
         || options.slot >= 32
-        || options.port == 0
+        || options.port == Some(0)
         || bytes.len() > 512 * 1024
     {
         return Err(error());
@@ -427,9 +443,9 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
     let mut entries = load(c, options.owner)?;
     if entries.len() >= 32
         || entries.contains_key(options.reservation)
-        || entries
-            .values()
-            .any(|e| e.port == options.port || e.slot == options.slot)
+        || entries.values().any(|e| {
+            options.port.is_some_and(|port| !e.unix && e.port == port) || e.slot == options.slot
+        })
     {
         return Err(error());
     }
@@ -445,7 +461,8 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
         run: options.run.into(),
         reservation: options.reservation.into(),
         slot: options.slot,
-        port: options.port,
+        port: options.port.unwrap_or(0),
+        unix: options.port.is_none(),
         token,
         process,
         digest: format!("{:x}", Sha256::digest(bytes)),
@@ -500,9 +517,25 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
     e.binary.as_mut().expect("recorded staged file").ready = true;
     entries.insert(e.reservation.clone(), e.clone());
     save(c, &entries)?;
+    let endpoint = if e.unix {
+        dir.join("frontend").into_os_string()
+    } else {
+        e.port.to_string().into()
+    };
+    if e.unix {
+        eprintln!(
+            "Unix publication endpoint (await ready): {}",
+            dir.join("frontend").display()
+        );
+    }
     let failure = std::process::Command::new(&e.process.executable)
         .env_clear()
-        .args(["--publish", &e.port.to_string()])
+        .arg(if e.unix {
+            "--publish-unix"
+        } else {
+            "--publish"
+        })
+        .arg(endpoint)
         .arg(options.upstream)
         .args([&e.reservation, "60000", "--control"])
         .arg(dir.join("control"))
@@ -540,6 +573,7 @@ mod tests {
             reservation: format!("{:016x}{serial:016x}", std::process::id()),
             slot: 0,
             port: 3000,
+            unix: false,
             token: "c".repeat(32),
             process,
             digest: format!("{:x}", Sha256::digest(b"fixture")),
@@ -577,60 +611,87 @@ mod tests {
         fs::remove_dir_all(c.checkout).unwrap();
     }
     #[test]
+    fn legacy_tcp_records_remain_valid_and_endpoint_modes_cannot_be_reinterpreted() {
+        let (c, e) = fixture();
+        let mut legacy = serde_json::to_value(&e).unwrap();
+        legacy.as_object_mut().unwrap().remove("unix");
+        let decoded: Entry = serde_json::from_value(legacy).unwrap();
+        assert!(!decoded.unix);
+        let mut entries = BTreeMap::from([(decoded.reservation.clone(), decoded)]);
+        validate(&entries, &e.owner).unwrap();
+        entries.get_mut(&e.reservation).unwrap().unix = true;
+        assert!(validate(&entries, &e.owner).is_err());
+        entries.get_mut(&e.reservation).unwrap().port = 0;
+        validate(&entries, &e.owner).unwrap();
+        entries.get_mut(&e.reservation).unwrap().unix = false;
+        assert!(validate(&entries, &e.owner).is_err());
+        fs::remove_dir_all(c.checkout).unwrap();
+    }
+    #[test]
     fn stale_control_requires_matching_native_receipt_and_preserves_replacements() {
         use std::os::unix::net::UnixDatagram;
-        for mismatch in ["none", "token", "replacement", "missing"] {
-            let (c, mut e) = fixture();
-            let dir = directory(&e);
-            fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
-            let m = fs::metadata(&dir).unwrap();
-            e.directory = Some((m.dev(), m.ino()));
-            let control = dir.join("control");
-            let socket = UnixDatagram::bind(&control).unwrap();
-            fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
-            let original = fs::symlink_metadata(&control).unwrap();
-            let receipt = dir.join("control.identity");
-            let token = if mismatch == "token" {
-                "f".repeat(32)
-            } else {
-                e.token.clone()
-            };
-            if mismatch != "missing" {
-                fs::write(
-                    &receipt,
-                    format!(
-                        "HKPC1 {} {} {} {token}\n",
-                        e.process.pid,
-                        original.dev(),
-                        original.ino()
-                    ),
-                )
-                .unwrap();
-                fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
-            }
-            let replacement = if mismatch == "replacement" {
-                fs::remove_file(&control).unwrap();
-                let other = UnixDatagram::bind(&control).unwrap();
+        for unix in [false, true] {
+            for mismatch in ["none", "token", "replacement", "missing"] {
+                let (c, mut e) = fixture();
+                e.unix = unix;
+                e.port = if unix { 0 } else { 3000 };
+                let name = if unix { "frontend" } else { "control" };
+                let kind = if unix { "HKPF1" } else { "HKPC1" };
+                let dir = directory(&e);
+                fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+                let m = fs::metadata(&dir).unwrap();
+                e.directory = Some((m.dev(), m.ino()));
+                let control = dir.join(name);
+                let socket = UnixDatagram::bind(&control).unwrap();
                 fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
-                assert_ne!(
-                    original.ino(),
-                    fs::symlink_metadata(&control).unwrap().ino()
-                );
-                Some(other)
-            } else {
-                None
-            };
-            if mismatch == "none" {
-                cleanup(&e).unwrap();
-                assert!(!dir.exists());
-            } else {
-                assert!(cleanup(&e).is_err());
-                assert!(control.exists());
-                fs::remove_dir_all(&dir).unwrap();
+                let original = fs::symlink_metadata(&control).unwrap();
+                let receipt = dir.join(format!("{name}.identity"));
+                let token = if mismatch == "token" {
+                    "f".repeat(32)
+                } else {
+                    if unix {
+                        e.reservation.clone()
+                    } else {
+                        e.token.clone()
+                    }
+                };
+                if mismatch != "missing" {
+                    fs::write(
+                        &receipt,
+                        format!(
+                            "{kind} {} {} {} {token}\n",
+                            e.process.pid,
+                            original.dev(),
+                            original.ino()
+                        ),
+                    )
+                    .unwrap();
+                    fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+                }
+                let replacement = if mismatch == "replacement" {
+                    fs::remove_file(&control).unwrap();
+                    let other = UnixDatagram::bind(&control).unwrap();
+                    fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
+                    assert_ne!(
+                        original.ino(),
+                        fs::symlink_metadata(&control).unwrap().ino()
+                    );
+                    Some(other)
+                } else {
+                    None
+                };
+                if mismatch == "none" {
+                    cleanup(&e).unwrap();
+                    assert!(!dir.exists());
+                } else {
+                    assert!(cleanup(&e).is_err());
+                    assert!(control.exists());
+                    fs::remove_dir_all(&dir).unwrap();
+                }
+                drop(replacement);
+                drop(socket);
+                fs::remove_dir_all(c.checkout).unwrap();
             }
-            drop(replacement);
-            drop(socket);
-            fs::remove_dir_all(c.checkout).unwrap();
         }
     }
     #[test]

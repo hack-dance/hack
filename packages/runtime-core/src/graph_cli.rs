@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed, plus --source-revision for source mounts; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and --port (no --json); unpublish-bridge requires --run-id and --expect-reservation.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed, plus --source-revision for source mounts; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); unpublish-bridge requires --run-id and --expect-reservation.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
@@ -43,10 +43,18 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let mut profiles = Vec::new();
     let mut remove_data = false;
     let mut json = false;
+    let mut unix = false;
     let mut index = 0;
     while index < args.len() {
         let key = args[index];
         index += 1;
+        if key == "--unix" {
+            if unix || *action != "publish-bridge" {
+                return Err(invalid());
+            }
+            unix = true;
+            continue;
+        }
         if key == "--json" {
             if json {
                 return Err(invalid());
@@ -136,7 +144,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         )?)
         .map_err(|_| invalid()),
         "publish-bridge" => {
-            if json {
+            if json || unix == singles.contains_key("--port") {
                 return Err(invalid());
             }
             graph::publish_bridge(
@@ -153,9 +161,8 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                     .ok_or_else(invalid)?,
                 singles
                     .get("--port")
-                    .ok_or_else(invalid)?
-                    .parse()
-                    .map_err(|_| invalid())?,
+                    .map(|value| value.parse().map_err(|_| invalid()))
+                    .transpose()?,
             )?;
             unreachable!("successful publication replaces the foreground process")
         }

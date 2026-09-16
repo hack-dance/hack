@@ -295,7 +295,7 @@ pub fn publish_bridge(
     run: &str,
     slot: u8,
     reservation: &str,
-    port: u16,
+    port: Option<u16>,
 ) -> Result<(), CandidateError> {
     let engine = Engine::connect(candidate)?;
     let store = load_store(candidate, &engine, false)?;

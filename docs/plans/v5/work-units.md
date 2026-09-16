@@ -581,6 +581,9 @@ Unix frontend publishers now persist a private socket identity receipt before
 readiness; actual-process abrupt-death and occupied-receipt controls cover the
 native primitive. Managed intent/retirement integration remains the next gate,
 including ambiguous partial receipts and replacement preservation.
+[Managed Unix publication](managed-unix-publication-20260916.md) now persists
+endpoint mode and consumes native frontend receipts through the managed cleanup
+path. TLS route/configuration lifecycle and real-app parity remain open.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

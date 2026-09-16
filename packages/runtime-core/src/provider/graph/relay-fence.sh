@@ -35,22 +35,31 @@ if test "$serial" -ne 0; then
  fi
  test "$serial" -ge "$seen"
  if test "$serial" -eq "$seen"; then test "$previous" = "$allocation"; fi
- # Resume only complete, canonical, same-generation writes along known transitions.
+ # Resume only complete, canonical writes along known transitions.
  # The old command cannot still run while this slot lock is held. Never replay a start.
  if test -e "$control/pending" || test -L "$control/pending"; then
   case "$action" in stop|remove) :;; *) exit 1;; esac
-  test "$serial" -eq "$seen" && test "$previous" = "$allocation"
   private_file "$control/pending"
   set -- $(cat "$control/pending")
-  test "$#" = 3 && test "$1" = "$serial" && test "$2" = "$allocation"
+  test "$#" = 3; test "$1" = "$serial"; test "$2" = "$allocation"
   next=$3
   printf '%s %s %s\n' "$serial" "$allocation" "$next" | cmp -s - "$control/pending"
-  case "$phase:$next" in
-   preparing:launching|preparing:discarding|discarding:discarding|discarding:discarded|discarded:discarded|launching:closing|closing:closing|closing:stopped|stopped:closing) :;;
-   *) exit 1;;
-  esac
+  if test "$serial" -eq "$seen"; then
+   test "$previous" = "$allocation"
+   case "$phase:$next" in
+    preparing:launching|preparing:discarding|discarding:discarding|discarding:discarded|discarded:discarded|launching:closing|closing:closing|closing:stopped|stopped:closing) :;;
+    *) exit 1;;
+   esac
+  else
+   # A first publication precedes all allocation effects. Cancel only an empty slot.
+   test "$action" = stop; test "$serial" -gt "$seen"
+   case "$phase" in empty|cancelled|stopped|discarded) :;; *) exit 1;; esac
+   case "$next" in preparing|cancelled) :;; *) exit 1;; esac
+   test ! -e "$root"; test ! -L "$root"
+   test ! -e "$socket"; test ! -L "$socket"
+  fi
   mv "$control/pending" "$control/state"
-  phase=$next
+  phase=$next; seen=$serial; previous=$allocation
  fi
  case "$action" in
  start)
@@ -61,13 +70,13 @@ if test "$serial" -ne 0; then
  stop)
   if test "$serial" -gt "$seen"; then
    case "$phase" in empty|cancelled|stopped|discarded) :;; *) exit 1;; esac
-   test ! -e "$root" && test ! -L "$root"
-   test ! -e "$socket" && test ! -L "$socket"
+   test ! -e "$root"; test ! -L "$root"
+   test ! -e "$socket"; test ! -L "$socket"
    fence_write cancelled
    printf 'stopped\n'; exit
   fi
   if test "$phase" = cancelled; then
-   test ! -e "$root" && test ! -L "$root"
+   test ! -e "$root"; test ! -L "$root"
    printf 'stopped\n'; exit
   fi
   case "$phase" in
@@ -90,7 +99,7 @@ if test "$serial" -ne 0; then
    check_staging; printf 'exited\n'; exit;;
   esac
   if test "$phase" = cancelled; then
-   test ! -e "$root" && test ! -L "$root"
+   test ! -e "$root"; test ! -L "$root"
    printf 'exited\n'; exit
   fi
   ;;

@@ -710,3 +710,7 @@ later process/socket ambiguity still refuse cleanup.
 Provider commands enforce a private child umask without changing the caller. See
 [creation-permission qualification](provider-child-permissions-20260916.md) for permissive-caller
 startup, failed-boot recovery and lifecycle controls.
+
+Cleanup can resume complete, canonical, same-generation relay fence writes under the slot lock.
+[Recovery qualification](relay-fence-recovery-20260916.md) documents retained refusals for partial,
+foreign-generation and invalid-transition records. No launch replay is permitted.

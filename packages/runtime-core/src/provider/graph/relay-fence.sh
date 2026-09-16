@@ -19,7 +19,6 @@ if test "$serial" -ne 0; then
  private_file "$control/lock"
  exec 9<> "$control/lock"
  flock -w 7 9
- test ! -e "$control/pending" && test ! -L "$control/pending"
  seen=0; previous=-; phase=empty
  if test -e "$control/state" || test -L "$control/state"; then
   private_file "$control/state"
@@ -36,6 +35,23 @@ if test "$serial" -ne 0; then
  fi
  test "$serial" -ge "$seen"
  if test "$serial" -eq "$seen"; then test "$previous" = "$allocation"; fi
+ # Resume only complete, canonical, same-generation writes along known transitions.
+ # The old command cannot still run while this slot lock is held. Never replay a start.
+ if test -e "$control/pending" || test -L "$control/pending"; then
+  case "$action" in stop|remove) :;; *) exit 1;; esac
+  test "$serial" -eq "$seen" && test "$previous" = "$allocation"
+  private_file "$control/pending"
+  set -- $(cat "$control/pending")
+  test "$#" = 3 && test "$1" = "$serial" && test "$2" = "$allocation"
+  next=$3
+  printf '%s %s %s\n' "$serial" "$allocation" "$next" | cmp -s - "$control/pending"
+  case "$phase:$next" in
+   preparing:launching|preparing:discarding|discarding:discarding|discarding:discarded|discarded:discarded|launching:closing|closing:closing|closing:stopped|stopped:closing) :;;
+   *) exit 1;;
+  esac
+  mv "$control/pending" "$control/state"
+  phase=$next
+ fi
  case "$action" in
  start)
   test "$serial" -gt "$seen"

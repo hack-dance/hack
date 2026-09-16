@@ -527,7 +527,9 @@ identity, dead relays without socket identity, fence-journal crash windows, unkn
 unhealthy-but-running target policy remain open before normal publication.
 The identity-control maintenance boot failure is fixed and qualified: [provider child permissions](provider-child-permissions-20260916.md)
 now force a private child umask independent of the caller. The failed boot recovered and its
-pending fixture archive/export completed. Remaining identity/fence recovery work stays open.
+pending fixture archive/export completed. [Complete same-generation fence publication recovery](relay-fence-recovery-20260916.md)
+now passes live positive/negative controls. Partial/first-generation fence writes and missing
+process/socket identity recovery remain open.
 New actionable work joins this ledger with acceptance and a bounded verification path. Release,
 production migration and unrelated global configuration remain separate from this development goal.
 

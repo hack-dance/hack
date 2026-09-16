@@ -24,6 +24,7 @@ mod export;
 pub use export::{Export, export};
 mod journal;
 mod retention;
+mod storage;
 pub use retention::{prune, reconcile_export};
 mod restore;
 mod source;
@@ -115,6 +116,7 @@ pub struct Snapshot {
     pub journal_incomplete: bool,
     pub observations: BTreeMap<String, Value>,
     pub guest_endpoints: BTreeMap<String, GuestEndpoint>,
+    pub storage_references: Value,
 }
 fn labels(owner: &str, run: &str, namespace: &str, plan: &str, resource: &Resource) -> Value {
     json!({"io.hack-local.owner":owner,"io.hack-local.graph":run,"io.hack-local.namespace":namespace,"io.hack-local.plan":plan,"io.hack-local.kind":resource.kind.word(),"io.hack-local.resource":resource.key})
@@ -853,11 +855,13 @@ fn inspect_using(
         };
         observations.insert(key.clone(), value);
     }
+    let storage_references = storage::references(&receipt, journal_incomplete, &observations);
     Ok(Snapshot {
         receipt,
         journal_incomplete,
         observations,
         guest_endpoints,
+        storage_references,
     })
 }
 /// Explicit owned cleanup. Ordinary cleanup preserves named data; removing it requires `remove_data`.

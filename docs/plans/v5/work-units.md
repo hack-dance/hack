@@ -541,6 +541,10 @@ restart. Exercise disk-full and retention-budget exhaustion before admission. Me
 allocation after guest cleanup and any supported discard/compaction, including temporary headroom
 and latency. Unexported recovery evidence cannot be silently evicted to satisfy a budget.
 
+**Current reference work:** [per-graph storage references](graph-storage-references-20260916.md)
+connect verified volume observations to durable restore intent. This is a single-graph
+classification, not complete cross-branch collection authority.
+
 **Next slices:** [offline bridge recovery export](bridge-recovery-export-20260916.md) now frees
 retained journal slots after verified preservation. External archival/reviewed retirement of the
 bounded export store remains open; read-only ownership/accounting inventory; immutable cache reference model; bounded

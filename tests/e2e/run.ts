@@ -2,6 +2,7 @@ import { runIsolationCanary, runScenarios, type Scenario } from "./harness.ts";
 import { agentDocsSyncScenario } from "./scenarios/agent-docs-sync.ts";
 import { automationCheckScenario } from "./scenarios/automation-check.ts";
 import { cachePruneScenario } from "./scenarios/cache-prune.ts";
+import { dependencyCacheScenario } from "./scenarios/dependency-cache.ts";
 import { doctorScenario } from "./scenarios/doctor.ts";
 import { envSecretsScenario } from "./scenarios/env-secrets.ts";
 import { initScenario } from "./scenarios/init.ts";
@@ -41,6 +42,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   doctorScenario,
   lifecycleSessionRecoveryScenario,
   cachePruneScenario,
+  dependencyCacheScenario,
   upDownScenario,
   lifecycleHostProcessScenario,
   worktreeParallelUpScenario,

@@ -3,7 +3,11 @@ import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: string[][] = [];
-const runOpts: { stdout?: string }[] = [];
+const runOpts: {
+  stdout?: string;
+  timeoutMs?: number;
+  forwardSignals?: boolean;
+}[] = [];
 const execCalls: string[][] = [];
 
 const shellMock = await registerScopedModuleMock({
@@ -20,10 +24,18 @@ const shellMock = await registerScopedModuleMock({
     },
     run: async (
       cmd: readonly string[],
-      opts: { readonly stdout?: string } = {}
+      opts: {
+        readonly stdout?: string;
+        readonly timeoutMs?: number;
+        readonly forwardSignals?: boolean;
+      } = {}
     ) => {
       runCalls.push([...cmd]);
-      runOpts.push({ stdout: opts.stdout });
+      runOpts.push({
+        stdout: opts.stdout,
+        timeoutMs: opts.timeoutMs,
+        forwardSignals: opts.forwardSignals,
+      });
       return 0;
     },
     findExecutableInPath: () => "/usr/bin/docker",
@@ -379,4 +391,23 @@ test("down routes stdout to stderr when requested (--json purity)", async () => 
     routeStdoutToStderr: true,
   });
   expect(runOpts[0]?.stdout).toBe("stderr");
+});
+
+test("automatic bootstrap preserves output and forwards cancellation to its bounded child", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  await backend.run({
+    composeFiles: ["compose.yml"],
+    cwd: "/tmp",
+    service: "deps",
+    cmdArgs: [],
+    noDeps: true,
+    timeoutMs: 600_000,
+    forwardSignals: true,
+    routeStdoutToStderr: true,
+  });
+  expect(runOpts[0]).toEqual({
+    stdout: "stderr",
+    timeoutMs: 600_000,
+    forwardSignals: true,
+  });
 });

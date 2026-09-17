@@ -43,6 +43,8 @@ export interface RuntimePsOptions extends RuntimeBaseOptions {
 }
 
 export interface RuntimeRunOptions extends RuntimeBaseOptions {
+  readonly forwardSignals?: boolean;
+  readonly timeoutMs?: number;
   readonly service: string;
   readonly noDeps?: boolean;
   readonly workdir?: string;
@@ -166,7 +168,14 @@ export const composeRuntimeBackend: RuntimeBackend = {
       opts.service,
       ...(opts.cmdArgs.length > 0 ? opts.cmdArgs : []),
     ];
-    return await run(cmd, { cwd: opts.cwd, stdin: "inherit", env: opts.env });
+    return await run(cmd, {
+      cwd: opts.cwd,
+      stdin: "inherit",
+      env: opts.env,
+      stdout: opts.routeStdoutToStderr ? "stderr" : "inherit",
+      timeoutMs: opts.timeoutMs,
+      forwardSignals: opts.forwardSignals,
+    });
   },
   async exec(opts) {
     const cmd = [

@@ -70,3 +70,26 @@ test("dependency cache shares a lockfile and runtime keyed volume", async () => 
     first.volumes[0]?.resolvedName
   );
 });
+
+test("identical inputs share cache across checkouts and runtime changes isolate it", async () => {
+  const firstProject = await createProject();
+  const secondProject = await createProject();
+  const first = await resolveDependencyCacheOverride({
+    ...firstProject,
+    projectName: "shared",
+  });
+  const second = await resolveDependencyCacheOverride({
+    ...secondProject,
+    projectName: "shared",
+  });
+  expect(second.volumes).toEqual(first.volumes);
+  await writeFile(
+    resolve(secondProject.projectRoot, "package.json"),
+    '{"packageManager":"bun@1.4.0"}\n'
+  );
+  const changed = await resolveDependencyCacheOverride({
+    ...secondProject,
+    projectName: "shared",
+  });
+  expect(changed.fingerprint).not.toBe(first.fingerprint);
+});

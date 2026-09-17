@@ -111,7 +111,11 @@ import {
   classifyComposeStartupState,
 } from "../lib/compose-startup-state.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
-import { resolveDependencyCacheOverride } from "../lib/dependency-cache.ts";
+import {
+  resolveDependencyCacheBootstrapServices,
+  resolveDependencyCacheOverride,
+} from "../lib/dependency-cache.ts";
+import { bootstrapDependencyCaches } from "../lib/dependency-cache-bootstrap.ts";
 import { removeDisposableCacheVolumes } from "../lib/disposable-cache-volumes.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
@@ -5980,10 +5984,20 @@ async function runUpCommand({
   });
   const serviceScoped = requestedServices.length > 0;
   const targetServices = serviceScoped ? requestedServices : allServiceNames;
+  const cacheBootstrapServices = serviceScoped
+    ? await resolveDependencyCacheBootstrapServices({
+        composeFile: project.composeFile,
+        cache: dependencyCache,
+        targetServices,
+      })
+    : [];
+  const preparedServices = [
+    ...new Set([...targetServices, ...cacheBootstrapServices]),
+  ];
   const envOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
-    targetServices,
+    targetServices: preparedServices,
     allServiceNames,
     envName,
   });
@@ -5996,7 +6010,7 @@ async function runUpCommand({
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
     composeFile: project.composeFile,
-    targetServices,
+    targetServices: preparedServices,
     envByService: envOverrides.preflightEnvByService,
   });
 
@@ -6061,6 +6075,27 @@ async function runUpCommand({
     lifecycleSignalCleanup ??
     installLifecycleSignalCleanup({ cleanup: lifecycleCleanup });
   try {
+    const bootstrapCode = await bootstrapDependencyCaches({
+      services: cacheBootstrapServices,
+      composeFiles: composeFilesWithEnv,
+      composeProject: composeProjectName,
+      profiles,
+      cwd: dirname(project.composeFile),
+      env: envOverrides.env,
+    });
+    if (bootstrapCode !== 0) {
+      if (json) {
+        return emitLifecycleResult({
+          result: errorResult({
+            code: "E_DEPENDENCY_BOOTSTRAP_FAILED",
+            message:
+              "Dependency cache initialization failed; consumers were not changed",
+          }),
+          exitCode: bootstrapCode,
+        });
+      }
+      return bootstrapCode;
+    }
     const upCode = await composeRuntimeBackend.up({
       composeFiles: composeFilesWithEnv,
       composeProject: composeProjectName,
@@ -6811,6 +6846,7 @@ type TargetedServiceRestartResult =
       readonly errorCode:
         | "E_COMPOSE_FAILED"
         | "E_STARTUP_INCOMPLETE"
+        | "E_DEPENDENCY_BOOTSTRAP_FAILED"
         | "E_STARTUP_TIMEOUT";
       readonly message: string;
       readonly running: readonly string[];
@@ -6857,24 +6893,32 @@ async function runTargetedServiceRestart(opts: {
           aliasHost,
         })
       : [opts.project.composeFile];
+  const dependencyCache = await resolveDependencyCacheOverride({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    projectName: opts.projectName,
+    composeFile: opts.project.composeFile,
+  });
+  const cacheBootstrapServices = await resolveDependencyCacheBootstrapServices({
+    composeFile: opts.project.composeFile,
+    cache: dependencyCache,
+    targetServices: opts.services,
+  });
+  const preparedServices = [
+    ...new Set([...opts.services, ...cacheBootstrapServices]),
+  ];
   const envOverrides = await resolveComposeEnvOverrides({
     project: opts.project,
     projectName: opts.projectName,
-    targetServices: opts.services,
+    targetServices: preparedServices,
     allServiceNames: opts.allServiceNames,
     envName: opts.envName,
   });
   await assertRegistryCredentialsAvailable({
     projectRoot: opts.project.projectRoot,
     composeFile: opts.project.composeFile,
-    targetServices: opts.services,
+    targetServices: preparedServices,
     envByService: envOverrides.preflightEnvByService,
-  });
-  const dependencyCache = await resolveDependencyCacheOverride({
-    projectRoot: opts.project.projectRoot,
-    projectDir: opts.project.projectDir,
-    projectName: opts.projectName,
-    composeFile: opts.project.composeFile,
   });
   const composeFilesWithRuntimeOverrides = [
     ...composeFiles,
@@ -6889,12 +6933,32 @@ async function runTargetedServiceRestart(opts: {
     aliasHost,
     composeProject: opts.composeProjectName ?? opts.baseProjectName,
   });
+  const composeFilesWithEnv = [
+    ...composeFilesWithRuntimeOverrides,
+    ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
+    ...envOverrides.composeFiles,
+  ];
+  const bootstrapCode = await bootstrapDependencyCaches({
+    services: cacheBootstrapServices,
+    composeFiles: composeFilesWithEnv,
+    composeProject: opts.composeProjectName,
+    profiles: opts.profiles,
+    cwd: dirname(opts.project.composeFile),
+    env: envOverrides.env,
+  });
+  if (bootstrapCode !== 0) {
+    return {
+      ok: false,
+      code: bootstrapCode,
+      errorCode: "E_DEPENDENCY_BOOTSTRAP_FAILED",
+      message:
+        "Dependency cache initialization failed; consumers were not changed",
+      running: [],
+      completed: [],
+    };
+  }
   const code = await composeRuntimeBackend.up({
-    composeFiles: [
-      ...composeFilesWithRuntimeOverrides,
-      ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
-      ...envOverrides.composeFiles,
-    ],
+    composeFiles: composeFilesWithEnv,
     composeProject: opts.composeProjectName,
     profiles: opts.profiles,
     detach: true,
@@ -7557,9 +7621,18 @@ async function handleRun({
   const composeFiles = branch
     ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
     : [project.composeFile];
-  const composeFilesWithInternal = internalOverride
-    ? [...composeFiles, internalOverride]
-    : composeFiles;
+  const projectName = sanitizeProjectSlug(baseProjectName);
+  const dependencyCache = await resolveDependencyCacheOverride({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    projectName,
+    composeFile: project.composeFile,
+  });
+  const composeFilesWithInternal = [
+    ...composeFiles,
+    ...(internalOverride ? [internalOverride] : []),
+    ...(dependencyCache.overridePath ? [dependencyCache.overridePath] : []),
+  ];
   const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
     project,
     composeFiles: composeFilesWithInternal,
@@ -7569,12 +7642,17 @@ async function handleRun({
     composeProject: composeProjectName ?? baseProjectName,
   });
 
-  const projectName = sanitizeProjectSlug(baseProjectName);
+  const cacheBootstrapServices = await resolveDependencyCacheBootstrapServices({
+    composeFile: project.composeFile,
+    cache: dependencyCache,
+    targetServices: [service],
+  });
+  const preparedServices = [...new Set([service, ...cacheBootstrapServices])];
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const envOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
-    targetServices: [service],
+    targetServices: preparedServices,
     allServiceNames,
     envName,
   });
@@ -7583,6 +7661,23 @@ async function handleRun({
     ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
     ...envOverrides.composeFiles,
   ];
+  await assertRegistryCredentialsAvailable({
+    projectRoot: project.projectRoot,
+    composeFile: project.composeFile,
+    targetServices: preparedServices,
+    envByService: envOverrides.preflightEnvByService,
+  });
+  const bootstrapCode = await bootstrapDependencyCaches({
+    services: cacheBootstrapServices,
+    composeFiles: composeFilesWithEnv,
+    composeProject: composeProjectName,
+    profiles,
+    cwd: dirname(project.composeFile),
+    env: envOverrides.env,
+  });
+  if (bootstrapCode !== 0) {
+    return bootstrapCode;
+  }
   const stackIsRunning = await resolveCanSkipRunDependencies({
     composeFiles: composeFilesWithEnv,
     composeProjectKey: composeProjectName ?? baseProjectName,

@@ -105,7 +105,7 @@ route for it.
 - Container-to-container traffic: use Compose DNS rather than routing back through Caddy.
 
 Service-scoped runtime changes do not run project-wide lifecycle hooks and do not start Compose
-dependencies implicitly:
+dependencies implicitly, except declared shared-cache installers needed by the selected services:
 
 ```bash
 hack up api worker --env qa --detach
@@ -144,7 +144,17 @@ services:
 
 Hack generates a content-addressed volume name from the declared inputs. Branch instances adopt an
 existing compatible volume automatically; a lockfile or runtime change selects a new volume. No
-service name such as `deps` is special.
+service name such as `deps` is special. `hack run` resolves the same cache as `up` and `restart`.
+
+Before a scoped `up`, `restart`, or a consumer `run`, Hack executes each needed cache installer
+with the same Compose files and selected service environment, using `run --rm --no-deps`.
+Installers must be idempotent and coordinate concurrent writers (for example, a lock and a ready
+marker inside the volume). They run even for warm caches so an empty or interrupted cache cannot
+be mistaken for a ready one. No project lifecycle hook or unrelated dependency is started.
+A failed installer leaves existing consumer containers untouched; JSON lifecycle commands return
+`E_DEPENDENCY_BOOTSTRAP_FAILED`. Automatic initialization has a ten-minute process deadline.
+`hack exec` continues to use the existing container and its mounted cache until that container
+is explicitly recreated.
 
 ## Branch instances and linked worktrees
 

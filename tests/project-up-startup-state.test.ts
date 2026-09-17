@@ -2,7 +2,11 @@ import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-
+import { YAML } from "bun";
+import type {
+  RuntimeRunOptions,
+  RuntimeUpOptions,
+} from "../src/backends/runtime-backend.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import {
   PROJECT_COMPOSE_FILENAME,
@@ -17,6 +21,11 @@ const upEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
 const psEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
 const upServiceSelections: Array<readonly string[] | undefined> = [];
 const tempDirs = new Set<string>();
+const runtimeCalls: Array<
+  | { kind: "run"; opts: RuntimeRunOptions }
+  | { kind: "up"; opts: RuntimeUpOptions }
+> = [];
+let runExitCode = 0;
 const originalHackHome = process.env.HACK_HOME;
 const originalComposeProfiles = process.env.COMPOSE_PROFILES;
 let autoBranch: string | null = null;
@@ -52,10 +61,8 @@ const runtimeBackendMock = await registerScopedModuleMock({
   overrides: {
     composeRuntimeBackend: {
       name: "compose",
-      up: async (opts: {
-        readonly env?: Readonly<Record<string, string>>;
-        readonly services?: readonly string[];
-      }) => {
+      up: async (opts: RuntimeUpOptions) => {
+        runtimeCalls.push({ kind: "up", opts });
         upEnvs.push(opts.env);
         upServiceSelections.push(opts.services);
         return 0;
@@ -72,7 +79,10 @@ const runtimeBackendMock = await registerScopedModuleMock({
         };
       },
       ps: async () => 0,
-      run: async () => 0,
+      run: async (opts: RuntimeRunOptions) => {
+        runtimeCalls.push({ kind: "run", opts });
+        return runExitCode;
+      },
       exec: async () => 0,
     },
   },
@@ -106,7 +116,7 @@ const loggerMock = await registerScopedModuleMock({
   },
 });
 
-const { restartCommand, upCommand } = await import(
+const { restartCommand, upCommand, runCommand } = await import(
   "../src/commands/project.ts"
 );
 
@@ -125,6 +135,8 @@ afterEach(async () => {
   upEnvs.length = 0;
   psEnvs.length = 0;
   upServiceSelections.length = 0;
+  runtimeCalls.length = 0;
+  runExitCode = 0;
   autoBranch = null;
   runtimeProjects = [];
   for (const tempDir of tempDirs) {
@@ -606,3 +618,98 @@ async function createProject(opts?: {
   }
   return projectRoot;
 }
+
+async function createCachedProject(): Promise<string> {
+  const projectRoot = await createProject({ registryTokenScope: "deps" });
+  const composeFile = resolve(projectRoot, ".hack", PROJECT_COMPOSE_FILENAME);
+  const compose = YAML.parse(await readFile(composeFile, "utf8")) as {
+    services: Record<string, Record<string, unknown>>;
+    volumes: Record<string, unknown>;
+  };
+  compose.services.api!.volumes = ["dependencies:/app/node_modules"];
+  compose.services.deps!.volumes = ["dependencies:/app/node_modules"];
+  compose.services.deps!.labels = {
+    "hack.dependencies.cache-volume": "dependencies",
+    "hack.dependencies.bootstrap": "true",
+    "hack.dependencies.lockfiles": "bun.lock",
+  };
+  compose.volumes = { dependencies: {} };
+  await writeFile(composeFile, YAML.stringify(compose));
+  await writeFile(resolve(projectRoot, "bun.lock"), "first-lock");
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+  );
+  return projectRoot;
+}
+
+for (const operation of [runDetachedUp, runRestart]) {
+  test(`${operation.name} initializes the selected cache before recreating a consumer`, async () => {
+    const projectRoot = await createCachedProject();
+    expect(await operation({ projectRoot, services: ["api"] })).toBe(0);
+    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run", "up"]);
+    const installer = runtimeCalls[0];
+    const consumer = runtimeCalls[1];
+    expect(installer?.kind).toBe("run");
+    if (installer?.kind !== "run" || consumer?.kind !== "up") {
+      throw new Error("Missing initialization");
+    }
+    expect(installer.opts.service).toBe("deps");
+    expect(installer.opts.noDeps).toBe(true);
+    expect(installer.opts.forwardSignals).toBe(true);
+    expect(installer.opts.composeFiles).toEqual(consumer.opts.composeFiles);
+    expect(installer.opts.env).toEqual(consumer.opts.env);
+    expect(consumer.opts.services).toEqual(["api"]);
+    const override = installer.opts.composeFiles.find((file) =>
+      file.endsWith("compose.dependencies.override.yml")
+    );
+    expect(override).toBeDefined();
+    const firstCache = await readFile(override!, "utf8");
+    runtimeCalls.length = 0;
+    await writeFile(resolve(projectRoot, "bun.lock"), "second-lock");
+    expect(await operation({ projectRoot, services: ["api"] })).toBe(0);
+    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run", "up"]);
+    expect(await readFile(override!, "utf8")).not.toBe(firstCache);
+  });
+
+  test(`${operation.name} leaves consumers untouched when cache initialization fails`, async () => {
+    const projectRoot = await createCachedProject();
+    runExitCode = 42;
+    expect(await operation({ projectRoot, services: ["api"] })).toBe(42);
+    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run"]);
+  });
+
+  test(`${operation.name} does not bootstrap caches for unrelated services`, async () => {
+    const projectRoot = await createCachedProject();
+    psRows.length = 0;
+    psRows.push(
+      JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+    );
+    expect(await operation({ projectRoot, services: ["migrate"] })).toBe(0);
+    expect(runtimeCalls.map((call) => call.kind)).toEqual(["up"]);
+  });
+}
+
+test("run deps resolves the same shared cache as up", async () => {
+  const projectRoot = await createCachedProject();
+  await runDetachedUp({ projectRoot, services: ["api"] });
+  const up = runtimeCalls.find((call) => call.kind === "up")!;
+  runtimeCalls.length = 0;
+  const result = await runCommand.handler({
+    ctx: { cwd: projectRoot, cli: CLI_SPEC },
+    args: {
+      options: { path: projectRoot, env: "base" },
+      positionals: { service: "deps", cmd: [] },
+      raw: { argv: [], positionals: [] },
+    },
+  } as unknown as Parameters<typeof runCommand.handler>[0]);
+  expect(result).toBe(0);
+  expect(runtimeCalls).toHaveLength(1);
+  const installer = runtimeCalls[0]!;
+  expect(installer.kind).toBe("run");
+  const dependencyOverrides = (files: readonly string[]) =>
+    files.filter((file) => file.endsWith("compose.dependencies.override.yml"));
+  expect(dependencyOverrides(installer.opts.composeFiles)).toEqual(
+    dependencyOverrides(up.opts.composeFiles)
+  );
+  expect(dependencyOverrides(installer.opts.composeFiles)).toHaveLength(1);
+});

@@ -130,3 +130,93 @@ Evidence: `.hack-local/reclaim-host-control/guarded-pair-1789603087722130000/`,
 including per-variant package/build receipts and `live/comparison.json`. Cohorts:
 `worktrees-32-paired-unsorted-1789603273313707000/` and
 `worktrees-32-paired-sorted-1789603426902287000/` under `.hack-local/review/wu07/`.
+
+
+## Reverse-order repeat
+
+The same verified binaries ran sorted then unsorted, with fresh 32-worktree
+fixtures and the same warm-image protocol. Both runs passed all token, inventory,
+export/prune and worktree cleanup checks. Final native status again confirmed both
+VMs stopped. All 72 sorted and 67 unsorted watchdog samples had normal pressure,
+unchanged swapouts and at least 2 GiB admission headroom.
+
+| Observation | Unsorted | Sorted |
+| --- | ---: | ---: |
+| Retained footprint, MiB | 946.74 | 961.16 |
+| After cache drop, MiB | 934.99 | 949.30 |
+| 4 GiB balloon footprint, MiB | 934.11 | 677.47 |
+| Deflated footprint, MiB | 935.74 | 680.31 |
+| Two restored footprint, MiB | 940.83 | 809.97 |
+| Two restored RSS, MiB | 970.36 | 918.09 |
+| Initial start median, seconds | 0.713 | 0.907 |
+| First wake, seconds | 1.683 | 2.100 |
+| Last wake, seconds | 0.691 | 0.974 |
+| Deflated CPU, percent of one core | 0.481 | 0.291 |
+| Two restored CPU, percent of one core | 1.943 | 0.884 |
+
+The lower final measured footprint repeats in both orders: 15.6% in the first
+pair and 13.9% in the reverse pair. RSS reductions were 9.0% and 5.4%. These remain
+provider-process observations for this workload, not exclusive physical RAM or a
+Compose/OrbStack comparison. The first wake is slower with sorting in both pairs,
+but the unsorted first wake also varies from 0.761 to 1.683 seconds. The combined
+timer includes restore/readiness, bridge setup and first HTTP readback; these
+measurements do not identify a remap, CPU or HTTP bottleneck.
+
+**Next bounded experiment:** collect separate command durations and the first
+owned probe status immediately after wake, while retaining the same workload and
+both providers. Distinguish time before probe startup, readiness polling/retries,
+and publication/first request before changing remap granularity or health timing.
+Keep the one-second health interval fixed; do not conceal latency by changing the
+benchmark's configured semantics. Sustained memory reuse and CPU windows remain
+required before promotion. No provider pin or default changes in this repeat.
+
+Evidence: `live-reversed-1789603858602555000/` under the corrected pair directory,
+with the frozen driver, per-cohort logs, comparison and protected-hash receipt.
+Cohorts under `.hack-local/review/wu07/`:
+`worktrees-32-paired-sorted-1789603865108942000/` and
+`worktrees-32-paired-unsorted-1789604020577742000/`.
+
+
+## Wake-stage timing control
+
+A further pair retained the binaries, 32-worktree workload and one-second probe
+interval, adding per-command monotonic durations and a generation-checked probe
+status read immediately after the timed first HTTP readback. That diagnostic read
+is outside the wake timer; this is a separate instrumentation cohort. Both runs
+passed data, inventory, export/prune and worktree cleanup checks. Both VMs were
+confirmed stopped, and all 64 watchdog samples per variant passed.
+
+| Wake stage | Unsorted first | Sorted first | Unsorted last | Sorted last |
+| --- | ---: | ---: | ---: | ---: |
+| Whole wake, seconds | 0.719 | 1.873 | 0.690 | 0.645 |
+| Restore command, seconds | 0.472 | 1.613 | 0.416 | 0.411 |
+| After restore through HTTP readback, seconds | 0.247 | 0.260 | 0.274 | 0.234 |
+| Before probe startup, milliseconds | 314 | 321 | 311 | 299 |
+| Probe startup through restore completion, milliseconds | 158 | 1291 | 105 | 112 |
+| Observed probe sequence | 1 | 2 | 1 | 1 |
+| Successful probe duration, milliseconds | 1 | 3 | 1 | 0 |
+
+The extra first-wake delay is inside restore after probe startup, not the
+publication/first-readback stage or successful HTTP request duration. Probe
+sequence two and the one-second configured interval are consistent with an extra
+readiness cycle. The status format replaces previous samples, so this does not
+prove the first sample failed or distinguish a delayed observation from a retry.
+Record that first transition before changing readiness timing. This control gives
+no basis to replace HTTP with RPC, or to attribute the whole delay to memory
+remapping. The before/after probe offsets use host timestamps stored by the
+runtime; whole/command durations use the harness monotonic clock.
+
+Final diagnostic counters after both wakes reported 77,611,008 remapped bytes
+unsorted and 194,740,224 sorted, with no unmap/discard failures. These are cumulative
+mapped-range bytes, not unique physical pages or time spent faulting. Smaller
+refault ranges remain a hypothesis with CPU/metadata tradeoffs, not a selected fix.
+
+Evidence: `live-timed-1789604282238975000/` under the corrected pair directory,
+including the driver and `timing-comparison.json`. Each cohort preserves its timed
+protocol, command durations and probe observations. Cohorts under
+`.hack-local/review/wu07/`: `worktrees-32-paired-unsorted-1789604288839049000/` and
+`worktrees-32-paired-sorted-1789604427413478000/`.
+
+**Next priority:** complete the queued one-off dependency-cache compatibility fix.
+Keep provider promotion gated on physical-memory attribution, sustained workloads
+and a complete readiness-transition trace; no pinned provider or default changes.

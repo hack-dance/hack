@@ -574,13 +574,18 @@ internal, runtime-host and environment overrides without calling
 container and therefore does not select a new mount itself. Do not infer identical
 effects or claim the installed 4.2.0 binary has been reproduced from this source
 inspection. Existing dependency-cache setup calls elsewhere are not proof of
-one-off command parity.
+one-off command parity. The current `resolveCanSkipRunDependencies` checks the
+runtime environment and whether the target service is running, but does not
+compare dependency-cache fingerprints or mounts. Adding the missing override
+alone could select a fresh cache while still passing `--no-deps` based on an old
+running container; include this invalidation case in the fix.
 
 **Acceptance:** one-off services and any dependencies they start must resolve the
 same compatible cache volume as ordinary startup, in primary and linked worktrees.
 Reuse shared override assembly where appropriate to prevent command-path drift;
-preserve branch/profile/env precedence, service targeting and dependency-skip
-behavior. Diagnose incompatible existing containers rather than implying that
+preserve branch/profile/env precedence and service targeting. Skip dependencies
+only when readiness applies to the selected cache; a changed fingerprint must not
+inherit readiness from the old running stack. Diagnose incompatible existing containers rather than implying that
 adding an override to exec changes their mounts. Update affected command docs.
 
 **Verification:** compare effective mounts and read/write a dependency marker via
@@ -675,10 +680,14 @@ than the earlier baseline. A [guarded matched comparison](balloon-guarded-pair-2
 and workload controls but exposed missing `MADV_FREE_REUSE` on refault: apparent
 footprint reductions may be discounted live memory, not real RAM savings. The
 isolated reuse correction now passes a rebuilt matched 32-worktree pair with data
-and cleanup controls: final footprint/RSS are 15.6%/9.0% lower in one cohort, but
-first wake is slower. Reverse-order repetition and physical-memory attribution
-remain open; no CPU or validated system-wide RAM win is claimed. The maintained
-BalloonReuse TLA+ model checks the accounting contract with positive and negative controls.
+and cleanup controls. The reverse-order repeat also passes: final footprint is
+13.9–15.6% lower and RSS 5.4–9.0% lower across the two orders, but first wake is
+slower and varies in both controls. A stage-timed pair places the extra first-wake
+delay after probe startup, with a second sample consistent with another readiness
+interval; successful HTTP probes take 0–3 ms. Capture the first readiness transition
+before changing timing or remap granularity. Physical-memory attribution remains open; no
+CPU or validated system-wide RAM win is claimed. The maintained BalloonReuse TLA+
+model checks the accounting contract with positive and negative controls.
 Also preflight pinned guest-network archives before allocation and report missing
 inputs specifically, following the new diagnostic fixture's recovered first-boot failure.
 

@@ -1,3 +1,9 @@
+## [4.2.1](https://github.com/hack-dance/hack/compare/v4.2.0...v4.2.1) (2026-09-17)
+
+### Bug Fixes
+
+* initialize shared dependency caches before scoped startup ([#86](https://github.com/hack-dance/hack/issues/86)) ([e47c341](https://github.com/hack-dance/hack/commit/e47c34146ef1856a82d91ef26e4560a40567e0e0))
+
 ## [4.2.0](https://github.com/hack-dance/hack/compare/v4.1.1...v4.2.0) (2026-09-08)
 
 ### Features

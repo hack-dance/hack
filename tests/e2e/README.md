@@ -20,6 +20,16 @@ HACK_E2E_REQUIRE_TMUX=1 bun tests/e2e/run.ts --only=lifecycle-session-recovery
 Exit codes: `0` all pass/skip, `1` any scenario failed, `2` isolation canary
 failed (nothing ran).
 
+## Command-path cache regressions
+
+`bun test tests/e2e/run-dependency-cache.test.ts` runs the real source CLI in
+isolated child homes against a recording Docker stub. It covers linked-worktree
+cache selection, changed fingerprints, dependency-skip decisions and container
+inspection failures. It runs in the normal Bun suite without a Docker daemon;
+its passing result proves command assembly and decisions, not mounted data.
+The separate [live cache qualification](../../docs/plans/v5/run-cache-parity-20260916.md)
+records compiled-CLI volume readback and cleanup against an isolated engine.
+
 ## Isolation model (HACK_HOME)
 
 Every CLI invocation runs with `HACK_HOME=<fresh tempdir>` plus

@@ -211,6 +211,7 @@ import {
   preflightRegistryCredentials,
   RegistryCredentialPreflightError,
 } from "../lib/registry-credential-preflight.ts";
+import { canReuseRunningDependencyCache } from "../lib/run-dependency-cache.ts";
 import { buildRuntimeHostMetadataOverride } from "../lib/runtime-host-metadata.ts";
 import {
   type RuntimeProject,
@@ -7560,16 +7561,25 @@ async function handleRun({
   const composeFilesWithInternal = internalOverride
     ? [...composeFiles, internalOverride]
     : composeFiles;
+  const projectName = sanitizeProjectSlug(baseProjectName);
+  const dependencyCache = await resolveDependencyCacheOverride({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    projectName,
+    composeFile: project.composeFile,
+  });
+  const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
+    ? [...composeFilesWithInternal, dependencyCache.overridePath]
+    : composeFilesWithInternal;
   const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
     project,
-    composeFiles: composeFilesWithInternal,
+    composeFiles: composeFilesWithRuntimeOverrides,
     branch,
     devHost,
     aliasHost,
     composeProject: composeProjectName ?? baseProjectName,
   });
 
-  const projectName = sanitizeProjectSlug(baseProjectName);
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const envOverrides = await resolveComposeEnvOverrides({
     project,
@@ -7579,7 +7589,7 @@ async function handleRun({
     envName,
   });
   const composeFilesWithEnv = [
-    ...composeFilesWithInternal,
+    ...composeFilesWithRuntimeOverrides,
     ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
     ...envOverrides.composeFiles,
   ];
@@ -7590,6 +7600,10 @@ async function handleRun({
     project,
     profiles,
     effectiveEnvName: envOverrides.effectiveEnvName,
+    cacheVolumeNames: dependencyCache.volumes.map(
+      (volume) => volume.resolvedName
+    ),
+    env: envOverrides.env,
     service,
   });
   return await composeRuntimeBackend.run({
@@ -7726,6 +7740,8 @@ async function resolveCanSkipRunDependencies(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly effectiveEnvName: string | null;
   readonly service: string;
+  readonly cacheVolumeNames: readonly string[];
+  readonly env?: Record<string, string>;
 }): Promise<boolean> {
   const runtimeState = await readProjectRuntimeStateEntry({
     projectDir: opts.project.projectDir,
@@ -7740,17 +7756,29 @@ async function resolveCanSkipRunDependencies(opts: {
     composeProject: opts.composeProject,
     profiles: opts.profiles,
     cwd: dirname(opts.project.composeFile),
+    env: opts.env,
   });
   if (psResult.exitCode !== 0) {
     return false;
   }
 
   const runningServices = parseJsonLines(psResult.stdout);
-  return runningServices.some((entry) => {
+  const runningTarget = runningServices.find((entry) => {
     const service = getString(entry, "Service")?.trim();
     const state = getString(entry, "State")?.trim().toLowerCase();
     return service === opts.service && state === "running";
   });
+  return (
+    runningTarget !== undefined &&
+    (await canReuseRunningDependencyCache({
+      containerId: getString(runningTarget, "ID"),
+      composeProject: opts.composeProjectKey,
+      service: opts.service,
+      volumeNames: opts.cacheVolumeNames,
+      cwd: dirname(opts.project.composeFile),
+      env: opts.env,
+    }))
+  );
 }
 
 async function resolveExecTargetReady(opts: {

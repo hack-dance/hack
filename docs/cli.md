@@ -146,6 +146,19 @@ Hack generates a content-addressed volume name from the declared inputs. Branch 
 existing compatible volume automatically; a lockfile or runtime change selects a new volume. No
 service name such as `deps` is special.
 
+`hack run` uses the same dependency-volume override as `up` and `restart`, including
+in linked worktrees. It skips dependency startup only when the target is running
+in the requested environment and its inspected mounts contain the selected cache
+volumes. Changed fingerprints, uncertain container identity, or caches mounted only
+by other services leave dependency reconciliation to Compose. This does not certify
+cache completeness or skip installer/generation commands by itself.
+
+`hack exec` uses the existing container and its existing mounts. After changing a
+lockfile/runtime input, use `hack restart` to move the long-running service to the
+new cache; a successful one-off `run` does not remount that existing service.
+Unlabelled services retain their existing behavior. Old cache volumes are retained;
+this change does not prune caches or application data.
+
 ## Branch instances and linked worktrees
 
 `--branch <name>` on `hack up/down/restart/ps/logs/open/run/exec` targets a separate branch

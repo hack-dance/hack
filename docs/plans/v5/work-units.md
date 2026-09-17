@@ -562,20 +562,20 @@ readback of effective aliases plus dependency completeness. Add the source/hook
 ordering checks to the worktree-inheritance follow-up. No Event Agent PR/config
 changes or stable Hack behavior changes are authorized or made by this queue entry.
 
-### Queued follow-up — Dependency-cache parity for one-off commands
+### Dependency-cache parity for one-off commands
 
 **User report (September 16):** Event Agent's CLI fallback and documented Prisma/
 db-ops recipes use `hack run`; the reported Hack 4.2.0 path omits the dependency
 cache override and can mount an empty or stale per-instance dependency volume.
-**Current-source evidence:** `handleRun` in `src/commands/project.ts` assembles
+**Initial source evidence:** `handleRun` in `src/commands/project.ts` assembles
 internal, runtime-host and environment overrides without calling
 `resolveDependencyCacheOverride`. Audit the whole command matrix: the current
 `handleExec` also omits that resolver, although exec operates in an existing
 container and therefore does not select a new mount itself. Do not infer identical
 effects or claim the installed 4.2.0 binary has been reproduced from this source
 inspection. Existing dependency-cache setup calls elsewhere are not proof of
-one-off command parity. The current `resolveCanSkipRunDependencies` checks the
-runtime environment and whether the target service is running, but does not
+one-off command parity. The pre-fix `resolveCanSkipRunDependencies` checked the
+runtime environment and whether the target service was running, but did not
 compare dependency-cache fingerprints or mounts. Adding the missing override
 alone could select a fresh cache while still passing `--no-deps` based on an old
 running container; include this invalidation case in the fix.
@@ -594,7 +594,15 @@ changed lock/runtime inputs, no-cache services, branch isolation and failed or
 concurrent installers. Exercise the reported wrapper fallback and Prisma-style
 one-off workflow in an isolated fixture. Cache labels alone do not prove complete
 dependencies or justify skipping generation/install steps.
-**Status:** queued for v5; no Event Agent configuration or runtime behavior changed.
+**Candidate status:** the [one-off cache correction](run-cache-parity-20260916.md)
+is implemented and live-qualified for the Compose command path. Actual primary/
+worktree markers, changed fingerprints, restart and failed-installer controls pass;
+the installed 4.2.0 missing-volume failure was reproduced in the isolated fixture.
+The inspected-mount check closes the invalid `--no-deps` shortcut for newly selected
+caches. `exec` keeps existing mounts; docs explain restart requirements. Concurrent
+installer safety, complete dependency readiness, stale-mount diagnostics for exec,
+native v5 cache integration and bounded retention remain open. No Event Agent configuration, installed binary or
+global environment changed.
 
 ### Verification follow-up — Maintain useful state-machine specifications
 

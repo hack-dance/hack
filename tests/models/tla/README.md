@@ -47,3 +47,35 @@ and update expected exploration bounds only with an explanation. Preserve useful
 counterexamples as ordinary regression tests. Add recovery and idle/wake models when
 their state machines and concrete invariants are defined; do not expand this small
 model merely to represent unrelated product behavior.
+
+## Balloon reuse accounting
+
+`balloon-reuse/BalloonReuse.tla` models one guest mapping's unmap, discard,
+reuse-accounting restoration, remap, and terminal failure transitions. The positive
+model explores seven states. Its invariant requires mapped guest memory to be
+outside the host's reusable/discounted accounting state. The negative control omits
+reuse accounting and must fail `MappedMemoryAccounted` with both `phase = "mapped"`
+and `reusable = TRUE` in the same remap step. Fields appearing in different trace
+states, another invariant, or a tool failure do not qualify the negative control.
+
+| Model action | Provider boundary |
+| --- | --- |
+| `Unmap` | Successful `hv_vm_unmap` in libkrun `balloon_reclaim_range` |
+| `Discard` | `MADV_FREE_REUSABLE`; both success and failure are represented |
+| `Reuse` | Experimental correction: successful `MADV_FREE_REUSE` before remapping |
+| `ReuseFailure` | Refuse a live mapping and stop on failed reuse accounting |
+| `Remap` / `RemapFailure` | Successful `hv_vm_map`, or existing fatal remap failure |
+| `Stop` | Abstract terminal shutdown of this mapping's owning process |
+
+This is the intended contract for the **experimental correction**, not a claim that
+Hack's currently pinned provider implements it. The pinned libkrun commit
+`5de9ab51c1bb166af2324de3c9413d00022eb178` omits reuse advice in
+`src/hvf/src/lib.rs::balloon_remap_if_reclaimed`. The native accounting control and
+initial matched guest results are recorded in the
+[provider investigation](../../../docs/plans/v5/balloon-guarded-pair-20260916.md).
+
+The model abstracts the serialized reclaim-map lock and one mapping. It omits PFN
+sorting, overlapping ranges, mapping geometry, multiple vCPUs, real kernel return
+codes, physical residency, persistent data, performance and process restart. A
+passing model cannot replace native accounting, mapping-boundary or guest readback
+tests, and must not turn an apparent footprint reduction into a RAM-savings claim.

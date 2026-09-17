@@ -3,7 +3,10 @@ import { spawnSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { verifyAdmissionModelResult } from "./lib/tla-result.ts";
+import {
+  verifyAdmissionModelResult,
+  verifyBalloonReuseModelResult,
+} from "./lib/tla-result.ts";
 
 const expectedSha =
   "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88";
@@ -20,42 +23,57 @@ if (
 ) {
   throw new Error("TLA+ jar checksum differs from the pinned tool.");
 }
-const directory = resolve(
-  import.meta.dir,
-  "../tests/models/tla/graph-admission"
-);
+const models = [
+  {
+    name: "graph-admission",
+    module: "Admission",
+    verify: verifyAdmissionModelResult,
+  },
+  {
+    name: "balloon-reuse",
+    module: "BalloonReuse",
+    verify: verifyBalloonReuseModelResult,
+  },
+];
 const scratch = await mkdtemp(resolve(tmpdir(), "hack-tla-"));
 try {
-  for (const negative of [false, true]) {
-    const name = negative ? "negative" : "positive";
-    const result = spawnSync(
-      process.env.JAVA_BIN ?? "java",
-      [
-        "-Xmx512m",
-        "-cp",
-        jar,
-        "tlc2.TLC",
-        "-workers",
-        "2",
-        "-metadir",
-        resolve(scratch, name),
-        "-config",
-        resolve(directory, `${name}.cfg`),
-        resolve(directory, "Admission.tla"),
-      ],
-      { encoding: "utf8", timeout: 120_000, maxBuffer: 1024 * 1024 }
+  for (const model of models) {
+    const directory = resolve(
+      import.meta.dir,
+      "../tests/models/tla",
+      model.name
     );
-    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-    if (
-      result.error ||
-      !verifyAdmissionModelResult({ negative, exitCode: result.status, output })
-    ) {
-      process.stderr.write(output);
-      throw new Error(
-        `Admission ${name} control failed (${result.error?.message ?? result.status}).`
+    for (const negative of [false, true]) {
+      const name = negative ? "negative" : "positive";
+      const result = spawnSync(
+        process.env.JAVA_BIN ?? "java",
+        [
+          "-Xmx512m",
+          "-cp",
+          jar,
+          "tlc2.TLC",
+          "-workers",
+          "2",
+          "-metadir",
+          resolve(scratch, model.name, name),
+          "-config",
+          resolve(directory, `${name}.cfg`),
+          resolve(directory, `${model.module}.tla`),
+        ],
+        { encoding: "utf8", timeout: 120_000, maxBuffer: 1024 * 1024 }
       );
+      const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+      if (
+        result.error ||
+        !model.verify({ negative, exitCode: result.status, output })
+      ) {
+        process.stderr.write(output);
+        throw new Error(
+          `${model.name} ${name} control failed (${result.error?.message ?? result.status}).`
+        );
+      }
+      process.stdout.write(`${model.name} ${name}: verified\n`);
     }
-    process.stdout.write(`graph-admission ${name}: verified\n`);
   }
 } finally {
   await rm(scratch, { recursive: true, force: true });

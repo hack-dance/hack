@@ -674,8 +674,11 @@ alignment loss during a synthetic 1 GiB inflation, with no discard failures.
 than the earlier baseline. A [guarded matched comparison](balloon-guarded-pair-20260916.md) passed range tests
 and workload controls but exposed missing `MADV_FREE_REUSE` on refault: apparent
 footprint reductions may be discounted live memory, not real RAM savings. The
-isolated reuse correction passes compilation; rebuild and requalify data/accounting
-and matched CPU/memory before promotion. No CPU or validated RAM win is claimed.
+isolated reuse correction now passes a rebuilt matched 32-worktree pair with data
+and cleanup controls: final footprint/RSS are 15.6%/9.0% lower in one cohort, but
+first wake is slower. Reverse-order repetition and physical-memory attribution
+remain open; no CPU or validated system-wide RAM win is claimed. The maintained
+BalloonReuse TLA+ model checks the accounting contract with positive and negative controls.
 Also preflight pinned guest-network archives before allocation and report missing
 inputs specifically, following the new diagnostic fixture's recovered first-boot failure.
 

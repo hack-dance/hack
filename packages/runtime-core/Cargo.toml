@@ -7,6 +7,7 @@ publish = false
 description = "Private Hack v5 candidate runtime contracts and local planning"
 
 [features]
+installed-candidate = []
 environment-launcher = []
 native-http-probe = []
 native-stream-relay = []
@@ -18,6 +19,11 @@ name = "hack_runtime_core"
 [[bin]]
 name = "hack-runtime-candidate"
 path = "src/main.rs"
+
+[[bin]]
+name = "hack-native"
+path = "src/native_main.rs"
+required-features = ["installed-candidate"]
 
 [[bin]]
 name = "hack-mcp-adapter"

@@ -1,12 +1,10 @@
 //! Authenticated explicit replacement of a control-only graph with fresh values.
 use super::*;
 use crate::provider::managed_environment;
-use sha2::{Digest, Sha256};
 
 pub(in crate::provider::graph) fn generation(receipt: &Receipt) -> Result<String, CandidateError> {
     // Receipts contain identities and phases, never environment values.
-    let bytes = serde_json::to_vec(receipt).map_err(|_| refused())?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    super::super::service_exec_generation(receipt)
 }
 pub(in crate::provider::graph) fn check_generation(
     receipt: &Receipt,

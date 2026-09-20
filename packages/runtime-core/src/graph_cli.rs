@@ -5,6 +5,7 @@ mod relay;
 #[cfg(test)]
 mod restore_tests;
 mod routes;
+mod service_io;
 use hack_runtime_core::{
     Candidate, CandidateError,
     project::{PlanOptions, execution::Condition},
@@ -22,6 +23,9 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let Some((action, args)) = args.split_first() else {
         return Err(invalid());
     };
+    if ["logs", "exec"].contains(action) {
+        return service_io::command(candidate, action, args);
+    }
     if *action == "owner-restore" {
         let options = restore_options(args)?;
         #[cfg(target_os = "macos")]

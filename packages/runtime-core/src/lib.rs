@@ -53,6 +53,39 @@ impl Candidate {
         })
     }
 
+    /// Discover an explicitly selected private installed home without creating it.
+    /// `checkout` remains the durable root identifier for existing child/receipt contracts;
+    /// it is independent of the executable's versioned installation directory.
+    pub fn discover_installed(home: &Path) -> Result<Self, CandidateError> {
+        use std::os::unix::fs::MetadataExt;
+        if !home.is_absolute()
+            || home
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(CandidateError::new(
+                "invalid_candidate_home",
+                "Candidate home must be an absolute path without parent traversal.",
+            ));
+        }
+        reject_aliased_state(home)?;
+        let metadata = home.symlink_metadata().map_err(|_| {
+            CandidateError::new(
+                "invalid_candidate_home",
+                "Candidate home must already exist.",
+            )
+        })?;
+        validate_installed_home_metadata(
+            metadata.is_dir(),
+            metadata.uid(),
+            metadata.mode(),
+            unsafe { libc::geteuid() },
+        )?;
+        let mut candidate = Self::discover(home)?;
+        candidate.channel = "installed-candidate";
+        Ok(candidate)
+    }
+
     /// Preview a workspace attachment; it neither reads project configuration nor registers it.
     pub fn plan(&self, project: &Path) -> Result<WorkspacePlan, CandidateError> {
         let project = canonical_directory(project)?;
@@ -168,4 +201,42 @@ fn reject_aliased_state(path: &Path) -> Result<(), CandidateError> {
         }
     }
     Ok(())
+}
+
+/// Keep ownership validation independently testable without privileged chown operations.
+fn validate_installed_home_metadata(
+    directory: bool,
+    owner: u32,
+    mode: u32,
+    current_user: u32,
+) -> Result<(), CandidateError> {
+    if !directory || owner != current_user || mode & 0o777 != 0o700 {
+        return Err(CandidateError::new(
+            "unsafe_candidate_home",
+            "Candidate home must be a current-user-owned directory with mode 0700.",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod installed_home_tests {
+    use super::*;
+
+    #[test]
+    fn refuses_foreign_public_or_non_directory_home() {
+        assert!(validate_installed_home_metadata(true, 501, 0o40700, 501).is_ok());
+        for (directory, owner, mode) in [
+            (true, 502, 0o40700),
+            (true, 501, 0o40755),
+            (false, 501, 0o100700),
+        ] {
+            assert_eq!(
+                validate_installed_home_metadata(directory, owner, mode, 501)
+                    .unwrap_err()
+                    .code,
+                "unsafe_candidate_home"
+            );
+        }
+    }
 }

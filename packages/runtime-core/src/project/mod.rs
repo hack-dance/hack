@@ -1,4 +1,6 @@
 //! WU03 Compose review and metadata-only enrollment. These plans cannot execute services.
+mod adapter;
+pub use adapter::{NormalizedComposeOptions, plan_normalized};
 mod compose;
 mod enrollment;
 pub mod execution;
@@ -334,6 +336,14 @@ pub(crate) fn identity(plan: &PlanData) -> Result<String, CandidateError> {
 }
 
 pub fn plan(candidate: &Candidate, options: PlanOptions<'_>) -> Result<PlanReport, CandidateError> {
+    plan_input(candidate, options, None)
+}
+
+fn plan_input(
+    candidate: &Candidate,
+    options: PlanOptions<'_>,
+    normalized: Option<adapter::Input<'_>>,
+) -> Result<PlanReport, CandidateError> {
     if options.profiles.len() > 64 {
         return Err(problem(
             "profile_budget",
@@ -347,8 +357,14 @@ pub fn plan(candidate: &Candidate, options: PlanOptions<'_>) -> Result<PlanRepor
         .to_str()
         .ok_or_else(|| problem("invalid_compose_path", "Compose path must be valid UTF-8."))?;
     let path = source::resolve(source, source, file_text, false)?;
-    let bytes = source::read_compose(&path)?;
-    let value = yaml::parse(&bytes)?;
+    let original = source::read_compose(&path)?;
+    let bytes = if let Some(input) = normalized {
+        input.verify(&preview.namespace, &original)?;
+        input.bytes
+    } else {
+        &original
+    };
+    let value = yaml::parse(bytes)?;
     let mut profiles = options.profiles.to_vec();
     profiles.sort();
     profiles.dedup();
@@ -365,7 +381,7 @@ pub fn plan(candidate: &Candidate, options: PlanOptions<'_>) -> Result<PlanRepor
         source,
         path.parent().expect("compose parent"),
         &relative,
-        &bytes,
+        bytes,
         &profiles,
         value,
     )?;
@@ -393,7 +409,7 @@ pub fn plan(candidate: &Candidate, options: PlanOptions<'_>) -> Result<PlanRepor
     });
     data.enrollment_compatible = !data.diagnostics.iter().any(|d| d.severity == "error");
     // Re-read only the explicitly selected config; a changed plan is never silently enrolled.
-    if source::read_compose(&path)? != bytes {
+    if source::read_compose(&path)? != original {
         return Err(problem(
             "compose_changed",
             "Compose input changed during planning.",

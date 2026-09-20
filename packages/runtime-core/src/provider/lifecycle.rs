@@ -736,6 +736,7 @@ fn up_selected(
     let samples = admission::sample_for(&candidate.checkout, profile)?;
     artifact::verify(candidate)?;
     artifact::verify_engine(candidate)?;
+    super::network_tools::verify(candidate)?;
     let _lock = state::Lock::acquire(&root(candidate))?;
     let fresh_owner = match fs::symlink_metadata(root(candidate).join("owner.json")) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,

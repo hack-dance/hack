@@ -1,4 +1,8 @@
 //! Fresh owned graph attempts. Recovery only observes or cleans recorded resources; never replay.
+mod service_exec;
+pub use service_exec::{
+    ServiceExecOptions, ServiceExecResult, service_exec, service_exec_generation,
+};
 mod admission;
 mod cache_provenance;
 mod dependency_hosts;
@@ -54,7 +58,11 @@ pub use storage_inventory::inventory as storage_inventory;
 mod restore;
 mod restore_history;
 mod routes;
+mod service_logs;
 mod shutdown;
+pub use service_logs::{
+    ServiceLogOptions, ServiceLogResult, ServiceSelection, service_logs, service_selection,
+};
 mod source;
 use super::{engine::Engine, state};
 use crate::{

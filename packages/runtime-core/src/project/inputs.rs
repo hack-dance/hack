@@ -394,7 +394,8 @@ pub fn compile(
     expected_plan: &str,
     supplied: &BTreeMap<String, String>,
 ) -> Result<ExecutionInputs, CandidateError> {
-    compile_inner(candidate, options, expected_plan, supplied, None).map(|result| result.executable)
+    compile_inner(candidate, options, expected_plan, supplied, None, None)
+        .map(|result| result.executable)
 }
 
 /// Compile service-scoped managed values separately from public executable configuration.
@@ -408,7 +409,40 @@ pub fn compile_scoped(
     non_secret: &BTreeMap<String, String>,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
 ) -> Result<ScopedExecutionInputs, CandidateError> {
-    compile_inner(candidate, options, expected_plan, non_secret, Some(managed))
+    compile_inner(
+        candidate,
+        options,
+        expected_plan,
+        non_secret,
+        Some(managed),
+        None,
+    )
+}
+
+/// Compile explicitly normalized declarations without persisting private values or
+/// weakening source-path exclusions. Replans the exact supplied bytes against the
+/// pinned original project/configuration and applies the same scoped-value rules.
+/// Provider graph admission still needs to carry this explicit input through its
+/// own revalidation; this API alone does not start services.
+pub fn compile_scoped_normalized(
+    candidate: &Candidate,
+    options: super::NormalizedComposeOptions<'_>,
+    expected_plan: &str,
+    non_secret: &BTreeMap<String, String>,
+    managed: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Result<ScopedExecutionInputs, CandidateError> {
+    compile_inner(
+        candidate,
+        PlanOptions {
+            project: options.project,
+            compose_file: options.compose_file,
+            profiles: options.profiles,
+        },
+        expected_plan,
+        non_secret,
+        Some(managed),
+        Some(&options),
+    )
 }
 
 fn compile_inner(
@@ -417,8 +451,13 @@ fn compile_inner(
     expected_plan: &str,
     supplied: &BTreeMap<String, String>,
     managed: Option<&BTreeMap<String, BTreeMap<String, String>>>,
+    normalized: Option<&super::NormalizedComposeOptions<'_>>,
 ) -> Result<ScopedExecutionInputs, CandidateError> {
-    let review = plan(candidate, options)?;
+    let review = if let Some(input) = normalized {
+        super::plan_normalized(candidate, *input)?
+    } else {
+        plan(candidate, options)?
+    };
     if review.plan_id != expected_plan {
         return Err(error(
             "execution_plan_changed",
@@ -437,14 +476,23 @@ fn compile_inner(
         &review.plan.compose_file,
         false,
     )?;
-    let bytes = source::read_compose(&path)?;
-    if format!("{:x}", Sha256::digest(&bytes)) != review.plan.compose_sha256 {
+    let original = source::read_compose(&path)?;
+    if normalized.is_some_and(|input| {
+        format!("{:x}", Sha256::digest(&original)) != input.expected_compose_sha256
+    }) {
+        return Err(error(
+            "execution_plan_changed",
+            "Original Compose input changed after normalized review.",
+        ));
+    }
+    let bytes = normalized.map_or(original.as_slice(), |input| input.compose_bytes);
+    if format!("{:x}", Sha256::digest(bytes)) != review.plan.compose_sha256 {
         return Err(error(
             "execution_plan_changed",
             "Compose bytes changed after review.",
         ));
     }
-    let value = yaml::parse(&bytes)?;
+    let value = yaml::parse(bytes)?;
     let raw = value["services"]
         .as_object()
         .ok_or_else(|| error("execution_services", "Missing reviewed services."))?;
@@ -528,7 +576,7 @@ fn compile_inner(
             },
         );
     }
-    if source::read_compose(&path)? != bytes {
+    if source::read_compose(&path)? != original {
         return Err(error(
             "execution_plan_changed",
             "Compose changed while executable inputs were compiled.",

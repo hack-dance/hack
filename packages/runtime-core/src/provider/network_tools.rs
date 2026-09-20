@@ -1,11 +1,12 @@
 //! Pinned guest-only networking dependencies, installed before Docker discovers capabilities.
 use super::{source_sync, state};
 use crate::{Candidate, CandidateError};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
-    fs::OpenOptions,
-    io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::Path,
 };
 
@@ -57,6 +58,97 @@ fn read_archive(path: &Path, expected: &str) -> Result<Vec<u8>, CandidateError> 
         return Err(error("Networking archive size or pinned digest mismatch."));
     }
     Ok(bytes)
+}
+
+#[derive(Debug, Serialize)]
+pub struct Preparation {
+    pub status: &'static str,
+    pub package_count: usize,
+    pub identity: String,
+}
+
+/// Validate the entire pinned input set before mutation, then publish one complete
+/// private directory under the same operation lock used by runtime lifecycle work.
+/// Interrupted staging is retained and refused; existing installs are never repaired in place.
+pub(super) fn prepare(
+    candidate: &Candidate,
+    directory: &Path,
+) -> Result<Preparation, CandidateError> {
+    prepare_packages(candidate, directory, &PACKAGES)
+}
+
+fn prepare_packages(
+    candidate: &Candidate,
+    directory: &Path,
+    packages: &[(&str, &str)],
+) -> Result<Preparation, CandidateError> {
+    let archives = packages
+        .iter()
+        .map(|(name, hash)| read_archive(&directory.join(name), hash))
+        .collect::<Result<Vec<_>, _>>()?;
+    let identity = format!(
+        "{:x}",
+        Sha256::digest(packages.iter().map(|(_, hash)| *hash).collect::<String>())
+    );
+    let _lock = state::Lock::acquire(&candidate.state_root.join("run/smolvm"))?;
+    let providers = candidate.state_root.join("providers");
+    state::private_directory(&providers)?;
+    let target = providers.join("network-tools");
+    match target.symlink_metadata() {
+        Ok(_) => {
+            for (name, hash) in packages {
+                read_archive(&target.join(name), hash)?;
+            }
+            return Ok(Preparation {
+                status: "reused",
+                package_count: packages.len(),
+                identity,
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(state::io(error)),
+    }
+    let staging = providers.join("network-tools-installing");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&staging)
+        .map_err(|e| error(&format!("Cannot create network-tools staging: {e}")))?;
+    for ((name, _), bytes) in packages.iter().zip(archives) {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(staging.join(name))
+            .map_err(|e| error(&format!("Cannot create staged archive: {e}")))?;
+        file.write_all(&bytes).map_err(state::io)?;
+        file.sync_all().map_err(state::io)?;
+    }
+    for (name, hash) in packages {
+        read_archive(&staging.join(name), hash)?;
+    }
+    File::open(&staging)
+        .and_then(|directory| directory.sync_all())
+        .map_err(state::io)?;
+    fs::rename(&staging, &target)
+        .map_err(|e| error(&format!("Cannot publish network-tools directory: {e}")))?;
+    File::open(&providers)
+        .and_then(|directory| directory.sync_all())
+        .map_err(state::io)?;
+    Ok(Preparation {
+        status: "installed",
+        package_count: packages.len(),
+        identity,
+    })
+}
+
+/// Refuse missing or invalid setup before VM creation/start; guest provisioning rechecks bytes.
+pub(super) fn verify(candidate: &Candidate) -> Result<(), CandidateError> {
+    for (name, hash) in PACKAGES {
+        read_archive(&candidate.state_root.join("providers/network-tools").join(name), hash)
+            .map_err(|_| error("Pinned network tools are missing or invalid. Run runtime prepare-network-tools --directory <private-pinned-apk-directory> before runtime up."))?;
+    }
+    Ok(())
 }
 
 pub(super) fn provision(
@@ -135,6 +227,123 @@ pub(super) fn provision(
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+    static NEXT_FIXTURE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    struct Fixture(std::path::PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+                "hack-network-prepare-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            state::private_directory(&root).unwrap();
+            Self(root)
+        }
+        fn candidate(&self) -> Candidate {
+            let root = self.0.join("candidate");
+            state::private_directory(&root).unwrap();
+            Candidate::discover(&root).unwrap()
+        }
+        fn inputs(&self) -> std::path::PathBuf {
+            let root = self.0.join("input");
+            state::private_directory(&root).unwrap();
+            for name in ["first.apk", "second.apk"] {
+                fs::write(root.join(name), b"fixture").unwrap();
+                fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            root
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn missing_or_corrupt_inputs_do_not_create_candidate_state() {
+        let fixture = Fixture::new();
+        let candidate = fixture.candidate();
+        let input = fixture.inputs();
+        let hash = format!("{:x}", Sha256::digest(b"fixture"));
+        let pins = [("first.apk", hash.as_str()), ("second.apk", hash.as_str())];
+        fs::remove_file(input.join("second.apk")).unwrap();
+        assert!(prepare_packages(&candidate, &input, &pins).is_err());
+        assert!(!candidate.state_root.exists());
+        fs::write(input.join("second.apk"), b"corrupt").unwrap();
+        fs::set_permissions(input.join("second.apk"), fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(prepare_packages(&candidate, &input, &pins).is_err());
+        assert!(!candidate.state_root.exists());
+        // The public entrypoint cannot accept arbitrary test pins.
+        assert!(prepare(&candidate, &input).is_err());
+        let missing = verify(&candidate).unwrap_err();
+        assert_eq!(missing.code, "network_tools");
+        assert!(missing.message.contains("prepare-network-tools"));
+        assert!(!candidate.state_root.exists());
+    }
+
+    #[test]
+    fn complete_install_is_atomic_reusable_and_corruption_is_not_overwritten() {
+        let fixture = Fixture::new();
+        let candidate = fixture.candidate();
+        let input = fixture.inputs();
+        let hash = format!("{:x}", Sha256::digest(b"fixture"));
+        let pins = [("first.apk", hash.as_str()), ("second.apk", hash.as_str())];
+        assert_eq!(
+            prepare_packages(&candidate, &input, &pins).unwrap().status,
+            "installed"
+        );
+        let target = candidate.state_root.join("providers/network-tools");
+        let inode = target.metadata().unwrap().ino();
+        assert!(
+            !candidate
+                .state_root
+                .join("providers/network-tools-installing")
+                .exists()
+        );
+        assert_eq!(
+            prepare_packages(&candidate, &input, &pins).unwrap().status,
+            "reused"
+        );
+        assert_eq!(target.metadata().unwrap().ino(), inode);
+        fs::write(target.join("first.apk"), b"corrupt").unwrap();
+        assert!(prepare_packages(&candidate, &input, &pins).is_err());
+        assert_eq!(fs::read(target.join("first.apk")).unwrap(), b"corrupt");
+    }
+
+    #[test]
+    fn interrupted_staging_and_foreign_target_are_retained_and_refused() {
+        let fixture = Fixture::new();
+        let candidate = fixture.candidate();
+        let input = fixture.inputs();
+        let hash = format!("{:x}", Sha256::digest(b"fixture"));
+        let pins = [("first.apk", hash.as_str())];
+        let providers = candidate.state_root.join("providers");
+        let staging = providers.join("network-tools-installing");
+        state::private_directory(&staging).unwrap();
+        fs::write(staging.join("evidence"), "retain").unwrap();
+        assert!(prepare_packages(&candidate, &input, &pins).is_err());
+        assert!(!providers.join("network-tools").exists());
+        assert_eq!(
+            fs::read_to_string(staging.join("evidence")).unwrap(),
+            "retain"
+        );
+        symlink(&input, providers.join("network-tools")).unwrap();
+        assert!(prepare_packages(&candidate, &input, &pins).is_err());
+        assert!(
+            providers
+                .join("network-tools")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
     #[test]
     fn archives_reject_corruption_aliases_and_public_files() {
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(

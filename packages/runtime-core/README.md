@@ -86,6 +86,10 @@ candidate identity, bounded Compose review and enrollment, native source synchro
 immutable source-job admission, durable host fixture jobs, and the
 experimental Apple Silicon SmolVM lifecycle. The installed Hack, existing Docker contexts, and existing project runtimes are separate.
 
+For an explicit relocatable Apple Silicon bundle alongside the supported CLI, see
+[opt-in native candidate installation](../../docs/guides/native-candidate.md).
+The default checkout launcher retains its existing identity and state boundary.
+
 Build with `./scripts/build-hack-local.sh`, then run `./hack-local info` and
 `./hack-local runtime probe`. The development guide (local `_docs/docs/plans/v5/development.md`) describes
 pinned package preparation, ownership, resource admission, lifecycle commands, and manual tests.

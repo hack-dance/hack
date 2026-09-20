@@ -43,6 +43,15 @@ pub use image_load::load as load_image;
 mod lifecycle;
 mod network_intent;
 mod network_tools;
+
+/// Prepare the pinned guest networking inputs without starting a runtime.
+pub fn prepare_network_tools(
+    candidate: &Candidate,
+    directory: &Path,
+) -> Result<impl Serialize, CandidateError> {
+    network_tools::prepare(candidate, directory)
+}
+
 pub use network_intent::NetworkIntent;
 mod process;
 mod profile;

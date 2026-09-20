@@ -22,6 +22,8 @@ Usage:
   hack-local graph run|restart|restore --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
   hack-local graph inspect|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
+  hack-local graph logs --run-id <32-hex> --service <name> [--tail <1..1000>] [--json]
+  hack-local graph exec --run-id <32-hex> --service <name> [--workdir /path] [--timeout-seconds <1..120>] [--json] -- <program> [args...]
   hack-local graph dependency-plan --dependencies <reviewed.json> [--json]
   hack-local graph serve --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... --dependencies <reviewed.json> --expect-dependencies <sha256> [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
   hack-local graph owner-status --run-id <32-hex> [--json]
@@ -54,6 +56,7 @@ Usage:
   hack-local runtime up --profile research|development [--bridge-sockets <1..32>] [--dependency-sockets <1..32>] [--json]
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
   hack-local runtime prepare-engine --archive <pinned-docker.tgz>
+  hack-local runtime prepare-network-tools --directory <private-pinned-apk-directory>
   hack-local runtime load-image --archive <flat-image.tar> --sha256 <archive-hash> --image-id <sha256:config-hash>
   hack-local runtime up|status|down|recover [--json]
   hack-local node serve|status|inspect
@@ -76,6 +79,39 @@ fn main() {
     }
 }
 
+fn installed_entrypoint() -> bool {
+    cfg!(feature = "installed-candidate") && env!("CARGO_BIN_NAME") == "hack-native"
+}
+
+fn discover_candidate(root: &Path) -> Result<Candidate, CandidateError> {
+    if installed_entrypoint() {
+        Candidate::discover_installed(root)
+    } else {
+        Candidate::discover(root)
+    }
+}
+
+fn resolve_candidate_root(root: &Path) -> Result<std::path::PathBuf, CandidateError> {
+    if installed_entrypoint() {
+        // Do not inspect the build checkout: release executables must survive its removal.
+        return Ok(Candidate::discover_installed(root)?.checkout);
+    }
+    let compiled_checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let requested = root
+        .canonicalize()
+        .map_err(|error| CandidateError::new("invalid_candidate_root", error.to_string()))?;
+    let compiled = compiled_checkout
+        .canonicalize()
+        .map_err(|error| CandidateError::new("invalid_candidate_root", error.to_string()))?;
+    if requested != compiled {
+        return Err(CandidateError::new(
+            "checkout_mismatch",
+            "This binary was built for a different checkout. Build this checkout's candidate.",
+        ));
+    }
+    Ok(requested)
+}
+
 fn run() -> Result<(), CandidateError> {
     let arguments: Vec<String> = std::env::args_os()
         .skip(1)
@@ -88,39 +124,47 @@ fn run() -> Result<(), CandidateError> {
     if arguments.len() < 2 || arguments[0] != "--candidate-root" {
         return Err(CandidateError::new(
             "missing_candidate_root",
-            "Use the checkout's hack-local launcher.",
+            "Supply --candidate-root explicitly, or use the matching candidate launcher.",
         ));
     }
-    let compiled_checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let requested = Path::new(&arguments[1])
-        .canonicalize()
-        .map_err(|error| CandidateError::new("invalid_candidate_root", error.to_string()))?;
-    let compiled = compiled_checkout
-        .canonicalize()
-        .map_err(|error| CandidateError::new("invalid_candidate_root", error.to_string()))?;
-    if requested != compiled {
-        return Err(CandidateError::new(
-            "checkout_mismatch",
-            "This binary was built for a different checkout. Build this checkout's candidate.",
-        ));
-    }
+    let requested = resolve_candidate_root(Path::new(&arguments[1]))?;
     let command: Vec<&str> = arguments[2..].iter().map(String::as_str).collect();
     match command.as_slice() {
-        [] | ["--help"] | ["help"] => println!("{HELP}"),
+        [] | ["--help"] | ["help"] => {
+            println!(
+                "{}",
+                if installed_entrypoint() {
+                    HELP.replace("Build with: ./scripts/build-hack-local.sh", "Opt-in installed candidate; explicit private --candidate-root is required.").replace("hack-local", "hack-native")
+                } else {
+                    HELP.to_owned()
+                }
+            )
+        }
         ["--version"] => println!(
-            "hack-local {CANDIDATE_VERSION} (runtime-core {})",
+            "{} {CANDIDATE_VERSION} (runtime-core {})",
+            if installed_entrypoint() {
+                "hack-native"
+            } else {
+                "hack-local"
+            },
             env!("CARGO_PKG_VERSION")
         ),
         ["info"] | ["info", "--json"] => {
-            let candidate = Candidate::discover(&requested)?;
+            let candidate = discover_candidate(&requested)?;
             if command.contains(&"--json") {
                 print_json(&candidate)?;
             } else {
                 println!(
-                    "hack-local {} — {}",
-                    candidate.version, candidate.checkpoint
+                    "{} {} — {}",
+                    if installed_entrypoint() {
+                        "hack-native"
+                    } else {
+                        "hack-local"
+                    },
+                    candidate.version,
+                    candidate.checkpoint
                 );
-                println!("Checkout: {}", candidate.checkout.display());
+                println!("Candidate root: {}", candidate.checkout.display());
                 println!("Executable: {}", candidate.executable.display());
                 println!("Candidate state: {}", candidate.state_root.display());
                 println!("Runtime lifecycle: experimental; live qualification pending");
@@ -128,7 +172,7 @@ fn run() -> Result<(), CandidateError> {
             }
         }
         ["plan", "--project", project] | ["plan", "--project", project, "--json"] => {
-            let candidate = Candidate::discover(&requested)?;
+            let candidate = discover_candidate(&requested)?;
             let plan = candidate.plan(Path::new(project))?;
             if command.contains(&"--json") {
                 print_json(&plan)?;
@@ -148,7 +192,7 @@ fn run() -> Result<(), CandidateError> {
             }
         }
         ["node", "serve"] => {
-            let candidate = Candidate::discover(&requested)?;
+            let candidate = discover_candidate(&requested)?;
             hack_runtime_core::node::serve(
                 &hack_runtime_core::node::root(&candidate),
                 &candidate.executable,
@@ -156,7 +200,7 @@ fn run() -> Result<(), CandidateError> {
             )?;
         }
         ["node", "inspect"] => {
-            let candidate = Candidate::discover(&requested)?;
+            let candidate = discover_candidate(&requested)?;
             let mut store = hack_runtime_core::node::Store::inspect(
                 &hack_runtime_core::node::root(&candidate),
             )?;
@@ -166,14 +210,14 @@ fn run() -> Result<(), CandidateError> {
             )?)?;
         }
         ["node", "status"] => {
-            let candidate = Candidate::discover(&requested)?;
+            let candidate = discover_candidate(&requested)?;
             print_json(&hack_runtime_core::node::call(
                 &hack_runtime_core::node::root(&candidate),
                 &hack_runtime_core::node::Request::Status { version: 1 },
             )?)?;
         }
         ["node", "request", json] => {
-            let candidate = Candidate::discover(&requested)?;
+            let candidate = discover_candidate(&requested)?;
             let request: hack_runtime_core::node::Request = serde_json::from_str(json)
                 .map_err(|e| CandidateError::new("invalid_request", e.to_string()))?;
             use hack_runtime_core::node::Request;
@@ -198,7 +242,7 @@ fn run() -> Result<(), CandidateError> {
             }
         }
         ["__job_supervisor", state, id] => {
-            let candidate = Candidate::discover(&requested)?;
+            let candidate = discover_candidate(&requested)?;
             let state = Path::new(state)
                 .canonicalize()
                 .map_err(|e| CandidateError::new("invalid_node_root", e.to_string()))?;
@@ -219,11 +263,20 @@ fn run() -> Result<(), CandidateError> {
             hack_runtime_core::node::fixture(fixture)?;
         }
         ["graph", arguments @ ..] => {
-            let candidate = Candidate::discover(&requested)?;
-            print_json(&graph_cli::command(&candidate, arguments)?)?;
+            let candidate = discover_candidate(&requested)?;
+            let result = graph_cli::command(&candidate, arguments)?;
+            print_json(&result)?;
+            if arguments.first() == Some(&"exec") {
+                let code = result["exit_code"].as_i64().ok_or_else(|| {
+                    CandidateError::new("graph_exec_result", "Missing service command exit status.")
+                })?;
+                if code != 0 {
+                    std::process::exit(i32::try_from(code).unwrap_or(1));
+                }
+            }
         }
         ["project", arguments @ ..] => {
-            project_command(&Candidate::discover(&requested)?, arguments)?;
+            project_command(&discover_candidate(&requested)?, arguments)?;
         }
         ["runtime", "up", arguments @ ..]
             if arguments.contains(&"--bridge-sockets")
@@ -232,7 +285,7 @@ fn run() -> Result<(), CandidateError> {
         {
             let options = runtime_up_cli::parse(arguments)?;
             print_json(&hack_runtime_core::provider::up_with_network_sockets(
-                &Candidate::discover(&requested)?,
+                &discover_candidate(&requested)?,
                 options.profile,
                 options.bridges,
                 options.dependencies,
@@ -258,7 +311,7 @@ fn run() -> Result<(), CandidateError> {
                     ));
                 }
             };
-            let candidate = Candidate::discover(&requested)?;
+            let candidate = discover_candidate(&requested)?;
             if *action == "probe" {
                 print_json(&provider::admission::probe_for(
                     &candidate.checkout,
@@ -278,7 +331,7 @@ fn run() -> Result<(), CandidateError> {
         ] => {
             print_json(
                 &hack_runtime_core::provider::hostname_authority::ownership::inspect(
-                    &Candidate::discover(&requested)?,
+                    &discover_candidate(&requested)?,
                     std::path::Path::new(socket),
                 )?,
             )?;
@@ -302,7 +355,7 @@ fn run() -> Result<(), CandidateError> {
         ] => {
             print_json(
                 &hack_runtime_core::provider::hostname_authority::ownership::recover(
-                    &Candidate::discover(&requested)?,
+                    &discover_candidate(&requested)?,
                     std::path::Path::new(socket),
                     hash,
                 )?,
@@ -312,25 +365,25 @@ fn run() -> Result<(), CandidateError> {
         | ["runtime", "managed-hostname-authority", "--json"] => {
             print_json(
                 &hack_runtime_core::provider::hostname_authority::managed::inspect(
-                    &Candidate::discover(&requested)?,
+                    &discover_candidate(&requested)?,
                 )?,
             )?;
         }
         ["runtime", "guest-disk-usage"] | ["runtime", "guest-disk-usage", "--json"] => {
             print_json(&hack_runtime_core::provider::guest_storage::inspect(
-                &Candidate::discover(&requested)?,
+                &discover_candidate(&requested)?,
             )?)?;
         }
         ["runtime", "disk-usage", rest @ ..] => {
             print_json(&hack_runtime_core::provider::storage_usage::inspect_args(
-                &Candidate::discover(&requested)?,
+                &discover_candidate(&requested)?,
                 rest,
             )?)?;
         }
         ["runtime", "certificate-admission"] | ["runtime", "certificate-admission", "--json"] => {
             print_json(
                 &hack_runtime_core::provider::hostname_authority::certificates::inspect(
-                    &Candidate::discover(&requested)?,
+                    &discover_candidate(&requested)?,
                 )?,
             )?;
         }
@@ -344,12 +397,12 @@ fn run() -> Result<(), CandidateError> {
                 CandidateError::new("certificate_admission", "Invalid certificate name limit.")
             })?;
             hack_runtime_core::provider::hostname_authority::managed::serve_with_certificate_limit(
-                &Candidate::discover(&requested)?,
+                &discover_candidate(&requested)?,
                 Some(limit),
             )?;
         }
         ["runtime", "serve-managed-hostnames"] => {
-            hack_runtime_core::provider::hostname_authority::managed::serve(&Candidate::discover(
+            hack_runtime_core::provider::hostname_authority::managed::serve(&discover_candidate(
                 &requested,
             )?)?;
         }
@@ -372,7 +425,7 @@ fn run() -> Result<(), CandidateError> {
         ] => {
             print_json(
                 &hack_runtime_core::provider::hostname_authority::ownership::stop(
-                    &Candidate::discover(&requested)?,
+                    &discover_candidate(&requested)?,
                     std::path::Path::new(socket),
                     hash,
                 )?,
@@ -380,27 +433,27 @@ fn run() -> Result<(), CandidateError> {
         }
         ["runtime", "serve-hostnames", "--socket", socket] => {
             hack_runtime_core::provider::hostname_authority::serve(
-                &Candidate::discover(&requested)?,
+                &discover_candidate(&requested)?,
                 std::path::Path::new(socket),
             )?;
         }
         ["runtime", "lookup-hostname", "--hostname", name]
         | ["runtime", "lookup-hostname", "--hostname", name, "--json"] => {
             print_json(&hack_runtime_core::provider::publication::lookup_hostname(
-                &Candidate::discover(&requested)?,
+                &discover_candidate(&requested)?,
                 name,
             )?)?;
         }
         ["runtime", "publication-hostnames"] | ["runtime", "publication-hostnames", "--json"] => {
             print_json(&hack_runtime_core::provider::publication::inspect_claims(
-                &Candidate::discover(&requested)?,
+                &discover_candidate(&requested)?,
             )?)?;
         }
         ["runtime", "publication-recovery"] | ["runtime", "publication-recovery", "--json"] => {
             print_json(
-                &hack_runtime_core::provider::publication::recovery::inspect(
-                    &Candidate::discover(&requested)?,
-                )?,
+                &hack_runtime_core::provider::publication::recovery::inspect(&discover_candidate(
+                    &requested,
+                )?)?,
             )?;
         }
         ["runtime", "recover-publications", "--expect-sha256", hash]
@@ -413,16 +466,16 @@ fn run() -> Result<(), CandidateError> {
         ] => {
             print_json(
                 &hack_runtime_core::provider::publication::recovery::recover(
-                    &Candidate::discover(&requested)?,
+                    &discover_candidate(&requested)?,
                     hash,
                 )?,
             )?;
         }
         ["runtime", "bridge-recovery"] | ["runtime", "bridge-recovery", "--json"] => {
             print_json(
-                &hack_runtime_core::provider::graph::inspect_bridge_recovery(
-                    &Candidate::discover(&requested)?,
-                )?,
+                &hack_runtime_core::provider::graph::inspect_bridge_recovery(&discover_candidate(
+                    &requested,
+                )?)?,
             )?;
         }
         [
@@ -446,30 +499,36 @@ fn run() -> Result<(), CandidateError> {
                 CandidateError::new("invalid_arguments", "Recovery slot must be 1..8.")
             })?;
             print_json(&hack_runtime_core::provider::graph::export_bridge_recovery(
-                &Candidate::discover(&requested)?,
+                &discover_candidate(&requested)?,
                 slot,
                 hash,
             )?)?;
         }
         ["runtime", "engine-info"] | ["runtime", "engine-info", "--json"] => {
             print_json(&hack_runtime_core::provider::engine_info(
-                &Candidate::discover(&requested)?,
+                &discover_candidate(&requested)?,
             )?)?;
         }
         ["runtime", "probe"] | ["runtime", "probe", "--json"] => {
-            print_json(&hack_runtime_core::provider::probe(&Candidate::discover(
+            print_json(&hack_runtime_core::provider::probe(&discover_candidate(
                 &requested,
             )?)?)?;
         }
         ["runtime", "prepare", "--archive", archive] => {
             print_json(&hack_runtime_core::provider::prepare(
-                &Candidate::discover(&requested)?,
+                &discover_candidate(&requested)?,
                 Path::new(archive),
+            )?)?;
+        }
+        ["runtime", "prepare-network-tools", "--directory", directory] => {
+            print_json(&hack_runtime_core::provider::prepare_network_tools(
+                &discover_candidate(&requested)?,
+                Path::new(directory),
             )?)?;
         }
         ["runtime", "prepare-engine", "--archive", archive] => {
             print_json(&hack_runtime_core::provider::prepare_engine(
-                &Candidate::discover(&requested)?,
+                &discover_candidate(&requested)?,
                 Path::new(archive),
             )?)?;
         }
@@ -484,14 +543,14 @@ fn run() -> Result<(), CandidateError> {
             image,
         ] => {
             print_json(&hack_runtime_core::provider::load_image(
-                &Candidate::discover(&requested)?,
+                &discover_candidate(&requested)?,
                 Path::new(archive),
                 digest,
                 image,
             )?)?;
         }
         ["runtime", action] | ["runtime", action, "--json"] => {
-            let candidate = Candidate::discover(&requested)?;
+            let candidate = discover_candidate(&requested)?;
             let result = match *action {
                 "up" => hack_runtime_core::provider::up(&candidate),
                 "status" => hack_runtime_core::provider::status(&candidate),

@@ -12,6 +12,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
+mod service_exec;
 mod stop;
 
 const MAX_BODY: u64 = 4 * 1024 * 1024;
@@ -266,13 +267,30 @@ impl<'a> Engine<'a> {
         Ok(Some(raw))
     }
     pub(super) fn logs(&self, id: &str) -> Result<(String, String, bool), CandidateError> {
+        self.logs_with_tail(id, "all")
+    }
+    pub(super) fn logs_tail(
+        &self,
+        id: &str,
+        tail: u16,
+    ) -> Result<(String, String, bool), CandidateError> {
+        if !(1..=1000).contains(&tail) {
+            return Err(failure("Container log tail must be from 1 to 1000."));
+        }
+        self.logs_with_tail(id, &tail.to_string())
+    }
+    fn logs_with_tail(
+        &self,
+        id: &str,
+        tail: &str,
+    ) -> Result<(String, String, bool), CandidateError> {
         if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(failure("Invalid container log identity."));
         }
         self.guest.verify()?;
         let bytes = self.transport.request_bytes(
             Method::GET,
-            &format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail=all"),
+            &format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail={tail}"),
             None,
         )?;
         let result = decode_logs(&bytes)?;

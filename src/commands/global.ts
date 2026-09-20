@@ -13,6 +13,7 @@ import {
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_COREDNS_IP,
+  DEFAULT_GRAFANA_HOST,
   DEFAULT_HOST_DNS_IP,
   DEFAULT_INGRESS_GATEWAY,
   DEFAULT_INGRESS_NETWORK,
@@ -515,7 +516,7 @@ async function globalInstall(): Promise<number> {
   note(
     [
       "Next:",
-      "- Open https://logs.hack",
+      `- Open https://${DEFAULT_GRAFANA_HOST}`,
       "- Start a repo with: hack init && hack up",
     ].join("\n"),
     "Global install"

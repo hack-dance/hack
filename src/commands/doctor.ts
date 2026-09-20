@@ -18,7 +18,6 @@ import {
 import { optJson, optPath } from "../cli/options.ts";
 import {
   DEFAULT_CADDY_IP,
-  DEFAULT_GRAFANA_HOST,
   DEFAULT_HOST_DNS_IP,
   DEFAULT_INGRESS_GATEWAY,
   DEFAULT_INGRESS_NETWORK,
@@ -33,6 +32,7 @@ import {
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
   HACK_PROJECT_DIR_PRIMARY,
+  LEGACY_GRAFANA_HOST,
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
 } from "../constants.ts";
@@ -73,6 +73,7 @@ import {
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
@@ -556,7 +557,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     results.push({
       name: "grafana",
       status: "warn",
-      message: `Skipped reachability (DNS for ${DEFAULT_GRAFANA_HOST} not configured)`,
+      message: `Skipped reachability (DNS for ${LEGACY_GRAFANA_HOST} not configured)`,
       durationMs: 0,
     });
   }
@@ -1349,7 +1350,7 @@ async function checkMacDnsmasqConfigForDomain(
 
 async function checkMacDnsmasqPort53(): Promise<CheckResult> {
   const ip = await queryDnsARecord({
-    hostname: DEFAULT_GRAFANA_HOST,
+    hostname: LEGACY_GRAFANA_HOST,
     server: "127.0.0.1",
     port: 53,
     timeoutMs: 900,
@@ -1368,7 +1369,7 @@ async function checkMacDnsmasqPort53(): Promise<CheckResult> {
   return {
     name: "dnsmasq:53",
     status: ok ? "ok" : "warn",
-    message: `${DEFAULT_GRAFANA_HOST} → ${ip} (from 127.0.0.1:53)`,
+    message: `${LEGACY_GRAFANA_HOST} → ${ip} (from 127.0.0.1:53)`,
   };
 }
 
@@ -1665,7 +1666,7 @@ export async function checkHackLocalDns(
 
 async function checkHackDns(): Promise<CheckResult> {
   try {
-    const res = await lookup(DEFAULT_GRAFANA_HOST);
+    const res = await lookup(LEGACY_GRAFANA_HOST);
     const ok =
       res.address === DEFAULT_CADDY_IP ||
       res.address === "127.0.0.1" ||
@@ -1673,13 +1674,13 @@ async function checkHackDns(): Promise<CheckResult> {
     return {
       name: `dns:${DEFAULT_PROJECT_TLD}`,
       status: ok ? "ok" : "warn",
-      message: `${DEFAULT_GRAFANA_HOST} → ${res.address}`,
+      message: `${LEGACY_GRAFANA_HOST} → ${res.address}`,
     };
   } catch {
     return {
       name: `dns:${DEFAULT_PROJECT_TLD}`,
       status: "warn",
-      message: `Unable to resolve ${DEFAULT_GRAFANA_HOST} (run: hack global install)`,
+      message: `Unable to resolve ${LEGACY_GRAFANA_HOST} (run: hack global install)`,
     };
   }
 }
@@ -1707,11 +1708,20 @@ async function checkOauthAliasDns(): Promise<CheckResult> {
 }
 
 async function checkGrafanaReachable(): Promise<CheckResult> {
+  const host = await resolveInstalledGrafanaHost();
+  if (!host) {
+    return {
+      name: "grafana",
+      status: "warn",
+      message:
+        "Cannot identify configured Grafana route; review global logging Compose configuration",
+    };
+  }
   // Best-effort; TLS may fail if CA isn't trusted. Don't error on this.
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(`http://${DEFAULT_GRAFANA_HOST}`, {
+    const res = await fetch(`http://${host}`, {
       signal: controller.signal,
       redirect: "manual",
     });
@@ -1726,13 +1736,13 @@ async function checkGrafanaReachable(): Promise<CheckResult> {
         res.status === 308
           ? "ok"
           : "warn",
-      message: `http://${DEFAULT_GRAFANA_HOST} → ${res.status}`,
+      message: `http://${host} → ${res.status}`,
     };
   } catch {
     return {
       name: "grafana",
       status: "warn",
-      message: `Unable to reach http://${DEFAULT_GRAFANA_HOST} (is global infra up?)`,
+      message: `Unable to reach http://${host} (is global infra up?)`,
     };
   }
 }

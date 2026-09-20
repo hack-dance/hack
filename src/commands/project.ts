@@ -132,6 +132,7 @@ import {
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
@@ -5535,7 +5536,7 @@ function renderHackFolderReadme(opts: {
     "",
     "## Logs (Grafana + Loki)",
     "",
-    "- Open Grafana: https://logs.hack",
+    `- Open Grafana: https://${DEFAULT_GRAFANA_HOST}`,
     "- Default credentials: `admin` / `admin`",
     "",
     "In **Explore**, try queries like:",
@@ -8508,7 +8509,8 @@ async function handleOpen({
     branch && usesProjectBaseHost
       ? applyBranchToHost({ host: rawHost, branch, baseHosts })
       : rawHost;
-  const url = resolveOpenUrl({ targetRaw, resolvedHost });
+  const grafanaHost = await resolveOpenGrafanaHost(targetRaw);
+  const url = resolveOpenUrl({ targetRaw, resolvedHost, grafanaHost });
 
   if (json) {
     process.stdout.write(`${JSON.stringify({ url }, null, 2)}\n`);
@@ -8595,12 +8597,28 @@ function resolveRawHost(opts: {
 /**
  * Resolves the final URL to open based on target input.
  */
-function resolveOpenUrl(opts: {
+async function resolveOpenGrafanaHost(
+  target: string
+): Promise<string | undefined> {
+  if (target !== "logs") {
+    return undefined;
+  }
+  const host = await resolveInstalledGrafanaHost();
+  if (!host) {
+    throw new CliUsageError(
+      "Cannot identify a configured global Grafana route; review the global logging Compose file or pass an explicit URL."
+    );
+  }
+  return host;
+}
+
+export function resolveOpenUrl(opts: {
+  readonly grafanaHost?: string;
   readonly targetRaw: string;
   readonly resolvedHost: string;
 }): string {
   if (opts.targetRaw === "logs") {
-    return `https://${DEFAULT_GRAFANA_HOST}`;
+    return `https://${opts.grafanaHost ?? DEFAULT_GRAFANA_HOST}`;
   }
   if (hasUrlScheme(opts.targetRaw)) {
     return opts.targetRaw;

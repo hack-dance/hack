@@ -274,7 +274,7 @@ impl Owner {
     ) -> Result<Self, CandidateError> {
         Self::create_with_dependencies(candidate, profile, application_bridge, network, None)
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub fn create_with_dependencies(
         candidate: &Candidate,
         profile: super::Profile,

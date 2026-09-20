@@ -25,6 +25,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install mise for model-helper contract tests
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: "2026.9.12"
+          install: false
+          cache: false
+          env: false
       - name: Fetch pinned model checker
         run: curl --fail --location --retry 2 --max-time 60 https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar --output "$RUNNER_TEMP/tla2tools.jar"
       - name: Check evidence validation and models

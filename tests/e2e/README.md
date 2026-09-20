@@ -49,7 +49,12 @@ platform identity, not cross-architecture package compatibility.
 
 ## Domain migration routing qualification
 
-The `domain-migration` scenario additionally requires `HACK_E2E_DOMAIN_ROUTING=1`,
+The `domain-migration` scenario belongs to the separate `host-ingress` tier and is
+excluded from the default local/Docker suite. Select it explicitly with
+`--only=domain-migration`; missing prerequisites then fail the run rather than skip.
+Docker skip enforcement remains unchanged for the portable Docker tier.
+
+This scenario requires `HACK_E2E_DOMAIN_ROUTING=1`,
 a locally installed `node:24.11.0-bookworm-slim` image, existing Caddy ingress on
 `hack-dev`, and its exported public CA (default `~/.hack/caddy/pki/caddy-local-authority.crt`,
 override with `HACK_E2E_DOMAIN_CA`). It makes no global DNS or trust changes.

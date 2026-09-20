@@ -8,3 +8,17 @@ id = "generic-api-key"
 description = "Ticket journal idempotency keys are event dedupe identifiers, not credentials"
 paths = ['''^\.hack/tickets/events/events-\d{4}-\d{2}\.jsonl$''']
 regexes = ['''"idempotencyKey":"[^"]+"''']
+
+[[rules.allowlists]]
+description = "Relay input validation uses the hexadecimal alphabet, not a credential"
+condition = "AND"
+paths = ['''^packages/runtime-core/guest/stream-relay\.c$''']
+regexTarget = "line"
+regexes = ['''^\s*if \(strlen\(token\) != 32 \|\| strspn\(token, "0123456789abcdef"\) != 32\) return 64;\s*$''']
+
+[[rules.allowlists]]
+description = "Local relay handshake test uses a fixed synthetic hexadecimal token"
+condition = "AND"
+paths = ['''^packages/runtime-core/tests/stream_relay_contract\.rs$''']
+regexTarget = "line"
+regexes = ['''^\s*let token = "0123456789abcdef0123456789abcdef";\s*$''']

@@ -25,6 +25,7 @@ import { worktreeSecretsScenario } from "./scenarios/worktree-secrets.ts";
  *   bun tests/e2e/run.ts                    # tier 1 (local) scenarios
  *   HACK_E2E_DOCKER=1 bun tests/e2e/run.ts  # + tier 2 (docker) scenarios
  *   bun tests/e2e/run.ts --only=init,doctor # subset by name
+ *   # Host-ingress scenarios require explicit --only plus their prerequisites.
  *   bun tests/e2e/run.ts --list             # list scenarios and exit
  *   HACK_E2E_KEEP=1 ...                     # keep temp fixtures for debugging
  *   HACK_E2E_CLI_BIN=./dist/hack ...        # exercise the compiled binary

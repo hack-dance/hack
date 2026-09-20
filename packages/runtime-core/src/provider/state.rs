@@ -260,7 +260,7 @@ impl Owner {
         check_private_directory(&root.join("home"))?;
         Ok(owner)
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub fn create(
         candidate: &Candidate,
         profile: super::Profile,

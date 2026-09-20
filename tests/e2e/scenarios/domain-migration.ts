@@ -11,15 +11,15 @@ const TIMEOUT = 60_000;
 /** Explicit opt-in: uses existing ingress, never installs DNS or trust. Native DNS qualification is separate. */
 export const domainMigrationScenario: Scenario = {
   name: "domain-migration",
-  tier: "docker",
+  tier: "host-ingress",
   summary:
     "retained legacy/new/branch routes with verified TLS and exact container response",
   run: async (ctx) => {
-    if (process.env.HACK_E2E_DOMAIN_ROUTING !== "1") {
-      ctx.skip(
-        "Set HACK_E2E_DOMAIN_ROUTING=1 to use the existing shared Caddy ingress"
-      );
-    }
+    expect({
+      that: process.env.HACK_E2E_DOMAIN_ROUTING === "1",
+      message:
+        "Set HACK_E2E_DOMAIN_ROUTING=1 to use the existing shared Caddy ingress",
+    });
     const command = (argv: readonly string[]) =>
       runCommand({ argv, cwd: ctx.tempRoot, timeoutMs: TIMEOUT });
     const checked = async (argv: readonly string[]) => {

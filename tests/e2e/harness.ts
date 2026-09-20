@@ -66,7 +66,7 @@ export type CliInvocation = {
   readonly onStderrChunk?: (chunk: string) => void;
 };
 
-export type ScenarioTier = "local" | "docker";
+export type ScenarioTier = "local" | "docker" | "host-ingress";
 
 export type ScenarioContext = {
   readonly repoRoot: string;
@@ -686,6 +686,18 @@ export type RunScenariosOptions = {
   readonly keepTempDirs?: boolean;
 };
 
+/** Host ingress qualification requires explicit selection; Docker enablement is insufficient. */
+export function selectScenarios(opts: {
+  readonly scenarios: readonly Scenario[];
+  readonly only?: readonly string[];
+}): readonly Scenario[] {
+  return opts.scenarios.filter((scenario) =>
+    opts.only && opts.only.length > 0
+      ? opts.only.includes(scenario.name)
+      : scenario.tier !== "host-ingress"
+  );
+}
+
 /**
  * Run scenarios sequentially, printing a plain-text progress log and a final
  * summary table. Returns the outcomes; the caller decides the exit code.
@@ -694,10 +706,7 @@ export async function runScenarios(
   opts: RunScenariosOptions
 ): Promise<ScenarioOutcome[]> {
   const outcomes: ScenarioOutcome[] = [];
-  const selected = opts.scenarios.filter(
-    (scenario) =>
-      !opts.only || opts.only.length === 0 || opts.only.includes(scenario.name)
-  );
+  const selected = selectScenarios(opts);
 
   for (const scenario of selected) {
     const startedAt = Date.now();
@@ -733,6 +742,10 @@ export async function runScenarios(
     process.stdout.write(`-- ${scenario.name} (${scenario.tier}) --\n`);
     let outcome: ScenarioOutcome;
     try {
+      expect({
+        that: scenario.tier !== "host-ingress" || opts.dockerEnabled,
+        message: "Host ingress qualification requires HACK_E2E_DOCKER=1",
+      });
       await scenario.run(ctx);
       outcome = {
         name: scenario.name,
@@ -743,7 +756,7 @@ export async function runScenarios(
       };
     } catch (error: unknown) {
       outcome =
-        error instanceof ScenarioSkip
+        error instanceof ScenarioSkip && scenario.tier !== "host-ingress"
           ? {
               name: scenario.name,
               tier: scenario.tier,

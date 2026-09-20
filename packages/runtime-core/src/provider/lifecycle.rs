@@ -1,10 +1,14 @@
+#[cfg(any(target_os = "macos", test))]
 mod private_child;
+mod relay_process;
 use super::{
     admission, agent, artifact, identity, process,
     state::{self, Owner, io},
 };
 use crate::{Candidate, CandidateError, reject_aliased_state};
-pub(super) use private_child::{RelayChild, RelayLaunch, RelayProcess};
+#[cfg(target_os = "macos")]
+pub(super) use private_child::{RelayChild, RelayLaunch};
+pub(super) use relay_process::RelayProcess;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};

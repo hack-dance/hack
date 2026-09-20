@@ -113,14 +113,14 @@ test("long syntax and explicit region are supported without changing unrelated m
     input: input([
       {
         type: "bind",
-        source: "/fixture/home/.aws",
+        source: "/fixture/user-root/.aws",
         target: "/root/.aws",
         read_only: true,
       },
       "cache:/cache",
     ]),
     profile: "qa",
-    homeDirectory: "/fixture/home",
+    homeDirectory: "/fixture/user-root",
     region: "eu-west-1",
     exportSource: source,
     now,
@@ -139,7 +139,7 @@ test("ambiguous/custom/writable AWS mounts refuse before exporting", async () =>
   for (const volumes of [
     ["${HOME}/.aws:/root/.aws:rw"],
     ["/custom/.aws:/root/.aws:ro"],
-    ["${HOME}/.aws:/home/app/.aws:ro"],
+    ["${HOME}/.aws:/opt/app/.aws:ro"],
     ["${HOME}/.aws:/root/.aws:ro", "${HOME}/.aws:/root/.aws:ro"],
     [
       {

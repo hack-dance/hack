@@ -1,0 +1,1190 @@
+//! Foreground host publications. Intent precedes staging/exec; cleanup never adopts unknown files.
+pub mod recovery;
+use super::{identity, publisher, state};
+use crate::{Candidate, CandidateError};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    os::unix::{
+        fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt},
+        process::CommandExt,
+    },
+    path::{Path, PathBuf},
+};
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Entry {
+    owner: String,
+    run: String,
+    reservation: String,
+    slot: u8,
+    port: u16,
+    #[serde(default)]
+    unix: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    hostnames: Vec<String>,
+    token: String,
+    process: identity::ProcessIdentity,
+    digest: String,
+    directory: Option<(u64, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binary: Option<BinaryStage>,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BinaryStage {
+    device: u64,
+    inode: u64,
+    ready: bool,
+}
+fn error() -> CandidateError {
+    CandidateError::new(
+        "publisher_intent",
+        "Publication ownership or cleanup is uncertain; retain intent and files.",
+    )
+}
+fn hex(s: &str, n: usize) -> bool {
+    s.len() == n
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+/// Normalize a DNS name, never a URL, authority-with-port, wildcard or IP address.
+pub fn normalize_hostname(value: &str) -> Result<String, CandidateError> {
+    let name = value
+        .strip_suffix('.')
+        .unwrap_or(value)
+        .to_ascii_lowercase();
+    if name.is_empty()
+        || name.len() > 253
+        || !name.is_ascii()
+        || name.parse::<std::net::IpAddr>().is_ok()
+        || name.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+    {
+        return Err(error());
+    }
+    Ok(name)
+}
+fn names(values: &[String]) -> Result<Vec<String>, CandidateError> {
+    if values.len() > 8 {
+        return Err(error());
+    }
+    let mut result = std::collections::BTreeSet::new();
+    for value in values {
+        if !result.insert(normalize_hostname(value)?) {
+            return Err(error());
+        }
+    }
+    Ok(result.into_iter().collect())
+}
+fn directory(e: &Entry) -> PathBuf {
+    PathBuf::from(format!(
+        "/private/tmp/hkp-{}-{}-{}",
+        e.process.uid,
+        &e.owner[..12],
+        e.reservation
+    ))
+}
+fn root(c: &Candidate) -> PathBuf {
+    c.state_root.join("run/publications")
+}
+fn load(c: &Candidate, owner: &str) -> Result<BTreeMap<String, Entry>, CandidateError> {
+    let root = root(c);
+    if !root.exists() && !root.is_symlink() {
+        return Ok(BTreeMap::new());
+    }
+    state::check_private_directory(&root)?;
+    if root.join("state.pending").exists() || root.join("state.pending").is_symlink() {
+        return Err(error());
+    }
+    let path = root.join("state.json");
+    let entries: BTreeMap<String, Entry> = if path.exists() || path.is_symlink() {
+        state::read_bounded(&path, 65536)?
+    } else {
+        BTreeMap::new()
+    };
+    validate(&entries, owner)?;
+    Ok(entries)
+}
+fn validate(entries: &BTreeMap<String, Entry>, owner: &str) -> Result<(), CandidateError> {
+    if !hex(owner, 32) || entries.len() > 32 {
+        return Err(error());
+    }
+    let mut ports = std::collections::BTreeSet::new();
+    let mut slots = std::collections::BTreeSet::new();
+    let mut hosts = std::collections::BTreeSet::new();
+    let mut host_bytes = 0usize;
+    for (key, e) in entries {
+        if (!e.unix && !e.hostnames.is_empty()) || names(&e.hostnames)? != e.hostnames {
+            return Err(error());
+        }
+        for hostname in &e.hostnames {
+            host_bytes += hostname.len();
+            if !hosts.insert(hostname) || hosts.len() > 128 || host_bytes > 16384 {
+                return Err(error());
+            }
+        }
+        if !hex(owner, 32)
+            || e.owner != owner
+            || key != &e.reservation
+            || !hex(&e.reservation, 32)
+            || !hex(&e.run, 32)
+            || !hex(&e.token, 32)
+            || !hex(&e.digest, 64)
+            || e.slot >= 32
+            || (e.unix != (e.port == 0))
+            || (!e.unix && !ports.insert(e.port))
+            || !slots.insert(e.slot)
+            || e.process.pid <= 1
+            || e.process.start_micros == 0
+            || e.process.uid != unsafe { libc::geteuid() }
+            || e.directory.is_some_and(|(_, inode)| inode == 0)
+            || e.binary
+                .as_ref()
+                .is_some_and(|b| b.inode == 0 || e.directory.is_none())
+            || e.process.executable != directory(e).join("publisher")
+        {
+            return Err(error());
+        }
+    }
+    Ok(())
+}
+/// Recover only complete, single-step publications while holding the provider lock.
+/// This runs on cleanup paths; startup never replays a pending journal.
+fn recover_pending(c: &Candidate, owner: &str) -> Result<(), CandidateError> {
+    let root = root(c);
+    let pending = root.join("state.pending");
+    if !pending.exists() && !pending.is_symlink() {
+        return Ok(());
+    }
+    state::check_private_directory(&root)?;
+    let path = root.join("state.json");
+    let before: BTreeMap<String, Entry> = if path.exists() || path.is_symlink() {
+        state::read_bounded(&path, 65536)?
+    } else {
+        BTreeMap::new()
+    };
+    let after: BTreeMap<String, Entry> = state::read_bounded(&pending, 65536)?;
+    validate(&before, owner)?;
+    validate(&after, owner)?;
+    let keys = before
+        .keys()
+        .chain(after.keys())
+        .collect::<std::collections::BTreeSet<_>>();
+    let changed = keys
+        .into_iter()
+        .filter(|key| before.get(*key) != after.get(*key))
+        .collect::<Vec<_>>();
+    if changed.len() > 1 {
+        return Err(error());
+    }
+    if let Some(key) = changed.first() {
+        let old = before.get(*key);
+        let new = after.get(*key);
+        let entry = new.or(old).expect("changed entry");
+        if identity::alive(entry.process.pid)? {
+            return Err(error());
+        }
+        match (old, new) {
+            (None, Some(e)) => {
+                if e.directory.is_some()
+                    || e.binary.is_some()
+                    || directory(e).exists()
+                    || directory(e).is_symlink()
+                {
+                    return Err(error());
+                }
+            }
+            (Some(e), None) => {
+                if directory(e).exists() || directory(e).is_symlink() {
+                    return Err(error());
+                }
+            }
+            (Some(old), Some(new)) => {
+                let mut expected = old.clone();
+                let allowed = match (&old.directory, &new.directory, &old.binary, &new.binary) {
+                    (None, Some(_), None, None) => {
+                        expected.directory = new.directory;
+                        true
+                    }
+                    (Some(a), Some(b), None, Some(stage)) if a == b && !stage.ready => {
+                        expected.binary = new.binary.clone();
+                        true
+                    }
+                    (Some(a), Some(b), Some(x), Some(y))
+                        if a == b
+                            && !x.ready
+                            && y.ready
+                            && x.device == y.device
+                            && x.inode == y.inode =>
+                    {
+                        expected.binary = new.binary.clone();
+                        true
+                    }
+                    _ => false,
+                };
+                if !allowed || expected != *new {
+                    return Err(error());
+                }
+                verify_directory(new)?;
+            }
+            _ => return Err(error()),
+        }
+    }
+    // read_bounded checked the private regular file; open again without following aliases
+    // and sync before completing the same rename used by the original writer.
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&pending)
+        .map_err(state::io)?
+        .sync_all()
+        .map_err(state::io)?;
+    fs::rename(&pending, &path).map_err(state::io)?;
+    File::open(root)
+        .map_err(state::io)?
+        .sync_all()
+        .map_err(state::io)
+}
+fn save(c: &Candidate, entries: &BTreeMap<String, Entry>) -> Result<(), CandidateError> {
+    if serde_json::to_vec_pretty(entries)
+        .map_err(|_| error())?
+        .len()
+        > 65536
+    {
+        return Err(error());
+    }
+    state::private_directory(&root(c))?;
+    state::write(&root(c).join("state.json"), entries)
+}
+fn verify_directory(e: &Entry) -> Result<bool, CandidateError> {
+    let dir = directory(e);
+    if !dir.exists() && !dir.is_symlink() {
+        return Ok(false);
+    }
+    state::check_private_directory(&dir)?;
+    let m = fs::symlink_metadata(&dir).map_err(state::io)?;
+    if !m.is_dir() || Some((m.dev(), m.ino())) != e.directory {
+        return Err(error());
+    }
+    Ok(true)
+}
+fn check_socket(
+    e: &Entry,
+    name: &str,
+    kind: &str,
+    token: &str,
+    retire: bool,
+) -> Result<(), CandidateError> {
+    let dir = directory(e);
+    let control = dir.join(name);
+    let receipt = dir.join(format!("{name}.identity"));
+    let present = |p: &Path| p.exists() || p.is_symlink();
+    if !present(&receipt) {
+        return if !retire || present(&control) {
+            Err(error())
+        } else {
+            Ok(())
+        };
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&receipt)
+        .map_err(state::io)?;
+    let m = file.metadata().map_err(state::io)?;
+    if !m.is_file()
+        || m.nlink() != 1
+        || m.uid() != e.process.uid
+        || m.mode() & 0o077 != 0
+        || m.len() > 256
+    {
+        return Err(error());
+    }
+    let mut bytes = Vec::new();
+    file.take(257).read_to_end(&mut bytes).map_err(state::io)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| error())?;
+    let fields = text.split_ascii_whitespace().collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return Err(error());
+    }
+    let device = fields[2].parse::<u64>().map_err(|_| error())?;
+    let inode = fields[3].parse::<u64>().map_err(|_| error())?;
+    if inode == 0 || text != format!("{kind} {} {device} {inode} {token}\n", e.process.pid) {
+        return Err(error());
+    }
+    if present(&control) {
+        let socket = fs::symlink_metadata(&control).map_err(state::io)?;
+        if !socket.file_type().is_socket()
+            || socket.uid() != e.process.uid
+            || socket.mode() & 0o077 != 0
+            || socket.nlink() != 1
+            || socket.dev() != device
+            || socket.ino() != inode
+        {
+            return Err(error());
+        }
+        if retire {
+            fs::remove_file(control).map_err(state::io)?;
+        }
+    } else if !retire {
+        return Err(error());
+    }
+    let current = fs::symlink_metadata(&receipt).map_err(state::io)?;
+    if current.dev() != m.dev() || current.ino() != m.ino() {
+        return Err(error());
+    }
+    if !retire {
+        return Ok(());
+    }
+    fs::remove_file(receipt).map_err(state::io)?;
+    File::open(dir)
+        .map_err(state::io)?
+        .sync_all()
+        .map_err(state::io)
+}
+fn cleanup(e: &Entry) -> Result<(), CandidateError> {
+    publisher::stop(publisher::StopOptions {
+        process: &e.process,
+        binary: &e.process.executable,
+        control: &directory(e).join("control"),
+        token: &e.token,
+    })?;
+    if !verify_directory(e)? {
+        return Ok(());
+    }
+    let dir = directory(e);
+    let staging = e.binary.as_ref().is_some_and(|b| !b.ready);
+    if staging
+        && [
+            "control",
+            "control.identity",
+            "frontend",
+            "frontend.identity",
+        ]
+        .iter()
+        .any(|name| {
+            let path = dir.join(name);
+            path.exists() || path.is_symlink()
+        })
+    {
+        return Err(error());
+    }
+    // Validate the complete directory before deleting any staged resource.
+    for entry in fs::read_dir(&dir).map_err(state::io)? {
+        let entry = entry.map_err(state::io)?;
+        if entry.file_name() == "control"
+            || entry.file_name() == "control.identity"
+            || (e.unix
+                && (entry.file_name() == "frontend" || entry.file_name() == "frontend.identity"))
+        {
+            continue;
+        }
+        if entry.file_name() != "publisher" {
+            return Err(error());
+        }
+        let path = entry.path();
+        let m = fs::symlink_metadata(&path).map_err(state::io)?;
+        if !m.is_file()
+            || m.nlink() != 1
+            || m.uid() != e.process.uid
+            || m.mode() & 0o077 != 0
+            || m.len() > 512 * 1024
+        {
+            return Err(error());
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(state::io)?;
+        let opened = file.metadata().map_err(state::io)?;
+        if opened.dev() != m.dev() || opened.ino() != m.ino() {
+            return Err(error());
+        }
+        let mut bytes = Vec::new();
+        file.take(512 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(state::io)?;
+        if e.binary
+            .as_ref()
+            .is_some_and(|b| b.device != m.dev() || b.inode != m.ino())
+        {
+            return Err(error());
+        }
+        if bytes.len() > 512 * 1024
+            || (!staging && format!("{:x}", Sha256::digest(bytes)) != e.digest)
+        {
+            return Err(error());
+        }
+    }
+    if e.unix {
+        check_socket(e, "frontend", "HKPF1", &e.reservation, true)?;
+    }
+    check_socket(e, "control", "HKPC1", &e.token, true)?;
+    let binary = dir.join("publisher");
+    if binary.exists() {
+        fs::remove_file(binary).map_err(state::io)?;
+    }
+    fs::remove_dir(&dir).map_err(state::io)?;
+    File::open("/private/tmp")
+        .map_err(state::io)?
+        .sync_all()
+        .map_err(state::io)
+}
+/// Caller holds the provider operation lock. Stop host listeners before guest resources.
+pub(super) fn release(
+    c: &Candidate,
+    owner: &str,
+    selected: Option<(&str, &str)>,
+) -> Result<(), CandidateError> {
+    recover_pending(c, owner)?;
+    let mut entries = load(c, owner)?;
+    if selected.is_some_and(|(run, res)| entries.get(res).is_some_and(|e| e.run != run)) {
+        return Err(error());
+    }
+    let keys = entries
+        .iter()
+        .filter(|(_, e)| selected.is_none_or(|(run, res)| e.run == run && e.reservation == res))
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    for key in keys {
+        cleanup(&entries[&key])?;
+        entries.remove(&key);
+        save(c, &entries)?;
+    }
+    Ok(())
+}
+pub fn unpublish(c: &Candidate, run: &str, reservation: &str) -> Result<(), CandidateError> {
+    if !hex(run, 32) || !hex(reservation, 32) {
+        return Err(error());
+    }
+    let _lock = state::Lock::acquire(&c.state_root.join("run/smolvm"))?;
+    let owner = state::Owner::load(c)?;
+    release(c, &owner.token, Some((run, reservation)))
+}
+
+/// Durable claims only: consumers must independently verify live publication readiness.
+pub fn inspect_claims(c: &Candidate) -> Result<serde_json::Value, CandidateError> {
+    let _lock = state::Lock::acquire(&c.state_root.join("run/smolvm"))?;
+    let owner = state::Owner::load(c)?;
+    let entries = load(c, &owner.token)?;
+    let claims = entries
+        .values()
+        .flat_map(|e| {
+            e.hostnames.iter().map(|name| {
+                serde_json::json!({"hostname":name,"run":e.run,"reservation":e.reservation,
+            "endpoint":directory(e).join("frontend"),"state":"claimed"})
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({"scope":"durable-ownership-only","claims":claims}))
+}
+
+fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
+    let observed = identity::observe(e.process.pid)?;
+    identity::verify(&e.process, &observed, &e.process.executable, unsafe {
+        libc::geteuid()
+    })?;
+    if !e.unix || !verify_directory(e)? || !e.binary.as_ref().is_some_and(|b| b.ready) {
+        return Err(error());
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&e.process.executable)
+        .map_err(state::io)?;
+    let m = file.metadata().map_err(state::io)?;
+    let staged = e.binary.as_ref().expect("verified stage");
+    if !m.is_file()
+        || m.nlink() != 1
+        || m.uid() != e.process.uid
+        || m.mode() & 0o077 != 0
+        || m.len() > 512 * 1024
+        || m.dev() != staged.device
+        || m.ino() != staged.inode
+    {
+        return Err(error());
+    }
+    let mut bytes = Vec::new();
+    file.take(512 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(state::io)?;
+    if format!("{:x}", Sha256::digest(bytes)) != e.digest {
+        return Err(error());
+    }
+    check_socket(e, "frontend", "HKPF1", &e.reservation, false)?;
+    check_socket(e, "control", "HKPC1", &e.token, false)?;
+    // A second observation refuses death or identity change during filesystem checks.
+    let after = identity::observe(e.process.pid)?;
+    identity::verify(&e.process, &after, &e.process.executable, unsafe {
+        libc::geteuid()
+    })
+}
+fn verify_claim_snapshot(
+    entry: &Entry,
+    after: &BTreeMap<String, Entry>,
+    owner: &str,
+) -> Result<(), CandidateError> {
+    if entry.owner != owner || after.get(&entry.reservation) != Some(entry) {
+        return Err(CandidateError::new(
+            "publication_changed",
+            "Publication ownership changed during lookup; retry a fresh observation.",
+        ));
+    }
+    Ok(())
+}
+/// A point-in-time observation, not a persistent capability or guest health claim.
+pub fn lookup_hostname(c: &Candidate, value: &str) -> Result<serde_json::Value, CandidateError> {
+    let name = normalize_hostname(value)?;
+    let owner = state::Owner::load(c)?;
+    let entries = load(c, &owner.token)?;
+    let entry = entries
+        .values()
+        .find(|e| e.hostnames.contains(&name))
+        .ok_or_else(error)?;
+    observe_publication(entry)?;
+    // Writers retain the provider lock. Readers validate the selected immutable
+    // ownership record twice instead of blocking unrelated running applications.
+    let after_owner = state::Owner::load(c)?;
+    let after = load(c, &after_owner.token)?;
+    verify_claim_snapshot(entry, &after, &after_owner.token)?;
+    let process = identity::observe(entry.process.pid)?;
+    identity::verify(
+        &entry.process,
+        &process,
+        &entry.process.executable,
+        unsafe { libc::geteuid() },
+    )?;
+    Ok(
+        serde_json::json!({"hostname":name,"run":entry.run,"reservation":entry.reservation,
+        "endpoint":directory(entry).join("frontend"),"state":"publication-observed",
+        "scope":"point-in-time-host-publication"}),
+    )
+}
+
+pub(super) struct Launch<'a> {
+    pub owner: &'a str,
+    pub run: &'a str,
+    pub reservation: &'a str,
+    pub slot: u8,
+    pub port: Option<u16>,
+    pub hostnames: &'a [String],
+    pub upstream: &'a Path,
+}
+#[cfg(feature = "native-stream-relay")]
+fn payload() -> Result<&'static [u8], CandidateError> {
+    Ok(include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/stream-relay-host"
+    )))
+}
+#[cfg(not(feature = "native-stream-relay"))]
+fn payload() -> Result<&'static [u8], CandidateError> {
+    Err(CandidateError::new(
+        "bridge_unavailable",
+        "Publication requires a native-stream-relay build.",
+    ))
+}
+/// The caller must retain its operation lock until exec closes inherited descriptors.
+pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), CandidateError> {
+    let bytes = payload()?;
+    let hostnames = names(options.hostnames)?;
+    if !hex(options.owner, 32)
+        || !hex(options.run, 32)
+        || !hex(options.reservation, 32)
+        || options.slot >= 32
+        || options.port == Some(0)
+        || (options.port.is_some() && !hostnames.is_empty())
+        || bytes.len() > 512 * 1024
+    {
+        return Err(error());
+    }
+    let mut entries = load(c, options.owner)?;
+    if entries.len() >= 32
+        || entries.contains_key(options.reservation)
+        || entries.values().any(|e| {
+            options.port.is_some_and(|port| !e.unix && e.port == port) || e.slot == options.slot
+        })
+    {
+        return Err(error());
+    }
+    let mut random = [0u8; 16];
+    File::open("/dev/urandom")
+        .map_err(state::io)?
+        .read_exact(&mut random)
+        .map_err(state::io)?;
+    let token = random.iter().map(|b| format!("{b:02x}")).collect();
+    let process = identity::observe(std::process::id() as i32)?;
+    let mut e = Entry {
+        owner: options.owner.into(),
+        run: options.run.into(),
+        reservation: options.reservation.into(),
+        slot: options.slot,
+        port: options.port.unwrap_or(0),
+        unix: options.port.is_none(),
+        hostnames,
+        token,
+        process,
+        digest: format!("{:x}", Sha256::digest(bytes)),
+        directory: None,
+        binary: None,
+    };
+    let dir = directory(&e);
+    e.process.executable = dir.join("publisher");
+    if dir.exists() || dir.is_symlink() {
+        return Err(error());
+    }
+    entries.insert(e.reservation.clone(), e.clone());
+    validate(&entries, options.owner)?;
+    save(c, &entries)?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(state::io)?;
+    File::open("/private/tmp")
+        .map_err(state::io)?
+        .sync_all()
+        .map_err(state::io)?;
+    let m = fs::symlink_metadata(&dir).map_err(state::io)?;
+    e.directory = Some((m.dev(), m.ino()));
+    entries.insert(e.reservation.clone(), e.clone());
+    save(c, &entries)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&e.process.executable)
+        .map_err(state::io)?;
+    let metadata = file.metadata().map_err(state::io)?;
+    File::open(&dir)
+        .map_err(state::io)?
+        .sync_all()
+        .map_err(state::io)?;
+    e.binary = Some(BinaryStage {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        ready: false,
+    });
+    entries.insert(e.reservation.clone(), e.clone());
+    save(c, &entries)?;
+    file.write_all(bytes).map_err(state::io)?;
+    file.sync_all().map_err(state::io)?;
+    File::open(&dir)
+        .map_err(state::io)?
+        .sync_all()
+        .map_err(state::io)?;
+    drop(file);
+    e.binary.as_mut().expect("recorded staged file").ready = true;
+    entries.insert(e.reservation.clone(), e.clone());
+    save(c, &entries)?;
+    let endpoint = if e.unix {
+        dir.join("frontend").into_os_string()
+    } else {
+        e.port.to_string().into()
+    };
+    if e.unix {
+        eprintln!(
+            "Unix publication endpoint (await ready): {}",
+            dir.join("frontend").display()
+        );
+    }
+    let failure = std::process::Command::new(&e.process.executable)
+        .env_clear()
+        .arg(if e.unix {
+            "--publish-unix"
+        } else {
+            "--publish"
+        })
+        .arg(endpoint)
+        .arg(options.upstream)
+        .args([&e.reservation, "60000", "--control"])
+        .arg(dir.join("control"))
+        .arg(&e.token)
+        .exec();
+    Err(state::io(failure))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::{
+        os::unix::fs::PermissionsExt,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    fn fixture() -> (Candidate, Entry) {
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let base = PathBuf::from(format!(
+            "/private/tmp/hkpub-test-{}-{serial}",
+            std::process::id()
+        ));
+        fs::create_dir(&base).unwrap();
+        let candidate = Candidate::discover(&base).unwrap();
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let process = identity::observe(child.id() as i32).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let mut e = Entry {
+            owner: "a".repeat(32),
+            run: "b".repeat(32),
+            reservation: format!("{:016x}{serial:016x}", std::process::id()),
+            slot: 0,
+            port: 3000,
+            unix: false,
+            hostnames: vec![],
+            token: "c".repeat(32),
+            process,
+            digest: format!("{:x}", Sha256::digest(b"fixture")),
+            directory: None,
+            binary: None,
+        };
+        e.process.executable = directory(&e).join("publisher");
+        (candidate, e)
+    }
+    #[test]
+    fn absent_prelaunch_process_retires_intent_but_unknown_directory_does_not() {
+        let (c, mut e) = fixture();
+        let mut entries = BTreeMap::from([(e.reservation.clone(), e.clone())]);
+        save(&c, &entries).unwrap();
+        fs::create_dir(directory(&e)).unwrap();
+        fs::set_permissions(directory(&e), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(release(&c, &e.owner, None).is_err());
+        assert!(load(&c, &e.owner).unwrap().contains_key(&e.reservation));
+        let m = fs::metadata(directory(&e)).unwrap();
+        e.directory = Some((m.dev(), m.ino()));
+        entries.insert(e.reservation.clone(), e.clone());
+        save(&c, &entries).unwrap();
+        fs::write(directory(&e).join("foreign"), b"preserve").unwrap();
+        assert!(release(&c, &e.owner, None).is_err());
+        assert_eq!(
+            fs::read(directory(&e).join("foreign")).unwrap(),
+            b"preserve"
+        );
+        fs::remove_file(directory(&e).join("foreign")).unwrap();
+        fs::write(&e.process.executable, b"fixture").unwrap();
+        fs::set_permissions(&e.process.executable, fs::Permissions::from_mode(0o700)).unwrap();
+        release(&c, &e.owner, None).unwrap();
+        assert!(!directory(&e).exists());
+        assert!(load(&c, &e.owner).unwrap().is_empty());
+        fs::remove_dir_all(c.checkout).unwrap();
+    }
+    #[test]
+    fn read_snapshot_refuses_changed_owner_or_claim_but_allows_unrelated_publication_changes() {
+        let (c, mut e) = fixture();
+        e.unix = true;
+        e.port = 0;
+        e.hostnames = vec!["demo.hack".into()];
+        let mut after = BTreeMap::from([(e.reservation.clone(), e.clone())]);
+        verify_claim_snapshot(&e, &after, &e.owner).unwrap();
+        let mut unrelated = e.clone();
+        unrelated.reservation = "f".repeat(32);
+        unrelated.hostnames = vec!["other.hack".into()];
+        after.insert(unrelated.reservation.clone(), unrelated);
+        verify_claim_snapshot(&e, &after, &e.owner).unwrap();
+        assert!(verify_claim_snapshot(&e, &after, &"d".repeat(32)).is_err());
+        for mutation in 0..4 {
+            let mut changed = after.clone();
+            let selected = changed.get_mut(&e.reservation).unwrap();
+            match mutation {
+                0 => selected.process.start_micros += 1,
+                1 => selected.hostnames = vec!["changed.hack".into()],
+                2 => selected.directory = Some((1, 2)),
+                _ => {
+                    changed.remove(&e.reservation);
+                }
+            }
+            assert!(verify_claim_snapshot(&e, &changed, &e.owner).is_err());
+        }
+        fs::remove_dir_all(c.checkout).unwrap();
+    }
+    #[test]
+    fn hostname_claims_normalize_conflict_bound_and_preserve_pending_changes() {
+        assert_eq!(
+            normalize_hostname("API.Feature-X.Demo.Hack.").unwrap(),
+            "api.feature-x.demo.hack"
+        );
+        for value in [
+            "",
+            ".",
+            "a..b",
+            "a/b",
+            "https://a.hack",
+            "a:443",
+            "*.hack",
+            "-a.hack",
+            "a-.hack",
+            "127.0.0.1",
+            "[::1]",
+            "a.hack..",
+            "é.hack",
+        ] {
+            assert!(normalize_hostname(value).is_err(), "{value}");
+        }
+        assert!(names(&["a.hack".into(), "A.HACK.".into()]).is_err());
+        assert!(names(&(0..9).map(|n| format!("a{n}.hack")).collect::<Vec<_>>()).is_err());
+        let (c, mut e) = fixture();
+        e.unix = true;
+        e.port = 0;
+        e.hostnames = vec!["api.feature-x.demo.hack".into()];
+        let mut entries = BTreeMap::from([(e.reservation.clone(), e.clone())]);
+        validate(&entries, &e.owner).unwrap();
+        save(&c, &entries).unwrap();
+        assert_eq!(
+            load(&c, &e.owner).unwrap()[&e.reservation].hostnames,
+            e.hostnames
+        );
+        let mut other = e.clone();
+        other.slot = 1;
+        other.reservation = "e".repeat(32);
+        other.process.executable = directory(&other).join("publisher");
+        entries.insert(other.reservation.clone(), other.clone());
+        assert!(validate(&entries, &e.owner).is_err());
+        entries.get_mut(&other.reservation).unwrap().hostnames = vec!["custom.example.test".into()];
+        validate(&entries, &e.owner).unwrap();
+        let mut pending = BTreeMap::from([(e.reservation.clone(), e.clone())]);
+        pending.get_mut(&e.reservation).unwrap().hostnames = vec!["changed.hack".into()];
+        state::write(&root(&c).join("state.pending"), &pending).unwrap();
+        assert!(recover_pending(&c, &e.owner).is_err());
+        assert!(root(&c).join("state.pending").exists());
+        let mut bounded = BTreeMap::new();
+        for index in 0..17u8 {
+            let mut entry = e.clone();
+            entry.slot = index;
+            entry.reservation = format!("{index:032x}");
+            entry.process.executable = directory(&entry).join("publisher");
+            entry.hostnames = (0..8).map(|n| format!("h{n}.p{index}.hack")).collect();
+            bounded.insert(entry.reservation.clone(), entry);
+            assert_eq!(validate(&bounded, &e.owner).is_ok(), index < 16);
+        }
+        fs::remove_dir_all(c.checkout).unwrap();
+    }
+    #[test]
+    fn legacy_tcp_records_remain_valid_and_endpoint_modes_cannot_be_reinterpreted() {
+        let (c, e) = fixture();
+        let mut legacy = serde_json::to_value(&e).unwrap();
+        legacy.as_object_mut().unwrap().remove("unix");
+        let decoded: Entry = serde_json::from_value(legacy).unwrap();
+        assert!(!decoded.unix);
+        let mut entries = BTreeMap::from([(decoded.reservation.clone(), decoded)]);
+        validate(&entries, &e.owner).unwrap();
+        entries.get_mut(&e.reservation).unwrap().unix = true;
+        assert!(validate(&entries, &e.owner).is_err());
+        entries.get_mut(&e.reservation).unwrap().port = 0;
+        validate(&entries, &e.owner).unwrap();
+        entries.get_mut(&e.reservation).unwrap().unix = false;
+        assert!(validate(&entries, &e.owner).is_err());
+        fs::remove_dir_all(c.checkout).unwrap();
+    }
+    #[test]
+    fn stale_control_requires_matching_native_receipt_and_preserves_replacements() {
+        use std::os::unix::net::UnixDatagram;
+        for unix in [false, true] {
+            for mismatch in ["none", "token", "replacement", "missing", "partial"] {
+                let (c, mut e) = fixture();
+                e.unix = unix;
+                e.port = if unix { 0 } else { 3000 };
+                let name = if unix { "frontend" } else { "control" };
+                let kind = if unix { "HKPF1" } else { "HKPC1" };
+                let dir = directory(&e);
+                fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+                let m = fs::metadata(&dir).unwrap();
+                e.directory = Some((m.dev(), m.ino()));
+                let control = dir.join(name);
+                let socket = UnixDatagram::bind(&control).unwrap();
+                fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
+                let original = fs::symlink_metadata(&control).unwrap();
+                let receipt = dir.join(format!("{name}.identity"));
+                let token = if mismatch == "token" {
+                    "f".repeat(32)
+                } else {
+                    if unix {
+                        e.reservation.clone()
+                    } else {
+                        e.token.clone()
+                    }
+                };
+                if mismatch != "missing" {
+                    fs::write(
+                        &receipt,
+                        format!(
+                            "{kind} {} {} {} {token}\n",
+                            e.process.pid,
+                            original.dev(),
+                            original.ino()
+                        ),
+                    )
+                    .unwrap();
+                    fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+                }
+                if mismatch == "partial" {
+                    fs::write(&receipt, b"HK").unwrap();
+                }
+                let replacement = if mismatch == "replacement" {
+                    fs::remove_file(&control).unwrap();
+                    let other = UnixDatagram::bind(&control).unwrap();
+                    fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
+                    assert_ne!(
+                        original.ino(),
+                        fs::symlink_metadata(&control).unwrap().ino()
+                    );
+                    Some(other)
+                } else {
+                    None
+                };
+                let expected_token = if unix { &e.reservation } else { &e.token };
+                assert_eq!(
+                    check_socket(&e, name, kind, expected_token, false).is_ok(),
+                    mismatch == "none"
+                );
+                assert!(control.exists());
+                if mismatch == "none" {
+                    assert!(receipt.exists());
+                    cleanup(&e).unwrap();
+                    assert!(!dir.exists());
+                } else {
+                    assert!(cleanup(&e).is_err());
+                    assert!(control.exists());
+                    fs::remove_dir_all(&dir).unwrap();
+                }
+                drop(replacement);
+                drop(socket);
+                fs::remove_dir_all(c.checkout).unwrap();
+            }
+        }
+    }
+    #[test]
+    fn incomplete_helper_cleanup_requires_recorded_inode_and_pre_exec_phase() {
+        for variant in ["staging", "ready", "replaced", "legacy", "control"] {
+            let (c, mut e) = fixture();
+            let dir = directory(&e);
+            fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+            let m = fs::metadata(&dir).unwrap();
+            e.directory = Some((m.dev(), m.ino()));
+            fs::write(&e.process.executable, b"partial helper bytes").unwrap();
+            fs::set_permissions(&e.process.executable, fs::Permissions::from_mode(0o700)).unwrap();
+            let m = fs::metadata(&e.process.executable).unwrap();
+            if variant != "legacy" {
+                e.binary = Some(BinaryStage {
+                    device: m.dev(),
+                    inode: m.ino() + u64::from(variant == "replaced"),
+                    ready: variant == "ready",
+                });
+            }
+            if variant == "control" {
+                fs::write(dir.join("control.identity"), b"unexpected").unwrap();
+            }
+            let entries = BTreeMap::from([(e.reservation.clone(), e.clone())]);
+            save(&c, &entries).unwrap();
+            if variant == "staging" {
+                release(&c, &e.owner, None).unwrap();
+                assert!(!dir.exists());
+                assert!(load(&c, &e.owner).unwrap().is_empty());
+            } else {
+                assert!(release(&c, &e.owner, None).is_err());
+                assert_eq!(
+                    fs::read(&e.process.executable).unwrap(),
+                    b"partial helper bytes"
+                );
+                assert!(load(&c, &e.owner).unwrap().contains_key(&e.reservation));
+                fs::remove_dir_all(dir).unwrap();
+            }
+            fs::remove_dir_all(c.checkout).unwrap();
+        }
+    }
+    fn pending(c: &Candidate, entries: &BTreeMap<String, Entry>) {
+        let path = root(c).join("state.pending");
+        fs::write(&path, serde_json::to_vec(entries).unwrap()).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[test]
+    fn cleanup_recovers_complete_single_step_journals_without_launching() {
+        for phase in [
+            "initial",
+            "directory",
+            "binary",
+            "ready",
+            "removed",
+            "identical",
+        ] {
+            let (c, mut e) = fixture();
+            let dir = directory(&e);
+            let mut before = BTreeMap::new();
+            let mut after = BTreeMap::new();
+            if phase != "initial" {
+                if ["binary", "ready", "removed"].contains(&phase) {
+                    fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+                    let m = fs::metadata(&dir).unwrap();
+                    e.directory = Some((m.dev(), m.ino()));
+                }
+                if ["ready", "removed"].contains(&phase) {
+                    fs::write(&e.process.executable, b"fixture").unwrap();
+                    fs::set_permissions(&e.process.executable, fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                    let m = fs::metadata(&e.process.executable).unwrap();
+                    e.binary = Some(BinaryStage {
+                        device: m.dev(),
+                        inode: m.ino(),
+                        ready: false,
+                    });
+                }
+                before.insert(e.reservation.clone(), e.clone());
+            }
+            match phase {
+                "directory" => {
+                    fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+                    let m = fs::metadata(&dir).unwrap();
+                    e.directory = Some((m.dev(), m.ino()));
+                }
+                "binary" => {
+                    fs::write(&e.process.executable, b"partial").unwrap();
+                    fs::set_permissions(&e.process.executable, fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                    let m = fs::metadata(&e.process.executable).unwrap();
+                    e.binary = Some(BinaryStage {
+                        device: m.dev(),
+                        inode: m.ino(),
+                        ready: false,
+                    });
+                }
+                "ready" => {
+                    e.binary.as_mut().unwrap().ready = true;
+                }
+                "removed" => {
+                    fs::remove_dir_all(&dir).unwrap();
+                }
+                _ => {}
+            }
+            if phase != "removed" {
+                after.insert(e.reservation.clone(), e.clone());
+            }
+            save(&c, &before).unwrap();
+            pending(&c, &after);
+            assert!(load(&c, &e.owner).is_err()); // Startup remains fail-closed.
+            release(&c, &e.owner, None).unwrap();
+            assert!(!dir.exists());
+            assert!(!root(&c).join("state.pending").exists());
+            assert!(load(&c, &e.owner).unwrap().is_empty());
+            fs::remove_dir_all(c.checkout).unwrap();
+        }
+    }
+    #[test]
+    fn journal_recovery_refuses_immutable_changes_live_launchers_and_early_retirement() {
+        for variant in [
+            "token",
+            "pid",
+            "live",
+            "remove-owned",
+            "regress",
+            "multiple",
+        ] {
+            let (c, mut e) = fixture();
+            let dir = directory(&e);
+            fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+            let m = fs::metadata(&dir).unwrap();
+            e.directory = Some((m.dev(), m.ino()));
+            if variant == "live" {
+                e.process = identity::observe(std::process::id() as i32).unwrap();
+                e.process.executable = dir.join("publisher");
+            }
+            if variant == "regress" {
+                e.binary = Some(BinaryStage {
+                    device: m.dev(),
+                    inode: m.ino(),
+                    ready: true,
+                });
+            }
+            let before = BTreeMap::from([(e.reservation.clone(), e.clone())]);
+            let mut after = before.clone();
+            let entry = after.get_mut(&e.reservation).unwrap();
+            match variant {
+                "token" => entry.token = "f".repeat(32),
+                "pid" => entry.process.start_micros += 1,
+                "live" => {
+                    entry.binary = Some(BinaryStage {
+                        device: m.dev(),
+                        inode: m.ino(),
+                        ready: false,
+                    })
+                }
+                "remove-owned" => {
+                    after.clear();
+                }
+                "regress" => entry.binary.as_mut().unwrap().ready = false,
+                "multiple" => {
+                    after.clear();
+                    let mut other = e.clone();
+                    other.reservation = "f".repeat(32);
+                    other.process.executable = directory(&other).join("publisher");
+                    other.directory = None;
+                    after.insert(other.reservation.clone(), other);
+                }
+                _ => unreachable!(),
+            }
+            save(&c, &before).unwrap();
+            pending(&c, &after);
+            let original = fs::read(root(&c).join("state.json")).unwrap();
+            let pending_bytes = fs::read(root(&c).join("state.pending")).unwrap();
+            assert!(release(&c, &e.owner, None).is_err());
+            assert_eq!(fs::read(root(&c).join("state.json")).unwrap(), original);
+            assert_eq!(
+                fs::read(root(&c).join("state.pending")).unwrap(),
+                pending_bytes
+            );
+            assert!(dir.exists());
+            fs::remove_dir_all(dir).unwrap();
+            fs::remove_dir_all(c.checkout).unwrap();
+        }
+    }
+    #[test]
+    fn store_rejects_foreign_owner_rebound_path_and_pending_journal() {
+        let (c, e) = fixture();
+        let mut entries = BTreeMap::from([(e.reservation.clone(), e.clone())]);
+        save(&c, &entries).unwrap();
+        assert!(load(&c, &"d".repeat(32)).is_err());
+        for duplicate_port in [true, false] {
+            let mut second = e.clone();
+            second.reservation = "f".repeat(32);
+            second.process.executable = directory(&second).join("publisher");
+            if duplicate_port {
+                second.slot = 1;
+            } else {
+                second.port += 1;
+            }
+            entries.insert(second.reservation.clone(), second.clone());
+            save(&c, &entries).unwrap();
+            assert!(load(&c, &e.owner).is_err());
+            entries.remove(&second.reservation);
+        }
+
+        entries.get_mut(&e.reservation).unwrap().process.executable = PathBuf::from("/bin/sleep");
+        save(&c, &entries).unwrap();
+        assert!(load(&c, &e.owner).is_err());
+        entries.insert(e.reservation.clone(), e.clone());
+        save(&c, &entries).unwrap();
+        fs::write(root(&c).join("state.pending"), b"partial").unwrap();
+        fs::set_permissions(
+            root(&c).join("state.pending"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert!(release(&c, &e.owner, None).is_err());
+        assert!(root(&c).join("state.json").exists());
+        fs::remove_dir_all(c.checkout).unwrap();
+    }
+}

@@ -245,39 +245,10 @@ graph LR
   Hackd -->|"cached state"| Cache["In-memory cache"]
 ```
 
-## Control plane + extensions
+## Unsupported retained surfaces
 
-The control plane keeps the core CLI minimal while adding features as extensions. `hackd` loads
-extension manifests and exposes their APIs; the CLI dispatches extension commands via `hack x`.
-
-Builtin extensions: **Supervisor** (job execution + streaming for agents), **Gateway** (optional HTTP/WS
-access to `hackd`), **Cloudflare**, and **Tailscale** (exposure/tunnel helpers).
-
-> Gateway, remote, node, and dispatch surfaces are experimental and unsupported. They are hidden
-> from default `hack help` (use `hack help --all` to see them) and print a warning when invoked.
-> See [Beta workflows](beta.md) and [Gateway API](gateway-api.md) for details — this doc only
-> summarizes where they fit in the system.
-
-```mermaid
-graph LR
-  CLI["hack CLI"] --> Hackd["hackd"]
-  Hackd --> ExtMgr["ExtensionManager"]
-  ExtMgr --> Gateway["Gateway"]
-  ExtMgr --> Supervisor["Supervisor"]
-  ExtMgr --> Cloudflare["Cloudflare"]
-  ExtMgr --> Tailscale["Tailscale"]
-  Remote["Remote client"] -->|HTTP/WS| Gateway
-  Gateway --> Hackd
-```
-
-### Gateway API + remote workflows (unsupported experimental)
-
-Summary only — see `gateway-api.md` for full usage, security posture, and end-to-end examples:
-- `GET /v1/projects` with `project_id` for remote workflow routing
-- job execution + streaming (`/control-plane/projects/:id/jobs`)
-- PTY-backed shells (`/control-plane/projects/:id/shells`, WS stream)
-- One gateway instance is active per machine (global config); projects opt in with
-  `controlPlane.gateway.enabled`; remote clients route by `project_id` in the API paths.
+Remote, gateway, node and dispatch code remains in the repository for explicit
+maintenance. It is outside the supported local CLI contract and default onboarding.
 
 ## Branch builds
 

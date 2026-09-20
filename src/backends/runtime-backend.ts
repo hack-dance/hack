@@ -1,9 +1,13 @@
+import {
+  DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+  resolveComposeStartupTimeoutMs,
+} from "../lib/compose-startup-budget.ts";
+import { withDependencyStartupProgress } from "../lib/dependency-startup-progress.ts";
 import { exec, run } from "../lib/shell.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import { createStructuredLogGrouper } from "../ui/log-group.ts";
 
 export type RuntimeBackendName = "compose";
-const DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS = 90_000;
 const DEFAULT_COMPOSE_INSPECTION_TIMEOUT_MS = 15_000;
 
 export interface RuntimeBackend {
@@ -30,7 +34,12 @@ export interface RuntimeBaseOptions {
 }
 
 export interface RuntimeUpOptions extends RuntimeBaseOptions {
+  readonly dependencyProgress?: {
+    readonly project: string;
+    readonly services: readonly string[];
+  };
   readonly detach: boolean;
+  readonly startupTimeoutMs?: number;
   readonly services?: readonly string[];
   readonly noDeps?: boolean;
   readonly forceRecreate?: boolean;
@@ -83,11 +92,38 @@ export const composeRuntimeBackend: RuntimeBackend = {
       ...(opts.services ?? []),
     ];
     if (opts.detach) {
-      return await run(cmd, {
+      const startupTimeoutMs = resolveComposeStartupTimeoutMs({
+        startupTimeoutMs: opts.startupTimeoutMs,
+        env: { ...process.env, ...opts.env },
+      });
+      const launch = () =>
+        run(cmd, {
+          cwd: opts.cwd,
+          env: opts.env,
+          stdout: opts.routeStdoutToStderr ? "stderr" : "inherit",
+          timeoutMs: startupTimeoutMs,
+        });
+      const progress = opts.dependencyProgress;
+      if (!progress) {
+        return await launch();
+      }
+      return await withDependencyStartupProgress({
+        project: progress.project,
+        services: progress.services.filter(
+          (service) =>
+            !(opts.noDeps && opts.services) || opts.services.includes(service)
+        ),
         cwd: opts.cwd,
         env: opts.env,
-        stdout: opts.routeStdoutToStderr ? "stderr" : "inherit",
-        timeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+        onPhase: (service, phase) => {
+          process.stderr.write(`Dependency cache ${service}: ${phase}\n`);
+        },
+        onUnavailable: () => {
+          process.stderr.write(
+            "Dependency progress unavailable; Compose startup continues. Inspect hack ps and hack logs for status.\n"
+          );
+        },
+        run: launch,
       });
     }
 

@@ -10,9 +10,35 @@ services:
     networks:
       - default
 
+  toolchain:
+    pull_policy: build
+    profiles: [toolchain]
+    build:
+      context: ..
+      dockerfile: .hack/toolchain/Dockerfile
+    init: true
+    working_dir: /app
+    cpus: 2
+    mem_limit: 4g
+    volumes:
+      - ..:/app
+      - toolchain_dependencies:/app/node_modules
+      - toolchain_dist:/app/dist
+      - toolchain_build:/build
+      - toolchain_cargo:/opt/cargo/registry
+    environment:
+      CARGO_TARGET_DIR: /build/rust
+      CARGO_BUILD_JOBS: "2"
+      HACK_NO_INTERACTIVE: "1"
+      HUSKY: "0"
+
 networks:
   hack-dev:
     external: true
 
 volumes:
   node_modules:
+  toolchain_dependencies:
+  toolchain_dist:
+  toolchain_build:
+  toolchain_cargo:

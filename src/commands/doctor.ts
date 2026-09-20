@@ -24,6 +24,7 @@ import {
   DEFAULT_INGRESS_NETWORK,
   DEFAULT_INGRESS_SUBNET,
   DEFAULT_LOGGING_NETWORK,
+  DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_ROOT,
   DEFAULT_PROJECT_TLD,
   GLOBAL_CADDY_COMPOSE_FILENAME,
@@ -40,6 +41,8 @@ import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts
 import { probeDaemonApi } from "../daemon/client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
+import { repairCaddyCaExport } from "../lib/caddy-ca-export.ts";
+import { inspectCaddyCaIdentity } from "../lib/caddy-ca-identity.ts";
 import {
   readInternalExtraHostsIp,
   resolveGlobalCaddyIp,
@@ -49,6 +52,10 @@ import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
 } from "../lib/config-paths.ts";
+import {
+  checkBrowserLocalNetwork,
+  parseBrowserNetworkOptions,
+} from "../lib/doctor-browser-network.ts";
 import {
   inspectTrackedGeneratedFiles,
   untrackGeneratedFiles,
@@ -86,6 +93,7 @@ import {
   readProjectConfig,
   readProjectDevHost,
 } from "../lib/project.ts";
+import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
   discoverComposeServiceNames,
   ensureHackDirGitignore,
@@ -158,7 +166,39 @@ const optMigrateEnvConfig = defineOption({
     "Migrate legacy hack.env.json/.env state to the new env config files",
 } as const);
 
-const doctorOptions = [optPath, optFix, optMigrateEnvConfig, optJson] as const;
+const optBrowserUrl = defineOption({
+  name: "browserUrl",
+  type: "string",
+  long: "--browser-url",
+  valueHint: "https://app.hack",
+  description:
+    "HTTPS origin manually tested in the browser (no path or credentials)",
+} as const);
+const optDomainMigration = defineOption({
+  name: "domainMigration",
+  type: "string",
+  long: "--domain-migration",
+  valueHint: "preview|apply|rollback",
+  description:
+    "Preview, apply, or roll back only this project's hack.local migration",
+} as const);
+const optBrowserResult = defineOption({
+  name: "browserResult",
+  type: "string",
+  long: "--browser-result",
+  valueHint: "unknown|works|fails|permission-denied",
+  description:
+    "Your manual browser observation for --browser-url (default: unknown)",
+} as const);
+const doctorOptions = [
+  optPath,
+  optFix,
+  optMigrateEnvConfig,
+  optDomainMigration,
+  optJson,
+  optBrowserUrl,
+  optBrowserResult,
+] as const;
 const doctorPositionals = [] as const;
 
 const doctorSpec = defineCommand({
@@ -210,14 +250,21 @@ const DOCTOR_SUMMARY_GROUPS = [
     ]),
   },
   {
+    title: "Browser access",
+    checks: new Set(["browser local network"]),
+  },
+  {
     title: "Resolver & DNS",
     checks: new Set([
       `resolver:${DEFAULT_PROJECT_TLD}`,
+      `resolver:${DEFAULT_NEW_PROJECT_TLD}`,
       `resolver:${DEFAULT_OAUTH_ALIAS_ROOT}`,
       `dnsmasq.conf:${DEFAULT_PROJECT_TLD}`,
+      `dnsmasq.conf:${DEFAULT_NEW_PROJECT_TLD}`,
       `dnsmasq.conf:${DEFAULT_OAUTH_ALIAS_ROOT}`,
       "dnsmasq:53",
       `dns:${DEFAULT_PROJECT_TLD}`,
+      `dns:${DEFAULT_NEW_PROJECT_TLD}`,
       `dns:${DEFAULT_OAUTH_ALIAS_ROOT}`,
       "coredns forwarding",
       "caddy hosts",
@@ -245,9 +292,42 @@ const DOCTOR_SUMMARY_GROUPS = [
   },
 ] as const;
 
+async function maybeRunDomainMigration(
+  args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
+): Promise<number | null> {
+  if (args.options.domainMigration !== undefined) {
+    if (
+      args.options.fix ||
+      args.options.migrateEnvConfig ||
+      args.options.browserUrl ||
+      args.options.browserResult
+    ) {
+      throw new CliUsageError(
+        "--domain-migration cannot be combined with other Doctor repair or browser options"
+      );
+    }
+    return await runProjectDomainCommand({
+      action: args.options.domainMigration,
+      startDir: args.options.path
+        ? resolve(process.cwd(), args.options.path)
+        : process.cwd(),
+      json: args.options.json === true,
+    });
+  }
+  return null;
+}
+
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
+  const domainResult = await maybeRunDomainMigration(args);
+  if (domainResult !== null) {
+    return domainResult;
+  }
+  const browser = parseBrowserNetworkOptions({
+    url: args.options.browserUrl,
+    result: args.options.browserResult,
+  });
   const json = args.options.json === true;
   assertDoctorOptionCompatibility({
     json,
@@ -257,6 +337,16 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   const results: TimedCheckResult[] = [];
   const s = createDoctorProgress({ json });
   s.start("Running doctor checks...");
+
+  results.push(
+    await runCheck(
+      s,
+      "browser local network",
+      () =>
+        checkBrowserLocalNetwork({ platform: process.platform, ...browser }),
+      { timeoutMs: 7000 }
+    )
+  );
 
   // Tools
   results.push(
@@ -365,6 +455,22 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     results.push(
       await runCheck(
         s,
+        `resolver:${DEFAULT_NEW_PROJECT_TLD}`,
+        () => checkMacResolverForDomain(DEFAULT_NEW_PROJECT_TLD),
+        { timeoutMs: 1000 }
+      )
+    );
+    results.push(
+      await runCheck(
+        s,
+        `dnsmasq.conf:${DEFAULT_NEW_PROJECT_TLD}`,
+        () => checkMacDnsmasqConfigForDomain(DEFAULT_NEW_PROJECT_TLD),
+        { timeoutMs: 3000 }
+      )
+    );
+    results.push(
+      await runCheck(
+        s,
         `resolver:${DEFAULT_PROJECT_TLD}`,
         () => checkMacResolverForDomain(DEFAULT_PROJECT_TLD),
         {
@@ -408,6 +514,15 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       })
     );
   }
+
+  results.push(
+    await runCheck(
+      s,
+      `dns:${DEFAULT_NEW_PROJECT_TLD}`,
+      () => checkHackLocalDns(),
+      { timeoutMs: 3000 }
+    )
+  );
 
   // DNS (can be very slow if wildcard DNS isn't configured)
   const dns = await runCheck(
@@ -460,7 +575,8 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   );
   results.push(
     await runCheck(s, "caddy local ca", () => checkCaddyLocalCa(), {
-      timeoutMs: 1500,
+      // The identity probe allows three sequential Docker calls up to 5s each.
+      timeoutMs: 16_000,
     })
   );
   if (isMac()) {
@@ -1150,13 +1266,14 @@ export async function checkCoreDnsForwarding(): Promise<CheckResult> {
 
 export async function checkCaddyLocalCa(): Promise<CheckResult> {
   const paths = getGlobalPaths();
-  const exists = await pathExists(paths.caddyCaCert);
+  const identity = await inspectCaddyCaIdentity({
+    composeFile: paths.caddyCompose,
+    certPath: paths.caddyCaCert,
+  });
   return {
     name: "caddy local ca",
-    status: exists ? "ok" : "warn",
-    message: exists
-      ? paths.caddyCaCert
-      : "Missing Caddy Local CA (run: hack doctor --fix)",
+    status: identity.state === "current" ? "ok" : "warn",
+    message: identity.message,
   };
 }
 
@@ -1212,7 +1329,15 @@ async function checkMacDnsmasqConfigForDomain(
     };
   }
 
-  const ok = dnsmasqConfigHasDomain({ text, domain });
+  let ok = dnsmasqConfigHasDomain({ text, domain });
+  if (!ok && domain === DEFAULT_NEW_PROJECT_TLD) {
+    const dynamicIp = await resolveGlobalCaddyIp();
+    ok =
+      dynamicIp !== null &&
+      text
+        .split("\n")
+        .some((line) => line.trim() === `address=/.${domain}/${dynamicIp}`);
+  }
   return {
     name: `dnsmasq.conf:${domain}`,
     status: ok ? "ok" : "warn",
@@ -1507,6 +1632,35 @@ function skipDnsName(buf: Buffer, startOffset: number): number {
     offset += 1 + len;
   }
   return offset;
+}
+
+/** DNS observation only; it does not assert an HTTP service exists at this probe name. */
+export async function checkHackLocalDns(
+  opts: {
+    readonly lookup?: (host: string) => Promise<{ address: string }>;
+    readonly caddyIp?: () => Promise<string | null>;
+  } = {}
+): Promise<CheckResult> {
+  const host = `doctor.${DEFAULT_NEW_PROJECT_TLD}`;
+  const name = `dns:${DEFAULT_NEW_PROJECT_TLD}`;
+  try {
+    const { address } = await (opts.lookup ?? lookup)(host);
+    let ok = [DEFAULT_CADDY_IP, DEFAULT_HOST_DNS_IP, "::1"].includes(address);
+    if (!ok) {
+      ok = address === (await (opts.caddyIp ?? resolveGlobalCaddyIp)());
+    }
+    return {
+      name,
+      status: ok ? "ok" : "warn",
+      message: `${host} → ${address}`,
+    };
+  } catch {
+    return {
+      name,
+      status: "warn",
+      message: `Unable to resolve ${host} (run: hack global install)`,
+    };
+  }
 }
 
 async function checkHackDns(): Promise<CheckResult> {
@@ -3182,19 +3336,17 @@ function commandFailureDetail(input: {
 async function maybeExportCaddyCaCert(opts: {
   readonly paths: ReturnType<typeof getGlobalPaths>;
 }): Promise<void> {
-  if (await pathExists(opts.paths.caddyCaCert)) {
-    return;
-  }
-
-  const okCa = await doctorConfirm({
-    message: "Export Caddy Local CA cert for container trust?",
-    initialValue: true,
+  const result = await repairCaddyCaExport({
+    composeFile: opts.paths.caddyCompose,
+    certPath: opts.paths.caddyCaCert,
+    confirm: () =>
+      doctorConfirm({
+        message:
+          "Refresh the exported Caddy Local CA from the running Caddy container? (does not change system trust)",
+        initialValue: true,
+      }),
   });
-  if (!okCa) {
-    return;
-  }
-
-  await exportCaddyLocalCaCert({ paths: opts.paths });
+  note(result.message, "Caddy CA export");
 }
 
 async function maybeRepairMacHostTlsTrust(): Promise<void> {
@@ -3261,26 +3413,31 @@ async function migrateDnsmasqToContainerIpIfNeeded(): Promise<
 
   const targetIp = await resolvePreferredMacHostDnsTarget();
   const desiredHackLine = `address=/.${DEFAULT_PROJECT_TLD}/${targetIp}`;
+  const desiredNewLine = `address=/.${DEFAULT_NEW_PROJECT_TLD}/${targetIp}`;
   const desiredOauthLine = `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${targetIp}`;
   const legacyHostTarget =
     targetIp === DEFAULT_CADDY_IP ? DEFAULT_HOST_DNS_IP : DEFAULT_CADDY_IP;
   const legacyLines = [
     `address=/.${DEFAULT_PROJECT_TLD}/${legacyHostTarget}`,
+    `address=/.${DEFAULT_NEW_PROJECT_TLD}/${legacyHostTarget}`,
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${legacyHostTarget}`,
     `address=/.${DEFAULT_PROJECT_TLD}/::1`,
+    `address=/.${DEFAULT_NEW_PROJECT_TLD}/::1`,
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/::1`,
   ];
 
   const hasDesired =
-    text.includes(desiredHackLine) && text.includes(desiredOauthLine);
+    text.includes(desiredHackLine) &&
+    text.includes(desiredOauthLine) &&
+    text.includes(desiredNewLine);
   const hasLegacy = legacyLines.some((line) => text.includes(line));
 
-  if (hasDesired || !hasLegacy) {
+  if (hasDesired && !hasLegacy) {
     return "not-needed";
   }
 
   const okMigrate = await doctorConfirm({
-    message: `Update dnsmasq to use ${targetIp} for host routing? (requires sudo to restart dnsmasq and flush the DNS cache)`,
+    message: `Update dnsmasq to use ${targetIp} for .${DEFAULT_PROJECT_TLD}, .${DEFAULT_NEW_PROJECT_TLD} and .${DEFAULT_OAUTH_ALIAS_ROOT} host routing? (requires sudo to restart dnsmasq and flush the DNS cache)`,
     initialValue: true,
     destructive: true,
   });
@@ -3294,7 +3451,10 @@ async function migrateDnsmasqToContainerIpIfNeeded(): Promise<
     updated = updated.replace(legacyLine, "");
   }
   updated = updated.replace(/\n{3,}/g, "\n\n").trim();
-  updated = `${updated}\n${desiredHackLine}\n${desiredOauthLine}\n`;
+  const missing = [desiredHackLine, desiredNewLine, desiredOauthLine].filter(
+    (line) => !updated.split("\n").includes(line)
+  );
+  updated = `${updated}\n${missing.join("\n")}\n`;
 
   await writeTextFileIfChanged(dnsmasqConf, updated);
 
@@ -3406,34 +3566,6 @@ async function resolveCoreDnsServer(): Promise<string | null> {
   return typeof network.IPAddress === "string" && network.IPAddress.length > 0
     ? network.IPAddress
     : null;
-}
-
-async function exportCaddyLocalCaCert(opts: {
-  readonly paths: GlobalPaths;
-}): Promise<void> {
-  const ps = await exec(
-    ["docker", "compose", "-f", opts.paths.caddyCompose, "ps", "-q", "caddy"],
-    {
-      cwd: dirname(opts.paths.caddyCompose),
-      stdin: "ignore",
-    }
-  );
-  const id = ps.exitCode === 0 ? ps.stdout.trim() : "";
-  if (!id) {
-    note("Unable to locate running Caddy container for CA export.", "doctor");
-    return;
-  }
-
-  await ensureDir(dirname(opts.paths.caddyCaCert));
-  await run(
-    [
-      "docker",
-      "cp",
-      `${id}:/data/caddy/pki/authorities/local/root.crt`,
-      opts.paths.caddyCaCert,
-    ],
-    { stdin: "inherit" }
-  );
 }
 
 type GlobalPaths = {
@@ -3733,6 +3865,11 @@ async function renderMacNote(
   await display.statusList({
     title: "macOS resolver setup",
     items: [
+      {
+        label: `*.${DEFAULT_NEW_PROJECT_TLD}`,
+        status: "info",
+        detail: `/etc/resolver/${DEFAULT_NEW_PROJECT_TLD} with dnsmasq address=/.${DEFAULT_NEW_PROJECT_TLD}/<reachable-ingress-target> (run: hack global install)`,
+      },
       {
         label: `*.${DEFAULT_PROJECT_TLD}`,
         status: "info",

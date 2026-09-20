@@ -1,4 +1,11 @@
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  test,
+} from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -13,12 +20,18 @@ import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 const psRows: string[] = [];
 const errorMessages: string[] = [];
 const warnMessages: string[] = [];
+const upComposeContents: string[] = [];
 const upEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
 const psEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
+const upDetachSelections: Array<boolean | undefined> = [];
+const upStartupTimeouts: Array<number | undefined> = [];
+let upExitCode = 0;
+let downCalls = 0;
 const upServiceSelections: Array<readonly string[] | undefined> = [];
 const tempDirs = new Set<string>();
 const originalHackHome = process.env.HACK_HOME;
 const originalComposeProfiles = process.env.COMPOSE_PROFILES;
+const originalStartupTimeout = process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS;
 let autoBranch: string | null = null;
 let runtimeProjects: readonly Record<string, unknown>[] = [];
 
@@ -55,12 +68,27 @@ const runtimeBackendMock = await registerScopedModuleMock({
       up: async (opts: {
         readonly env?: Readonly<Record<string, string>>;
         readonly services?: readonly string[];
+        readonly composeFiles: readonly string[];
+        readonly startupTimeoutMs?: number;
+        readonly detach?: boolean;
       }) => {
+        upComposeContents.push(
+          (
+            await Promise.all(
+              opts.composeFiles.map((path) => readFile(path, "utf8"))
+            )
+          ).join("\n")
+        );
         upEnvs.push(opts.env);
         upServiceSelections.push(opts.services);
+        upStartupTimeouts.push(opts.startupTimeoutMs);
+        upDetachSelections.push(opts.detach);
+        return upExitCode;
+      },
+      down: async () => {
+        downCalls += 1;
         return 0;
       },
-      down: async () => 0,
       psJson: async (opts: {
         readonly env?: Readonly<Record<string, string>>;
       }) => {
@@ -118,13 +146,27 @@ beforeAll(() => {
   loggerMock.activate();
 });
 
+beforeEach(() => {
+  Reflect.deleteProperty(process.env, "HACK_COMPOSE_STARTUP_TIMEOUT_MS");
+});
+
 afterEach(async () => {
   psRows.length = 0;
   errorMessages.length = 0;
   warnMessages.length = 0;
   upEnvs.length = 0;
+  upComposeContents.length = 0;
   psEnvs.length = 0;
   upServiceSelections.length = 0;
+  upStartupTimeouts.length = 0;
+  upDetachSelections.length = 0;
+  upExitCode = 0;
+  downCalls = 0;
+  if (originalStartupTimeout === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_COMPOSE_STARTUP_TIMEOUT_MS");
+  } else {
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = originalStartupTimeout;
+  }
   autoBranch = null;
   runtimeProjects = [];
   for (const tempDir of tempDirs) {
@@ -396,8 +438,180 @@ test("up warns before an auto-derived branch retargets the same worktree", async
   );
 });
 
+for (const action of ["up", "restart"] as const) {
+  test(`${action} uses extra hosts created and replaced by the same before hook`, async () => {
+    const projectRoot = await createProject({
+      lifecycleCommand:
+        "mkdir -p .hack/.internal && cp hook-hosts.json .hack/.internal/extra-hosts.json",
+    });
+    psRows.push(
+      JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+    );
+    const run = action === "up" ? runDetachedUp : runRestart;
+    for (const address of ["192.0.2.10", "192.0.2.11"]) {
+      await writeFile(
+        resolve(projectRoot, "hook-hosts.json"),
+        JSON.stringify({ "search.example.test": address })
+      );
+      expect(await run({ projectRoot })).toBe(0);
+      expect(upComposeContents.at(-1)).toContain(
+        `search.example.test: ${address}`
+      );
+    }
+    expect(upComposeContents.at(-1)).not.toContain("192.0.2.10");
+    await writeFile(resolve(projectRoot, "hook-hosts.json"), "{}");
+    expect(await run({ projectRoot })).toBe(0);
+    expect(upComposeContents.at(-1)).not.toContain("search.example.test");
+  });
+
+  test(`${action} clears runtime intent when post-hook override rendering fails`, async () => {
+    const projectRoot = await createProject({
+      lifecycleCommand:
+        "mkdir -p .hack/.internal/compose.override.yml && cp hook-hosts.json .hack/.internal/extra-hosts.json",
+    });
+    await writeFile(
+      resolve(projectRoot, "hook-hosts.json"),
+      JSON.stringify({ "search.example.test": "192.0.2.10" })
+    );
+    const run = action === "up" ? runDetachedUp : runRestart;
+    await expect(run({ projectRoot })).rejects.toThrow();
+    expect(upComposeContents).toEqual([]);
+    const state = JSON.parse(
+      await readFile(
+        resolve(projectRoot, ".hack/.internal/runtime-state.json"),
+        "utf8"
+      )
+    );
+    expect(state.entries).toEqual([]);
+  });
+
+  test(`${action} does not start Compose after a failing before hook`, async () => {
+    const projectRoot = await createProject({ lifecycleCommand: "exit 23" });
+    const run = action === "up" ? runDetachedUp : runRestart;
+    expect(await run({ projectRoot })).toBe(23);
+    expect(upComposeContents).toEqual([]);
+  });
+}
+
+for (const action of ["up", "restart", "scoped restart"] as const) {
+  const run = (projectRoot: string) =>
+    action === "up"
+      ? runDetachedUp({ projectRoot })
+      : runRestart({
+          projectRoot,
+          ...(action === "scoped restart" ? { services: ["api"] } : {}),
+        });
+
+  for (const configured of [undefined, "120000"] as const) {
+    test(`${action} forwards ${configured ?? "default"} startup budget to Compose`, async () => {
+      if (configured !== undefined) {
+        process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = configured;
+      }
+      const projectRoot = await createProject();
+      psRows.push(
+        JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+      );
+
+      expect(await run(projectRoot)).toBe(0);
+      expect(upStartupTimeouts).toEqual([
+        configured === undefined ? 90_000 : 120_000,
+      ]);
+    });
+  }
+
+  test(`${action} rejects an invalid startup budget before hooks or backend effects`, async () => {
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "0";
+    const projectRoot = await createProject({
+      lifecycleCommand: "touch startup-budget-hook-ran",
+    });
+    psRows.push(
+      JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+    );
+
+    await expect(run(projectRoot)).rejects.toThrow(
+      "HACK_COMPOSE_STARTUP_TIMEOUT_MS"
+    );
+    expect(
+      await Bun.file(resolve(projectRoot, "startup-budget-hook-ran")).exists()
+    ).toBe(false);
+    expect(upStartupTimeouts).toEqual([]);
+    expect(upComposeContents).toEqual([]);
+    expect(downCalls).toBe(0);
+    expect(psEnvs).toEqual([]);
+  });
+
+  test(`${action} reports the effective startup budget on timeout`, async () => {
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "120000";
+    upExitCode = 124;
+    const projectRoot = await createProject();
+
+    expect(await run(projectRoot)).toBe(124);
+    // Full restart attempts its existing repair path with a fresh equal budget.
+    expect(upStartupTimeouts).toEqual(
+      action === "restart" ? [120_000, 120_000] : [120_000]
+    );
+    expect(errorMessages.join("\n")).toContain("120000 ms");
+    expect(errorMessages.join("\n")).toContain("startup budget");
+  });
+}
+
+test("foreground up ignores an invalid detached startup budget", async () => {
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "invalid";
+  const projectRoot = await createProject();
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+  );
+
+  expect(await runDetachedUp({ projectRoot, detach: false })).toBe(0);
+  expect(upComposeContents).toHaveLength(1);
+  expect(upDetachSelections).toEqual([false]);
+  expect(errorMessages).toEqual([]);
+});
+
+test("restart preserves lifecycle failure when a before hook exits 124", async () => {
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "120000";
+  const projectRoot = await createProject({ lifecycleCommand: "exit 124" });
+
+  expect(await runRestart({ projectRoot })).toBe(124);
+  expect(upComposeContents).toEqual([]);
+  expect(upStartupTimeouts).toEqual([]);
+  expect(errorMessages.join("\n")).toContain("lifecycle hook failed");
+  expect(errorMessages.join("\n")).not.toContain("startup budget");
+  expect(errorMessages.join("\n")).not.toContain(
+    "process group was terminated"
+  );
+});
+
+test("restart JSON classifies hook exit 124 as E_LIFECYCLE_FAILED", async () => {
+  const projectRoot = await createProject({ lifecycleCommand: "exit 124" });
+  let stdout = "";
+  const originalWrite = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    stdout +=
+      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return true;
+  }) as typeof process.stdout.write;
+  let exitCode: number;
+  try {
+    exitCode = await runRestart({ projectRoot, json: true });
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+  expect(exitCode).toBe(124);
+  expect(JSON.parse(stdout)).toMatchObject({
+    ok: false,
+    error: {
+      code: "E_LIFECYCLE_FAILED",
+      detail: { exitCode: 124, phase: "up" },
+    },
+  });
+  expect(upComposeContents).toEqual([]);
+  expect(stdout).not.toContain("process group was terminated");
+});
+
 async function runDetachedUp(opts: {
   readonly projectRoot: string;
+  readonly detach?: boolean;
   readonly profiles?: readonly string[];
   readonly services?: readonly string[];
 }): Promise<number> {
@@ -410,7 +624,7 @@ async function runDetachedUp(opts: {
         project: undefined,
         env: "base",
         branch: undefined,
-        detach: true,
+        detach: opts.detach ?? true,
         profile,
         target: undefined,
         json: false,
@@ -422,7 +636,7 @@ async function runDetachedUp(opts: {
           opts.projectRoot,
           "--env",
           "base",
-          "--detach",
+          ...(opts.detach === false ? [] : ["--detach"]),
           ...(profile ? ["--profile", profile] : []),
           ...(opts.services ?? []),
         ],
@@ -436,6 +650,7 @@ async function runDetachedUp(opts: {
 
 async function runRestart(opts: {
   readonly projectRoot: string;
+  readonly json?: boolean;
   readonly profiles?: readonly string[];
   readonly services?: readonly string[];
 }): Promise<number> {
@@ -450,7 +665,7 @@ async function runRestart(opts: {
         branch: undefined,
         profile,
         target: undefined,
-        json: false,
+        json: opts.json ?? false,
       },
       positionals: { services: opts.services ?? [] },
       raw: {
@@ -459,6 +674,7 @@ async function runRestart(opts: {
           opts.projectRoot,
           "--env",
           "base",
+          ...(opts.json ? ["--json"] : []),
           ...(profile ? ["--profile", profile] : []),
           ...(opts.services ?? []),
         ],
@@ -512,6 +728,7 @@ async function runJsonUp(opts: {
 async function createProject(opts?: {
   readonly composeProfiles?: string;
   readonly lifecycleMarkerFile?: string;
+  readonly lifecycleCommand?: string;
   readonly registryTokenScope?: "api" | "deps";
 }): Promise<string> {
   const projectRoot = await mkdtemp(
@@ -556,14 +773,16 @@ async function createProject(opts?: {
         name: "startup-state-test",
         dev_host: "startup-state-test.hack",
         internal: { dns: false, tls: false },
-        ...(opts?.lifecycleMarkerFile
+        ...(opts?.lifecycleMarkerFile || opts?.lifecycleCommand
           ? {
               lifecycle: {
                 up: {
                   before: [
                     {
                       name: "capture-env",
-                      command: `printf "%s|%s" "$SHARED_MODE" "$HOST_ONLY" > "${opts.lifecycleMarkerFile}"`,
+                      command:
+                        opts.lifecycleCommand ??
+                        `printf "%s|%s" "$SHARED_MODE" "$HOST_ONLY" > "${opts.lifecycleMarkerFile}"`,
                     },
                   ],
                   after: [],
@@ -606,3 +825,66 @@ async function createProject(opts?: {
   }
   return projectRoot;
 }
+
+test("linked startup combines inherited aliases, local static precedence and same-start hook output", async () => {
+  const savedCi = process.env.CI;
+  const savedMode = process.env.HACK_EXECUTION_MODE;
+  process.env.CI = undefined;
+  process.env.HACK_EXECUTION_MODE = undefined;
+  try {
+    const primary = await createProject({
+      lifecycleCommand:
+        "mkdir -p .hack/.internal && printf '%s' '{\"hook.test\":\"192.0.2.30\"}' > .hack/.internal/extra-hosts.json",
+    });
+    const git = async (...args: string[]) => {
+      const child = Bun.spawn(["git", "-C", primary, ...args], {
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      const [code, error] = await Promise.all([
+        child.exited,
+        new Response(child.stderr).text(),
+      ]);
+      if (code !== 0) {
+        throw new Error(error);
+      }
+    };
+    await git("init", "--quiet");
+    await git("add", ".hack");
+    await git(
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "fixture"
+    );
+    const linked = resolve(primary, "linked");
+    await git("worktree", "add", "--quiet", "-b", "linked", linked);
+    await mkdir(resolve(primary, ".hack/.internal"), { recursive: true });
+    await writeFile(
+      resolve(primary, ".hack/.internal/extra-hosts.json"),
+      JSON.stringify({
+        "search.test": "192.0.2.10",
+        "primary.test": "192.0.2.11",
+      })
+    );
+    const configPath = resolve(linked, ".hack", PROJECT_CONFIG_FILENAME);
+    const config = await Bun.file(configPath).json();
+    config.internal.extra_hosts = { "search.test": "192.0.2.20" };
+    await writeFile(configPath, JSON.stringify(config));
+    psRows.push(
+      JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+    );
+    expect(await runDetachedUp({ projectRoot: linked })).toBe(0);
+    expect(upComposeContents.at(-1)).toContain("search.test: 192.0.2.20");
+    expect(upComposeContents.at(-1)).toContain("primary.test: 192.0.2.11");
+    expect(upComposeContents.at(-1)).toContain("hook.test: 192.0.2.30");
+    expect(upComposeContents.at(-1)).not.toContain("192.0.2.10");
+  } finally {
+    process.env.CI = savedCi;
+    process.env.HACK_EXECUTION_MODE = savedMode;
+  }
+});

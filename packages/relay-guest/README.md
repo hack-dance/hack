@@ -1,0 +1,171 @@
+# Authenticated guest relay adapter
+
+`hack-relay-guest --slot 0 --application-fd 3` serves one authenticated connection.
+It consumes exactly one private credential envelope from stdin, validates and owns
+the inherited connected AF_UNIX/SOCK_STREAM application descriptor, and connects
+only `/run/hack-dependencies/dependency-00.sock` (slots 0–31). Regular files, TCP
+sockets, listening sockets, invalid descriptors and duplicate credential descriptors
+are refused. Help and invalid arguments do not consume stdin.
+
+The launcher must pass an owned application socket without retained duplicates,
+verify the guest executable and mounted endpoint provenance, arrange namespace and
+lifecycle ownership, and revoke the grant when launch or delivery fails. Numeric
+FD validation does not establish the launcher's authority. The candidate's explicit
+dependency-socket intent supplies the fixed `/run/hack-dependencies/` mounts outside
+the runtime setup's temporary filesystem. The guest accepts no arbitrary transport path.
+
+Connect, credential delivery and handshake have independent five-second budgets;
+authenticated traffic has a 30-second idle bound. Traffic may continue while active.
+Success exits 0; argument errors 64; runtime refusal 1 with a generic message. No key,
+application bytes or credential bindings are printed. The record protocol provides
+integrity and authentication, not encryption: application TLS must remain intact.
+
+## Container-local TCP listener
+
+`hack-relay-guest --slot 0 --listen-port 15432` consumes the same private stdin
+credential envelope, including its required EOF, before binding **127.0.0.1**.
+An optional trailing `--listen-address 127.0.0.2` selects the address for slot 0;
+slot N permits only `127.0.0.(N+2)` or the legacy `127.0.0.1`. Wildcard addresses,
+other loopback addresses and address arguments in application-FD mode are refused
+before credential consumption. Distinct selected addresses can preserve the same
+destination port for multiple hostnames inside one Linux container. The graph must
+separately bind each hostname to its reviewed address and preserve TLS/SNI; this
+adapter never terminates TLS or rewrites application traffic.
+This Linux guest mode serves applications in the same container network namespace;
+it does not expose a wildcard address or accept an arbitrary transport path.
+The launch owner must still verify the executable, mount and namespace, provision
+and revoke the grant, and own the process lifecycle.
+
+The only normal stdout output is one line after binding:
+
+```text
+hack-relay-listener-v1 pid=<pid> start=<Linux-process-starttime> port=<port>
+```
+
+Selected nonlegacy addresses emit an address-bound v2 marker instead:
+
+```text
+hack-relay-listener-v2 pid=<pid> start=<Linux-process-starttime> address=127.0.0.2 port=<port>
+```
+
+The launcher checks the exact selected address and port. Legacy v1 output and old
+process receipts mean only `127.0.0.1`; they cannot authorize a selected-address
+listener. Cleanup checks the immutable container, process start time, executable
+and exact launch arguments before sending TERM.
+
+The starttime is field 22 of `/proc/self/stat`. This marker proves listener binding
+only: it does not prove host authentication or application readiness and must not
+release a graph startup barrier by itself. Every accepted connection authenticates
+through the canonical relay client before reading application bytes. Failed sessions
+close silently; there are no per-connection logs that can block admission on stdout.
+
+At most 32 workers run concurrently. Excess accepted connections are closed without
+reading payloads. The event loop blocks on the listener and a nonblocking self-pipe,
+with no periodic idle timer. Each turn accepts at most one connection and drains at
+most 1,024 wake bytes before checking shutdown again. Credentials remain in shared
+memory only and are released through the canonical zeroizing credential owner.
+
+This standalone binary owns the SIGTERM/SIGINT handlers; the listener is not an
+embeddable library signal service. Shutdown closes admission, interrupts active
+application and transport sockets, and joins every worker before restoring handlers
+and closing the wake descriptors. Cancellation duplicates exist only while their
+worker is active and are dropped on completion, so they do not keep normal sessions
+open. A worker still connecting can delay shutdown by its five-second connect bound.
+Orderly signal shutdown exits 0; setup failures exit 1 with a generic message.
+
+## Shared implementation
+
+Explicit Rust `#[path]` modules compile the canonical runtime-core source for
+`relay_client`, `relay_auth` (including private provisioning), `relay_frame`,
+`relay_integrity` and `CandidateError`. They are not copies. This standalone crate
+avoids SQLite, reqwest and the host provider graph. Keep it adjacent to runtime-core
+in isolated source snapshots. Dependency versions match runtime-core's current lock.
+Its binary disables Cargo's autogenerated test/bench harness so host-oriented tests
+nested in shared modules are not pulled into this guest executable.
+
+The source retains all existing authentication/framing checks; this adapter only
+owns argument validation, inherited socket validation, bounded loopback admission
+and the fixed slot connection.
+Changes to shared sources must qualify both host and guest builds. Host module tests
+alone do not prove guest artifact behavior, descriptor provisioning or mounted traffic.
+
+## Build
+
+Prerequisite: the pinned Rust toolchain's `aarch64-unknown-linux-musl` standard library
+and Zig 0.15.2. Use the committed Cargo.lock with `--locked`.
+
+From repository root:
+
+```sh
+CARGO_INCREMENTAL=0 \
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C link-self-contained=no' \
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$PWD/scripts/zig-aarch64-musl-linker" \
+cargo build --locked --release \
+  --manifest-path packages/relay-guest/Cargo.toml \
+  --target aarch64-unknown-linux-musl \
+  --target-dir .hack-local/guest-target \
+  --jobs 2
+```
+
+Hash the produced executable and verify Linux ARM64/static linkage before uploading
+it through the owned guest boundary. Use a dedicated target for isolated snapshots;
+do not build relocated or modified sources into the shared runtime target.
+Zig supplies the musl startup objects; disabling Rust's self-contained linker inputs
+prevents duplicate startup symbols. The wrapper removes Rust's obsolete `-Wl,-O1`
+hint, which this Zig linker otherwise ignores with a warning.
+
+Host provisioning can pass production
+`Credential::into_private_input()?.into_stdin()` directly to an owned Smol
+`machine exec -i` child, without `-t`, arguments or environment credentials.
+The pinned source forwards stdin data and EOF to a guest pipe; actual artifact
+qualification must verify that path and application-FD provisioning. Smol transient
+serialization buffers are not guaranteed zeroized. Do not pipe credentials through
+shell logging, print them, or write them to a temporary file.
+
+Qualification requires host/default/all-feature regression gates, Linux
+cross-build, inherited-FD negative controls, real mounted authenticated traffic,
+wrong-key/replacement/revocation controls and exact cleanup. The adapter alone does
+not provide a launcher capable of passing arbitrary FDs through Smol exec. Listener
+mode avoids that application-FD requirement but still requires a verified container
+exec launch, private stdin delivery and lifecycle ownership. Its qualification must
+include concurrent sessions, refusal without backend traffic, graceful signal
+shutdown and absence of surviving workers or descriptors.
+
+## Application startup release
+
+The Linux-only gate modes do not read stdin or install signal handlers:
+
+```text
+hack-relay-guest --await-release <32 lowercase hex generation> -- <absolute executable> [args...]
+hack-relay-guest --check-release <32 lowercase hex generation> -- <absolute executable> [args...]
+```
+
+Await mode watches `/run/hack-startup` with inotify before checking for `release`,
+then waits on events with one anchored 120-second monotonic deadline. Check mode
+checks once and refuses immediately while the marker is absent. A valid release
+executes the supplied absolute executable in place, preserving arguments (including
+non-UTF-8 arguments), environment, uid/gid and standard descriptors. Observation
+FDs close before exec. Graph launch must use Docker `Init=true` so normal init
+signal forwarding applies while waiting and after replacement.
+
+The fixed directory must be a nonsymlink root-owned directory with mode 0555. The
+marker is opened relative to that validated directory without following symlinks;
+it must be a root-owned regular file with exactly one link, mode 0444, and exactly
+the requested generation followed by one newline (33 bytes). Malformed, stale,
+oversized or unsafe markers refuse rather than prolonging the wait. The publisher
+must publish a complete marker atomically; intermediate files must use other names.
+
+The graph launcher must prove the directory is mounted read-only and owns the
+release decision; this adapter checks metadata, not mount provenance or host
+admission. The generation is a public fence, never a secret. Marker validation
+alone does not establish dependency readiness. Missing release, deadline expiry,
+invalid metadata or failed exec returns generic exit 1; invalid arguments return
+64. The binary disables the autogenerated test harness for shared host sources;
+release checks require executable integration coverage of absence, correct and
+incorrect generations, metadata refusal, bounded waiting, and argv/env/stdio
+preservation. Source formatting is not evidence of those runtime properties.
+
+Argument validation has a standalone integration-test target, avoiding the shared
+host modules' tests: `cargo test --locked --manifest-path packages/relay-guest/Cargo.toml --test options`.
+Its same-port address-isolation test runs only on Linux. Host argument tests do not
+qualify guest networking, authentication, TLS or owned cleanup.

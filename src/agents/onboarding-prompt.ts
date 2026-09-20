@@ -4,7 +4,7 @@ import { INSTRUCTION_SECTIONS } from "./instruction-source.ts";
  * Single source of truth for the agent-assisted onboarding prompt.
  *
  * Consumers (keep this list current — the content must never fork):
- * - `hack init --with claude|codex|both` (CLI handoff for new repos),
+ * - `hack init --with claude|codex` (CLI handoff for new repos),
  * - `hack agent onboard` (CLI print for existing projects),
  * - the `/hack-init` agent-side skill (thin pointer installed by
  *   `hack setup claude|codex`),
@@ -118,7 +118,7 @@ function renderSetupPhase(opts: {
   readonly mode: OnboardingMode;
   readonly devHost?: string;
 }): string[] {
-  const devHostExample = opts.devHost ?? "<project>.hack";
+  const devHostExample = opts.devHost ?? "<project>.hack.local";
   const bootstrap =
     opts.mode === "new-project"
       ? "- Scaffold config: run `hack init --auto` (add `--name <slug>` / `--dev-host <host>` when the defaults are wrong). If `.hack/` already exists, edit the config instead of re-running init."
@@ -150,8 +150,8 @@ function renderPlatformPhase(): string[] {
     "",
     "- Add an ops/tooling container only when tooling requires the container runtime or network. Reuse an existing service when suitable, or use `hack host exec` for host tooling. Run migrations and seeds only for the authorized development target.",
     "- Keep images matched to the project runtime version (check `.nvmrc`, `engines`, or the lockfile) so container installs match CI/prod.",
-    "- Dev-server host checks: framework dev servers reject unknown hostnames by default — allow the project's `.hack` hosts through (Vite `server.allowedHosts`, Astro/Vike equivalents, Next.js `allowedDevOrigins`, Rails `config.hosts`). Dev-server config only; leave prod builds untouched.",
-    "- If a required dev route fails an origin or callback check, inspect the existing security policy and configure only the exact authorized development origins. Do not broadly classify `*.hack` or the public-resolvable `*.hack.gy` alias as trusted, bypass CSRF checks, or disable transactional-email/publishing gates. Test any changed allowlist and its rejected origins.",
+    "- Dev-server host checks: framework dev servers reject unknown hostnames by default — allow the project's configured development hosts (new default `.hack.local`, with legacy `.hack` supported) through (Vite `server.allowedHosts`, Astro/Vike equivalents, Next.js `allowedDevOrigins`, Rails `config.hosts`). Dev-server config only; leave prod builds untouched.",
+    "- If a required dev route fails an origin or callback check, inspect the existing security policy and configure only the exact authorized development origins. Do not broadly classify `*.hack.local`, legacy `*.hack`, or the public-resolvable `*.hack.gy` alias as trusted, bypass CSRF checks, or disable transactional-email/publishing gates. Test any changed allowlist and its rejected origins.",
     "- Global DNS and CA setup may require native sudo/trust approval. Attempt only global actions covered by the request, let the user complete native prompts, and continue independent project work while blocked. Report HTTP reachability and certificate trust separately; do not disable verification to claim success.",
   ];
 }

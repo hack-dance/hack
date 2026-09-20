@@ -109,6 +109,18 @@ export function createSupervisorService(opts?: {
       projectName: input.projectName,
     });
 
+    // Admit cancellation before runJob can publish "running". The actual control
+    // arrives only after startup persistence, so cancellation cannot be overwritten
+    // by a late job.started metadata write.
+    const spawned = Promise.withResolvers<
+      { readonly cancel: () => Promise<boolean> } | undefined
+    >();
+    runningJobs.set(jobId, {
+      cancel: async () => {
+        const control = await spawned.promise;
+        return control ? await control.cancel() : false;
+      },
+    });
     let terminalClaimed = false;
     const run = runJob({
       jobStore: store,
@@ -120,7 +132,7 @@ export function createSupervisorService(opts?: {
         terminalClaimed = true;
       },
       onSpawn: ({ cancel }) => {
-        runningJobs.set(jobId, { cancel });
+        spawned.resolve({ cancel });
       },
     })
       .catch(async (error) => {
@@ -138,6 +150,8 @@ export function createSupervisorService(opts?: {
         return fallback;
       })
       .finally(() => {
+        // Startup can fail without ever exposing a process control.
+        spawned.resolve(undefined);
         runningJobs.delete(jobId);
       });
 

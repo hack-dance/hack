@@ -52,6 +52,7 @@ import { globalUp } from "../commands/global.ts";
 import {
   DEFAULT_GRAFANA_HOST,
   DEFAULT_INGRESS_NETWORK,
+  DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_TLD,
   DEFAULT_PROJECT_TLD,
   GLOBAL_CADDY_COMPOSE_FILENAME,
@@ -106,12 +107,19 @@ import {
   okResult,
 } from "../lib/cli-result.ts";
 import {
+  DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+  resolveComposeStartupTimeoutMs,
+} from "../lib/compose-startup-budget.ts";
+import {
   buildStartupIncompleteMessage,
   type ComposeServiceState,
   classifyComposeStartupState,
 } from "../lib/compose-startup-state.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
-import { resolveDependencyCacheOverride } from "../lib/dependency-cache.ts";
+import {
+  resolveDependencyCacheOverride,
+  resolveDependencyCacheProgress,
+} from "../lib/dependency-cache.ts";
 import { removeDisposableCacheVolumes } from "../lib/disposable-cache-volumes.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
@@ -128,6 +136,7 @@ import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
 import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
+import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import {
   appendLifecycleLogRecord,
@@ -164,6 +173,7 @@ import {
   readProjectConfig,
   readProjectDevHost,
   resolveProjectOauthAliasHost,
+  resolveProjectRouteBaseHosts,
   resolveWorktreeAutoBranch,
   sanitizeBranchSlug,
   sanitizeProjectSlug,
@@ -211,6 +221,7 @@ import {
   preflightRegistryCredentials,
   RegistryCredentialPreflightError,
 } from "../lib/registry-credential-preflight.ts";
+import { canReuseRunningDependencyCache } from "../lib/run-dependency-cache.ts";
 import { buildRuntimeHostMetadataOverride } from "../lib/runtime-host-metadata.ts";
 import {
   type RuntimeProject,
@@ -296,7 +307,8 @@ const optDevHost = defineOption({
   type: "string",
   long: "--dev-host",
   valueHint: "<host>",
-  description: "DEV_HOST override",
+  description:
+    "DEV_HOST override (new projects default to <project>.hack.local)",
 } as const);
 
 const optOauth = defineOption({
@@ -325,7 +337,7 @@ const optWith = defineOption({
   name: "with",
   type: "string",
   long: "--with",
-  valueHint: "<claude|codex|both>",
+  valueHint: "<claude|codex>",
   description:
     "After init, hand the onboarding prompt to an agent CLI (prints the prompt when the CLI is missing or the run is non-interactive)",
 } as const);
@@ -849,9 +861,22 @@ function startupSnapshotIsIncomplete(opts: {
   return opts.states.length === 0 || opts.failed.length > 0;
 }
 
+function reportComposeStartupBudget(opts: {
+  readonly startupTimeoutMs: number;
+  readonly detach: boolean;
+  readonly repair?: boolean;
+}): void {
+  if (opts.detach) {
+    logger.step({
+      message: `Compose ${opts.repair ? "repair" : "startup"}: launch and dependency wait (budget ${opts.startupTimeoutMs} ms)`,
+    });
+  }
+}
+
 function composeStartupFailure(
   code: number,
-  action: string
+  action: string,
+  startupTimeoutMs: number
 ): {
   readonly code: "E_COMPOSE_FAILED" | "E_STARTUP_TIMEOUT";
   readonly message: string;
@@ -859,7 +884,7 @@ function composeStartupFailure(
   return code === 124
     ? {
         code: "E_STARTUP_TIMEOUT",
-        message: `${action} timed out; the Compose process group was terminated and the runtime may require repair.`,
+        message: `${action} exceeded its detached Compose startup budget of ${startupTimeoutMs} ms (HACK_COMPOSE_STARTUP_TIMEOUT_MS). The Compose process group was terminated; inspect hack ps and hack logs before retrying. Containers may still be running. This limit covers Compose launch and dependency waiting, not lifecycle hooks or application readiness.`,
       }
     : {
         code: "E_COMPOSE_FAILED",
@@ -996,9 +1021,7 @@ async function buildBranchComposeOverride(opts: {
     return null;
   }
 
-  const baseHosts = [opts.devHost, opts.aliasHost].filter(
-    (host): host is string => typeof host === "string" && host.length > 0
-  );
+  const baseHosts = resolveProjectRouteBaseHosts(opts);
 
   const overrideServices: Record<string, { labels: Record<string, string> }> =
     {};
@@ -1104,47 +1127,6 @@ function parseLabelEntry(opts: {
 
 function cleanupYaml(yaml: string): string {
   return yaml.replaceAll(/: \n/g, ":\n");
-}
-
-async function readInternalExtraHostsFile(opts: {
-  readonly projectDir: string;
-}): Promise<Record<string, string>> {
-  const path = resolve(opts.projectDir, ".internal", "extra-hosts.json");
-  const text = await readTextFile(path);
-  if (!text) {
-    return {};
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return {};
-  }
-
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return {};
-  }
-
-  const out: Record<string, string> = {};
-  for (const [keyRaw, valueRaw] of Object.entries(
-    parsed as Record<string, unknown>
-  )) {
-    const key = keyRaw.trim();
-    if (key.length === 0) {
-      continue;
-    }
-    if (typeof valueRaw !== "string") {
-      continue;
-    }
-    const value = valueRaw.trim();
-    if (value.length === 0) {
-      continue;
-    }
-    out[key] = value;
-  }
-
-  return out;
 }
 
 function ensureTrailingNewline(text: string): string {
@@ -2975,8 +2957,9 @@ async function resolveInternalComposeOverride(opts: {
 }): Promise<string | null> {
   const internal = resolveInternalSettings(opts.cfg);
 
-  const managedExtraHosts = await readInternalExtraHostsFile({
-    projectDir: opts.project.projectDir,
+  const { hosts: managedExtraHosts } = await resolveInternalExtraHosts({
+    ...opts.project,
+    staticHosts: internal.extraHosts ?? undefined,
   });
   if (!shouldBuildInternalOverride({ internal, managedExtraHosts })) {
     return null;
@@ -2998,16 +2981,14 @@ async function resolveInternalComposeOverride(opts: {
     aliasHost: opts.aliasHost ?? null,
   });
   const tls = await resolveInternalTlsPaths({ enabled: internal.tls });
-  if (!(dns.dnsServer || tls.caPath || dns.caddyIp)) {
-    return null;
-  }
-
   const extraHosts = buildInternalExtraHosts({
     caddyIp: dns.caddyIp,
     caddyHosts: dns.caddyHosts,
-    internalExtraHosts: internal.extraHosts,
     managedExtraHosts,
   });
+  if (!(dns.dnsServer || tls.caPath || Object.keys(extraHosts).length > 0)) {
+    return null;
+  }
   const text = renderInternalOverride({
     services,
     dnsServer: dns.dnsServer,
@@ -3101,9 +3082,10 @@ async function resolveCaddyHostsForBranch(opts: {
 
   const devHost =
     opts.devHost ?? (await resolveBranchDevHost({ project: opts.project }));
-  const baseHosts = [devHost, opts.aliasHost ?? null].filter(
-    (host): host is string => typeof host === "string" && host.length > 0
-  );
+  const baseHosts = resolveProjectRouteBaseHosts({
+    devHost,
+    aliasHost: opts.aliasHost,
+  });
   if (baseHosts.length === 0) {
     return caddyHosts;
   }
@@ -3147,14 +3129,12 @@ async function resolveInternalTlsPaths(opts: {
 function buildInternalExtraHosts(opts: {
   readonly caddyIp: string | null;
   readonly caddyHosts: readonly string[];
-  readonly internalExtraHosts: Record<string, string> | null;
   readonly managedExtraHosts: Record<string, string>;
 }): Record<string, string> {
   return {
     ...(opts.caddyIp && opts.caddyHosts.length > 0
       ? buildExtraHostsMap({ hosts: opts.caddyHosts, ip: opts.caddyIp })
       : {}),
-    ...(opts.internalExtraHosts ? opts.internalExtraHosts : {}),
     ...opts.managedExtraHosts,
   };
 }
@@ -3737,7 +3717,7 @@ async function promptInitDevHost(opts: {
   readonly slug: string;
   readonly devHostOption: string | undefined;
 }): Promise<string | null> {
-  const defaultHost = `${opts.slug}.${DEFAULT_PROJECT_TLD}`;
+  const defaultHost = `${opts.slug}.${DEFAULT_NEW_PROJECT_TLD}`;
   const initialHost = (opts.devHostOption ?? defaultHost).trim();
   const devHost = await text({
     message: "DEV_HOST:",
@@ -3748,6 +3728,16 @@ async function promptInitDevHost(opts: {
     return null;
   }
   return devHost.trim();
+}
+
+/** A skipped init must describe the existing setup, not the new-project default. */
+async function resolveExistingInitHost(repoRoot: string): Promise<string> {
+  const project = await findProjectContext(repoRoot);
+  const configured = project ? await readProjectDevHost(project) : null;
+  return (
+    configured ??
+    `${defaultProjectSlugFromPath(repoRoot)}.${DEFAULT_PROJECT_TLD}`
+  );
 }
 
 function validateInitOauthTld(value: string | undefined): string | undefined {
@@ -3931,7 +3921,7 @@ async function handleInit({
         withValue,
         mode: "existing-project",
         projectName: slug,
-        devHost,
+        devHost: await resolveExistingInitHost(repoRoot),
       });
     }
     return 0;
@@ -4081,7 +4071,7 @@ async function handleInitAuto({
         withValue,
         mode: "existing-project",
         projectName: slug,
-        devHost,
+        devHost: await resolveExistingInitHost(repoRoot),
       });
       return 0;
     }
@@ -4191,7 +4181,7 @@ function resolveInitWithOption(opts: {
   const parsed = parseOnboardingWith({ value: opts.withRaw });
   if (!parsed) {
     throw new CliUsageError(
-      `Invalid --with "${opts.withRaw}". Use claude, codex, or both.`
+      `Invalid --with "${opts.withRaw}". Choose one agent: claude or codex.`
     );
   }
   return parsed;
@@ -4264,7 +4254,7 @@ function resolveInitDevHost(opts: {
   readonly slug: string;
   readonly devHostOpt?: string;
 }): string {
-  const fallback = `${opts.slug}.${DEFAULT_PROJECT_TLD}`;
+  const fallback = `${opts.slug}.${DEFAULT_NEW_PROJECT_TLD}`;
   const raw = (opts.devHostOpt ?? fallback).trim();
   const error = validateDevHost({ value: raw });
   if (error) {
@@ -4480,12 +4470,14 @@ function buildCaddyHostLabelValue(opts: {
   if (!opts.oauth.enabled) {
     return opts.primaryHost;
   }
-  if (!opts.primaryHost.endsWith(`.${DEFAULT_PROJECT_TLD}`)) {
+  const tld = normalizeOauthTld(opts.oauth.tld);
+  const aliasHost = resolveProjectOauthAliasHost({
+    devHost: opts.primaryHost,
+    oauth: { enabled: true, tld },
+  });
+  if (!aliasHost) {
     return opts.primaryHost;
   }
-
-  const tld = normalizeOauthTld(opts.oauth.tld);
-  const aliasHost = `${opts.primaryHost}.${tld}`;
 
   const uniq = new Set<string>();
   const out: string[] = [];
@@ -4537,10 +4529,13 @@ function expandCaddyHostsWithOauthAliases(opts: {
   }
 
   for (const host of opts.hosts) {
-    if (!host.endsWith(`.${DEFAULT_PROJECT_TLD}`)) {
+    const alias = resolveProjectOauthAliasHost({
+      devHost: host,
+      oauth: { enabled: true, tld: opts.tld },
+    });
+    if (!alias) {
       continue;
     }
-    const alias = `${host}.${opts.tld}`;
     if (seen.has(alias)) {
       continue;
     }
@@ -5480,8 +5475,10 @@ function renderHackFolderReadme(opts: {
   const oauthTld = oauthEnabled
     ? normalizeOauthTld(opts.oauth?.tld ?? DEFAULT_OAUTH_ALIAS_TLD)
     : null;
-  const oauthHost =
-    oauthEnabled && oauthTld ? `${opts.devHost}.${oauthTld}` : null;
+  const oauthHost = resolveProjectOauthAliasHost({
+    devHost: opts.devHost,
+    oauth: { enabled: oauthEnabled, tld: oauthTld ?? undefined },
+  });
 
   return [
     "# hack local dev",
@@ -5847,6 +5844,10 @@ async function runUpCommand({
   readonly json: boolean;
   readonly startedAtMs?: number;
 }): Promise<number> {
+  const detach = args.options.detach || json;
+  const startupTimeoutMs = detach
+    ? resolveComposeStartupTimeoutMs()
+    : DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
   let project: Awaited<ReturnType<typeof requireProjectContext>>;
   try {
     project = await resolveProjectForArgs({
@@ -5870,9 +5871,6 @@ async function runUpCommand({
     }
     throw error;
   }
-  // `--json` implies detach: machine-readable output requires the command to
-  // return instead of streaming compose logs on stdout.
-  const detach = args.options.detach || json;
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
@@ -5941,37 +5939,6 @@ async function runUpCommand({
   const aliasHost = resolveBranchAliasHost({ devHost, cfg });
   const internalSettings = resolveInternalSettings(cfg);
   await maybePromptToStartGlobal({ internal: internalSettings });
-  const internalOverride = await resolveInternalComposeOverride({
-    project,
-    cfg,
-    branch,
-    devHost,
-    aliasHost,
-  });
-  const composeFiles =
-    branch && devHost
-      ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
-      : [project.composeFile];
-  const composeFilesWithInternal = internalOverride
-    ? [...composeFiles, internalOverride]
-    : composeFiles;
-  const dependencyCache = await resolveDependencyCacheOverride({
-    projectRoot: project.projectRoot,
-    projectDir: project.projectDir,
-    projectName,
-    composeFile: project.composeFile,
-  });
-  const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
-    ? [...composeFilesWithInternal, dependencyCache.overridePath]
-    : composeFilesWithInternal;
-  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
-    project,
-    composeFiles: composeFilesWithRuntimeOverrides,
-    branch,
-    devHost,
-    aliasHost,
-    composeProject: composeProjectName ?? baseProjectName,
-  });
 
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const requestedServices = resolveRequestedComposeServices({
@@ -5987,11 +5954,6 @@ async function runUpCommand({
     allServiceNames,
     envName,
   });
-  const composeFilesWithEnv = [
-    ...composeFilesWithRuntimeOverrides,
-    ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
-    ...envOverrides.composeFiles,
-  ];
 
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
@@ -6061,7 +6023,58 @@ async function runUpCommand({
     lifecycleSignalCleanup ??
     installLifecycleSignalCleanup({ cleanup: lifecycleCleanup });
   try {
+    // Hooks may register or remove runtime aliases; render overrides only after
+    // successful preparation, while lifecycle cleanup remains installed.
+    const internalOverride = await resolveInternalComposeOverride({
+      project,
+      cfg,
+      branch,
+      devHost,
+      aliasHost,
+    });
+    const composeFiles =
+      branch && devHost
+        ? await resolveBranchComposeFiles({
+            project,
+            branch,
+            devHost,
+            aliasHost,
+          })
+        : [project.composeFile];
+    const composeFilesWithInternal = internalOverride
+      ? [...composeFiles, internalOverride]
+      : composeFiles;
+    const dependencyCache = await resolveDependencyCacheOverride({
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      projectName,
+      composeFile: project.composeFile,
+    });
+    reportDependencyCacheFallback(dependencyCache);
+    const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
+      ? [...composeFilesWithInternal, dependencyCache.overridePath]
+      : composeFilesWithInternal;
+    const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
+      project,
+      composeFiles: composeFilesWithRuntimeOverrides,
+      branch,
+      devHost,
+      aliasHost,
+      composeProject: composeProjectName ?? baseProjectName,
+    });
+    const composeFilesWithEnv = [
+      ...composeFilesWithRuntimeOverrides,
+      ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
+      ...envOverrides.composeFiles,
+    ];
+    reportComposeStartupBudget({ startupTimeoutMs, detach });
     const upCode = await composeRuntimeBackend.up({
+      dependencyProgress: resolveDependencyCacheProgress({
+        cache: dependencyCache,
+        project: composeProjectName,
+        baseProject: baseProjectName,
+      }),
+      startupTimeoutMs,
       composeFiles: composeFilesWithEnv,
       composeProject: composeProjectName,
       profiles,
@@ -6079,7 +6092,11 @@ async function runUpCommand({
         composeProject: lifecycleComposeProject,
       });
       if (json) {
-        const failure = composeStartupFailure(upCode, "docker compose up");
+        const failure = composeStartupFailure(
+          upCode,
+          "docker compose up",
+          startupTimeoutMs
+        );
         return emitLifecycleResult({
           result: errorResult({
             code: failure.code,
@@ -6089,6 +6106,13 @@ async function runUpCommand({
           exitCode: upCode,
         });
       }
+      logger.error({
+        message: composeStartupFailure(
+          upCode,
+          "docker compose up",
+          startupTimeoutMs
+        ).message,
+      });
       return upCode;
     }
 
@@ -6185,6 +6209,13 @@ async function runUpCommand({
       }),
       exitCode: 0,
     });
+  } catch (error: unknown) {
+    await lifecycleCleanup?.();
+    await removeProjectRuntimeStateEntry({
+      projectDir: project.projectDir,
+      composeProject: lifecycleComposeProject,
+    });
+    throw error;
   } finally {
     signalCleanup.dispose();
   }
@@ -6621,6 +6652,7 @@ async function runRestartDownPhase(opts: {
 }
 
 async function runRestartUpPhase(opts: {
+  readonly startupTimeoutMs: number;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly baseProjectName: string;
@@ -6632,7 +6664,10 @@ async function runRestartUpPhase(opts: {
   readonly envName?: string | null;
   readonly detach?: boolean;
   readonly routeStdoutToStderr?: boolean;
-}): Promise<number> {
+}): Promise<{
+  readonly code: number;
+  readonly phase: "compose" | "lifecycle";
+}> {
   await maybeSyncOauthAliasesInCompose({ project: opts.project });
 
   const devHost = await resolveRuntimeDevHost({
@@ -6640,42 +6675,6 @@ async function runRestartUpPhase(opts: {
     branch: opts.branch,
   });
   const aliasHost = resolveBranchAliasHost({ devHost, cfg: opts.cfg });
-  const internalOverride = await resolveInternalComposeOverride({
-    project: opts.project,
-    cfg: opts.cfg,
-    branch: opts.branch,
-    devHost,
-    aliasHost,
-  });
-  const composeFiles =
-    opts.branch && devHost
-      ? await resolveBranchComposeFiles({
-          project: opts.project,
-          branch: opts.branch,
-          devHost,
-          aliasHost,
-        })
-      : [opts.project.composeFile];
-  const composeFilesWithInternal = internalOverride
-    ? [...composeFiles, internalOverride]
-    : composeFiles;
-  const dependencyCache = await resolveDependencyCacheOverride({
-    projectRoot: opts.project.projectRoot,
-    projectDir: opts.project.projectDir,
-    projectName: opts.projectName,
-    composeFile: opts.project.composeFile,
-  });
-  const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
-    ? [...composeFilesWithInternal, dependencyCache.overridePath]
-    : composeFilesWithInternal;
-  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
-    project: opts.project,
-    composeFiles: composeFilesWithRuntimeOverrides,
-    branch: opts.branch,
-    devHost,
-    aliasHost,
-    composeProject: opts.composeProjectName ?? opts.baseProjectName,
-  });
 
   const targetServices = await readComposeServiceNames(
     opts.project.composeFile
@@ -6693,11 +6692,6 @@ async function runRestartUpPhase(opts: {
     targetServices,
     envByService: envOverrides.preflightEnvByService,
   });
-  const composeFilesWithEnv = [
-    ...composeFilesWithRuntimeOverrides,
-    ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
-    ...envOverrides.composeFiles,
-  ];
 
   await persistProjectRuntimeEnvSelection({
     projectDir: opts.project.projectDir,
@@ -6719,7 +6713,7 @@ async function runRestartUpPhase(opts: {
       composeProject: opts.lifecycleComposeProject,
     });
     if (lifecycleUp.code !== 0) {
-      return lifecycleUp.code;
+      return { code: lifecycleUp.code, phase: "lifecycle" };
     }
     if (lifecycleUp.sessionName) {
       logger.info({
@@ -6734,14 +6728,68 @@ async function runRestartUpPhase(opts: {
         ? error.message
         : "Failed to start lifecycle setup";
     logger.error({ message });
-    return 1;
+    return { code: 1, phase: "lifecycle" };
   }
 
   const signalCleanup =
     lifecycleSignalCleanup ??
     installLifecycleSignalCleanup({ cleanup: lifecycleCleanup });
   try {
+    // Hooks may register or remove runtime aliases; render overrides only after
+    // successful preparation, while lifecycle cleanup remains installed.
+    const internalOverride = await resolveInternalComposeOverride({
+      project: opts.project,
+      cfg: opts.cfg,
+      branch: opts.branch,
+      devHost,
+      aliasHost,
+    });
+    const composeFiles =
+      opts.branch && devHost
+        ? await resolveBranchComposeFiles({
+            project: opts.project,
+            branch: opts.branch,
+            devHost,
+            aliasHost,
+          })
+        : [opts.project.composeFile];
+    const composeFilesWithInternal = internalOverride
+      ? [...composeFiles, internalOverride]
+      : composeFiles;
+    const dependencyCache = await resolveDependencyCacheOverride({
+      projectRoot: opts.project.projectRoot,
+      projectDir: opts.project.projectDir,
+      projectName: opts.projectName,
+      composeFile: opts.project.composeFile,
+    });
+    reportDependencyCacheFallback(dependencyCache);
+    const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
+      ? [...composeFilesWithInternal, dependencyCache.overridePath]
+      : composeFilesWithInternal;
+    const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
+      project: opts.project,
+      composeFiles: composeFilesWithRuntimeOverrides,
+      branch: opts.branch,
+      devHost,
+      aliasHost,
+      composeProject: opts.composeProjectName ?? opts.baseProjectName,
+    });
+    const composeFilesWithEnv = [
+      ...composeFilesWithRuntimeOverrides,
+      ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
+      ...envOverrides.composeFiles,
+    ];
+    reportComposeStartupBudget({
+      startupTimeoutMs: opts.startupTimeoutMs,
+      detach: opts.detach === true,
+    });
     const upCode = await composeRuntimeBackend.up({
+      dependencyProgress: resolveDependencyCacheProgress({
+        cache: dependencyCache,
+        project: opts.composeProjectName,
+        baseProject: opts.baseProjectName,
+      }),
+      startupTimeoutMs: opts.startupTimeoutMs,
       composeFiles: composeFilesWithEnv,
       composeProject: opts.composeProjectName,
       profiles: opts.profiles,
@@ -6752,7 +6800,18 @@ async function runRestartUpPhase(opts: {
       forceRecreate: true,
     });
     if (upCode !== 0) {
+      reportComposeStartupBudget({
+        startupTimeoutMs: opts.startupTimeoutMs,
+        detach: true,
+        repair: true,
+      });
       const repairCode = await composeRuntimeBackend.up({
+        dependencyProgress: resolveDependencyCacheProgress({
+          cache: dependencyCache,
+          project: opts.composeProjectName,
+          baseProject: opts.baseProjectName,
+        }),
+        startupTimeoutMs: opts.startupTimeoutMs,
         composeFiles: composeFilesWithEnv,
         composeProject: opts.composeProjectName,
         profiles: opts.profiles,
@@ -6778,7 +6837,7 @@ async function runRestartUpPhase(opts: {
           composeProject: opts.lifecycleComposeProject,
         });
       }
-      return upCode;
+      return { code: upCode, phase: "compose" };
     }
 
     const upAfter = await runLifecycleCommands({
@@ -6792,7 +6851,14 @@ async function runRestartUpPhase(opts: {
     if (upAfter !== 0) {
       await lifecycleCleanup?.();
     }
-    return upAfter;
+    return { code: upAfter, phase: "lifecycle" };
+  } catch (error: unknown) {
+    await lifecycleCleanup?.();
+    await removeProjectRuntimeStateEntry({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.lifecycleComposeProject,
+    });
+    throw error;
   } finally {
     signalCleanup.dispose();
   }
@@ -6823,6 +6889,7 @@ type TargetedServiceRestartResult =
  * individual Compose service.
  */
 async function runTargetedServiceRestart(opts: {
+  readonly startupTimeoutMs: number;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly baseProjectName: string;
@@ -6876,6 +6943,7 @@ async function runTargetedServiceRestart(opts: {
     projectName: opts.projectName,
     composeFile: opts.project.composeFile,
   });
+  reportDependencyCacheFallback(dependencyCache);
   const composeFilesWithRuntimeOverrides = [
     ...composeFiles,
     ...(internalOverride ? [internalOverride] : []),
@@ -6889,7 +6957,17 @@ async function runTargetedServiceRestart(opts: {
     aliasHost,
     composeProject: opts.composeProjectName ?? opts.baseProjectName,
   });
+  reportComposeStartupBudget({
+    startupTimeoutMs: opts.startupTimeoutMs,
+    detach: true,
+  });
   const code = await composeRuntimeBackend.up({
+    dependencyProgress: resolveDependencyCacheProgress({
+      cache: dependencyCache,
+      project: opts.composeProjectName,
+      baseProject: opts.baseProjectName,
+    }),
+    startupTimeoutMs: opts.startupTimeoutMs,
     composeFiles: [
       ...composeFilesWithRuntimeOverrides,
       ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
@@ -6906,7 +6984,11 @@ async function runTargetedServiceRestart(opts: {
     routeStdoutToStderr: opts.routeStdoutToStderr,
   });
   if (code !== 0) {
-    const failure = composeStartupFailure(code, "Targeted service restart");
+    const failure = composeStartupFailure(
+      code,
+      "Targeted service restart",
+      opts.startupTimeoutMs
+    );
     return {
       ok: false,
       code,
@@ -7007,6 +7089,7 @@ async function runRestartCommand({
   readonly json: boolean;
   readonly startedAtMs?: number;
 }): Promise<number> {
+  const startupTimeoutMs = resolveComposeStartupTimeoutMs();
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -7066,6 +7149,7 @@ async function runRestartCommand({
   });
   if (requestedServices.length > 0) {
     const result = await runTargetedServiceRestart({
+      startupTimeoutMs,
       project,
       cfg,
       baseProjectName,
@@ -7079,6 +7163,9 @@ async function runRestartCommand({
       routeStdoutToStderr: json,
     });
     if (!json) {
+      if (!result.ok) {
+        logger.error({ message: result.message });
+      }
       return result.code;
     }
     if (!result.ok) {
@@ -7161,7 +7248,8 @@ async function runRestartCommand({
     composeProject: lifecycleComposeProject,
   });
 
-  const upCode = await runRestartUpPhase({
+  const upOutcome = await runRestartUpPhase({
+    startupTimeoutMs,
     project,
     cfg,
     baseProjectName,
@@ -7175,11 +7263,19 @@ async function runRestartCommand({
     routeStdoutToStderr: json,
   });
 
+  const upCode = upOutcome.code;
   if (upCode !== 0) {
+    const failure =
+      upOutcome.phase === "compose"
+        ? composeStartupFailure(upCode, "Restart up phase", startupTimeoutMs)
+        : {
+            code: "E_LIFECYCLE_FAILED" as const,
+            message: `Restart lifecycle hook failed (exit ${upCode})`,
+          };
     if (!json) {
+      logger.error({ message: failure.message });
       return upCode;
     }
-    const failure = composeStartupFailure(upCode, "Restart up phase");
     return emitLifecycleResult({
       result: errorResult({
         code: failure.code,
@@ -7513,6 +7609,7 @@ async function handleRun({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
+    touchRegistration: false,
   });
   const branch = await resolveEffectiveBranchForCommand({
     project,
@@ -7560,16 +7657,26 @@ async function handleRun({
   const composeFilesWithInternal = internalOverride
     ? [...composeFiles, internalOverride]
     : composeFiles;
+  const projectName = sanitizeProjectSlug(baseProjectName);
+  const dependencyCache = await resolveDependencyCacheOverride({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    projectName,
+    composeFile: project.composeFile,
+  });
+  reportDependencyCacheFallback(dependencyCache);
+  const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
+    ? [...composeFilesWithInternal, dependencyCache.overridePath]
+    : composeFilesWithInternal;
   const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
     project,
-    composeFiles: composeFilesWithInternal,
+    composeFiles: composeFilesWithRuntimeOverrides,
     branch,
     devHost,
     aliasHost,
     composeProject: composeProjectName ?? baseProjectName,
   });
 
-  const projectName = sanitizeProjectSlug(baseProjectName);
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const envOverrides = await resolveComposeEnvOverrides({
     project,
@@ -7579,19 +7686,25 @@ async function handleRun({
     envName,
   });
   const composeFilesWithEnv = [
-    ...composeFilesWithInternal,
+    ...composeFilesWithRuntimeOverrides,
     ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
     ...envOverrides.composeFiles,
   ];
-  const stackIsRunning = await resolveCanSkipRunDependencies({
-    composeFiles: composeFilesWithEnv,
-    composeProjectKey: composeProjectName ?? baseProjectName,
-    composeProject: composeProjectName,
-    project,
-    profiles,
-    effectiveEnvName: envOverrides.effectiveEnvName,
-    service,
-  });
+  const stackIsRunning =
+    !dependencyCache.sharingDisabledReason &&
+    (await resolveCanSkipRunDependencies({
+      composeFiles: composeFilesWithEnv,
+      composeProjectKey: composeProjectName ?? baseProjectName,
+      composeProject: composeProjectName,
+      project,
+      profiles,
+      effectiveEnvName: envOverrides.effectiveEnvName,
+      cacheVolumeNames: dependencyCache.volumes.map(
+        (volume) => volume.resolvedName
+      ),
+      env: envOverrides.env,
+      service,
+    }));
   return await composeRuntimeBackend.run({
     composeFiles: composeFilesWithEnv,
     composeProject: composeProjectName,
@@ -7616,6 +7729,7 @@ async function handleExec({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
+    touchRegistration: false,
   });
   const branch = await resolveEffectiveBranchForCommand({
     project,
@@ -7718,6 +7832,17 @@ async function handleExec({
   });
 }
 
+function reportDependencyCacheFallback(cache: {
+  readonly sharingDisabledReason?: string;
+}): void {
+  if (cache.sharingDisabledReason) {
+    logger.warn({
+      message:
+        "Shared dependency cache disabled: installer image/build inputs and platform must be explicit and resolved. Using the original Compose volume configuration.",
+    });
+  }
+}
+
 async function resolveCanSkipRunDependencies(opts: {
   readonly composeFiles: readonly string[];
   readonly composeProjectKey: string;
@@ -7726,6 +7851,8 @@ async function resolveCanSkipRunDependencies(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly effectiveEnvName: string | null;
   readonly service: string;
+  readonly cacheVolumeNames: readonly string[];
+  readonly env?: Record<string, string>;
 }): Promise<boolean> {
   const runtimeState = await readProjectRuntimeStateEntry({
     projectDir: opts.project.projectDir,
@@ -7740,17 +7867,29 @@ async function resolveCanSkipRunDependencies(opts: {
     composeProject: opts.composeProject,
     profiles: opts.profiles,
     cwd: dirname(opts.project.composeFile),
+    env: opts.env,
   });
   if (psResult.exitCode !== 0) {
     return false;
   }
 
   const runningServices = parseJsonLines(psResult.stdout);
-  return runningServices.some((entry) => {
+  const runningTarget = runningServices.find((entry) => {
     const service = getString(entry, "Service")?.trim();
     const state = getString(entry, "State")?.trim().toLowerCase();
     return service === opts.service && state === "running";
   });
+  return (
+    runningTarget !== undefined &&
+    (await canReuseRunningDependencyCache({
+      containerId: getString(runningTarget, "ID"),
+      composeProject: opts.composeProjectKey,
+      service: opts.service,
+      volumeNames: opts.cacheVolumeNames,
+      cwd: dirname(opts.project.composeFile),
+      env: opts.env,
+    }))
+  );
 }
 
 async function resolveExecTargetReady(opts: {
@@ -8337,9 +8476,7 @@ async function handleOpen({
     }
   }
   const aliasHost = resolveBranchAliasHost({ devHost, cfg });
-  const baseHosts = [devHost, aliasHost].filter(
-    (host): host is string => typeof host === "string" && host.length > 0
-  );
+  const baseHosts = resolveProjectRouteBaseHosts({ devHost, aliasHost });
 
   const targetRaw = (args.positionals.target ?? "").trim();
   const preferenceRaw = args.options.prefer;

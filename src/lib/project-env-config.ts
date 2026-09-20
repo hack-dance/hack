@@ -42,6 +42,10 @@ import {
 import { getRecord, getString, isRecord } from "./guards.ts";
 import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
+import {
+  resolvePrimaryLocalProjectDir,
+  validatePrimaryLocalFile,
+} from "./worktree-local-config.ts";
 
 const PROJECT_ENV_CONFIG_VERSION = 1 as const;
 const PROJECT_ENV_SECRETS_PROVIDER = "project_key" as const;
@@ -59,7 +63,11 @@ type ProjectEnvSecretValue = {
   readonly secure: string;
 };
 
-export type ProjectEnvStoredValue = ProjectEnvScalar | ProjectEnvSecretValue;
+/** Null is an explicit removal of a value from earlier layers. */
+export type ProjectEnvStoredValue =
+  | ProjectEnvScalar
+  | ProjectEnvSecretValue
+  | null;
 
 export type ProjectEnvValuesByScope = Record<
   string,
@@ -92,7 +100,14 @@ export type ProjectEnvSelection = {
   readonly localOverlayExists: boolean;
 };
 
+type EffectiveEnvMetadata = Record<
+  string,
+  Record<string, { readonly scope: string; readonly secret: boolean }>
+>;
+
 export type ProjectEnvResolvedConfig = {
+  readonly effectiveMetadata: EffectiveEnvMetadata;
+  readonly hostEffectiveMetadata: EffectiveEnvMetadata;
   readonly selection: ProjectEnvSelection;
   readonly merged: ProjectEnvConfig;
   readonly files: readonly string[];
@@ -641,6 +656,7 @@ function parseProjectEnvStoredValue(opts: {
   | { readonly ok: true; readonly value: ProjectEnvStoredValue }
   | { readonly ok: false; readonly error: string } {
   if (
+    opts.valueRaw === null ||
     typeof opts.valueRaw === "string" ||
     typeof opts.valueRaw === "number" ||
     typeof opts.valueRaw === "boolean"
@@ -657,7 +673,7 @@ function parseProjectEnvStoredValue(opts: {
 
   return {
     ok: false,
-    error: "expected a scalar or { secure: <ciphertext> }",
+    error: "expected null, a scalar or { secure: <ciphertext> }",
   };
 }
 
@@ -746,44 +762,52 @@ export async function resolveProjectEnvConfig(opts: {
           environment: selection.effectiveEnv ?? "default",
         });
 
-  if (
-    !(
-      defaultRead.exists ||
-      (overlayRead?.exists ?? false) ||
-      localDefaultRead.exists ||
-      (localOverlayRead?.exists ?? false)
-    )
-  ) {
+  const primaryDir = await resolvePrimaryLocalProjectDir(opts);
+  const inheritedReads: ProjectEnvConfigReadResult[] = [];
+  if (primaryDir !== null) {
+    const primaryDefaultPath = await resolveProjectEnvEffectiveLocalConfigPath({
+      projectRoot: dirname(primaryDir),
+      projectDir: primaryDir,
+      envName: null,
+    });
+    await validatePrimaryLocalFile(primaryDefaultPath);
+    inheritedReads.push(
+      await readProjectEnvConfigFile({
+        path: primaryDefaultPath,
+        environment: "default",
+      })
+    );
+    if (selection.effectiveEnv !== null) {
+      const primaryOverlayPath = resolveProjectEnvLocalConfigPath({
+        projectDir: primaryDir,
+        envName: selection.effectiveEnv,
+      });
+      await validatePrimaryLocalFile(primaryOverlayPath);
+      inheritedReads.push(
+        await readProjectEnvConfigFile({
+          path: primaryOverlayPath,
+          environment: selection.effectiveEnv,
+        })
+      );
+    }
+  }
+  // Primary local settings are live inputs, subordinate to checkout-local choices.
+  const reads = [
+    defaultRead,
+    overlayRead,
+    ...inheritedReads,
+    localDefaultRead,
+    localOverlayRead,
+  ];
+  if (!reads.some((read) => read?.exists)) {
     return null;
   }
-
-  if (defaultRead.parseError) {
-    throw new Error(
-      `Failed to parse ${defaultRead.path}: ${defaultRead.parseError}`
-    );
+  for (const read of reads) {
+    if (read?.parseError) {
+      throw new Error(`Failed to parse ${read.path}: ${read.parseError}`);
+    }
   }
-  if (overlayRead?.parseError) {
-    throw new Error(
-      `Failed to parse ${overlayRead.path}: ${overlayRead.parseError}`
-    );
-  }
-  if (localDefaultRead.parseError) {
-    throw new Error(
-      `Failed to parse ${localDefaultRead.path}: ${localDefaultRead.parseError}`
-    );
-  }
-  if (localOverlayRead?.parseError) {
-    throw new Error(
-      `Failed to parse ${localOverlayRead.path}: ${localOverlayRead.parseError}`
-    );
-  }
-
-  const envLayers = [
-    defaultRead.exists ? defaultRead.config : null,
-    overlayRead?.exists ? overlayRead.config : null,
-    localDefaultRead.exists ? localDefaultRead.config : null,
-    localOverlayRead?.exists ? localOverlayRead.config : null,
-  ];
+  const envLayers = reads.map((read) => (read?.exists ? read.config : null));
   const merged = mergeProjectEnvConfigLayers({
     layers: envLayers,
     environment: selection.effectiveEnv ?? "default",
@@ -821,11 +845,25 @@ export async function resolveProjectEnvConfig(opts: {
     ...opts.serviceNames,
     ...declaredScopes.filter((scope) => scope !== "global"),
   ]);
+  const effectiveMetadata: EffectiveEnvMetadata = {
+    global: resolveMetadata({ layers: envLayers, scopeNames: ["global"] }),
+  };
+  const hostEffectiveMetadata: EffectiveEnvMetadata = {};
   const serviceEnv: Record<string, Record<string, string>> = {};
   const hostTargetEnv: Record<string, Record<string, string>> = {};
   for (const serviceName of serviceSet) {
     const composeScopeNames =
       serviceName === "global" ? ["global"] : ["global", serviceName];
+    effectiveMetadata[serviceName] = resolveMetadata({
+      layers: envLayers,
+      scopeNames: composeScopeNames,
+    });
+    hostEffectiveMetadata[serviceName] = resolveMetadata({
+      layers: envLayers,
+      scopeNames: hostScopeConflictsWithService
+        ? composeScopeNames
+        : [...composeScopeNames, PROJECT_ENV_HOST_SCOPE],
+    });
     serviceEnv[serviceName] = resolveLayeredProjectEnvValuesForScopes({
       layers: envLayers,
       scopeNames: composeScopeNames,
@@ -839,6 +877,12 @@ export async function resolveProjectEnvConfig(opts: {
       keyText,
     });
   }
+  hostEffectiveMetadata.global = resolveMetadata({
+    layers: envLayers,
+    scopeNames: hostScopeConflictsWithService
+      ? ["global"]
+      : ["global", PROJECT_ENV_HOST_SCOPE],
+  });
   hostTargetEnv.global = resolveLayeredProjectEnvValuesForScopes({
     layers: envLayers,
     scopeNames: hostScopeConflictsWithService
@@ -851,6 +895,11 @@ export async function resolveProjectEnvConfig(opts: {
   if (selection.overlayPath && overlayRead?.exists) {
     files.push(selection.overlayPath);
   }
+  for (const read of inheritedReads) {
+    if (read.exists) {
+      files.push(read.path);
+    }
+  }
   if (localDefaultRead.exists) {
     files.push(selection.localDefaultPath);
   }
@@ -860,6 +909,8 @@ export async function resolveProjectEnvConfig(opts: {
 
   return {
     selection,
+    effectiveMetadata,
+    hostEffectiveMetadata,
     merged,
     files,
     globalEnv,
@@ -885,7 +936,13 @@ function mergeProjectEnvConfigLayers(opts: {
   for (const scope of scopes) {
     const scopeValues: Record<string, ProjectEnvStoredValue> = {};
     for (const layer of opts.layers) {
-      Object.assign(scopeValues, layer?.values[scope] ?? {});
+      for (const [key, value] of Object.entries(layer?.values[scope] ?? {})) {
+        if (value === null) {
+          delete scopeValues[key];
+        } else {
+          scopeValues[key] = value;
+        }
+      }
     }
     values[scope] = scopeValues;
   }
@@ -903,6 +960,9 @@ function resolveProjectEnvScopeValues(opts: {
 }): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, storedValue] of Object.entries(opts.values)) {
+    if (storedValue === null) {
+      continue;
+    }
     out[key] = decryptProjectEnvStoredValue({
       storedValue,
       keyText: opts.keyText,
@@ -922,19 +982,47 @@ function resolveLayeredProjectEnvValuesForScopes(opts: {
   readonly scopeNames: readonly string[];
   readonly keyText: string | null;
 }): Record<string, string> {
-  const storedValues: Record<string, ProjectEnvStoredValue> = {};
-  for (const layer of opts.layers) {
-    if (!layer) {
-      continue;
-    }
-    for (const scopeName of opts.scopeNames) {
-      Object.assign(storedValues, layer.values[scopeName] ?? {});
-    }
-  }
+  const entries = resolveEffectiveStoredEntries(opts);
   return resolveProjectEnvScopeValues({
-    values: storedValues,
+    values: Object.fromEntries(
+      Object.entries(entries).map(([key, entry]) => [key, entry.value])
+    ),
     keyText: opts.keyText,
   });
+}
+
+/** Shared traversal keeps runtime values and disclosure metadata in lockstep. */
+function resolveEffectiveStoredEntries(opts: {
+  readonly layers: readonly (ProjectEnvConfig | null)[];
+  readonly scopeNames: readonly string[];
+}) {
+  const entries: Record<
+    string,
+    { scope: string; value: Exclude<ProjectEnvStoredValue, null> }
+  > = {};
+  for (const layer of opts.layers) {
+    for (const scope of opts.scopeNames) {
+      for (const [key, value] of Object.entries(layer?.values[scope] ?? {})) {
+        if (value === null) {
+          delete entries[key];
+        } else {
+          entries[key] = { scope, value };
+        }
+      }
+    }
+  }
+  return entries;
+}
+
+function resolveMetadata(
+  opts: Parameters<typeof resolveEffectiveStoredEntries>[0]
+) {
+  return Object.fromEntries(
+    Object.entries(resolveEffectiveStoredEntries(opts)).map(([key, entry]) => [
+      key,
+      { scope: entry.scope, secret: isProjectEnvSecretValue(entry.value) },
+    ])
+  );
 }
 
 function hasSecretEntries(opts: {
@@ -957,7 +1045,7 @@ function isProjectEnvSecretValue(
 }
 
 function decryptProjectEnvStoredValue(opts: {
-  readonly storedValue: ProjectEnvStoredValue;
+  readonly storedValue: Exclude<ProjectEnvStoredValue, null>;
   readonly keyText: string | null;
 }): string {
   if (!isProjectEnvSecretValue(opts.storedValue)) {
@@ -1091,10 +1179,19 @@ export async function unsetProjectEnvValue(opts: {
   }
 
   const scopeValues = { ...(read.config.values[opts.scope] ?? {}) };
-  if (!(opts.key in scopeValues)) {
-    return { changed: false, filePath };
+  const inheritsLocal =
+    opts.local === true && (await resolvePrimaryLocalProjectDir(opts)) !== null;
+  if (inheritsLocal) {
+    if (scopeValues[opts.key] === null) {
+      return { changed: false, filePath };
+    }
+    scopeValues[opts.key] = null;
+  } else {
+    if (!(opts.key in scopeValues)) {
+      return { changed: false, filePath };
+    }
+    delete scopeValues[opts.key];
   }
-  delete scopeValues[opts.key];
 
   const nextValues: ProjectEnvValuesByScope = {
     ...read.config.values,

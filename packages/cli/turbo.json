@@ -1,0 +1,75 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/src/**",
+        "$TURBO_ROOT$/tests/**",
+        "$TURBO_ROOT$/scripts/**",
+        "$TURBO_ROOT$/docs/**",
+        "$TURBO_ROOT$/plugins/**",
+        "$TURBO_ROOT$/examples/**",
+        "$TURBO_ROOT$/.codex/skills/**",
+        "$TURBO_ROOT$/.cursor/rules/**",
+        "$TURBO_ROOT$/.claude/skills/**",
+        "$TURBO_ROOT$/AGENTS.md",
+        "$TURBO_ROOT$/README.md",
+        "$TURBO_ROOT$/CLAUDE.md",
+        "$TURBO_ROOT$/.releaserc*",
+        "$TURBO_ROOT$/index.ts",
+        "$TURBO_ROOT$/tsconfig.json",
+        "$TURBO_ROOT$/bunfig.toml",
+        "$TURBO_ROOT$/biome.jsonc",
+        "!$TURBO_ROOT$/examples/**/node_modules/**"
+      ]
+    },
+    "typecheck": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/src/**",
+        "$TURBO_ROOT$/tests/**",
+        "$TURBO_ROOT$/scripts/**",
+        "$TURBO_ROOT$/docs/**",
+        "$TURBO_ROOT$/plugins/**",
+        "$TURBO_ROOT$/examples/**",
+        "$TURBO_ROOT$/.codex/skills/**",
+        "$TURBO_ROOT$/.cursor/rules/**",
+        "$TURBO_ROOT$/.claude/skills/**",
+        "$TURBO_ROOT$/AGENTS.md",
+        "$TURBO_ROOT$/README.md",
+        "$TURBO_ROOT$/CLAUDE.md",
+        "$TURBO_ROOT$/.releaserc*",
+        "$TURBO_ROOT$/index.ts",
+        "$TURBO_ROOT$/tsconfig.json",
+        "$TURBO_ROOT$/bunfig.toml",
+        "$TURBO_ROOT$/biome.jsonc",
+        "!$TURBO_ROOT$/examples/**/node_modules/**"
+      ]
+    },
+    "check": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/src/**",
+        "$TURBO_ROOT$/tests/**",
+        "$TURBO_ROOT$/scripts/**",
+        "$TURBO_ROOT$/docs/**",
+        "$TURBO_ROOT$/plugins/**",
+        "$TURBO_ROOT$/examples/**",
+        "$TURBO_ROOT$/.codex/skills/**",
+        "$TURBO_ROOT$/.cursor/rules/**",
+        "$TURBO_ROOT$/.claude/skills/**",
+        "$TURBO_ROOT$/AGENTS.md",
+        "$TURBO_ROOT$/README.md",
+        "$TURBO_ROOT$/CLAUDE.md",
+        "$TURBO_ROOT$/.releaserc*",
+        "$TURBO_ROOT$/index.ts",
+        "$TURBO_ROOT$/tsconfig.json",
+        "$TURBO_ROOT$/bunfig.toml",
+        "$TURBO_ROOT$/biome.jsonc",
+        "!$TURBO_ROOT$/examples/**/node_modules/**"
+      ]
+    }
+  }
+}

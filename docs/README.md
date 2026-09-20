@@ -1,65 +1,34 @@
-# Docs
+# Hack documentation
 
-Hack runs the whole project — services, env, secrets, TLS, logs — at its own local
-HTTPS URL, for every project on your machine at once. These docs cover how.
+Hack manages local project services, environment variables, secrets, HTTPS routing,
+logs and sessions. Start with [Core docs](core.md) or the
+[Agent-first setup guide](guides/agent-first-setup.md).
 
-The docs are split into three areas so the default path stays on core local workflows.
+## Guides and reference
 
-## Choose a path
+- [Project setup](guides/init-project.md)
+- [Environment and secrets](env.md)
+- [Lifecycle hooks and startup](lifecycle.md)
+- [Persistent sessions](sessions.md)
+- [Worktrees, watchers and dependency caches](guides/development-runtime-safety.md)
+- [Global settings](guides/global-settings.md)
+- [macOS browser connectivity](guides/macos-browser-network.md) and [certificate trust](guides/macos-certificate-trust.md)
+- [Managed container environments](guides/codex-managed-environments.md)
+- [CLI overview](cli.md) and [generated command reference](reference/cli.md)
+- [Architecture](architecture.md)
+- [Agent integrations](integrations.md) and [guidance maintenance](agent-guidance.md)
+- [Extensions and reference](reference.md)
 
-### [Core docs](core.md)
+Remote/gateway/node/dispatch and the retained macOS app are unsupported. Historical
+setup guides and internal plans are excluded from the public documentation.
 
-Use this path for the main product story:
+## Contributing
 
-- local project setup (including agent-assisted onboarding via `hack init --with` / `hack agent onboard` — see the [agent-first setup guide](guides/agent-first-setup.md))
-- isolated runtime orchestration (including branch instances and linked worktrees)
-- stable local hostnames
-- env and secret management
-- lifecycle hooks
-- persistent sessions
-- diagnostics (`hack doctor` / `hack doctor --fix`)
+Read [AGENTS.md](../AGENTS.md) and the repository skills in `.ai/skills/` for
+contributor workflows. Public docs describe supported behavior; private planning,
+review notes and historical evidence belong in the gitignored `_docs/` directory.
+That local archive is not included in a fresh clone.
 
-Start here if you want to understand and use `hack` without remote or beta complexity by default.
-
-### [Beta workflows](beta.md)
-
-Use this path when you intentionally want remote and control-plane features:
-
-- gateway exposure
-- remote nodes
-- remote execution
-- remote supervisor jobs
-
-Beta material stays accessible, but it is explicitly labeled as unsupported experimental and kept
-out of the default path.
-
-### [Extensions & reference](reference.md)
-
-Use this path for:
-
-- full command reference: [CLI overview](cli.md) plus the generated [CLI reference](reference/cli.md) (every command and flag)
-- extension configuration and authoring
-- integrations
-- gateway API and SDK details
-
-This section is easy to find, but it does not lead the product story.
-
-## Quick links
-
-- New to `hack`: [Core docs](core.md)
-- Setting up with a coding agent: [Agent-first setup](guides/agent-first-setup.md)
-- Reviewing watcher, worktree-down, or disposable cache behavior:
-  [Development runtime safety](guides/development-runtime-safety.md)
-- Looking for command or API details: [Extensions & reference](reference.md), including the generated [CLI reference](reference/cli.md)
-- Need unsupported experimental remote workflows: [Beta workflows](beta.md)
-- Need the bucket definitions: [Docs information architecture](docs-ia.md)
-
-## Repo notes
-
-- Working notes and historical design docs live in `docs/plans/`; they are not the supported product contract
-- Root scripts orchestrate workspace tasks through Turbo
-- Package-local commands remain available via `bun run --cwd <workspace> <script>`
-- Agent-facing docs and setup output are generated from `src/agents/instruction-source.ts` via `src/agents/*` and `src/mcp/agent-docs.ts`; update the canonical source (not the rendered surfaces) when changing AGENTS/Codex/MCP guidance.
-- The generated [CLI reference](reference/cli.md) is rendered from the command spec (`bun run docs:cli-reference`); a drift test fails when it is stale.
-- End-to-end coverage that backs docs claims lives in `tests/e2e/` (`bun run test:e2e:local`).
-- `.factory/validation/` contains historical evidence from retired hosted/web/integration work and is not the current product contract.
+The command reference is generated with `bun run docs:cli-reference`. Agent-facing
+setup content is generated from `src/agents/instruction-source.ts` and
+`src/agents/onboarding-prompt.ts`. End-to-end checks live in `tests/e2e/`.

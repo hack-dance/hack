@@ -112,12 +112,10 @@ test("retired Tickets do not appear in generated agent guidance", () => {
 
 test("active contributor guidance and examples do not advertise retired Tickets", async () => {
   const guidancePaths = [
-    "WORKFLOW.md",
+    "AGENTS.md",
     ".hack/README.md",
-    ".factory/library/architecture.md",
-    ".factory/library/environment.md",
-    ".factory/library/user-testing.md",
-    ".factory/skills/control-plane-worker/SKILL.md",
+    ".ai/skills/hack-repo-code-quality/SKILL.md",
+    ".ai/skills/hack-repo-verify/SKILL.md",
   ];
   const retiredGuidancePattern =
     /`hack(?: x)? tickets\b|optional local tickets|tickets extension|dance\.hack\.tickets/i;
@@ -323,4 +321,19 @@ test("contributors share one baseline without per-edit repository-wide hooks", a
   expect(await Bun.file(".cursor/hooks.json").exists()).toBe(false);
   const settings = await Bun.file(".claude/settings.json").json();
   expect(settings.hooks).toBeUndefined();
+});
+
+test("rendered routing guidance distinguishes new defaults and legacy aliases", () => {
+  for (const surface of ["docs", "skill", "primer"] as const) {
+    expect(RENDERED_SURFACES[surface]).toContain(
+      "new-project default: `<project>.hack.local`"
+    );
+    expect(RENDERED_SURFACES[surface]).toContain(
+      "legacy `.hack` fallbacks remain supported"
+    );
+    expect(RENDERED_SURFACES[surface]).toContain("`<project>.hack.gy`");
+    expect(RENDERED_SURFACES[surface]).not.toContain(
+      "default: `<project>.hack`)"
+    );
+  }
 });

@@ -10,6 +10,8 @@ export const DEFAULT_COREDNS_IP = "172.30.0.53" as const;
 export const DEFAULT_HOST_DNS_IP = "127.0.0.1" as const;
 
 export const DEFAULT_PROJECT_TLD = "hack" as const;
+/** New project names; the legacy suffix remains the fallback for existing configs. */
+export const DEFAULT_NEW_PROJECT_TLD = "hack.local" as const;
 export const DEFAULT_GRAFANA_HOST = `logs.${DEFAULT_PROJECT_TLD}` as const;
 export const DEFAULT_LOKI_HOST = `loki.${DEFAULT_PROJECT_TLD}` as const;
 export const DEFAULT_SCHEMAS_HOST = `schemas.${DEFAULT_PROJECT_TLD}` as const;

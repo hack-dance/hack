@@ -1,5 +1,6 @@
 import { basename, dirname, resolve } from "node:path";
 import {
+  DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_TLD,
   DEFAULT_PROJECT_TLD,
   HACK_PROJECT_DIR_LEGACY,
@@ -341,6 +342,8 @@ export interface ProjectWorktreeConfig {
    * target the base instance from linked worktrees.
    */
   readonly autoBranch?: boolean;
+  /** Read eligible primary local env/aliases; false keeps this checkout isolated. */
+  readonly inheritLocal?: boolean;
 }
 
 /**
@@ -364,7 +367,7 @@ export function resolveProjectOauthTld(
 
 /**
  * Returns the OAuth alias only when Hack's generated Caddy routes can serve it.
- * Custom development hosts outside the managed `.hack` namespace retain their
+ * Custom development hosts outside the managed `.hack`/`.hack.local` namespaces retain their
  * primary host unless the project declares and routes an alias itself.
  */
 export function resolveProjectOauthAliasHost(opts: {
@@ -372,10 +375,32 @@ export function resolveProjectOauthAliasHost(opts: {
   readonly oauth: ProjectOauthConfig | undefined;
 }): string | null {
   const tld = resolveProjectOauthTld(opts.oauth);
-  if (!(tld && opts.devHost.endsWith(`.${DEFAULT_PROJECT_TLD}`))) {
+  if (!tld) {
     return null;
   }
-  return `${opts.devHost}.${tld}`;
+  if (opts.devHost.endsWith(`.${DEFAULT_NEW_PROJECT_TLD}`)) {
+    const prefix = opts.devHost.slice(0, -DEFAULT_NEW_PROJECT_TLD.length);
+    return `${prefix}${DEFAULT_PROJECT_TLD}.${tld}`;
+  }
+  return opts.devHost.endsWith(`.${DEFAULT_PROJECT_TLD}`)
+    ? `${opts.devHost}.${tld}`
+    : null;
+}
+
+/**
+ * Include retained legacy routes when branching a migrated local-domain project.
+ * These bases rewrite existing labels; they do not create or claim any routes.
+ */
+export function resolveProjectRouteBaseHosts(opts: {
+  readonly devHost: string;
+  readonly aliasHost: string | null;
+}): string[] {
+  const hosts = [opts.devHost, ...(opts.aliasHost ? [opts.aliasHost] : [])];
+  if (opts.devHost.endsWith(`.${DEFAULT_NEW_PROJECT_TLD}`)) {
+    const legacy = `${opts.devHost.slice(0, -DEFAULT_NEW_PROJECT_TLD.length)}${DEFAULT_PROJECT_TLD}`;
+    hosts.push(legacy, `${legacy}.${DEFAULT_OAUTH_ALIAS_TLD}`);
+  }
+  return [...new Set(hosts)];
 }
 
 export async function readProjectConfig(
@@ -958,7 +983,11 @@ function parseWorktreeConfig(
     value.auto_branch ?? value.autoBranch
   );
 
+  const inheritLocal = parseOptionalBoolean(
+    value.inherit_local ?? value.inheritLocal
+  );
   const out: ProjectWorktreeConfig = {
+    ...(inheritLocal !== undefined ? { inheritLocal } : {}),
     ...(autoBranch !== undefined ? { autoBranch } : {}),
   };
   return Object.keys(out).length > 0 ? out : undefined;

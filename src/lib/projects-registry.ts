@@ -22,6 +22,7 @@ const REGISTRY_LOCK_FILENAME = `${GLOBAL_PROJECTS_REGISTRY_FILENAME}.lock`;
 const REGISTRY_LOCK_TIMEOUT_MS = 2000;
 const REGISTRY_LOCK_STALE_MS = 30_000;
 const REGISTRY_LOCK_RETRY_MS = 50;
+const REGISTRY_TOUCH_INTERVAL_MS = 60_000;
 
 export interface RegisteredProjectWorktree {
   readonly path: string;
@@ -61,8 +62,11 @@ export type RegisterOutcome =
       >;
     };
 
-export async function readProjectsRegistry(): Promise<ProjectsRegistry> {
-  const path = getRegistryPath();
+/** Read an explicit session registry without changing process-wide environment. */
+export async function readProjectsRegistry(opts?: {
+  readonly registryPath?: string;
+}): Promise<ProjectsRegistry> {
+  const path = opts?.registryPath ?? getRegistryPath();
   const text = await readTextFile(path);
   if (!text) {
     return { version: REGISTRY_VERSION, projects: [] };
@@ -82,6 +86,8 @@ export async function readProjectsRegistry(): Promise<ProjectsRegistry> {
 export async function upsertProjectRegistration(opts: {
   readonly project: ProjectContext;
   readonly nowIso?: string;
+  /** Optional maintenance may abandon a busy lock without waiting or reclaiming it. */
+  readonly waitForLock?: boolean;
 }): Promise<RegisterOutcome> {
   const nowIso = opts.nowIso ?? new Date().toISOString();
   const registryPath = getRegistryPath();
@@ -102,68 +108,136 @@ export async function upsertProjectRegistration(opts: {
   const devHost = cfg.devHost?.trim();
   const gitBranch = await resolveGitCurrentBranch({ repoRoot: repoRootReal });
 
-  return await withRegistryLock(async () => {
-    const current = await readProjectsRegistry();
-    const { project, status } = await upsertInMemory({
-      current,
-      nowIso,
-      incoming: {
-        name,
-        devHost,
-        repoRoot: repoRootReal,
-        repoIdentity,
-        gitBranch,
-        projectDirName: opts.project.projectDirName,
-        projectDir: projectDirReal,
-      },
-    });
+  return await withRegistryLock(
+    async () => {
+      const current = await readProjectsRegistry();
+      const { project, status } = await upsertInMemory({
+        current,
+        nowIso,
+        incoming: {
+          name,
+          devHost,
+          repoRoot: repoRootReal,
+          repoIdentity,
+          gitBranch,
+          projectDirName: opts.project.projectDirName,
+          projectDir: projectDirReal,
+        },
+      });
 
-    if (status.status === "conflict") {
-      return status;
-    }
-    if (status.status === "noop") {
-      if (status.changed) {
-        await writeRegistryAtomic(registryPath, {
-          version: REGISTRY_VERSION,
-          projects: status.projects,
-        });
+      if (status.status === "conflict") {
+        return status;
       }
-      return { status: "noop", project };
-    }
+      if (status.status === "noop") {
+        if (status.changed) {
+          await writeRegistryAtomic(registryPath, {
+            version: REGISTRY_VERSION,
+            projects: status.projects,
+          });
+        }
+        return { status: "noop", project };
+      }
 
-    await writeRegistryAtomic(registryPath, {
-      version: REGISTRY_VERSION,
-      projects: status.projects,
-    });
+      await writeRegistryAtomic(registryPath, {
+        version: REGISTRY_VERSION,
+        projects: status.projects,
+      });
 
-    return { status: status.status, project };
-  });
+      return { status: status.status, project };
+    },
+    { waitForLock: opts.waitForLock }
+  );
 }
 
 /**
  * Best-effort registry touch for read-style commands (e.g. `hack projects`).
  *
- * Runs the same upsert as full registration — so linked-worktree checkouts
- * get recorded/refreshed on the family entry's `worktrees` array — but never
- * throws: registry maintenance must not break a read command.
+ * Coalesces unchanged observations for one minute. New or changed checkouts
+ * use the normal serialized upsert, but never wait for or reclaim a busy lock.
+ * Registry maintenance must not delay or break a read command.
  *
  * @returns The registration outcome, or null when the touch failed.
  */
 export async function touchProjectRegistration(opts: {
   readonly project: ProjectContext;
+  readonly nowIso?: string;
 }): Promise<RegisterOutcome | null> {
   try {
-    return await upsertProjectRegistration({ project: opts.project });
+    const nowIso = opts.nowIso ?? new Date().toISOString();
+    const fresh = await readFreshRegistration({
+      project: opts.project,
+      nowIso,
+    });
+    if (fresh) {
+      return { status: "noop", project: fresh };
+    }
+    return await upsertProjectRegistration({
+      project: opts.project,
+      nowIso,
+      waitForLock: false,
+    });
   } catch {
     return null;
   }
 }
 
+/** A read-only freshness optimization; mutation decisions still run under the lock. */
+async function readFreshRegistration(opts: {
+  readonly project: ProjectContext;
+  readonly nowIso: string;
+}): Promise<RegisteredProject | null> {
+  const [registry, cfg, projectDir, repoRoot] = await Promise.all([
+    readProjectsRegistry(),
+    readProjectConfig(opts.project),
+    tryRealpath(opts.project.projectDir),
+    tryRealpath(opts.project.projectRoot),
+  ]);
+  const name = sanitizeProjectName(
+    cfg.name ?? defaultProjectSlugFromPath(repoRoot)
+  );
+  for (const entry of registry.projects) {
+    if (
+      entry.name !== name ||
+      entry.devHost !== cfg.devHost?.trim() ||
+      entry.projectDirName !== opts.project.projectDirName
+    ) {
+      continue;
+    }
+    const primary =
+      entry.projectDir === projectDir && entry.repoRoot === repoRoot;
+    const worktree = primary
+      ? undefined
+      : entry.worktrees?.find((item) => item.path === repoRoot);
+    const lastSeen = primary ? entry.lastSeenAt : worktree?.lastSeenAt;
+    const age = Date.parse(opts.nowIso) - Date.parse(lastSeen ?? "");
+    if (!(age >= 0 && age < REGISTRY_TOUCH_INTERVAL_MS)) {
+      continue;
+    }
+    if (primary) {
+      return entry;
+    }
+    if (
+      worktree &&
+      worktree.branch === (await resolveGitCurrentBranch({ repoRoot })) &&
+      (await isSameRepositoryFamily({
+        existingRepoRoot: entry.repoRoot,
+        incomingRepoIdentity: await resolveGitRepositoryIdentity({ repoRoot }),
+      }))
+    ) {
+      return entry;
+    }
+  }
+  return null;
+}
+
 export async function resolveRegisteredProjectByName(opts: {
+  readonly registryPath?: string;
   readonly name: string;
 }): Promise<ProjectContext | null> {
   const name = sanitizeProjectName(opts.name);
-  const registry = await readProjectsRegistry();
+  const registry = await readProjectsRegistry({
+    registryPath: opts.registryPath,
+  });
   const match = registry.projects.find((p) => p.name === name) ?? null;
   if (!match) {
     return null;
@@ -392,8 +466,11 @@ async function tryRealpath(path: string): Promise<string> {
   }
 }
 
-async function withRegistryLock<T>(fn: () => Promise<T>): Promise<T> {
-  await acquireRegistryLock();
+async function withRegistryLock<T>(
+  fn: () => Promise<T>,
+  opts?: { readonly waitForLock?: boolean }
+): Promise<T> {
+  await acquireRegistryLock(opts);
   try {
     return await fn();
   } finally {
@@ -401,7 +478,9 @@ async function withRegistryLock<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-async function acquireRegistryLock(): Promise<void> {
+async function acquireRegistryLock(opts?: {
+  readonly waitForLock?: boolean;
+}): Promise<void> {
   const lockPath = getRegistryLockPath();
   const start = Date.now();
 
@@ -418,6 +497,9 @@ async function acquireRegistryLock(): Promise<void> {
           : undefined;
       if (code !== "EEXIST") {
         throw error;
+      }
+      if (opts?.waitForLock === false) {
+        throw new Error("Projects registry is busy; optional touch deferred");
       }
       if (await isLockStale(lockPath)) {
         // biome-ignore lint/suspicious/noEmptyBlockStatements: best-effort stale lock cleanup

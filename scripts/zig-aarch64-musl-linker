@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+# Rust emits this obsolete optimization hint; Zig 0.15's linker ignores it with a
+# warning. Remove only that known no-op, preserving all other arguments in order.
+for argument do
+  shift
+  case "$argument" in
+    -Wl,-O1) ;;
+    *) set -- "$@" "$argument" ;;
+  esac
+done
+exec zig cc -target aarch64-linux-musl "$@"

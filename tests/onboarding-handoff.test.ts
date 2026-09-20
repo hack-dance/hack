@@ -52,10 +52,10 @@ async function setupStubPath(opts: {
   return tempDir;
 }
 
-test("parseOnboardingWith accepts claude, codex, and both (case/space tolerant)", () => {
+test("parseOnboardingWith accepts claude and codex (case/space tolerant)", () => {
   expect(parseOnboardingWith({ value: "claude" })).toBe("claude");
   expect(parseOnboardingWith({ value: "codex" })).toBe("codex");
-  expect(parseOnboardingWith({ value: "both" })).toBe("both");
+  expect(parseOnboardingWith({ value: "both" })).toBeNull();
   expect(parseOnboardingWith({ value: " Claude " })).toBe("claude");
 });
 
@@ -65,13 +65,9 @@ test("parseOnboardingWith rejects unknown values", () => {
   expect(parseOnboardingWith({ value: "claude,codex" })).toBeNull();
 });
 
-test("resolveOnboardingAgents expands both into claude then codex", () => {
+test("resolveOnboardingAgents selects exactly one client", () => {
   expect(resolveOnboardingAgents({ withValue: "claude" })).toEqual(["claude"]);
   expect(resolveOnboardingAgents({ withValue: "codex" })).toEqual(["codex"]);
-  expect(resolveOnboardingAgents({ withValue: "both" })).toEqual([
-    "claude",
-    "codex",
-  ]);
 });
 
 test("non-interactive runs never spawn and print the prompt", async () => {
@@ -80,7 +76,7 @@ test("non-interactive runs never spawn and print the prompt", async () => {
 
   const outcome = await runOnboardingHandoff({
     prompt: "PROMPT-BODY",
-    withValue: "both",
+    withValue: "claude",
     interactive: false,
     launch: ({ agent }) => {
       launches.push(agent);
@@ -123,7 +119,7 @@ test("available binaries are launched with the prompt as positional argument", a
 
   const outcome = await runOnboardingHandoff({
     prompt: "PROMPT-BODY",
-    withValue: "both",
+    withValue: "claude",
     interactive: true,
     launch: (opts) => {
       launches.push(opts);
@@ -131,24 +127,23 @@ test("available binaries are launched with the prompt as positional argument", a
     },
   });
 
-  expect(outcome.launched).toEqual(["claude", "codex"]);
+  expect(outcome.launched).toEqual(["claude"]);
   expect(outcome.missing).toEqual([]);
   expect(outcome.printed).toBe(false);
-  expect(launches).toHaveLength(2);
+  expect(launches).toHaveLength(1);
   expect(launches[0]?.agent).toBe("claude");
   expect(launches[0]?.binPath).toBe(join(stubDir, "claude"));
   expect(launches[0]?.prompt).toBe("PROMPT-BODY");
-  expect(launches[1]?.agent).toBe("codex");
   expect(capturedStdout).not.toContain("PROMPT-BODY");
 });
 
-test("partial availability launches what exists and prints for the rest", async () => {
+test("missing selected agent does not launch a different installed client", async () => {
   await setupStubPath({ binaries: ["codex"] });
   const launches: string[] = [];
 
   const outcome = await runOnboardingHandoff({
     prompt: "PROMPT-BODY",
-    withValue: "both",
+    withValue: "claude",
     interactive: true,
     launch: ({ agent }) => {
       launches.push(agent);
@@ -156,8 +151,8 @@ test("partial availability launches what exists and prints for the rest", async 
     },
   });
 
-  expect(launches).toEqual(["codex"]);
-  expect(outcome.launched).toEqual(["codex"]);
+  expect(launches).toEqual([]);
+  expect(outcome.launched).toEqual([]);
   expect(outcome.missing).toEqual(["claude"]);
   expect(outcome.printed).toBe(true);
   expect(capturedStdout).toContain("PROMPT-BODY");

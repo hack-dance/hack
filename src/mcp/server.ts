@@ -9,7 +9,6 @@ import {
   type OnboardingMode,
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
-import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { ensureDir, pathExists } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -19,6 +18,13 @@ import {
   resolveRegisteredProjectByName,
 } from "../lib/projects-registry.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
+import type { McpCommandAdmission } from "./command-admission.ts";
+import { superviseMcpCommand } from "./command-lifetime.ts";
+import { createMcpOutputBudget } from "./output-budget.ts";
+import {
+  captureMcpSessionContext,
+  type McpSessionContext,
+} from "./session-context.ts";
 
 type PackageJsonType = {
   readonly name: string;
@@ -34,6 +40,7 @@ type ProjectSelection = {
 };
 
 type HackCommandResult = {
+  readonly outputTruncated?: boolean;
   readonly command: string;
   readonly exitCode: number;
   readonly stdout: string;
@@ -51,6 +58,7 @@ const DEFAULT_LOG_TAIL_MS = 5000;
 
 const toolOutputSchema = {
   ok: z.boolean(),
+  outputTruncated: z.boolean().optional(),
   command: z.string(),
   exitCode: z.number(),
   stdout: z.string(),
@@ -62,6 +70,19 @@ const toolOutputSchema = {
  * Start the hack MCP server on stdio for local tool clients.
  */
 export async function startMcpServer(): Promise<void> {
+  const server = createMcpServer({ cwd: process.cwd(), env: process.env });
+  await connectStdioServer(server);
+}
+
+/** Build a transport-independent server whose project and command state belongs
+ * only to this session. Creating it does not install process signal handlers.
+ */
+export function createMcpServer(opts: {
+  readonly admission?: McpCommandAdmission;
+  readonly cwd: string;
+  readonly env: Readonly<Record<string, string | undefined>>;
+}): McpServer {
+  const context = captureMcpSessionContext(opts);
   const server = new McpServer(
     {
       name: packageJson.name,
@@ -72,11 +93,40 @@ export async function startMcpServer(): Promise<void> {
     }
   );
 
-  registerTools({ server });
+  registerTools({ server, context });
   registerPrompts({ server });
+  return server;
+}
 
+async function connectStdioServer(server: McpServer): Promise<void> {
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  let closing = false;
+  const close = (): void => {
+    if (closing) {
+      return;
+    }
+    closing = true;
+    void server.close();
+  };
+  // Keep graceful signals handled while cancelled command groups finish draining.
+  // Signal listeners alone do not prevent process exit.
+  process.on("SIGTERM", close);
+  process.on("SIGINT", close);
+  process.stdin.once("end", close);
+  process.stdin.once("close", close);
+  server.server.onclose = () => {
+    process.stdin.off("end", close);
+    process.stdin.off("close", close);
+  };
+  try {
+    await server.connect(transport);
+  } catch (error) {
+    process.off("SIGTERM", close);
+    process.off("SIGINT", close);
+    process.stdin.off("end", close);
+    process.stdin.off("close", close);
+    throw error;
+  }
 }
 
 const ONBOARDING_MODES: ReadonlySet<string> = new Set([
@@ -134,7 +184,10 @@ function registerPrompts(opts: { readonly server: McpServer }): void {
   );
 }
 
-function registerTools(opts: { readonly server: McpServer }): void {
+function registerTools(opts: {
+  readonly server: McpServer;
+  readonly context: McpSessionContext;
+}): void {
   const projectSelectorInput = {
     projectName: z
       .string()
@@ -176,11 +229,10 @@ function registerTools(opts: { readonly server: McpServer }): void {
       },
       outputSchema: toolOutputSchema,
     },
-    async ({
-      filter,
-      includeGlobal,
-      includeUnregistered,
-    }): Promise<CallToolResult> => {
+    async (
+      { filter, includeGlobal, includeUnregistered },
+      extra
+    ): Promise<CallToolResult> => {
       const args = [
         "projects",
         "--json",
@@ -190,6 +242,8 @@ function registerTools(opts: { readonly server: McpServer }): void {
       ];
 
       const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
         tool: "hack.projects.list",
         args,
       });
@@ -213,10 +267,11 @@ function registerTools(opts: { readonly server: McpServer }): void {
       },
       outputSchema: toolOutputSchema,
     },
-    async (input) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
-        cwd: process.cwd(),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
         return buildToolError({ message: resolved.message });
@@ -231,6 +286,8 @@ function registerTools(opts: { readonly server: McpServer }): void {
       ];
 
       const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
         tool: "hack.project.status",
         args,
       });
@@ -254,10 +311,11 @@ function registerTools(opts: { readonly server: McpServer }): void {
       },
       outputSchema: toolOutputSchema,
     },
-    async (input) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
-        cwd: process.cwd(),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
         return buildToolError({ message: resolved.message });
@@ -272,6 +330,8 @@ function registerTools(opts: { readonly server: McpServer }): void {
       ];
 
       const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
         tool: "hack.project.up",
         args,
       });
@@ -292,10 +352,11 @@ function registerTools(opts: { readonly server: McpServer }): void {
       },
       outputSchema: toolOutputSchema,
     },
-    async (input) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
-        cwd: process.cwd(),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
         return buildToolError({ message: resolved.message });
@@ -309,6 +370,8 @@ function registerTools(opts: { readonly server: McpServer }): void {
       ];
 
       const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
         tool: "hack.project.down",
         args,
       });
@@ -329,10 +392,11 @@ function registerTools(opts: { readonly server: McpServer }): void {
       },
       outputSchema: toolOutputSchema,
     },
-    async (input) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
-        cwd: process.cwd(),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
         return buildToolError({ message: resolved.message });
@@ -346,6 +410,8 @@ function registerTools(opts: { readonly server: McpServer }): void {
       ];
 
       const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
         tool: "hack.project.restart",
         args,
       });
@@ -373,10 +439,11 @@ function registerTools(opts: { readonly server: McpServer }): void {
       },
       outputSchema: toolOutputSchema,
     },
-    async (input) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
-        cwd: process.cwd(),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
         return buildToolError({ message: resolved.message });
@@ -393,6 +460,8 @@ function registerTools(opts: { readonly server: McpServer }): void {
       ];
 
       const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
         tool: "hack.project.run",
         args,
         timeoutMs: input.timeoutMs,
@@ -431,10 +500,11 @@ function registerTools(opts: { readonly server: McpServer }): void {
       },
       outputSchema: toolOutputSchema,
     },
-    async (input) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
-        cwd: process.cwd(),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
         return buildToolError({ message: resolved.message });
@@ -460,6 +530,8 @@ function registerTools(opts: { readonly server: McpServer }): void {
       ];
 
       const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
         tool: "hack.project.logs.snapshot",
         args,
       });
@@ -505,10 +577,11 @@ function registerTools(opts: { readonly server: McpServer }): void {
       },
       outputSchema: toolOutputSchema,
     },
-    async (input) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
-        cwd: process.cwd(),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
         return buildToolError({ message: resolved.message });
@@ -533,6 +606,8 @@ function registerTools(opts: { readonly server: McpServer }): void {
       ];
 
       const result = await runHackLogTail({
+        context: opts.context,
+        signal: extra.signal,
         tool: "hack.project.logs.tail",
         args,
         maxEvents: input.maxEvents,
@@ -541,6 +616,7 @@ function registerTools(opts: { readonly server: McpServer }): void {
 
       return buildToolResult({
         result: {
+          ...(result.outputTruncated ? { outputTruncated: true } : {}),
           command: result.command,
           exitCode: result.exitCode,
           stdout: result.stdout,
@@ -568,10 +644,11 @@ function registerTools(opts: { readonly server: McpServer }): void {
       },
       outputSchema: toolOutputSchema,
     },
-    async (input) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
-        cwd: process.cwd(),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
         return buildToolError({ message: resolved.message });
@@ -586,6 +663,8 @@ function registerTools(opts: { readonly server: McpServer }): void {
       ];
 
       const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
         tool: "hack.project.open",
         args,
       });
@@ -619,7 +698,7 @@ function registerTools(opts: { readonly server: McpServer }): void {
       },
       outputSchema: toolOutputSchema,
     },
-    async (input) => {
+    async (input, extra) => {
       const selection = toProjectSelection(input);
       if (!(selection.path || selection.repoRoot)) {
         return buildToolError({
@@ -629,7 +708,8 @@ function registerTools(opts: { readonly server: McpServer }): void {
 
       const resolved = await resolveProjectArgs({
         selection,
-        cwd: process.cwd(),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
         allowUnregistered: true,
       });
       if (!resolved.ok) {
@@ -649,6 +729,8 @@ function registerTools(opts: { readonly server: McpServer }): void {
       ];
 
       const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
         tool: "hack.project.init",
         args,
         timeoutMs: 180_000,
@@ -670,7 +752,10 @@ function buildToolResult(opts: {
     exitCode: opts.result.exitCode,
     stdout: opts.result.stdout,
     stderr: opts.result.stderr,
-    ...(opts.data !== undefined ? { data: opts.data } : {}),
+    ...(opts.result.outputTruncated ? { outputTruncated: true } : {}),
+    ...(!opts.result.outputTruncated && opts.data !== undefined
+      ? { data: opts.data }
+      : {}),
   };
 
   return {
@@ -732,83 +817,8 @@ function toProjectSelection(input: ProjectSelection): ProjectSelection {
   };
 }
 
-async function _resolveProjectCwd(opts: {
-  readonly selection: ProjectSelection;
-  readonly cwd: string;
-  readonly requireProjectContext: boolean;
-  readonly allowUnregistered?: boolean;
-}): Promise<
-  | { readonly ok: true; readonly cwd: string }
-  | { readonly ok: false; readonly message: string }
-> {
-  const selection = opts.selection;
-  const picked = [
-    selection.projectName,
-    selection.repoRoot,
-    selection.path,
-  ].filter(Boolean);
-
-  if (picked.length > 1) {
-    return {
-      ok: false,
-      message: "Use only one of projectName, repoRoot, or path.",
-    };
-  }
-
-  if (selection.projectName) {
-    const project = await resolveRegisteredProjectByName({
-      name: selection.projectName,
-    });
-    if (!project) {
-      return {
-        ok: false,
-        message: `Unknown project "${selection.projectName}". Run 'hack init' or 'hack projects' first.`,
-      };
-    }
-    return { ok: true, cwd: project.projectRoot };
-  }
-
-  const pathLike = selection.repoRoot ?? selection.path;
-  if (pathLike) {
-    const absPath = resolve(opts.cwd, pathLike);
-    if (!(await pathExists(absPath))) {
-      return { ok: false, message: `Path not found: ${absPath}` };
-    }
-    if (!opts.allowUnregistered) {
-      const allowed = await isPathAllowed({ absPath });
-      if (!allowed) {
-        return {
-          ok: false,
-          message: "Path is outside registered hack projects.",
-        };
-      }
-    }
-    return { ok: true, cwd: absPath };
-  }
-
-  const context = await findProjectContext(opts.cwd);
-  if (context) {
-    return { ok: true, cwd: context.projectRoot };
-  }
-
-  if (!opts.requireProjectContext) {
-    return { ok: true, cwd: opts.cwd };
-  }
-
-  if (!opts.allowUnregistered) {
-    const allowed = await isPathAllowed({ absPath: opts.cwd });
-    if (!allowed) {
-      return {
-        ok: false,
-        message: "No project context found. Provide projectName or path.",
-      };
-    }
-  }
-
-  return { ok: true, cwd: opts.cwd };
-}
-
 async function resolveProjectArgs(opts: {
+  readonly registryPath: string;
   readonly selection: ProjectSelection;
   readonly cwd: string;
   readonly allowUnregistered?: boolean;
@@ -832,6 +842,7 @@ async function resolveProjectArgs(opts: {
   if (selection.projectName) {
     const project = await resolveRegisteredProjectByName({
       name: selection.projectName,
+      registryPath: opts.registryPath,
     });
     if (!project) {
       return {
@@ -849,7 +860,10 @@ async function resolveProjectArgs(opts: {
       return { ok: false, message: `Path not found: ${absPath}` };
     }
     if (!opts.allowUnregistered) {
-      const allowed = await isPathAllowed({ absPath });
+      const allowed = await isPathAllowed({
+        absPath,
+        registryPath: opts.registryPath,
+      });
       if (!allowed) {
         return {
           ok: false,
@@ -866,7 +880,10 @@ async function resolveProjectArgs(opts: {
   }
 
   if (!opts.allowUnregistered) {
-    const allowed = await isPathAllowed({ absPath: opts.cwd });
+    const allowed = await isPathAllowed({
+      absPath: opts.cwd,
+      registryPath: opts.registryPath,
+    });
     if (!allowed) {
       return {
         ok: false,
@@ -879,9 +896,10 @@ async function resolveProjectArgs(opts: {
 }
 
 async function isPathAllowed(opts: {
+  readonly registryPath: string;
   readonly absPath: string;
 }): Promise<boolean> {
-  const roots = await readAllowedRoots();
+  const roots = await readAllowedRoots(opts.registryPath);
   if (roots.length === 0) {
     return false;
   }
@@ -890,8 +908,8 @@ async function isPathAllowed(opts: {
   );
 }
 
-async function readAllowedRoots(): Promise<string[]> {
-  const registry = await readProjectsRegistry();
+async function readAllowedRoots(registryPath: string): Promise<string[]> {
+  const registry = await readProjectsRegistry({ registryPath });
   const roots = new Set<string>();
   for (const project of registry.projects) {
     roots.add(resolve(project.repoRoot));
@@ -912,51 +930,83 @@ function isPathWithin(opts: {
 }
 
 async function runHackCommand(opts: {
+  readonly context: McpSessionContext;
+  readonly signal: AbortSignal;
   readonly tool: string;
   readonly args: readonly string[];
   readonly cwd?: string;
   readonly timeoutMs?: number;
 }): Promise<HackCommandResult> {
-  const invocation = await resolveHackInvocation();
-  const cmd = [invocation.bin, ...invocation.args, ...opts.args];
-  const proc = Bun.spawn(cmd, {
-    cwd: opts.cwd,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const work = async () => {
+    const invocation = await resolveHackInvocation(opts.context);
+    opts.signal.throwIfAborted();
+    const cmd = [invocation.bin, ...invocation.args, ...opts.args];
+    const proc = Bun.spawn(cmd, {
+      detached: true,
+      cwd: opts.cwd ?? opts.context.cwd,
+      env: opts.context.env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
 
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_CMD_TIMEOUT_MS;
-  const timer = setTimeout(() => proc.kill(), timeoutMs);
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_CMD_TIMEOUT_MS;
+    const lifetime = superviseMcpCommand({
+      proc,
+      signal: opts.signal,
+      timeoutMs,
+    });
+    const output = createMcpOutputBudget({
+      onLimit: () => lifetime.stop("output_limit"),
+    });
+    let stdout: string;
+    let stderr: string;
+    let exitCode: number;
+    try {
+      [stdout, stderr, exitCode] = await Promise.all([
+        streamToText(output.wrap(proc.stdout)),
+        streamToText(output.wrap(proc.stderr)),
+        proc.exited,
+      ]);
+    } finally {
+      lifetime.dispose();
+    }
 
-  const [stdout, stderr] = await Promise.all([
-    streamToText(proc.stdout),
-    streamToText(proc.stderr),
-  ]);
-  const exitCode = await proc.exited;
-  clearTimeout(timer);
+    if (output.exceeded()) {
+      exitCode = 1;
+      stderr +=
+        "\nMCP output exceeded the 8 MiB capture limit; use the CLI for full output.\n";
+    }
+    const command = formatCommand(cmd);
+    await appendAuditLog({
+      hackHome: opts.context.hackHome,
+      tool: opts.tool,
+      command,
+      exitCode,
+    });
 
-  const command = formatCommand(cmd);
-  await appendAuditLog({
-    tool: opts.tool,
-    command,
-    exitCode,
-  });
-
-  return {
-    command,
-    exitCode,
-    stdout,
-    stderr,
+    return {
+      command,
+      exitCode,
+      stdout,
+      stderr,
+      ...(output.exceeded() ? { outputTruncated: true } : {}),
+    };
   };
+  return opts.context.admission
+    ? await opts.context.admission.run(work)
+    : await work();
 }
 
 async function runHackLogTail(opts: {
+  readonly context: McpSessionContext;
+  readonly signal: AbortSignal;
   readonly tool: string;
   readonly args: readonly string[];
   readonly maxEvents?: number;
   readonly maxMs?: number;
 }): Promise<{
+  readonly outputTruncated?: boolean;
   readonly command: string;
   readonly exitCode: number;
   readonly stdout: string;
@@ -965,74 +1015,100 @@ async function runHackLogTail(opts: {
   readonly stopReason: string;
   readonly durationMs: number;
 }> {
-  const invocation = await resolveHackInvocation();
-  const cmd = [invocation.bin, ...invocation.args, ...opts.args];
-  const proc = Bun.spawn(cmd, {
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const work = async () => {
+    const invocation = await resolveHackInvocation(opts.context);
+    opts.signal.throwIfAborted();
+    const cmd = [invocation.bin, ...invocation.args, ...opts.args];
+    const proc = Bun.spawn(cmd, {
+      detached: true,
+      cwd: opts.context.cwd,
+      env: opts.context.env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
 
-  const maxEvents = opts.maxEvents ?? DEFAULT_LOG_TAIL_EVENTS;
-  const maxMs = opts.maxMs ?? DEFAULT_LOG_TAIL_MS;
-  const start = Date.now();
+    const maxEvents = opts.maxEvents ?? DEFAULT_LOG_TAIL_EVENTS;
+    const maxMs = opts.maxMs ?? DEFAULT_LOG_TAIL_MS;
+    const start = Date.now();
 
-  const events: Record<string, unknown>[] = [];
-  const stdoutLines: string[] = [];
-  const stderrLines: string[] = [];
+    const events: Record<string, unknown>[] = [];
+    const stdoutLines: string[] = [];
+    const stderrLines: string[] = [];
 
-  let stopReason = "eof";
+    let stopReason = "eof";
 
-  const stop = (reason: string) => {
-    if (stopReason !== "eof") {
-      return;
+    const lifetime = superviseMcpCommand({
+      proc,
+      signal: opts.signal,
+      timeoutMs: maxMs,
+      onStop: (reason) => {
+        stopReason = reason;
+      },
+    });
+
+    const output = createMcpOutputBudget({
+      onLimit: () => lifetime.stop("output_limit"),
+    });
+    const stdoutTask = (async () => {
+      for await (const line of readLinesFromStream(output.wrap(proc.stdout))) {
+        stdoutLines.push(line);
+        const trimmed = line.trim();
+        if (trimmed.length === 0) {
+          continue;
+        }
+        const parsed = parseJsonLine(trimmed);
+        if (parsed) {
+          events.push(parsed);
+        }
+        if (events.length >= maxEvents) {
+          lifetime.stop("max_events");
+          break;
+        }
+      }
+    })();
+
+    const stderrTask = (async () => {
+      for await (const line of readLinesFromStream(output.wrap(proc.stderr))) {
+        stderrLines.push(line);
+      }
+    })();
+
+    let exitCode: number;
+    try {
+      [exitCode] = await Promise.all([proc.exited, stdoutTask, stderrTask]);
+    } finally {
+      lifetime.dispose();
     }
-    stopReason = reason;
-    proc.kill();
+
+    if (output.exceeded()) {
+      exitCode = 1;
+      stderrLines.push(
+        "MCP output exceeded the 8 MiB capture limit; use the CLI for full output."
+      );
+    }
+    const command = formatCommand(cmd);
+    await appendAuditLog({
+      hackHome: opts.context.hackHome,
+      tool: opts.tool,
+      command,
+      exitCode,
+    });
+
+    return {
+      command,
+      exitCode,
+      stdout: joinLines(stdoutLines),
+      stderr: joinLines(stderrLines),
+      events,
+      ...(output.exceeded() ? { outputTruncated: true } : {}),
+      stopReason,
+      durationMs: Date.now() - start,
+    };
   };
-
-  const stdoutTask = (async () => {
-    for await (const line of readLinesFromStream(proc.stdout)) {
-      stdoutLines.push(line);
-      const trimmed = line.trim();
-      if (trimmed.length === 0) {
-        continue;
-      }
-      const parsed = parseJsonLine(trimmed);
-      if (parsed) {
-        events.push(parsed);
-      }
-      if (events.length >= maxEvents) {
-        stop("max_events");
-        break;
-      }
-    }
-  })();
-
-  const stderrTask = (async () => {
-    for await (const line of readLinesFromStream(proc.stderr)) {
-      stderrLines.push(line);
-    }
-  })();
-
-  const timer = setTimeout(() => stop("timeout"), maxMs);
-  const exitCode = await proc.exited;
-  clearTimeout(timer);
-
-  await Promise.all([stdoutTask, stderrTask]);
-
-  const command = formatCommand(cmd);
-  await appendAuditLog({ tool: opts.tool, command, exitCode });
-
-  return {
-    command,
-    exitCode,
-    stdout: joinLines(stdoutLines),
-    stderr: joinLines(stderrLines),
-    events,
-    stopReason,
-    durationMs: Date.now() - start,
-  };
+  return opts.context.admission
+    ? await opts.context.admission.run(work)
+    : await work();
 }
 
 function formatCommand(parts: readonly string[]): string {
@@ -1104,11 +1180,12 @@ async function streamToText(
 }
 
 async function appendAuditLog(opts: {
+  readonly hackHome: string;
   readonly tool: string;
   readonly command: string;
   readonly exitCode: number;
 }): Promise<void> {
-  const logPath = resolve(resolveGlobalHackDir(), "mcp-audit.log");
+  const logPath = resolve(opts.hackHome, "mcp-audit.log");
   try {
     await ensureDir(dirname(logPath));
     const payload = {

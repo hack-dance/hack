@@ -1,0 +1,619 @@
+use super::{lifecycle::OwnedGuest, source_sync, state};
+use crate::{
+    Candidate, CandidateError,
+    project::snapshot::{ContentRevision, Snapshot},
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::path::PathBuf;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Publication {
+    pub checkout: PathBuf,
+    pub namespace: String,
+    pub provider_incarnation: String,
+    pub manifest: ContentRevision,
+    pub archive_sha256: String,
+}
+
+fn identity(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn publication_path(
+    candidate: &Candidate,
+    namespace: &str,
+    revision: &str,
+) -> Result<PathBuf, CandidateError> {
+    if !identity(namespace) || !identity(revision) {
+        return Err(CandidateError::new(
+            "invalid_source_identity",
+            "Invalid immutable source identity.",
+        ));
+    }
+    Ok(candidate
+        .state_root
+        .join("run/source-publications")
+        .join(namespace)
+        .join(format!("{revision}.json")))
+}
+
+pub(super) fn load(
+    candidate: &Candidate,
+    namespace: &str,
+    revision: &str,
+) -> Result<Publication, CandidateError> {
+    let path = publication_path(candidate, namespace, revision)?;
+    crate::reject_aliased_state(path.parent().expect("publication parent"))?;
+    if !path.try_exists().map_err(state::io)? {
+        return Err(CandidateError::new(
+            "source_not_published",
+            "The requested immutable source revision is not published.",
+        ));
+    }
+    let record: Publication = state::read_bounded(&path, 16 * 1024 * 1024)?;
+    record.manifest.validate()?;
+    if record.checkout != candidate.checkout
+        || record.namespace != namespace
+        || record.manifest.revision != revision
+        || !identity(&record.archive_sha256)
+    {
+        return Err(CandidateError::new(
+            "foreign_source_publication",
+            "Immutable source receipt belongs to another identity.",
+        ));
+    }
+    Ok(record)
+}
+
+pub(super) fn verify_published(
+    guest: &OwnedGuest<'_>,
+    record: &Publication,
+) -> Result<(), CandidateError> {
+    if record.provider_incarnation != guest.incarnation() {
+        return Err(CandidateError::new(
+            "foreign_source_publication",
+            "Immutable source belongs to another provider incarnation.",
+        ));
+    }
+    let root = format!(
+        "/storage/hack-source/{}/{}",
+        record.namespace, record.manifest.revision
+    );
+    let script = source_sync::verification(Some(&record.manifest));
+    guest.execute(
+        r#"
+for path in /storage/hack-source "$4" "$1" "$1/tree"; do test ! -L "$path"; test -d "$path"; done
+test ! -L "$1/archive.sha256"
+test "$(cat "$1/archive.sha256")" = "$2"
+test ! -L "$1/verify.sh"
+test "$(sha256sum "$1/verify.sh" | cut -d ' ' -f 1)" = "$3"
+(cd "$1/tree"; sh ../verify.sh)
+test -z "$(find "$1/tree" ! -type l -perm /222 -print -quit)"
+"#,
+        &[
+            &root,
+            &record.archive_sha256,
+            &digest(script.as_bytes()),
+            &format!("/storage/hack-source/{}", record.namespace),
+        ],
+        None,
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransferReceipt {
+    pub revision: String,
+    pub namespace: String,
+    pub guest_path: String,
+    pub archive_sha256: String,
+    pub total_bytes: u64,
+    pub state: &'static str,
+}
+
+fn digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+pub fn publish(
+    candidate: &Candidate,
+    namespace: &str,
+    snapshot: &Snapshot,
+) -> Result<TransferReceipt, CandidateError> {
+    publish_staged(candidate, namespace, snapshot, false, |_, _| Ok(()))
+}
+
+pub fn reconcile(
+    candidate: &Candidate,
+    namespace: &str,
+    snapshot: &Snapshot,
+) -> Result<TransferReceipt, CandidateError> {
+    publish_staged(candidate, namespace, snapshot, true, |_, _| Ok(()))
+}
+
+fn publish_staged(
+    candidate: &Candidate,
+    namespace: &str,
+    snapshot: &Snapshot,
+    reconcile: bool,
+    staged: impl FnOnce(&OwnedGuest<'_>, &str) -> Result<(), CandidateError>,
+) -> Result<TransferReceipt, CandidateError> {
+    snapshot.receipt().validate()?;
+    if namespace.len() != 64
+        || !namespace
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(CandidateError::new(
+            "invalid_namespace",
+            "Source transfer requires a candidate workspace identity.",
+        ));
+    }
+    let guest = OwnedGuest::connect(candidate)?;
+    let archive = snapshot.archive()?;
+    let archive_sha = digest(&archive);
+    let mut checksums = String::new();
+    for (entry, _) in snapshot.files() {
+        if let Some(sha) = &entry.sha256 {
+            checksums.push_str(&format!("{sha}  ./{}\n", entry.path));
+        }
+    }
+    let manifest_sha = digest(checksums.as_bytes());
+    let verification = source_sync::verification(Some(snapshot.receipt()));
+    let verifier_sha = digest(verification.as_bytes());
+    let revision = &snapshot.receipt().revision;
+    let root = format!("/storage/hack-source/{namespace}");
+    let pending = format!("{root}/{revision}.pending");
+    let complete = format!("{root}/{revision}");
+    let publication = Publication {
+        checkout: candidate.checkout.clone(),
+        namespace: namespace.into(),
+        provider_incarnation: guest.incarnation().into(),
+        manifest: snapshot.receipt().clone(),
+        archive_sha256: archive_sha.clone(),
+    };
+    let state = super::publication_stage::prepare(candidate, &guest, &publication, reconcile)?;
+    if state == "created" {
+        for (name, bytes) in [
+            ("source.tar", archive.as_slice()),
+            ("files.sha256", checksums.as_bytes()),
+            ("verify.sh", verification.as_bytes()),
+        ] {
+            source_sync::upload(&guest, &format!("{pending}/{name}"), bytes)?;
+        }
+        staged(&guest, &pending)?;
+        guest.execute(
+            r#"
+test "$(sha256sum "$1/verify.sh" | cut -d ' ' -f 1)" = "$5"
+test "$(sha256sum "$1/source.tar" | cut -d ' ' -f 1)" = "$2"
+test "$(sha256sum "$1/files.sha256" | cut -d ' ' -f 1)" = "$3"
+tar -xf "$1/source.tar" -C "$1/tree"
+(cd "$1/tree"; sh ../verify.sh)
+chmod 444 "$1/verify.sh"
+chmod -R a-w "$1/tree"
+(set -C; printf '%s\n' "$2" > "$1/archive.sha256")
+rm "$1/source.tar"
+sync
+test ! -e "$4"
+test ! -L "$4"
+mv -T "$1" "$4"
+sync
+"#,
+            &[
+                &pending,
+                &archive_sha,
+                &manifest_sha,
+                &complete,
+                &verifier_sha,
+            ],
+            None,
+        )?;
+    } else if state != "reused" {
+        return Err(CandidateError::new(
+            "source_transfer_uncertain",
+            "Unexpected source transfer acknowledgement.",
+        ));
+    }
+    guest.execute(
+        r#"
+test ! -L "$1/files.sha256"
+test ! -L "$1/tree"
+test "$(sha256sum "$1/files.sha256" | cut -d ' ' -f 1)" = "$2"
+(cd "$1/tree"; sha256sum -c ../files.sha256 >/dev/null)
+"#,
+        &[&complete, &manifest_sha],
+        None,
+    )?;
+    verify_published(&guest, &publication)?;
+    let path = publication_path(candidate, namespace, revision)?;
+    state::private_directory(path.parent().expect("publication parent"))?;
+    if path.try_exists().map_err(state::io)? {
+        let previous = load(candidate, namespace, revision)?;
+        if previous.provider_incarnation != publication.provider_incarnation
+            || previous.archive_sha256 != archive_sha
+        {
+            return Err(CandidateError::new(
+                "foreign_source_publication",
+                "A conflicting immutable source receipt already exists.",
+            ));
+        }
+    } else {
+        state::write(&path, &publication)?;
+    }
+    Ok(TransferReceipt {
+        revision: revision.clone(),
+        namespace: namespace.into(),
+        guest_path: format!("{complete}/tree"),
+        archive_sha256: archive_sha,
+        total_bytes: snapshot.receipt().total_bytes,
+        state: "guest-content-verified-no-job-started",
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    #[ignore = "Manual owned development VM only; requires external resource watchdog"]
+    fn owned_publication_failure_live() -> Result<(), CandidateError> {
+        let root = std::env::var("HACK_LOCAL_TEST_ROOT").expect("candidate root required");
+        let candidate = Candidate::discover(std::path::Path::new(&root))?;
+        let status = super::super::status(&candidate)?;
+        assert_eq!(status.phase, "running");
+        assert_eq!(status.profile, Some(super::super::Profile::Development));
+        let token = format!(
+            "publication-failure-{}-{}",
+            std::process::id(),
+            crate::node::now()
+        );
+        let source = std::env::temp_dir().canonicalize().unwrap().join(&token);
+        state::private_directory(&source)?;
+        std::fs::write(
+            source.join("marker.txt"),
+            b"immutable publication fixture\n",
+        )
+        .map_err(state::io)?;
+        std::fs::write(
+            source.join("compose.yaml"),
+            "services:\n  app:\n    image: busybox:latest\n",
+        )
+        .map_err(state::io)?;
+        let plan = crate::project::plan(
+            &candidate,
+            crate::project::PlanOptions {
+                project: &source,
+                compose_file: std::path::Path::new("compose.yaml"),
+                profiles: &[],
+            },
+        )?;
+        let snapshot = crate::project::snapshot::capture(
+            &source,
+            &Default::default(),
+            &plan.plan.source_selection.metadata_sha256,
+        )?;
+        let revision = &snapshot.receipt().revision;
+        let mut evidence = Vec::new();
+        let marker = source.with_extension("staged");
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = OwnedChild(
+            std::process::Command::new(std::env::current_exe().map_err(state::io)?)
+                .env_clear()
+                .env("HACK_LOCAL_TEST_ROOT", &candidate.checkout)
+                .env("HACK_PUBLICATION_SOURCE", &source)
+                .env("HACK_PUBLICATION_MARKER", &marker)
+                .args([
+                    "provider::source_transfer::tests::publication_crash_helper",
+                    "--ignored",
+                    "--exact",
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(state::io)?,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !marker.try_exists().map_err(state::io)? {
+            assert!(
+                child.0.try_wait().map_err(state::io)?.is_none(),
+                "publication helper exited before upload"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "publication helper upload deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        child.0.kill().map_err(state::io)?;
+        assert!(!child.0.wait().map_err(state::io)?.success());
+        drop(child);
+        assert_eq!(
+            load(&candidate, &plan.plan.namespace, revision)
+                .err()
+                .unwrap()
+                .code,
+            "source_not_published"
+        );
+        let repaired = std::process::Command::new(
+            candidate
+                .state_root
+                .join("target/release/hack-runtime-candidate"),
+        )
+        .env_clear()
+        .args([
+            "--candidate-root",
+            candidate.checkout.to_str().unwrap(),
+            "project",
+            "publish-source",
+            "--project",
+            source.to_str().unwrap(),
+            "--file",
+            "compose.yaml",
+            "--expect-plan",
+            &plan.plan_id,
+            "--reconcile",
+            "--json",
+        ])
+        .output()
+        .map_err(state::io)?;
+        assert!(
+            repaired.status.success(),
+            "{}",
+            String::from_utf8_lossy(&repaired.stderr)
+        );
+        let guest = OwnedGuest::connect(&candidate)?;
+        verify_published(&guest, &load(&candidate, &plan.plan.namespace, revision)?)?;
+        guest.execute(
+            r#"test -d "$1.retained-1"; test ! -e "$1.pending""#,
+            &[&format!(
+                "/storage/hack-source/{}/{revision}",
+                plan.plan.namespace
+            )],
+            None,
+        )?;
+        drop(guest);
+        evidence.push(serde_json::json!({"fault":"publisher-process-killed-after-upload", "unpublished_before_repair":true,"public_cli_reconcile_verified":true,"staging_retained":true}));
+        for fault in ["interrupted", "corrupt-verifier"] {
+            let namespace = digest(format!("{token}-{fault}").as_bytes());
+            let pending = format!("/storage/hack-source/{namespace}/{revision}.pending");
+            let complete = format!("/storage/hack-source/{namespace}/{revision}");
+            let failed =
+                publish_staged(&candidate, &namespace, &snapshot, false, |guest, stage| {
+                    if fault == "interrupted" {
+                        return Err(CandidateError::new(
+                            "injected_interruption",
+                            "Stopped after staged uploads.",
+                        ));
+                    }
+                    guest.execute("printf corrupted > \"$1/verify.sh\"", &[stage], None)?;
+                    Ok(())
+                });
+            assert!(failed.is_err());
+            assert_eq!(
+                load(&candidate, &namespace, revision).err().unwrap().code,
+                "source_not_published"
+            );
+            let inspect = || -> Result<String, CandidateError> {
+                OwnedGuest::connect(&candidate)?.execute(
+                    r#"test ! -e "$2"; test ! -L "$2"; test -d "$1"; test ! -L "$1"; stat -c %d:%i "$1"; sha256sum "$1/verify.sh" "$1/source.tar""#,
+                    &[&pending, &complete], None,
+                )
+            };
+            let retained = inspect()?;
+            assert!(publish(&candidate, &namespace, &snapshot).is_err());
+            assert_eq!(retained, inspect()?);
+            reconcile(&candidate, &namespace, &snapshot)?;
+            let guest = OwnedGuest::connect(&candidate)?;
+            verify_published(&guest, &load(&candidate, &namespace, revision)?)?;
+            let saved = guest.execute(
+                r#"test ! -e "$1"; stat -c %d:%i "$2"; sha256sum "$2/verify.sh" "$2/source.tar""#,
+                &[&pending, &format!("{complete}.retained-1")],
+                None,
+            )?;
+            assert_eq!(
+                retained.replace(&pending, &format!("{complete}.retained-1")),
+                saved
+            );
+            evidence.push(serde_json::json!({"fault":fault,"unpublished_before_repair":true,"retry_refused":true,"staging_preserved":true,"explicit_repair_verified":true}));
+        }
+        for fault in ["foreign-owner", "retention-full"] {
+            let namespace = digest(format!("{token}-{fault}").as_bytes());
+            assert!(
+                publish_staged(&candidate, &namespace, &snapshot, false, |guest, stage| {
+                    if fault == "foreign-owner" {
+                        guest.execute("printf foreign > \"$1/owner\"", &[stage], None)?;
+                    } else {
+                        let complete = stage.strip_suffix(".pending").unwrap();
+                        guest.execute(
+                            r#"for n in 1 2 3 4 5 6 7 8; do mkdir "$1.retained-$n"; done"#,
+                            &[complete],
+                            None,
+                        )?;
+                    }
+                    Err(CandidateError::new(
+                        "injected_interruption",
+                        "Stopped staged publication.",
+                    ))
+                })
+                .is_err()
+            );
+            let pending = format!("/storage/hack-source/{namespace}/{revision}.pending");
+            let inspect = || {
+                OwnedGuest::connect(&candidate)?.execute(
+                    r#"stat -c %d:%i "$1"; sha256sum "$1/owner" "$1/source.tar""#,
+                    &[&pending],
+                    None,
+                )
+            };
+            let before = inspect()?;
+            assert!(reconcile(&candidate, &namespace, &snapshot).is_err());
+            assert_eq!(before, inspect()?);
+            assert_eq!(
+                load(&candidate, &namespace, revision).err().unwrap().code,
+                "source_not_published"
+            );
+            evidence.push(serde_json::json!({"fault":fault,"reconcile_refused":true,"staging_unchanged":true}));
+        }
+        let namespace = digest(format!("{token}-complete").as_bytes());
+        publish(&candidate, &namespace, &snapshot)?;
+        let complete = format!("/storage/hack-source/{namespace}/{revision}");
+        let receipt = publication_path(&candidate, &namespace, revision)?;
+        let original_receipt = std::fs::read(&receipt).map_err(state::io)?;
+        for fault in ["corrupt-verifier", "missing-verifier"] {
+            {
+                let guest = OwnedGuest::connect(&candidate)?;
+                if fault == "corrupt-verifier" {
+                    guest.execute(
+                        "chmod 600 \"$1/verify.sh\"; printf corrupted > \"$1/verify.sh\"",
+                        &[&complete],
+                        None,
+                    )?;
+                } else {
+                    guest.execute("rm -- \"$1/verify.sh\"", &[&complete], None)?;
+                }
+            }
+            assert!(publish(&candidate, &namespace, &snapshot).is_err());
+            assert_eq!(
+                std::fs::read(&receipt).map_err(state::io)?,
+                original_receipt
+            );
+            let guest = OwnedGuest::connect(&candidate)?;
+            assert!(verify_published(&guest, &load(&candidate, &namespace, revision)?).is_err());
+            if fault == "missing-verifier" {
+                guest.execute("test ! -e \"$1/verify.sh\"", &[&complete], None)?;
+            } else {
+                guest.execute(
+                    "test \"$(cat \"$1/verify.sh\")\" = corrupted",
+                    &[&complete],
+                    None,
+                )?;
+            }
+            evidence.push(serde_json::json!({"fault":fault,"cache_reuse_refused":true,"host_receipt_unchanged":true,"guest_corruption_preserved":true}));
+        }
+        let directory = candidate.state_root.join("review/wu06");
+        state::private_directory(&directory)?;
+        state::write(
+            &directory.join("publication-failures.json"),
+            &serde_json::json!({
+                "passed":true,"controls":evidence,
+                "scope":"Deterministic staged interruption, explicit ownership-checked retention and repair; foreign ownership and retention exhaustion refused. Real publisher process kill after upload followed by public CLI reconciliation."
+            }),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "Subprocess helper for owned_publication_failure_live only"]
+    fn publication_crash_helper() -> Result<(), CandidateError> {
+        let candidate = Candidate::discover(std::path::Path::new(
+            &std::env::var("HACK_LOCAL_TEST_ROOT").expect("root"),
+        ))?;
+        let source = PathBuf::from(std::env::var("HACK_PUBLICATION_SOURCE").expect("source"));
+        let marker = PathBuf::from(std::env::var("HACK_PUBLICATION_MARKER").expect("marker"));
+        let plan = crate::project::plan(
+            &candidate,
+            crate::project::PlanOptions {
+                project: &source,
+                compose_file: std::path::Path::new("compose.yaml"),
+                profiles: &[],
+            },
+        )?;
+        let snapshot = crate::project::snapshot::capture(
+            &source,
+            &Default::default(),
+            &plan.plan.source_selection.metadata_sha256,
+        )?;
+        publish_staged(
+            &candidate,
+            &plan.plan.namespace,
+            &snapshot,
+            false,
+            |_, _| {
+                std::fs::write(&marker, "uploaded").map_err(state::io)?;
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                Err(CandidateError::new(
+                    "helper_timeout",
+                    "Publisher was not killed within the control window.",
+                ))
+            },
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn publication_load_reads_a_regular_receipt_and_refuses_aliases() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-publication-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        state::private_directory(&root).unwrap();
+        let source = root.join("source");
+        state::private_directory(&source).unwrap();
+        let candidate = Candidate::discover(&root).unwrap();
+        std::fs::write(
+            source.join("compose.yaml"),
+            "services:\n  app:\n    image: busybox:latest\n",
+        )
+        .unwrap();
+        let plan = crate::project::plan(
+            &candidate,
+            crate::project::PlanOptions {
+                project: &source,
+                compose_file: std::path::Path::new("compose.yaml"),
+                profiles: &[],
+            },
+        )
+        .unwrap();
+        let snapshot = crate::project::snapshot::capture(
+            &source,
+            &Default::default(),
+            &plan.plan.source_selection.metadata_sha256,
+        )
+        .unwrap();
+        let namespace = "b".repeat(64);
+        let revision = &snapshot.receipt().revision;
+        assert_eq!(
+            load(&candidate, &namespace, revision).err().unwrap().code,
+            "source_not_published"
+        );
+        let path = publication_path(&candidate, &namespace, revision).unwrap();
+        state::private_directory(path.parent().unwrap()).unwrap();
+        let record = Publication {
+            checkout: candidate.checkout.clone(),
+            namespace: namespace.clone(),
+            provider_incarnation: "owned".into(),
+            manifest: snapshot.receipt().clone(),
+            archive_sha256: "c".repeat(64),
+        };
+        state::write(&path, &record).unwrap();
+        assert_eq!(
+            load(&candidate, &namespace, revision)
+                .unwrap()
+                .manifest
+                .revision,
+            *revision
+        );
+        let retained = path.with_extension("retained");
+        std::fs::rename(&path, &retained).unwrap();
+        std::os::unix::fs::symlink(&retained, &path).unwrap();
+        assert!(load(&candidate, &namespace, revision).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::hard_link(&retained, &path).unwrap();
+        assert!(load(&candidate, &namespace, revision).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}

@@ -18,6 +18,7 @@ import {
   DEFAULT_INGRESS_NETWORK,
   DEFAULT_INGRESS_SUBNET,
   DEFAULT_LOGGING_NETWORK,
+  DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_ROOT,
   DEFAULT_PROJECT_TLD,
   GLOBAL_ALLOY_FILENAME,
@@ -75,6 +76,10 @@ import {
   resolveHackHostTrustEnvScriptPath,
   resolveHackLocalCaCertPath,
 } from "../lib/local-ca.ts";
+import {
+  checkMacCaTrust,
+  inspectMacCaEligibility,
+} from "../lib/mac-ca-trust.ts";
 import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
@@ -726,8 +731,8 @@ async function bootstrapMacGlobalInstall(): Promise<void> {
     // Mirror globalTrust: the host trust env (Bun/Node/curl/git) is
     // independent of the macOS System keychain step — prepare it regardless
     // so non-interactive installs still get CLI-tool trust.
-    await configureMacHostTlsTrust({ certPath });
-    if (!trustReady) {
+    const hostTrustReady = await configureMacHostTlsTrust({ certPath });
+    if (hostTrustReady && !trustReady) {
       note(
         "Host trust env is prepared, but the browser will still show warnings for https://*.hack until the System keychain step runs. Run `hack global trust` interactively to finish it.",
         "TLS"
@@ -1817,7 +1822,7 @@ async function globalDown(): Promise<number> {
 
   if (isMac()) {
     const ok = await confirmSafe({
-      message: `Stop dnsmasq? (disables *.${DEFAULT_PROJECT_TLD} and *.${DEFAULT_OAUTH_ALIAS_ROOT} DNS; requires sudo)`,
+      message: `Stop dnsmasq? (disables *.${DEFAULT_PROJECT_TLD}, *.${DEFAULT_NEW_PROJECT_TLD} and *.${DEFAULT_OAUTH_ALIAS_ROOT} DNS; requires sudo)`,
       initialValue: false,
       nonInteractive: "accept-default",
     });
@@ -2739,9 +2744,9 @@ async function globalTrust(): Promise<number> {
     // it regardless so non-interactive runs still get CLI-tool trust even
     // when the keychain step was skipped (declined, or sudo would have
     // prompted for a password with no TTY to answer it).
-    await configureMacHostTlsTrust({
-      certPath,
-    });
+    if (!(await configureMacHostTlsTrust({ certPath }))) {
+      return 1;
+    }
     if (!trustReady) {
       note(
         "Host trust env is prepared, but the browser will still show warnings for https://*.hack until the System keychain step runs. Run `hack global trust` interactively to finish it.",
@@ -3034,14 +3039,17 @@ async function ensureDnsmasqHackAliases(opts: {
 }): Promise<void> {
   const desiredLines = [
     `address=/.${DEFAULT_PROJECT_TLD}/${opts.targetIp}`,
+    `address=/.${DEFAULT_NEW_PROJECT_TLD}/${opts.targetIp}`,
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${opts.targetIp}`,
   ] as const;
   const legacyHostTarget =
     opts.targetIp === DEFAULT_CADDY_IP ? DEFAULT_HOST_DNS_IP : DEFAULT_CADDY_IP;
   const legacyLines = [
     `address=/.${DEFAULT_PROJECT_TLD}/${legacyHostTarget}`,
+    `address=/.${DEFAULT_NEW_PROJECT_TLD}/${legacyHostTarget}`,
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${legacyHostTarget}`,
     `address=/.${DEFAULT_PROJECT_TLD}/::1`,
+    `address=/.${DEFAULT_NEW_PROJECT_TLD}/::1`,
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/::1`,
   ] as const;
 
@@ -3056,7 +3064,7 @@ async function ensureDnsmasqHackAliases(opts: {
   const shouldWrite = migrated.changed || missing.length > 0;
   if (!shouldWrite) {
     logger.info({
-      message: `dnsmasq already configured for .${DEFAULT_PROJECT_TLD} and .${DEFAULT_OAUTH_ALIAS_ROOT}`,
+      message: `dnsmasq already configured for .${DEFAULT_PROJECT_TLD}  .${DEFAULT_NEW_PROJECT_TLD} and .${DEFAULT_OAUTH_ALIAS_ROOT}`,
     });
     return;
   }
@@ -3110,6 +3118,7 @@ function buildDnsmasqConf(opts: {
 
 async function ensureMacResolverFiles(): Promise<void> {
   await maybeWriteResolver({ domain: DEFAULT_PROJECT_TLD });
+  await maybeWriteResolver({ domain: DEFAULT_NEW_PROJECT_TLD });
   await maybeWriteResolver({ domain: DEFAULT_OAUTH_ALIAS_ROOT });
 }
 
@@ -3147,9 +3156,11 @@ function noteDnsConfigured(opts: {
   note(
     [
       `DNS configured: *.${DEFAULT_PROJECT_TLD} → ${opts.targetIp} (${targetLabel})`,
+      `DNS configured: *.${DEFAULT_NEW_PROJECT_TLD} → ${opts.targetIp} (${targetLabel})`,
       `DNS configured: *.${DEFAULT_OAUTH_ALIAS_ROOT} → ${opts.targetIp} (${targetLabel})`,
       `- dnsmasq: ${opts.dnsmasqConf}`,
       `- resolver: /etc/resolver/${DEFAULT_PROJECT_TLD}`,
+      `- resolver: /etc/resolver/${DEFAULT_NEW_PROJECT_TLD}`,
       `- resolver: /etc/resolver/${DEFAULT_OAUTH_ALIAS_ROOT}`,
     ].join("\n"),
     "DNS"
@@ -3376,20 +3387,18 @@ async function ensureMacTrustCaddyLocalCa(input: {
     return false;
   }
 
-  // Fast-path: already trusted.
-  const existing = await exec(
-    [
-      "security",
-      "find-certificate",
-      "-c",
-      "Caddy Local Authority",
-      "/Library/Keychains/System.keychain",
-    ],
-    { stdin: "ignore" }
-  );
-  if (existing.exitCode === 0) {
+  const existing = await checkMacCaTrust(input);
+  if (!existing.installable) {
+    logger.warn({
+      message:
+        existing.issue ??
+        "Current Caddy Local CA is not eligible for installation",
+    });
+    return false;
+  }
+  if (existing.trusted) {
     logger.info({
-      message: "Caddy Local CA already present in System keychain",
+      message: "Current Caddy Local CA is trusted in macOS System keychain",
     });
     return true;
   }
@@ -3427,6 +3436,16 @@ async function ensureMacTrustCaddyLocalCa(input: {
     return false;
   }
 
+  const installed = await checkMacCaTrust(input);
+  if (!installed.trusted) {
+    logger.warn({
+      message:
+        installed.issue ??
+        "macOS TLS trust verification failed after installation",
+    });
+    return false;
+  }
+
   logger.success({ message: "Trusted Caddy Local CA (macOS System keychain)" });
   note(
     [
@@ -3440,7 +3459,12 @@ async function ensureMacTrustCaddyLocalCa(input: {
 
 async function configureMacHostTlsTrust(input: {
   readonly certPath: string;
-}): Promise<void> {
+}): Promise<boolean> {
+  const eligibility = await inspectMacCaEligibility(input);
+  if (!eligibility.installable) {
+    logger.warn({ message: eligibility.issue });
+    return false;
+  }
   const bundlePath = await writeMacHostTrustBundle({
     certPath: input.certPath,
   });
@@ -3480,6 +3504,7 @@ async function configureMacHostTlsTrust(input: {
     ].join("\n"),
     "Host TLS"
   );
+  return true;
 }
 
 async function writeMacHostTrustBundle(input: {

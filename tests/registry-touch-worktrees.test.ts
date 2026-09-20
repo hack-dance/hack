@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,9 +26,15 @@ import {
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
+let originalHackHome: string | undefined;
+let originalGlobalConfig: string | undefined;
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
+  originalHackHome = process.env.HACK_HOME;
+  originalGlobalConfig = process.env.HACK_GLOBAL_CONFIG_PATH;
+  Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
+  Reflect.deleteProperty(process.env, "HACK_HOME");
   tempDir = await mkdtemp(join(tmpdir(), "hack-registry-touch-"));
   process.env.HOME = tempDir;
 });
@@ -29,7 +44,17 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = originalHome;
+  for (const [key, value] of [
+    ["HOME", originalHome],
+    ["HACK_HOME", originalHackHome],
+    ["HACK_GLOBAL_CONFIG_PATH", originalGlobalConfig],
+  ] as const) {
+    if (value === undefined) {
+      Reflect.deleteProperty(process.env, key);
+    } else {
+      process.env[key] = value;
+    }
+  }
 });
 
 function runGit(opts: {
@@ -132,3 +157,119 @@ test("touchProjectRegistration never throws for a broken project context", async
   });
   expect(outcome).toBeNull();
 });
+
+test("fresh primary observations preserve registry bytes and mtime; explicit registration still refreshes", async () => {
+  const { primary } = await createFixture();
+  await upsertProjectRegistration({
+    project: primary,
+    nowIso: "2026-01-01T00:00:00Z",
+  });
+  const path = join(tempDir ?? "missing-fixture", ".hack", "projects.json");
+  const before = await readFile(path, "utf8");
+  const modified = (await stat(path)).mtimeMs;
+  for (let index = 0; index < 32; index++) {
+    expect(
+      (
+        await touchProjectRegistration({
+          project: primary,
+          nowIso: "2026-01-01T00:00:30Z",
+        })
+      )?.status
+    ).toBe("noop");
+  }
+  expect(await readFile(path, "utf8")).toBe(before);
+  expect((await stat(path)).mtimeMs).toBe(modified);
+  await upsertProjectRegistration({
+    project: primary,
+    nowIso: "2026-01-01T00:00:30Z",
+  });
+  expect((await readProjectsRegistry()).projects[0]?.lastSeenAt).toBe(
+    "2026-01-01T00:00:30Z"
+  );
+});
+
+test("expired observations refresh and configuration changes bypass coalescing", async () => {
+  const { primary } = await createFixture();
+  await upsertProjectRegistration({
+    project: primary,
+    nowIso: "2026-01-01T00:00:00Z",
+  });
+  await touchProjectRegistration({
+    project: primary,
+    nowIso: "2026-01-01T00:01:00Z",
+  });
+  expect((await readProjectsRegistry()).projects[0]?.lastSeenAt).toBe(
+    "2026-01-01T00:01:00Z"
+  );
+  await writeFile(
+    primary.configFile,
+    JSON.stringify({ name: "renamed", dev_host: "new.hack" })
+  );
+  await touchProjectRegistration({
+    project: primary,
+    nowIso: "2026-01-01T00:01:01Z",
+  });
+  expect((await readProjectsRegistry()).projects[0]).toMatchObject({
+    name: "renamed",
+    devHost: "new.hack",
+    lastSeenAt: "2026-01-01T00:01:01Z",
+  });
+});
+
+test("fresh worktree observations preserve bytes while branch changes are recorded", async () => {
+  const { primary, worktreeRoot } = await createFixture();
+  const project = projectContextFor(worktreeRoot);
+  await upsertProjectRegistration({
+    project: primary,
+    nowIso: "2026-01-01T00:00:00Z",
+  });
+  await touchProjectRegistration({ project, nowIso: "2026-01-01T00:00:01Z" });
+  const path = join(tempDir ?? "missing-fixture", ".hack", "projects.json");
+  const before = await readFile(path, "utf8");
+  const lock = `${path}.lock`;
+  await writeFile(lock, "fixture-owner");
+  expect(
+    (
+      await touchProjectRegistration({
+        project,
+        nowIso: "2026-01-01T00:00:02Z",
+      })
+    )?.status
+  ).toBe("noop");
+  expect(await readFile(path, "utf8")).toBe(before);
+  expect(await readFile(lock, "utf8")).toBe("fixture-owner");
+  await rm(lock);
+  runGit({ cwd: worktreeRoot, args: ["checkout", "-b", "feature/changed"] });
+  await touchProjectRegistration({ project, nowIso: "2026-01-01T00:00:03Z" });
+  expect(
+    (await readProjectsRegistry()).projects[0]?.worktrees?.[0]?.branch
+  ).toBe("feature/changed");
+});
+
+for (const stale of [false, true]) {
+  test(`optional expired touch defers a ${stale ? "stale-looking" : "fresh"} busy lock without reclamation`, async () => {
+    const { primary } = await createFixture();
+    await upsertProjectRegistration({
+      project: primary,
+      nowIso: "2026-01-01T00:00:00Z",
+    });
+    const path = join(tempDir ?? "missing-fixture", ".hack", "projects.json");
+    const before = await readFile(path, "utf8");
+    const lock = `${path}.lock`;
+    await writeFile(lock, "fixture-owner");
+    if (stale) {
+      await utimes(lock, new Date(0), new Date(0));
+    }
+    const start = performance.now();
+    expect(
+      await touchProjectRegistration({
+        project: primary,
+        nowIso: "2026-01-01T00:01:00Z",
+      })
+    ).toBeNull();
+    // Existing required writes wait two seconds; optional discovery must not do so.
+    expect(performance.now() - start).toBeLessThan(1500);
+    expect(await readFile(path, "utf8")).toBe(before);
+    expect(await readFile(lock, "utf8")).toBe("fixture-owner");
+  });
+}

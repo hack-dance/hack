@@ -21,6 +21,7 @@ import {
   readProjectConfig,
   readProjectDevHost,
   resolveProjectOauthAliasHost,
+  resolveProjectRouteBaseHosts,
   sanitizeBranchSlug,
   sanitizeProjectSlug,
 } from "../lib/project.ts";
@@ -298,9 +299,7 @@ const handleBranchOpen: CommandHandlerFor<typeof branchOpenSpec> = async ({
   }
 
   const aliasHost = resolveBranchAliasHost({ devHost, cfg });
-  const baseHosts = [devHost, aliasHost].filter(
-    (host): host is string => typeof host === "string" && host.length > 0
-  );
+  const baseHosts = resolveProjectRouteBaseHosts({ devHost, aliasHost });
 
   const preferenceRaw = args.options.prefer;
   const optionPreference = parseOpenHostPreference(preferenceRaw);

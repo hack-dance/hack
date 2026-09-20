@@ -226,6 +226,10 @@ fn validate_archive(bytes: &[u8], image: &str, max_expanded: u64) -> Result<(), 
     Ok(())
 }
 
+pub(super) fn validate_download(bytes: &[u8], image: &str) -> Result<(), CandidateError> {
+    validate_archive(bytes, image, MAX_EXPANDED)
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageReceipt {

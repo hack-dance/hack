@@ -136,3 +136,32 @@ execution identity are refused; the executor does not silently reuse the origina
 file's different configuration. Use immutable source publication and a fresh run
 for this bounded path. Source exclusions and runtime ownership checks remain in
 force. Existing commands without these flags keep their file-based behavior.
+
+## Public image acquisition without Docker
+
+The candidate can fetch a **digest-pinned public Docker Hub image** without Docker,
+OrbStack, registry credentials, or a running guest:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime fetch-image \
+  --reference 'namespace/repository@sha256:REVIEWED_MANIFEST_DIGEST' \
+  --archive /absolute/private/new-image.tar
+```
+
+The archive must not already exist. The result reports `source_digest`, the selected
+Linux ARM64 `manifest_digest`, config `image_id`, `archive_sha256`, and archive size.
+Pass that exact archive, hash and image ID to `runtime load-image` after preparing
+the candidate guest. Fetching and importing remain separate operations.
+
+The fetch verifies the pinned index/manifest, the selected ARM64 manifest, every
+compressed blob and config digest, and the expanded layer identities. It supports
+only gzip layers, at most 128 layers, 256 MiB archived and 2 GiB expanded. HTTPS
+requests have a 60-second limit within a 300-second acquisition deadline; redirects
+are restricted to known Docker Hub HTTPS blob origins, with no bearer forwarding to
+CDNs. It never reads Docker credentials or proxy settings. Mutable tags, private
+registries, other registries and unsupported platforms fail closed. No implicit
+image refresh occurs. Keep the archive only as long as needed for owned imports;
+fetch does not install a background cache or cleanup daemon. The complete archive is synced and published without replacing an existing path.
+A failed write leaves no final archive; process interruption may retain a hidden
+temporary file beside the requested output. A directory-sync failure reports that
+a complete archive was published but durability could not be confirmed.

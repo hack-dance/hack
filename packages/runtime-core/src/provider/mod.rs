@@ -29,6 +29,7 @@ mod image_load;
 pub mod managed_environment;
 pub mod private_deadline;
 pub mod private_input;
+pub mod registry_image;
 pub mod relay_auth;
 pub mod relay_client;
 pub mod relay_frame;

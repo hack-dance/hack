@@ -3,18 +3,20 @@ use hack_runtime_core::{
     CandidateError,
     provider::{BridgeIntent, DependencySocketIntent, NetworkIntent, Profile},
 };
+use std::path::PathBuf;
 
 pub struct Options {
     pub profile: Profile,
     pub network: Option<NetworkIntent>,
     pub bridges: Option<BridgeIntent>,
     pub dependencies: Option<DependencySocketIntent>,
+    pub project_share: Option<PathBuf>,
 }
 
 fn invalid() -> CandidateError {
     CandidateError::new(
         "invalid_arguments",
-        "Use runtime up --profile research|development with --bridge-sockets and/or --dependency-sockets, each once, repeatable --allow-host HOST, plus optional --json.",
+        "Use runtime up --profile research|development with --bridge-sockets and/or --dependency-sockets, each once, repeatable --allow-host HOST, plus optional --json. Direct project sharing requires --profile development --project-share PATH --unfiltered-source together; it exposes the exact project tree without snapshot exclusions.",
     )
 }
 
@@ -24,9 +26,19 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
     let mut dependencies = None;
     let mut json = false;
     let mut hosts = Vec::new();
+    let mut project_share = None;
+    let mut unfiltered_source = false;
     let mut args = args.iter();
     while let Some(key) = args.next() {
         match *key {
+            "--project-share" if project_share.is_none() => {
+                let path = PathBuf::from(args.next().ok_or_else(invalid)?);
+                if !path.is_absolute() {
+                    return Err(invalid());
+                }
+                project_share = Some(path);
+            }
+            "--unfiltered-source" if !unfiltered_source => unfiltered_source = true,
             "--allow-host" => hosts.push(args.next().ok_or_else(invalid)?.to_string()),
             "--json" if !json => json = true,
             "--profile" if profile.is_none() => {
@@ -49,7 +61,14 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
             _ => return Err(invalid()),
         }
     }
-    if bridges.is_none() && dependencies.is_none() && hosts.is_empty() {
+    let profile = profile.ok_or_else(invalid)?;
+    if unfiltered_source != project_share.is_some()
+        || (project_share.is_some() && profile != Profile::Development)
+        || (bridges.is_none()
+            && dependencies.is_none()
+            && hosts.is_empty()
+            && project_share.is_none())
+    {
         return Err(invalid());
     }
     let network = if hosts.is_empty() {
@@ -59,15 +78,74 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
     };
     Ok(Options {
         network,
-        profile: profile.ok_or_else(invalid)?,
+        profile,
         bridges,
         dependencies,
+        project_share,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unfiltered_share_requires_explicit_pair_and_development_profile() {
+        let good = [
+            "--profile",
+            "development",
+            "--project-share",
+            "/fixture/project",
+            "--unfiltered-source",
+            "--json",
+        ];
+        assert_eq!(
+            parse(&good).unwrap().project_share,
+            Some(PathBuf::from("/fixture/project"))
+        );
+        for args in [
+            vec![
+                "--profile",
+                "development",
+                "--project-share",
+                "/fixture/project",
+            ],
+            vec!["--profile", "development", "--unfiltered-source"],
+            vec![
+                "--profile",
+                "research",
+                "--project-share",
+                "/fixture/project",
+                "--unfiltered-source",
+            ],
+            vec![
+                "--profile",
+                "development",
+                "--project-share",
+                "relative",
+                "--unfiltered-source",
+            ],
+            vec![
+                "--profile",
+                "development",
+                "--project-share",
+                "/fixture/project",
+                "--unfiltered-source",
+                "--unfiltered-source",
+            ],
+            vec![
+                "--profile",
+                "development",
+                "--project-share",
+                "/fixture/project",
+                "--unfiltered-source",
+                "--project-share",
+                "/fixture/other",
+            ],
+        ] {
+            assert!(parse(&args).is_err());
+        }
+    }
 
     #[test]
     fn approved_hosts_are_explicit_repeatable_and_composable() {

@@ -43,11 +43,10 @@ fn required(plan: &PlanData, entries: &[ContentEntry]) -> Result<BTreeSet<String
             let Some(bind) = parent.filter(|m| m.kind == "bind") else {
                 continue;
             };
-            if !bind.read_only
-                || (bind.source != "."
-                    && !entries
-                        .iter()
-                        .any(|entry| entry.path == bind.source && entry.kind == "directory"))
+            if bind.source != "."
+                && !entries
+                    .iter()
+                    .any(|entry| entry.path == bind.source && entry.kind == "directory")
             {
                 return Err(refused());
             }
@@ -239,6 +238,27 @@ mod tests {
         let other = capture(&changed).with_mountpoints(&changed).unwrap();
         assert_ne!(snapshot.receipt().revision, other.receipt().revision);
         assert!(!fixture.0.join("project/other").exists());
+    }
+    #[test]
+    fn writable_declarations_can_publish_immutable_mountpoint_skeletons() {
+        let (_fixture, mut plan) = fixture();
+        plan.services.get_mut("web").unwrap().mounts[0].read_only = false;
+        let snapshot = capture(&plan).with_mountpoints(&plan).unwrap();
+        snapshot.receipt().verify_mountpoints(&plan).unwrap();
+        assert!(
+            snapshot
+                .receipt()
+                .entries
+                .iter()
+                .any(|entry| entry.path == "node_modules" && entry.kind == "directory")
+        );
+        assert!(
+            !snapshot
+                .receipt()
+                .entries
+                .iter()
+                .any(|entry| entry.path.contains("private-excluded"))
+        );
     }
     #[test]
     fn selected_file_symlink_and_escape_conflicts_refuse() {

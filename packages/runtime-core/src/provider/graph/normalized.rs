@@ -213,6 +213,7 @@ mod tests {
                 compose,
                 run: RunOptions {
                     live_source: false,
+                    shared_source: false,
                     release_initializer_cache: BTreeSet::new(),
                     routing_enrolled: false,
                     project: PlanOptions {

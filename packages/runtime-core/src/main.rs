@@ -55,10 +55,13 @@ Usage:
   hack-local graph bridges|reconcile-bridges --run-id <32-hex> [--json]
   hack-local runtime probe|up --profile research|development [--json]
   hack-local runtime up --profile research|development [--bridge-sockets <1..32>] [--dependency-sockets <1..32>] [--json]
+  hack-local runtime up --profile development --project-share <exact-project-root> --unfiltered-source [--json]
+  hack-local graph serve|run ... --shared-source
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
   hack-local runtime prepare-engine --archive <pinned-docker.tgz>
   hack-local runtime prepare-network-tools --directory <private-pinned-apk-directory>
-  hack-local runtime fetch-image --reference <namespace/repository@sha256:digest> --archive <new-flat-image.tar>
+  hack-local runtime resolve-image --reference <namespace/repository[:tag]> --json
+  hack-local runtime fetch-image --reference <namespace/repository@sha256:digest> --archive <new-flat-image.tar> [--json]
   hack-local runtime load-image --archive <flat-image.tar> --sha256 <archive-hash> --image-id <sha256:config-hash>
   hack-local runtime up|status|down|recover [--json]
   hack-local node serve|status|inspect
@@ -284,15 +287,25 @@ fn run() -> Result<(), CandidateError> {
         ["runtime", "up", arguments @ ..]
             if arguments.contains(&"--bridge-sockets")
                 || arguments.contains(&"--dependency-sockets")
-                || arguments.contains(&"--allow-host") =>
+                || arguments.contains(&"--allow-host")
+                || arguments.contains(&"--project-share")
+                || arguments.contains(&"--unfiltered-source") =>
         {
             let options = runtime_up_cli::parse(arguments)?;
-            print_json(&hack_runtime_core::provider::up_with_network_sockets(
+            let share = options
+                .project_share
+                .as_deref()
+                .map(|project| {
+                    hack_runtime_core::provider::ProjectShareIntent::approve(project, true)
+                })
+                .transpose()?;
+            print_json(&hack_runtime_core::provider::up_with_project_share(
                 &discover_candidate(&requested)?,
                 options.profile,
                 options.bridges,
                 options.dependencies,
                 options.network,
+                share,
             )?)?;
         }
         ["runtime", action @ ("probe" | "up"), "--profile", profile]
@@ -537,11 +550,31 @@ fn run() -> Result<(), CandidateError> {
         }
         [
             "runtime",
+            "resolve-image",
+            "--reference",
+            reference,
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::registry_image::resolve(
+                reference,
+            )?)?;
+        }
+        [
+            "runtime",
             "fetch-image",
             "--reference",
             reference,
             "--archive",
             archive,
+        ]
+        | [
+            "runtime",
+            "fetch-image",
+            "--reference",
+            reference,
+            "--archive",
+            archive,
+            "--json",
         ] => {
             print_json(&hack_runtime_core::provider::registry_image::acquire(
                 reference,

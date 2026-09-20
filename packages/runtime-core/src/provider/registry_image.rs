@@ -174,6 +174,12 @@ impl Fetch {
                 url = next;
                 continue;
             }
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Err(CandidateError::new(
+                    "registry_image_not_found",
+                    "The public registry image or requested tag was not found.",
+                ));
+            }
             if !response.status().is_success() {
                 return Err(error(
                     "Public registry request was refused; no local credentials were used.",
@@ -240,15 +246,7 @@ pub struct AcquiredImage {
     pub archive_sha256: String,
     pub archive_bytes: u64,
 }
-/// Acquire one public pinned Linux ARM64 image into a new explicit archive. The output
-/// must not exist. A failure never imports an image or changes candidate runtime state.
-/// HTTPS requests have a 60s bound and the complete acquisition a 300s deadline.
-/// SIGINT/process cancellation stops acquisition; no child transfer outlives the caller.
-pub fn acquire(reference_text: &str, output: &Path) -> Result<AcquiredImage, CandidateError> {
-    let (repo, pin) = reference(reference_text)?;
-    if output.exists() {
-        return Err(error("Image archive output already exists."));
-    }
+fn authenticated_fetch(repo: &str) -> Result<Fetch, CandidateError> {
     let mut fetch = Fetch {
         client: Client::builder()
             .https_only(true)
@@ -277,6 +275,115 @@ pub fn acquire(reference_text: &str, output: &Path) -> Result<AcquiredImage, Can
         return Err(error("Invalid anonymous registry token."));
     }
     fetch.token = Zeroizing::new(token.token);
+    Ok(fetch)
+}
+
+fn tagged_reference(value: &str) -> Result<(&str, &str), CandidateError> {
+    let value = value.strip_prefix("docker.io/").unwrap_or(value);
+    if value.contains('@') {
+        return Err(error(
+            "Tag resolution requires a repository and optional tag, not a digest.",
+        ));
+    }
+    let (repo, tag) = value.split_once(':').unwrap_or((value, "latest"));
+    let tag_valid = !tag.is_empty()
+        && tag.len() <= 128
+        && tag.bytes().enumerate().all(|(i, b)| {
+            b.is_ascii_alphanumeric() || b == b'_' || (i > 0 && matches!(b, b'.' | b'-'))
+        });
+    let repo_valid = repo.len() <= 200
+        && repo.split('/').count() == 2
+        && repo.split('/').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+                && part
+                    .bytes()
+                    .next()
+                    .is_some_and(|b| b.is_ascii_alphanumeric())
+                && part
+                    .bytes()
+                    .last()
+                    .is_some_and(|b| b.is_ascii_alphanumeric())
+        });
+    if !tag_valid || !repo_valid {
+        return Err(error(
+            "Only public Docker Hub namespace/repository[:tag] references are supported.",
+        ));
+    }
+    Ok((repo, tag))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResolvedImage {
+    pub pinned_reference: String,
+    pub source_digest: String,
+    pub manifest_digest: String,
+    pub image_id: String,
+    pub platform: &'static str,
+}
+
+/// Resolve public mutable metadata once and return an explicit immutable identity.
+/// No image layers, archive, runtime state or local credentials are accessed. A later
+/// fetch must use pinned_reference: reusing the original tag would discard this review.
+pub fn resolve(reference_text: &str) -> Result<ResolvedImage, CandidateError> {
+    let (repo, tag) = tagged_reference(reference_text)?;
+    let fetch = authenticated_fetch(repo)?;
+    let url = Url::parse(&format!(
+        "https://registry-1.docker.io/v2/{repo}/manifests/{tag}"
+    ))
+    .map_err(|_| error("Invalid manifest address."))?;
+    let initial = fetch.bytes(url, MAX_METADATA, true)?;
+    let source_digest = digest(&initial);
+    let mut manifest = parse_manifest(&initial, &source_digest)?;
+    let mut manifest_digest = source_digest.clone();
+    if !manifest.manifests.is_empty() {
+        let selected = arm64(&manifest)?;
+        manifest_digest = selected.digest.clone();
+        let bytes = fetch.object(repo, "manifests", selected, MAX_METADATA)?;
+        manifest = parse_manifest(&bytes, &manifest_digest)?;
+    }
+    if !manifest.manifests.is_empty() || manifest.layers.is_empty() || manifest.layers.len() > 128 {
+        return Err(error("Only a bounded single-image manifest is supported."));
+    }
+    let config = manifest
+        .config
+        .ok_or_else(|| error("Image config descriptor is missing."))?;
+    let config_bytes = fetch.object(repo, "blobs", &config, MAX_METADATA)?;
+    verify_platform(&config_bytes)?;
+    Ok(ResolvedImage {
+        pinned_reference: format!("docker.io/{repo}@{source_digest}"),
+        source_digest,
+        manifest_digest,
+        image_id: config.digest,
+        platform: "linux/arm64",
+    })
+}
+fn verify_platform(config_bytes: &[u8]) -> Result<(), CandidateError> {
+    let config: serde_json::Value =
+        serde_json::from_slice(config_bytes).map_err(|_| error("Invalid image configuration."))?;
+    if config["os"] != "linux"
+        || config["architecture"] != "arm64"
+        || config.get("variant").is_some_and(|v| v != "v8")
+    {
+        return Err(error(
+            "Image configuration does not target supported Linux ARM64.",
+        ));
+    }
+    Ok(())
+}
+
+/// Acquire one public pinned Linux ARM64 image into a new explicit archive. The output
+/// must not exist. A failure never imports an image or changes candidate runtime state.
+/// HTTPS requests have a 60s bound and the complete acquisition a 300s deadline.
+/// SIGINT/process cancellation stops acquisition; no child transfer outlives the caller.
+pub fn acquire(reference_text: &str, output: &Path) -> Result<AcquiredImage, CandidateError> {
+    let (repo, pin) = reference(reference_text)?;
+    if output.exists() {
+        return Err(error("Image archive output already exists."));
+    }
+    let fetch = authenticated_fetch(repo)?;
     let url = Url::parse(&format!(
         "https://registry-1.docker.io/v2/{repo}/manifests/{pin}"
     ))
@@ -414,6 +521,57 @@ mod tests {
         assert_eq!(fs::read(&output).unwrap(), b"complete");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn mutable_resolution_is_explicit_and_rejects_non_repository_inputs() {
+        assert_eq!(
+            tagged_reference("bitnami/redis").unwrap(),
+            ("bitnami/redis", "latest")
+        );
+        assert_eq!(
+            tagged_reference("docker.io/chromedp/headless-shell:stable").unwrap(),
+            ("chromedp/headless-shell", "stable")
+        );
+        for value in [
+            "redis",
+            "host.test/a/b:tag",
+            "https://docker.io/a/b:tag",
+            "a/b@sha256:bad",
+            "a/b:",
+            "a/b:-bad",
+            "a/b:foo?bar",
+            "a/b:foo/bar",
+            "a/..:tag",
+            "a/b:PRIVATE CANARY",
+        ] {
+            assert!(tagged_reference(value).is_err(), "{value}");
+        }
+        assert!(reference("bitnami/redis:latest").is_err());
+    }
+    #[test]
+    fn resolution_requires_unambiguous_linux_arm64_and_actual_config_architecture() {
+        let bytes=br#"{"schemaVersion":2,"manifests":[{"digest":"sha256:unused","size":10,"mediaType":"manifest","platform":{"os":"linux","architecture":"amd64"}}]}"#;
+        assert!(arm64(&parse_manifest(bytes, &digest(bytes)).unwrap()).is_err());
+        for bytes in [
+            br#"{"os":"linux","architecture":"arm64"}"#.as_slice(),
+            br#"{"os":"linux","architecture":"arm64","variant":"v8"}"#.as_slice(),
+        ] {
+            assert!(verify_platform(bytes).is_ok());
+        }
+        for bytes in [
+            br#"{"os":"linux","architecture":"amd64"}"#.as_slice(),
+            br#"{"os":"linux","architecture":"arm64","variant":"v9"}"#.as_slice(),
+            br#"{"os":"darwin","architecture":"arm64"}"#.as_slice(),
+        ] {
+            assert!(verify_platform(bytes).is_err());
+        }
+        // Duplicate supported entries remain ambiguous, even when their digests agree.
+        let descriptor = serde_json::json!({"digest":"sha256:unused","size":10,"mediaType":"manifest","platform":{"os":"linux","architecture":"arm64"}});
+        let bytes = serde_json::to_vec(
+            &serde_json::json!({"schemaVersion":2,"manifests":[descriptor.clone(),descriptor]}),
+        )
+        .unwrap();
+        assert!(arm64(&parse_manifest(&bytes, &digest(&bytes)).unwrap()).is_err());
     }
     #[test]
     fn only_public_digest_pinned_repository_references_are_accepted() {

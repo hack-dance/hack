@@ -2,10 +2,13 @@
 //! Replay verifies a fresh compatible acknowledgement but retains baseline cache identity.
 use super::*;
 use crate::project::{PlanData, snapshot::ContentRevision};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared: Option<super::super::ProjectShareIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<LiveBinding>,
     pub revision: String,
@@ -23,7 +26,12 @@ impl SourceBinding {
         [&self.revision, &self.archive_sha256, &self.selection_sha256]
             .iter()
             .all(|v| hex(v, 64))
+            && !(self.live.is_some() && self.shared.is_some())
             && self.live.as_ref().is_none_or(|live| live.workspace.valid())
+            && self
+                .shared
+                .as_ref()
+                .is_none_or(|share| share.validate_receipt().is_ok())
     }
 }
 pub(super) struct Inputs {
@@ -107,6 +115,109 @@ fn paths(
     Ok(paths)
 }
 
+pub(super) fn requested_mode(
+    plan: &PlanData,
+    revision: Option<&str>,
+    live: bool,
+    shared: bool,
+) -> Result<(), CandidateError> {
+    if !shared {
+        return requested(plan, revision);
+    }
+    let cache = plan
+        .services
+        .values()
+        .any(|s| s.active && s.dependency_cache.is_some());
+    if live
+        || mounts(plan).next().is_none()
+        || cache != revision.is_some()
+        || revision.is_some_and(|r| !hex(r, 64))
+    {
+        return Err(error(
+            "graph_shared_source",
+            "Shared source requires an explicit provider project share; a published revision is required only for dependency-cache identity.",
+        ));
+    }
+    Ok(())
+}
+pub(super) fn prepare_mode(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    plan: &PlanData,
+    revision: Option<&str>,
+    live: bool,
+    shared: bool,
+) -> Result<Option<Inputs>, CandidateError> {
+    requested_mode(plan, revision, live, shared)?;
+    if !shared {
+        return prepare(candidate, engine, plan, revision, live);
+    }
+    let share = engine.guest().project_share().ok_or_else(|| {
+        error(
+            "graph_shared_source",
+            "Runtime has no approved project share.",
+        )
+    })?;
+    share.validate()?;
+    if share.project != plan.source {
+        return Err(error(
+            "graph_shared_source",
+            "Shared project root differs from reviewed source.",
+        ));
+    }
+    let mut selected = BTreeMap::new();
+    for mount in mounts(plan) {
+        let path = share.bind_path(&mount.source)?;
+        engine.guest().execute(
+            "set -eu; test \"$(realpath -e -- \"$1\")\" = \"$1\"; test -f \"$1\" || test -d \"$1\"",
+            &[&path],
+            None,
+        )?;
+        selected.insert(mount.source.clone(), path);
+    }
+    engine.guest().execute("set -eu; test \"$(findmnt -n -o FSTYPE --mountpoint \"$1\")\" = virtiofs; case \",$(findmnt -n -o OPTIONS --mountpoint \"$1\"),\" in *,rw,*) ;; *) exit 1;; esac", &[&share.guest_path], None)?;
+    let (manifest, archive_sha256) = if let Some(revision) = revision {
+        let publication =
+            super::super::source_transfer::load(candidate, &plan.namespace, revision)?;
+        super::super::source_transfer::verify_published(engine.guest(), &publication)?;
+        if publication.manifest.selection_sha256 != plan.source_selection.metadata_sha256 {
+            return Err(error(
+                "graph_shared_source",
+                "Cache baseline differs from current review.",
+            ));
+        }
+        publication.manifest.verify_mountpoints(plan)?;
+        publication.manifest.verify_registry(plan)?;
+        publication.manifest.verify_generated(plan)?;
+        let fresh = project::snapshot::capture_plan(plan)?;
+        if fresh.receipt().revision != publication.manifest.revision {
+            return Err(error(
+                "graph_shared_source",
+                "Published cache baseline no longer matches project contents; publish a fresh review before starting.",
+            ));
+        }
+        (publication.manifest, publication.archive_sha256)
+    } else {
+        let snapshot = project::snapshot::capture_plan(plan)?;
+        (
+            snapshot.receipt().clone(),
+            format!("{:x}", Sha256::digest(snapshot.archive()?)),
+        )
+    };
+    Ok(Some(Inputs {
+        current_manifest: None,
+        binding: SourceBinding {
+            shared: Some(share.clone()),
+            live: None,
+            revision: manifest.revision.clone(),
+            archive_sha256,
+            selection_sha256: manifest.selection_sha256.clone(),
+        },
+        manifest,
+        paths: selected,
+    }))
+}
+
 pub(super) fn prepare(
     candidate: &Candidate,
     engine: &Engine<'_>,
@@ -173,8 +284,27 @@ pub(super) fn prepare_replay(
     receipt: &Receipt,
     revision: Option<&str>,
     live: bool,
+    shared: bool,
     non_secret_values: &BTreeMap<String, String>,
 ) -> Result<Option<Inputs>, CandidateError> {
+    if shared || receipt.source.as_ref().is_some_and(|s| s.shared.is_some()) {
+        if !shared || live || inputs.review.plan_id != receipt.plan_id {
+            return Err(error(
+                "graph_shared_source",
+                "Shared replay requires explicit unchanged source mode and review; replan after host edits.",
+            ));
+        }
+        let source = prepare_mode(
+            engine.guest().candidate(),
+            engine,
+            &inputs.review.plan,
+            revision,
+            false,
+            true,
+        )?;
+        unchanged(&source, receipt)?;
+        return Ok(source);
+    }
     let retained = receipt
         .source
         .as_ref()
@@ -319,6 +449,7 @@ fn published_inputs(
         current_manifest: None,
         manifest: publication.manifest.clone(),
         binding: SourceBinding {
+            shared: None,
             live: None,
             revision: revision.into(),
             archive_sha256: publication.archive_sha256.clone(),
@@ -370,6 +501,7 @@ mod tests {
             archive_sha256: "d".repeat(64),
         };
         let binding = SourceBinding {
+            shared: None,
             revision: baseline.receipt().revision.clone(),
             archive_sha256: publication.archive_sha256.clone(),
             selection_sha256: baseline.receipt().selection_sha256.clone(),
@@ -504,6 +636,7 @@ mod tests {
             relay_cleanup: None,
             probes: BTreeMap::new(),
             source: Some(SourceBinding {
+                shared: None,
                 revision: manifest.revision,
                 archive_sha256: "d".repeat(64),
                 selection_sha256: manifest.selection_sha256,
@@ -619,6 +752,7 @@ mod tests {
             current_manifest: None,
             manifest: manifest.clone(),
             binding: SourceBinding {
+                shared: None,
                 live: None,
                 revision: manifest.revision.clone(),
                 archive_sha256: "b".repeat(64),
@@ -694,6 +828,7 @@ mod tests {
         let mut receipt: Receipt = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(&receipt).unwrap(), value);
         let binding = SourceBinding {
+            shared: None,
             live: None,
             revision: "a".repeat(64),
             archive_sha256: "b".repeat(64),

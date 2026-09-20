@@ -34,6 +34,7 @@ fn execute(
     let readiness = BTreeMap::from([("app".into(), Condition::Started)]);
     let options = RunOptions {
         live_source: false,
+        shared_source: false,
         release_initializer_cache: std::collections::BTreeSet::new(),
         routing_enrolled: false,
         project: project(),

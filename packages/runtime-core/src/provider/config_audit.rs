@@ -18,8 +18,10 @@ pub(super) fn verify(candidate: &Candidate, owner: &Owner) -> Result<(), Candida
     let database = home.join("Library/Application Support/smolvm/server/smolvm.db");
     #[cfg(not(target_os = "macos"))]
     let database = home.join(".local/share/smolvm/server/smolvm.db");
-    verify_database(
-        &database,
+    let record = read_database(&database, &owner.machine)?;
+    verify_mounts(candidate, owner, &record)?;
+    verify_record(
+        &record,
         &owner.machine,
         &owner.token,
         owner.application_bridge,
@@ -41,6 +43,7 @@ pub(super) fn pin_created_network(
     #[cfg(not(target_os = "macos"))]
     let database = home.join(".local/share/smolvm/server/smolvm.db");
     let record = read_database(&database, &owner.machine)?;
+    verify_mounts(candidate, owner, &record)?;
     let network = owner.network.pin(&record)?;
     verify_record(
         &record,
@@ -53,6 +56,26 @@ pub(super) fn pin_created_network(
         network.clone(),
     )?;
     owner.network = network;
+    Ok(())
+}
+
+fn verify_mounts(
+    candidate: &Candidate,
+    owner: &Owner,
+    record: &Value,
+) -> Result<(), CandidateError> {
+    let mut mounts = vec![json!([
+        super::artifact::engine_root(candidate),
+        "/opt/hack-engine",
+        true
+    ])];
+    if let Some(share) = &owner.project_share {
+        share.validate_receipt()?;
+        mounts.push(share.database_mount());
+    }
+    if record["mounts"] != json!(mounts) {
+        return Err(invalid());
+    }
     Ok(())
 }
 
@@ -69,6 +92,7 @@ fn metadata(path: &Path) -> Result<fs::Metadata, CandidateError> {
     Ok(metadata)
 }
 
+#[cfg(test)]
 fn verify_database(
     path: &Path,
     machine: &str,

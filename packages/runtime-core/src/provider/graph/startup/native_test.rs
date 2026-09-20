@@ -103,6 +103,7 @@ fn options<'a>(
 ) -> RunOptions<'a> {
     RunOptions {
         live_source: false,
+        shared_source: false,
         release_initializer_cache: std::collections::BTreeSet::new(),
         routing_enrolled: false,
         project: PlanOptions {

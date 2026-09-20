@@ -201,7 +201,8 @@ pub(super) fn prepare_delivery(
                 return Err(unsupported());
             }
             if mount.kind == "bind" {
-                if !mount.read_only || !source.is_some_and(|s| s.paths.contains_key(&mount.source))
+                if (!mount.read_only && !source.is_some_and(|s| s.binding.shared.is_some()))
+                    || !source.is_some_and(|s| s.paths.contains_key(&mount.source))
                 {
                     return Err(unsupported());
                 }
@@ -300,7 +301,15 @@ pub(super) fn prepare_delivery(
         let (network, endpoints) = network_config(name, &service.networks, &network_names)?;
         let mounts: Vec<_> = service.mounts.iter().map(|m| {
             if m.kind == "bind" {
-                json!({"Type":"bind","Source":source.expect("validated source").paths[&m.source],"Target":m.target,"ReadOnly":true,"BindOptions":{"Propagation":"rprivate"}})
+                let source = source.expect("validated source");
+                // Installers must read immutable inputs so a host edit cannot poison
+                // a content-keyed cache while installation is in progress.
+                let frozen_initializer = source.binding.shared.is_some() && service.dependency_cache.is_some();
+                let path = if frozen_initializer {
+                    let root = format!("/storage/hack-source/{}/{}/tree", plan.namespace, source.manifest.revision);
+                    if m.source == "." { root } else { format!("{root}/{}", m.source) }
+                } else { source.paths[&m.source].clone() };
+                json!({"Type":"bind","Source":path,"Target":m.target,"ReadOnly":frozen_initializer || m.read_only,"BindOptions":{"Propagation":"rprivate"}})
             } else {
                 { let mut mount = json!({"Type":"volume","Source":resources[&format!("volume:{}",m.source)].name,"Target":m.target,"ReadOnly":m.read_only});
                 if let Some(subpath) = &m.subpath { mount["VolumeOptions"] = json!({"Subpath":subpath,"NoCopy":true}); } mount }
@@ -314,6 +323,15 @@ pub(super) fn prepare_delivery(
             "Mounts":mounts,"Tmpfs":{"/tmp":"rw,noexec,nosuid,size=16777216"},"ShmSize":service.limits.shared_memory_bytes.unwrap_or(67108864),
             "RestartPolicy":{"Name":"no"},"LogConfig":{"Type":"json-file","Config":{"max-size":"1m","max-file":"1"}}
         }});
+        // Virtiofs preserves the host uid. Root services need DAC_OVERRIDE to
+        // traverse/write an explicitly shared tree owned by that uid. Read-only
+        // mounts still enforce read-only access; no other capabilities are added.
+        if source.is_some_and(|s| s.binding.shared.is_some())
+            && service.dependency_cache.is_none()
+            && service.mounts.iter().any(|m| m.kind == "bind")
+        {
+            config["HostConfig"]["CapAdd"] = json!(["DAC_OVERRIDE"]);
+        }
         // Only explicitly compiled public values enter engine metadata. Bare/null
         // managed inputs are delivered separately by the private launcher.
         // Omit Env when empty so image defaults remain the engine's responsibility.

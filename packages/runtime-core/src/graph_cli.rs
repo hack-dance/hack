@@ -125,6 +125,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let mut remove_data = false;
     let mut environment_stdin = false;
     let mut live_source = false;
+    let mut shared_source = false;
     let mut json = false;
     let mut unix = false;
     let mut hostnames = Vec::new();
@@ -132,8 +133,21 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     while index < args.len() {
         let key = args[index];
         index += 1;
+        if key == "--shared-source" {
+            if shared_source
+                || live_source
+                || !["run", "serve", "restart", "restore"].contains(action)
+            {
+                return Err(invalid());
+            }
+            shared_source = true;
+            continue;
+        }
         if key == "--live-source" {
-            if live_source || !["run", "serve", "restart", "restore"].contains(action) {
+            if live_source
+                || shared_source
+                || !["run", "serve", "restart", "restore"].contains(action)
+            {
                 return Err(invalid());
             }
             live_source = true;
@@ -388,6 +402,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 expected_plan: expected,
                 source_revision: singles.get("--source-revision").copied(),
                 live_source,
+                shared_source,
                 release_initializer_cache,
                 non_secret_values: &values,
                 readiness: &readiness,

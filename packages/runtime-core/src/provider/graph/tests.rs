@@ -807,6 +807,7 @@ fn fault_child() -> Result<(), CandidateError> {
         &candidate,
         RunOptions {
             live_source: false,
+            shared_source: false,
             release_initializer_cache: std::collections::BTreeSet::new(),
             routing_enrolled: false,
             project: options(),
@@ -1111,6 +1112,7 @@ fn native_http_graph_readiness_restart_restore_and_supervisor_loss() -> Result<(
     let public = BTreeMap::new();
     let options = |run_id| RunOptions {
         live_source: false,
+        shared_source: false,
         release_initializer_cache: std::collections::BTreeSet::new(),
         routing_enrolled: false,
         project: fixture.options(),
@@ -1230,6 +1232,7 @@ kill -KILL "$1"
         &candidate,
         RunOptions {
             live_source: false,
+            shared_source: false,
             release_initializer_cache: std::collections::BTreeSet::new(),
             routing_enrolled: false,
             project: fixture.options(),
@@ -1431,6 +1434,7 @@ fn native_http_preserves_scoped_nonroot_delivery_and_fresh_restore() -> Result<(
     let public = BTreeMap::new();
     let options = || RunOptions {
         live_source: false,
+        shared_source: false,
         release_initializer_cache: std::collections::BTreeSet::new(),
         routing_enrolled: false,
         project: fixture.options(),
@@ -1606,6 +1610,7 @@ fn dependency_cache_graphs_share_only_verified_binding_and_pin_restore_targets()
         let source = source::Inputs {
             current_manifest: None,
             binding: SourceBinding {
+                shared: None,
                 live: None,
                 revision: manifest.revision.clone(),
                 archive_sha256: "b".repeat(64),
@@ -1944,4 +1949,98 @@ fn cleanup_identity_is_independent_of_declared_root_mode() {
             );
         }
     }
+}
+
+#[test]
+fn shared_source_preserves_app_writes_but_freezes_cache_installer_inputs() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    fs::write(fixture.0.join("bun.lock"), "lock-one").unwrap();
+    fs::write(fixture.0.join("package.json"), "{}").unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let document = json!({"services":{
+        "deps":{"image":image,"network_mode":"none","entrypoint":["/bin/true"],"command":[],
+            "volumes":[".:/app","deps:/app/node_modules"],
+            "labels":{"hack.dependencies.cache-volume":"deps","hack.dependencies.lockfiles":"bun.lock","hack.dependencies.bootstrap":"true"}},
+        "app":{"image":image,"network_mode":"none","entrypoint":["/bin/true"],"command":[],
+            "volumes":[".:/app","deps:/app/node_modules"],
+            "depends_on":{"deps":{"condition":"service_completed_successfully"}}},
+        "reader":{"image":image,"network_mode":"none","entrypoint":["/bin/true"],"command":[],"volumes":[".:/app:ro"]}
+    },"volumes":{"deps":{}}});
+    fs::write(fixture.0.join("compose.yaml"), document.to_string()).unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    let snapshot = project::snapshot::capture_plan(&review.plan).unwrap();
+    let manifest = snapshot.receipt().clone();
+    let share = super::super::ProjectShareIntent::approve(&fixture.0, true).unwrap();
+    let path = share.guest_path.clone();
+    let mut source = source::Inputs {
+        current_manifest: None,
+        binding: SourceBinding {
+            shared: Some(share),
+            live: None,
+            revision: manifest.revision.clone(),
+            archive_sha256: "b".repeat(64),
+            selection_sha256: manifest.selection_sha256.clone(),
+        },
+        manifest,
+        paths: BTreeMap::from([(".".into(), path.clone())]),
+    };
+    let compile = || {
+        project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap()
+    };
+    let prepared = config::prepare(
+        compile(),
+        &BTreeMap::from([
+            ("deps".into(), Condition::Completed),
+            ("app".into(), Condition::Started),
+            ("reader".into(), Condition::Started),
+        ]),
+        &"a".repeat(32),
+        &"b".repeat(32),
+        Some(&source),
+    )
+    .unwrap();
+    let mounts = |name: &str| prepared.configs[name]["HostConfig"]["Mounts"][0].clone();
+    assert_eq!(mounts("app")["Source"], path);
+    assert_eq!(mounts("app")["ReadOnly"], false);
+    assert_eq!(mounts("reader")["ReadOnly"], true);
+    assert_eq!(
+        prepared.configs["app"]["HostConfig"]["CapAdd"],
+        json!(["DAC_OVERRIDE"])
+    );
+    assert_eq!(
+        prepared.configs["reader"]["HostConfig"]["CapAdd"],
+        json!(["DAC_OVERRIDE"])
+    );
+    assert!(prepared.configs["deps"]["HostConfig"]["CapAdd"].is_null());
+    assert_eq!(mounts("deps")["ReadOnly"], true);
+    assert_eq!(
+        mounts("deps")["Source"],
+        format!(
+            "/storage/hack-source/{}/{}/tree",
+            review.plan.namespace, source.manifest.revision
+        )
+    );
+    source.binding.shared = None;
+    assert!(
+        config::prepare(
+            compile(),
+            &BTreeMap::from([
+                ("deps".into(), Condition::Completed),
+                ("app".into(), Condition::Started),
+                ("reader".into(), Condition::Started)
+            ]),
+            &"a".repeat(32),
+            &"b".repeat(32),
+            Some(&source)
+        )
+        .is_err()
+    );
 }

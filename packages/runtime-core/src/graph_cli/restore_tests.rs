@@ -5,6 +5,27 @@ const RUN: &str = "11111111111111111111111111111111";
 const PLAN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const GENERATION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+#[test]
+fn shared_and_filtered_source_modes_cannot_be_combined_or_used_for_inspection() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let candidate = Candidate::discover(&root).unwrap();
+    for args in [
+        vec!["run", "--live-source", "--shared-source"],
+        vec!["run", "--shared-source", "--live-source"],
+        vec!["serve", "--shared-source", "--shared-source"],
+        vec!["inspect", "--shared-source"],
+        vec!["cleanup", "--shared-source"],
+    ] {
+        assert_eq!(
+            command(&candidate, &args).unwrap_err().code,
+            "graph_arguments"
+        );
+    }
+}
+
 fn valid() -> Vec<&'static str> {
     vec![
         "--run-id",

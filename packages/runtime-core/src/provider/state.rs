@@ -181,6 +181,8 @@ impl Default for ReclamationPolicy {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Owner {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_share: Option<super::ProjectShareIntent>,
     #[serde(default)]
     pub network: super::NetworkIntent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,6 +216,9 @@ impl Owner {
         reject_aliased_state(&root)?;
         let owner: Self = read(&root.join("owner.json"))?;
         owner.network.validate()?;
+        if let Some(share) = &owner.project_share {
+            share.validate_receipt()?;
+        }
         if owner.created
             && matches!(&owner.network, super::NetworkIntent::ApprovedHosts { cidrs, .. } if cidrs.is_empty())
         {
@@ -269,6 +274,7 @@ impl Owner {
     ) -> Result<Self, CandidateError> {
         Self::create_with_dependencies(candidate, profile, application_bridge, network, None)
     }
+    #[cfg(test)]
     pub fn create_with_dependencies(
         candidate: &Candidate,
         profile: super::Profile,
@@ -276,6 +282,26 @@ impl Owner {
         network: super::NetworkIntent,
         dependency_sockets: Option<super::DependencySocketIntent>,
     ) -> Result<Self, CandidateError> {
+        Self::create_with_project_share(
+            candidate,
+            profile,
+            application_bridge,
+            network,
+            dependency_sockets,
+            None,
+        )
+    }
+    pub fn create_with_project_share(
+        candidate: &Candidate,
+        profile: super::Profile,
+        application_bridge: Option<super::BridgeIntent>,
+        network: super::NetworkIntent,
+        dependency_sockets: Option<super::DependencySocketIntent>,
+        project_share: Option<super::ProjectShareIntent>,
+    ) -> Result<Self, CandidateError> {
+        if let Some(share) = &project_share {
+            share.validate()?;
+        }
         super::dependency_socket::check_capacity(application_bridge, dependency_sockets)?;
         let root = candidate.state_root.join("run/smolvm");
         let owner_path = root.join("owner.json");
@@ -302,6 +328,7 @@ impl Owner {
             .map_err(io)?;
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let owner = Self {
+            project_share,
             network,
             profile,
             application_bridge,

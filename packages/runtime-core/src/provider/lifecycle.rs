@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Serialize)]
 pub struct RuntimeStatus {
     pub network: Option<super::NetworkIntent>,
+    pub project_share: Option<super::ProjectShareIntent>,
     pub application_bridge: Option<super::BridgeIntent>,
     pub dependency_sockets: Option<super::DependencySocketIntent>,
     pub dependency_socket_observations: Vec<super::DependencySocketObservation>,
@@ -259,6 +260,7 @@ impl<'a> ObservedGuest<'a> {
             || current.token != self.owner.token
             || current.guest_boot_id != self.owner.guest_boot_id
             || current.network != self.owner.network
+            || current.project_share != self.owner.project_share
             || current.application_bridge != self.owner.application_bridge
             || current.dependency_sockets != self.owner.dependency_sockets
             || current.process != self.owner.process
@@ -309,6 +311,9 @@ impl<'a> OwnedGuest<'a> {
         verify_live(self.candidate, &self.owner)
     }
 
+    pub(super) fn project_share(&self) -> Option<&super::ProjectShareIntent> {
+        self.owner.project_share.as_ref()
+    }
     pub(super) fn before_effect(&self) -> Result<(), CandidateError> {
         if let Some((swapouts, last)) = &self.guard {
             if last.get().elapsed() >= Duration::from_secs(2) {
@@ -496,7 +501,14 @@ fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError
             },
         )?;
     owner.network.verify_resources(&config["resources"])?;
-    let mounts = json!([{"source":artifact::engine_root(candidate),"target":"/opt/hack-engine","read_only":true,"staged":false}]);
+    let mut mounts = json!([{"source":artifact::engine_root(candidate),"target":"/opt/hack-engine","read_only":true,"staged":false}]);
+    if let Some(share) = &owner.project_share {
+        share.validate_receipt()?;
+        mounts
+            .as_array_mut()
+            .expect("mounts")
+            .push(share.running_mount());
+    }
     if config["version"] != 1
         || config["mounts"] != mounts
         || config["ports"] != json!([])
@@ -536,6 +548,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     {
         return Ok(RuntimeStatus {
             network: None,
+            project_share: None,
             application_bridge: None,
             dependency_sockets: None,
             dependency_socket_observations: Vec::new(),
@@ -577,6 +590,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     };
     Ok(RuntimeStatus {
         network: Some(owner.network.clone()),
+        project_share: owner.project_share.clone(),
         dependency_sockets: owner.dependency_sockets,
         dependency_socket_observations: super::dependency_socket::observe(candidate, &owner)?,
         provider_resources: resources,
@@ -646,7 +660,7 @@ pub fn up_with_capabilities(
     requested: Option<super::BridgeIntent>,
     network: Option<super::NetworkIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(candidate, profile, requested, network, None)
+    up_selected(candidate, profile, requested, network, None, None)
 }
 
 /// Stage fixed inbound and outbound UNIX socket capacity. Missing dependency
@@ -657,7 +671,7 @@ pub fn up_with_sockets(
     bridge: Option<super::BridgeIntent>,
     dependencies: Option<super::DependencySocketIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(candidate, profile, bridge, None, dependencies)
+    up_selected(candidate, profile, bridge, None, dependencies, None)
 }
 
 /// Explicit socket and egress selection; an existing pool is never widened.
@@ -668,7 +682,26 @@ pub fn up_with_network_sockets(
     dependencies: Option<super::DependencySocketIntent>,
     network: Option<super::NetworkIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(candidate, profile, bridge, network, dependencies)
+    up_selected(candidate, profile, bridge, network, dependencies, None)
+}
+
+/// Explicit unfiltered writable project sharing; never modifies an existing pool.
+pub fn up_with_project_share(
+    candidate: &Candidate,
+    profile: super::Profile,
+    bridge: Option<super::BridgeIntent>,
+    dependencies: Option<super::DependencySocketIntent>,
+    network: Option<super::NetworkIntent>,
+    project_share: Option<super::ProjectShareIntent>,
+) -> Result<RuntimeStatus, CandidateError> {
+    up_selected(
+        candidate,
+        profile,
+        bridge,
+        network,
+        dependencies,
+        project_share,
+    )
 }
 
 fn up_selected(
@@ -677,7 +710,11 @@ fn up_selected(
     requested: Option<super::BridgeIntent>,
     network: Option<super::NetworkIntent>,
     dependencies: Option<super::DependencySocketIntent>,
+    project_share: Option<super::ProjectShareIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
+    if let Some(share) = &project_share {
+        share.validate()?;
+    }
     if let Some(intent) = &network {
         intent.validate()?;
     }
@@ -689,12 +726,13 @@ fn up_selected(
         super::BridgeIntent::new(intent.slots)?;
     }
     reject_aliased_state(&root(candidate))?;
-    let (existing, existing_network, existing_dependencies) = if root(candidate)
+    let (existing, existing_network, existing_dependencies, existing_share) = if root(candidate)
         .join("owner.json")
         .try_exists()
         .map_err(io)?
     {
         let owner = Owner::load(candidate)?;
+        super::project_share::check_request(owner.project_share.as_ref(), project_share.as_ref())?;
         super::bridge::check_request(owner.application_bridge, requested)?;
         super::network_intent::check_request(&owner.network, network.as_ref())?;
         super::dependency_socket::check_request(owner.dependency_sockets, dependencies)?;
@@ -702,9 +740,15 @@ fn up_selected(
             owner.application_bridge,
             owner.network.clone(),
             owner.dependency_sockets,
+            owner.project_share.clone(),
         )
     } else {
-        (requested, network.unwrap_or_default(), dependencies)
+        (
+            requested,
+            network.unwrap_or_default(),
+            dependencies,
+            project_share.clone(),
+        )
     };
     super::dependency_socket::check_capacity(existing, existing_dependencies)?;
     if existing.is_some() && !cfg!(feature = "native-stream-relay") {
@@ -743,13 +787,21 @@ fn up_selected(
         Ok(_) => false,
         Err(error) => return Err(io(error)),
     };
-    let mut owner = Owner::create_with_dependencies(
+    let mut owner = Owner::create_with_project_share(
         candidate,
         profile,
         requested,
         existing_network.clone(),
         existing_dependencies,
+        existing_share.clone(),
     )?;
+    super::project_share::check_request(owner.project_share.as_ref(), existing_share.as_ref())?;
+    if owner.project_share != existing_share {
+        return Err(CandidateError::new(
+            "project_share",
+            "Project share changed before the operation lock.",
+        ));
+    }
     super::bridge::check_request(owner.application_bridge, requested)?;
     super::network_intent::check_request(&owner.network, Some(&existing_network))?;
     super::dependency_socket::check_request(owner.dependency_sockets, dependencies)?;
@@ -832,6 +884,10 @@ fn up_selected(
             "--volume".into(),
             mount,
         ];
+        if let Some(share) = &owner.project_share {
+            share.validate()?;
+            arguments.extend(["--volume".into(), share.argument()]);
+        }
         arguments.extend(
             owner
                 .network

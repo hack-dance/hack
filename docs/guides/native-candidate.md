@@ -163,6 +163,21 @@ OrbStack, registry credentials, or a running guest:
   --archive /absolute/private/new-image.tar
 ```
 
+For an existing mutable image declaration, resolve it explicitly first:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime resolve-image \
+  --reference 'namespace/repository:tag' --json
+```
+
+Omitting the tag selects `latest`. Resolution returns `pinned_reference`,
+`source_digest`, `manifest_digest`, `image_id` and `platform`; it downloads only
+bounded metadata and verifies one unambiguous Linux ARM64 image configuration.
+Pass the returned **pinned reference** to `fetch-image`, not the original tag.
+Resolution creates no archive or runtime state and does not prove that all image
+layers fit the importer limits or that the application starts. A missing public
+tag/object reports `registry_image_not_found`; no replacement image is selected.
+
 The archive must not already exist. The result reports `source_digest`, the selected
 Linux ARM64 `manifest_digest`, config `image_id`, `archive_sha256`, and archive size.
 Pass that exact archive, hash and image ID to `runtime load-image` after preparing
@@ -173,10 +188,34 @@ compressed blob and config digest, and the expanded layer identities. It support
 only gzip layers, at most 128 layers, 256 MiB archived and 2 GiB expanded. HTTPS
 requests have a 60-second limit within a 300-second acquisition deadline; redirects
 are restricted to known Docker Hub HTTPS blob origins, with no bearer forwarding to
-CDNs. It never reads Docker credentials or proxy settings. Mutable tags, private
+CDNs. It never reads Docker credentials or proxy settings. Mutable tags passed directly to fetch, private
 registries, other registries and unsupported platforms fail closed. No implicit
 image refresh occurs. Keep the archive only as long as needed for owned imports;
 fetch does not install a background cache or cleanup daemon. The complete archive is synced and published without replacing an existing path.
 A failed write leaves no final archive; process interruption may retain a hidden
 temporary file beside the requested output. A directory-sync failure reports that
 a complete archive was published but durability could not be confirmed.
+
+### Explicit writable development source
+
+An isolated development pool can opt into a direct host project mount with
+`runtime up --profile development --project-share /absolute/project --unfiltered-source`.
+`graph run` and `graph serve` select that mount with `--shared-source`.
+This shares the entire approved project, including ignored local files, with guest
+read/write access. Filtered source publication remains the default. Do not use the
+unfiltered mode for a checkout whose local files must remain hidden from its services.
+Only the exact canonical project root is accepted; home/credential directories,
+aliased roots, and changes to a retained pool's mount intent are refused.
+
+Shared-source graphs with dependency caches still require a freshly published
+source revision. Cache initializer services read that immutable publication through
+read-only source mounts; their named cache volumes remain writable. This prevents
+concurrent host edits from changing the inputs halfway through installation.
+Other services use the direct host mount with their declared read/write mode.
+Because virtiofs preserves host ownership, those services receive `DAC_OVERRIDE`
+in addition to the otherwise empty capability set. This allows root processes to
+access the explicitly shared tree; it does not bypass a read-only mount.
+An installer that needs to modify source files is not supported in this mode yet.
+Restart after dependency-input changes with a new review and publication.
+Moving or deleting a project prevents further activation, but does not prevent
+owned runtime teardown. Teardown never removes the shared host tree.

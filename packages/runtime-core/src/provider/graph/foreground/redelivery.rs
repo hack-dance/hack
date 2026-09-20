@@ -21,6 +21,7 @@ pub(in crate::provider::graph) fn check_generation(
 pub(super) fn options<'a>(original: &RunOptions<'a>) -> RunOptions<'a> {
     RunOptions {
         live_source: original.live_source,
+        shared_source: original.shared_source,
         release_initializer_cache: original.release_initializer_cache.clone(),
         routing_enrolled: original.routing_enrolled,
         project: crate::project::PlanOptions {
@@ -95,6 +96,7 @@ pub(super) fn restore(
             &receipt,
             original.source_revision,
             original.live_source,
+            original.shared_source,
             original.non_secret_values,
         )?;
     }

@@ -102,6 +102,7 @@ fn restore_inputs(
         &receipt,
         options.source_revision,
         options.live_source,
+        options.shared_source,
         options.non_secret_values,
     )?;
     if let Some(mut marker) = receipt.relay_cleanup.clone() {
@@ -234,6 +235,7 @@ mod tests {
         // must refuse before compilation or an Engine connection can have effects.
         let options = RunOptions {
             live_source: false,
+            shared_source: false,
             release_initializer_cache: std::collections::BTreeSet::new(),
             routing_enrolled: false,
             project: PlanOptions {
@@ -303,6 +305,7 @@ mod tests {
             &candidate,
             RunOptions {
                 live_source: false,
+                shared_source: false,
                 release_initializer_cache: std::collections::BTreeSet::new(),
                 routing_enrolled: false,
                 project: project_options(),

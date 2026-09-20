@@ -6,6 +6,28 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
+#[test]
+fn json_image_fetch_still_refuses_unpinned_input_before_network_or_output() {
+    let fixture = Fixture::new();
+    let archive = fixture.0.join("must-not-exist.tar");
+    let output = invoke(
+        &fixture,
+        &[
+            "runtime",
+            "fetch-image",
+            "--reference",
+            "example/image:latest",
+            "--archive",
+            archive.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let failure: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(failure["code"], "registry_image");
+    assert!(!archive.exists());
+}
+
 struct Fixture(PathBuf);
 
 impl Fixture {

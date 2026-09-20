@@ -544,6 +544,7 @@ fn load_at(
 pub struct RunOptions<'a> {
     /// Explicitly consume an acknowledged mutable directory workspace.
     pub live_source: bool,
+    pub shared_source: bool,
     /// Explicit guest page/dentry cache release after selected fresh initializers.
     pub release_initializer_cache: BTreeSet<String>,
     /// Admit reviewed route intent; this does not itself publish an HTTPS route.
@@ -1149,7 +1150,12 @@ fn run_inputs(
             "Live source cannot yet bind external execution substitutions.",
         ));
     }
-    source::requested(&inputs.review.plan, options.source_revision)?;
+    source::requested_mode(
+        &inputs.review.plan,
+        options.source_revision,
+        options.live_source,
+        options.shared_source,
+    )?;
     // The Engine retains OwnedGuest's mutation lease through immutable/live source
     // verification and durable consumer publication, serializing sync and admission.
     let engine = Engine::connect(candidate)?;
@@ -1174,12 +1180,13 @@ fn run_inputs(
         ));
     }
     super::source_job::check_reservations(&engine)?;
-    let source = source::prepare(
+    let source = source::prepare_mode(
         candidate,
         &engine,
         &inputs.review.plan,
         options.source_revision,
         options.live_source,
+        options.shared_source,
     )?;
     let mut prepared = config::prepare_delivery(
         inputs,
@@ -1578,6 +1585,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         &receipt,
         options.source_revision,
         options.live_source,
+        options.shared_source,
         options.non_secret_values,
     )?;
     let mut prepared = config::prepare(

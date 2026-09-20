@@ -1114,6 +1114,7 @@ fn finish_boot(
             &owner.token,
             owner.guest_boot_id.as_deref().expect("verified boot"),
             &artifact::digest(&artifact::engine_root(candidate).join("runc"))?,
+            &artifact::digest(&artifact::engine_root(candidate).join("docker-init"))?,
         ],
         false,
     )?;
@@ -1663,14 +1664,70 @@ mod tests {
     }
 
     #[test]
+    fn executable_cache_requires_both_digest_arguments_before_guest_effects() {
+        use std::process::{Command, Stdio};
+        let script = include_str!("guest-runc-cache.sh");
+        assert!(
+            Command::new("/bin/sh")
+                .args(["-n", "-c", script])
+                .status()
+                .unwrap()
+                .success()
+        );
+        for digests in [
+            vec!["a".repeat(64)],
+            vec!["a".repeat(64), "b".repeat(63)],
+            vec!["a".repeat(64), "G".repeat(64)],
+        ] {
+            let status = Command::new("/bin/sh")
+                .args(["-c", script, "cache-test", "owner", "boot"])
+                .args(digests)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(!status.success());
+        }
+    }
+
+    #[test]
+    #[ignore = "Manual owned VM, loaded shell image HACK_LOCAL_TEST_IMAGE and watchdog required"]
+    fn cached_init_executes_in_image_only_container_without_capabilities() {
+        let candidate =
+            Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))
+                .unwrap();
+        let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
+        assert!(image.strip_prefix("sha256:").is_some_and(|hash| {
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        }));
+        let owned = OwnedGuest::connect_cleanup(&candidate).unwrap();
+        assert_eq!(owned.execute_cleanup(r#"
+name=init-cache-check-$1
+docker=/opt/hack-engine/docker
+if "$docker" inspect "$name" >/dev/null 2>&1; then exit 1; fi
+cleanup() {
+ if test "$("$docker" inspect --format '{{index .Config.Labels "io.hack-local.init-cache-test"}}' "$name" 2>/dev/null || true)" = "$1"; then "$docker" rm -f "$name" >/dev/null; fi
+}
+trap 'cleanup "$1"' EXIT
+"$docker" run --rm --pull never --name "$name" --label "io.hack-local.init-cache-test=$1" --network none --read-only --cap-drop ALL --security-opt no-new-privileges --init --entrypoint /bin/sh "$2" -c 'test "$(cat /proc/1/comm)" = docker-init; grep -Eq "^CapEff:[[:space:]]+0+$" /proc/self/status'
+printf 'init-without-capabilities\n'
+"#,&[&owned.owner.token,&image]).unwrap(),"init-without-capabilities\n");
+    }
+
+    #[test]
     #[ignore = "Manual owned VM and external watchdog required"]
-    fn runc_cache_is_pinned_bounded_read_only_and_refuses_replacement() {
+    fn executable_cache_is_pinned_bounded_read_only_and_refuses_replacement() {
         let candidate = Candidate::discover(std::path::Path::new(
             &std::env::var("HACK_LOCAL_TEST_ROOT").expect("explicit candidate root"),
         ))
         .unwrap();
         let owned = OwnedGuest::connect_cleanup(&candidate).unwrap();
         let digest = artifact::digest(&artifact::engine_root(&candidate).join("runc")).unwrap();
+        let init_digest =
+            artifact::digest(&artifact::engine_root(&candidate).join("docker-init")).unwrap();
         let verify = || {
             assert_eq!(
                 owned
@@ -1679,7 +1736,8 @@ mod tests {
 cache=/run/hack-local/engine-exec
 test "$(stat -c %u:%g:%a "$cache")" = 0:0:700
 test "$(stat -c %u:%g:%a "$cache/runc")" = 0:0:555
-for target in "$cache" /opt/hack-engine/runc; do
+test "$(stat -c %u:%g:%a "$cache/docker-init")" = 0:0:555
+for target in "$cache" /opt/hack-engine/runc /opt/hack-engine/docker-init; do
  test "$(findmnt -n -o FSTYPE --mountpoint "$target")" = tmpfs
  case ",$(findmnt -n -o OPTIONS --mountpoint "$target")," in *,ro,*) ;; *) exit 1;; esac
 done
@@ -1687,24 +1745,38 @@ for path in "$cache/runc" /opt/hack-engine/runc; do
  test "$(sha256sum "$path" | cut -d ' ' -f 1)" = "$1"
  if (exec 3>>"$path") >/dev/null 2>&1; then exit 1; fi
 done
+for path in "$cache/docker-init" /opt/hack-engine/docker-init; do
+ test "$(sha256sum "$path" | cut -d ' ' -f 1)" = "$2"
+ if (exec 3>>"$path") >/dev/null 2>&1; then exit 1; fi
+done
 /opt/hack-engine/runc --version >/dev/null
+/opt/hack-engine/docker-init --version >/dev/null
 set -- $(stat -f -c '%S %b' "$cache")
 test "$(( $1 * $2 ))" = 33554432
 printf 'verified-cache\n'
 "#,
-                        &[&digest],
+                        &[&digest, &init_digest],
                     )
                     .unwrap(),
                 "verified-cache\n"
             );
         };
         verify();
-        for expected in ["0".repeat(64), digest.clone()] {
+        for (expected, expected_init) in [
+            ("0".repeat(64), init_digest.clone()),
+            (digest.clone(), "0".repeat(64)),
+            (digest.clone(), init_digest.clone()),
+        ] {
             let error = guest(
                 &candidate,
                 &owned.owner,
                 include_str!("guest-runc-cache.sh"),
-                &[&owned.owner.token, owned.boot_id(), &expected],
+                &[
+                    &owned.owner.token,
+                    owned.boot_id(),
+                    &expected,
+                    &expected_init,
+                ],
                 false,
             )
             .unwrap_err();

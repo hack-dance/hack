@@ -29,11 +29,11 @@ fn run() !void {
     }
     const args = if (health) raw[1..] else raw;
     if (args.len < 4 or args.len > 4100 or !std.fs.path.isAbsolute(args[3])) return error.Arguments;
-    const payload = try privateFile(args[1], 8192);
+    const payload = try privateFile(args[1], 32768);
     const expiry = try privateFile(args[2], 32);
     const deadline = try std.fmt.parseInt(u64, expiry, 10);
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{ .duplicate_field_behavior = .@"error" });
-    if (parsed.value != .object or parsed.value.object.count() == 0 or parsed.value.object.count() > 64) return error.Payload;
+    if (parsed.value != .object or parsed.value.object.count() == 0 or parsed.value.object.count() > 256) return error.Payload;
     var env = try std.process.getEnvMap(allocator);
     var entries = parsed.value.object.iterator();
     while (entries.next()) |entry| {

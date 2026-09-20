@@ -295,6 +295,8 @@ pub struct PlanData {
     pub namespace: String,
     pub compose_file: String,
     pub compose_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_compose_sha256: Option<String>,
     pub active_profiles: Vec<String>,
     pub services: BTreeMap<String, ServicePlan>,
     pub networks: BTreeMap<String, NetworkPlan>,
@@ -303,6 +305,9 @@ pub struct PlanData {
     pub registry: Option<registry::RegistryTemplate>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub generated_files: BTreeMap<String, String>,
+    /// Original env-file exclusions retained when normalization removes declarations.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub original_environment_files: std::collections::BTreeSet<String>,
     pub source_selection: SourceSelection,
     pub diagnostics: Vec<Diagnostic>,
     pub enrollment_compatible: bool,
@@ -386,11 +391,23 @@ fn plan_input(
         value,
     )?;
     data.namespace = preview.namespace;
-    let environment_files = data
+    let mut environment_files = data
         .services
         .values()
         .flat_map(|service| service.environment_files.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    if bytes != original.as_slice() {
+        data.original_compose_sha256 = Some(format!("{:x}", Sha256::digest(&original)));
+        data.original_environment_files = compose::original_environment_files(
+            source,
+            path.parent().expect("compose parent"),
+            &original,
+        )?
+        .difference(&environment_files)
+        .cloned()
         .collect();
+        environment_files.extend(data.original_environment_files.iter().cloned());
+    }
     data.source_selection = source::inventory(source, &environment_files, &mut data.diagnostics)?;
     let needs_registry = data
         .services

@@ -2,6 +2,7 @@ use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 fn receipt(index: usize) -> Receipt {
     Receipt {
+        normalized_input: None,
         relay_startup: None,
         relay_cleanup: None,
         version: 1,

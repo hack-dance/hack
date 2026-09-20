@@ -8,7 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MAX_PAYLOAD: usize = 8192;
+/// Encoded values occupy at most half of each fixed 64 KiB tmpfs allocation.
+pub const MAX_ENVIRONMENT_PAYLOAD: usize = 32 * 1024;
+pub const MAX_ENVIRONMENT_KEYS: usize = 256;
 const MAX_LIFETIME: Duration = Duration::from_secs(300);
 /// Maximum managed services in one graph/envelope; the aggregate input budget still applies.
 pub const MAX_MANAGED_SERVICES: usize = 32;
@@ -127,7 +129,7 @@ impl PendingEnvironment {
         if !valid_deadline() {
             return Err(error("environment_expired"));
         }
-        if !name(service) || values.is_empty() || values.len() > 64 {
+        if !name(service) || values.is_empty() || values.len() > MAX_ENVIRONMENT_KEYS {
             return Err(error("environment_input"));
         }
         // Bound input before allocating its encoded copy. JSON escaping is checked separately.
@@ -140,14 +142,14 @@ impl PendingEnvironment {
                 .checked_add(k.len())
                 .and_then(|n| n.checked_add(v.len()))
                 .ok_or_else(|| error("environment_budget"))?;
-            if bytes > MAX_PAYLOAD {
+            if bytes > MAX_ENVIRONMENT_PAYLOAD {
                 return Err(error("environment_budget"));
             }
         }
         let payload = zeroize::Zeroizing::new(
             serde_json::to_string(values).map_err(|_| error("environment_input"))?,
         );
-        if payload.len() > MAX_PAYLOAD {
+        if payload.len() > MAX_ENVIRONMENT_PAYLOAD {
             return Err(error("environment_budget"));
         }
         if !valid_deadline() {
@@ -210,6 +212,7 @@ impl PendingEnvironment {
                 &lease.gid.to_string(),
                 &MAX_CONCURRENT_ALLOCATIONS.to_string(),
                 &ALLOCATION_BYTES.to_string(),
+                &MAX_ENVIRONMENT_PAYLOAD.to_string(),
             ],
             Some(&self.payload),
         );
@@ -283,6 +286,7 @@ impl EnvironmentLease {
                 &self.service,
                 &self.uid.to_string(),
                 &self.gid.to_string(),
+                &MAX_ENVIRONMENT_PAYLOAD.to_string(),
             ],
             None,
         )?;
@@ -353,7 +357,7 @@ printf '%s' "$2" > "$root/service"
 now=$(cut -d. -f1 /proc/uptime)
 printf '%s' "$((now + $3))" > "$root/expires"
 cat > "$root/values.json"
-test "$(stat -c %s "$root/values.json")" -le 8192
+test "$(stat -c %s "$root/values.json")" -le "$8"
 chmod 400 "$root/service" "$root/expires" "$root/values.json"
 chown "$4:$5" "$root/expires" "$root/values.json"
 ) >/dev/null 2>&1
@@ -378,7 +382,7 @@ for name in service expires values.json; do
 done
 test "$(cat "$root/service")" = "$2"
 test "$(cut -d. -f1 /proc/uptime)" -lt "$(cat "$root/expires")"
-test "$(stat -c %s "$root/values.json")" -le 8192
+test "$(stat -c %s "$root/values.json")" -le "$5"
 ) >/dev/null 2>&1
 printf 'environment-verified-v1\n'
 "#;
@@ -517,7 +521,7 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::from([("BAD=KEY".into(), "x".into())]),
             BTreeMap::from([("TOKEN".into(), "x\0y".into())]),
-            BTreeMap::from([("TOKEN".into(), "\n".repeat(5000))]),
+            BTreeMap::from([("TOKEN".into(), "\n".repeat(MAX_ENVIRONMENT_PAYLOAD / 2))]),
         ] {
             assert!(PendingEnvironment::new("web", &values, Duration::from_secs(60)).is_err());
         }
@@ -525,6 +529,27 @@ mod tests {
         assert!(PendingEnvironment::new("web", &good, Duration::from_secs(301)).is_err());
         assert!(PendingEnvironment::new("web", &good, Duration::from_secs(60)).is_ok());
     }
+    #[test]
+    fn application_sized_environment_preserves_fixed_allocation_budget() {
+        let mut values: BTreeMap<String, String> = (0..256)
+            .map(|n| (format!("APP_KEY_{n}"), "synthetic-value".repeat(4)))
+            .collect();
+        let prepared = PendingEnvironment::new("web", &values, Duration::from_secs(60)).unwrap();
+        assert!(prepared.payload.len() > 8192);
+        assert_eq!(
+            serde_json::from_str::<BTreeMap<String, String>>(&prepared.payload).unwrap(),
+            values
+        );
+        assert!(prepared.payload.len() + 3 * 4096 <= ALLOCATION_BYTES);
+        values.insert("ONE_TOO_MANY".into(), "synthetic".into());
+        assert!(PendingEnvironment::new("web", &values, Duration::from_secs(60)).is_err());
+        let mut exact = BTreeMap::from([("K".into(), "x".repeat(MAX_ENVIRONMENT_PAYLOAD - 8))]);
+        let prepared = PendingEnvironment::new("web", &exact, Duration::from_secs(60)).unwrap();
+        assert_eq!(prepared.payload.len(), MAX_ENVIRONMENT_PAYLOAD);
+        exact.get_mut("K").unwrap().push('x');
+        assert!(PendingEnvironment::new("web", &exact, Duration::from_secs(60)).is_err());
+    }
+
     #[test]
     fn expired_preparation_refuses_before_runtime_lookup() {
         let mut pending = PendingEnvironment::new(

@@ -361,6 +361,7 @@ pub fn capture_plan(plan: &super::PlanData) -> Result<Snapshot, CandidateError> 
         .services
         .values()
         .flat_map(|service| service.environment_files.iter().cloned())
+        .chain(plan.original_environment_files.iter().cloned())
         .collect();
     capture(
         &plan.source,

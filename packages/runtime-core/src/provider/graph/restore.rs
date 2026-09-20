@@ -76,6 +76,7 @@ fn restore_inputs(
         ));
     }
     let (mut receipt, root) = load(candidate, &engine, options.run_id)?;
+    normalized::require_file_replay(&receipt)?;
     initializer_cache::require_resolved(&receipt)?;
     cleanup_enrollment::retention(&root, &receipt)?;
     if let Some(driver) = startup.as_mut() {

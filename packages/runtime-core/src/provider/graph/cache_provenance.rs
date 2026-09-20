@@ -378,6 +378,7 @@ mod tests {
             phase: "created".into(),
         };
         let mut receipt = Receipt {
+            normalized_input: None,
             relay_startup: None,
             relay_cleanup: None,
             probes: BTreeMap::new(),

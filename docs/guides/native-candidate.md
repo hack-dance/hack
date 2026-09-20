@@ -106,3 +106,33 @@ container's static environment; private values delivered only to the service's
 launcher are not automatically available to an exec command. This is not yet normal
 `hack exec` parity. Neither command persists application output in runtime receipts;
 output can contain sensitive application values and should be handled accordingly.
+
+## Explicit normalized public Compose input
+
+A frontend can pass a reviewed public Compose document without replacing the
+original configuration or relaxing source exclusions. Add all three flags to
+`project plan`, `project capture`, `project publish-source`, `project verify-source`,
+or fresh `graph run` / `graph serve`:
+
+```text
+--normalized-file /absolute/public-normalized.yml
+--expect-original <sha256-of-original-compose-bytes>
+--expect-namespace <reviewed-workspace-namespace>
+```
+
+Keep `--file` pointing to the original Compose file inside the selected project;
+relative paths retain that file's directory as their base. Obtain the namespace
+from `hack-native --candidate-root HOME plan --project PROJECT --json`. Review the
+normalized `project plan` result, then pass that exact `--expect-plan` to capture,
+publication, and graph execution. Every operation rechecks the original hash and
+namespace. The normalized file must be a nonempty regular file of at most 256 KiB;
+symlink files and hardlinked files are refused. Its bytes are retained in memory,
+not copied into candidate state. The input is public configuration only: managed
+secrets still use the separate `graph serve --environment-stdin` private envelope.
+
+Normalized enrollment, source sync, live source, restart, restore, and owner restore
+are not supported. Their explicit normalization flags or recorded normalized
+execution identity are refused; the executor does not silently reuse the original
+file's different configuration. Use immutable source publication and a fresh run
+for this bounded path. Source exclusions and runtime ownership checks remain in
+force. Existing commands without these flags keep their file-based behavior.

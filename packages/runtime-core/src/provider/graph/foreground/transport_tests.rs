@@ -73,7 +73,20 @@ fn framing_refuses_zero_oversize_truncation_and_trailing_bytes() {
 #[test]
 fn oversized_serialization_fails_before_sending_any_frame() {
     let (mut writer, mut reader) = UnixStream::pair().unwrap();
-    assert!(write(&mut writer, &"x".repeat(256 * 1024), Duration::from_secs(1)).is_err());
+    writer
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    reader
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    assert!(
+        write(
+            &mut writer,
+            &"x".repeat(REQUEST_LIMIT + 1),
+            Duration::from_secs(1)
+        )
+        .is_err()
+    );
     drop(writer);
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes).unwrap();

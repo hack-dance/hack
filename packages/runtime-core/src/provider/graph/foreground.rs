@@ -81,15 +81,66 @@ pub fn serve_with_environment(
 pub fn serve_with_routes(
     candidate: &Candidate,
     options: RunOptions<'_>,
-    mut runtime: HostRelayRuntime,
+    runtime: HostRelayRuntime,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
     deadline: Instant,
     route_slots: &BTreeMap<String, u8>,
 ) -> Result<Receipt, CandidateError> {
+    serve_input(
+        candidate,
+        options,
+        runtime,
+        managed,
+        deadline,
+        route_slots,
+        None,
+    )
+}
+
+/// Supervise a fresh graph using exact normalized bytes. The owner retains these
+/// bytes only in memory. Owner restore is explicitly refused until normalized
+/// recovery is implemented; status and owned cleanup remain available.
+pub fn serve_normalized_with_routes(
+    candidate: &Candidate,
+    options: super::NormalizedRunOptions<'_>,
+    runtime: HostRelayRuntime,
+    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    deadline: Instant,
+    route_slots: &BTreeMap<String, u8>,
+) -> Result<Receipt, CandidateError> {
+    serve_input(
+        candidate,
+        options.run,
+        runtime,
+        managed,
+        deadline,
+        route_slots,
+        Some(options.compose),
+    )
+}
+
+fn serve_input<'a>(
+    candidate: &Candidate,
+    options: RunOptions<'a>,
+    mut runtime: HostRelayRuntime,
+    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    deadline: Instant,
+    route_slots: &BTreeMap<String, u8>,
+    normalized: Option<crate::project::NormalizedComposeOptions<'a>>,
+) -> Result<Receipt, CandidateError> {
     if options.routing_enrolled != !route_slots.is_empty() {
         return Err(refused());
     }
-    if !managed.is_empty() {
+    if let Some(compose) = normalized {
+        super::compile_normalized_inputs(
+            candidate,
+            &super::NormalizedRunOptions {
+                run: redelivery::options(&options),
+                compose,
+            },
+            managed,
+        )?;
+    } else if !managed.is_empty() {
         // Refuse invalid scoped ownership or payload before publishing an owner.
         // Runtime admission compiles again to detect intervening project changes.
         super::compile_environment_inputs_until(candidate, &options, managed, deadline)?;
@@ -104,13 +155,26 @@ pub fn serve_with_routes(
         }
     };
     runtime.set_startup_cancellation(Some(signals::startup_pending));
-    let attempt = super::run_with_host_dependencies_until(
-        candidate,
-        redelivery::options(&options),
-        &mut runtime,
-        managed,
-        deadline,
-    );
+    let attempt = if let Some(compose) = normalized {
+        super::run_normalized_with_host_dependencies_until(
+            candidate,
+            super::NormalizedRunOptions {
+                run: redelivery::options(&options),
+                compose,
+            },
+            &mut runtime,
+            managed,
+            deadline,
+        )
+    } else {
+        super::run_with_host_dependencies_until(
+            candidate,
+            redelivery::options(&options),
+            &mut runtime,
+            managed,
+            deadline,
+        )
+    };
     runtime.set_startup_cancellation(None);
     let receipt = match attempt {
         Ok(receipt) => receipt,
@@ -169,13 +233,17 @@ pub fn serve_with_routes(
                     continue;
                 }
                 let mut effects_started = false;
-                let restored = redelivery::restore(
-                    candidate,
-                    &options,
-                    &mut runtime,
-                    &restore,
-                    &mut effects_started,
-                )
+                let restored = if normalized.is_some() {
+                    Err(super::normalized::replay_refused())
+                } else {
+                    redelivery::restore(
+                        candidate,
+                        &options,
+                        &mut runtime,
+                        &restore,
+                        &mut effects_started,
+                    )
+                }
                 .and_then(|restored| {
                     publishers
                         .reap_after_cleanup(&signals, Instant::now() + Duration::from_secs(5))?;

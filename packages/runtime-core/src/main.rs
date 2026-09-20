@@ -1,4 +1,5 @@
 mod graph_cli;
+mod normalized_cli;
 mod runtime_up_cli;
 mod source_watch_retry;
 use hack_runtime_core::{CANDIDATE_VERSION, Candidate, CandidateError};
@@ -64,6 +65,7 @@ Usage:
   hack-local --version
   hack-local --help
 
+Normalized public input for project plan/capture/publish-source/verify-source and graph run/serve: --normalized-file <path> --expect-original <sha256> --expect-namespace <sha256>. Sync/enroll/restart/restore do not accept it.
 Build with: ./scripts/build-hack-local.sh
 Runtime commands affect only the candidate pool. Graph commands support a bounded pinned-image subset; full project up/exec/down remains unimplemented.
 The installed hack and its state are never used as a fallback.";
@@ -584,6 +586,10 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
     {
         return Err(CandidateError::new("unsupported_command", HELP));
     }
+    let (arguments, normalized_selection) = normalized_cli::extract(
+        arguments,
+        ["plan", "capture", "publish-source", "verify-source"].contains(action),
+    )?;
     let mut source = None;
     let mut file = None;
     let mut expected = None;
@@ -663,6 +669,10 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         compose_file: file,
         profiles: &profiles,
     };
+    let normalized = normalized_selection
+        .as_ref()
+        .map(|selection| selection.load())
+        .transpose()?;
     if duration.is_some() && !watch {
         return Err(CandidateError::new(
             "invalid_arguments",
@@ -673,7 +683,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         if expected.is_some() {
             return Err(CandidateError::new("invalid_arguments", HELP));
         }
-        let report = project::plan(candidate, options)?;
+        let report = normalized_cli::review(candidate, options, normalized.as_ref())?;
         return print_json(&hack_runtime_core::provider::sync_status(
             candidate,
             &report.plan.namespace,
@@ -683,7 +693,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         return sync_source_command(candidate, options, expected, watch, reconcile, duration);
     }
     if ["capture", "publish-source", "verify-source"].contains(action) {
-        let report = project::plan(candidate, options)?;
+        let report = normalized_cli::review(candidate, options, normalized.as_ref())?;
         if expected != Some(report.plan_id.as_str()) {
             return Err(CandidateError::new(
                 "stale_plan",
@@ -738,7 +748,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         if expected.is_some() {
             return Err(CandidateError::new("invalid_arguments", HELP));
         }
-        let report = project::plan(candidate, options)?;
+        let report = normalized_cli::review(candidate, options, normalized.as_ref())?;
         if json {
             print_json(&report)?;
         } else {

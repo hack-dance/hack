@@ -29,8 +29,9 @@ pub(super) struct WireRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore: Option<RestoreRequest>,
 }
-pub(super) const REQUEST_LIMIT: usize = 132 * 1024;
-const PRIVATE_LIMIT: usize = 64 * 1024;
+const PRIVATE_LIMIT: usize = crate::provider::managed_environment::MAX_INPUT_BYTES;
+// JSON string escaping may double the private envelope, plus fixed routing metadata.
+pub(super) const REQUEST_LIMIT: usize = 2 * PRIVATE_LIMIT + 4096;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -497,7 +498,7 @@ pub(super) fn write<T: Serialize>(
 ) -> Result<(), CandidateError> {
     // Serialize directly into a fixed allocation: no intermediate private JSON
     // Vec or reallocating frame. serde parser scratch is not covered by this.
-    let mut frame = Zeroizing::new(vec![0; 256 * 1024 + 4]);
+    let mut frame = Zeroizing::new(vec![0; REQUEST_LIMIT + 4]);
     let length = {
         let mut cursor = std::io::Cursor::new(&mut frame[4..]);
         serde_json::to_writer(&mut cursor, value).map_err(|_| refused())?;

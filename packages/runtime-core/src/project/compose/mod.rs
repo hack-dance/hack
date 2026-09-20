@@ -11,6 +11,31 @@ pub(super) fn identifier(value: &str) -> Result<(), CandidateError> {
     fields::identifier(value)
 }
 
+/// Preserve original secret-file ownership when normalization removes env_file or
+/// drops services. Inspect declarations/metadata only; never read their contents.
+pub(super) fn original_environment_files(
+    project: &Path,
+    base: &Path,
+    original: &[u8],
+) -> Result<std::collections::BTreeSet<String>, CandidateError> {
+    let value = super::yaml::parse(original)?;
+    let root = object(&value)?;
+    let Some(services) = root.get("services") else {
+        return Ok(Default::default());
+    };
+    let mut result = std::collections::BTreeSet::new();
+    for service in object(services)?.values() {
+        result.extend(service::environment_files(
+            project,
+            base,
+            object(service)?.get("env_file"),
+            "original.env_file",
+            &mut Vec::new(),
+        )?);
+    }
+    Ok(result)
+}
+
 pub(super) fn compile(
     candidate: &Candidate,
     project: &Path,
@@ -143,8 +168,8 @@ pub(super) fn compile(
         &mut diagnostics,
     )?;
     graph::validate(&services, &networks, profiles, &mut diagnostics);
-    Ok(PlanData {schema_version:1,kind:"compose-enrollment-review-only".into(),candidate_root:candidate.checkout.clone(),source:project.into(),namespace:String::new(),compose_file:file.into(),compose_sha256:format!("{:x}",Sha256::digest(input)),active_profiles:profiles.to_vec(),services,networks,volumes,registry:None,generated_files:super::generated::parse(m.get("x-hack-generated-files"))?,
-        source_selection:SourceSelection {policy:String::new(),identity_kind:String::new(),metadata_sha256:String::new(),ignore_files:BTreeMap::new(),entries:vec![],excluded_paths:vec![],exclusion_rules:vec![]},diagnostics,enrollment_compatible:false,runtime_execution_supported:false,
+    Ok(PlanData {schema_version:1,kind:"compose-enrollment-review-only".into(),candidate_root:candidate.checkout.clone(),source:project.into(),namespace:String::new(),compose_file:file.into(),compose_sha256:format!("{:x}",Sha256::digest(input)),original_compose_sha256:None,active_profiles:profiles.to_vec(),services,networks,volumes,registry:None,generated_files:super::generated::parse(m.get("x-hack-generated-files"))?,
+        original_environment_files:std::collections::BTreeSet::new(),source_selection:SourceSelection {policy:String::new(),identity_kind:String::new(),metadata_sha256:String::new(),ignore_files:BTreeMap::new(),entries:vec![],excluded_paths:vec![],exclusion_rules:vec![]},diagnostics,enrollment_compatible:false,runtime_execution_supported:false,
         planned_effects:vec!["Create one private candidate enrollment receipt only; no project writes, source copy, VM boot, image pull, container, volume, network or port creation".into()],
         execution_gates:vec!["WU04 execution/receipt contract".into(),"WU05 source conformance and sync".into(),"WU07 network/graph/data qualification".into(),"explicit scoped environment delivery and image/build resolution".into()],
     })

@@ -235,7 +235,7 @@ in selection files, arguments, logs or source control. The envelope fields are
 `services` mapping service names to their declared bare/null environment keys.
 Only explicit values are delivered; no host environment is read implicitly.
 
-Input is bounded to 64 KiB total, 32 services, 64 keys and 8 KiB encoded payload
+Input is bounded to 256 KiB total, 32 services, 256 keys and 32 KiB encoded payload
 per service. The five-second input deadline requires EOF. The delivery lifetime
 starts before input reception and is never renewed by compilation or staging.
 Missing/extra service keys, ownership conflicts and expiry refuse before relay

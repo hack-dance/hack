@@ -10,6 +10,8 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+pub(crate) const MAX_RECEIVE_BYTES: usize = 256 * 1024;
+
 fn refused() -> CandidateError {
     CandidateError::new(
         "private_input_refused",
@@ -19,7 +21,7 @@ fn refused() -> CandidateError {
 /// Consumes and closes the descriptor on every outcome. Only pipes and AF_UNIX
 /// stream sockets qualify; regular files, terminals and network sockets refuse.
 /// Requires EOF within one anchored budget (at most five seconds) and at most
-/// `maximum` bytes (1..=65536). The payload may be empty; callers own its schema.
+/// `maximum` bytes (1..=262144). The payload may be empty; callers own its schema.
 /// The descriptor and any duplicates must be transferred by the trusted launcher:
 /// nonblocking flags share an open-file description with remaining duplicates.
 pub fn receive(
@@ -27,7 +29,11 @@ pub fn receive(
     budget: Duration,
     maximum: usize,
 ) -> Result<Zeroizing<Vec<u8>>, CandidateError> {
-    if budget.is_zero() || budget > Duration::from_secs(5) || maximum == 0 || maximum > 65536 {
+    if budget.is_zero()
+        || budget > Duration::from_secs(5)
+        || maximum == 0
+        || maximum > MAX_RECEIVE_BYTES
+    {
         return Err(refused());
     }
     let deadline = Instant::now() + budget;
@@ -206,26 +212,28 @@ mod tests {
             (Duration::ZERO, 1),
             (Duration::from_secs(6), 1),
             (Duration::from_secs(1), 0),
-            (Duration::from_secs(1), 65537),
+            (Duration::from_secs(1), MAX_RECEIVE_BYTES + 1),
         ] {
             assert!(receive(local(b"x"), budget, limit).is_err());
         }
     }
     #[test]
-    fn full_sixty_four_kib_budget_requires_eof() {
-        let (reader, mut writer) = UnixStream::pair().unwrap();
-        let worker = std::thread::spawn(move || {
-            writer
-                .set_write_timeout(Some(Duration::from_secs(1)))
-                .unwrap();
-            let bytes = vec![b'x'; 65536];
-            writer.write_all(&bytes)
-        });
-        let received = receive(reader.into(), Duration::from_secs(2), 65536);
-        assert!(worker.join().unwrap().is_ok());
-        let received = received.unwrap();
-        assert_eq!(received.len(), 65536);
-        assert!(received.iter().all(|b| *b == b'x'));
+    fn full_explicit_budgets_require_eof() {
+        for limit in [65536, MAX_RECEIVE_BYTES] {
+            let (reader, mut writer) = UnixStream::pair().unwrap();
+            let worker = std::thread::spawn(move || {
+                writer
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let bytes = vec![b'x'; limit];
+                writer.write_all(&bytes)
+            });
+            let received = receive(reader.into(), Duration::from_secs(2), limit);
+            assert!(worker.join().unwrap().is_ok());
+            let received = received.unwrap();
+            assert_eq!(received.len(), limit);
+            assert!(received.iter().all(|b| *b == b'x'));
+        }
     }
     #[test]
     fn files_tcp_datagrams_and_terminals_refuse() {

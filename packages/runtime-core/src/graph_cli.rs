@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 mod environment;
+mod normalized;
 #[cfg(target_os = "macos")]
 mod relay;
 #[cfg(test)]
@@ -26,6 +27,9 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     if ["logs", "exec"].contains(action) {
         return service_io::command(candidate, action, args);
     }
+    let (arguments, normalized_selection) =
+        crate::normalized_cli::extract(args, ["run", "serve"].contains(action))?;
+    let args = arguments.as_slice();
     if *action == "owner-restore" {
         let options = restore_options(args)?;
         #[cfg(target_os = "macos")]
@@ -236,6 +240,12 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             return Err(invalid());
         }
     }
+    if live_source && normalized_selection.is_some() {
+        return Err(CandidateError::new(
+            "normalized_live_source_unsupported",
+            "Normalized graphs currently require immutable source; live source is not supported.",
+        ));
+    }
     if live_source && !singles.contains_key("--source-revision") {
         return Err(invalid());
     }
@@ -384,6 +394,25 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 run_id: run,
                 timeout: Duration::from_secs(timeout),
             };
+            if let Some(selection) = &normalized_selection {
+                let input = selection.load()?;
+                let compose = input.options(PlanOptions {
+                    project: options.project.project,
+                    compose_file: options.project.compose_file,
+                    profiles: options.project.profiles,
+                });
+                return normalized::command(
+                    candidate,
+                    action,
+                    graph::NormalizedRunOptions {
+                        run: options,
+                        compose,
+                    },
+                    &singles,
+                    &route_slots,
+                    environment_stdin,
+                );
+            }
             if *action == "serve" {
                 #[cfg(target_os = "macos")]
                 {

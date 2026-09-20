@@ -3,6 +3,12 @@ mod service_exec;
 pub use service_exec::{
     ServiceExecOptions, ServiceExecResult, service_exec, service_exec_generation,
 };
+mod normalized;
+#[cfg(target_os = "macos")]
+pub use normalized::run_normalized_with_host_dependencies_until;
+pub use normalized::{
+    NormalizedInputIdentity, NormalizedRunOptions, compile_normalized_inputs, run_normalized,
+};
 mod admission;
 mod cache_provenance;
 mod dependency_hosts;
@@ -156,6 +162,8 @@ pub struct Resource {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalized_input: Option<NormalizedInputIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_startup: Option<startup::Startup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -412,6 +420,10 @@ fn load_at(
         || receipt.owner != incarnation
         || !hex(&receipt.namespace, 64)
         || !hex(&receipt.plan_id, 64)
+        || receipt
+            .normalized_input
+            .as_ref()
+            .is_some_and(|input| !input.valid(&receipt.namespace))
         || receipt.source.as_ref().is_some_and(|s| {
             !s.valid()
                 || s.live.as_ref().is_some_and(|live| {
@@ -950,7 +962,7 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
         options.expected_plan,
         options.non_secret_values,
     )?;
-    run_inputs(candidate, options, inputs, BTreeMap::new(), None)
+    run_inputs(candidate, options, inputs, BTreeMap::new(), None, None)
 }
 /// Initial graph startup with a retained foreground dependency owner. The caller
 /// must keep runtime alive and use its enrolled cleanup, including after failure.
@@ -1000,7 +1012,14 @@ pub fn run_with_host_dependencies_until(
     };
     check_environment_deadline(deadline)?;
     startup::Driver::check_cancelled(runtime)?;
-    run_inputs(candidate, options, inputs, environments, Some(runtime))
+    run_inputs(
+        candidate,
+        options,
+        inputs,
+        environments,
+        Some(runtime),
+        None,
+    )
 }
 /// Experimental explicit in-memory delivery. No native provider is selected or called.
 pub fn run_with_environment(
@@ -1011,7 +1030,7 @@ pub fn run_with_environment(
 ) -> Result<Receipt, CandidateError> {
     let (inputs, environments) =
         compile_environment_inputs(candidate, &options, managed, lifetime)?;
-    run_inputs(candidate, options, inputs, environments, None)
+    run_inputs(candidate, options, inputs, environments, None, None)
 }
 type EnvironmentInputs = (
     project::inputs::ExecutionInputs,
@@ -1096,6 +1115,7 @@ fn run_inputs(
     inputs: project::inputs::ExecutionInputs,
     environments: BTreeMap<String, super::environment::PendingEnvironment>,
     startup: Option<&mut dyn startup::Driver>,
+    normalized_input: Option<NormalizedInputIdentity>,
 ) -> Result<Receipt, CandidateError> {
     if let Some(driver) = startup.as_ref() {
         driver.validate_inputs(&inputs)?;
@@ -1201,6 +1221,7 @@ fn run_inputs(
         .map_err(state::io)?;
     let probe_states = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
     let receipt = Receipt {
+        normalized_input,
         relay_startup: None,
         relay_cleanup: None,
         probes: probe_states,
@@ -1526,6 +1547,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         ));
     }
     let (mut receipt, root) = load(candidate, &engine, options.run_id)?;
+    normalized::require_file_replay(&receipt)?;
     initializer_cache::require_resolved(&receipt)?;
     cleanup_enrollment::ordinary_mutation(&root, &receipt)?;
     environment::require_replay_supported(&receipt)?;

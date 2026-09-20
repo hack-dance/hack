@@ -302,6 +302,22 @@ mod tests {
         );
     }
     #[test]
+    fn changed_original_changes_normalized_review_even_when_normalized_bytes_match() {
+        let mut fixture = Fixture::new();
+        let bytes = b"services:\n  web:\n    image: alpine:3.22\n";
+        let before = plan_normalized(&fixture.candidate, fixture.options(bytes)).unwrap();
+        let original = ORIGINAL.replace("alpine:3.21", "alpine:3.23");
+        fs::write(fixture.project.join(".hack/compose.yml"), &original).unwrap();
+        fixture.hash = format!("{:x}", Sha256::digest(original.as_bytes()));
+        let after = plan_normalized(&fixture.candidate, fixture.options(bytes)).unwrap();
+        assert_eq!(before.plan.compose_sha256, after.plan.compose_sha256);
+        assert_ne!(
+            before.plan.original_compose_sha256,
+            after.plan.original_compose_sha256
+        );
+        assert_ne!(before.plan_id, after.plan_id);
+    }
+    #[test]
     fn malformed_normalized_input_does_not_echo_values() {
         let fixture = Fixture::new();
         let error = plan_normalized(
@@ -310,5 +326,45 @@ mod tests {
         )
         .unwrap_err();
         assert!(!error.message.contains("PRIVATE_CANARY"));
+    }
+    #[test]
+    fn removing_original_env_files_or_services_preserves_secret_source_exclusions() {
+        let mut fixture = Fixture::new();
+        fs::create_dir(fixture.project.join("config")).unwrap();
+        fs::write(
+            fixture.project.join("config/private-vars.txt"),
+            "TOKEN=PRIVATE_FILE_CANARY",
+        )
+        .unwrap();
+        let original = "services:\n  discarded:\n    image: alpine:3.21\n    env_file: ../config/private-vars.txt\n  web:\n    image: alpine:3.21\n";
+        fs::write(fixture.project.join(".hack/compose.yml"), original).unwrap();
+        fixture.hash = format!("{:x}", Sha256::digest(original.as_bytes()));
+        for normalized in [
+            b"services:\n  web:\n    image: alpine:3.21\n".as_slice(),
+            b"services:\n  discarded:\n    image: alpine:3.21\n  web:\n    image: alpine:3.21\n"
+                .as_slice(),
+        ] {
+            let review = plan_normalized(&fixture.candidate, fixture.options(normalized)).unwrap();
+            assert!(
+                !review
+                    .plan
+                    .source_selection
+                    .entries
+                    .iter()
+                    .any(|entry| entry.path == "config/private-vars.txt")
+            );
+            let snapshot = project::snapshot::capture_plan(&review.plan).unwrap();
+            assert!(!snapshot.files().any(|(entry, bytes)| {
+                entry.path == "config/private-vars.txt"
+                    || bytes
+                        .windows(b"PRIVATE_FILE_CANARY".len())
+                        .any(|window| window == b"PRIVATE_FILE_CANARY")
+            }));
+            assert!(
+                !serde_json::to_string(&review)
+                    .unwrap()
+                    .contains("PRIVATE_FILE_CANARY")
+            );
+        }
     }
 }

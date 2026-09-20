@@ -2,7 +2,7 @@
 use super::private_deadline::Deadline;
 use crate::{
     CandidateError,
-    provider::environment::{MAX_MANAGED_SERVICES, PendingEnvironment},
+    provider::environment::{MAX_ENVIRONMENT_KEYS, MAX_MANAGED_SERVICES, PendingEnvironment},
 };
 use serde::{
     Deserialize, Deserializer, Serialize,
@@ -15,6 +15,8 @@ use std::{
     time::{Duration, Instant},
 };
 use zeroize::{Zeroize, Zeroizing};
+
+pub(crate) const MAX_INPUT_BYTES: usize = 256 * 1024;
 
 type Values = BTreeMap<String, BTreeMap<String, String>>;
 fn refused() -> CandidateError {
@@ -100,7 +102,7 @@ impl<'de> Deserialize<'de> for ServiceValues {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut values = ServiceValues::default();
                 while let Some((key, mut value)) = map.next_entry::<String, Secret>()? {
-                    if values.0.len() >= 64 || values.0.contains_key(&key) {
+                    if values.0.len() >= MAX_ENVIRONMENT_KEYS || values.0.contains_key(&key) {
                         return Err(de::Error::custom("invalid environment map"));
                     }
                     values.0.insert(key, std::mem::take(&mut value.0));
@@ -156,7 +158,7 @@ fn parse(
     run: &str,
     started: Instant,
 ) -> Result<Managed, CandidateError> {
-    if bytes.len() > 65536 {
+    if bytes.len() > MAX_INPUT_BYTES {
         return Err(refused());
     }
     let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| refused())?;
@@ -239,7 +241,7 @@ impl Managed {
             services: &self.values,
         };
         // Fixed storage prevents serializer growth from leaving prior secret copies.
-        let mut bytes = Zeroizing::new(vec![0; 65536]);
+        let mut bytes = Zeroizing::new(vec![0; MAX_INPUT_BYTES]);
         let used = {
             let mut cursor = std::io::Cursor::new(bytes.as_mut_slice());
             serde_json::to_writer(&mut cursor, &document).map_err(|_| refused())?;
@@ -257,7 +259,7 @@ pub fn receive_forwarded(
     expected_plan: &str,
     run: &str,
 ) -> Result<Managed, CandidateError> {
-    if !cfg!(feature = "environment-launcher") || bytes.len() > 65536 {
+    if !cfg!(feature = "environment-launcher") || bytes.len() > MAX_INPUT_BYTES {
         return Err(refused());
     }
     let envelope: Forwarded = serde_json::from_slice(bytes).map_err(|_| refused())?;
@@ -281,8 +283,8 @@ pub fn receive(fd: OwnedFd, expected_plan: &str, run: &str) -> Result<Managed, C
         return Err(refused());
     }
     let started = Instant::now();
-    let bytes =
-        super::private_input::receive(fd, Duration::from_secs(5), 65536).map_err(|_| refused())?;
+    let bytes = super::private_input::receive(fd, Duration::from_secs(5), MAX_INPUT_BYTES)
+        .map_err(|_| refused())?;
     parse(&bytes, expected_plan, run, started)
 }
 
@@ -301,6 +303,60 @@ mod tests {
         assert_eq!(error.code, "graph_environment_input");
         assert!(!error.message.contains("synthetic-private-canary"));
     }
+    #[test]
+    fn multi_service_application_envelope_exceeds_old_limit_without_leaking_values() {
+        let values: BTreeMap<String, String> = (0..128)
+            .map(|n| (format!("APP_KEY_{n}"), "synthetic-value".repeat(4)))
+            .collect();
+        let services: BTreeMap<String, _> = (0..14)
+            .map(|n| (format!("service{n}"), values.clone()))
+            .collect();
+        let mut input = document();
+        input["services"] = json!(services);
+        let bytes = serde_json::to_vec(&input).unwrap();
+        assert!(bytes.len() > 65536 && bytes.len() < MAX_INPUT_BYTES);
+        let managed = decode(&bytes, Instant::now()).unwrap();
+        assert_eq!(managed.values(), &services);
+        assert!(managed.remaining().unwrap() <= Duration::from_secs(120));
+        input["services"]["service0"] = json!(
+            (0..257)
+                .map(|n| (format!("KEY_{n}"), "x".to_owned()))
+                .collect::<BTreeMap<_, _>>()
+        );
+        rejected(&serde_json::to_vec(&input).unwrap());
+    }
+
+    #[test]
+    #[cfg(feature = "environment-launcher")]
+    fn application_envelope_crosses_private_pipe_and_forwarding_boundaries() {
+        use std::{io::Write, os::unix::net::UnixStream};
+        let values: BTreeMap<String, String> = (0..128)
+            .map(|n| (format!("KEY_{n}"), "x".repeat(80)))
+            .collect();
+        let mut input = document();
+        input["services"] = json!(
+            (0..10)
+                .map(|n| (format!("service{n}"), values.clone()))
+                .collect::<BTreeMap<_, _>>()
+        );
+        let bytes = serde_json::to_vec(&input).unwrap();
+        assert!(bytes.len() > 65536);
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || {
+            writer
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            writer.write_all(&bytes).unwrap();
+        });
+        let managed = receive(reader.into(), &"a".repeat(64), &"b".repeat(32)).unwrap();
+        worker.join().unwrap();
+        let forwarded = managed.forward(&"a".repeat(64), &"b".repeat(32)).unwrap();
+        assert!(forwarded.len() > 65536);
+        let received = receive_forwarded(&forwarded, &"a".repeat(64), &"b".repeat(32)).unwrap();
+        assert_eq!(received.values(), managed.values());
+        assert!(received.deadline() <= managed.deadline());
+    }
+
     #[test]
     #[cfg(feature = "environment-launcher")]
     fn forwarded_values_preserve_deadline_scope_and_reject_rebinding() {
@@ -347,14 +403,21 @@ mod tests {
                 .map(|n| {
                     (
                         format!("service{n}"),
-                        BTreeMap::from([("TOKEN".into(), "x".repeat(2500))]),
+                        BTreeMap::from([("TOKEN".into(), "x".repeat(9000))]),
                     )
                 })
                 .collect(),
             deadline: Instant::now() + Duration::from_secs(120),
         };
         assert!(managed.forward(&"a".repeat(64), &"b".repeat(32)).is_err());
-        assert!(receive_forwarded(&vec![b' '; 65537], &"a".repeat(64), &"b".repeat(32)).is_err());
+        assert!(
+            receive_forwarded(
+                &vec![b' '; MAX_INPUT_BYTES + 1],
+                &"a".repeat(64),
+                &"b".repeat(32)
+            )
+            .is_err()
+        );
     }
     #[test]
     #[cfg(not(feature = "environment-launcher"))]
@@ -432,7 +495,7 @@ mod tests {
         let mut value = document();
         value["services"] = json!(
             (0..32)
-                .map(|n| (format!("service{n}"), json!({"TOKEN":"x".repeat(2500)})))
+                .map(|n| (format!("service{n}"), json!({"TOKEN":"x".repeat(9000)})))
                 .collect::<BTreeMap<_, _>>()
         );
         rejected(&serde_json::to_vec(&value).unwrap());
@@ -442,8 +505,8 @@ mod tests {
         for values in [
             json!({}),
             json!({"TOKEN":"bad\u{0}value"}),
-            json!({"TOKEN":"x".repeat(8193)}),
-            json!({"TOKEN":"\n".repeat(4100)}),
+            json!({"TOKEN":"x".repeat(32769)}),
+            json!({"TOKEN":"\n".repeat(16384)}),
             json!({"BAD-KEY":"value"}),
             json!({"TOKEN":42}),
         ] {
@@ -460,12 +523,12 @@ mod tests {
         rejected(&serde_json::to_vec(&changed).unwrap());
         changed = document();
         changed["services"]["web"] = json!(
-            (0..65)
+            (0..257)
                 .map(|n| (format!("KEY{n}"), "value"))
                 .collect::<BTreeMap<_, _>>()
         );
         rejected(&serde_json::to_vec(&changed).unwrap());
-        rejected(&vec![b' '; 65537]);
+        rejected(&vec![b' '; MAX_INPUT_BYTES + 1]);
         rejected(b"{malformed synthetic-private-canary");
     }
 }

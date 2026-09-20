@@ -6,7 +6,11 @@ import { join } from "node:path";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: string[][] = [];
-const runOpts: { stdout?: string; timeoutMs?: number }[] = [];
+const runOpts: {
+  stdout?: string;
+  timeoutMs?: number;
+  forwardSignals?: boolean;
+}[] = [];
 const execCalls: string[][] = [];
 
 const shellMock = await registerScopedModuleMock({
@@ -23,10 +27,18 @@ const shellMock = await registerScopedModuleMock({
     },
     run: async (
       cmd: readonly string[],
-      opts: { readonly stdout?: string; readonly timeoutMs?: number } = {}
+      opts: {
+        readonly stdout?: string;
+        readonly timeoutMs?: number;
+        readonly forwardSignals?: boolean;
+      } = {}
     ) => {
       runCalls.push([...cmd]);
-      runOpts.push({ stdout: opts.stdout, timeoutMs: opts.timeoutMs });
+      runOpts.push({
+        stdout: opts.stdout,
+        timeoutMs: opts.timeoutMs,
+        forwardSignals: opts.forwardSignals,
+      });
       return 0;
     },
     findExecutableInPath: () => "/usr/bin/docker",
@@ -433,3 +445,21 @@ test("foreground ignores detached timeout settings and preserves child exit", as
     await rm(dir, { recursive: true, force: true });
   }
 }, 5000);
+test("automatic bootstrap preserves output and forwards cancellation to its bounded child", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  await backend.run({
+    composeFiles: ["compose.yml"],
+    cwd: "/tmp",
+    service: "deps",
+    cmdArgs: [],
+    noDeps: true,
+    timeoutMs: 600_000,
+    forwardSignals: true,
+    routeStdoutToStderr: true,
+  });
+  expect(runOpts[0]).toEqual({
+    stdout: "stderr",
+    timeoutMs: 600_000,
+    forwardSignals: true,
+  });
+});

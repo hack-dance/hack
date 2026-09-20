@@ -222,7 +222,9 @@ stopped. `hack restart` preserves the same guard semantics during its down phase
 current Compose runtime until preflight succeeds. It then force-recreates services and attempts a
 repair start if recreation fails. This avoids destroying a healthy stack before env and registry
 checks have passed. `hack restart <service...>` is service-scoped: it skips project-wide lifecycle
-hooks, uses `--no-deps`, and verifies only the selected services.
+hooks, initializes declared shared dependency caches before replacing their selected consumers,
+uses `--no-deps`, and verifies only the selected services. Failed cache initialization leaves the
+existing consumers running.
 From the primary checkout, it targets only the base Compose/lifecycle instance. A linked worktree uses
 its isolated derived branch instance, and `--branch <name>` targets only that explicit branch.
 

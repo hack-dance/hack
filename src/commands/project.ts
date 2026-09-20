@@ -117,9 +117,14 @@ import {
 } from "../lib/compose-startup-state.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import {
+  resolveDependencyCacheBootstrapServices,
   resolveDependencyCacheOverride,
   resolveDependencyCacheProgress,
 } from "../lib/dependency-cache.ts";
+import {
+  bootstrapDependencyCaches,
+  dependencyCacheBootstrapFailure,
+} from "../lib/dependency-cache-bootstrap.ts";
 import { removeDisposableCacheVolumes } from "../lib/disposable-cache-volumes.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
@@ -5947,11 +5952,29 @@ async function runUpCommand({
     available: allServiceNames,
   });
   const serviceScoped = requestedServices.length > 0;
+  const scopedDependencyCache = serviceScoped
+    ? await resolveDependencyCacheOverride({
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        projectName,
+        composeFile: project.composeFile,
+      })
+    : null;
   const targetServices = serviceScoped ? requestedServices : allServiceNames;
+  const cacheBootstrapServices = scopedDependencyCache
+    ? await resolveDependencyCacheBootstrapServices({
+        composeFile: project.composeFile,
+        cache: scopedDependencyCache,
+        targetServices,
+      })
+    : [];
+  const preparedServices = [
+    ...new Set([...targetServices, ...cacheBootstrapServices]),
+  ];
   const envOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
-    targetServices,
+    targetServices: preparedServices,
     allServiceNames,
     envName,
   });
@@ -5959,7 +5982,7 @@ async function runUpCommand({
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
     composeFile: project.composeFile,
-    targetServices,
+    targetServices: preparedServices,
     envByService: envOverrides.preflightEnvByService,
   });
 
@@ -6045,12 +6068,14 @@ async function runUpCommand({
     const composeFilesWithInternal = internalOverride
       ? [...composeFiles, internalOverride]
       : composeFiles;
-    const dependencyCache = await resolveDependencyCacheOverride({
-      projectRoot: project.projectRoot,
-      projectDir: project.projectDir,
-      projectName,
-      composeFile: project.composeFile,
-    });
+    const dependencyCache =
+      scopedDependencyCache ??
+      (await resolveDependencyCacheOverride({
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        projectName,
+        composeFile: project.composeFile,
+      }));
     reportDependencyCacheFallback(dependencyCache);
     const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
       ? [...composeFilesWithInternal, dependencyCache.overridePath]
@@ -6069,6 +6094,29 @@ async function runUpCommand({
       ...envOverrides.composeFiles,
     ];
     reportComposeStartupBudget({ startupTimeoutMs, detach });
+    const bootstrapCode = await bootstrapDependencyCaches({
+      timeoutMs: detach ? startupTimeoutMs : undefined,
+      services: cacheBootstrapServices,
+      composeFiles: composeFilesWithEnv,
+      composeProject: composeProjectName,
+      profiles,
+      cwd: dirname(project.composeFile),
+      env: envOverrides.env,
+    });
+    if (bootstrapCode !== 0) {
+      const failure = dependencyCacheBootstrapFailure({
+        code: bootstrapCode,
+        timeoutMs: detach ? startupTimeoutMs : undefined,
+      });
+      if (json) {
+        return emitLifecycleResult({
+          result: errorResult(failure),
+          exitCode: bootstrapCode,
+        });
+      }
+      logger.error({ message: failure.message });
+      return bootstrapCode;
+    }
     const upCode = await composeRuntimeBackend.up({
       dependencyProgress: resolveDependencyCacheProgress({
         cache: dependencyCache,
@@ -6878,6 +6926,7 @@ type TargetedServiceRestartResult =
       readonly errorCode:
         | "E_COMPOSE_FAILED"
         | "E_STARTUP_INCOMPLETE"
+        | "E_DEPENDENCY_BOOTSTRAP_FAILED"
         | "E_STARTUP_TIMEOUT";
       readonly message: string;
       readonly running: readonly string[];
@@ -6925,24 +6974,32 @@ async function runTargetedServiceRestart(opts: {
           aliasHost,
         })
       : [opts.project.composeFile];
+  const dependencyCache = await resolveDependencyCacheOverride({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    projectName: opts.projectName,
+    composeFile: opts.project.composeFile,
+  });
+  const cacheBootstrapServices = await resolveDependencyCacheBootstrapServices({
+    composeFile: opts.project.composeFile,
+    cache: dependencyCache,
+    targetServices: opts.services,
+  });
+  const preparedServices = [
+    ...new Set([...opts.services, ...cacheBootstrapServices]),
+  ];
   const envOverrides = await resolveComposeEnvOverrides({
     project: opts.project,
     projectName: opts.projectName,
-    targetServices: opts.services,
+    targetServices: preparedServices,
     allServiceNames: opts.allServiceNames,
     envName: opts.envName,
   });
   await assertRegistryCredentialsAvailable({
     projectRoot: opts.project.projectRoot,
     composeFile: opts.project.composeFile,
-    targetServices: opts.services,
+    targetServices: preparedServices,
     envByService: envOverrides.preflightEnvByService,
-  });
-  const dependencyCache = await resolveDependencyCacheOverride({
-    projectRoot: opts.project.projectRoot,
-    projectDir: opts.project.projectDir,
-    projectName: opts.projectName,
-    composeFile: opts.project.composeFile,
   });
   reportDependencyCacheFallback(dependencyCache);
   const composeFilesWithRuntimeOverrides = [
@@ -6958,6 +7015,34 @@ async function runTargetedServiceRestart(opts: {
     aliasHost,
     composeProject: opts.composeProjectName ?? opts.baseProjectName,
   });
+  const composeFilesWithEnv = [
+    ...composeFilesWithRuntimeOverrides,
+    ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
+    ...envOverrides.composeFiles,
+  ];
+  const bootstrapCode = await bootstrapDependencyCaches({
+    timeoutMs: opts.startupTimeoutMs,
+    services: cacheBootstrapServices,
+    composeFiles: composeFilesWithEnv,
+    composeProject: opts.composeProjectName,
+    profiles: opts.profiles,
+    cwd: dirname(opts.project.composeFile),
+    env: envOverrides.env,
+  });
+  if (bootstrapCode !== 0) {
+    const failure = dependencyCacheBootstrapFailure({
+      code: bootstrapCode,
+      timeoutMs: opts.startupTimeoutMs,
+    });
+    return {
+      ok: false,
+      code: bootstrapCode,
+      errorCode: failure.code,
+      message: failure.message,
+      running: [],
+      completed: [],
+    };
+  }
   reportComposeStartupBudget({
     startupTimeoutMs: opts.startupTimeoutMs,
     detach: true,
@@ -6969,11 +7054,7 @@ async function runTargetedServiceRestart(opts: {
       baseProject: opts.baseProjectName,
     }),
     startupTimeoutMs: opts.startupTimeoutMs,
-    composeFiles: [
-      ...composeFilesWithRuntimeOverrides,
-      ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
-      ...envOverrides.composeFiles,
-    ],
+    composeFiles: composeFilesWithEnv,
     composeProject: opts.composeProjectName,
     profiles: opts.profiles,
     detach: true,
@@ -7678,11 +7759,17 @@ async function handleRun({
     composeProject: composeProjectName ?? baseProjectName,
   });
 
+  const cacheBootstrapServices = await resolveDependencyCacheBootstrapServices({
+    composeFile: project.composeFile,
+    cache: dependencyCache,
+    targetServices: [service],
+  });
+  const preparedServices = [...new Set([service, ...cacheBootstrapServices])];
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const envOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
-    targetServices: [service],
+    targetServices: preparedServices,
     allServiceNames,
     envName,
   });
@@ -7691,6 +7778,23 @@ async function handleRun({
     ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
     ...envOverrides.composeFiles,
   ];
+  await assertRegistryCredentialsAvailable({
+    projectRoot: project.projectRoot,
+    composeFile: project.composeFile,
+    targetServices: preparedServices,
+    envByService: envOverrides.preflightEnvByService,
+  });
+  const bootstrapCode = await bootstrapDependencyCaches({
+    services: cacheBootstrapServices,
+    composeFiles: composeFilesWithEnv,
+    composeProject: composeProjectName,
+    profiles,
+    cwd: dirname(project.composeFile),
+    env: envOverrides.env,
+  });
+  if (bootstrapCode !== 0) {
+    return bootstrapCode;
+  }
   const stackIsRunning =
     !dependencyCache.sharingDisabledReason &&
     (await resolveCanSkipRunDependencies({

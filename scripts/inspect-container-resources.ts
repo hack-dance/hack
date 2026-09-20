@@ -22,7 +22,7 @@ if (values.runtime !== "bun" && values.runtime !== "node") {
 }
 
 const format =
-  '{"id":{{json .Id}},"name":{{json .Name}},"state":{{json .State.Status}},"oomKilled":{{.State.OOMKilled}},"restartCount":{{.RestartCount}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"mounts":{{json .Mounts}},"healthcheckIntervalNs":{{with (index .Config "Healthcheck")}}{{json (index . "Interval")}}{{else}}null{{end}},"writableLayerBytes":{{json (index . "SizeRw")}}}';
+  '{"id":{{json .ID}},"name":{{json .Name}},"state":{{json .State.Status}},"oomKilled":{{.State.OOMKilled}},"restartCount":{{.RestartCount}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"mounts":{{json .Mounts}},"healthcheckIntervalNs":{{with .Config.Healthcheck}}{{json .Interval}}{{else}}null{{end}},"writableLayerBytes":{{json .SizeRw}}}';
 const metadata = await exec(
   [
     "docker",

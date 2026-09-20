@@ -9,7 +9,11 @@ import {
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-
+import { YAML } from "bun";
+import type {
+  RuntimeRunOptions,
+  RuntimeUpOptions,
+} from "../src/backends/runtime-backend.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import {
   PROJECT_COMPOSE_FILENAME,
@@ -29,6 +33,11 @@ let upExitCode = 0;
 let downCalls = 0;
 const upServiceSelections: Array<readonly string[] | undefined> = [];
 const tempDirs = new Set<string>();
+const runtimeCalls: Array<
+  | { kind: "run"; opts: RuntimeRunOptions }
+  | { kind: "up"; opts: RuntimeUpOptions }
+> = [];
+let runExitCode = 0;
 const originalHackHome = process.env.HACK_HOME;
 const originalComposeProfiles = process.env.COMPOSE_PROFILES;
 const originalStartupTimeout = process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS;
@@ -65,13 +74,8 @@ const runtimeBackendMock = await registerScopedModuleMock({
   overrides: {
     composeRuntimeBackend: {
       name: "compose",
-      up: async (opts: {
-        readonly env?: Readonly<Record<string, string>>;
-        readonly services?: readonly string[];
-        readonly composeFiles: readonly string[];
-        readonly startupTimeoutMs?: number;
-        readonly detach?: boolean;
-      }) => {
+      up: async (opts: RuntimeUpOptions) => {
+        runtimeCalls.push({ kind: "up", opts });
         upComposeContents.push(
           (
             await Promise.all(
@@ -100,7 +104,10 @@ const runtimeBackendMock = await registerScopedModuleMock({
         };
       },
       ps: async () => 0,
-      run: async () => 0,
+      run: async (opts: RuntimeRunOptions) => {
+        runtimeCalls.push({ kind: "run", opts });
+        return runExitCode;
+      },
       exec: async () => 0,
     },
   },
@@ -134,7 +141,7 @@ const loggerMock = await registerScopedModuleMock({
   },
 });
 
-const { restartCommand, upCommand } = await import(
+const { restartCommand, upCommand, runCommand } = await import(
   "../src/commands/project.ts"
 );
 
@@ -167,6 +174,8 @@ afterEach(async () => {
   } else {
     process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = originalStartupTimeout;
   }
+  runtimeCalls.length = 0;
+  runExitCode = 0;
   autoBranch = null;
   runtimeProjects = [];
   for (const tempDir of tempDirs) {
@@ -688,6 +697,7 @@ async function runRestart(opts: {
 
 async function runJsonUp(opts: {
   readonly projectRoot: string;
+  readonly services?: readonly string[];
 }): Promise<{ readonly exitCode: number; readonly stdout: string }> {
   let stdout = "";
   const originalWrite = process.stdout.write;
@@ -711,7 +721,7 @@ async function runJsonUp(opts: {
           target: undefined,
           json: true,
         },
-        positionals: {},
+        positionals: { services: opts.services ?? [] },
         raw: {
           argv: ["--path", opts.projectRoot, "--env", "base", "--json"],
           positionals: [],
@@ -888,3 +898,157 @@ test("linked startup combines inherited aliases, local static precedence and sam
     process.env.HACK_EXECUTION_MODE = savedMode;
   }
 });
+
+async function createCachedProject(): Promise<string> {
+  const projectRoot = await createProject({ registryTokenScope: "deps" });
+  const composeFile = resolve(projectRoot, ".hack", PROJECT_COMPOSE_FILENAME);
+  const compose = YAML.parse(await readFile(composeFile, "utf8")) as {
+    services: Record<string, Record<string, unknown>>;
+    volumes: Record<string, unknown>;
+  };
+  compose.services.api!.volumes = ["dependencies:/app/node_modules"];
+  compose.services.deps!.platform = "linux/arm64";
+  compose.services.deps!.volumes = ["dependencies:/app/node_modules"];
+  compose.services.deps!.labels = {
+    "hack.dependencies.cache-volume": "dependencies",
+    "hack.dependencies.bootstrap": "true",
+    "hack.dependencies.lockfiles": "bun.lock",
+  };
+  compose.volumes = { dependencies: {} };
+  await writeFile(composeFile, YAML.stringify(compose));
+  await writeFile(resolve(projectRoot, "bun.lock"), "first-lock");
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+  );
+  return projectRoot;
+}
+
+for (const operation of [runDetachedUp, runRestart]) {
+  test(`${operation.name} initializes the selected cache before recreating a consumer`, async () => {
+    const projectRoot = await createCachedProject();
+    expect(await operation({ projectRoot, services: ["api"] })).toBe(0);
+    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run", "up"]);
+    const installer = runtimeCalls[0];
+    const consumer = runtimeCalls[1];
+    expect(installer?.kind).toBe("run");
+    if (installer?.kind !== "run" || consumer?.kind !== "up") {
+      throw new Error("Missing initialization");
+    }
+    expect(installer.opts.service).toBe("deps");
+    expect(installer.opts.noDeps).toBe(true);
+    expect(installer.opts.forwardSignals).toBe(true);
+    expect(installer.opts.composeFiles).toEqual(consumer.opts.composeFiles);
+    expect(installer.opts.env).toEqual(consumer.opts.env);
+    expect(consumer.opts.services).toEqual(["api"]);
+    const override = installer.opts.composeFiles.find((file) =>
+      file.endsWith("compose.dependencies.override.yml")
+    );
+    expect(override).toBeDefined();
+    const firstCache = await readFile(override!, "utf8");
+    runtimeCalls.length = 0;
+    await writeFile(resolve(projectRoot, "bun.lock"), "second-lock");
+    expect(await operation({ projectRoot, services: ["api"] })).toBe(0);
+    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run", "up"]);
+    expect(await readFile(override!, "utf8")).not.toBe(firstCache);
+  });
+
+  test(`${operation.name} leaves consumers untouched when cache initialization fails`, async () => {
+    const projectRoot = await createCachedProject();
+    runExitCode = 42;
+    expect(await operation({ projectRoot, services: ["api"] })).toBe(42);
+    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run"]);
+  });
+
+  test(`${operation.name} does not bootstrap caches for unrelated services`, async () => {
+    const projectRoot = await createCachedProject();
+    psRows.length = 0;
+    psRows.push(
+      JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+    );
+    expect(await operation({ projectRoot, services: ["migrate"] })).toBe(0);
+    expect(runtimeCalls.map((call) => call.kind)).toEqual(["up"]);
+  });
+}
+
+test("run deps resolves the same shared cache as up", async () => {
+  const projectRoot = await createCachedProject();
+  await runDetachedUp({ projectRoot, services: ["api"] });
+  const up = runtimeCalls.find((call) => call.kind === "up")!;
+  runtimeCalls.length = 0;
+  const result = await runCommand.handler({
+    ctx: { cwd: projectRoot, cli: CLI_SPEC },
+    args: {
+      options: { path: projectRoot, env: "base" },
+      positionals: { service: "deps", cmd: [] },
+      raw: { argv: [], positionals: [] },
+    },
+  } as unknown as Parameters<typeof runCommand.handler>[0]);
+  expect(result).toBe(0);
+  expect(runtimeCalls).toHaveLength(1);
+  const installer = runtimeCalls[0]!;
+  expect(installer.kind).toBe("run");
+  const dependencyOverrides = (files: readonly string[]) =>
+    files.filter((file) => file.endsWith("compose.dependencies.override.yml"));
+  expect(dependencyOverrides(installer.opts.composeFiles)).toEqual(
+    dependencyOverrides(up.opts.composeFiles)
+  );
+  expect(dependencyOverrides(installer.opts.composeFiles)).toHaveLength(1);
+});
+
+for (const operation of [runDetachedUp, runRestart]) {
+  test(`${operation.name} applies configured budget to cache bootstrap before consumer launch`, async () => {
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "120000";
+    const projectRoot = await createCachedProject();
+    expect(await operation({ projectRoot, services: ["api"] })).toBe(0);
+    const bootstrap = runtimeCalls[0];
+    expect(bootstrap?.kind).toBe("run");
+    if (bootstrap?.kind !== "run") {
+      throw new Error("Missing bootstrap");
+    }
+    expect(bootstrap.opts.timeoutMs).toBe(120_000);
+    expect(upStartupTimeouts).toEqual([120_000]);
+  });
+  test(`${operation.name} reports bootstrap timeout without replacing consumers`, async () => {
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "120000";
+    runExitCode = 124;
+    const projectRoot = await createCachedProject();
+    expect(await operation({ projectRoot, services: ["api"] })).toBe(124);
+    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run"]);
+    expect(errorMessages.join("\n")).toContain(
+      "Dependency cache initialization exceeded its startup budget of 120000 ms"
+    );
+  });
+}
+
+for (const action of ["up", "restart"] as const) {
+  test(`${action} JSON classifies cache initializer deadline as startup timeout`, async () => {
+    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "120000";
+    runExitCode = 124;
+    const projectRoot = await createCachedProject();
+    let output = "";
+    let code: number;
+    if (action === "up") {
+      const result = await runJsonUp({ projectRoot, services: ["api"] });
+      output = result.stdout;
+      code = result.exitCode;
+    } else {
+      const write = process.stdout.write;
+      process.stdout.write = ((chunk: string | Uint8Array) => {
+        output +=
+          typeof chunk === "string"
+            ? chunk
+            : Buffer.from(chunk).toString("utf8");
+        return true;
+      }) as typeof process.stdout.write;
+      try {
+        code = await runRestart({ projectRoot, services: ["api"], json: true });
+      } finally {
+        process.stdout.write = write;
+      }
+    }
+    expect(code).toBe(124);
+    expect(JSON.parse(output).error.code).toBe("E_STARTUP_TIMEOUT");
+    expect(JSON.parse(output).error.message).toContain("120000 ms");
+    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run"]);
+  });
+}

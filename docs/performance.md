@@ -48,7 +48,9 @@ Host tracking, timeout and persistence semantics are described in [env.md](env.m
 types/locations to JSON, plus a per-container table in human output. The project
 filter includes its branch instances. Stats requests exclude stopped containers
 and synthetic lifecycle entries. Verified tracked host command trees also appear
-in host usage groups; this does not transfer ownership of other processes.
+in host usage groups. The project filter also scopes these command groups and
+their totals, including branch instances. Shared host infrastructure remains
+visible; reporting does not transfer ownership of other processes.
 
 For a deeper, explicit read-only probe from this checkout:
 

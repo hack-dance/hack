@@ -72,6 +72,35 @@ test("preserves daemons belonging to another state directory", async () => {
   expect(orphans).toEqual([]);
 });
 
+test("accepts Linux lsof stream names without accepting foreign paths or suffix lookalikes", async () => {
+  expect(
+    await findOrphanDaemonProcesses({
+      trackedPid: null,
+      daemonRoot: DAEMON_ROOT,
+      psLines: PS_LINES,
+      lsofLines: [
+        "p123",
+        `n${DAEMON_ROOT}/hackd.sock type=STREAM`,
+        "p456",
+        `n${DAEMON_ROOT}/hackd.sock.backup type=STREAM`,
+      ],
+    })
+  ).toEqual([123]);
+  expect(
+    await findOrphanDaemonProcesses({
+      trackedPid: null,
+      daemonRoot: DAEMON_ROOT,
+      psLines: PS_LINES,
+      lsofLines: [
+        "p123",
+        "n/tmp/foreign/hackd.sock type=STREAM",
+        "p456",
+        `n${DAEMON_ROOT}/hackd.sock type=STREAM extra`,
+      ],
+    })
+  ).toEqual([]);
+});
+
 test("does not authorize cleanup without socket ownership evidence", async () => {
   const orphans = await findOrphanDaemonProcesses({
     trackedPid: null,

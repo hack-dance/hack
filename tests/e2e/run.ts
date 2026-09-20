@@ -3,6 +3,7 @@ import { agentDocsSyncScenario } from "./scenarios/agent-docs-sync.ts";
 import { automationCheckScenario } from "./scenarios/automation-check.ts";
 import { cachePruneScenario } from "./scenarios/cache-prune.ts";
 import { dependencyCacheScenario } from "./scenarios/dependency-cache.ts";
+import { dependencyCacheBootstrapScenario } from "./scenarios/dependency-cache-bootstrap.ts";
 import { dependencyCachePackageScenario } from "./scenarios/dependency-cache-package.ts";
 import { dependencyCacheProtocolScenario } from "./scenarios/dependency-cache-protocol.ts";
 import { doctorScenario } from "./scenarios/doctor.ts";
@@ -46,6 +47,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   lifecycleSessionRecoveryScenario,
   cachePruneScenario,
   dependencyCacheScenario,
+  dependencyCacheBootstrapScenario,
   dependencyCacheProtocolScenario,
   dependencyCachePackageScenario,
   domainMigrationScenario,

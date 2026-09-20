@@ -11,6 +11,7 @@ import {
   writeTextFileIfChanged,
 } from "./fs.ts";
 import { isRecord } from "./guards.ts";
+import { discoverDependencyBootstrapServices } from "./registry-credential-preflight.ts";
 
 const CACHE_VOLUME_LABEL = "hack.dependencies.cache-volume";
 const LOCKFILES_LABEL = "hack.dependencies.lockfiles";
@@ -72,6 +73,56 @@ export function resolveDependencyCacheProgress(opts: {
         services: opts.cache.progressServices,
       }
     : undefined;
+}
+
+/** Select only installers for cache volumes mounted by the requested consumers. */
+export async function resolveDependencyCacheBootstrapServices(opts: {
+  readonly composeFile: string;
+  readonly cache: DependencyCacheResolution;
+  readonly targetServices: readonly string[];
+}): Promise<readonly string[]> {
+  if (!opts.cache.overridePath) {
+    return [];
+  }
+  const text = await readTextFile(opts.composeFile);
+  const parsed: unknown = YAML.parse(text ?? "");
+  if (!(isRecord(parsed) && isRecord(parsed.services))) {
+    return [];
+  }
+  const installers = new Set([
+    ...(await discoverDependencyBootstrapServices(opts)),
+    ...(opts.cache.progressServices ?? []),
+  ]);
+  const services = parsed.services;
+  const requiredVolumes = opts.cache.volumes.filter((volume) =>
+    opts.targetServices.some((target) => {
+      if (volume.services.includes(target)) {
+        return false;
+      }
+      const service = services[target];
+      return (
+        isRecord(service) &&
+        Array.isArray(service.volumes) &&
+        service.volumes.some(
+          (mount: unknown) => resolveVolumeSource(mount) === volume.logicalName
+        )
+      );
+    })
+  );
+  return [
+    ...new Set(
+      requiredVolumes
+        .flatMap((volume) => volume.services)
+        .filter((service) => installers.has(service))
+    ),
+  ].sort();
+}
+
+function resolveVolumeSource(mount: unknown): unknown {
+  if (typeof mount === "string") {
+    return mount.split(":")[0];
+  }
+  return isRecord(mount) && mount.type === "volume" ? mount.source : null;
 }
 
 function parseCsv(value: unknown): readonly string[] {

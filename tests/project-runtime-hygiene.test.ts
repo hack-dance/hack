@@ -120,6 +120,42 @@ test("findOrphanRuntimeProjects reports missing working dirs and compose files",
   ]);
 });
 
+test("orphan cleanup excludes lifecycle placeholders from mixed and lifecycle-only projects", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-runtime-hygiene-"));
+  tempDirs.add(root);
+  const mixed = buildRuntimeProject({
+    project: "mixed",
+    workingDir: root,
+    containerIds: ["docker-1", "lifecycle-1"],
+  });
+  const lifecycle = buildRuntimeProject({
+    project: "lifecycle",
+    workingDir: root,
+    containerIds: ["lifecycle-only"],
+  });
+  for (const project of [mixed, lifecycle]) {
+    for (const service of project.services.values()) {
+      for (const container of service.containers) {
+        if (container.id.startsWith("lifecycle-")) {
+          Object.assign(container, {
+            labels: { "hack.lifecycle.process": "true" },
+          });
+        }
+      }
+    }
+  }
+  expect(
+    await findOrphanRuntimeProjects({ runtime: [mixed, lifecycle] })
+  ).toEqual([
+    {
+      project: "mixed",
+      workingDir: root,
+      reason: "missing compose file",
+      containerIds: ["docker-1"],
+    },
+  ]);
+});
+
 test("findIncompleteRuntimeProjects reports regular services stuck in Created", () => {
   const runtime = buildRuntimeProject({
     project: "interrupted",

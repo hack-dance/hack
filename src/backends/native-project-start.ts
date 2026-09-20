@@ -3,6 +3,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
+import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
+import {
+  hasOnlyNativeCacheLabels,
+  publishNativeCacheSource,
+} from "./native-project-cache.ts";
 import {
   type NativeProjectInput,
   prepareNativeProjectInput,
@@ -30,6 +35,7 @@ type Hooks = {
 };
 type Dependencies = {
   prepare: typeof prepareNativeProjectInput;
+  adaptAws: typeof adaptNativeAwsEnvironment;
   review: typeof withNativeProjectReview;
   serve: typeof serveNativeProjectGraph;
   invoke: typeof invokeNativeRuntime;
@@ -39,6 +45,7 @@ type Dependencies = {
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
+  adaptAws: adaptNativeAwsEnvironment,
   review: withNativeProjectReview,
   serve: serveNativeProjectGraph,
   invoke: invokeNativeRuntime,
@@ -68,7 +75,7 @@ function services(
       value.ports !== undefined ||
       value.logging !== undefined ||
       (value.restart !== undefined && value.restart !== "no") ||
-      value.labels !== undefined
+      !hasOnlyNativeCacheLabels(value.labels)
     ) {
       throw refused();
     }
@@ -76,7 +83,10 @@ function services(
   }
   return result;
 }
-function readiness(specs: Record<string, Record<string, unknown>>): string[] {
+function readiness(
+  specs: Record<string, Record<string, unknown>>,
+  initializers: ReadonlySet<string>
+): string[] {
   const ready: Record<string, string> = Object.fromEntries(
     Object.entries(specs).map(([name, spec]) => [
       name,
@@ -98,6 +108,9 @@ function readiness(specs: Record<string, Record<string, unknown>>): string[] {
         ready[name] = "healthy";
       }
     }
+  }
+  for (const name of initializers) {
+    ready[name] = "completed";
   }
   return Object.entries(ready).flatMap(([name, condition]) => [
     "--ready",
@@ -193,6 +206,7 @@ export async function startNativeProject(opts: {
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
   readonly sharedSource: boolean;
+  readonly aws?: { readonly profile: string; readonly region?: string };
   readonly before: (input: NativeProjectInput) => Promise<Hooks>;
   readonly signal?: AbortSignal;
   readonly dependencies?: Partial<Dependencies>;
@@ -208,12 +222,12 @@ export async function startNativeProject(opts: {
       "Native project already has an owned run mapping; inspect it before starting another run."
     );
   }
-  const input = await deps.prepare({
+  let input = await deps.prepare({
     ...opts.scope,
     composeFile: opts.composeFile,
     envName: opts.envName,
   });
-  const specs = services(input);
+  let specs = services(input);
   const artifact = join(dirname(opts.runtime.binary), "hack-relay-guest");
   const artifactFile = Bun.file(artifact);
   if (
@@ -247,6 +261,10 @@ export async function startNativeProject(opts: {
       throw refused();
     }
     hooks = await opts.before(input);
+    if (opts.aws) {
+      input = (await deps.adaptAws({ input, ...opts.aws })).input;
+      specs = services(input);
+    }
     await deps.invoke({
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
@@ -299,6 +317,12 @@ export async function startNativeProject(opts: {
         ) {
           throw refused();
         }
+        const cache = await publishNativeCacheSource({
+          runtime: opts.runtime,
+          projectRoot: opts.scope.projectRoot,
+          review,
+          invoke: deps.invoke,
+        });
         const directory = await mkdtemp(join(tmpdir(), "hack-native-start-"));
         const run = randomBytes(16).toString("hex");
         let mapping: NativeProjectRun | undefined;
@@ -352,7 +376,8 @@ export async function startNativeProject(opts: {
                 "--expect-plan",
                 review.planId,
                 "--shared-source",
-                ...readiness(specs),
+                ...cache.flags,
+                ...readiness(specs, cache.initializers),
                 "--dependencies",
                 dependencyFile,
                 "--expect-dependencies",

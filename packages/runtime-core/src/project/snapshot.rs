@@ -47,6 +47,35 @@ pub struct Delta {
     pub transferred_file_bytes: u64,
 }
 
+// v2 binds the reviewed selection as well as bytes. Two selections can produce
+// identical entries (for example an ignored mount directory appearing after up),
+// but their immutable publication receipts must not collide. v1 remains readable.
+fn revision_hash(
+    version: u32,
+    selection: &str,
+    entries: &[ContentEntry],
+) -> Result<String, CandidateError> {
+    let invalid = || {
+        problem(
+            "invalid_source_manifest",
+            "Unsupported source revision identity.",
+        )
+    };
+    let encoded = match version {
+        1 => serde_json::to_vec(&(1_u32, entries)),
+        2 if selection.len() == 64
+            && selection
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+        {
+            serde_json::to_vec(&(2_u32, selection, entries))
+        }
+        _ => return Err(invalid()),
+    }
+    .map_err(|_| invalid())?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
 impl ContentRevision {
     pub fn validate(&self) -> Result<(), CandidateError> {
         let invalid = || {
@@ -55,7 +84,10 @@ impl ContentRevision {
                 "Source manifest identity, paths or limits are invalid.",
             )
         };
-        if self.schema_version != 1 || self.entries.len() > 20_000 || self.total_bytes > MAX_BYTES {
+        if ![1, 2].contains(&self.schema_version)
+            || self.entries.len() > 20_000
+            || self.total_bytes > MAX_BYTES
+        {
             return Err(invalid());
         }
         if self
@@ -146,8 +178,10 @@ impl ContentRevision {
         ) {
             return Err(invalid());
         }
-        let encoded = serde_json::to_vec(&(1_u32, &self.entries)).map_err(|_| invalid())?;
-        if total != self.total_bytes || format!("{:x}", Sha256::digest(encoded)) != self.revision {
+        if total != self.total_bytes
+            || revision_hash(self.schema_version, &self.selection_sha256, &self.entries)?
+                != self.revision
+        {
             return Err(invalid());
         }
         Ok(())
@@ -453,12 +487,11 @@ pub fn capture(
     if selection(project, environment_files)?.metadata_sha256 != selected.metadata_sha256 {
         return Err(changed());
     }
-    let encoded = serde_json::to_vec(&(1_u32, &entries))
-        .map_err(|_| problem("serialization_failed", "Cannot encode source revision."))?;
+    let revision = revision_hash(2, &selected.metadata_sha256, &entries)?;
     Ok(Snapshot {
         receipt: ContentRevision {
-            schema_version: 1,
-            revision: format!("{:x}", Sha256::digest(encoded)),
+            schema_version: 2,
+            revision,
             selection_sha256: selected.metadata_sha256,
             total_bytes: total,
             entries,

@@ -1,4 +1,7 @@
 import { isAbsolute } from "node:path";
+import { isRecord } from "../lib/guards.ts";
+
+const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 export interface NativeRuntimeSelection {
   readonly binary: string;
@@ -61,9 +64,10 @@ export async function invokeNativeRuntime(opts: {
       env,
       stdin: opts.privateInput ? "pipe" : "ignore",
       stdout: "pipe",
-      stderr: "ignore",
+      stderr: "pipe",
     }
   );
+  const failureCode = readNativeFailureCode(child.stderr);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -76,11 +80,12 @@ export async function invokeNativeRuntime(opts: {
     }
     const bytes = await readBoundedOutput(child.stdout);
     const code = await child.exited;
+    const failure = await failureCode;
     if (timedOut || code !== 0) {
       throw new Error(
         timedOut
           ? "Native runtime request timed out; inspect owned state before retrying."
-          : "Native runtime request failed; inspect owned state before retrying."
+          : `Native runtime request failed${failure ? ` (${failure})` : ""}; inspect owned state before retrying.`
       );
     }
     try {
@@ -127,4 +132,41 @@ async function readBoundedOutput(
     offset += chunk.byteLength;
   }
   return result;
+}
+
+/** Only the native structured error code leaves this boundary, never stderr messages. */
+export async function readNativeFailureCode(
+  stream: ReadableStream<Uint8Array>
+): Promise<string | undefined> {
+  const reader = stream.getReader();
+  let bytes = 0;
+  let text = "";
+  const decoder = new TextDecoder();
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) {
+        break;
+      }
+      bytes += result.value.byteLength;
+      if (bytes <= 8192) {
+        text += decoder.decode(result.value, { stream: true });
+      }
+    }
+    if (bytes > 8192) {
+      return;
+    }
+    const value: unknown = JSON.parse(text + decoder.decode());
+    if (
+      isRecord(value) &&
+      typeof value.code === "string" &&
+      ERROR_CODE.test(value.code)
+    ) {
+      return value.code;
+    }
+  } catch {
+    return;
+  } finally {
+    reader.releaseLock();
+  }
 }

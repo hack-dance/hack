@@ -1,7 +1,9 @@
 import { isRecord } from "../lib/guards.ts";
-import type { NativeRuntimeSelection } from "./native-runtime-client.ts";
+import {
+  type NativeRuntimeSelection,
+  readNativeFailureCode,
+} from "./native-runtime-client.ts";
 
-const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const RUN = /^[a-f0-9]{32}$/;
 const MAX_OUTPUT = 16 * 1024 * 1024;
 const MAX_INPUT = 256 * 1024;
@@ -58,7 +60,7 @@ export async function serveNativeProjectGraph(opts: {
       stderr: "pipe",
     }
   );
-  const failureCode = nativeFailureCode(child.stderr);
+  const failureCode = readNativeFailureCode(child.stderr);
   let ready = false;
   let canceled = false;
   let timedOut = false;
@@ -181,41 +183,4 @@ async function consumeGraphOutput(opts: {
     reader.releaseLock();
   }
   return ready;
-}
-
-/** Only the native structured error code leaves this boundary, never stderr messages. */
-async function nativeFailureCode(
-  stream: ReadableStream<Uint8Array>
-): Promise<string | undefined> {
-  const reader = stream.getReader();
-  let bytes = 0;
-  let text = "";
-  const decoder = new TextDecoder();
-  try {
-    while (true) {
-      const result = await reader.read();
-      if (result.done) {
-        break;
-      }
-      bytes += result.value.byteLength;
-      if (bytes <= 8192) {
-        text += decoder.decode(result.value, { stream: true });
-      }
-    }
-    if (bytes > 8192) {
-      return;
-    }
-    const value: unknown = JSON.parse(text + decoder.decode());
-    if (
-      isRecord(value) &&
-      typeof value.code === "string" &&
-      ERROR_CODE.test(value.code)
-    ) {
-      return value.code;
-    }
-  } catch {
-    return;
-  } finally {
-    reader.releaseLock();
-  }
 }

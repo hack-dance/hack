@@ -22,6 +22,7 @@ async function fixture() {
     binary,
     `#!${process.execPath}
 if (process.argv.includes("hang")) await Bun.sleep(60_000);
+if (process.argv.includes("structured")) { console.error(JSON.stringify({code:"source_conflict",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("fail")) { console.error("synthetic-secret-diagnostic"); process.exit(23); }
 if (process.argv.includes("overflow")) { process.stdout.write("x".repeat(17 * 1024 * 1024)); }
 else {
@@ -111,4 +112,13 @@ test("private-input and response bounds reject instead of truncating", async () 
   await expect(
     invokeNativeRuntime({ runtime, cwd: runtime.home, args: ["overflow"] })
   ).rejects.toThrow("output budget");
+});
+
+test("structured failures expose only a bounded code, never their message", async () => {
+  const runtime = await fixture();
+  await expect(
+    invokeNativeRuntime({ runtime, cwd: runtime.home, args: ["structured"] })
+  ).rejects.toThrow(
+    "Native runtime request failed (source_conflict); inspect owned state before retrying."
+  );
 });

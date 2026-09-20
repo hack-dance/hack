@@ -54,7 +54,12 @@ async function fixture(withEnvironment = true) {
         planId,
         namespace,
         projectArgs: ["--project", root],
-        report: { plan: { enrollment_compatible: true } },
+        report: {
+          plan: {
+            enrollment_compatible: true,
+            services: { web: { active: true } },
+          },
+        },
       }),
     invoke: async (opts) => {
       events.push(opts.args.slice(0, 2).join(" "));
@@ -210,4 +215,74 @@ test("projects without managed values omit the private environment envelope", as
   const { opts, events } = await fixture(false);
   expect(await startNativeProject(opts)).toBe(0);
   expect(events).toContain("remove");
+});
+
+test("AWS profile export follows native login hooks and precedes runtime effects", async () => {
+  const { opts, events } = await fixture();
+  opts.dependencies.adaptAws = async ({ input, profile }) => {
+    expect(profile).toBe("qa-test");
+    events.push("aws");
+    return {
+      input,
+      receipt: { profile, expiry: "2099-01-01T00:00:00Z", services: ["web"] },
+    };
+  };
+  expect(
+    await startNativeProject({ ...opts, aws: { profile: "qa-test" } })
+  ).toBe(0);
+  expect(events.indexOf("aws")).toBeGreaterThan(events.indexOf("before"));
+  expect(events.indexOf("aws")).toBeLessThan(events.indexOf("runtime up"));
+  events.length = 0;
+  opts.dependencies.adaptAws = async () => {
+    throw new Error("expired profile");
+  };
+  await expect(
+    startNativeProject({ ...opts, aws: { profile: "qa-test" } })
+  ).rejects.toThrow("expired profile");
+  expect(events).toEqual(["before", "cleanup"]);
+});
+
+test("reviewed dependency caches bind published source and successful completion readiness", async () => {
+  const { opts } = await fixture(false);
+  const review = opts.dependencies.review,
+    invoke = opts.dependencies.invoke,
+    serve = opts.dependencies.serve;
+  opts.dependencies.review = async (input) => {
+    if (!review) {
+      throw new Error("missing fixture review");
+    }
+    return await review({
+      ...input,
+      run: async (reviewed) =>
+        input.run({
+          ...reviewed,
+          report: {
+            plan: {
+              enrollment_compatible: true,
+              services: {
+                web: { active: true, dependency_cache: { volume: "modules" } },
+              },
+            },
+          },
+        }),
+    });
+  };
+  opts.dependencies.invoke = async (input) =>
+    input.args[1] === "publish-source"
+      ? {
+          revision: "e".repeat(64),
+          namespace: "b".repeat(64),
+          state: "guest-content-verified-no-job-started",
+        }
+      : await invoke?.(input);
+  opts.dependencies.serve = async (input) => {
+    expect(input.args).toContain("--source-revision");
+    expect(input.args).toContain("e".repeat(64));
+    expect(input.args).toContain("web=completed");
+    if (!serve) {
+      throw new Error("missing fixture serve");
+    }
+    return await serve(input);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
 });

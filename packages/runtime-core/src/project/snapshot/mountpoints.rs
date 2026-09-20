@@ -125,12 +125,11 @@ impl Snapshot {
             }
         }
         (self.receipt.entries, self.files) = entries.into_values().unzip();
-        self.receipt.revision = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&(1_u32, &self.receipt.entries)).map_err(|_| refused())?
-            )
-        );
+        self.receipt.revision = revision_hash(
+            self.receipt.schema_version,
+            &self.receipt.selection_sha256,
+            &self.receipt.entries,
+        )?;
         self.receipt.verify_mountpoints(plan)?;
         Ok(self)
     }
@@ -196,6 +195,45 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn ignored_mountpoint_selection_changes_do_not_collide_and_legacy_stays_readable() {
+        let (fixture, plan) = fixture();
+        let before = capture(&plan).with_mountpoints(&plan).unwrap();
+        fs::remove_dir_all(plan.source.join("node_modules")).unwrap();
+        let candidate = Candidate::discover(&fixture.0.join("candidate")).unwrap();
+        let next = project::plan(
+            &candidate,
+            PlanOptions {
+                project: &plan.source,
+                compose_file: Path::new("compose.yaml"),
+                profiles: &[],
+            },
+        )
+        .unwrap()
+        .plan;
+        let after = capture(&next).with_mountpoints(&next).unwrap();
+        assert_eq!(before.receipt().entries, after.receipt().entries);
+        assert_eq!(before.archive().unwrap(), after.archive().unwrap());
+        assert_ne!(
+            before.receipt().selection_sha256,
+            after.receipt().selection_sha256
+        );
+        assert_ne!(before.receipt().revision, after.receipt().revision);
+        before.receipt().validate().unwrap();
+        after.receipt().validate().unwrap();
+        let mut tampered = after.receipt().clone();
+        tampered.selection_sha256 = before.receipt().selection_sha256.clone();
+        assert!(tampered.validate().is_err());
+        let mut legacy = before.receipt().clone();
+        legacy.schema_version = 1;
+        legacy.revision = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(1_u32, &legacy.entries)).unwrap())
+        );
+        legacy.validate().unwrap();
+        assert_ne!(legacy.revision, before.receipt().revision);
+    }
+
     #[test]
     fn excluded_mountpoint_is_attested_without_copying_ignored_contents_or_host_writes() {
         let (fixture, plan) = fixture();

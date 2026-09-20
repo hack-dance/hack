@@ -243,8 +243,11 @@ for owned cleanup and removes the mapping only after confirming cleanup; named
 volumes are retained. The VM remains available until explicit runtime shutdown.
 
 This initial foreground path does not support detached/JSON startup, selected
-services, routed services, host dependencies, external networks or dependency-cache
-labels. Event Agent requires further integration and is not yet supported by this
+services, routed services, host dependencies or external networks. Existing
+`hack.dependencies.*` cache declarations publish the reviewed source snapshot and
+require successful initializer completion before dependent services start. Cache
+initializers receive immutable source mounts and writable named cache volumes;
+workspace installs that write elsewhere still require explicit volume mappings. Event Agent requires further integration and is not yet supported by this
 normal command. `down`, `restart`, `run` and `exec` still refuse native selection;
 there is no silent fallback to the stable runtime. An uncertain shutdown retains
 its mapping and evidence for recovery; do not delete managed state to retry.
@@ -263,3 +266,19 @@ not preallocated memory and is not added again to graph memory reservations.
 Actual shared-memory allocation remains constrained by an explicit container
 memory cap, when present, and by the admitted VM pool. Restart review preserves
 the exact shared-memory setting; zero, malformed and oversized values are refused.
+
+
+For a project using the recognized read-only AWS home mount, explicit
+`HACK_NATIVE_AWS_PROFILE` (and optional `HACK_NATIVE_AWS_REGION`) applies the
+service-scoped AWS adapter after the normal login hook. It removes only recognized
+AWS mounts/selectors and supplies temporary credentials through private stdin.
+Expired or unsupported profiles fail startup; credentials are not persisted or
+refreshed automatically. Unrecognized mounts and other unsupported bindings still
+refuse admission.
+
+New immutable source captures use manifest schema 2: the revision binds both
+selected content and its selection receipt. This prevents an ignored mountpoint
+appearing after startup from colliding with an earlier publication containing the
+same bytes under a different selection. Existing schema-1 manifests remain
+verifiable; they are not rewritten or deleted. Cache keys still derive from their
+declared dependency inputs and execution identity.

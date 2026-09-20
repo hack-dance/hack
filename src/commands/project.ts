@@ -5874,6 +5874,12 @@ async function handleNativeUp({
     envName: resolveRequestedEnvName({ envOption: args.options.env }),
     profiles: parseCsvList(args.options.profile),
     sharedSource: process.env.HACK_NATIVE_SHARED_SOURCE === "1",
+    aws: process.env.HACK_NATIVE_AWS_PROFILE
+      ? {
+          profile: process.env.HACK_NATIVE_AWS_PROFILE,
+          region: process.env.HACK_NATIVE_AWS_REGION,
+        }
+      : undefined,
     before: async (input) => {
       const lifecycle = await runLifecycleUpBeforeAndProcesses({
         title: "Lifecycle (native up before)",

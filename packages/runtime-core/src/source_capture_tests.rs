@@ -165,7 +165,13 @@ fn plan_capture_materializes_reviewed_next_declarations_without_reading_ignored_
     )
     .unwrap();
     let next = capture_plan_source(&plan()).unwrap();
-    assert_eq!(initial.receipt().revision, next.receipt().revision);
+    assert_eq!(initial.receipt().entries, next.receipt().entries);
+    assert_eq!(initial.archive().unwrap(), next.archive().unwrap());
+    assert_ne!(
+        initial.receipt().selection_sha256,
+        next.receipt().selection_sha256
+    );
+    assert_ne!(initial.receipt().revision, next.receipt().revision);
     assert!(next.files().all(|(_, bytes)| {
         !bytes
             .windows(b"excluded-generated-canary".len())

@@ -356,7 +356,12 @@ mod tests {
     fn resign(manifest: &mut ContentRevision) {
         manifest.entries.sort_by(|a, b| a.path.cmp(&b.path));
         manifest.total_bytes = manifest.entries.iter().map(|e| e.bytes).sum();
-        manifest.revision = hash(&(1_u32, &manifest.entries)).unwrap();
+        manifest.revision = match manifest.schema_version {
+            1 => hash(&(1_u32, &manifest.entries)),
+            2 => hash(&(2_u32, &manifest.selection_sha256, &manifest.entries)),
+            _ => panic!("unknown fixture manifest version"),
+        }
+        .unwrap();
     }
     #[test]
     fn subpath_layout_changes_cache_identity_without_compose_digest_shortcut() {

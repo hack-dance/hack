@@ -142,6 +142,70 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
     assert!(!candidate.state_root.exists());
 }
 #[test]
+fn omitted_service_limits_share_pool_and_explicit_caps_remain_enforced() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    for (count, cpu, memory, accepted) in [
+        (14, None, None, true),
+        (32, None, None, true),
+        (33, None, None, false),
+        (1, Some(0.5), Some(64 * 1024 * 1024), true),
+        (1, Some(0.5), None, true),
+        (1, None, Some(64 * 1024 * 1024), true),
+        (1, Some(f64::NAN), None, false),
+        (1, Some(f64::INFINITY), None, false),
+        (1, Some(0.0), None, false),
+        (1, Some(-0.5), None, false),
+        (1, Some(0.05), None, false),
+        (1, Some(2.1), None, false),
+        (1, None, Some(0), false),
+        (1, None, Some(8 * 1024 * 1024), false),
+        (1, None, Some(MAX_MEMORY_BYTES + 1), false),
+        (3, Some(2.0), None, false),
+        (2, None, Some(3 * 1024 * 1024 * 1024), false),
+    ] {
+        let services: serde_json::Map<String, Value> = (0..count).map(|i| (format!("job-{i}"),json!({"image":image,"read_only":true,"network_mode":"none","command":["true"]}))).collect();
+        let goals = services
+            .keys()
+            .map(|name| (name.clone(), Condition::Completed))
+            .collect();
+        state::write(
+            &fixture.0.join("compose.yaml"),
+            &json!({"services":services}),
+        )
+        .unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let mut inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        for service in inputs.review.plan.services.values_mut() {
+            service.limits.cpus = cpu;
+            service.limits.memory_bytes = memory;
+        }
+        let result = config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None);
+        if !accepted {
+            assert_eq!(result.err().unwrap().code, "graph_budget");
+            continue;
+        }
+        let prepared = result.unwrap();
+        assert_eq!(prepared.configs.len(), count);
+        for config in prepared.configs.values() {
+            assert_eq!(config["HostConfig"]["Memory"], json!(memory.unwrap_or(0)));
+            assert_eq!(
+                config["HostConfig"]["NanoCpus"],
+                json!((cpu.unwrap_or(0.0) * 1e9) as u64)
+            );
+        }
+    }
+    assert!(!candidate.state_root.exists());
+}
+#[test]
 fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
     let fixture = Fixture::new();
     let candidate_root = Fixture::new();

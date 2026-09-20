@@ -1,0 +1,132 @@
+import { afterEach, expect, test } from "bun:test";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { serveNativeProjectGraph } from "../src/backends/native-project-process.ts";
+
+const roots: string[] = [];
+const run = "a".repeat(32);
+afterEach(async () => {
+  await Promise.all(
+    roots.splice(0).map((path) => rm(path, { recursive: true, force: true }))
+  );
+});
+const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+async function fixture(program: string) {
+  const root = await mkdtemp(join(tmpdir(), "native-process-"));
+  roots.push(root);
+  const script = join(root, "fake.ts"),
+    binary = join(root, "fake-native");
+  await writeFile(script, program);
+  await writeFile(
+    binary,
+    `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(script)} "$@"\n`
+  );
+  await chmod(binary, 0o700);
+  return {
+    runtime: { binary, home: root },
+    projectRoot: root,
+    run,
+    args: ["--project", root],
+    startupTimeoutMs: 2000,
+  };
+}
+test("foreground owner receives private stdin, reports readiness once and returns completion", async () => {
+  const opts = await fixture(`
+    const input = JSON.parse(await Bun.stdin.text());
+    if (input.value !== "synthetic-private-input" || process.argv.some(a => a.includes("synthetic-private-input"))) process.exit(19);
+    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
+    await Bun.sleep(30);
+    console.log(JSON.stringify({phase:"cleaned"}));
+  `);
+  let ready = 0;
+  const code = await serveNativeProjectGraph({
+    ...opts,
+    privateInput: new TextEncoder().encode(
+      JSON.stringify({ value: "synthetic-private-input" })
+    ),
+    onReady: async () => {
+      ready++;
+    },
+  });
+  expect(code).toBe(0);
+  expect(ready).toBe(1);
+});
+test("wrong readiness identity never publishes a mapping and stops the owned child", async () => {
+  const opts = await fixture(
+    `console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${"b".repeat(32)}"})); await Bun.sleep(10000);`
+  );
+  let ready = false;
+  await expect(
+    serveNativeProjectGraph({
+      ...opts,
+      onReady: async () => {
+        ready = true;
+      },
+    })
+  ).rejects.toThrow("identity");
+  expect(ready).toBe(false);
+});
+test("startup timeout and pre-cancellation do not become readiness", async () => {
+  const opts = await fixture("await Bun.sleep(10000)");
+  let ready = false;
+  await expect(
+    serveNativeProjectGraph({
+      ...opts,
+      startupTimeoutMs: 30,
+      onReady: async () => {
+        ready = true;
+      },
+    })
+  ).rejects.toThrow("interrupted");
+  const controller = new AbortController();
+  controller.abort();
+  await expect(
+    serveNativeProjectGraph({
+      ...opts,
+      signal: controller.signal,
+      onReady: async () => {
+        ready = true;
+      },
+    })
+  ).rejects.toThrow("canceled");
+  expect(ready).toBe(false);
+});
+test("failed owner preserves nonzero completion and callback failure terminates ownership", async () => {
+  const opts = await fixture(
+    `console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"})); await Bun.sleep(20); process.exit(23);`
+  );
+  expect(
+    await serveNativeProjectGraph({ ...opts, onReady: async () => {} })
+  ).toBe(23);
+  const waiting = await fixture(
+    `console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"})); await Bun.sleep(10000);`
+  );
+  await expect(
+    serveNativeProjectGraph({
+      ...waiting,
+      onReady: async () => {
+        throw new Error("mapping refused");
+      },
+    })
+  ).rejects.toThrow("mapping refused");
+});
+
+test("structured startup failure exposes its code without stderr values", async () => {
+  const opts = await fixture(
+    'console.error(JSON.stringify({code:"graph_budget",message:"synthetic-private-detail"}));process.exit(2);'
+  );
+  let failure = "";
+  try {
+    await serveNativeProjectGraph({
+      ...opts,
+      onReady: async () => {
+        throw new Error("must not become ready");
+      },
+    });
+  } catch (error) {
+    failure = String(error);
+  }
+  expect(failure).toContain("graph_budget");
+  expect(failure).not.toContain("synthetic-private-detail");
+});

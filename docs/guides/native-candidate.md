@@ -219,3 +219,28 @@ An installer that needs to modify source files is not supported in this mode yet
 Restart after dependency-input changes with a new review and publication.
 Moving or deleting a project prevents further activation, but does not prevent
 owned runtime teardown. Teardown never removes the shared host tree.
+
+Service CPU and memory limits are optional. Services without an explicit Compose
+limit share the admitted VM pool (Docker `NanoCpus: 0` and `Memory: 0`); the VM's
+CPU and memory admission bounds remain unchanged. Explicit limits retain per-service
+validation and aggregate reservation checks, and graphs remain limited to 32
+services. This preserves ordinary Compose omission semantics; it makes no
+performance guarantee or claim about fairness between workloads.
+
+### Frontend integration status
+
+Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
+`HACK_NATIVE_HOME` selects native observations for normal `hack ps` and bounded
+`hack logs SERVICE --no-follow`. They verify the project/branch run mapping
+against the current native graph. Logs do not support following or Loki options.
+A project with no admitted mapping reports not started. Other normal runtime
+commands currently refuse native selection before lifecycle or Compose effects;
+there is no silent fallback to the stable runtime.
+
+After starting an owned native pool, `runtime ensure-image --reference REF --json`
+resolves a public Docker Hub tag or accepts an explicit digest, reuses the verified
+archive cache, and imports through the existing content-ID-checked loader. Tags
+are resolved on each call; a warm explicit digest needs no registry request.
+The cache is limited to 16 archives and 2 GiB; an incomplete or conflicting entry
+requires inspection, and the command never prunes existing data. This command
+is a startup building block, not evidence of complete normal `hack up` support.

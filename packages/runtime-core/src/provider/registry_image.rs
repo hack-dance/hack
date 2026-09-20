@@ -30,7 +30,7 @@ fn valid_digest(value: &str) -> bool {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     })
 }
-fn reference(value: &str) -> Result<(&str, &str), CandidateError> {
+pub(super) fn reference(value: &str) -> Result<(&str, &str), CandidateError> {
     let value = value.strip_prefix("docker.io/").unwrap_or(value);
     let (name, hash) = value
         .split_once('@')
@@ -278,7 +278,7 @@ fn authenticated_fetch(repo: &str) -> Result<Fetch, CandidateError> {
     Ok(fetch)
 }
 
-fn tagged_reference(value: &str) -> Result<(&str, &str), CandidateError> {
+pub(super) fn tagged_reference(value: &str) -> Result<(&str, &str), CandidateError> {
     let value = value.strip_prefix("docker.io/").unwrap_or(value);
     if value.contains('@') {
         return Err(error(

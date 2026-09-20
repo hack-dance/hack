@@ -213,11 +213,18 @@ pub(super) fn prepare_delivery(
             }
             volumes.insert(mount.source.clone());
         }
-        let memory = service.limits.memory_bytes.unwrap_or(256 * 1024 * 1024);
-        let cpus = service.limits.cpus.unwrap_or(0.5);
-        if !(16 * 1024 * 1024..=MAX_MEMORY_BYTES).contains(&memory)
-            || !cpus.is_finite()
-            || !(0.1..=2.0).contains(&cpus)
+        // Omitted limits share the already-admitted VM pool; only explicit limits
+        // count toward graph reservations. Docker represents omitted caps as zero.
+        let memory = service.limits.memory_bytes.unwrap_or(0);
+        let cpus = service.limits.cpus.unwrap_or(0.0);
+        if service
+            .limits
+            .memory_bytes
+            .is_some_and(|value| !(16 * 1024 * 1024..=MAX_MEMORY_BYTES).contains(&value))
+            || service
+                .limits
+                .cpus
+                .is_some_and(|value| !value.is_finite() || !(0.1..=2.0).contains(&value))
             || service.limits.pids.is_some_and(|p| p > 128)
             || service
                 .limits
@@ -318,7 +325,7 @@ pub(super) fn prepare_delivery(
         // Writable roots are container-owned layers, not writable source binds.
         // Their contents are discarded when the container is removed; durable data uses named volumes.
         let mut config = json!({"Image":image,"Labels":labels,"HostConfig":{
-            "NetworkMode":network,"Memory":service.limits.memory_bytes.unwrap_or(268435456),"NanoCpus":(service.limits.cpus.unwrap_or(0.5)*1e9) as u64,
+            "NetworkMode":network,"Memory":service.limits.memory_bytes.unwrap_or(0),"NanoCpus":(service.limits.cpus.unwrap_or(0.0)*1e9) as u64,
             "PidsLimit":service.limits.pids.unwrap_or(64),"ReadonlyRootfs":service.read_only,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"Init":service.init,
             "Mounts":mounts,"Tmpfs":{"/tmp":"rw,noexec,nosuid,size=16777216"},"ShmSize":service.limits.shared_memory_bytes.unwrap_or(67108864),
             "RestartPolicy":{"Name":"no"},"LogConfig":{"Type":"json-file","Config":{"max-size":"1m","max-file":"1"}}

@@ -24,6 +24,12 @@ import {
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
+import {
+  nativeProjectLogs,
+  nativeProjectPs,
+  requireComposeOperationAvailable,
+} from "../backends/native-project-observe.ts";
+import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
@@ -5820,6 +5826,7 @@ async function handleUp({
   readonly ctx: CliContext;
   readonly args: UpArgs;
 }): Promise<number> {
+  requireComposeOperationAvailable("up");
   const json = args.options.json === true;
   if (!json) {
     return await runUpCommand({ ctx, args, json: false });
@@ -6333,6 +6340,7 @@ async function handleDown({
   readonly ctx: CliContext;
   readonly args: DownArgs;
 }): Promise<number> {
+  requireComposeOperationAvailable("down");
   const json = args.options.json === true;
   if (!json) {
     return await runDownCommand({ ctx, args, json: false });
@@ -7132,6 +7140,7 @@ async function handleRestart({
   readonly ctx: CliContext;
   readonly args: RestartArgs;
 }): Promise<number> {
+  requireComposeOperationAvailable("restart");
   const json = args.options.json === true;
   if (!json) {
     return await runRestartCommand({ ctx, args, json: false });
@@ -7604,6 +7613,35 @@ async function handlePs({
     branchOption: args.options.branch,
     noticeToStderr: json,
   });
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    if (args.options.profile) {
+      throw new CliUsageError("Native ps does not support profile filtering.");
+    }
+    const result = await nativeProjectPs({
+      runtime: native,
+      scope: {
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        nativeHome: native.home,
+        branch,
+      },
+    });
+    if (json) {
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    } else {
+      await display.table({
+        columns: ["NATIVE SERVICE", "CONTAINER", "STATE", "HEALTH"],
+        rows: result.items.map((item) => [
+          item.service,
+          item.container ?? "",
+          item.state,
+          item.health ?? "",
+        ]),
+      });
+    }
+    return 0;
+  }
   const profiles = parseCsvList(args.options.profile);
 
   const cfg = await readProjectConfig(project);
@@ -7687,6 +7725,7 @@ async function handleRun({
   readonly ctx: CliContext;
   readonly args: RunArgs;
 }): Promise<number> {
+  requireComposeOperationAvailable("run");
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -7830,6 +7869,7 @@ async function handleExec({
   readonly ctx: CliContext;
   readonly args: ExecArgs;
 }): Promise<number> {
+  requireComposeOperationAvailable("exec");
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -8354,6 +8394,63 @@ async function resolveLifecycleLogCompanion(opts: {
   return { logPath };
 }
 
+async function handleNativeLogs({
+  args,
+  project,
+  branch,
+  native,
+}: {
+  readonly args: LogsArgs;
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly branch: string | null;
+  readonly native: NonNullable<
+    ReturnType<typeof resolveNativeRuntimeSelection>
+  >;
+}): Promise<number> {
+  const json = args.options.json === true;
+  const service = args.positionals.service;
+  const tail = args.options.tail ?? 200;
+  const follow = !args.options.noFollow;
+  if (
+    [
+      args.options.profile,
+      args.options.compose,
+      args.options.loki,
+      args.options.services,
+      args.options.query,
+      args.options.since,
+      args.options.until,
+      args.options.pretty,
+    ].some(Boolean)
+  ) {
+    throw new CliUsageError(
+      "Native logs support only a service, --no-follow, --tail and --json."
+    );
+  }
+  const result = await nativeProjectLogs({
+    runtime: native,
+    scope: {
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      nativeHome: native.home,
+      branch,
+    },
+    service,
+    tail,
+    follow,
+  });
+  if (json) {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  } else {
+    process.stderr.write(
+      `Native logs: ${result.service}${result.truncated ? " (truncated)" : ""}\n`
+    );
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+  }
+  return 0;
+}
+
 async function handleLogs({
   ctx,
   args,
@@ -8376,6 +8473,10 @@ async function handleLogs({
   const follow = !args.options.noFollow;
   const tail = args.options.tail ?? 200;
   const service = args.positionals.service;
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    return await handleNativeLogs({ args, project, branch, native });
+  }
   const profiles = parseCsvList(args.options.profile);
   const format = resolveLogFormat({ json, pretty: args.options.pretty });
   const timeRange = parseLogTimeRange({

@@ -60,6 +60,7 @@ Usage:
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
   hack-local runtime prepare-engine --archive <pinned-docker.tgz>
   hack-local runtime prepare-network-tools --directory <private-pinned-apk-directory>
+  hack-local runtime ensure-image --reference <namespace/repository[:tag]|namespace/repository@sha256:digest> --json
   hack-local runtime resolve-image --reference <namespace/repository[:tag]> --json
   hack-local runtime fetch-image --reference <namespace/repository@sha256:digest> --archive <new-flat-image.tar> [--json]
   hack-local runtime load-image --archive <flat-image.tar> --sha256 <archive-hash> --image-id <sha256:config-hash>
@@ -546,6 +547,18 @@ fn run() -> Result<(), CandidateError> {
             print_json(&hack_runtime_core::provider::prepare_engine(
                 &discover_candidate(&requested)?,
                 Path::new(archive),
+            )?)?;
+        }
+        [
+            "runtime",
+            "ensure-image",
+            "--reference",
+            reference,
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::image_ensure::ensure(
+                &discover_candidate(&requested)?,
+                reference,
             )?)?;
         }
         [

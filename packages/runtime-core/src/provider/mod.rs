@@ -25,6 +25,7 @@ pub mod host_endpoint;
 pub mod hostname_authority;
 pub mod http_probe;
 mod identity;
+pub mod image_ensure;
 mod image_load;
 pub mod managed_environment;
 pub mod private_deadline;

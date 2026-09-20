@@ -202,7 +202,7 @@ export async function nativeProjectLogs(
 
 /** Refuse before any legacy lifecycle effects until the native operation is wired. */
 export function requireComposeOperationAvailable(
-  operation: "up" | "down" | "restart" | "run" | "exec",
+  operation: "down" | "restart" | "run" | "exec",
   env: Readonly<Record<string, string | undefined>> = process.env
 ): void {
   if (env.HACK_RUNTIME_BACKEND === "native") {

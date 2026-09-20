@@ -233,9 +233,21 @@ Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME` selects native observations for normal `hack ps` and bounded
 `hack logs SERVICE --no-follow`. They verify the project/branch run mapping
 against the current native graph. Logs do not support following or Loki options.
-A project with no admitted mapping reports not started. Other normal runtime
-commands currently refuse native selection before lifecycle or Compose effects;
-there is no silent fallback to the stable runtime.
+A project with no admitted mapping reports not started. Foreground whole-project
+`hack up` additionally requires `HACK_NATIVE_SHARED_SOURCE=1`: it exposes the exact
+project tree, including ignored files, with each mount's declared write mode. Use
+an explicitly prepared candidate home and the binary from a complete native bundle.
+It acquires public images, privately supplies managed environment values, runs
+lifecycle hooks, and publishes the run mapping after native readiness. Ctrl-C waits
+for owned cleanup and removes the mapping only after confirming cleanup; named
+volumes are retained. The VM remains available until explicit runtime shutdown.
+
+This initial foreground path does not support detached/JSON startup, selected
+services, routed services, host dependencies, external networks or dependency-cache
+labels. Event Agent requires further integration and is not yet supported by this
+normal command. `down`, `restart`, `run` and `exec` still refuse native selection;
+there is no silent fallback to the stable runtime. An uncertain shutdown retains
+its mapping and evidence for recovery; do not delete managed state to retry.
 
 After starting an owned native pool, `runtime ensure-image --reference REF --json`
 resolves a public Docker Hub tag or accepts an explicit digest, reuses the verified
@@ -244,3 +256,10 @@ are resolved on each call; a warm explicit digest needs no registry request.
 The cache is limited to 16 archives and 2 GiB; an incomplete or conflicting entry
 requires inspection, and the command never prunes existing data. This command
 is a startup building block, not evidence of complete normal `hack up` support.
+
+Explicit Compose `shm_size` supports positive sizes up to 1 GiB, including
+`shm_size: 1gb`; omission retains Docker's 64 MiB default. This tmpfs ceiling is
+not preallocated memory and is not added again to graph memory reservations.
+Actual shared-memory allocation remains constrained by an explicit container
+memory cap, when present, and by the admitted VM pool. Restart review preserves
+the exact shared-memory setting; zero, malformed and oversized values are refused.

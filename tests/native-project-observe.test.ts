@@ -259,6 +259,7 @@ test("unsupported native lifecycle commands refuse before Docker or project hook
       process.execPath,
       resolve(import.meta.dir, "../index.ts"),
       operation,
+      ...(operation === "up" ? ["--detach"] : []),
       "--path",
       opts.scope.projectRoot,
       ...(["run", "exec"].includes(operation) ? ["web", "--", "true"] : []),
@@ -269,6 +270,8 @@ test("unsupported native lifecycle commands refuse before Docker or project hook
         HOME: opts.scope.projectRoot,
         HACK_HOME: join(opts.scope.projectRoot, "isolated-global"),
         HACK_RUNTIME_BACKEND: "native",
+        HACK_NATIVE_BINARY: join(bin, "native-never-invoked"),
+        HACK_NATIVE_HOME: opts.scope.nativeHome,
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -282,7 +285,9 @@ test("unsupported native lifecycle commands refuse before Docker or project hook
       ]);
       expect(code).not.toBe(0);
       expect(stdout + stderr).toContain(
-        `Native runtime operation '${operation}' is unavailable`
+        operation === "up"
+          ? "foreground whole-project startup only"
+          : `Native runtime operation '${operation}' is unavailable`
       );
     } finally {
       clearTimeout(timer);
@@ -297,7 +302,7 @@ test("absent native selector preserves legacy command availability", async () =>
   const { requireComposeOperationAvailable } = await import(
     "../src/backends/native-project-observe.ts"
   );
-  for (const operation of ["up", "down", "restart", "run", "exec"] as const) {
+  for (const operation of ["down", "restart", "run", "exec"] as const) {
     expect(() => requireComposeOperationAvailable(operation, {})).not.toThrow();
   }
 });

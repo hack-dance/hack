@@ -130,3 +130,32 @@ test("structured startup failure exposes its code without stderr values", async 
   expect(failure).toContain("graph_budget");
   expect(failure).not.toContain("synthetic-private-detail");
 });
+
+test("cancellation preserves the owner's graceful cleanup beyond five seconds", async () => {
+  const opts = await fixture(`
+    process.on("SIGTERM", async () => {
+      await Bun.sleep(6000);
+      await Bun.write(${JSON.stringify("PLACEHOLDER")}, "cleaned");
+      process.exit(0);
+    });
+    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
+    await Bun.sleep(30000);
+  `);
+  const marker = join(opts.projectRoot, "cleanup-complete");
+  const file = join(opts.projectRoot, "fake.ts");
+  await Bun.write(
+    file,
+    (await Bun.file(file).text()).replace("PLACEHOLDER", marker)
+  );
+  const controller = new AbortController();
+  await expect(
+    serveNativeProjectGraph({
+      ...opts,
+      signal: controller.signal,
+      onReady: async () => {
+        setTimeout(() => controller.abort(), 20);
+      },
+    })
+  ).rejects.toThrow("interrupted");
+  expect(await Bun.file(marker).text()).toBe("cleaned");
+}, 15_000);

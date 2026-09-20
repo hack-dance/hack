@@ -68,11 +68,13 @@ export async function serveNativeProjectGraph(opts: {
       return;
     }
     child.kill("SIGTERM");
+    // Native cleanup permits a 120-second control request, including graceful stops.
+    // Keep the owner alive through that budget before last-resort termination.
     killTimer ??= setTimeout(() => {
       if (child.exitCode === null) {
         child.kill("SIGKILL");
       }
-    }, 5000);
+    }, 130_000);
   };
   const abort = () => {
     canceled = true;

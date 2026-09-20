@@ -29,6 +29,7 @@ import {
   nativeProjectPs,
   requireComposeOperationAvailable,
 } from "../backends/native-project-observe.ts";
+import { startNativeProject } from "../backends/native-project-start.ts";
 import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
@@ -5819,6 +5820,103 @@ async function runRemoteLifecycleCommand(opts: {
   });
 }
 
+async function handleNativeUp({
+  ctx,
+  args,
+  native,
+}: {
+  readonly ctx: CliContext;
+  readonly args: UpArgs;
+  readonly native: NonNullable<
+    ReturnType<typeof resolveNativeRuntimeSelection>
+  >;
+}): Promise<number> {
+  if (
+    args.options.detach ||
+    args.options.json ||
+    args.options.target ||
+    args.positionals.services?.length
+  ) {
+    throw new CliUsageError(
+      "Native up currently supports foreground whole-project startup only; detach, JSON, target and service selection are unavailable."
+    );
+  }
+  const project = await resolveProjectForArgs({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+    touchRegistration: false,
+  });
+  const branch = await resolveEffectiveBranchForCommand({
+    project,
+    branchOption: args.options.branch,
+  });
+  const cfg = await readProjectConfig(project);
+  if (cfg.parseError) {
+    throw new CliUsageError(
+      "Native up requires valid project configuration; values omitted."
+    );
+  }
+  const projectName = await resolveComposeProjectName({ project, cfg });
+  const composeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
+  return await startNativeProject({
+    runtime: native,
+    scope: {
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      nativeHome: native.home,
+      branch,
+    },
+    composeFile: project.composeFile,
+    envName: resolveRequestedEnvName({ envOption: args.options.env }),
+    profiles: parseCsvList(args.options.profile),
+    sharedSource: process.env.HACK_NATIVE_SHARED_SOURCE === "1",
+    before: async (input) => {
+      const lifecycle = await runLifecycleUpBeforeAndProcesses({
+        title: "Lifecycle (native up before)",
+        project,
+        cfg,
+        projectName,
+        branch,
+        env: input.lifecycleHostEnvironment,
+        effectiveEnvName: input.effectiveEnvName,
+        composeProject,
+      });
+      if (lifecycle.code !== 0) {
+        await lifecycle.cleanup?.();
+        lifecycle.signalCleanup?.dispose();
+        throw new Error(
+          "Native up lifecycle preparation failed; values omitted."
+        );
+      }
+      return {
+        cleanup: async () => {
+          lifecycle.signalCleanup?.dispose();
+          await lifecycle.cleanup?.();
+        },
+        ready: async () => {
+          const code = await runLifecycleCommands({
+            title: "Lifecycle (native up after)",
+            commands: cfg.lifecycle?.up?.after,
+            projectRoot: project.projectRoot,
+            env: input.lifecycleHostEnvironment,
+            projectDir: project.projectDir,
+            composeProject,
+          });
+          if (code !== 0) {
+            throw new Error(
+              "Native up lifecycle readiness hook failed; values omitted."
+            );
+          }
+        },
+      };
+    },
+  });
+}
+
 async function handleUp({
   ctx,
   args,
@@ -5826,7 +5924,10 @@ async function handleUp({
   readonly ctx: CliContext;
   readonly args: UpArgs;
 }): Promise<number> {
-  requireComposeOperationAvailable("up");
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    return await handleNativeUp({ ctx, args, native });
+  }
   const json = args.options.json === true;
   if (!json) {
     return await runUpCommand({ ctx, args, json: false });

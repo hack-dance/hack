@@ -142,6 +142,83 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
     assert!(!candidate.state_root.exists());
 }
 #[test]
+fn compose_shared_memory_is_bounded_without_double_counting_memory() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    for (shm, memory, expected) in [
+        (None, None, Some(64 * 1024 * 1024)),
+        (Some(json!("1gb")), None, Some(1024 * 1024 * 1024)),
+        (Some(json!("1gb")), Some("512m"), Some(1024 * 1024 * 1024)),
+        (Some(json!("1gb")), Some("4g"), Some(1024 * 1024 * 1024)),
+        (Some(json!("1b")), None, Some(1)),
+        (Some(json!("1073741825b")), None, None),
+        (Some(json!("0b")), None, None),
+        (Some(json!(-1)), None, None),
+        (Some(json!("-1gb")), None, None),
+        (Some(json!("not-a-size")), None, None),
+    ] {
+        let mut service = json!({"image":image,"network_mode":"none","command":["true"]});
+        if let Some(shm) = shm {
+            service["shm_size"] = shm;
+        }
+        if let Some(memory) = memory {
+            service["mem_limit"] = json!(memory);
+        }
+        let mut document = json!({"services":{"chrome":service}});
+        let mut goals = BTreeMap::from([("chrome".into(), Condition::Completed)]);
+        if memory == Some("4g") {
+            // Fill the 5.5GiB explicit reservation budget; tmpfs ceilings must not add to it.
+            document["services"]["peer"] = json!({"image":image,"network_mode":"none","command":["true"],"mem_limit":"1536m","shm_size":"1gb"});
+            goals.insert("peer".into(), Condition::Completed);
+        }
+        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+        let review = match project::plan(&candidate, fixture.options()) {
+            Ok(review) => review,
+            Err(error) => {
+                assert!(
+                    expected.is_none(),
+                    "unexpected parser refusal: {}",
+                    error.code
+                );
+                continue;
+            }
+        };
+        let compiled = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        );
+        let result = compiled.and_then(|inputs| {
+            config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None)
+        });
+        let Some(expected) = expected else {
+            assert!(result.is_err());
+            continue;
+        };
+        let prepared = result.unwrap();
+        let config = &prepared.configs["chrome"];
+        assert_eq!(config["HostConfig"]["ShmSize"], json!(expected));
+        let expected_memory = match memory {
+            Some("512m") => 512 * 1024 * 1024_u64,
+            Some("4g") => 4 * 1024 * 1024 * 1024_u64,
+            _ => 0,
+        };
+        assert_eq!(config["HostConfig"]["Memory"], json!(expected_memory));
+        let mut changed = config.clone();
+        changed["HostConfig"]["ShmSize"] = json!(expected + 1);
+        assert_eq!(
+            mismatch(config, &changed, "request").as_deref(),
+            Some("request.HostConfig.ShmSize")
+        );
+        assert!(contains_request(config, config));
+        assert!(!contains_request(config, &changed));
+    }
+    assert!(!candidate.state_root.exists());
+}
+#[test]
 fn omitted_service_limits_share_pool_and_explicit_caps_remain_enforced() {
     let fixture = Fixture::new();
     let candidate_root = Fixture::new();

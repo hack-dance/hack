@@ -229,7 +229,7 @@ pub(super) fn prepare_delivery(
             || service
                 .limits
                 .shared_memory_bytes
-                .is_some_and(|v| v > 64 * 1024 * 1024)
+                .is_some_and(|v| !(1..=1024 * 1024 * 1024).contains(&v))
             || service
                 .stop_grace_period_nanos
                 .is_some_and(|n| n > 30_000_000_000)
@@ -239,6 +239,8 @@ pub(super) fn prepare_delivery(
                 "A service exceeds the bounded graph profile.",
             ));
         }
+        // ShmSize is a tmpfs ceiling, not preallocated RSS. Its actual usage is
+        // already constrained by an explicit container memory cap or the VM pool.
         total_memory += memory;
         total_cpus += cpus;
     }

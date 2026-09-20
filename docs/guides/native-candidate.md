@@ -137,6 +137,21 @@ file's different configuration. Use immutable source publication and a fresh run
 for this bounded path. Source exclusions and runtime ownership checks remain in
 force. Existing commands without these flags keep their file-based behavior.
 
+Graph execution respects the declared container root mode: `read_only: true`
+keeps the root read-only, while false or omitted permits a writable container
+layer. Removing the owned container discards that layer; use named volumes for
+durable data. Source bind mounts still require read-only publication. Writable
+container layers do not imply writable source synchronization.
+
+The normal-CLI integration helpers prepare modern environment overlays and
+worktree inheritance in memory, with null declarations in public normalized
+configuration. An explicit AWS profile adapter can replace the recognized
+read-only `${HOME}/.aws:/root/.aws:ro` mount with temporary, service-scoped
+credentials. It preserves unrelated mounts and refuses custom credential-file
+selectors. Credentials are not written to Compose or the project snapshot, and
+are not automatically renewed after expiry. These helpers are integration
+building blocks; normal `hack up` is not yet connected to native admission.
+
 ## Public image acquisition without Docker
 
 The candidate can fetch a **digest-pinned public Docker Hub image** without Docker,

@@ -59,7 +59,7 @@ pub(super) fn retain_replay_ownership(
 fn unsupported() -> CandidateError {
     error(
         "graph_subset",
-        "Graph driver requires pinned images, read-only roots, explicit managed environment delivery, internal networks, named volumes and no automatic restart; build, unbound/writable source, port, label and logging overrides remain gated.",
+        "Graph driver requires pinned images, explicit managed environment delivery, internal networks, named volumes and no automatic restart; build, unbound/writable source, port, label and logging overrides remain gated.",
     )
 }
 pub(super) fn prepare(
@@ -152,8 +152,7 @@ pub(super) fn prepare_delivery(
     let mut total_memory = 0u64;
     let mut total_cpus = 0f64;
     for service in plan.services.values().filter(|s| s.active) {
-        if !service.read_only
-            || service.restart != "no"
+        if service.restart != "no"
             || !service.ports.is_empty()
             || service.labels.keys().any(|key| {
                 !(routing_enrolled && service.routing.is_some() && routes::recognized(key))
@@ -307,9 +306,11 @@ pub(super) fn prepare_delivery(
                 if let Some(subpath) = &m.subpath { mount["VolumeOptions"] = json!({"Subpath":subpath,"NoCopy":true}); } mount }
             }
         }).collect();
+        // Writable roots are container-owned layers, not writable source binds.
+        // Their contents are discarded when the container is removed; durable data uses named volumes.
         let mut config = json!({"Image":image,"Labels":labels,"HostConfig":{
             "NetworkMode":network,"Memory":service.limits.memory_bytes.unwrap_or(268435456),"NanoCpus":(service.limits.cpus.unwrap_or(0.5)*1e9) as u64,
-            "PidsLimit":service.limits.pids.unwrap_or(64),"ReadonlyRootfs":true,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"Init":service.init,
+            "PidsLimit":service.limits.pids.unwrap_or(64),"ReadonlyRootfs":service.read_only,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"Init":service.init,
             "Mounts":mounts,"Tmpfs":{"/tmp":"rw,noexec,nosuid,size=16777216"},"ShmSize":service.limits.shared_memory_bytes.unwrap_or(67108864),
             "RestartPolicy":{"Name":"no"},"LogConfig":{"Type":"json-file","Config":{"max-size":"1m","max-file":"1"}}
         }});

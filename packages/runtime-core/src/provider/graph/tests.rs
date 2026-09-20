@@ -75,10 +75,11 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
     base["services"]["web"]["expose"] = json!(["3000"]);
     for (case, code) in [
         (0, None),
-        (1, Some("graph_subset")),
+        (1, None),
         (2, None),
         (3, Some("graph_budget")),
         (4, Some("graph_dependency_hosts")),
+        (5, None),
     ] {
         let mut document = base.clone();
         match case {
@@ -86,6 +87,12 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
             2 => document["services"]["web"]["environment"] = json!({"PUBLIC":"value"}),
             3 => document["services"]["web"]["mem_limit"] = json!("5g"),
             4 => document["services"]["web"]["extra_hosts"] = json!(["one.example:host-gateway"]),
+            5 => {
+                document["services"]["web"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("read_only");
+            }
             _ => {}
         }
         state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
@@ -112,7 +119,17 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
                 );
                 assert_eq!(
                     prepared.configs["web"]["HostConfig"]["ReadonlyRootfs"],
-                    true
+                    case != 1 && case != 5
+                );
+                let host = &prepared.configs["web"]["HostConfig"];
+                assert_eq!(host["CapDrop"], json!(["ALL"]));
+                assert_eq!(host["SecurityOpt"], json!(["no-new-privileges"]));
+                assert!(host.get("Privileged").is_none());
+                let mut changed = host.clone();
+                changed["ReadonlyRootfs"] = json!(case == 1 || case == 5);
+                assert_eq!(
+                    mismatch(host, &changed, "HostConfig").as_deref(),
+                    Some("HostConfig.ReadonlyRootfs")
                 );
                 assert_eq!(
                     prepared.configs["web"]["HostConfig"]["LogConfig"]["Config"]["max-size"],
@@ -1889,5 +1906,42 @@ fn declared_networks_survive_compile_and_bind_restore_identity() {
         assert!(!network_bindings_valid(&changed));
         assert!(!same_resource_bindings(&prepared.resources, &changed));
         assert!(!candidate.state_root.exists());
+    }
+}
+
+#[test]
+fn cleanup_identity_is_independent_of_declared_root_mode() {
+    let resource: Resource = serde_json::from_value(json!({
+        "kind":"container", "key":"web", "name":"owned-web", "id":"a".repeat(64),
+        "image":format!("sha256:{}","b".repeat(64)), "phase":"started", "networks":[]
+    }))
+    .unwrap();
+    let receipt: Receipt = serde_json::from_value(json!({
+        "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),
+        "namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"ready-observed",
+        "readiness":{},"resources":{}
+    }))
+    .unwrap();
+    for read_only in [false, true] {
+        let observed = json!({"Id":resource.id,"Name":"/owned-web","Image":resource.image,
+            "Config":{"Labels":expected_labels(&receipt,&resource)},
+            "HostConfig":{"ReadonlyRootfs":read_only}});
+        verify_resource_identity(&receipt, &resource, &observed).unwrap();
+        for field in ["owner", "run", "plan", "id", "name", "image"] {
+            let mut foreign = observed.clone();
+            match field {
+                "owner" => foreign["Config"]["Labels"]["io.hack-local.owner"] = json!("foreign"),
+                "run" => foreign["Config"]["Labels"]["io.hack-local.graph"] = json!("foreign"),
+                "plan" => foreign["Config"]["Labels"]["io.hack-local.plan"] = json!("foreign"),
+                "id" => foreign["Id"] = json!("e".repeat(64)),
+                "name" => foreign["Name"] = json!("/foreign"),
+                "image" => foreign["Image"] = json!(format!("sha256:{}", "e".repeat(64))),
+                _ => unreachable!(),
+            }
+            assert!(
+                verify_resource_identity(&receipt, &resource, &foreign).is_err(),
+                "{field}"
+            );
+        }
     }
 }

@@ -237,6 +237,16 @@ fn inspect_resource(
         Err(e) if e.code == "engine_not_found" => return Ok(None),
         Err(e) => return Err(e),
     };
+    verify_resource_identity(receipt, resource, &value)?;
+    Ok(Some(value))
+}
+// Container layer contents never authorize cleanup: both writable and read-only
+// roots use the same immutable identity, labels, name and image checks.
+fn verify_resource_identity(
+    receipt: &Receipt,
+    resource: &Resource,
+    value: &Value,
+) -> Result<(), CandidateError> {
     let observed_labels = if resource.kind == Kind::Container {
         &value["Config"]["Labels"]
     } else {
@@ -288,7 +298,7 @@ fn inspect_resource(
             "Owned resource type, name or pinned image differs.",
         ));
     }
-    Ok(Some(value))
+    Ok(())
 }
 fn observation(value: &Value) -> Result<Observation, CandidateError> {
     let state = &value["State"];

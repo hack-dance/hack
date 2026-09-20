@@ -55,6 +55,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
+      - name: Install pinned Zig for guest helpers
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: "2026.9.12"
+          install_args: zig
+          add_shims_to_path: false
+          cache: false
+          env: false
       - name: Check candidate formatting
         run: cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check
       - name: Lint candidate core
@@ -63,7 +71,7 @@ jobs:
         run: cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --jobs 2
       - name: Build and inspect local candidate
         run: |
-          ./scripts/build-hack-local.sh
+          mise exec zig -- ./scripts/build-hack-local.sh
           ./hack-local info --json
 
   secret-scan:

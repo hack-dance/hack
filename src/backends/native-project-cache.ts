@@ -13,6 +13,21 @@ const CACHE_LABELS = new Set([
 ]);
 const SHA = /^[a-f0-9]{64}$/;
 
+/** Source sharing is meaningful only for active bind mounts, not image-only services. */
+export function nativeSharedSourceFlags(plan: unknown): readonly string[] {
+  if (!(isRecord(plan) && isRecord(plan.services))) {
+    throw new Error("Native source review is invalid.");
+  }
+  const shared = Object.values(plan.services).some(
+    (service) =>
+      isRecord(service) &&
+      service.active === true &&
+      Array.isArray(service.mounts) &&
+      service.mounts.some((mount) => isRecord(mount) && mount.kind === "bind")
+  );
+  return shared ? ["--shared-source"] : [];
+}
+
 /** Only the existing cache contract is admitted here; native review validates its values. */
 export function hasOnlyNativeCacheLabels(labels: unknown): boolean {
   if (labels === undefined) {

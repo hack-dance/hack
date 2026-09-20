@@ -149,8 +149,8 @@ configuration. An explicit AWS profile adapter can replace the recognized
 read-only `${HOME}/.aws:/root/.aws:ro` mount with temporary, service-scoped
 credentials. It preserves unrelated mounts and refuses custom credential-file
 selectors. Credentials are not written to Compose or the project snapshot, and
-are not automatically renewed after expiry. These helpers are integration
-building blocks; normal `hack up` is not yet connected to native admission.
+are not automatically renewed after expiry. Normal native foreground `hack up`
+uses these adapters within the capability limits described below.
 
 ## Public image acquisition without Docker
 
@@ -243,7 +243,8 @@ for owned cleanup and removes the mapping only after confirming cleanup; named
 volumes are retained. The VM remains available until explicit runtime shutdown.
 
 This initial foreground path does not support detached/JSON startup, selected
-services, routed services, host dependencies or external networks. Existing
+services or external networks. Routed services and host dependencies require the
+explicit native selections described below. Existing
 `hack.dependencies.*` cache declarations publish the reviewed source snapshot and
 require successful initializer completion before dependent services start. Cache
 initializers receive immutable source mounts and writable named cache volumes;
@@ -282,3 +283,60 @@ appearing after startup from colliding with an earlier publication containing th
 same bytes under a different selection. Existing schema-1 manifests remain
 verifiable; they are not rewritten or deleted. Cache keys still derive from their
 declared dependency inputs and execution identity.
+
+New native foreground pools remain isolated unless `HACK_NATIVE_ALLOW_HOSTS`
+is explicitly set to a comma-separated list of at most 32 unique lowercase DNS
+names, for example `registry.npmjs.org,example.com`. Wildcards, IP addresses, local
+names, whitespace, trailing dots and empty entries are refused before lifecycle
+hooks. The provider permits each selected domain and its subdomains, including
+TTL-learned public addresses; this is not a URL, port or exact-host-only policy.
+The provider retains its private, loopback and metadata-address restrictions.
+Selection is passed to native pool admission without implicit widening; changing
+an existing pool's network intent is refused and requires explicit owned-pool
+retirement and recreation. Omitting the variable requests no new egress capability.
+
+Normal native foreground startup recognizes the bounded `caddy`,
+`caddy.reverse_proxy`, and `caddy.tls` label contract alongside dependency-cache
+labels. It reserves bridge capacity for declared routed services before pool
+startup and enrolls only active routes from native review. Each routed service
+must already declare a matching `healthcheck.x-hack-http`; command healthchecks
+and missing probes are not replaced or inferred. Native review still validates
+hostnames, ports, networks and labels. Foreground graph ownership supervises and
+retires Unix route publishers. This enrollment does not start a hostname authority
+or Caddy HTTPS server, install trust, configure DNS, or widen an existing pool.
+
+`HACK_NATIVE_DEPENDENCIES` selects an absolute path to a regular JSON file with
+explicit host listeners. The CLI reads it after lifecycle hooks, so a hook can
+prepare current listeners before selection. For example:
+
+```json
+{
+  "version": 1,
+  "dependencies": [{
+    "service": "web",
+    "binding": "search",
+    "guest_port": 443,
+    "aliases": ["search.example.com"],
+    "host_pid": 12345,
+    "host_port": 8443
+  }]
+}
+```
+
+Replace the example PID with the actual listener process. Up to 32 bindings and
+eight exact aliases per binding are supported; slots are assigned in file order.
+Aliases must match the service's declared `extra_hosts` entries targeting
+`host-gateway`. No general host-gateway access is enabled. Native dependency review
+pins the same-user process and exclusive loopback listener generation, then checks
+that identity again during admission. A stale PID, replaced listener, undeclared
+alias, extra field, symlink or malformed file refuses admission. This file contains
+selection metadata only, never credentials. It does not adopt or stop the selected
+host process; lifecycle hooks retain ownership of listeners they launch.
+Selected services receive `init: true` when omitted because the guest relay launcher
+requires a reaping init process. An explicit `init: false` is refused, not replaced.
+
+Fresh pools reserve dependency sockets from that selection. Existing pool capacity
+cannot be silently widened. The selection is copied into the temporary exact-plan
+dependency request and removed when foreground startup exits. No durable listener
+authority is inferred from a saved selection file. Image-only services omit graph
+shared-source mode; active project bind mounts still use the explicit project share.

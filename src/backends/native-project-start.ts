@@ -5,15 +5,25 @@ import { dirname, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import {
-  hasOnlyNativeCacheLabels,
+  nativeSharedSourceFlags,
   publishNativeCacheSource,
 } from "./native-project-cache.ts";
+import {
+  prepareNativeDependencyServices,
+  readNativeHostDependencies,
+} from "./native-project-dependencies.ts";
 import {
   type NativeProjectInput,
   prepareNativeProjectInput,
 } from "./native-project-input.ts";
+import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import { serveNativeProjectGraph } from "./native-project-process.ts";
 import { withNativeProjectReview } from "./native-project-review.ts";
+import {
+  hasOnlyNativeSupportedLabels,
+  nativeBridgeCapacity,
+  reviewedNativeRoutes,
+} from "./native-project-routing.ts";
 import {
   loadNativeProjectRun,
   type NativeProjectRun,
@@ -59,7 +69,8 @@ function refused(): Error {
   );
 }
 function services(
-  input: NativeProjectInput
+  input: NativeProjectInput,
+  hasHostDependencies = false
 ): Record<string, Record<string, unknown>> {
   const compose: unknown = JSON.parse(input.normalizedComposeJson);
   if (!(isRecord(compose) && isRecord(compose.services))) {
@@ -71,11 +82,11 @@ function services(
       !isRecord(value) ||
       typeof value.image !== "string" ||
       value.build !== undefined ||
-      value.extra_hosts !== undefined ||
+      (value.extra_hosts !== undefined && !hasHostDependencies) ||
       value.ports !== undefined ||
       value.logging !== undefined ||
       (value.restart !== undefined && value.restart !== "no") ||
-      !hasOnlyNativeCacheLabels(value.labels)
+      !hasOnlyNativeSupportedLabels(value.labels)
     ) {
       throw refused();
     }
@@ -85,7 +96,8 @@ function services(
 }
 function readiness(
   specs: Record<string, Record<string, unknown>>,
-  initializers: ReadonlySet<string>
+  initializers: ReadonlySet<string>,
+  routed: ReadonlySet<string>
 ): string[] {
   const ready: Record<string, string> = Object.fromEntries(
     Object.entries(specs).map(([name, spec]) => [
@@ -111,6 +123,9 @@ function readiness(
   }
   for (const name of initializers) {
     ready[name] = "completed";
+  }
+  for (const name of routed) {
+    ready[name] = "healthy";
   }
   return Object.entries(ready).flatMap(([name, condition]) => [
     "--ready",
@@ -177,7 +192,10 @@ function environmentDelivery(
     ),
   };
 }
-function requireConfirmedCleanup(final: unknown): void {
+function requireConfirmedCleanup(
+  final: unknown,
+  startupFailure?: unknown
+): void {
   if (
     !(
       isRecord(final) &&
@@ -193,8 +211,12 @@ function requireConfirmedCleanup(final: unknown): void {
         (!isRecord(value) || value.state !== "absent")
     )
   ) {
-    throw new Error(
-      "Native foreground exit cleanup is unconfirmed; run mapping retained."
+    // Preserve the sanitized startup diagnostic without retiring uncertain state.
+    throw (
+      startupFailure ??
+      new Error(
+        "Native foreground exit cleanup is unconfirmed; run mapping retained."
+      )
     );
   }
 }
@@ -206,11 +228,14 @@ export async function startNativeProject(opts: {
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
   readonly sharedSource: boolean;
+  readonly dependencyFile?: string;
+  readonly allowedHosts?: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
   readonly before: (input: NativeProjectInput) => Promise<Hooks>;
   readonly signal?: AbortSignal;
   readonly dependencies?: Partial<Dependencies>;
 }): Promise<number> {
+  const allowedHosts = validateNativeAllowedHosts(opts.allowedHosts);
   if (!opts.sharedSource) {
     throw new Error(
       "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 to share this exact project, including ignored files."
@@ -227,7 +252,8 @@ export async function startNativeProject(opts: {
     composeFile: opts.composeFile,
     envName: opts.envName,
   });
-  let specs = services(input);
+  let specs = services(input, opts.dependencyFile !== undefined);
+  const bridgeCapacity = nativeBridgeCapacity(specs);
   const artifact = join(dirname(opts.runtime.binary), "hack-relay-guest");
   const artifactFile = Bun.file(artifact);
   if (
@@ -263,8 +289,16 @@ export async function startNativeProject(opts: {
     hooks = await opts.before(input);
     if (opts.aws) {
       input = (await deps.adaptAws({ input, ...opts.aws })).input;
-      specs = services(input);
+      specs = services(input, opts.dependencyFile !== undefined);
     }
+    const hostDependencies = await readNativeHostDependencies({
+      path: opts.dependencyFile,
+      services: Object.keys(specs),
+    });
+    prepareNativeDependencyServices({
+      dependencies: hostDependencies,
+      services: specs,
+    });
     await deps.invoke({
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
@@ -276,6 +310,13 @@ export async function startNativeProject(opts: {
         "--project-share",
         opts.scope.projectRoot,
         "--unfiltered-source",
+        ...(hostDependencies.length > 0
+          ? ["--dependency-sockets", String(hostDependencies.length)]
+          : []),
+        ...(bridgeCapacity > 0
+          ? ["--bridge-sockets", String(bridgeCapacity)]
+          : []),
+        ...allowedHosts.flatMap((host) => ["--allow-host", host]),
         "--json",
       ],
     });
@@ -317,6 +358,11 @@ export async function startNativeProject(opts: {
         ) {
           throw refused();
         }
+        const routes = reviewedNativeRoutes({
+          plan: review.report.plan,
+          specs,
+          capacity: bridgeCapacity,
+        });
         const cache = await publishNativeCacheSource({
           runtime: opts.runtime,
           projectRoot: opts.scope.projectRoot,
@@ -335,7 +381,7 @@ export async function startNativeProject(opts: {
               plan: review.planId,
               artifact,
               artifact_sha256: artifactHash,
-              dependencies: [],
+              dependencies: hostDependencies,
             }),
             { mode: 0o600, flag: "wx" }
           );
@@ -375,9 +421,10 @@ export async function startNativeProject(opts: {
                 ...review.projectArgs,
                 "--expect-plan",
                 review.planId,
-                "--shared-source",
+                ...nativeSharedSourceFlags(review.report.plan),
                 ...cache.flags,
-                ...readiness(specs, cache.initializers),
+                ...readiness(specs, cache.initializers, routes.services),
+                ...routes.flags,
                 "--dependencies",
                 dependencyFile,
                 "--expect-dependencies",
@@ -422,7 +469,7 @@ export async function startNativeProject(opts: {
             review.namespace,
             review.planId
           );
-          requireConfirmedCleanup(final);
+          requireConfirmedCleanup(final, serveFailure);
           if (mapping) {
             if (mapping.owner !== owned.owner) {
               throw refused();

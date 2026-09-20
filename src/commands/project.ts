@@ -24,6 +24,7 @@ import {
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
+import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
 import {
   nativeProjectLogs,
   nativeProjectPs,
@@ -5874,6 +5875,8 @@ async function handleNativeUp({
     envName: resolveRequestedEnvName({ envOption: args.options.env }),
     profiles: parseCsvList(args.options.profile),
     sharedSource: process.env.HACK_NATIVE_SHARED_SOURCE === "1",
+    dependencyFile: process.env.HACK_NATIVE_DEPENDENCIES,
+    allowedHosts: parseNativeAllowedHosts(process.env.HACK_NATIVE_ALLOW_HOSTS),
     aws: process.env.HACK_NATIVE_AWS_PROFILE
       ? {
           profile: process.env.HACK_NATIVE_AWS_PROFILE,

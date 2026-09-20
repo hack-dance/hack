@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startNativeProject } from "../src/backends/native-project-start.ts";
@@ -283,6 +283,223 @@ test("reviewed dependency caches bind published source and successful completion
       throw new Error("missing fixture serve");
     }
     return await serve(input);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+});
+
+test("approved outbound hosts are forwarded exactly and sorted before runtime admission", async () => {
+  const { opts } = await fixture(false);
+  const invoke = opts.dependencies.invoke!;
+  let up: readonly string[] = [];
+  opts.dependencies.invoke = async (call) => {
+    if (call.args[0] === "runtime" && call.args[1] === "up") {
+      up = call.args;
+    }
+    return await invoke(call);
+  };
+  expect(
+    await startNativeProject({
+      ...opts,
+      allowedHosts: ["registry.npmjs.org", "example.com"],
+    })
+  ).toBe(0);
+  expect(up).toEqual([
+    "runtime",
+    "up",
+    "--profile",
+    "development",
+    "--project-share",
+    opts.scope.projectRoot,
+    "--unfiltered-source",
+    "--allow-host",
+    "example.com",
+    "--allow-host",
+    "registry.npmjs.org",
+    "--json",
+  ]);
+});
+test("invalid outbound selection refuses before lifecycle or preparation effects", async () => {
+  const { opts, events } = await fixture();
+  opts.dependencies.load = async () => {
+    throw new Error("load must not run");
+  };
+  opts.dependencies.prepare = async () => {
+    throw new Error("prepare must not run");
+  };
+  for (const allowedHosts of [
+    [""],
+    ["*.example.com"],
+    ["127.0.0.1"],
+    ["host.local"],
+    ["host.localhost"],
+    ["EXAMPLE.com"],
+    ["example.com."],
+    ["example.com", "example.com"],
+    Array.from({ length: 33 }, (_, i) => `h${i}.example.com`),
+  ]) {
+    await expect(startNativeProject({ ...opts, allowedHosts })).rejects.toThrow(
+      "HACK_NATIVE_ALLOW_HOSTS"
+    );
+  }
+  expect(events).toEqual([]);
+});
+
+test("host listener selections are read after hooks and bound to the exact reviewed plan", async () => {
+  const { opts } = await fixture(false);
+  const path = join(opts.scope.projectRoot, "host-selection.json");
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.web.extra_hosts = ["search.example.com:host-gateway"];
+    return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+  };
+  const binding = {
+    service: "web",
+    binding: "search",
+    guest_port: 443,
+    host_pid: 123,
+    host_port: 8443,
+    aliases: ["search.example.com"],
+  };
+  const before = opts.before;
+  opts.before = async () => {
+    await writeFile(
+      path,
+      JSON.stringify({ version: 1, dependencies: [binding] })
+    );
+    return await before();
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "up") {
+      expect(request.args).toContain("--dependency-sockets");
+      expect(
+        request.args[request.args.indexOf("--dependency-sockets") + 1]
+      ).toBe("1");
+    }
+    if (request.args[1] === "dependency-plan") {
+      const selected = JSON.parse(
+        await readFile(String(request.args[3]), "utf8")
+      );
+      expect(selected.plan).toBe("a".repeat(64));
+      expect(selected.dependencies).toEqual([{ ...binding, slot: 0 }]);
+    }
+    return await invoke(request);
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow("cannot admit");
+  expect(await startNativeProject({ ...opts, dependencyFile: path })).toBe(0);
+});
+
+test("invalid listener selection cleans lifecycle hooks before runtime effects", async () => {
+  const { opts, events } = await fixture(false);
+  const path = join(opts.scope.projectRoot, "host-selection.json");
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      dependencies: [{ password: "synthetic-private" }],
+    })
+  );
+  await expect(
+    startNativeProject({ ...opts, dependencyFile: path })
+  ).rejects.toThrow("values omitted");
+  expect(events).toEqual(["before", "cleanup"]);
+});
+
+test("retained startup failure preserves its diagnostic and never removes the run mapping", async () => {
+  const { opts, events } = await fixture(false);
+  const serve = opts.dependencies.serve!;
+  const invoke = opts.dependencies.invoke!;
+  let failed = false;
+  opts.dependencies.serve = async (request) => {
+    await serve(request);
+    failed = true;
+    throw new Error(
+      "Native graph startup failed (graph_network_intent); inspect owned state before retrying."
+    );
+  };
+  opts.dependencies.invoke = async (request) => {
+    const result = await invoke(request);
+    if (failed && request.args[1] === "inspect") {
+      return {
+        ...(result as Record<string, unknown>),
+        receipt: {
+          ...(result as { receipt: Record<string, unknown> }).receipt,
+          phase: "failed-retained",
+        },
+      };
+    }
+    return result;
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "graph_network_intent"
+  );
+  expect(events).not.toContain("remove");
+  expect(events.at(-1)).toBe("cleanup");
+});
+
+test("routed startup reserves bridges and enrolls reviewed healthy services without dropping labels", async () => {
+  const { opts } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  const review = opts.dependencies.review!;
+  const invoke = opts.dependencies.invoke!;
+  const serve = opts.dependencies.serve!;
+  const labels = {
+    caddy: "web.example.com",
+    "caddy.reverse_proxy": "{{upstreams 3000}}",
+    "caddy.tls": "internal",
+  };
+  const probe = {
+    port: 3000,
+    path: "/health",
+    interval_ms: 100,
+    timeout_ms: 500,
+    retries: 3,
+    start_period_ms: 0,
+  };
+  opts.dependencies.prepare = async (call) => {
+    const input = await prepare(call);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.web.labels = labels;
+    compose.services.web.healthcheck = { "x-hack-http": probe };
+    return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+  };
+  opts.dependencies.review = async (call) => {
+    expect(
+      JSON.parse(call.input.normalizedComposeJson).services.web.labels
+    ).toEqual(labels);
+    return await review({
+      ...call,
+      run: async (checked) =>
+        call.run({
+          ...checked,
+          report: {
+            plan: {
+              enrollment_compatible: true,
+              services: {
+                web: {
+                  active: true,
+                  routing: { port: 3000, hostnames: ["web.example.com"] },
+                  healthcheck: { native_http: probe, disabled: false },
+                },
+              },
+            },
+          },
+        }),
+    });
+  };
+  opts.dependencies.invoke = async (call) => {
+    if (call.args[0] === "runtime" && call.args[1] === "up") {
+      expect(call.args).toContain("--bridge-sockets");
+      expect(call.args[call.args.indexOf("--bridge-sockets") + 1]).toBe("1");
+    }
+    return await invoke(call);
+  };
+  opts.dependencies.serve = async (call) => {
+    expect(call.args).toContain("web=0");
+    expect(call.args).toContain("web=healthy");
+    return await serve(call);
   };
   expect(await startNativeProject(opts)).toBe(0);
 });

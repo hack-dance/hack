@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   hasOnlyNativeCacheLabels,
+  nativeSharedSourceFlags,
   publishNativeCacheSource,
 } from "../src/backends/native-project-cache.ts";
 import type { NativeProjectReview } from "../src/backends/native-project-review.ts";
@@ -27,6 +28,26 @@ const base = {
   runtime: { binary: "/native", home: "/home" },
   projectRoot: "/fixture",
 };
+test("image-only and inactive bind services do not request native shared-source mode", () => {
+  expect(
+    nativeSharedSourceFlags({
+      services: {
+        web: { active: true, mounts: [] },
+        disabled: { active: false, mounts: [{ kind: "bind" }] },
+      },
+    })
+  ).toEqual([]);
+  expect(
+    nativeSharedSourceFlags({
+      services: { web: { active: true, mounts: [{ kind: "volume" }] } },
+    })
+  ).toEqual([]);
+  expect(
+    nativeSharedSourceFlags({
+      services: { web: { active: true, mounts: [{ kind: "bind" }] } },
+    })
+  ).toEqual(["--shared-source"]);
+});
 test("cache labels preserve map/list contracts without admitting routing or unrelated labels", () => {
   for (const labels of [
     undefined,

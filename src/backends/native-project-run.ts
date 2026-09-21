@@ -262,7 +262,16 @@ export async function removeNativeProjectRun(
     const p = await paths(opts, false);
     await mkdir(p.lock, { mode: 0o700 });
     try {
-      const current = record(await read(p.file), p.identity);
+      let current: NativeProjectRun;
+      try {
+        current = record(await read(p.file), p.identity);
+      } catch (error) {
+        // Another confirmed owner-side cleanup may already have retired this file.
+        if (isRecord(error) && error.code === "ENOENT") {
+          return;
+        }
+        throw error;
+      }
       if (JSON.stringify(current) !== JSON.stringify(opts.expected)) {
         throw refused();
       }

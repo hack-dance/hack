@@ -97,3 +97,31 @@ test("malformed ownership, symlink storage and foreign contents refuse", async (
   await writeFile(join(dir, name ?? "absent"), "{}");
   await expect(load(opts)).rejects.toThrow();
 });
+
+test("repeated confirmed retirement is idempotent without deleting a replacement", async () => {
+  const opts = await fixture();
+  await save({ ...opts, run });
+  await remove({ ...opts, expected: run });
+  await remove({ ...opts, expected: run });
+  const replacement = { ...run, run: "f".repeat(32) };
+  await save({ ...opts, run: replacement });
+  await expect(remove({ ...opts, expected: run })).rejects.toThrow();
+  expect(await load(opts)).toEqual(replacement);
+});
+
+test("absent mapping does not excuse another owner's cleanup lock", async () => {
+  const opts = await fixture();
+  await save({ ...opts, run });
+  const dir = join(opts.projectDir, ".internal/native-runs");
+  const name = (await readdir(dir)).find((value) => value.endsWith(".json"));
+  expect(name).toBeDefined();
+  await remove({ ...opts, expected: run });
+  const lock = join(dir, (name ?? "missing.json").replace(".json", ".lock"));
+  await mkdir(lock);
+  await expect(remove({ ...opts, expected: run })).rejects.toThrow();
+  expect(
+    (await readdir(dir)).includes(
+      (name ?? "missing.json").replace(".json", ".lock")
+    )
+  ).toBe(true);
+});

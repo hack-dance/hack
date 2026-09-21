@@ -250,7 +250,11 @@ explicit native selections described below. Existing
 require successful initializer completion before dependent services start. Cache
 initializers receive immutable source mounts and writable named cache volumes;
 workspace installs that write elsewhere still require explicit volume mappings. Event Agent requires further integration and is not yet supported by this
-normal command. `down`, `restart` and `run` still refuse native selection;
+normal command. Native `down` requests retaining cleanup from the graph owner and
+verifies container absence before retiring the exact run mapping. It currently
+refuses configured down hooks because startup environment selection is not yet
+persisted, and refuses environment/profile/target changes and cache pruning.
+`restart` and `run` still refuse native selection;
 there is no silent fallback to the stable runtime. An uncertain shutdown retains
 its mapping and evidence for recovery; do not delete managed state to retry.
 

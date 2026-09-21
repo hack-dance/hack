@@ -24,6 +24,7 @@ import {
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
+import { nativeProjectDown } from "../backends/native-project-down.ts";
 import { nativeProjectExec } from "../backends/native-project-exec.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
@@ -6454,7 +6455,67 @@ async function handleDown({
   readonly ctx: CliContext;
   readonly args: DownArgs;
 }): Promise<number> {
-  requireComposeOperationAvailable("down");
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    if (
+      [
+        args.options.env,
+        args.options.profile,
+        args.options.target,
+        args.options.pruneCaches,
+        args.options.yes,
+      ].some(Boolean)
+    ) {
+      throw new CliUsageError(
+        "Native down preserves data and does not support --env, --profile, --target, --prune-caches or --yes."
+      );
+    }
+    const project = await resolveProjectForArgs({
+      ctx,
+      pathOpt: args.options.path,
+      projectOpt: args.options.project,
+      touchRegistration: false,
+    });
+    const branch = await resolveEffectiveBranchForCommand({
+      project,
+      branchOption: args.options.branch,
+      noticeToStderr: args.options.json === true,
+    });
+    const cfg = await readProjectConfig(project);
+    if (cfg.parseError) {
+      throw new CliUsageError(
+        "Native down requires valid lifecycle configuration; values omitted."
+      );
+    }
+    if (
+      (cfg.lifecycle?.down?.before?.length ?? 0) > 0 ||
+      (cfg.lifecycle?.down?.after?.length ?? 0) > 0
+    ) {
+      throw new CliUsageError(
+        "Native down lifecycle hooks require persisted startup environment selection, which this mapping does not yet provide; refusing to skip or run hooks with a different environment."
+      );
+    }
+    const result = await nativeProjectDown({
+      runtime: native,
+      scope: {
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        nativeHome: native.home,
+        branch,
+      },
+    });
+    if (args.options.json) {
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    } else {
+      logger.info({
+        message:
+          result.status === "stopped"
+            ? "Native project stopped; data retained."
+            : "Native project is not started.",
+      });
+    }
+    return 0;
+  }
   const json = args.options.json === true;
   if (!json) {
     return await runDownCommand({ ctx, args, json: false });

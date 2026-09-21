@@ -254,7 +254,7 @@ test("unsupported native lifecycle commands refuse before Docker or project hook
     join(opts.scope.projectDir, "docker-compose.yml"),
     "services:\n  web:\n    image: public:fixture\n"
   );
-  for (const operation of ["up", "down", "restart", "run", "exec"]) {
+  for (const operation of ["up", "restart", "run", "exec"]) {
     const args = [
       process.execPath,
       resolve(import.meta.dir, "../index.ts"),

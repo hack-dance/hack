@@ -120,6 +120,7 @@ fn service_exec_inner(
                 &receipt.run,
                 options.service,
                 &resource.name,
+                mounted_environment_slot(&container)?.as_deref(),
             )?;
             // The existing allocation must still belong to this exact container.
             // Its expiry is not renewed or read; only this command gets fresh values.
@@ -169,6 +170,7 @@ fn service_exec_inner(
                 &receipt.run,
                 options.service,
                 &resource.name,
+                mounted_environment_slot(&container)?.as_deref(),
             )?
         } else {
             None
@@ -222,6 +224,30 @@ fn require_current_launcher(container: &Value, source: &str) -> Result<(), Candi
     Ok(())
 }
 
+/// Infer only from the exact inspected container, never historical run inventory.
+fn mounted_environment_slot(container: &Value) -> Result<Option<String>, CandidateError> {
+    let mounts = container["HostConfig"]["Mounts"]
+        .as_array()
+        .ok_or_else(refused)?;
+    let mut payloads = mounts
+        .iter()
+        .filter(|m| m["Target"] == "/run/hack-environment.json");
+    let Some(payload) = payloads.next() else {
+        return Ok(None);
+    };
+    if payloads.next().is_some() || payload["Type"] != "bind" || payload["ReadOnly"] != true {
+        return Err(refused());
+    }
+    let slot = payload["Source"]
+        .as_str()
+        .and_then(|source| source.strip_prefix("/run/"))
+        .and_then(|source| source.strip_suffix("/values.json"))
+        .filter(|slot| !slot.contains('/') && slot.starts_with("hack-env-lease-"))
+        .ok_or_else(refused)?;
+    // Check the complete mount trio before loading any allocation metadata.
+    managed_exec_argv(container, Some(slot), &["/bin/true".into()])?;
+    Ok(Some(slot.into()))
+}
 /// Reuse only the service's already attached environment. The guest launcher checks
 /// owner-only payload files and the original expiry; exec never renews the lease.
 fn managed_exec_argv(
@@ -348,6 +374,43 @@ mod tests {
         let plain = json!({"HostConfig":{"Mounts":[]}});
         assert_eq!(managed_exec_argv(&plain, None, &args).unwrap(), args);
         assert!(managed_exec_argv(&plain, Some(slot), &args).is_err());
+    }
+    #[test]
+    fn mounted_allocation_selection_rejects_ambiguous_partial_or_escaping_mounts() {
+        let slot = format!(
+            "hack-env-lease-dddddddd-dddd-4ddd-8ddd-dddddddddddd-{}",
+            "a".repeat(32)
+        );
+        let valid = json!({"HostConfig":{"Mounts":[
+            {"Type":"bind","Source":format!("/storage/hack-environment-launcher/{}", "a".repeat(64)),"Target":"/run/hack-environment-launcher","ReadOnly":true},
+            {"Type":"bind","Source":format!("/run/{slot}/values.json"),"Target":"/run/hack-environment.json","ReadOnly":true},
+            {"Type":"bind","Source":format!("/run/{slot}/expires"),"Target":"/run/hack-environment.expires","ReadOnly":true}
+        ]}});
+        assert_eq!(mounted_environment_slot(&valid).unwrap(), Some(slot));
+        let mut duplicate = valid.clone();
+        let payload = duplicate["HostConfig"]["Mounts"][1].clone();
+        duplicate["HostConfig"]["Mounts"]
+            .as_array_mut()
+            .unwrap()
+            .push(payload);
+        assert!(mounted_environment_slot(&duplicate).is_err());
+        for source in [
+            "/run/hack-env-lease-../other/values.json",
+            "/run/foreign/values.json",
+        ] {
+            let mut changed = valid.clone();
+            changed["HostConfig"]["Mounts"][1]["Source"] = json!(source);
+            assert!(mounted_environment_slot(&changed).is_err());
+        }
+        let mut partial = valid.clone();
+        partial["HostConfig"]["Mounts"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(mounted_environment_slot(&partial).is_err());
+        let mut writable = valid;
+        writable["HostConfig"]["Mounts"][1]["ReadOnly"] = json!(false);
+        assert!(mounted_environment_slot(&writable).is_err());
     }
     #[test]
     fn rejects_unsafe_or_unbounded_arguments_before_connecting() {

@@ -246,7 +246,7 @@ pub(super) fn graph_slots(
     Ok(bindings)
 }
 /// Delivery authority for exec, unlike cleanup inventory: only a committed,
-/// current-boot, unique service allocation may be reused. The caller holds the
+/// current-boot allocation mounted by the exact service may be reused. The caller holds the
 /// guest lease and still verifies the exact container's read-only mounts.
 pub(super) fn active_exec_slot(
     candidate: &Candidate,
@@ -254,6 +254,7 @@ pub(super) fn active_exec_slot(
     run: &str,
     service: &str,
     container: &str,
+    mounted_slot: Option<&str>,
 ) -> Result<Option<String>, CandidateError> {
     active_exec_slot_for(
         candidate,
@@ -262,6 +263,7 @@ pub(super) fn active_exec_slot(
         run,
         service,
         container,
+        mounted_slot,
     )
 }
 fn active_exec_slot_for(
@@ -271,33 +273,31 @@ fn active_exec_slot_for(
     run: &str,
     service: &str,
     container: &str,
+    mounted_slot: Option<&str>,
 ) -> Result<Option<String>, CandidateError> {
     if !hex(run, 32) || !hex(incarnation, 32) || !uuid(boot) || !super::environment::name(service) {
         return Err(error());
     }
-    let mut selected = None;
-    for slot in recorded_slots(candidate)? {
-        let intent = read_mode(candidate, &slot, incarnation, None, false)?;
-        let Some(binding) = &intent.graph else {
-            continue;
-        };
-        if binding.run != run || intent.service != service {
-            continue;
-        }
-        let pending = root(candidate).join(format!("{slot}.pending"));
-        match fs::symlink_metadata(pending) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            _ => return Err(error()),
-        }
-        if intent.boot != boot
-            || binding.container != container
-            || retention::reserved(candidate, &slot)?
-            || selected.replace(slot).is_some()
-        {
-            return Err(error());
-        }
+    let Some(slot) = mounted_slot else {
+        return Ok(None);
+    };
+    // Historical allocations survive same-run restores. Only the allocation
+    // actually mounted by the verified current container can authorize delivery.
+    let intent = read_mode(candidate, slot, incarnation, None, false)?;
+    let binding = intent.graph.as_ref().ok_or_else(error)?;
+    match fs::symlink_metadata(root(candidate).join(format!("{slot}.pending"))) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err(error()),
     }
-    Ok(selected)
+    if intent.boot != boot
+        || intent.service != service
+        || binding.run != run
+        || binding.container != container
+        || retention::reserved(candidate, slot)?
+    {
+        return Err(error());
+    }
+    Ok(Some(slot.to_owned()))
 }
 
 /// Canonical value-free identities, independent of active/archive file placement.
@@ -552,7 +552,7 @@ mod tests {
         assert_eq!(fs::read_dir(directory).unwrap().count(), 4096);
     }
     #[test]
-    fn active_exec_requires_committed_current_unique_exact_service_intent() {
+    fn active_exec_selects_mounted_current_intent_despite_retained_restore_history() {
         let fixture = Fixture::new();
         let mut intent = fixture.intent();
         let run = "c".repeat(32);
@@ -569,9 +569,10 @@ mod tests {
                 &run,
                 "web",
                 container,
+                Some(&intent.slot),
             )
         };
-        assert_eq!(select(&intent.boot, &container).unwrap(), None);
+        assert!(select(&intent.boot, &container).is_err());
         let bytes = serde_json::to_vec(&intent).unwrap();
         let pending = fixture.pending(&bytes, &intent.slot);
         assert!(select(&intent.boot, &container).is_err());
@@ -591,8 +592,22 @@ mod tests {
             &second,
         )
         .unwrap();
-        assert!(select(&intent.boot, &container).is_err());
-        fs::remove_file(root(&fixture.0).join(format!("{}.json", second.slot))).unwrap();
+        assert_eq!(
+            select(&intent.boot, &container).unwrap(),
+            Some(intent.slot.clone())
+        );
+        // An older boot's retained record is not a current delivery candidate.
+        second.boot = "dddddddd-dddd-4ddd-8ddd-dddddddddddd".into();
+        second.slot = format!("hack-env-lease-{}-{}", second.boot, "f".repeat(32));
+        state::write(
+            &root(&fixture.0).join(format!("{}.json", second.slot)),
+            &second,
+        )
+        .unwrap();
+        assert_eq!(
+            select(&intent.boot, &container).unwrap(),
+            Some(intent.slot.clone())
+        );
         fixture.pending(&bytes, &intent.slot);
         assert!(select(&intent.boot, &container).is_err());
         assert_eq!(fs::read(committed).unwrap(), bytes);

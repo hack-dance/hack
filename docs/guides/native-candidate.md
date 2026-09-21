@@ -131,12 +131,16 @@ symlink files and hardlinked files are refused. Its bytes are retained in memory
 not copied into candidate state. The input is public configuration only: managed
 secrets still use the separate `graph serve --environment-stdin` private envelope.
 
-Normalized enrollment, source sync, live source, restart, restore, and owner restore
-are not supported. Their explicit normalization flags or recorded normalized
-execution identity are refused; the executor does not silently reuse the original
-file's different configuration. Use immutable source publication and a fresh run
-for this bounded path. Source exclusions and runtime ownership checks remain in
-force. Existing commands without these flags keep their file-based behavior.
+The file-based enrollment, source-sync, `graph restart`, and `graph restore`
+commands do not accept normalized input. A stopped normalized graph instead uses
+`graph restore-selection --run-id RUN_ID --json`, followed by `graph serve-restore`
+with the same run, plan and original input identity, the returned
+`--expect-generation`, and fresh environment, dependency and route selections.
+Normal foreground `hack restart` performs this selection and retained-data restore.
+It verifies the old containers and networks are absent and the retained volumes
+still have their recorded identities; it does not silently create replacement data.
+Source exclusions and runtime ownership checks remain in force. Existing commands
+without normalization flags keep their file-based behavior.
 
 Graph execution respects the declared container root mode: `read_only: true`
 keeps the root read-only, while false or omitted permits a writable container
@@ -546,6 +550,10 @@ an absolute executable. Normal `hack exec` resolves the saved startup overlay an
 AWS profile again, and delivers fresh selected-service values through private stdin.
 Each request binds the reviewed plan, current container and generation, and has
 its own short ingress lifetime. Startup leases and files are not renewed or rewritten.
+The allocation is selected from the current container's exact read-only mounts and
+checked against its committed current-boot intent. Historical allocations retained
+by earlier restores do not compete with this selection; pending, mismatched or
+ambiguous mounted allocations are refused.
 Legacy mappings without explicit selectors and services with older launcher mounts
 refuse before execution; restart with the matching candidate to adopt this path.
 Services without managed values use ordinary exec. The native live qualification

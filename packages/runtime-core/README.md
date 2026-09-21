@@ -500,3 +500,14 @@ describes the defect. This setting allowed the real dependency install and web
 edit/restore/revert workflow to pass with the original 2 GiB installer limit.
 It remains specific to this pinned fixture; buffering changes memory behavior
 and must be included in capacity and performance comparisons.
+
+### Automatic disk trim limitation
+
+Candidate provider launches explicitly set `SMOLVM_DISK_TRIM=0`, including
+restart and recovery; ambient values cannot enable automatic guest trim. Pinned
+Smol accepts `0` as disabled and forwards it to its guest agent. Its imago discard
+path can truncate backing files, conflicting with the candidate's exact retained
+disk-size identity. Automatic trim remains disabled until safe disk reclamation
+is supported and qualified. This does not relax disk identity checks or repair
+previously shortened files, and does not change the separate memory-reclamation
+policy. Already running providers require an owned stop/start to receive the setting.

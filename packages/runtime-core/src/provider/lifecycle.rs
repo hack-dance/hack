@@ -55,6 +55,9 @@ fn command(candidate: &Candidate, owner: &Owner) -> std::process::Command {
         .env("TMPDIR", root(candidate).join("tmp"))
         .env("DOCKER_CONFIG", root(candidate).join("docker-config"))
         .env("SMOLVM_AGENT_ROOTFS", root(candidate).join("rootfs"))
+        // Pinned Smol forwards this to the guest agent. Its automatic trim can
+        // truncate imago backing files; retained disk identity requires exact size.
+        .env("SMOLVM_DISK_TRIM", "0")
         .env("DYLD_LIBRARY_PATH", artifact::root(candidate).join("lib"));
     // All provider invocations (including start/recovery and private exec) use
     // this clean environment. DNS-learned answers must not reopen host/private
@@ -1724,7 +1727,23 @@ mod tests {
     }
 
     #[test]
+    fn provider_command_disables_trim_despite_ambient_override() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "provider::lifecycle::tests::provider_command_uses_recorded_reclamation_policy",
+                "--nocapture",
+            ])
+            .env("SMOLVM_DISK_TRIM", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("provider-trim-disabled"));
+    }
+
+    #[test]
     fn provider_command_uses_recorded_reclamation_policy() {
+        println!("provider-trim-disabled");
         let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
         let mut owner: Owner = serde_json::from_value(json!({
             "version":1, "checkout":"/fixture", "token":"fixture", "machine":"fixture",
@@ -1743,6 +1762,10 @@ mod tests {
             owner.reclamation = Some(policy);
             let cmd = command(&candidate, &owner);
             let env: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();
+            assert_eq!(
+                env[std::ffi::OsStr::new("SMOLVM_DISK_TRIM")],
+                Some(std::ffi::OsStr::new("0"))
+            );
             assert_eq!(
                 env[std::ffi::OsStr::new("SMOLVM_BALLOON_RECLAIM")],
                 Some(std::ffi::OsStr::new(if policy.enabled { "1" } else { "0" }))

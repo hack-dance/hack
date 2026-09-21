@@ -520,6 +520,19 @@ refuse. Preserve these files and use the reported reconciliation path rather tha
 editing receipts. Receipt-only export/prune still requires its existing relay
 acknowledgement. Runtime restart and actual cleanup remain explicit operations.
 
+After recovery completes, explicitly remove that graph's retained data with:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph cleanup --run-id RUN_ID --remove-data --json
+```
+
+This separate destructive request requires the retained dead-owner identity and
+completed recovery evidence on the same boot. It journals the selected volumes
+before removal and refuses changed ownership or replaced volumes. An interrupted
+removal can resume against its recorded inventory; it does not authorize removal of
+another graph's volumes. Recovery alone continues to preserve data. Keep the
+recovery evidence until cleanup finishes; deleting it is not a repair.
+
 Private environment delivery preserves the selected numeric image or Compose
 `User`, including UID-only values. Docker resolves the application's primary and
 supplementary groups from the image; the wrapper does not replace them with group

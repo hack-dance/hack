@@ -434,6 +434,9 @@ pub fn cleanup_request(
         if let Some(guard) = transport::Retired::acquire(candidate, run)? {
             return retained_data::remove(candidate, run, guard);
         }
+        if let Ok(guard) = transport::DeadOwner::acquire(candidate, run) {
+            return retained_data::remove_recovered(candidate, run, guard);
+        }
     }
     request(candidate, run, Some(remove_data))
 }

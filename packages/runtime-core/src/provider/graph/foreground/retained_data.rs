@@ -13,6 +13,8 @@ struct Intent {
     binding: String,
     boot: String,
     volumes: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery: Option<String>,
 }
 fn refused() -> CandidateError {
     CandidateError::new(
@@ -36,12 +38,18 @@ fn binding(receipt: &Receipt) -> Result<String, CandidateError> {
     let bytes = serde_json::to_vec(&value).map_err(|_| refused())?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
-fn allowed(receipt: &Receipt, intent: Option<&Intent>, boot: &str) -> Result<(), CandidateError> {
+fn allowed(
+    receipt: &Receipt,
+    intent: Option<&Intent>,
+    boot: &str,
+    recovery: Option<&str>,
+) -> Result<(), CandidateError> {
     if receipt.relay_startup.is_none()
-        || receipt
-            .relay_cleanup
-            .as_ref()
-            .is_none_or(|m| m.phase() != cleanup_enrollment::Phase::Confirmed)
+        || (recovery.is_none()
+            && receipt
+                .relay_cleanup
+                .as_ref()
+                .is_none_or(|m| m.phase() != cleanup_enrollment::Phase::Confirmed))
     {
         return Err(refused());
     }
@@ -51,6 +59,7 @@ fn allowed(receipt: &Receipt, intent: Option<&Intent>, boot: &str) -> Result<(),
             if intent.version == 1
                 && intent.boot == boot
                 && intent.binding == binding(receipt)?
+                && intent.recovery.as_deref() == recovery
                 && ["stopped-data-retained", "cleanup-intent", "removed"]
                     .contains(&receipt.phase.as_str()) =>
         {
@@ -82,6 +91,28 @@ pub(super) fn remove(
     run: &str,
     guard: transport::Retired,
 ) -> Result<Value, CandidateError> {
+    remove_guarded(candidate, run, Guard::Retired(guard))
+}
+pub(super) fn remove_recovered(
+    candidate: &Candidate,
+    run: &str,
+    guard: transport::DeadOwner,
+) -> Result<Value, CandidateError> {
+    remove_guarded(candidate, run, Guard::Recovered(guard))
+}
+enum Guard {
+    Retired(transport::Retired),
+    Recovered(transport::DeadOwner),
+}
+impl Guard {
+    fn verify(&self) -> Result<(), CandidateError> {
+        match self {
+            Self::Retired(g) => g.verify(),
+            Self::Recovered(g) => g.verify(),
+        }
+    }
+}
+fn remove_guarded(candidate: &Candidate, run: &str, guard: Guard) -> Result<Value, CandidateError> {
     guard.verify()?;
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, root) = graph::load(candidate, &engine, run)?;
@@ -93,20 +124,37 @@ pub(super) fn remove(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => return Err(refused()),
     };
-    allowed(&receipt, intent.as_ref(), engine.guest().boot_id())?;
-    cleanup_enrollment::retention(&root, &receipt)?;
-    let marker = receipt.relay_cleanup.as_ref().ok_or_else(refused)?;
-    let context = host_relay::context(&receipt.owner, engine.guest().boot_id())?;
-    if marker.runtime != context.runtime
-        || marker.boot != context.boot
-        || receipt
-            .relay_startup
-            .as_ref()
-            .ok_or_else(refused)?
-            .control_root
-            != marker.control_root
-    {
-        return Err(refused());
+    let recovery = match &guard {
+        Guard::Retired(_) => None,
+        Guard::Recovered(dead) => Some(graph::dead_owner_cleanup::removal_proof(
+            &root,
+            &receipt,
+            &dead.fingerprint(),
+            engine.guest().boot_id(),
+            intent.as_ref().and_then(|i| i.recovery.as_deref()),
+        )?),
+    };
+    allowed(
+        &receipt,
+        intent.as_ref(),
+        engine.guest().boot_id(),
+        recovery.as_deref(),
+    )?;
+    if recovery.is_none() {
+        cleanup_enrollment::retention(&root, &receipt)?;
+        let marker = receipt.relay_cleanup.as_ref().ok_or_else(refused)?;
+        let context = host_relay::context(&receipt.owner, engine.guest().boot_id())?;
+        if marker.runtime != context.runtime
+            || marker.boot != context.boot
+            || receipt
+                .relay_startup
+                .as_ref()
+                .ok_or_else(refused)?
+                .control_root
+                != marker.control_root
+        {
+            return Err(refused());
+        }
     }
     let mut volumes = BTreeMap::new();
     for (key, resource) in &receipt.resources {
@@ -147,6 +195,7 @@ pub(super) fn remove(
                 binding: binding(&receipt)?,
                 boot: engine.guest().boot_id().into(),
                 volumes,
+                recovery,
             },
         )?;
     }
@@ -163,23 +212,45 @@ mod tests {
         serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"stopped-data-retained","readiness":{},"resources":{},"relay_startup":{"control_only":true,"guest_root":null,"control_root":"/private/owned","artifact":"e".repeat(64),"services":{}},"relay_cleanup":{"version":1,"runtime":vec![1;16],"boot":vec![2;16],"operation":vec![3;16],"effect":vec![4;32],"control_root":"/private/owned","phase":"confirmed"}})).unwrap()
     }
     #[test]
-    fn explicit_intent_binds_retired_generation_and_partial_removal() {
+    fn recovered_removal_intent_does_not_fabricate_relay_acknowledgement() {
         let mut receipt = receipt();
-        assert!(allowed(&receipt, None, "boot").is_ok());
+        receipt.relay_cleanup = None;
+        let proof = "a".repeat(64);
+        assert!(allowed(&receipt, None, "boot", None).is_err());
+        assert!(allowed(&receipt, None, "boot", Some(&proof)).is_ok());
         let intent = Intent {
             version: 1,
             binding: binding(&receipt).unwrap(),
             boot: "boot".into(),
             volumes: BTreeMap::new(),
+            recovery: Some(proof.clone()),
+        };
+        for phase in ["cleanup-intent", "removed"] {
+            receipt.phase = phase.into();
+            assert!(allowed(&receipt, Some(&intent), "boot", Some(&proof)).is_ok());
+            assert!(allowed(&receipt, Some(&intent), "other", Some(&proof)).is_err());
+            assert!(allowed(&receipt, Some(&intent), "boot", Some(&"b".repeat(64))).is_err());
+        }
+    }
+    #[test]
+    fn explicit_intent_binds_retired_generation_and_partial_removal() {
+        let mut receipt = receipt();
+        assert!(allowed(&receipt, None, "boot", None).is_ok());
+        let intent = Intent {
+            version: 1,
+            binding: binding(&receipt).unwrap(),
+            boot: "boot".into(),
+            volumes: BTreeMap::new(),
+            recovery: None,
         };
         receipt.phase = "cleanup-intent".into();
-        assert!(allowed(&receipt, None, "boot").is_err());
-        assert!(allowed(&receipt, Some(&intent), "boot").is_ok());
+        assert!(allowed(&receipt, None, "boot", None).is_err());
+        assert!(allowed(&receipt, Some(&intent), "boot", None).is_ok());
         receipt.phase = "removed".into();
-        assert!(allowed(&receipt, Some(&intent), "boot").is_ok());
-        assert!(allowed(&receipt, Some(&intent), "other-boot").is_err());
+        assert!(allowed(&receipt, Some(&intent), "boot", None).is_ok());
+        assert!(allowed(&receipt, Some(&intent), "other-boot", None).is_err());
         receipt.plan_id = "f".repeat(64);
-        assert!(allowed(&receipt, Some(&intent), "boot").is_err());
+        assert!(allowed(&receipt, Some(&intent), "boot", None).is_err());
     }
     #[test]
     fn live_unconfirmed_and_unenrolled_receipts_refuse() {
@@ -191,7 +262,7 @@ mod tests {
         ] {
             let mut receipt = receipt();
             receipt.phase = phase.into();
-            assert!(allowed(&receipt, None, "boot").is_err());
+            assert!(allowed(&receipt, None, "boot", None).is_err());
         }
         for phase in [
             cleanup_enrollment::Phase::Pending,
@@ -199,11 +270,11 @@ mod tests {
         ] {
             let mut receipt = receipt();
             receipt.relay_cleanup.as_mut().unwrap().phase = phase;
-            assert!(allowed(&receipt, None, "boot").is_err());
+            assert!(allowed(&receipt, None, "boot", None).is_err());
         }
         let mut receipt = receipt();
         receipt.relay_cleanup = None;
-        assert!(allowed(&receipt, None, "boot").is_err());
+        assert!(allowed(&receipt, None, "boot", None).is_err());
     }
     #[test]
     fn volume_replacement_never_becomes_recovery_authority() {

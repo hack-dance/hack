@@ -276,6 +276,41 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     state::write(&root.join(FILE), &intent)?;
     Ok(json!({"run":run,"phase":"stopped-data-retained","recovered":true,"data_retained":true}))
 }
+/// Authorize a distinct explicit data-removal operation from a completed recovery.
+/// First admission matches the completed receipt exactly; retries additionally pin
+/// this immutable recovery proof while permitting only cleanup phase progress.
+pub(super) fn removal_proof(
+    root: &std::path::Path,
+    receipt: &Receipt,
+    owner: &str,
+    boot: &str,
+    expected: Option<&str>,
+) -> Result<String, CandidateError> {
+    if exists(&root.join("dead-owner-cleanup.pending"))? {
+        return Err(refused());
+    }
+    let intent: Intent = state::read(&root.join(FILE))?;
+    validate(&intent, receipt, &intent.original_sha256, owner)?;
+    let complete = intent
+        .complete_sha256
+        .as_deref()
+        .filter(|v| hex(v, 64))
+        .ok_or_else(refused)?;
+    if intent.new_boot.as_deref() != Some(boot) {
+        return Err(refused());
+    }
+    let proof = digest(&serde_json::to_vec(&intent).map_err(|_| refused())?);
+    match expected {
+        None if receipt.phase == "stopped-data-retained" && selected(receipt)? == complete => {}
+        Some(value)
+            if value == proof
+                && ["stopped-data-retained", "cleanup-intent", "removed"]
+                    .contains(&receipt.phase.as_str()) => {}
+        _ => return Err(refused()),
+    }
+    Ok(proof)
+}
+
 /// Only local retained receipts are covered. Exported receipt-only retention still
 /// requires the existing relay acknowledgement; recovery does not fabricate one.
 pub(super) fn retained(root: &std::path::Path, receipt: &Receipt) -> Result<bool, CandidateError> {
@@ -320,6 +355,86 @@ mod tests {
             bridges: None,
             complete_sha256: None,
         }
+    }
+    #[test]
+    fn completed_recovery_removal_pins_owner_boot_completion_and_resume() {
+        let fixture = super::super::tests::Fixture::new();
+        let mut receipt = partial();
+        let mut intent = intent(&receipt);
+        receipt.phase = "stopped-data-retained".into();
+        for r in receipt
+            .resources
+            .values_mut()
+            .filter(|r| r.kind != Kind::Volume)
+        {
+            r.phase = "absent".into();
+        }
+        intent.new_boot = Some("new-boot".into());
+        state::write(&fixture.0.join(FILE), &intent).unwrap();
+        assert!(
+            removal_proof(&fixture.0, &receipt, &intent.owner_sha256, "new-boot", None).is_err()
+        );
+        intent.complete_sha256 = Some(selected(&receipt).unwrap());
+        state::write(&fixture.0.join(FILE), &intent).unwrap();
+        let proof =
+            removal_proof(&fixture.0, &receipt, &intent.owner_sha256, "new-boot", None).unwrap();
+        assert!(removal_proof(&fixture.0, &receipt, &"9".repeat(64), "new-boot", None).is_err());
+        assert!(
+            removal_proof(
+                &fixture.0,
+                &receipt,
+                &intent.owner_sha256,
+                "other-boot",
+                None
+            )
+            .is_err()
+        );
+        for phase in ["cleanup-intent", "removed"] {
+            receipt.phase = phase.into();
+            receipt.resources.get_mut("volume:data").unwrap().phase = "absent".into();
+            assert_eq!(
+                removal_proof(
+                    &fixture.0,
+                    &receipt,
+                    &intent.owner_sha256,
+                    "new-boot",
+                    Some(&proof)
+                )
+                .unwrap(),
+                proof
+            );
+            assert!(
+                removal_proof(&fixture.0, &receipt, &intent.owner_sha256, "new-boot", None)
+                    .is_err()
+            );
+        }
+        intent.complete_sha256 = Some("8".repeat(64));
+        state::write(&fixture.0.join(FILE), &intent).unwrap();
+        assert!(
+            removal_proof(
+                &fixture.0,
+                &receipt,
+                &intent.owner_sha256,
+                "new-boot",
+                Some(&proof)
+            )
+            .is_err()
+        );
+        receipt.phase = "stopped-data-retained".into();
+        assert!(
+            removal_proof(&fixture.0, &receipt, &intent.owner_sha256, "new-boot", None).is_err()
+        );
+        receipt.resources.get_mut("volume:data").unwrap().name = "foreign".into();
+        assert!(
+            removal_proof(
+                &fixture.0,
+                &receipt,
+                &intent.owner_sha256,
+                "new-boot",
+                Some(&proof)
+            )
+            .is_err()
+        );
     }
     #[test]
     fn partial_provision_cleanup_progress_retains_volume_and_exact_identity() {

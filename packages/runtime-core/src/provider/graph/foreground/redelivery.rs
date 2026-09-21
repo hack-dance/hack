@@ -78,7 +78,7 @@ pub(super) fn restore(
     )?;
     {
         let engine = Engine::connect(candidate)?;
-        let (receipt, _) = super::super::load(candidate, &engine, original.run_id)?;
+        let (mut receipt, root) = super::super::load(candidate, &engine, original.run_id)?;
         check_generation(&receipt, &request.generation)?;
         if receipt.phase != "ready-observed"
             || receipt.plan_id != original.expected_plan
@@ -89,7 +89,7 @@ pub(super) fn restore(
         {
             return Err(refused());
         }
-        startup::Driver::verify(runtime, &engine, &receipt)?;
+        startup::Driver::verify(runtime, &engine, &mut receipt, &root)?;
         super::super::source::prepare_replay(
             &engine,
             &inputs,

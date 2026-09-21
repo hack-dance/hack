@@ -48,6 +48,41 @@ fn refused() -> CandidateError {
         "Graph dependency startup is incomplete or its owned identity changed.",
     )
 }
+// Fixed stage codes identify refusal boundaries without serializing configuration.
+fn stage_refused(code: &'static str) -> CandidateError {
+    error(
+        code,
+        "Graph dependency startup validation failed; configuration values omitted.",
+    )
+}
+// Fresh and restored graphs both provision a new container generation. Retained
+// stopped/ready receipts cannot authorize listener attachment.
+fn validate_start_phase(resource_phase: &str, graph_phase: &str) -> Result<(), CandidateError> {
+    if resource_phase != "start-intent" || !matches!(graph_phase, "preparing" | "restoring") {
+        return Err(stage_refused("graph_startup_started_phase"));
+    }
+    Ok(())
+}
+fn verify_exited_listener(
+    condition: Option<&Condition>,
+    observed: &Value,
+) -> Result<(), CandidateError> {
+    if condition == Some(&Condition::Completed)
+        && observed["State"]["Running"] == false
+        && observed["State"]["ExitCode"] == 0
+        && observed["State"]["OOMKilled"] != true
+    {
+        return Ok(());
+    }
+    let code = if observed["State"]["Running"] == true {
+        "graph_startup_running_listener_lost"
+    } else if observed["State"]["OOMKilled"] == true {
+        "graph_startup_listener_oom"
+    } else {
+        "graph_startup_listener_unexpected_exit"
+    };
+    Err(stage_refused(code))
+}
 fn validate_routes<'a>(
     dependencies: impl Iterator<Item = &'a Dependency>,
     inputs: &project::inputs::ExecutionInputs,
@@ -168,7 +203,7 @@ impl HostRelayRuntime {
         if !hex(expected_sha256, 64)
             || dependencies.len() > crate::provider::relay_auth::MAX_LOGICAL_BINDINGS
         {
-            return Err(refused());
+            return Err(stage_refused("graph_startup_input"));
         }
         let bytes = if dependencies.is_empty() {
             Vec::new()
@@ -180,7 +215,7 @@ impl HostRelayRuntime {
                 .map_err(state::io)?;
             let metadata = file.metadata().map_err(state::io)?;
             if !metadata.is_file() || metadata.len() > 2 * 1024 * 1024 || metadata.nlink() != 1 {
-                return Err(refused());
+                return Err(stage_refused("graph_startup_artifact_file"));
             }
             let mut bytes = Vec::new();
             file.by_ref()
@@ -192,7 +227,7 @@ impl HostRelayRuntime {
                 || bytes.get(..6) != Some(b"\x7fELF\x02\x01")
                 || bytes.get(18..20) != Some(&[183, 0])
             {
-                return Err(refused());
+                return Err(stage_refused("graph_startup_artifact_identity"));
             }
             bytes
         };
@@ -203,7 +238,10 @@ impl HostRelayRuntime {
         let capacity = if dependencies.is_empty() {
             0
         } else {
-            owner.dependency_sockets.ok_or_else(refused)?.slots
+            owner
+                .dependency_sockets
+                .ok_or_else(|| stage_refused("graph_startup_capacity"))?
+                .slots
         };
         let mut selected = BTreeMap::new();
         let mut slots = BTreeMap::new();
@@ -228,7 +266,7 @@ impl HostRelayRuntime {
                     .all(|alias| aliases.insert((dependency.service.clone(), alias.clone())))
                 || selected.contains_key(&(dependency.service.clone(), dependency.binding.clone()))
             {
-                return Err(refused());
+                return Err(stage_refused("graph_startup_dependency_selection"));
             }
             selected.insert(
                 (dependency.service.clone(), dependency.binding.clone()),
@@ -363,7 +401,12 @@ impl Driver for HostRelayRuntime {
     ) -> Result<(), CandidateError> {
         validate_routes(self.dependencies.values(), inputs)
     }
-    fn verify(&mut self, engine: &Engine<'_>, receipt: &Receipt) -> Result<(), CandidateError> {
+    fn verify(
+        &mut self,
+        engine: &Engine<'_>,
+        receipt: &mut Receipt,
+        root: &Path,
+    ) -> Result<(), CandidateError> {
         self.check(engine, receipt)?;
         for ((name, _), child) in &mut self.children {
             if child.poll_exit()?.is_some() {
@@ -372,13 +415,15 @@ impl Driver for HostRelayRuntime {
                     .get(&format!("container:{name}"))
                     .ok_or_else(refused)?;
                 let observed = inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
-                if receipt.readiness.get(name) != Some(&Condition::Completed)
-                    || observed["State"]["Running"] != false
-                    || observed["State"]["ExitCode"] != 0
-                    || observed["State"]["OOMKilled"] == true
-                {
-                    return Err(refused());
+                let observation = probes::observe(engine, receipt, name, &observed)?;
+                if observation.failed() {
+                    // The relay often exits with its application. Preserve the owned
+                    // service's value-free failure before automatic cleanup removes it.
+                    startup_failure::record(receipt, name, observation)?;
+                    state::write(&root.join("state.json"), receipt)?;
+                    return Err(stage_refused("graph_startup_application_failed"));
                 }
+                verify_exited_listener(receipt.readiness.get(name), &observed)?;
             }
         }
         Ok(())
@@ -395,14 +440,16 @@ impl Driver for HostRelayRuntime {
             || receipt.relay_startup.is_some()
             || !matches_selected_run(self.selected_run.as_deref(), &receipt.run)
         {
-            return Err(refused());
+            return Err(stage_refused("graph_startup_prepare_state"));
         }
         let mut services: BTreeMap<String, Service> = BTreeMap::new();
         for ((name, binding), dependency) in &self.dependencies {
-            let config = configs.get(name).ok_or_else(refused)?;
+            let config = configs
+                .get(name)
+                .ok_or_else(|| stage_refused("graph_startup_service_config"))?;
             launcher::validate(config)?;
             if config["HostConfig"]["Init"] != true {
-                return Err(refused());
+                return Err(stage_refused("graph_startup_init"));
             }
             if !services.contains_key(name) {
                 let mut random = [0u8; 16];
@@ -443,7 +490,7 @@ impl Driver for HostRelayRuntime {
             .ok_or_else(refused)?
             .valid(receipt)
         {
-            return Err(refused());
+            return Err(stage_refused("graph_startup_binding_validation"));
         }
         self.run = Some(receipt.run.clone());
         self.check(engine, receipt)?;
@@ -520,9 +567,7 @@ impl Driver for HostRelayRuntime {
             .get(&format!("container:{service}"))
             .ok_or_else(refused)?
             .clone();
-        if resource.phase != "start-intent" || receipt.phase != "preparing" {
-            return Err(refused());
-        }
+        validate_start_phase(&resource.phase, &receipt.phase)?;
         let observed = inspect_resource(engine, receipt, &resource)?.ok_or_else(refused)?;
         let generation = host_relay::inspected_generation(
             receipt,
@@ -715,6 +760,65 @@ mv "$root/pending" "$root/release"; sync -f "$root"
 #[cfg(test)]
 mod route_tests {
     use super::*;
+    #[test]
+    fn exited_listener_accepts_only_successful_completed_service() {
+        let exited = json!({"State":{"Running":false,"ExitCode":0,"OOMKilled":false}});
+        verify_exited_listener(Some(&Condition::Completed), &exited).unwrap();
+        assert_eq!(
+            verify_exited_listener(Some(&Condition::Started), &exited)
+                .unwrap_err()
+                .code,
+            "graph_startup_listener_unexpected_exit"
+        );
+        let running = json!({"State":{"Running":true,"ExitCode":0,"OOMKilled":false}});
+        assert_eq!(
+            verify_exited_listener(Some(&Condition::Completed), &running)
+                .unwrap_err()
+                .code,
+            "graph_startup_running_listener_lost"
+        );
+        let oom = json!({"State":{"Running":false,"ExitCode":137,"OOMKilled":true}});
+        assert_eq!(
+            verify_exited_listener(Some(&Condition::Completed), &oom)
+                .unwrap_err()
+                .code,
+            "graph_startup_listener_oom"
+        );
+    }
+    #[test]
+    fn restored_dependency_container_accepts_only_new_start_intent() {
+        validate_start_phase("start-intent", "preparing").unwrap();
+        validate_start_phase("start-intent", "restoring").unwrap();
+        for phase in [
+            "ready-observed",
+            "stopped-data-retained",
+            "removed",
+            "failed-retained",
+        ] {
+            assert_eq!(
+                validate_start_phase("start-intent", phase)
+                    .unwrap_err()
+                    .code,
+                "graph_startup_started_phase"
+            );
+        }
+        for phase in ["reserved", "created", "running", "removed"] {
+            assert!(validate_start_phase(phase, "restoring").is_err());
+        }
+    }
+    #[test]
+    fn invalid_constructor_input_has_fixed_stage_code_before_effects() {
+        let fixture = super::super::super::tests::Fixture::new();
+        let failure = HostRelayRuntime::new(
+            &Candidate::discover(&fixture.0).unwrap(),
+            Path::new("/unread-artifact"),
+            "invalid",
+            Vec::new(),
+        )
+        .err()
+        .expect("invalid digest refused");
+        assert_eq!(failure.code, "graph_startup_input");
+    }
     #[test]
     fn declared_aliases_must_be_bound_exactly_before_owner_creation() {
         let fixture = super::super::super::tests::Fixture::new();

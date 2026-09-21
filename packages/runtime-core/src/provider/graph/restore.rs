@@ -200,7 +200,7 @@ fn restore_inputs(
     if fresh.is_none()
         && let Some(driver) = startup.as_mut()
     {
-        driver.verify(&engine, &receipt)?;
+        driver.verify(&engine, &mut receipt, &root)?;
     }
     if !redelivery {
         environment::require_replay_supported(&receipt)?;
@@ -321,6 +321,9 @@ fn restore_inputs(
     if fresh.is_none() && receipt.relay_cleanup.is_none() {
         super::restore_history::retain(&root, &receipt)?;
     }
+    // The complete previous attempt is retained above; current failure evidence
+    // belongs only to this newly admitted generation.
+    receipt.startup_failure = None;
     receipt.probes = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
     receipt.phase = "restoring".into();
     for (key, resource) in &mut receipt.resources {

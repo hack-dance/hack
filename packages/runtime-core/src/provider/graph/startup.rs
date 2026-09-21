@@ -181,7 +181,12 @@ pub(super) trait Driver {
         &self,
         inputs: &project::inputs::ExecutionInputs,
     ) -> Result<(), CandidateError>;
-    fn verify(&mut self, engine: &Engine<'_>, receipt: &Receipt) -> Result<(), CandidateError>;
+    fn verify(
+        &mut self,
+        engine: &Engine<'_>,
+        receipt: &mut Receipt,
+        root: &Path,
+    ) -> Result<(), CandidateError>;
     fn prepare(
         &mut self,
         engine: &Engine<'_>,

@@ -849,7 +849,7 @@ impl Driver for Session<'_, '_> {
             Event::Observed { .. } => Ok(()),
             Event::Ready => {
                 if let Some(startup) = self.startup.as_mut() {
-                    startup.verify(&self.engine, &self.receipt)?;
+                    startup.verify(&self.engine, &mut self.receipt, &self.root)?;
                 }
                 self.receipt.phase = "ready-observed".into();
                 self.save()
@@ -953,7 +953,7 @@ impl Driver for Session<'_, '_> {
             lease.verified_path_with_guest(self.engine.guest(), service)?;
         }
         if let Some(startup) = self.startup.as_mut() {
-            startup.verify(&self.engine, &self.receipt)?;
+            startup.verify(&self.engine, &mut self.receipt, &self.root)?;
         }
         self.check_cancelled()?;
         self.engine
@@ -974,7 +974,7 @@ impl Driver for Session<'_, '_> {
     }
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
         if let Some(startup) = self.startup.as_mut() {
-            startup.verify(&self.engine, &self.receipt)?;
+            startup.verify(&self.engine, &mut self.receipt, &self.root)?;
         }
         let resource = &self.receipt.resources[&format!("container:{service}")];
         let value = inspect_resource(&self.engine, &self.receipt, resource)?

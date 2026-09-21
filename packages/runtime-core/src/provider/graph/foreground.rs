@@ -389,9 +389,12 @@ fn serve_input<'a>(
                 }
                 // inspect releases its Engine lease before the fresh runtime check.
                 publishers.verify_live(candidate)?;
-                let snapshot = super::inspect(candidate, &receipt.run)?;
+                let mut snapshot = super::inspect(candidate, &receipt.run)?;
                 let engine = Engine::connect(candidate)?;
-                let checked = startup::Driver::verify(&mut runtime, &engine, &snapshot.receipt);
+                let (current, root) = super::load(candidate, &engine, &receipt.run)?;
+                snapshot.receipt = current;
+                let checked =
+                    startup::Driver::verify(&mut runtime, &engine, &mut snapshot.receipt, &root);
                 Ok::<_, CandidateError>(
                     json!({"ok":true,"run":snapshot.receipt.run,"phase":snapshot.receipt.phase,"plan":snapshot.receipt.plan_id,"generation":redelivery::generation(&snapshot.receipt)?,"foreground_alive":true,"runtime_verified":checked.is_ok(),"runtime_error":checked.err().map(|error|error.code)}),
                 )

@@ -424,8 +424,9 @@ status alone does not establish application health. The separately declared nati
 HTTP readiness probes remain required. DNS and user-approved trust setup are
 separate prerequisites for normal browser access.
 
+The probe pins its TCP connection to loopback independently of SNI and Host.
 Failed HTTPS verification reports a reviewed TLS/transport error code or
-`VERIFICATION_TIMEOUT`, without peer values. Unknown errors use
+`VERIFICATION_TIMEOUT_HANDSHAKE` / `VERIFICATION_TIMEOUT_RESPONSE`, without peer values. Unknown errors use
 `TLS_OR_TRANSPORT_ERROR`. Startup saves the project run mapping only after these
 checks succeed; failed verification retains its original error through graph cleanup.
 

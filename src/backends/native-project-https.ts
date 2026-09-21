@@ -11,10 +11,10 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { request } from "node:http";
-import { request as httpsRequest } from "node:https";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { connect as tlsConnect } from "node:tls";
 import { isRecord } from "../lib/guards.ts";
 import { checkNativeHttpsPort } from "./native-https-port.ts";
 import {
@@ -22,6 +22,7 @@ import {
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
+const HTTP_STATUS = /^HTTP\/1\.[01] ([2-5][0-9]{2})(?: [^\r\n]*)?$/;
 const SHA = /^[a-f0-9]{64}$/;
 const HOST =
   /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -61,11 +62,15 @@ const SAFE_TLS_CODES = new Set([
 /** Return only fixed classifications; raw TLS messages can contain peer values. */
 export function nativeHttpsVerificationError(
   error: unknown,
-  timedOut = false
+  timedOut = false,
+  phase: "handshake" | "response" = "handshake"
 ): Error {
   let code = "TLS_OR_TRANSPORT_ERROR";
   if (timedOut) {
-    code = "VERIFICATION_TIMEOUT";
+    code =
+      phase === "handshake"
+        ? "VERIFICATION_TIMEOUT_HANDSHAKE"
+        : "VERIFICATION_TIMEOUT_RESPONSE";
   } else if (
     isRecord(error) &&
     typeof error.code === "string" &&
@@ -455,57 +460,81 @@ async function validCa(path: string): Promise<Buffer> {
   }
   return pem;
 }
-async function verifyHostname(
+/** Pin TCP to loopback independently of SNI and the HTTP Host authority.
+ * Bun's HTTPS adapter refused this distinct transport/SNI selection in a real TLS control.
+ */
+export async function verifyNativeHttpsHostname(
   hostname: string,
   port: number,
   caPath: string
 ): Promise<{ statusCode: number }> {
-  if (hostname.length > 253 || !HOST.test(hostname)) {
+  if (
+    hostname.length > 253 ||
+    !HOST.test(hostname) ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65_535
+  ) {
     throw refused();
   }
   const ca = await validCa(caPath);
   return await new Promise((resolve, reject) => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let timedOut = false;
-    const req = httpsRequest(
-      {
-        host: "127.0.0.1",
-        port,
-        servername: hostname,
-        headers: { Host: port === 443 ? hostname : `${hostname}:${port}` },
-        path: "/",
-        ca,
-        rejectUnauthorized: true,
-        timeout: 5000,
-      },
-      (response) => {
-        if (timer) {
-          clearTimeout(timer);
-        }
-        const statusCode = response.statusCode;
-        response.destroy();
-        if (statusCode === undefined) {
-          reject(refused());
-        } else {
-          resolve({ statusCode });
-        }
+    let settled = false;
+    let prefix = "";
+    let phase: "handshake" | "response" = "handshake";
+    const finish = (error?: Error, statusCode?: number) => {
+      if (settled) {
+        return;
       }
-    );
-    const timeout = () => {
-      timedOut = true;
-      req.destroy(nativeHttpsVerificationError(undefined, true));
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (error || statusCode === undefined) {
+        reject(error ?? nativeHttpsVerificationError(undefined));
+      } else {
+        resolve({ statusCode });
+      }
     };
-    req.on("timeout", timeout);
-    req.on("error", (error: unknown) => {
-      if (timer) {
-        clearTimeout(timer);
-      }
-      reject(nativeHttpsVerificationError(error, timedOut));
+    const socket = tlsConnect({
+      host: "127.0.0.1",
+      port,
+      servername: hostname,
+      ca,
+      rejectUnauthorized: true,
+      ALPNProtocols: ["http/1.1"],
     });
-    timer = setTimeout(timeout, 5000);
-    req.end();
+    const timer = setTimeout(
+      () => finish(nativeHttpsVerificationError(undefined, true, phase)),
+      5000
+    );
+    socket.once("secureConnect", () => {
+      phase = "response";
+      const authority = port === 443 ? hostname : `${hostname}:${port}`;
+      socket.write(
+        `GET / HTTP/1.1\r\nHost: ${authority}\r\nConnection: close\r\n\r\n`
+      );
+    });
+    socket.on("data", (data: Buffer) => {
+      // Only the bounded public status line is needed, never application bodies.
+      prefix += data.subarray(0, 1024 - prefix.length).toString("latin1");
+      const end = prefix.indexOf("\r\n");
+      if (end < 0 && prefix.length < 1024) {
+        return;
+      }
+      const match =
+        end >= 0 && end < 1024 ? HTTP_STATUS.exec(prefix.slice(0, end)) : null;
+      finish(
+        match ? undefined : nativeHttpsVerificationError(undefined),
+        match ? Number(match[1]) : undefined
+      );
+    });
+    socket.once("error", (error: unknown) =>
+      finish(nativeHttpsVerificationError(error))
+    );
+    socket.once("close", () => finish(nativeHttpsVerificationError(undefined)));
   });
 }
+
 async function waitReady<T>(
   deadline: number,
   dead: () => boolean,
@@ -738,7 +767,7 @@ export async function startNativeProjectHttps(opts: {
       httpsPort: opts.httpsPort,
       exited,
       verifyHostname: (hostname) =>
-        verifyHostname(hostname, opts.httpsPort, caPath),
+        verifyNativeHttpsHostname(hostname, opts.httpsPort, caPath),
       close,
     };
   } catch (error) {

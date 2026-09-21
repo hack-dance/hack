@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
@@ -19,6 +20,7 @@ import {
   nativeHttpsVerificationError,
   spawnNativeHttpsChild,
   startNativeProjectHttps,
+  verifyNativeHttpsHostname,
 } from "../src/backends/native-project-https.ts";
 import { CURRENT_CA_PEM } from "./helpers/ca-certificates.ts";
 
@@ -431,4 +433,119 @@ test("HTTPS errors preserve only reviewed codes and distinguish wall timeouts", 
   expect(
     nativeHttpsVerificationError({ code: "ECONNRESET" }, true).message
   ).toContain("VERIFICATION_TIMEOUT");
+});
+
+test("verification timeouts identify handshake versus HTTP response", () => {
+  expect(
+    nativeHttpsVerificationError(undefined, true, "handshake").message
+  ).toContain("VERIFICATION_TIMEOUT_HANDSHAKE");
+  expect(
+    nativeHttpsVerificationError(undefined, true, "response").message
+  ).toContain("VERIFICATION_TIMEOUT_RESPONSE");
+});
+
+test("real TLS verification pins loopback, SNI, Host and CA and bounds status parsing", async () => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), "https-wire-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const cert = join(root, "cert.pem");
+  const key = join(root, "key.pem");
+  const generated = spawnSync(
+    "/usr/bin/openssl",
+    [
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-days",
+      "1",
+      "-subj",
+      "/CN=fixture.invalid",
+      "-addext",
+      "subjectAltName=DNS:fixture.invalid",
+      "-addext",
+      "basicConstraints=critical,CA:TRUE",
+      "-keyout",
+      key,
+      "-out",
+      cert,
+    ],
+    { stdio: "ignore", timeout: 10_000 }
+  );
+  expect(generated.status).toBe(0);
+  const responsePath = join(root, "response");
+  const seenPath = join(root, "seen");
+  await writeFile(
+    responsePath,
+    "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+  );
+  const script = join(root, "server.py");
+  await writeFile(
+    script,
+    String.raw`import json,socket,ssl,sys,pathlib
+root=pathlib.Path(sys.argv[1])
+context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(str(root/'cert.pem'),str(root/'key.pem'))
+seen={}
+def sni(sock,name,ctx): seen['sni']=name
+context.set_servername_callback(sni)
+server=socket.socket();server.bind(('127.0.0.1',0));server.listen(8)
+print(server.getsockname()[1],flush=True)
+while True:
+ client,remote=server.accept()
+ try:
+  with context.wrap_socket(client,server_side=True) as conn:
+   conn.settimeout(3)
+   data=b''
+   while b'\r\n\r\n' not in data:
+    chunk=conn.recv(4096)
+    if not chunk: break
+    data+=chunk
+   seen.update(request=data.decode(),remote=remote[0])
+   (root/'seen').write_text(json.dumps(seen))
+   conn.sendall((root/'response').read_bytes())
+ except (OSError,ssl.SSLError): client.close()
+`
+  );
+  const child = Bun.spawn(["python3", "-I", "-S", script, root], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  cleanups.push(async () => {
+    child.kill();
+    await child.exited;
+  });
+  const reader = child.stdout.getReader();
+  const announced = await reader.read();
+  reader.releaseLock();
+  const port = Number(new TextDecoder().decode(announced.value).trim());
+  expect(Number.isInteger(port) && port > 0).toBe(true);
+  const address = { port };
+  expect(
+    await verifyNativeHttpsHostname("fixture.invalid", address.port, cert)
+  ).toEqual({ statusCode: 204 });
+  expect(JSON.parse(await readFile(seenPath, "utf8"))).toEqual({
+    sni: "fixture.invalid",
+    request: `GET / HTTP/1.1\r\nHost: fixture.invalid:${address.port}\r\nConnection: close\r\n\r\n`,
+    remote: "127.0.0.1",
+  });
+  await expect(
+    verifyNativeHttpsHostname("wrong.invalid", address.port, cert)
+  ).rejects.toThrow("Native HTTPS verification failed");
+  const foreignCa = join(root, "foreign.pem");
+  await writeFile(foreignCa, CURRENT_CA_PEM);
+  await expect(
+    verifyNativeHttpsHostname("fixture.invalid", address.port, foreignCa)
+  ).rejects.toThrow("Native HTTPS verification failed");
+  for (const invalid of [
+    "HTTP/1.1 100 Continue\r\n\r\n",
+    "malformed\r\n",
+    `HTTP/1.1 200 ${"x".repeat(2048)}\r\n`,
+    "HTTP/1.1 200 OK",
+  ]) {
+    await writeFile(responsePath, invalid);
+    await expect(
+      verifyNativeHttpsHostname("fixture.invalid", address.port, cert)
+    ).rejects.toThrow("Native HTTPS verification failed");
+  }
 });

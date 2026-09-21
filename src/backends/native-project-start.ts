@@ -295,6 +295,20 @@ function environmentDelivery(
     ),
   };
 }
+const SAFE_STARTUP_DIAGNOSTIC =
+  /^(Native (?:graph startup (?:failed|was interrupted or failed)|HTTPS verification failed)) \(([A-Za-z0-9_]{1,80})\); (?:inspect owned state before retrying\.|peer values omitted\.)$/;
+/** Preserve only the fixed diagnostic envelope emitted by the native clients. */
+function cleanupUnconfirmed(startupFailure?: unknown): Error {
+  const message = startupFailure instanceof Error ? startupFailure.message : "";
+  const diagnostic = SAFE_STARTUP_DIAGNOSTIC.exec(message);
+  const startup =
+    startupFailure === undefined
+      ? ""
+      : ` Startup diagnostic: ${diagnostic ? `${diagnostic[1]} (${diagnostic[2]})` : "STARTUP_FAILURE (details omitted)"}.`;
+  return new Error(
+    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startup}`
+  );
+}
 function requireConfirmedCleanup(
   final: unknown,
   startupFailure?: unknown
@@ -314,13 +328,7 @@ function requireConfirmedCleanup(
         (!isRecord(value) || value.state !== "absent")
     )
   ) {
-    // Preserve the sanitized startup diagnostic without retiring uncertain state.
-    throw (
-      startupFailure ??
-      new Error(
-        "Native foreground exit cleanup is unconfirmed; run mapping retained."
-      )
-    );
+    throw cleanupUnconfirmed(startupFailure);
   }
 }
 /** Explicit unfiltered project sharing; foreground only. Native refusal never falls back to Compose. */
@@ -596,7 +604,7 @@ export async function startNativeProject(opts: {
           try {
             final = await invokeInspect();
           } catch (inspectionFailure) {
-            throw serveFailure ?? inspectionFailure;
+            throw cleanupUnconfirmed(serveFailure ?? inspectionFailure);
           }
           const owned = authoritative(
             final,

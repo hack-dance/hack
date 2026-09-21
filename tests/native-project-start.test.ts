@@ -164,7 +164,9 @@ test("uncertain foreground failure retains published mapping and cleans lifecycl
   };
   const int = process.listenerCount("SIGINT"),
     term = process.listenerCount("SIGTERM");
-  await expect(startNativeProject(opts)).rejects.toThrow("uncertain");
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "cleanup is unconfirmed"
+  );
   expect(events).toContain("save");
   expect(events).not.toContain("remove");
   expect(events.at(-1)).toBe("cleanup");
@@ -708,4 +710,68 @@ test("mapping save failure preserves its cause without removing an unconfirmed m
   expect(events).not.toContain("remove");
   expect(events).not.toContain("ready");
   expect(events.at(-1)).toBe("cleanup");
+});
+
+test("failed cleanup reports sanitized TLS failure and retained state without removing mapping", async () => {
+  const { opts, events } = await httpsFixture();
+  const failure = new Error(
+    "Native HTTPS verification failed (VERIFICATION_TIMEOUT_RESPONSE); peer values omitted."
+  );
+  opts.dependencies.https = async () => ({
+    caPath: "/synthetic/root.crt",
+    httpsPort: 8443,
+    exited: new Promise(() => {}),
+    verifyHostname: async () => {
+      throw failure;
+    },
+    close: async () => {},
+  });
+  const invoke = opts.dependencies.invoke!;
+  let inspections = 0;
+  opts.dependencies.invoke = async (request) => {
+    const value = await invoke(request);
+    if (request.args[1] === "inspect" && ++inspections === 2) {
+      return {
+        ...(value as object),
+        observations: { "container:web": { state: "running" } },
+      };
+    }
+    return value;
+  };
+  let caught: unknown;
+  try {
+    await startNativeProject({ ...opts, https: httpsSelection });
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(Error);
+  expect((caught as Error).message).toContain("cleanup is unconfirmed");
+  expect((caught as Error).message).toContain(
+    "runtime and bridge state may be retained"
+  );
+  expect((caught as Error).message).toContain("VERIFICATION_TIMEOUT_RESPONSE");
+  expect((caught as Error).cause).toBeUndefined();
+  expect(events).not.toContain("remove");
+});
+
+test("final inspection failure reports uncertainty without echoing arbitrary failure values", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  let inspections = 0;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "inspect" && ++inspections === 2) {
+      throw new Error("synthetic-private-canary");
+    }
+    return invoke(request);
+  };
+  const failure = await startNativeProject(opts).catch(
+    (error: unknown) => error
+  );
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toContain("cleanup is unconfirmed");
+  expect((failure as Error).message).not.toContain("synthetic-private-canary");
+  expect((failure as Error).cause).toBeUndefined();
+  expect(Bun.inspect(failure)).not.toContain("synthetic-private-canary");
+  expect(JSON.stringify(failure)).not.toContain("synthetic-private-canary");
+  expect(events).not.toContain("remove");
 });

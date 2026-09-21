@@ -7,6 +7,8 @@ pub(crate) struct Selection {
     version: u8,
     owner: String,
     boot: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_boot: Option<String>,
     run: String,
     plan: String,
     capacity: u8,
@@ -18,7 +20,8 @@ pub(crate) struct Selection {
 #[serde(deny_unknown_fields)]
 struct Selected {
     assignment: Assignment,
-    helper: relay::CleanupEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    helper: Option<relay::CleanupEvidence>,
 }
 
 fn strict_store(candidate: &Candidate, engine: &Engine<'_>) -> Result<Store, CandidateError> {
@@ -52,6 +55,27 @@ fn validate_selection(
     {
         return Err(invalid());
     }
+    let previous = if selection.previous_boot.is_some() {
+        crate::provider::state::Owner::load(engine.guest().candidate())?.previous_guest_boot_id
+    } else {
+        None
+    };
+    validate_bindings(receipt, selection, previous.as_deref())
+}
+
+fn validate_bindings(
+    receipt: &Receipt,
+    selection: &Selection,
+    previous_boot: Option<&str>,
+) -> Result<(), CandidateError> {
+    if let Some(previous) = &selection.previous_boot {
+        if previous == &selection.boot
+            || previous_boot != Some(previous.as_str())
+            || selection.selected.is_empty()
+        {
+            return Err(invalid());
+        }
+    }
     let store = Store {
         version: 1,
         owner: selection.owner.clone(),
@@ -62,13 +86,17 @@ fn validate_selection(
             .map(|(slot, v)| (*slot, v.assignment.clone()))
             .collect(),
     };
-    validate(&store, engine.guest().incarnation(), capacity)?;
+    validate(&store, &selection.owner, selection.capacity)?;
     for selected in selection.selected.values() {
         let a = &selected.assignment;
         if a.run != receipt.run
-            || a.boot_id != selection.boot
+            || a.boot_id != *selection.previous_boot.as_ref().unwrap_or(&selection.boot)
             || a.phase != "running"
-            || !selected.helper.valid()
+            || match (&selection.previous_boot, &selected.helper) {
+                (None, Some(helper)) => !helper.valid(),
+                (Some(_), None) => false,
+                _ => true,
+            }
             || !receipt
                 .resources
                 .get(&format!("container:{}", a.service))
@@ -94,6 +122,7 @@ pub(crate) fn capture(
         version: 1,
         owner: engine.guest().incarnation().into(),
         boot: engine.guest().boot_id().into(),
+        previous_boot: None,
         run: receipt.run.clone(),
         plan: receipt.plan_id.clone(),
         capacity: engine.guest().bridge_intent().map_or(0, |v| v.slots),
@@ -109,12 +138,88 @@ pub(crate) fn capture(
             *slot,
             Selected {
                 assignment: a.clone(),
-                helper,
+                helper: Some(helper),
             },
         );
     }
     validate_selection(engine, receipt, &selection)?;
     Ok(selection)
+}
+
+/// Explicit dead-owner recovery only: guest helper absence follows the audited
+/// immediate boot transition, never a fabricated live-helper observation.
+pub(crate) fn capture_previous_boot(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    previous: &str,
+) -> Result<Selection, CandidateError> {
+    let store = strict_store(candidate, engine)?;
+    let selection = Selection {
+        version: 1,
+        owner: engine.guest().incarnation().into(),
+        boot: engine.guest().boot_id().into(),
+        previous_boot: Some(previous.into()),
+        run: receipt.run.clone(),
+        plan: receipt.plan_id.clone(),
+        capacity: engine.guest().bridge_intent().map_or(0, |v| v.slots),
+        serial: store.next_launch_serial,
+        selected: store
+            .slots
+            .into_iter()
+            .filter(|(_, a)| a.run == receipt.run)
+            .map(|(slot, assignment)| {
+                (
+                    slot,
+                    Selected {
+                        assignment,
+                        helper: None,
+                    },
+                )
+            })
+            .collect(),
+    };
+    validate_selection(engine, receipt, &selection)?;
+    Ok(selection)
+}
+
+/// Pending recovery may resume only the exact remaining reservations. Released
+/// slots may be absent; a replacement or new reservation is never adopted.
+pub(crate) fn verify_remaining(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    selection: &Selection,
+) -> Result<(), CandidateError> {
+    validate_selection(engine, receipt, selection)?;
+    if selection.previous_boot.is_none() {
+        return Ok(());
+    }
+    let store = strict_store(candidate, engine)?;
+    remaining_matches(&store, receipt, selection)
+}
+fn remaining_matches(
+    store: &Store,
+    receipt: &Receipt,
+    selection: &Selection,
+) -> Result<(), CandidateError> {
+    if store.next_launch_serial < selection.serial {
+        return Err(invalid());
+    }
+    for (slot, assignment) in &store.slots {
+        if assignment.run == receipt.run || selection.selected.contains_key(slot) {
+            let expected = selection.selected.get(slot).ok_or_else(invalid)?;
+            let mut observed = assignment.clone();
+            if !["running", "stopped"].contains(&observed.phase.as_str()) {
+                return Err(invalid());
+            }
+            observed.phase = expected.assignment.phase.clone();
+            if observed != expected.assignment {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn selection_path(root: &std::path::Path) -> Result<PathBuf, CandidateError> {
@@ -187,7 +292,9 @@ pub(crate) fn verify(
         return Err(invalid());
     }
     for (slot, selected) in &selection.selected {
-        relay::verify_cleanup(engine, *slot, &selected.assignment, &selected.helper)?;
+        if let Some(helper) = &selected.helper {
+            relay::verify_cleanup(engine, *slot, &selected.assignment, helper)?;
+        }
     }
     engine.guest().verify()?;
     Ok(())
@@ -204,12 +311,97 @@ mod tests {
             version: 1,
             owner: "a".repeat(32),
             boot: "boot".into(),
+            previous_boot: None,
             run: "b".repeat(32),
             plan: "c".repeat(64),
             capacity: 0,
             serial,
             selected: BTreeMap::new(),
         }
+    }
+    #[test]
+    fn prior_boot_selection_refuses_mixed_current_foreign_and_replaced_reservations() {
+        let mut selection = selection(1);
+        selection.boot = "22222222-2222-2222-2222-222222222222".into();
+        let previous = "11111111-1111-1111-1111-111111111111";
+        selection.previous_boot = Some(previous.into());
+        selection.capacity = 2;
+        let assignment = Assignment {
+            reservation: "d".repeat(32),
+            run: selection.run.clone(),
+            service: "web".into(),
+            generation: "e".repeat(64),
+            container_id: "f".repeat(64),
+            network_id: "1".repeat(64),
+            boot_id: previous.into(),
+            phase: "running".into(),
+            relay: Some(relay::Relay {
+                transport: relay::Transport::ReservationV1,
+                launch_serial: 1,
+                binary_sha256: "2".repeat(64),
+                target_pid: 10,
+                target_start: 10,
+                port: 8080,
+            }),
+        };
+        selection.selected.insert(
+            0,
+            Selected {
+                assignment: assignment.clone(),
+                helper: None,
+            },
+        );
+        let receipt: Receipt = serde_json::from_value(json!({"version":1,"run":selection.run,"owner":selection.owner,"namespace":"3".repeat(64),"plan_id":selection.plan,"phase":"ready-observed","readiness":{"web":"healthy"},"resources":{
+            "container:web":{"kind":"container","key":"web","name":"owned","id":assignment.container_id,"image":null,"phase":"started"},
+            "network:default":{"kind":"network","key":"default","name":"owned","id":assignment.network_id,"image":null,"phase":"created"}
+        }})).unwrap();
+        assert!(validate_bindings(&receipt, &selection, Some(previous)).is_ok());
+        for boot in [
+            selection.boot.as_str(),
+            "33333333-3333-3333-3333-333333333333",
+        ] {
+            let mut changed = selection.clone();
+            changed.selected.get_mut(&0).unwrap().assignment.boot_id = boot.into();
+            assert!(validate_bindings(&receipt, &changed, Some(previous)).is_err());
+        }
+        let mut mixed = selection.clone();
+        let mut extra = assignment.clone();
+        extra.service = "foreign".into();
+        extra.reservation = "7".repeat(32);
+        extra.boot_id = selection.boot.clone();
+        extra.relay.as_mut().unwrap().launch_serial = 2;
+        mixed.serial = 2;
+        mixed.selected.insert(
+            1,
+            Selected {
+                assignment: extra,
+                helper: None,
+            },
+        );
+        assert!(validate_bindings(&receipt, &mixed, Some(previous)).is_err());
+        let mut changed_receipt = receipt.clone();
+        changed_receipt
+            .resources
+            .get_mut("container:web")
+            .unwrap()
+            .id = Some("8".repeat(64));
+        assert!(validate_bindings(&changed_receipt, &selection, Some(previous)).is_err());
+        assert!(validate_bindings(&receipt, &selection, None).is_err());
+        assert!(validate_bindings(&receipt, &selection, Some(&selection.boot)).is_err());
+        let mut changed = selection.clone();
+        changed.selected.get_mut(&0).unwrap().assignment.run = "9".repeat(32);
+        assert!(validate_bindings(&receipt, &changed, Some(previous)).is_err());
+        let mut store = Store {
+            version: 1,
+            owner: selection.owner.clone(),
+            next_launch_serial: 1,
+            slots: BTreeMap::from([(0, assignment)]),
+        };
+        assert!(remaining_matches(&store, &receipt, &selection).is_ok());
+        store.slots.get_mut(&0).unwrap().reservation = "8".repeat(32);
+        assert!(remaining_matches(&store, &receipt, &selection).is_err());
+        store.slots.clear();
+        assert!(remaining_matches(&store, &receipt, &selection).is_ok());
     }
     fn pending(root: &std::path::Path, bytes: &[u8]) -> PathBuf {
         let path = root.join("relay-cleanup-bridges.pending");

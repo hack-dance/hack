@@ -428,7 +428,10 @@ The probe pins its TCP connection to loopback independently of SNI and Host.
 Failed HTTPS verification reports a reviewed TLS/transport error code or
 `VERIFICATION_TIMEOUT_HANDSHAKE` / `VERIFICATION_TIMEOUT_RESPONSE`, without peer values. Unknown errors use
 `TLS_OR_TRANSPORT_ERROR`. Startup saves the project run mapping only after these
-checks succeed; failed verification retains its original error through graph cleanup.
+checks succeed. Confirmed graph cleanup preserves the original startup error. If final
+inspection or cleanup cannot be confirmed, the error instead reports retained-state
+uncertainty alongside the sanitized startup diagnostic. Any published mapping remains
+intact; inspect owned runtime and bridge state before retrying.
 
 ### Explicit cleanup after a dead foreground owner
 
@@ -441,6 +444,15 @@ it returns `awaiting-runtime-start` without guest effects. After explicit ordina
 the same pool incarnation and the selected previous boot, removes only verified
 owned containers and networks, and retains named volumes and dependency caches.
 It neither marks incomplete package caches valid nor replays initializers.
+
+If a foreground owner died after its graph reached `ready-observed` and the pool
+has already restarted once, the same explicit command can select recovery on that
+immediate successor boot. It requires the retained dead-owner identity, exact receipt
+hash, and bridge assignments belonging to the recorded previous boot. The recovery
+intent pins those assignments before effects and refuses replacements on retry.
+Do not restart again to attempt this path: another boot rollover invalidates the
+previous-boot evidence. Old guest helper absence follows the verified boot transition;
+it is not recorded as a live helper acknowledgement.
 
 Recovery retains its own durable intent and completion evidence. It does not forge
 a relay acknowledgement or permit ordinary restore of the old enrolled graph;

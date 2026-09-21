@@ -1,5 +1,6 @@
-//! Explicit two-phase recovery. VM stop plus owner death is selected before reboot;
-//! no endpoint-file deletion is treated as a relay retirement acknowledgement.
+//! Explicit recovery selects VM stop plus owner death before reboot, or a dead
+//! ready owner with exact reservations from the immediate predecessor boot.
+//! No endpoint-file deletion is treated as a relay retirement acknowledgement.
 use super::*;
 use crate::provider::{identity, lifecycle, state::Owner};
 use sha2::{Digest, Sha256};
@@ -20,7 +21,7 @@ struct Intent {
 fn refused() -> CandidateError {
     error(
         "graph_dead_owner_recovery",
-        "Dead-owner cleanup requires the exact stopped selection, absent foreground owner, a fresh verified boot and unchanged inventories; evidence retained.",
+        "Dead-owner cleanup requires an exact stopped selection or ready graph from the immediate prior boot, an absent foreground owner, and unchanged verified inventories; evidence retained.",
     )
 }
 fn digest(value: &[u8]) -> String {
@@ -90,7 +91,9 @@ fn retain_interrupted_write(root: &std::path::Path) -> Result<(), CandidateError
     )?;
     Ok(())
 }
-/// The first call occurs while stopped; the second follows explicit runtime up.
+/// Normally select while stopped, then call after explicit runtime up. A dead
+/// ready owner with exact previous-boot reservations can be selected on the
+/// immediate successor boot without another restart.
 /// This operation never starts a VM or deletes retained data.
 pub fn recover_cleanup(
     candidate: &Candidate,
@@ -187,7 +190,41 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     let dead = foreground::DeadOwner::acquire(candidate, run)?;
     let (receipt, root) = load(candidate, &engine, run)?;
     no_pending(&root)?;
-    let mut intent: Intent = state::read(&root.join(FILE))?;
+    let mut intent: Intent = if exists(&root.join(FILE))? {
+        state::read(&root.join(FILE))?
+    } else {
+        // A dead ready owner may be selected after exactly one already audited
+        // restart. No additional restart is requested or inferred here.
+        let owner = Owner::load(candidate)?;
+        if receipt.phase != "ready-observed"
+            || receipt.relay_startup.is_none()
+            || receipt.relay_cleanup.is_some()
+            || selected(&receipt)? != expected
+            || exists(&root.join("relay-cleanup-bridges.json"))?
+            || exists(&root.join("relay-cleanup-bridges.pending"))?
+        {
+            return Err(refused());
+        }
+        initializer_cache::require_resolved(&receipt)?;
+        let old_boot = owner.previous_guest_boot_id.ok_or_else(refused)?;
+        let bridges =
+            bridges::cleanup::capture_previous_boot(candidate, &engine, &receipt, &old_boot)?;
+        let intent = Intent {
+            version: 1,
+            original_sha256: expected.into(),
+            owner_sha256: dead.fingerprint(),
+            old_boot,
+            new_boot: Some(engine.guest().boot_id().into()),
+            original: receipt.clone(),
+            environment: None,
+            bridges: Some(bridges),
+            complete_sha256: None,
+        };
+        dead.verify()?;
+        retain_interrupted_write(&root)?;
+        state::write(&root.join(FILE), &intent)?;
+        intent
+    };
     validate(&intent, &receipt, expected, &dead.fingerprint())?;
     let owner = Owner::load(candidate)?;
     let boot = engine.guest().boot_id();
@@ -195,6 +232,11 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     host_relay::cleanup_preflight(&engine, &receipt, &root, false)?;
     for resource in receipt.resources.values() {
         inspect_resource(&engine, &receipt, resource)?;
+    }
+    if let Some(selection) = &intent.bridges {
+        if intent.complete_sha256.is_none() {
+            bridges::cleanup::verify_remaining(candidate, &engine, &receipt, selection)?;
+        }
     }
     let environment = environment::cleanup_inventory(candidate, &engine, &receipt, &root)?;
     let environment_value = serde_json::to_value(&environment).map_err(|_| refused())?;

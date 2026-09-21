@@ -117,7 +117,11 @@ impl RelayExec {
     }
 }
 
-pub(super) fn start(stream: &mut UnixStream, id: &str, deadline: Instant) -> Result<(), CandidateError> {
+pub(super) fn start(
+    stream: &mut UnixStream,
+    id: &str,
+    deadline: Instant,
+) -> Result<(), CandidateError> {
     let body = r#"{"Detach":false,"Tty":false}"#;
     let request = format!(
         "POST /v1.53/exec/{id}/start HTTP/1.1\r\nHost: hack-local\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",

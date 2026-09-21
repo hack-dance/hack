@@ -534,7 +534,9 @@ export async function startNativeProject(opts: {
         ...(bridgeCapacity > 0
           ? ["--bridge-sockets", String(bridgeCapacity)]
           : []),
-        ...allowedHosts.flatMap((host) => ["--allow-host", host]),
+        ...(allowedHosts.length > 0
+          ? allowedHosts.flatMap((host) => ["--allow-host", host])
+          : ["--internet"]),
         "--json",
       ],
     });
@@ -692,6 +694,12 @@ export async function startNativeProject(opts: {
                 const persistedMapping = {
                   ...readyMapping,
                   effectiveEnvName: input.effectiveEnvName,
+                  aws: opts.aws
+                    ? {
+                        profile: opts.aws.profile,
+                        ...(opts.aws.region ? { region: opts.aws.region } : {}),
+                      }
+                    : null,
                 };
                 await deps.save({ ...opts.scope, run: persistedMapping });
                 mapping = persistedMapping;

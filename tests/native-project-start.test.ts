@@ -927,3 +927,39 @@ test("startup persists resolved environment selection only after readiness", asy
   expect(await startNativeProject(opts)).toBe(0);
   expect(saved).toMatchObject({ effectiveEnvName: "qa" });
 });
+
+test("startup persists only explicit public AWS profile selection for later commands", async () => {
+  const { opts } = await fixture();
+  opts.dependencies.adaptAws = async ({ input, profile }) => ({
+    input,
+    receipt: { profile, expiry: "2099-01-01T00:00:00Z", services: ["web"] },
+  });
+  let saved: NativeProjectRun | undefined;
+  opts.dependencies.save = async ({ run }) => {
+    saved = run;
+  };
+  opts.dependencies.remove = async ({ expected }) => {
+    expect(saved).toBe(expected);
+  };
+  await startNativeProject({
+    ...opts,
+    aws: { profile: "qa", region: "us-east-1" },
+  });
+  expect(saved?.aws).toEqual({ profile: "qa", region: "us-east-1" });
+  expect(JSON.stringify(saved)).not.toContain("2099-");
+});
+
+test("normal startup defaults to public internet without per-host declarations", async () => {
+  const { opts } = await fixture(false);
+  const invoke = opts.dependencies.invoke!;
+  let up: readonly string[] = [];
+  opts.dependencies.invoke = async (call) => {
+    if (call.args[0] === "runtime" && call.args[1] === "up") {
+      up = call.args;
+    }
+    return await invoke(call);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(up).toContain("--internet");
+  expect(up).not.toContain("--allow-host");
+});

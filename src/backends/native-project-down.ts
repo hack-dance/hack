@@ -81,7 +81,23 @@ export async function nativeProjectDown(opts: {
       args: ["graph", "inspect", "--run-id", run.run, "--json"],
       timeoutMs: 30_000,
     });
-  verify(await inspect(), run, false);
+  const initial = await inspect();
+  verify(initial, run, false);
+  if (
+    isRecord(initial) &&
+    isRecord(initial.receipt) &&
+    initial.receipt.phase === "stopped-data-retained"
+  ) {
+    // Recovery already completed cleanup. Do not replay hooks or owned effects.
+    verify(initial, run, true);
+    await removeNativeProjectRun({ ...opts.scope, expected: run });
+    return {
+      backend: "native",
+      status: "stopped",
+      run: run.run,
+      dataPreserved: true,
+    } as const;
+  }
   await opts.before?.(run);
   // Recheck after hooks, which may run arbitrary user-authorized commands.
   verify(await inspect(), run, false);

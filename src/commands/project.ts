@@ -8117,6 +8117,7 @@ async function handleExec({
       service: args.positionals.service ?? "",
       argv: args.positionals.cmd,
       workdir: args.options.workdir,
+      composeFile: project.composeFile,
     });
     process.stdout.write(result.stdout);
     process.stderr.write(result.stderr);

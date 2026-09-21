@@ -6,6 +6,11 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
 #[cfg(feature = "environment-launcher")]
+pub(super) fn current_source() -> String {
+    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/environment-launcher"));
+    format!("/storage/hack-environment-launcher/{:x}", Sha256::digest(bytes))
+}
+#[cfg(feature = "environment-launcher")]
 pub(super) fn publish(engine: &Engine<'_>) -> Result<String, CandidateError> {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/environment-launcher"));
     let hash = format!("{:x}", Sha256::digest(bytes));
@@ -27,7 +32,7 @@ pub(super) fn publish(engine: &Engine<'_>) -> Result<String, CandidateError> {
             "Launcher publication was not confirmed.",
         ));
     }
-    Ok(format!("/storage/hack-environment-launcher/{hash}"))
+    Ok(current_source())
 }
 #[cfg(feature = "environment-launcher")]
 const PUBLISH: &str = r#"

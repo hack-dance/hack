@@ -97,7 +97,7 @@ fn execute(
     })
 }
 
-fn decode(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>, bool), CandidateError> {
+pub(super) fn decode(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>, bool), CandidateError> {
     const LIMIT: usize = 1024 * 1024;
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();

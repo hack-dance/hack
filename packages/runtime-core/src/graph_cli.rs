@@ -24,7 +24,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let Some((action, args)) = args.split_first() else {
         return Err(invalid());
     };
-    if ["logs", "exec"].contains(action) {
+    if ["logs", "exec", "exec-selection"].contains(action) {
         return service_io::command(candidate, action, args);
     }
     let (arguments, normalized_selection) =

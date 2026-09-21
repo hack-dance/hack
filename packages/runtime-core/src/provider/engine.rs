@@ -15,6 +15,8 @@ use std::time::Duration;
 #[cfg(any(target_os = "macos", test))]
 pub(super) mod relay_exec;
 mod service_exec;
+#[cfg(any(all(target_os = "macos", feature = "environment-launcher"), test))]
+mod private_service_exec;
 mod stop;
 
 const MAX_BODY: u64 = 4 * 1024 * 1024;

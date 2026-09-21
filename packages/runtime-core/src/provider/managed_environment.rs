@@ -216,13 +216,17 @@ struct Forwarded {
 }
 
 impl Managed {
-    /// Encode only for an authenticated same-host, same-boot private transport.
-    /// The absolute deadline subtracts transit time; it never starts a new lease.
-    pub fn forward(&self, plan: &str, run: &str) -> Result<Zeroizing<Vec<u8>>, CandidateError> {
+    pub(crate) fn validate_binding(&self, plan: &str, run: &str) -> Result<(), CandidateError> {
         if !cfg!(feature = "environment-launcher") || plan != self.plan || run != self.run {
             return Err(refused());
         }
         self.remaining()?;
+        Ok(())
+    }
+    /// Encode only for an authenticated same-host, same-boot private transport.
+    /// The absolute deadline subtracts transit time; it never starts a new lease.
+    pub fn forward(&self, plan: &str, run: &str) -> Result<Zeroizing<Vec<u8>>, CandidateError> {
+        self.validate_binding(plan, run)?;
         #[derive(Serialize)]
         struct Borrowed<'a> {
             version: u8,

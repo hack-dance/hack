@@ -2,6 +2,7 @@
 mod service_exec;
 pub use service_exec::{
     ServiceExecOptions, ServiceExecResult, service_exec, service_exec_generation,
+    service_exec_with_environment,
 };
 mod normalized;
 #[cfg(target_os = "macos")]
@@ -345,11 +346,12 @@ fn check_network_request(
     resources: &BTreeMap<String, Resource>,
 ) -> Result<(), CandidateError> {
     if resources.values().any(|r| r.outbound)
+        && *intent != super::NetworkIntent::Internet
         && !matches!(intent, super::NetworkIntent::ApprovedHosts { cidrs, .. } if !cidrs.is_empty())
     {
         return Err(error(
             "graph_network_intent",
-            "Outbound graph networks require an explicitly approved-host pool.",
+            "Outbound graph networks require an internet or explicitly approved-host pool.",
         ));
     }
     Ok(())

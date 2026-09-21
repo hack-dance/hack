@@ -1891,6 +1891,7 @@ fn outbound_network_is_pinned_and_requires_explicit_pool_capability() {
         cidrs: vec!["1.1.1.1/32".into()],
     };
     check_network_request(&approved, &resources).unwrap();
+    check_network_request(&super::super::NetworkIntent::Internet, &resources).unwrap();
     let mut internal = resources.clone();
     internal.get_mut("network:default").unwrap().outbound = false;
     check_network_request(&super::super::NetworkIntent::Isolated, &internal).unwrap();

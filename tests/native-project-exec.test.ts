@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nativeProjectExec } from "../src/backends/native-project-exec.ts";
@@ -198,4 +198,141 @@ test("malformed exec output refuses without replay", async () => {
     ).rejects.toThrow("unconfirmed");
     expect(executions).toBe(1);
   }
+});
+
+async function freshFixture(values: Record<string, string>) {
+  const opts = await fixture(false);
+  await saveNativeProjectRun({
+    ...opts.scope,
+    run: { ...run, effectiveEnvName: null, aws: null },
+  });
+  const composeFile = join(opts.scope.projectDir, "docker-compose.yml");
+  await writeFile(composeFile, "services:\n  web:\n    image: fixture\n");
+  await writeFile(
+    join(opts.scope.projectDir, "hack.env.default.yaml"),
+    JSON.stringify({
+      version: 1,
+      environment: "default",
+      secretsprovider: "project_key",
+      values: { global: values },
+    })
+  );
+  return { ...opts, composeFile };
+}
+function selection() {
+  return {
+    ...run,
+    plan: run.planId,
+    service: "web",
+    container: id,
+    generation: "f".repeat(64),
+    boot: "fixture-boot",
+  };
+}
+test("fresh exec sends environment only through private stdin and clears its buffer", async () => {
+  const opts = await freshFixture({ FIXTURE: "private-fixture-value" });
+  let payload: Uint8Array | undefined;
+  let executions = 0;
+  const result = await nativeProjectExec({
+    ...opts,
+    service: "web",
+    argv: ["/bin/true"],
+    invoke: async (request) => {
+      if (request.args[1] === "inspect") {
+        return snapshot();
+      }
+      if (request.args[1] === "exec-selection") {
+        return selection();
+      }
+      executions++;
+      expect(request.args).toContain("--environment-stdin");
+      expect(request.args.join(" ")).not.toContain("private-fixture-value");
+      payload = request.privateInput;
+      expect(JSON.parse(Buffer.from(payload!).toString()).services).toEqual({
+        web: { FIXTURE: "private-fixture-value" },
+      });
+      return {
+        exit_code: 7,
+        stdout_base64: "",
+        stderr_base64: "",
+        truncated: false,
+      };
+    },
+  });
+  expect(result.exitCode).toBe(7);
+  expect(executions).toBe(1);
+  expect(payload?.every((byte) => byte === 0)).toBe(true);
+});
+test("empty managed environment uses ordinary exec without a private launcher", async () => {
+  const opts = await freshFixture({});
+  await nativeProjectExec({
+    ...opts,
+    service: "web",
+    argv: ["/bin/true"],
+    invoke: async (request) => {
+      if (request.args[1] === "inspect") {
+        return snapshot();
+      }
+      if (request.args[1] === "exec-selection") {
+        return selection();
+      }
+      expect(request.privateInput).toBeUndefined();
+      expect(request.args).not.toContain("--environment-stdin");
+      return {
+        exit_code: 0,
+        stdout_base64: "",
+        stderr_base64: "",
+        truncated: false,
+      };
+    },
+  });
+});
+
+test("fresh exec clears private input on transport failure and never retries", async () => {
+  const opts = await freshFixture({ FIXTURE: "private-fixture-value" });
+  let payload: Uint8Array | undefined;
+  let executions = 0;
+  await expect(
+    nativeProjectExec({
+      ...opts,
+      service: "web",
+      argv: ["/bin/true"],
+      invoke: async (request) => {
+        if (request.args[1] === "inspect") {
+          return snapshot();
+        }
+        if (request.args[1] === "exec-selection") {
+          return selection();
+        }
+        executions++;
+        payload = request.privateInput;
+        throw new Error("transport failure");
+      },
+    })
+  ).rejects.toThrow();
+  expect(executions).toBe(1);
+  expect(payload?.every((byte) => byte === 0)).toBe(true);
+});
+
+test("changed exec selection refuses before private environment delivery", async () => {
+  const opts = await freshFixture({ FIXTURE: "private-fixture-value" });
+  let executions = 0;
+  await expect(
+    nativeProjectExec({
+      ...opts,
+      service: "web",
+      argv: ["/bin/true"],
+      invoke: async (request) => {
+        if (request.args[1] === "inspect") {
+          return snapshot();
+        }
+        if (request.args[1] === "exec-selection") {
+          return { ...selection(), container: "0".repeat(64) };
+        }
+        executions++;
+        throw new Error("unexpected execution");
+      },
+    })
+  ).rejects.toThrow("unconfirmed");
+  expect(executions).toBe(0);
 });

@@ -61,8 +61,11 @@ fn command(candidate: &Candidate, owner: &Owner) -> std::process::Command {
         .env("DYLD_LIBRARY_PATH", artifact::root(candidate).join("lib"));
     // All provider invocations (including start/recovery and private exec) use
     // this clean environment. DNS-learned answers must not reopen host/private
-    // ranges; Smol's local default floor is insufficient for ApprovedHosts.
-    if matches!(&owner.network, super::NetworkIntent::ApprovedHosts { .. }) {
+    // ranges; Smol's local default floor is insufficient for public egress modes.
+    if matches!(
+        &owner.network,
+        super::NetworkIntent::ApprovedHosts { .. } | super::NetworkIntent::Internet
+    ) {
         command.env("SMOLVM_EGRESS_FLOOR", "strict");
     }
     let policy = owner.reclamation.unwrap_or_default();
@@ -1172,6 +1175,7 @@ fn finish_boot(
     }
     let network_mode = match owner.network {
         super::NetworkIntent::Isolated => "isolated",
+        super::NetworkIntent::Internet => "internet",
         super::NetworkIntent::HostGateway => "host-gateway",
         super::NetworkIntent::ApprovedHosts { .. } => "approved-hosts",
     };
@@ -1688,7 +1692,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_command_enforces_strict_floor_only_for_approved_hosts() {
+    fn provider_command_enforces_strict_floor_for_public_egress_modes() {
         let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
         let mut owner: Owner = serde_json::from_value(json!({
             "version":1,"checkout":"/fixture","token":"fixture","machine":"fixture",
@@ -1700,10 +1704,15 @@ mod tests {
         for intent in [
             super::super::NetworkIntent::Isolated,
             super::super::NetworkIntent::HostGateway,
+            super::super::NetworkIntent::Internet,
             super::super::NetworkIntent::approved_hosts(vec!["registry.example.com".into()])
                 .unwrap(),
         ] {
-            let approved = matches!(&intent, super::super::NetworkIntent::ApprovedHosts { .. });
+            let approved = matches!(
+                &intent,
+                super::super::NetworkIntent::ApprovedHosts { .. }
+                    | super::super::NetworkIntent::Internet
+            );
             owner.network = intent;
             // The same constructor supplies normal start, re-start after stop,
             // recovery and exec. Inspect argv/env only; never spawn a provider.

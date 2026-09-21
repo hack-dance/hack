@@ -26,6 +26,7 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
     let mut dependencies = None;
     let mut json = false;
     let mut hosts = Vec::new();
+    let mut internet = false;
     let mut project_share = None;
     let mut unfiltered_source = false;
     let mut args = args.iter();
@@ -39,6 +40,7 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
                 project_share = Some(path);
             }
             "--unfiltered-source" if !unfiltered_source => unfiltered_source = true,
+            "--internet" if !internet => internet = true,
             "--allow-host" => hosts.push(args.next().ok_or_else(invalid)?.to_string()),
             "--json" if !json => json = true,
             "--profile" if profile.is_none() => {
@@ -62,16 +64,20 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
         }
     }
     let profile = profile.ok_or_else(invalid)?;
-    if unfiltered_source != project_share.is_some()
+    if (internet && !hosts.is_empty())
+        || unfiltered_source != project_share.is_some()
         || (project_share.is_some() && profile != Profile::Development)
         || (bridges.is_none()
             && dependencies.is_none()
             && hosts.is_empty()
+            && !internet
             && project_share.is_none())
     {
         return Err(invalid());
     }
-    let network = if hosts.is_empty() {
+    let network = if internet {
+        Some(NetworkIntent::Internet)
+    } else if hosts.is_empty() {
         None
     } else {
         Some(NetworkIntent::approved_hosts(hosts)?)
@@ -89,6 +95,22 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn internet_mode_is_explicit_and_conflicts_with_allowlisting() {
+        let args = ["--profile", "development", "--internet", "--json"];
+        assert_eq!(parse(&args).unwrap().network, Some(NetworkIntent::Internet));
+        for suffix in [vec!["--internet"], vec!["--allow-host", "example.com"]] {
+            let mut bad = args.to_vec();
+            bad.extend(suffix);
+            assert!(parse(&bad).is_err());
+        }
+        assert!(
+            parse(&["--profile", "development", "--bridge-sockets", "1"])
+                .unwrap()
+                .network
+                .is_none()
+        );
+    }
     #[test]
     fn unfiltered_share_requires_explicit_pair_and_development_profile() {
         let good = [

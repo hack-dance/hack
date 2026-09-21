@@ -381,7 +381,9 @@ package installation still require qualification independently of these bindings
 
 Explicit package egress can be requested when creating a separate candidate pool:
 `runtime up --profile development --allow-host registry.example.com --allow-host packages.example.com`.
-The default remains isolated. This accepts at most 32 canonical DNS name inputs;
+Low-level omission preserves legacy isolated creation and existing intent; normal
+native development selects `--internet` explicitly. The opt-in host mode accepts
+at most 32 canonical DNS name inputs;
 existing pools preserve their intent on omission and refuse a changed configured
 host set. The pinned SmolVM virtio-net provider resolves names during creation.
 The candidate validates and pins that initial public-address configuration before
@@ -396,7 +398,7 @@ DNS; the weaker local default is not used. This launch policy does not retroacti
 change an already-running provider. Source review and configuration checks require
 fresh native allowed/denied destination controls before credentials are delivered.
 
-Outbound Docker bridges require this recorded approved-host capability. Their
+Outbound Docker bridges require recorded internet or approved-host capability. Their
 internal/outbound property is recorded and checked through inspect, restart,
 restore and cleanup; existing external Docker networks are never adopted. NAT is
 enabled only for explicitly networked pools, without an implicit host-gateway
@@ -547,3 +549,36 @@ Compose services without `pids_limit` retain Docker's default PID policy; the
 candidate does not impose an implicit 64-task cap. Linux counts threads as tasks,
 so that cap can prevent Next.js/Bun workers from starting even without an OOM.
 Explicit supported PID limits remain enforced and verified (maximum 128).
+
+Fresh managed environment for noninteractive exec uses `graph exec-selection`
+followed by one `graph exec --environment-stdin --expect-plan SHA
+--expect-container ID --expect-generation SHA` request. Selection includes owner,
+namespace, run, service, boot and generation; clients must compare it with their
+saved project mapping. The bounded v1 private input selects exactly one service.
+Values travel through an upgraded Engine stdin stream to the exact current
+launcher already mounted in that service, never Docker Env, arguments or journals.
+The launcher checks an ingress-derived expiry and consumes stdin to EOF before
+executing an absolute command. This does not renew startup environment allocations
+or host-dependency grants. Older mounted launcher versions refuse fresh execution
+until an explicit restart with the matching candidate. Transport timeout or loss
+is uncertain completion, never authorization to replay or a claim that the command
+was killed. Output remains caller-owned and may contain secrets.
+
+
+Normal native development uses `runtime up --profile development --internet --json`:
+unrestricted public outbound internet/NAT, without hostname allowlisting. The
+pinned provider still receives `SMOLVM_EGRESS_FLOOR=strict`, preserving its
+private/loopback/metadata boundary. This is not restricted package egress, TLS
+verification, or application authorization. It adds no inbound ports, host gateway
+alias or cross-VM network. Internal Docker networks remain internal.
+
+An existing owned pool changes policy only while stopped through
+`runtime network internet --json`, then an explicit up with `--internet`.
+The operation verifies the dead retained process, owner registry, exact disks and
+provider database; it changes only network intent under the existing durable
+recovery journal. Volumes and all unrelated database fields remain unchanged.
+Repeating the same command reconciles exact old/new commit sides; foreign changes
+and incomplete journal staging refuse. Running pools and mismatched startup
+requests refuse without changing policy. Host allowlisting remains opt-in through
+`--allow-host`, mutually exclusive with `--internet`; there is no automatic policy
+migration, restart or disk replacement.

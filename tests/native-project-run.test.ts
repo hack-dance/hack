@@ -159,3 +159,29 @@ test("stored overlay names cannot normalize to a different selection", async () 
   await save({ ...opts, run: { ...run, effectiveEnvName: "qa-local" } });
   expect((await load(opts))?.effectiveEnvName).toBe("qa-local");
 });
+
+test("AWS startup selection roundtrips without admitting credentials or ambient selectors", async () => {
+  for (const aws of [
+    null,
+    { profile: "qa" },
+    { profile: "qa", region: "us-east-1" },
+  ]) {
+    const opts = await fixture();
+    const selected = { ...run, effectiveEnvName: "qa", aws };
+    await save({ ...opts, run: selected });
+    expect(await load(opts)).toEqual(selected);
+    await remove({ ...opts, expected: selected });
+  }
+  for (const aws of [
+    { profile: "../qa" },
+    { profile: "qa", region: "not-a-region" },
+    { profile: "qa", AWS_SECRET_ACCESS_KEY: "synthetic-rejected" },
+    { profile: "qa", region: "us-east-1", credentials: "synthetic-rejected" },
+  ]) {
+    const opts = await fixture();
+    await expect(
+      save({ ...opts, run: { ...run, effectiveEnvName: null, aws } })
+    ).rejects.toThrow();
+    expect(await load(opts)).toBeNull();
+  }
+});

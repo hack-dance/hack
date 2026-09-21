@@ -224,24 +224,49 @@ fn plan(
         record_after,
     })
 }
+fn internet_plan(
+    owner: &Owner,
+    record: Value,
+    database_identity: (u64, u64),
+) -> Result<Journal, CandidateError> {
+    let mut owner_after = owner_value(owner)?;
+    owner_after["network"] = json!(NetworkIntent::Internet);
+    let mut record_after = record.clone();
+    record_after["network"] = json!(true);
+    record_after["network_backend"] = json!("virtio-net");
+    record_after["dns_filter_hosts"] = Value::Null;
+    record_after["allowed_cidrs"] = Value::Null;
+    Ok(Journal {
+        version: 2,
+        requested: vec![],
+        database_identity,
+        owner_before: owner_value(owner)?,
+        owner_after,
+        record_before: record,
+        record_after,
+    })
+}
 fn validate(j: &Journal) -> Result<(Owner, Owner), CandidateError> {
     let before: Owner = serde_json::from_value(j.owner_before.clone()).map_err(|_| refused())?;
     let after: Owner = serde_json::from_value(j.owner_after.clone()).map_err(|_| refused())?;
-    NetworkIntent::approved_hosts(j.requested.clone())?;
-    let NetworkIntent::ApprovedHosts { cidrs, .. } = &after.network else {
+    let expected = if j.version == 2 && j.requested.is_empty() {
+        internet_plan(&before, j.record_before.clone(), j.database_identity)?
+    } else if j.version == 1 {
+        NetworkIntent::approved_hosts(j.requested.clone())?;
+        let NetworkIntent::ApprovedHosts { cidrs, .. } = &after.network else {
+            return Err(refused());
+        };
+        plan(
+            &before,
+            j.record_before.clone(),
+            j.requested.clone(),
+            cidrs.clone(),
+            j.database_identity,
+        )?
+    } else {
         return Err(refused());
     };
-    let expected = plan(
-        &before,
-        j.record_before.clone(),
-        j.requested.clone(),
-        cidrs.clone(),
-        j.database_identity,
-    )?;
-    if j.version != 1
-        || expected.owner_after != j.owner_after
-        || expected.record_after != j.record_after
-    {
+    if expected.owner_after != j.owner_after || expected.record_after != j.record_after {
         return Err(refused());
     }
     before.network.verify(&j.record_before)?;
@@ -330,12 +355,21 @@ fn apply_database(path: &Path, machine: &str, j: &Journal) -> Result<(), Candida
 }
 /// Extend an existing stopped approved-host pool without restarting or replacing disks.
 /// Repeating the same request reconciles only the journal's exact before/after states.
-pub fn extend_network(
+pub fn extend_network(candidate: &Candidate, hosts: Vec<String>) -> Result<Value, CandidateError> {
+    NetworkIntent::approved_hosts(hosts.clone())?;
+    update_network(candidate, hosts, false)
+}
+/// Explicitly enable public internet on an exactly owned stopped pool. No boot,
+/// disk replacement, inbound publication or application mutation is performed.
+pub fn enable_internet(candidate: &Candidate) -> Result<Value, CandidateError> {
+    update_network(candidate, vec![], true)
+}
+fn update_network(
     candidate: &Candidate,
     mut hosts: Vec<String>,
+    internet: bool,
 ) -> Result<Value, CandidateError> {
     hosts.sort();
-    NetworkIntent::approved_hosts(hosts.clone())?;
     reject_aliased_state(&root(candidate))?;
     let _lock = state::Lock::acquire(&root(candidate))?;
     let owner = Owner::load(candidate)?;
@@ -352,24 +386,28 @@ pub fn extend_network(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             require_complete(candidate)?;
             config_audit::verify_value(candidate, &owner, &record)?;
-            let NetworkIntent::ApprovedHosts {
-                hosts: existing, ..
-            } = &owner.network
-            else {
-                return Err(refused());
+            let j = if internet {
+                internet_plan(&owner, record.clone(), file_identity(&db)?)?
+            } else {
+                let NetworkIntent::ApprovedHosts {
+                    hosts: existing, ..
+                } = &owner.network
+                else {
+                    return Err(refused());
+                };
+                let added: Vec<_> = hosts
+                    .iter()
+                    .filter(|h| !existing.contains(h))
+                    .cloned()
+                    .collect();
+                plan(
+                    &owner,
+                    record.clone(),
+                    hosts.clone(),
+                    resolve(&added)?,
+                    file_identity(&db)?,
+                )?
             };
-            let added: Vec<_> = hosts
-                .iter()
-                .filter(|h| !existing.contains(h))
-                .cloned()
-                .collect();
-            let j = plan(
-                &owner,
-                record.clone(),
-                hosts.clone(),
-                resolve(&added)?,
-                file_identity(&db)?,
-            )?;
             state::write(&path, &j)?;
             j
         }
@@ -377,7 +415,8 @@ pub fn extend_network(
     };
     let (before, after) = validate(&j)?;
     let current_owner = owner_value(&owner)?;
-    if j.requested != hosts
+    if (j.version == 2) != internet
+        || j.requested != hosts
         || (current_owner != j.owner_before && current_owner != j.owner_after)
         || (record != j.record_before && record != j.record_after)
     {
@@ -423,7 +462,7 @@ pub fn extend_network(
         .and_then(|f| f.sync_all())
         .map_err(|_| refused())?;
     Ok(
-        json!({"kind":"network_extended", "owner":owner.token, "machine":owner.machine, "network":after.network, "restarted":false, "disks_preserved":true}),
+        json!({"kind":if internet {"network_internet_enabled"} else {"network_extended"}, "owner":owner.token, "machine":owner.machine, "network":after.network, "restarted":false, "disks_preserved":true}),
     )
 }
 
@@ -487,6 +526,32 @@ mod tests {
             db,
             journal,
         }
+    }
+    #[test]
+    fn internet_transition_preserves_record_and_recovers_only_ordered_sides() {
+        let f = fixture();
+        let owner: Owner = serde_json::from_value(f.journal.owner_before.clone()).unwrap();
+        let j = internet_plan(
+            &owner,
+            f.journal.record_before.clone(),
+            f.journal.database_identity,
+        )
+        .unwrap();
+        let (_, after) = validate(&j).unwrap();
+        assert_eq!(after.network, NetworkIntent::Internet);
+        assert_eq!(j.record_after["unrelated"], j.record_before["unrelated"]);
+        assert!(j.record_after["allowed_cidrs"].is_null());
+        assert!(j.record_after["dns_filter_hosts"].is_null());
+        validate_sides(&j, &j.owner_before, &j.record_before).unwrap();
+        apply_database(&f.db, "fixture", &j).unwrap();
+        let record = config_audit::read_database(&f.db, "fixture").unwrap();
+        assert_eq!(record, j.record_after);
+        validate_sides(&j, &j.owner_before, &record).unwrap();
+        validate_sides(&j, &j.owner_after, &record).unwrap();
+        assert!(validate_sides(&j, &j.owner_after, &j.record_before).is_err());
+        let mut changed = j;
+        changed.owner_after["token"] = json!("foreign");
+        assert!(validate(&changed).is_err());
     }
     #[test]
     fn interrupted_sides_resume_exact_transaction_and_preserve_other_fields() {

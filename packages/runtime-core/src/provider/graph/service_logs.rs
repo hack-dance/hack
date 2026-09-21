@@ -22,6 +22,11 @@ pub struct ServiceLogResult {
 
 #[derive(Debug, Serialize)]
 pub struct ServiceSelection {
+    pub run: String,
+    pub service: String,
+    pub plan: String,
+    pub owner: String,
+    pub namespace: String,
     pub container: String,
     pub boot: String,
     pub generation: String,
@@ -64,6 +69,11 @@ pub fn service_selection(
         return Err(refused());
     }
     Ok(ServiceSelection {
+        run: receipt.run.clone(),
+        service: service.into(),
+        plan: receipt.plan_id.clone(),
+        owner: receipt.owner.clone(),
+        namespace: receipt.namespace.clone(),
         container: container.to_owned(),
         boot: engine.guest().boot_id().to_owned(),
         generation: service_exec_generation(&receipt)?,

@@ -75,6 +75,21 @@ pub fn service_exec(
     candidate: &Candidate,
     options: ServiceExecOptions<'_>,
 ) -> Result<ServiceExecResult, CandidateError> {
+    service_exec_inner(candidate, options, None)
+}
+/// Explicit fresh per-command environment; never changes the startup allocation.
+pub fn service_exec_with_environment(
+    candidate: &Candidate,
+    options: ServiceExecOptions<'_>,
+    managed: &super::super::managed_environment::Managed,
+) -> Result<ServiceExecResult, CandidateError> {
+    service_exec_inner(candidate, options, Some(managed))
+}
+fn service_exec_inner(
+    candidate: &Candidate,
+    options: ServiceExecOptions<'_>,
+    managed: Option<&super::super::managed_environment::Managed>,
+) -> Result<ServiceExecResult, CandidateError> {
     validate(&options)?;
     let engine = Engine::connect(candidate)?;
     let (receipt, root) = load(candidate, &engine, options.run)?;
@@ -92,24 +107,80 @@ pub fn service_exec(
     {
         return Err(refused());
     }
-    let selected = if receipt.environment_attached {
-        super::super::environment_recovery::active_exec_slot(
-            candidate,
-            engine.guest(),
-            &receipt.run,
-            options.service,
-            &resource.name,
-        )?
+    let result = if let Some(managed) = managed {
+        #[cfg(all(target_os = "macos", feature = "environment-launcher"))]
+        {
+            managed.validate_binding(&receipt.plan_id, &receipt.run)?;
+            if !receipt.environment_attached {
+                return Err(refused());
+            }
+            let slot = super::super::environment_recovery::active_exec_slot(
+                candidate,
+                engine.guest(),
+                &receipt.run,
+                options.service,
+                &resource.name,
+            )?;
+            // The existing allocation must still belong to this exact container.
+            // Its expiry is not renewed or read; only this command gets fresh values.
+            managed_exec_argv(&container, slot.as_deref(), options.argv)?;
+
+            if managed.values().len() != 1 {
+                return Err(refused());
+            }
+            let values = managed
+                .values()
+                .get(options.service)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(refused)?;
+            require_current_launcher(&container, &super::launcher::current_source())?;
+            if !options.argv[0].starts_with('/') {
+                return Err(error(
+                    "graph_service_exec_path",
+                    "Managed native exec requires an absolute executable path.",
+                ));
+            }
+            let mut argv = vec![
+                "/run/hack-environment-launcher".into(),
+                "--exec-environment-stdin-v1".into(),
+            ];
+            argv.extend_from_slice(options.argv);
+            let deadline = managed
+                .deadline()
+                .min(std::time::Instant::now() + options.timeout);
+            engine.service_exec_private(
+                options.expected_container,
+                &argv,
+                options.workdir,
+                deadline,
+                values,
+            )?
+        }
+        #[cfg(not(all(target_os = "macos", feature = "environment-launcher")))]
+        {
+            let _ = managed;
+            return Err(refused());
+        }
     } else {
-        None
+        let selected = if receipt.environment_attached {
+            super::super::environment_recovery::active_exec_slot(
+                candidate,
+                engine.guest(),
+                &receipt.run,
+                options.service,
+                &resource.name,
+            )?
+        } else {
+            None
+        };
+        let argv = managed_exec_argv(&container, selected.as_deref(), options.argv)?;
+        engine.service_exec(
+            options.expected_container,
+            &argv,
+            options.workdir,
+            options.timeout,
+        )?
     };
-    let argv = managed_exec_argv(&container, selected.as_deref(), options.argv)?;
-    let result = engine.service_exec(
-        options.expected_container,
-        &argv,
-        options.workdir,
-        options.timeout,
-    )?;
     // An external engine mutation must not be mistaken for a stable completion.
     if inspect_resource(&engine, &receipt, resource)
         .ok()
@@ -127,6 +198,28 @@ pub fn service_exec(
         stderr_base64: base64::engine::general_purpose::STANDARD.encode(result.stderr),
         truncated: result.truncated,
     })
+}
+
+#[cfg(any(all(target_os = "macos", feature = "environment-launcher"), test))]
+fn require_current_launcher(container: &Value, source: &str) -> Result<(), CandidateError> {
+    let mounts = container["HostConfig"]["Mounts"]
+        .as_array()
+        .ok_or_else(refused)?;
+    let selected: Vec<_> = mounts
+        .iter()
+        .filter(|m| m["Target"] == "/run/hack-environment-launcher")
+        .collect();
+    if selected.len() != 1
+        || selected[0]["Type"] != "bind"
+        || selected[0]["ReadOnly"] != true
+        || selected[0]["Source"] != source
+    {
+        return Err(error(
+            "graph_service_exec_launcher",
+            "Fresh exec requires the current verified launcher already mounted in this service; restart with the matching candidate before retrying.",
+        ));
+    }
+    Ok(())
 }
 
 /// Reuse only the service's already attached environment. The guest launcher checks
@@ -217,6 +310,24 @@ fn binding<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fresh_exec_refuses_old_missing_duplicate_and_writable_launchers() {
+        let source = format!("/storage/hack-environment-launcher/{}", "a".repeat(64));
+        let valid = json!({"Type":"bind","Target":"/run/hack-environment-launcher","Source":source,"ReadOnly":true});
+        let container = |mounts: Value| json!({"HostConfig":{"Mounts":mounts}});
+        assert!(require_current_launcher(&container(json!([valid.clone()])), &source).is_ok());
+        assert!(require_current_launcher(&container(json!([])), &source).is_err());
+        assert!(
+            require_current_launcher(&container(json!([valid.clone(), valid.clone()])), &source)
+                .is_err()
+        );
+        let mut old = valid.clone();
+        old["Source"] = json!("/storage/hack-environment-launcher/old");
+        assert!(require_current_launcher(&container(json!([old])), &source).is_err());
+        let mut writable = valid;
+        writable["ReadOnly"] = json!(false);
+        assert!(require_current_launcher(&container(json!([writable])), &source).is_err());
+    }
     #[test]
     fn managed_exec_reuses_only_exact_readonly_bound_mounts() {
         let slot = "owned-slot";

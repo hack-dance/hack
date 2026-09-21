@@ -9,6 +9,8 @@ struct Options<'a> {
     timeout: Duration,
     workdir: Option<&'a str>,
     argv: Vec<String>,
+    environment: bool,
+    expected: Option<(&'a str, &'a str, &'a str)>,
 }
 
 fn invalid() -> CandidateError {
@@ -21,6 +23,7 @@ fn invalid() -> CandidateError {
 fn parse<'a>(action: &str, args: &[&'a str]) -> Result<Options<'a>, CandidateError> {
     let mut values = BTreeMap::new();
     let mut json = false;
+    let mut environment = false;
     let mut index = 0;
     let mut argv = Vec::new();
     while index < args.len() {
@@ -33,6 +36,13 @@ fn parse<'a>(action: &str, args: &[&'a str]) -> Result<Options<'a>, CandidateErr
             argv = args[index..].iter().map(|s| (*s).to_owned()).collect();
             break;
         }
+        if key == "--environment-stdin" {
+            if action != "exec" || environment {
+                return Err(invalid());
+            }
+            environment = true;
+            continue;
+        }
         if key == "--json" {
             if json {
                 return Err(invalid());
@@ -42,7 +52,15 @@ fn parse<'a>(action: &str, args: &[&'a str]) -> Result<Options<'a>, CandidateErr
         }
         if !["--run-id", "--service"].contains(&key)
             && !(action == "logs" && key == "--tail")
-            && !(action == "exec" && ["--workdir", "--timeout-seconds"].contains(&key))
+            && !(action == "exec"
+                && [
+                    "--workdir",
+                    "--timeout-seconds",
+                    "--expect-plan",
+                    "--expect-container",
+                    "--expect-generation",
+                ]
+                .contains(&key))
         {
             return Err(invalid());
         }
@@ -86,7 +104,30 @@ fn parse<'a>(action: &str, args: &[&'a str]) -> Result<Options<'a>, CandidateErr
     {
         return Err(invalid());
     }
+    let pins = ["--expect-plan", "--expect-container", "--expect-generation"];
+    let expected = if environment {
+        let p = pins.map(|key| values.get(key).copied());
+        let [Some(plan), Some(container), Some(generation)] = p else {
+            return Err(invalid());
+        };
+        if [plan, container, generation].iter().any(|v| {
+            v.len() != 64
+                || !v
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }) {
+            return Err(invalid());
+        }
+        Some((plan, container, generation))
+    } else {
+        if pins.iter().any(|key| values.contains_key(key)) {
+            return Err(invalid());
+        }
+        None
+    };
     Ok(Options {
+        environment,
+        expected,
         run,
         service,
         tail,
@@ -102,7 +143,36 @@ pub(super) fn command(
     args: &[&str],
 ) -> Result<Value, CandidateError> {
     let options = parse(action, args)?;
+    let managed = if options.environment {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        if unsafe { libc::fcntl(0, libc::F_GETFD) } < 0 {
+            return Err(invalid());
+        }
+        // SAFETY: explicit one-shot input transfers checked stdin ownership; the
+        // receiver validates descriptor type, bounded length and EOF.
+        Some(super::environment::receive(
+            unsafe { OwnedFd::from_raw_fd(0) },
+            options.expected.ok_or_else(invalid)?.0,
+            options.run,
+        )?)
+    } else {
+        None
+    };
     let selection = graph::service_selection(candidate, options.run, options.service)?;
+    if action == "exec-selection" {
+        return serde_json::to_value(selection).map_err(|_| invalid());
+    }
+    if let Some((plan, container, generation)) = options.expected {
+        if selection.plan != plan
+            || selection.container != container
+            || selection.generation != generation
+        {
+            return Err(CandidateError::new(
+                "graph_service_exec",
+                "Fresh exec selection changed; no command was started.",
+            ));
+        }
+    }
     if action == "logs" {
         return serde_json::to_value(graph::service_logs(
             candidate,
@@ -117,26 +187,71 @@ pub(super) fn command(
         )?)
         .map_err(|_| invalid());
     }
-    serde_json::to_value(graph::service_exec(
-        candidate,
-        graph::ServiceExecOptions {
-            run: options.run,
-            service: options.service,
-            expected_container: &selection.container,
-            expected_boot: &selection.boot,
-            expected_generation: &selection.generation,
-            argv: &options.argv,
-            workdir: options.workdir,
-            timeout: options.timeout,
-        },
-    )?)
-    .map_err(|_| invalid())
+    let exec_options = graph::ServiceExecOptions {
+        run: options.run,
+        service: options.service,
+        expected_container: &selection.container,
+        expected_boot: &selection.boot,
+        expected_generation: &selection.generation,
+        argv: &options.argv,
+        workdir: options.workdir,
+        timeout: options.timeout,
+    };
+    let result = if let Some(managed) = managed.as_ref() {
+        graph::service_exec_with_environment(candidate, exec_options, managed)?
+    } else {
+        graph::service_exec(candidate, exec_options)?
+    };
+    serde_json::to_value(result).map_err(|_| invalid())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     const RUN: &str = "11111111111111111111111111111111";
+    #[test]
+    fn fresh_exec_requires_all_exact_pins_before_private_input() {
+        let hash = "a".repeat(64);
+        let args = [
+            "--run-id",
+            RUN,
+            "--service",
+            "web",
+            "--environment-stdin",
+            "--expect-plan",
+            &hash,
+            "--expect-container",
+            &hash,
+            "--expect-generation",
+            &hash,
+            "--",
+            "/bin/true",
+        ];
+        assert!(parse("exec", &args).unwrap().environment);
+        for index in [4, 5, 7, 9] {
+            let mut bad = args.to_vec();
+            if index == 4 {
+                bad.remove(index);
+            } else {
+                bad.drain(index..index + 2);
+            }
+            assert!(parse("exec", &bad).is_err());
+        }
+        assert!(
+            parse(
+                "exec-selection",
+                &["--run-id", RUN, "--service", "web", "--environment-stdin"]
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                "exec-selection",
+                &["--run-id", RUN, "--service", "web", "--json"]
+            )
+            .is_ok()
+        );
+    }
     #[test]
     fn exec_preserves_literal_arguments_and_separator() {
         let parsed = parse(

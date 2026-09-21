@@ -17,6 +17,8 @@ const HEX64 = /^[a-f0-9]{64}$/;
 const LIMIT = 8192;
 // Equivalent to normalizeEnvConfigName(value) === value, with a bounded length.
 const ENV_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const AWS_PROFILE = /^[A-Za-z0-9_+=,.@-]{1,128}$/;
+const AWS_REGION = /^[a-z]{2}(?:-[a-z]+)+-\d+$/;
 const CONTROL = /[\x00-\x1f\x7f]/;
 export type NativeProjectRun = {
   readonly run: string;
@@ -25,6 +27,8 @@ export type NativeProjectRun = {
   readonly planId: string;
   /** Absent in legacy mappings; null explicitly selects base-only values. */
   readonly effectiveEnvName?: string | null;
+  /** Public startup selector only; null means no AWS adaptation. Never credentials. */
+  readonly aws?: { readonly profile: string; readonly region?: string } | null;
 };
 export type NativeProjectRunScope = {
   readonly projectRoot: string;
@@ -37,13 +41,30 @@ function refused(): Error {
     "Native project run mapping is unsafe, changed, or owned by another run; inspect native state before recovery."
   );
 }
+function validAws(value: unknown): boolean {
+  return (
+    value === null ||
+    (isRecord(value) &&
+      ["profile", "profile,region"].includes(
+        Object.keys(value).sort().join()
+      ) &&
+      typeof value.profile === "string" &&
+      AWS_PROFILE.test(value.profile) &&
+      (!Object.hasOwn(value, "region") ||
+        (typeof value.region === "string" &&
+          value.region.length <= 64 &&
+          AWS_REGION.test(value.region))))
+  );
+}
 function valid(value: unknown): value is NativeProjectRun {
   return (
     isRecord(value) &&
     [
       "namespace,owner,planId,run",
       "effectiveEnvName,namespace,owner,planId,run",
+      "aws,effectiveEnvName,namespace,owner,planId,run",
     ].includes(Object.keys(value).sort().join()) &&
+    (!Object.hasOwn(value, "aws") || validAws(value.aws)) &&
     (!Object.hasOwn(value, "effectiveEnvName") ||
       value.effectiveEnvName === null ||
       (typeof value.effectiveEnvName === "string" &&

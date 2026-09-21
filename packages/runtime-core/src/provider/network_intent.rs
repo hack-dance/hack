@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 pub enum NetworkIntent {
     #[default]
     Isolated,
+    /// Unrestricted public internet NAT; private/loopback/metadata floor remains.
+    Internet,
     /// Permit the provider gateway's host-loopback translation across TCP ports.
     /// This does not authorize a service alias or identify the listener owner.
     HostGateway,
@@ -55,6 +57,9 @@ impl NetworkIntent {
     pub(super) fn arguments(&self) -> Vec<String> {
         match self {
             Self::Isolated => Vec::new(),
+            Self::Internet => ["--net", "--net-backend", "virtio-net"]
+                .map(str::to_owned)
+                .to_vec(),
             Self::HostGateway => [
                 "--net-backend",
                 "virtio-net",
@@ -107,6 +112,7 @@ impl NetworkIntent {
         self.validate()?;
         let (enabled, backend, cidrs) = match self {
             Self::Isolated => (false, Value::Null, Value::Null),
+            Self::Internet => (true, json!("virtio-net"), Value::Null),
             Self::HostGateway => (true, json!("virtio-net"), json!(["100.96.0.1/32"])),
             Self::ApprovedHosts { cidrs, .. } if !cidrs.is_empty() => {
                 (true, json!("virtio-net"), json!(cidrs))
@@ -221,6 +227,33 @@ pub(super) fn check_request(
 mod tests {
     use super::*;
 
+    #[test]
+    fn internet_is_exact_unfiltered_nat_not_an_empty_allowlist() {
+        let mode = NetworkIntent::Internet;
+        assert_eq!(mode.arguments(), ["--net", "--net-backend", "virtio-net"]);
+        let record = json!({"network":true,"network_backend":"virtio-net","allowed_cidrs":null,"dns_filter_hosts":null});
+        mode.verify(&record).unwrap();
+        mode.verify_resources(&record).unwrap();
+        assert_eq!(serde_json::to_value(&mode).unwrap(), json!("internet"));
+        for (key, value) in [
+            ("allowed_cidrs", json!([])),
+            ("dns_filter_hosts", json!(["example.com"])),
+            ("network", json!(false)),
+            ("network_backend", json!("tsi")),
+        ] {
+            let mut changed = record.clone();
+            changed[key] = value;
+            assert!(mode.verify(&changed).is_err());
+        }
+        assert!(check_request(&NetworkIntent::Isolated, Some(&mode)).is_err());
+        assert!(
+            check_request(
+                &mode,
+                Some(&NetworkIntent::approved_hosts(vec!["example.com".into()]).unwrap())
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn explicit_mode_changes_refuse_and_omission_preserves_intent() {
         for mode in [NetworkIntent::Isolated, NetworkIntent::HostGateway] {

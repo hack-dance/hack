@@ -297,18 +297,29 @@ same bytes under a different selection. Existing schema-1 manifests remain
 verifiable; they are not rewritten or deleted. Cache keys still derive from their
 declared dependency inputs and execution identity.
 
-New native foreground pools remain isolated unless `HACK_NATIVE_ALLOW_HOSTS`
-is explicitly set to a comma-separated list of at most 32 unique lowercase DNS
-names, for example `registry.npmjs.org,example.com`. Wildcards, IP addresses, local
-names, whitespace, trailing dots and empty entries are refused before lifecycle
-hooks. The provider permits each selected domain and its subdomains, including
-TTL-learned public addresses; this is not a URL, port or exact-host-only policy.
-The provider retains its private, loopback and metadata-address restrictions.
-Selection is passed to native pool admission without implicit widening. Omitting
-the variable requests no new egress capability. Package downloads can redirect to
-a different domain: GitHub Packages uses `npm.pkg.github.com` for metadata and
-`pkg-npm.githubusercontent.com` for tarballs. Approve both when the project uses
-that registry; reaching its metadata endpoint alone does not verify installation.
+Normal native foreground startup requests outbound public internet access by
+default. Package downloads and external APIs do not require per-host configuration.
+This does not publish inbound ports or grant host-service access; the provider's
+private, loopback and metadata-address restrictions remain separate.
+
+Set `HACK_NATIVE_ALLOW_HOSTS` only to opt into restricted outbound access: a
+comma-separated list of at most 32 unique lowercase DNS names, such as
+`registry.npmjs.org,example.com`. Wildcards, IP addresses, local names, whitespace,
+trailing dots and empty entries are refused before lifecycle hooks. The provider
+permits each selected domain and its subdomains, including TTL-learned public
+addresses; this is not a URL, port or exact-host-only policy. Redirect destinations
+also need approval in this optional mode.
+
+Existing pools retain their network policy. To change an existing pool to the
+normal internet mode, stop its owned runtime and run:
+
+```sh
+./bundle/hack-native --candidate-root /absolute/private/candidate-home runtime network internet --json
+```
+
+The transition preserves disks and caches and does not start the VM. Remove
+`HACK_NATIVE_ALLOW_HOSTS` for subsequent normal foreground starts. Startup refuses
+a policy mismatch instead of silently changing an existing pool.
 
 To add an approved host to an existing pool, first stop the owned runtime, then
 explicitly extend its policy:
@@ -523,6 +534,11 @@ the current owned project/branch mapping, preserves binary stdout/stderr and the
 command exit code, and never falls back to Compose. It is noninteractive, with a
 30-second observation budget; a timeout may leave the command running and is not
 retried. `--env` and `--profile` changes are refused. For a managed environment, use
-an absolute executable; its existing private lease must still be valid. Startup
-leases currently last at most five minutes; an expired launcher exits125 without
-executing the command. Fresh per-command environment delivery remains a parity gap.
+an absolute executable. Normal `hack exec` resolves the saved startup overlay and
+AWS profile again, and delivers fresh selected-service values through private stdin.
+Each request binds the reviewed plan, current container and generation, and has
+its own short ingress lifetime. Startup leases and files are not renewed or rewritten.
+Legacy mappings without explicit selectors and services with older launcher mounts
+refuse before execution; restart with the matching candidate to adopt this path.
+Services without managed values use ordinary exec. The native live qualification
+of this fresh-delivery path remains separate from its unit and transport tests.

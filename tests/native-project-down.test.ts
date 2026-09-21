@@ -403,3 +403,42 @@ test("native down JSON isolates hook output and uses saved overlay through real 
     clearTimeout(timer);
   }
 });
+
+test("recovered stopped graph retires mapping without replaying hooks or cleanup", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  const result = await nativeProjectDown({
+    ...opts,
+    before: async () => {
+      throw new Error("replayed before");
+    },
+    after: async () => {
+      throw new Error("replayed after");
+    },
+    invoke: async (request) => {
+      calls.push(request.args[1]!);
+      const value = snapshot();
+      value.receipt.phase = "stopped-data-retained";
+      value.observations["container:web"].state = "absent";
+      return value;
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(calls).toEqual(["inspect"]);
+  expect(await loadNativeProjectRun(opts.scope)).toBeNull();
+});
+
+test("stopped receipt with a remaining container preserves mapping", async () => {
+  const opts = await fixture();
+  await expect(
+    nativeProjectDown({
+      ...opts,
+      invoke: async () => {
+        const value = snapshot();
+        value.receipt.phase = "stopped-data-retained";
+        return value;
+      },
+    })
+  ).rejects.toThrow("unconfirmed");
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});

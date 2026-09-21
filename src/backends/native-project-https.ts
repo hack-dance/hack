@@ -473,12 +473,52 @@ export function isNativeHttpsProbePath(path: unknown): path is string {
     !path.includes("#")
   );
 }
+export interface NativeHttpsResponse {
+  readonly statusCode: number;
+  readonly location?: string;
+}
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+const HEADER_VALUE = /^[\x20-\x7e\t]*$/;
+export function parseNativeHttpsHeaders(header: string): NativeHttpsResponse {
+  if (header.length > 8192 || !header.endsWith("\r\n\r\n")) {
+    throw refused();
+  }
+  const [status, ...lines] = header.slice(0, -4).split("\r\n");
+  const match =
+    status && status.length < 1024 ? HTTP_STATUS.exec(status) : null;
+  if (!match || lines.length > 64) {
+    throw refused();
+  }
+  let location: string | undefined;
+  for (const line of lines) {
+    const colon = line.indexOf(":");
+    const name = line.slice(0, colon).toLowerCase();
+    const value = line.slice(colon + 1).trim();
+    if (
+      colon < 1 ||
+      !HEADER_NAME.test(name) ||
+      !HEADER_VALUE.test(line.slice(colon + 1))
+    ) {
+      throw refused();
+    }
+    if (name === "location") {
+      if (location !== undefined || !value || value.length > 2048) {
+        throw refused();
+      }
+      location = value;
+    }
+  }
+  return {
+    statusCode: Number(match[1]),
+    ...(location === undefined ? {} : { location }),
+  };
+}
 export async function verifyNativeHttpsHostname(
   hostname: string,
   port: number,
   caPath: string,
   path: string
-): Promise<{ statusCode: number }> {
+): Promise<NativeHttpsResponse> {
   if (
     !isNativeHttpsProbePath(path) ||
     hostname.length > 253 ||
@@ -494,17 +534,17 @@ export async function verifyNativeHttpsHostname(
     let settled = false;
     let prefix = "";
     let phase: "handshake" | "response" = "handshake";
-    const finish = (error?: Error, statusCode?: number) => {
+    const finish = (error?: Error, response?: NativeHttpsResponse) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
       socket.destroy();
-      if (error || statusCode === undefined) {
+      if (error || response === undefined) {
         reject(error ?? nativeHttpsVerificationError(undefined));
       } else {
-        resolve({ statusCode });
+        resolve(response);
       }
     };
     const socket = tlsConnect({
@@ -527,18 +567,17 @@ export async function verifyNativeHttpsHostname(
       );
     });
     socket.on("data", (data: Buffer) => {
-      // Only the bounded public status line is needed, never application bodies.
-      prefix += data.subarray(0, 1024 - prefix.length).toString("latin1");
-      const end = prefix.indexOf("\r\n");
-      if (end < 0 && prefix.length < 1024) {
+      // Parse only bounded headers; discard any body bytes delivered in the same chunk.
+      prefix += data.subarray(0, 8192 - prefix.length).toString("latin1");
+      const end = prefix.indexOf("\r\n\r\n");
+      if (end < 0 && prefix.length < 8192) {
         return;
       }
-      const match =
-        end >= 0 && end < 1024 ? HTTP_STATUS.exec(prefix.slice(0, end)) : null;
-      finish(
-        match ? undefined : nativeHttpsVerificationError(undefined),
-        match ? Number(match[1]) : undefined
-      );
+      try {
+        finish(undefined, parseNativeHttpsHeaders(prefix.slice(0, end + 4)));
+      } catch {
+        finish(nativeHttpsVerificationError(undefined));
+      }
     });
     socket.once("error", (error: unknown) =>
       finish(nativeHttpsVerificationError(error))
@@ -577,10 +616,7 @@ export async function startNativeProjectHttps(opts: {
   readonly caPath: string;
   readonly httpsPort: number;
   readonly exited: Promise<{ component: string; code: number }>;
-  verifyHostname(
-    hostname: string,
-    path: string
-  ): Promise<{ statusCode: number }>;
+  verifyHostname(hostname: string, path: string): Promise<NativeHttpsResponse>;
   close(): Promise<void>;
 }> {
   const deps = {

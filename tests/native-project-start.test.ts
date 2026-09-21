@@ -6,6 +6,7 @@ import {
   parseNativeHttpsSelection,
   reviewedNativeHttpsRoutes,
   startNativeProject,
+  verifyHttpsRoutes,
 } from "../src/backends/native-project-start.ts";
 
 const roots: string[] = [];
@@ -802,7 +803,9 @@ test("HTTPS route paths come only from reviewed native probes and conflicts refu
       { services: { web: service("/api/health") } },
       new Set(["web"])
     )
-  ).toEqual([{ hostname: "web.example.com", path: "/api/health" }]);
+  ).toEqual([
+    { hostname: "web.example.com", path: "/api/health", service: "web" },
+  ]);
   expect(() =>
     reviewedNativeHttpsRoutes(
       { services: { web: service("/health"), other: service("/other") } },
@@ -833,4 +836,75 @@ test("HTTPS startup refuses a non-2xx reviewed health response", async () => {
   ).rejects.toThrow("HTTP_STATUS_403");
   expect(events).not.toContain("save");
   expect(events).toContain("https-close");
+});
+
+test("HTTPS redirects terminate only at verified same-service reviewed aliases", async () => {
+  const plan = {
+    services: {
+      web: {
+        routing: {
+          hostnames: ["legacy.hack", "canonical.hack.gy", "third.hack.local"],
+        },
+        healthcheck: { native_http: { path: "/health" } },
+      },
+      other: {
+        routing: { hostnames: ["other.hack"] },
+        healthcheck: { native_http: { path: "/health" } },
+      },
+    },
+  };
+  const responses = new Map<string, { statusCode: number; location?: string }>([
+    [
+      "legacy.hack",
+      { statusCode: 307, location: "https://canonical.hack.gy/health" },
+    ],
+    [
+      "canonical.hack.gy",
+      { statusCode: 308, location: "https://third.hack.local:18443/health" },
+    ],
+    ["third.hack.local", { statusCode: 200 }],
+    ["other.hack", { statusCode: 204 }],
+  ]);
+  const calls: string[] = [];
+  const frontend = {
+    caPath: "/public",
+    httpsPort: 18_443,
+    exited: new Promise<{ component: string; code: number }>(() => {}),
+    close: async () => {},
+    verifyHostname: async (hostname: string, path: string) => {
+      expect(path).toBe("/health");
+      calls.push(hostname);
+      const response = responses.get(hostname);
+      if (!response) {
+        throw new Error("Unexpected network target");
+      }
+      return response;
+    },
+  };
+  await verifyHttpsRoutes(frontend, plan, new Set(["web", "other"]));
+  expect(calls.length).toBe(4);
+  for (const location of [
+    "http://canonical.hack.gy/health",
+    "https://external.invalid/health",
+    "https://other.hack/health",
+    "https://user:pass@canonical.hack.gy/health",
+    "https://canonical.hack.gy:1234/health",
+    "https://canonical.hack.gy/wrong",
+    "https://canonical.hack.gy/health?q=1",
+    "https://canonical.hack.gy/health#fragment",
+    "https://legacy.hack/health",
+  ]) {
+    responses.set("legacy.hack", { statusCode: 307, location });
+    await expect(
+      verifyHttpsRoutes(frontend, plan, new Set(["web", "other"]))
+    ).rejects.toThrow();
+  }
+  responses.set("legacy.hack", {
+    statusCode: 307,
+    location: "https://canonical.hack.gy/health",
+  });
+  responses.set("third.hack.local", { statusCode: 503 });
+  await expect(
+    verifyHttpsRoutes(frontend, plan, new Set(["web", "other"]))
+  ).rejects.toThrow();
 });

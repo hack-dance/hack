@@ -19,6 +19,7 @@ import {
   type HttpsChild,
   isNativeHttpsProbePath,
   nativeHttpsVerificationError,
+  parseNativeHttpsHeaders,
   spawnNativeHttpsChild,
   startNativeProjectHttps,
   verifyNativeHttpsHostname,
@@ -548,6 +549,18 @@ while True:
       "/health"
     )
   ).rejects.toThrow("Native HTTPS verification failed");
+  await writeFile(
+    responsePath,
+    "HTTP/1.1 307 Temporary Redirect\r\nLocation: https://canonical.invalid/health\r\nContent-Length: 0\r\n\r\n"
+  );
+  expect(
+    await verifyNativeHttpsHostname(
+      "fixture.invalid",
+      address.port,
+      cert,
+      "/health"
+    )
+  ).toEqual({ statusCode: 307, location: "https://canonical.invalid/health" });
   for (const invalid of [
     "HTTP/1.1 100 Continue\r\n\r\n",
     "malformed\r\n",
@@ -586,4 +599,28 @@ test("HTTPS probe paths match native path bounds and reject request injection", 
   ]) {
     expect(isNativeHttpsProbePath(path)).toBe(false);
   }
+});
+
+test("HTTPS header parsing refuses duplicate, folded and oversized fields", () => {
+  for (const value of [
+    "HTTP/1.1 307 Redirect\r\nLocation: /a\r\nlocation: /b\r\n\r\n",
+    "HTTP/1.1 200 OK\r\n folded\r\n\r\n",
+    `HTTP/1.1 200 OK\r\nX: ${"x".repeat(8192)}\r\n\r\n`,
+    "HTTP/1.1 200 OK\r\nX: bad\0value\r\n\r\n",
+  ]) {
+    expect(() => parseNativeHttpsHeaders(value)).toThrow();
+  }
+});
+
+test("HTTPS headers permit unrelated duplicates but keep Location unambiguous", () => {
+  expect(
+    parseNativeHttpsHeaders(
+      "HTTP/1.1 200 OK\r\nSet-Cookie: first=synthetic\r\nSet-Cookie: second=synthetic\r\n\r\n"
+    )
+  ).toEqual({ statusCode: 200 });
+  expect(() =>
+    parseNativeHttpsHeaders(
+      "HTTP/1.1 307 Redirect\r\nLocation: /health\r\nLOCATION: /health\r\n\r\n"
+    )
+  ).toThrow();
 });

@@ -97,11 +97,11 @@ export function parseNativeHttpsSelection(
 export function reviewedNativeHttpsRoutes(
   plan: unknown,
   services: ReadonlySet<string>
-): readonly { hostname: string; path: string }[] {
+): readonly { hostname: string; path: string; service: string }[] {
   if (!(isRecord(plan) && isRecord(plan.services))) {
     throw refused();
   }
-  const names = new Map<string, string>();
+  const names = new Map<string, { path: string; service: string }>();
   for (const name of services) {
     const service = plan.services[name];
     if (
@@ -122,15 +122,19 @@ export function reviewedNativeHttpsRoutes(
         throw refused();
       }
       const path = service.healthcheck.native_http.path;
-      if (names.has(hostname) && names.get(hostname) !== path) {
+      if (
+        names.has(hostname) &&
+        (names.get(hostname)?.path !== path ||
+          names.get(hostname)?.service !== name)
+      ) {
         throw refused();
       }
-      names.set(hostname, path);
+      names.set(hostname, { path, service: name });
     }
   }
   return [...names]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([hostname, path]) => ({ hostname, path }));
+    .map(([hostname, route]) => ({ hostname, ...route }));
 }
 type Hooks = {
   readonly cleanup: () => Promise<void>;
@@ -257,7 +261,41 @@ function requireEnrollmentCompatible(plan: unknown): void {
     throw refused();
   }
 }
-async function verifyHttpsRoutes(
+const HTTPS_REDIRECTS = new Set([301, 302, 303, 307, 308]);
+type HttpsRoute = ReturnType<typeof reviewedNativeHttpsRoutes>[number];
+function redirectHostname(
+  location: string,
+  hostname: string,
+  port: number,
+  route: HttpsRoute,
+  routes: readonly HttpsRoute[]
+): string {
+  let target: URL;
+  try {
+    target = new URL(location, `https://${hostname}:${port}${route.path}`);
+  } catch {
+    throw refused();
+  }
+  const reviewed = routes.find((entry) => entry.hostname === target.hostname);
+  if (
+    target.protocol !== "https:" ||
+    target.username ||
+    target.password ||
+    target.search ||
+    target.hash ||
+    (target.port && target.port !== "443" && target.port !== String(port)) ||
+    !reviewed ||
+    reviewed.service !== route.service ||
+    reviewed.path !== route.path ||
+    target.pathname !== route.path
+  ) {
+    throw new Error(
+      "Native HTTPS verification failed (REDIRECT_TARGET_REFUSED); peer values omitted."
+    );
+  }
+  return target.hostname;
+}
+export async function verifyHttpsRoutes(
   frontend: Awaited<ReturnType<typeof startNativeProjectHttps>> | undefined,
   plan: unknown,
   services: ReadonlySet<string>
@@ -265,25 +303,50 @@ async function verifyHttpsRoutes(
   if (!frontend) {
     return;
   }
-  for (const { hostname, path } of reviewedNativeHttpsRoutes(plan, services)) {
-    const response = await frontend.verifyHostname(hostname, path);
-    if (
-      !Number.isInteger(response.statusCode) ||
-      response.statusCode < 200 ||
-      response.statusCode >= 300
-    ) {
-      const code =
-        Number.isInteger(response.statusCode) &&
-        response.statusCode >= 100 &&
-        response.statusCode <= 599
-          ? `HTTP_STATUS_${response.statusCode}`
-          : "HTTP_STATUS_INVALID";
-      throw new Error(
-        `Native HTTPS verification failed (${code}); peer values omitted.`
+  const routes = reviewedNativeHttpsRoutes(plan, services);
+  const results = new Map<
+    string,
+    Awaited<ReturnType<typeof frontend.verifyHostname>>
+  >();
+  for (const route of routes) {
+    results.set(
+      route.hostname,
+      await frontend.verifyHostname(route.hostname, route.path)
+    );
+  }
+  for (const route of routes) {
+    const visited = new Set<string>();
+    let hostname = route.hostname;
+    while (true) {
+      if (visited.has(hostname)) {
+        throw new Error(
+          "Native HTTPS verification failed (REDIRECT_CYCLE); peer values omitted."
+        );
+      }
+      visited.add(hostname);
+      const response = results.get(hostname);
+      if (!(response && Number.isInteger(response.statusCode))) {
+        throw refused();
+      }
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        break;
+      }
+      if (!(HTTPS_REDIRECTS.has(response.statusCode) && response.location)) {
+        throw new Error(
+          `Native HTTPS verification failed (HTTP_STATUS_${response.statusCode}); peer values omitted.`
+        );
+      }
+      hostname = redirectHostname(
+        response.location,
+        hostname,
+        frontend.httpsPort,
+        route,
+        routes
       );
     }
   }
 }
+
 function foregroundExitCode(opts: {
   aborted: boolean;
   interruptedExit: number;

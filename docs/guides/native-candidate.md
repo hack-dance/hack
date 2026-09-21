@@ -489,3 +489,15 @@ list and original CIDRs exactly; restarting does not expand the approved hosts.
 This audit trusts fresh DNS resolution by the pinned provider. It does not
 independently prove which hostname produced each added address. Existing dynamic
 DNS and descendant-host policy semantics remain unchanged.
+
+Native HTTPS startup probes each reviewed alias at its service's reviewed native
+HTTP health path. A 2xx response qualifies directly. Redirects (301, 302, 303,
+307, 308) qualify only when their chain ends at a verified 2xx response from another
+reviewed alias of the same service and health path. Redirect targets must use HTTPS,
+port443 or the selected frontend port, and no credentials, query or fragment.
+Cycles, external names and cross-service redirects refuse startup. Every request
+still connects to loopback with the selected private CA and the alias as SNI/Host;
+redirect URLs never select network destinations. Response headers are bounded to
+8KiB; malformed headers and duplicate Location fields are refused. Only bounded
+headers are parsed and returned; unrelated repeated headers such as Set-Cookie
+are allowed.

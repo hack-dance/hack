@@ -98,9 +98,12 @@ async function fixture(withEnvironment = true) {
         expect(opts.args).not.toContain("--environment-stdin");
       }
       expect(opts.args.join(" ")).not.toContain("synthetic-secret");
-      await opts.onReady();
-      ready = false;
-      return 0;
+      try {
+        await opts.onReady();
+        return 0;
+      } finally {
+        ready = false;
+      }
     },
   };
   const opts = {
@@ -659,5 +662,50 @@ test("unexpected HTTPS owner exit aborts the graph and fails instead of returnin
     startNativeProject({ ...opts, https: httpsSelection })
   ).rejects.toThrow("HTTPS owner exited unexpectedly");
   expect(events.indexOf("remove")).toBeLessThan(events.indexOf("https-close"));
+  expect(events.at(-1)).toBe("cleanup");
+});
+
+test("HTTPS readiness failure preserves its cause without removing an unpublished mapping", async () => {
+  const { opts, events } = await httpsFixture();
+  const failure = new Error("synthetic HTTPS verification failure");
+  opts.dependencies.https = async () => ({
+    caPath: "/synthetic/root.crt",
+    httpsPort: 8443,
+    exited: new Promise(() => {}),
+    verifyHostname: async () => {
+      throw failure;
+    },
+    close: async () => {
+      events.push("https-close");
+    },
+  });
+  opts.dependencies.remove = async () => {
+    events.push("remove");
+    throw new Error("mapping was never saved");
+  };
+  await expect(
+    startNativeProject({ ...opts, https: httpsSelection })
+  ).rejects.toBe(failure);
+  expect(events).not.toContain("save");
+  expect(events).not.toContain("remove");
+  expect(events).not.toContain("ready");
+  expect(events.slice(-2)).toEqual(["https-close", "cleanup"]);
+});
+
+test("mapping save failure preserves its cause without removing an unconfirmed mapping", async () => {
+  const { opts, events } = await fixture();
+  const failure = new Error("synthetic mapping publication failure");
+  opts.dependencies.save = async () => {
+    events.push("save-attempt");
+    throw failure;
+  };
+  opts.dependencies.remove = async () => {
+    events.push("remove");
+    throw new Error("mapping was never saved");
+  };
+  await expect(startNativeProject(opts)).rejects.toBe(failure);
+  expect(events).toContain("save-attempt");
+  expect(events).not.toContain("remove");
+  expect(events).not.toContain("ready");
   expect(events.at(-1)).toBe("cleanup");
 });

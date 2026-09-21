@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   type HttpsChild,
+  nativeHttpsVerificationError,
   spawnNativeHttpsChild,
   startNativeProjectHttps,
 } from "../src/backends/native-project-https.ts";
@@ -404,4 +405,30 @@ test("HTTPS port refusal happens before authority or certificate state is create
   ).rejects.toThrow("requires host permission");
   expect(f.children).toHaveLength(0);
   await expect(access(join(f.root, "native-https"))).rejects.toThrow();
+});
+
+test("HTTPS errors preserve only reviewed codes and distinguish wall timeouts", () => {
+  for (const code of [
+    "ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR",
+    "ECONNREFUSED",
+    "ERR_TLS_CERT_ALTNAME_INVALID",
+  ]) {
+    const error = nativeHttpsVerificationError({
+      code,
+      message: "secret peer URL",
+      stack: "secret trace",
+    });
+    expect(error.message).toContain(code);
+    expect(error.message).not.toContain("secret");
+  }
+  expect(
+    nativeHttpsVerificationError({ code: "secret-value", message: "secret" })
+      .message
+  ).toContain("TLS_OR_TRANSPORT_ERROR");
+  expect(
+    nativeHttpsVerificationError(new Error("secret")).message
+  ).not.toContain("secret");
+  expect(
+    nativeHttpsVerificationError({ code: "ECONNRESET" }, true).message
+  ).toContain("VERIFICATION_TIMEOUT");
 });

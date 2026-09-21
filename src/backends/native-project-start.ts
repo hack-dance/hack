@@ -563,7 +563,7 @@ export async function startNativeProject(opts: {
               startupTimeoutMs: 300_000,
               signal: controller.signal,
               onReady: async () => {
-                mapping = authoritative(
+                const readyMapping = authoritative(
                   await invokeInspect(),
                   run,
                   review.namespace,
@@ -582,7 +582,8 @@ export async function startNativeProject(opts: {
                 if (httpsFailure) {
                   throw httpsFailure;
                 }
-                await deps.save({ ...opts.scope, run: mapping });
+                await deps.save({ ...opts.scope, run: readyMapping });
+                mapping = readyMapping;
                 await hooks?.ready?.();
               },
             });

@@ -424,6 +424,11 @@ status alone does not establish application health. The separately declared nati
 HTTP readiness probes remain required. DNS and user-approved trust setup are
 separate prerequisites for normal browser access.
 
+Failed HTTPS verification reports a reviewed TLS/transport error code or
+`VERIFICATION_TIMEOUT`, without peer values. Unknown errors use
+`TLS_OR_TRANSPORT_ERROR`. Startup saves the project run mapping only after these
+checks succeed; failed verification retains its original error through graph cleanup.
+
 ### Explicit cleanup after a dead foreground owner
 
 `graph recover-cleanup --run-id <run> --expect-receipt <sha256>` is a retaining,

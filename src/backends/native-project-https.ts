@@ -43,6 +43,40 @@ interface Dependencies {
   readonly permissionPort: () => Promise<number>;
   readonly adminReady: (socket: string) => Promise<boolean>;
 }
+const SAFE_TLS_CODES = new Set([
+  "ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR",
+  "ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EPROTO",
+  "ETIMEDOUT",
+]);
+/** Return only fixed classifications; raw TLS messages can contain peer values. */
+export function nativeHttpsVerificationError(
+  error: unknown,
+  timedOut = false
+): Error {
+  let code = "TLS_OR_TRANSPORT_ERROR";
+  if (timedOut) {
+    code = "VERIFICATION_TIMEOUT";
+  } else if (
+    isRecord(error) &&
+    typeof error.code === "string" &&
+    SAFE_TLS_CODES.has(error.code)
+  ) {
+    code = error.code;
+  }
+  return new Error(
+    `Native HTTPS verification failed (${code}); peer values omitted.`
+  );
+}
 function refused(): Error {
   return new Error(
     "Native HTTPS startup or ownership verification failed; values omitted. Inspect retained owned state before retrying."
@@ -432,6 +466,7 @@ async function verifyHostname(
   const ca = await validCa(caPath);
   return await new Promise((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
     const req = httpsRequest(
       {
         host: "127.0.0.1",
@@ -456,14 +491,18 @@ async function verifyHostname(
         }
       }
     );
-    req.on("timeout", () => req.destroy());
-    req.on("error", () => {
+    const timeout = () => {
+      timedOut = true;
+      req.destroy(nativeHttpsVerificationError(undefined, true));
+    };
+    req.on("timeout", timeout);
+    req.on("error", (error: unknown) => {
       if (timer) {
         clearTimeout(timer);
       }
-      reject(refused());
+      reject(nativeHttpsVerificationError(error, timedOut));
     });
-    timer = setTimeout(() => req.destroy(refused()), 5000);
+    timer = setTimeout(timeout, 5000);
     req.end();
   });
 }

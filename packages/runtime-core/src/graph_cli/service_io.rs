@@ -150,7 +150,7 @@ pub(super) fn command(
         }
         // SAFETY: explicit one-shot input transfers checked stdin ownership; the
         // receiver validates descriptor type, bounded length and EOF.
-        Some(super::environment::receive(
+        Some(hack_runtime_core::provider::managed_environment::receive(
             unsafe { OwnedFd::from_raw_fd(0) },
             options.expected.ok_or_else(invalid)?.0,
             options.run,

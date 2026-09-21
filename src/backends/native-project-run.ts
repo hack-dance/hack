@@ -15,12 +15,16 @@ import { isRecord } from "../lib/guards.ts";
 const HEX32 = /^[a-f0-9]{32}$/;
 const HEX64 = /^[a-f0-9]{64}$/;
 const LIMIT = 8192;
+// Equivalent to normalizeEnvConfigName(value) === value, with a bounded length.
+const ENV_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const CONTROL = /[\x00-\x1f\x7f]/;
 export type NativeProjectRun = {
   readonly run: string;
   readonly owner: string;
   readonly namespace: string;
   readonly planId: string;
+  /** Absent in legacy mappings; null explicitly selects base-only values. */
+  readonly effectiveEnvName?: string | null;
 };
 export type NativeProjectRunScope = {
   readonly projectRoot: string;
@@ -36,7 +40,15 @@ function refused(): Error {
 function valid(value: unknown): value is NativeProjectRun {
   return (
     isRecord(value) &&
-    Object.keys(value).sort().join() === "namespace,owner,planId,run" &&
+    [
+      "namespace,owner,planId,run",
+      "effectiveEnvName,namespace,owner,planId,run",
+    ].includes(Object.keys(value).sort().join()) &&
+    (!Object.hasOwn(value, "effectiveEnvName") ||
+      value.effectiveEnvName === null ||
+      (typeof value.effectiveEnvName === "string" &&
+        value.effectiveEnvName.length <= 128 &&
+        ENV_NAME.test(value.effectiveEnvName))) &&
     typeof value.run === "string" &&
     HEX32.test(value.run) &&
     typeof value.owner === "string" &&

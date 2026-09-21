@@ -689,8 +689,12 @@ export async function startNativeProject(opts: {
                 if (httpsFailure) {
                   throw httpsFailure;
                 }
-                await deps.save({ ...opts.scope, run: readyMapping });
-                mapping = readyMapping;
+                const persistedMapping = {
+                  ...readyMapping,
+                  effectiveEnvName: input.effectiveEnvName,
+                };
+                await deps.save({ ...opts.scope, run: persistedMapping });
+                mapping = persistedMapping;
                 await hooks?.ready?.();
               },
             });

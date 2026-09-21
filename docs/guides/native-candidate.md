@@ -251,9 +251,17 @@ require successful initializer completion before dependent services start. Cache
 initializers receive immutable source mounts and writable named cache volumes;
 workspace installs that write elsewhere still require explicit volume mappings. Event Agent requires further integration and is not yet supported by this
 normal command. Native `down` requests retaining cleanup from the graph owner and
-verifies container absence before retiring the exact run mapping. It currently
-refuses configured down hooks because startup environment selection is not yet
-persisted, and refuses environment/profile/target changes and cache pruning.
+verifies container absence before retiring the exact run mapping. Down hooks resolve
+fresh managed host values using the environment selection saved by `up`; hook output goes to stderr with `--json`. A before-hook failure
+prevents cleanup; an after-hook failure reports that graph cleanup already completed.
+Environment/profile/target changes and cache pruning remain unsupported.
+
+New mappings record the effective overlay name, or explicit `null` for base-only
+configuration; no environment values are persisted. New readers accept legacy
+mappings with missing selection, but refuse down hooks for those mappings rather
+than guessing an overlay. Missing selected overlay files also refuse before cleanup.
+Older binaries may reject extended mappings: this is backward state-reading
+compatibility, not support for rolling back binaries over new state.
 `restart` and `run` still refuse native selection;
 there is no silent fallback to the stable runtime. An uncertain shutdown retains
 its mapping and evidence for recovery; do not delete managed state to retry.

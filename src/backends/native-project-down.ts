@@ -1,4 +1,9 @@
+import { basename } from "node:path";
 import { isRecord } from "../lib/guards.ts";
+import {
+  resolveProjectEnvConfig,
+  selectProjectEnvValuesForExecutionTarget,
+} from "../lib/project-env-config.ts";
 import {
   loadNativeProjectRun,
   type NativeProjectRun,
@@ -56,8 +61,8 @@ function verify(value: unknown, run: NativeProjectRun, stopped: boolean): void {
 export async function nativeProjectDown(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
-  readonly before?: () => Promise<void>;
-  readonly after?: () => Promise<void>;
+  readonly before?: (run: NativeProjectRun) => Promise<void>;
+  readonly after?: (run: NativeProjectRun) => Promise<void>;
   readonly invoke?: typeof invokeNativeRuntime;
 }) {
   const run = await loadNativeProjectRun(opts.scope);
@@ -77,7 +82,7 @@ export async function nativeProjectDown(opts: {
       timeoutMs: 30_000,
     });
   verify(await inspect(), run, false);
-  await opts.before?.();
+  await opts.before?.(run);
   // Recheck after hooks, which may run arbitrary user-authorized commands.
   verify(await inspect(), run, false);
   await invoke({
@@ -88,11 +93,59 @@ export async function nativeProjectDown(opts: {
   });
   verify(await inspect(), run, true);
   await removeNativeProjectRun({ ...opts.scope, expected: run });
-  await opts.after?.();
+  await opts.after?.(run);
   return {
     backend: "native",
     status: "stopped",
     run: run.run,
     dataPreserved: true,
   } as const;
+}
+
+/** Resolve fresh values with the original selection; never infer legacy/default overlays. */
+export async function nativeDownEnvironment(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+  readonly serviceNames: readonly string[];
+}): Promise<Readonly<Record<string, string>>> {
+  if (!Object.hasOwn(opts.run, "effectiveEnvName")) {
+    throw new Error(
+      "Native down lifecycle hooks require persisted startup environment selection; legacy mapping must not guess an overlay."
+    );
+  }
+  try {
+    const resolved = await resolveProjectEnvConfig({
+      projectRoot: opts.scope.projectRoot,
+      projectDir: opts.scope.projectDir,
+      envName: opts.run.effectiveEnvName,
+      serviceNames: opts.serviceNames,
+    });
+    if (!resolved) {
+      if (opts.run.effectiveEnvName !== null) {
+        throw refused();
+      }
+      return {};
+    }
+    const selected = opts.run.effectiveEnvName;
+    if (
+      selected !== null &&
+      !resolved.files.some((path) =>
+        [
+          `hack.env.${selected}.yaml`,
+          `hack.env.${selected}.local.yaml`,
+        ].includes(basename(path))
+      )
+    ) {
+      throw refused();
+    }
+    return selectProjectEnvValuesForExecutionTarget({
+      resolved,
+      scopeName: "global",
+      target: "host",
+    });
+  } catch {
+    throw new Error(
+      "Native down lifecycle environment is unavailable; values omitted. No cleanup was requested."
+    );
+  }
 }

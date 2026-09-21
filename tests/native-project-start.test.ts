@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
 import {
   parseNativeHttpsSelection,
   reviewedNativeHttpsRoutes,
@@ -907,4 +908,22 @@ test("HTTPS redirects terminate only at verified same-service reviewed aliases",
   await expect(
     verifyHttpsRoutes(frontend, plan, new Set(["web", "other"]))
   ).rejects.toThrow();
+});
+
+test("startup persists resolved environment selection only after readiness", async () => {
+  const { opts } = await fixture();
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    effectiveEnvName: "qa",
+  });
+  let saved: NativeProjectRun | undefined;
+  opts.dependencies.save = async (request) => {
+    saved = request.run;
+  };
+  opts.dependencies.remove = async (request) => {
+    expect(saved).toBe(request.expected);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(saved).toMatchObject({ effectiveEnvName: "qa" });
 });

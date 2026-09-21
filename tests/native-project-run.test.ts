@@ -125,3 +125,37 @@ test("absent mapping does not excuse another owner's cleanup lock", async () => 
     )
   ).toBe(true);
 });
+
+test("environment selection distinguishes legacy, explicit base and overlay metadata", async () => {
+  for (const selected of [undefined, null, "qa"]) {
+    const opts = await fixture();
+    const mapped =
+      selected === undefined ? run : { ...run, effectiveEnvName: selected };
+    await save({ ...opts, run: mapped });
+    expect(await load(opts)).toEqual(mapped);
+    await remove({ ...opts, expected: mapped });
+  }
+  const opts = await fixture();
+  await expect(
+    save({ ...opts, run: { ...run, effectiveEnvName: "../qa" } })
+  ).rejects.toThrow();
+});
+
+test("stored overlay names cannot normalize to a different selection", async () => {
+  const opts = await fixture();
+  for (const effectiveEnvName of [
+    "QA",
+    "qa_env",
+    "qa--env",
+    "-qa",
+    "qa-",
+    "qa.local",
+    "a".repeat(129),
+  ]) {
+    await expect(
+      save({ ...opts, run: { ...run, effectiveEnvName } })
+    ).rejects.toThrow();
+  }
+  await save({ ...opts, run: { ...run, effectiveEnvName: "qa-local" } });
+  expect((await load(opts))?.effectiveEnvName).toBe("qa-local");
+});

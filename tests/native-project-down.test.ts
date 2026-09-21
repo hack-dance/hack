@@ -2,7 +2,10 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { nativeProjectDown } from "../src/backends/native-project-down.ts";
+import {
+  nativeDownEnvironment,
+  nativeProjectDown,
+} from "../src/backends/native-project-down.ts";
 import {
   loadNativeProjectRun,
   removeNativeProjectRun,
@@ -191,7 +194,7 @@ test("native down rejects unsupported flags before project or runtime access", a
   }
 });
 
-test("configured down hooks refuse before invoking native or lifecycle commands", async () => {
+test("not-started native down does not run configured hooks", async () => {
   const opts = await fixture(false);
   await writeFile(
     join(opts.scope.projectDir, "hack.config.json"),
@@ -224,10 +227,178 @@ test("configured down hooks refuse before invoking native or lifecycle commands"
       new Response(child.stderr).text(),
       child.exited,
     ]);
-    expect(code).not.toBe(0);
-    expect(stdout + stderr).toContain(
-      "Native down lifecycle hooks require persisted startup environment selection"
+    expect(code).toBe(0);
+    expect(stdout + stderr).toContain("Native project is not started");
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
+test("down environment preserves explicit base and named overlay while legacy refuses", async () => {
+  const opts = await fixture(false);
+  const env = async (name: string, value: string) =>
+    writeFile(
+      join(opts.scope.projectDir, `hack.env.${name}.yaml`),
+      JSON.stringify({
+        version: 1,
+        environment: name,
+        secretsprovider: "project_key",
+        values: { global: { VALUE: value } },
+      })
     );
+  await env("default", "base");
+  await env("qa", "qa-value");
+  await writeFile(
+    join(opts.scope.projectDir, "hack.config.json"),
+    JSON.stringify({ name: "fixture", env: { defaultOverlay: "qa" } })
+  );
+  expect(
+    await nativeDownEnvironment({
+      scope: opts.scope,
+      run: { ...run, effectiveEnvName: null },
+      serviceNames: ["web"],
+    })
+  ).toEqual({ VALUE: "base" });
+  expect(
+    await nativeDownEnvironment({
+      scope: opts.scope,
+      run: { ...run, effectiveEnvName: "qa" },
+      serviceNames: ["web"],
+    })
+  ).toEqual({ VALUE: "qa-value" });
+  await env("qa", "fresh-value");
+  expect(
+    await nativeDownEnvironment({
+      scope: opts.scope,
+      run: { ...run, effectiveEnvName: "qa" },
+      serviceNames: ["web"],
+    })
+  ).toEqual({ VALUE: "fresh-value" });
+  await rm(join(opts.scope.projectDir, "hack.env.qa.yaml"));
+  await expect(
+    nativeDownEnvironment({
+      scope: opts.scope,
+      run: { ...run, effectiveEnvName: "qa" },
+      serviceNames: ["web"],
+    })
+  ).rejects.toThrow("unavailable");
+  await expect(
+    nativeDownEnvironment({ scope: opts.scope, run, serviceNames: ["web"] })
+  ).rejects.toThrow("legacy");
+});
+test("before failure prevents cleanup; after failure follows confirmed retirement", async () => {
+  for (const phase of ["before", "after"] as const) {
+    const opts = await fixture();
+    let cleaned = false;
+    let calls = 0;
+    const failure = new Error(`synthetic ${phase} failure`);
+    await expect(
+      nativeProjectDown({
+        ...opts,
+        [phase]: async () => {
+          throw failure;
+        },
+        invoke: async (request) => {
+          if (request.args[1] === "cleanup") {
+            calls++;
+            cleaned = true;
+            return {};
+          }
+          const value = snapshot();
+          if (cleaned) {
+            value.receipt.phase = "stopped-data-retained";
+            value.observations["container:web"].state = "absent";
+          }
+          return value;
+        },
+      })
+    ).rejects.toBe(failure);
+    expect(calls).toBe(phase === "before" ? 0 : 1);
+    expect(await loadNativeProjectRun(opts.scope)).toEqual(
+      phase === "before" ? run : null
+    );
+  }
+});
+
+test("native down JSON isolates hook output and uses saved overlay through real CLI", async () => {
+  const opts = await fixture(false);
+  await saveNativeProjectRun({
+    ...opts.scope,
+    run: { ...run, effectiveEnvName: "qa" },
+  });
+  await writeFile(
+    join(opts.scope.projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "fixture",
+      env: { defaultOverlay: "other" },
+      lifecycle: {
+        down: {
+          before: ['test "$VALUE" = selected && echo hook-before'],
+          after: ['test "$VALUE" = selected && echo hook-after'],
+        },
+      },
+    })
+  );
+  await writeFile(
+    join(opts.scope.projectDir, "docker-compose.yml"),
+    "services:\n  web:\n    image: fixture\n"
+  );
+  for (const [name, value] of [
+    ["default", "wrong"],
+    ["qa", "selected"],
+    ["other", "wrong-other"],
+  ]) {
+    await writeFile(
+      join(opts.scope.projectDir, `hack.env.${name}.yaml`),
+      JSON.stringify({
+        version: 1,
+        environment: name,
+        secretsprovider: "project_key",
+        values: { global: { VALUE: value } },
+      })
+    );
+  }
+  const binary = join(opts.scope.projectRoot, "fake-native");
+  await writeFile(
+    binary,
+    `#!${process.execPath}\nconst marker=${JSON.stringify(join(opts.scope.projectRoot, "cleaned"))};const value=${JSON.stringify(snapshot())};if(process.argv.includes("cleanup")){await Bun.write(marker,"yes");console.log("{}")}else{if(await Bun.file(marker).exists()){value.receipt.phase="stopped-data-retained";value.observations["container:web"].state="absent"}console.log(JSON.stringify(value))}`,
+    { mode: 0o700 }
+  );
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "index.ts",
+      "down",
+      "--json",
+      "--path",
+      opts.scope.projectRoot,
+    ],
+    {
+      env: {
+        ...process.env,
+        HACK_RUNTIME_BACKEND: "native",
+        HACK_NATIVE_HOME: opts.scope.nativeHome,
+        HACK_NATIVE_BINARY: binary,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      backend: "native",
+      status: "stopped",
+    });
+    expect(stderr).toContain("hook-before");
+    expect(stderr).toContain("hook-after");
+    expect(await loadNativeProjectRun(opts.scope)).toBeNull();
   } finally {
     clearTimeout(timer);
   }

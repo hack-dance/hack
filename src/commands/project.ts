@@ -24,7 +24,10 @@ import {
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
-import { nativeProjectDown } from "../backends/native-project-down.ts";
+import {
+  nativeDownEnvironment,
+  nativeProjectDown,
+} from "../backends/native-project-down.ts";
 import { nativeProjectExec } from "../backends/native-project-exec.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
@@ -1652,6 +1655,7 @@ async function runLifecycleCommands(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly projectDir: string;
   readonly composeProject: string;
+  readonly routeStdoutToStderr?: boolean;
   readonly onPersistentCommand?: (opts: {
     readonly command: ProjectLifecycleCommand;
     readonly index: number;
@@ -1717,7 +1721,7 @@ async function runLifecycleCommands(opts: {
 
     const stdoutTask = streamLifecycleCommandOutput({
       stream: proc.stdout,
-      output: "stdout",
+      output: opts.routeStdoutToStderr ? "stderr" : "stdout",
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
       service: serviceName,
@@ -6457,6 +6461,9 @@ async function handleDown({
 }): Promise<number> {
   const native = resolveNativeRuntimeSelection();
   if (native) {
+    if (args.options.json) {
+      setLoggerBackendOverride({ backend: "console" });
+    }
     if (
       [
         args.options.env,
@@ -6487,21 +6494,56 @@ async function handleDown({
         "Native down requires valid lifecycle configuration; values omitted."
       );
     }
-    if (
-      (cfg.lifecycle?.down?.before?.length ?? 0) > 0 ||
-      (cfg.lifecycle?.down?.after?.length ?? 0) > 0
-    ) {
-      throw new CliUsageError(
-        "Native down lifecycle hooks require persisted startup environment selection, which this mapping does not yet provide; refusing to skip or run hooks with a different environment."
-      );
-    }
-    const result = await nativeProjectDown({
-      runtime: native,
-      scope: {
+    const scope = {
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      nativeHome: native.home,
+      branch,
+    };
+    let lifecycleEnv: Readonly<Record<string, string>> = {};
+    const hasHooks = Boolean(
+      cfg.lifecycle?.down?.before?.length || cfg.lifecycle?.down?.after?.length
+    );
+    const composeProject = resolveLifecycleComposeProjectName({
+      projectName: sanitizeProjectSlug(
+        await resolveComposeProjectName({ project, cfg })
+      ),
+      branch,
+    });
+    const hook = async (phase: "before" | "after") => {
+      const code = await runLifecycleCommands({
+        title: `Lifecycle (native down ${phase})`,
+        commands: cfg.lifecycle?.down?.[phase],
         projectRoot: project.projectRoot,
         projectDir: project.projectDir,
-        nativeHome: native.home,
-        branch,
+        composeProject,
+        env: lifecycleEnv,
+        routeStdoutToStderr: args.options.json === true,
+      });
+      if (code !== 0) {
+        throw new Error(
+          `Native down ${phase} hook failed (exit ${code})${phase === "after" ? "; native graph cleanup was confirmed and data retained" : "; cleanup was not requested"}.`
+        );
+      }
+    };
+    const result = await nativeProjectDown({
+      runtime: native,
+      scope,
+      before: async (run) => {
+        if (!hasHooks) {
+          return;
+        }
+        lifecycleEnv = await nativeDownEnvironment({
+          scope,
+          run,
+          serviceNames: await readComposeServiceNames(project.composeFile),
+        });
+        await hook("before");
+      },
+      after: async () => {
+        if (hasHooks) {
+          await hook("after");
+        }
       },
     });
     if (args.options.json) {

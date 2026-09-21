@@ -291,9 +291,27 @@ names, whitespace, trailing dots and empty entries are refused before lifecycle
 hooks. The provider permits each selected domain and its subdomains, including
 TTL-learned public addresses; this is not a URL, port or exact-host-only policy.
 The provider retains its private, loopback and metadata-address restrictions.
-Selection is passed to native pool admission without implicit widening; changing
-an existing pool's network intent is refused and requires explicit owned-pool
-retirement and recreation. Omitting the variable requests no new egress capability.
+Selection is passed to native pool admission without implicit widening. Omitting
+the variable requests no new egress capability. Package downloads can redirect to
+a different domain: GitHub Packages uses `npm.pkg.github.com` for metadata and
+`pkg-npm.githubusercontent.com` for tarballs. Approve both when the project uses
+that registry; reaching its metadata endpoint alone does not verify installation.
+
+To add an approved host to an existing pool, first stop the owned runtime, then
+explicitly extend its policy:
+
+```sh
+./bundle/hack-native --candidate-root /absolute/private/candidate-home runtime network extend \
+  --allow-host pkg-npm.githubusercontent.com --json
+```
+
+This preserves disks and caches and does not start the VM. It supports additive
+changes to an existing approved-host policy, not switching an isolated pool to
+networked mode or removing hosts. A recorded interrupted transition blocks startup until
+the same command reconciles its exact before/after states. Incomplete staging or
+foreign changes remain refused for inspection. Include the resulting
+complete host list in `HACK_NATIVE_ALLOW_HOSTS` on subsequent foreground starts;
+ordinary startup still refuses a different policy.
 
 Normal native foreground startup recognizes the bounded `caddy`,
 `caddy.reverse_proxy`, and `caddy.tls` label contract alongside dependency-cache

@@ -122,7 +122,7 @@ fn provider_file(
     file.read_to_string(&mut text).map_err(io)?;
     Ok(text)
 }
-fn recorded_process(
+pub(super) fn recorded_process(
     candidate: &Candidate,
     owner: &Owner,
 ) -> Result<identity::ProcessIdentity, CandidateError> {
@@ -170,7 +170,7 @@ fn verify_live(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateErro
     )?;
     verify_disks(candidate, owner)
 }
-fn verify_disks(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
+pub(super) fn verify_disks(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
     let directory = owner.real_data_dir(candidate)?;
     for (name, expected) in [
         ("storage.raw", &owner.storage),
@@ -756,6 +756,7 @@ fn up_selected(
     dependencies: Option<super::DependencySocketIntent>,
     project_share: Option<super::ProjectShareIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
+    super::network_update::require_complete(candidate)?;
     if let Some(share) = &project_share {
         share.validate()?;
     }
@@ -826,6 +827,7 @@ fn up_selected(
     artifact::verify_engine(candidate)?;
     super::network_tools::verify(candidate)?;
     let _lock = state::Lock::acquire(&root(candidate))?;
+    super::network_update::require_complete(candidate)?;
     let fresh_owner = match fs::symlink_metadata(root(candidate).join("owner.json")) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
         Ok(_) => false,

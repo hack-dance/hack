@@ -511,3 +511,22 @@ disk-size identity. Automatic trim remains disabled until safe disk reclamation
 is supported and qualified. This does not relax disk identity checks or repair
 previously shortened files, and does not change the separate memory-reclamation
 policy. Already running providers require an owned stop/start to receive the setting.
+
+### Extending a stopped pool's approved hosts
+
+`runtime network extend --allow-host pkg-npm.githubusercontent.com --json` adds
+explicit hostnames to an existing approved-host pool without replacing its disks
+or starting it. It requires the retained provider process to be absent, its PID
+record and database identity to match, the VM lock and disk handles to be free,
+and existing disk/configuration/owner-registry checks to pass. Isolated and
+host-gateway pools cannot be converted through this command.
+
+The managed pinned-schema adapter journals the exact old/new owner and provider
+record before a SQLite transaction, then commits the owner policy. Normal startup
+refuses an outstanding network-update journal. Repeat the same extension to
+reconcile a complete journal whose state is exactly before/before, before/after,
+or after/after; foreign edits and the impossible after/before state refuse.
+Malformed or incomplete staging files require inspection rather than automatic
+adoption. DNS resolution is bounded, and only canonical public host addresses are
+accepted. Existing hosts/CIDRs and unrelated provider fields remain unchanged;
+this does not bypass disk recovery or authorize runtime startup.

@@ -44,6 +44,8 @@ pub mod storage_usage;
 pub use image_load::load as load_image;
 mod lifecycle;
 mod network_intent;
+mod network_update;
+pub use network_update::extend_network;
 mod project_share;
 pub use project_share::ProjectShareIntent;
 mod network_tools;

@@ -65,6 +65,7 @@ Usage:
   hack-local runtime resolve-image --reference <namespace/repository[:tag]> --json
   hack-local runtime fetch-image --reference <namespace/repository@sha256:digest> --archive <new-flat-image.tar> [--json]
   hack-local runtime load-image --archive <flat-image.tar> --sha256 <archive-hash> --image-id <sha256:config-hash>
+  hack-local runtime network extend --allow-host <hostname> [--allow-host <hostname>] --json
   hack-local runtime up|status|down|recover [--json]
   hack-local node serve|status|inspect
   hack-local node request <versioned-json>
@@ -285,6 +286,24 @@ fn run() -> Result<(), CandidateError> {
         }
         ["project", arguments @ ..] => {
             project_command(&discover_candidate(&requested)?, arguments)?;
+        }
+        ["runtime", "network", "extend", arguments @ ..] => {
+            let mut hosts = Vec::new();
+            let mut rest = arguments;
+            while let ["--allow-host", host, tail @ ..] = rest {
+                hosts.push((*host).to_owned());
+                rest = tail;
+            }
+            if hosts.is_empty() || rest != ["--json"] {
+                return Err(CandidateError::new(
+                    "network_update",
+                    "Expected runtime network extend --allow-host HOST [--allow-host HOST] --json.",
+                ));
+            }
+            print_json(&hack_runtime_core::provider::extend_network(
+                &discover_candidate(&requested)?,
+                hosts,
+            )?)?;
         }
         ["runtime", "up", arguments @ ..]
             if arguments.contains(&"--bridge-sockets")

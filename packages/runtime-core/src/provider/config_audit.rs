@@ -19,9 +19,17 @@ pub(super) fn verify(candidate: &Candidate, owner: &Owner) -> Result<(), Candida
     #[cfg(not(target_os = "macos"))]
     let database = home.join(".local/share/smolvm/server/smolvm.db");
     let record = read_database(&database, &owner.machine)?;
-    verify_mounts(candidate, owner, &record)?;
+    verify_value(candidate, owner, &record)
+}
+
+pub(super) fn verify_value(
+    candidate: &Candidate,
+    owner: &Owner,
+    record: &Value,
+) -> Result<(), CandidateError> {
+    verify_mounts(candidate, owner, record)?;
     verify_record(
-        &record,
+        record,
         &owner.machine,
         &owner.token,
         owner.application_bridge,
@@ -105,7 +113,7 @@ fn verify_database(
     verify_record(&record, machine, token, bridge, dependencies, network)
 }
 
-fn read_database(path: &Path, machine: &str) -> Result<Value, CandidateError> {
+pub(super) fn read_database(path: &Path, machine: &str) -> Result<Value, CandidateError> {
     reject_aliased_state(path.parent().ok_or_else(invalid)?).map_err(|_| invalid())?;
     let before = metadata(path)?;
     for suffix in ["-wal", "-shm", "-journal"] {

@@ -530,3 +530,14 @@ Malformed or incomplete staging files require inspection rather than automatic
 adoption. DNS resolution is bounded, and only canonical public host addresses are
 accepted. Existing hosts/CIDRs and unrelated provider fields remain unchanged;
 this does not bypass disk recovery or authorize runtime startup.
+
+### Temporary files in writable services
+
+Services with writable image roots (the Compose default, or `read_only: false`)
+use the image's ordinary `/tmp`; the candidate does not overlay it with a small
+RAM filesystem or impose `noexec`. This permits package extraction and temporary
+executables without imposing an unrelated 16 MiB limit. These files remain in
+the container-owned writable layer and are discarded with container removal;
+source-bind protections and named-volume persistence are unchanged. Explicit
+`read_only: true` services retain the bounded 16 MiB `rw,noexec,nosuid` `/tmp`
+tmpfs contract.

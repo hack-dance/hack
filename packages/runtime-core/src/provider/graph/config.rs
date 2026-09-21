@@ -329,9 +329,15 @@ pub(super) fn prepare_delivery(
         let mut config = json!({"Image":image,"Labels":labels,"HostConfig":{
             "NetworkMode":network,"Memory":service.limits.memory_bytes.unwrap_or(0),"NanoCpus":(service.limits.cpus.unwrap_or(0.0)*1e9) as u64,
             "PidsLimit":service.limits.pids.unwrap_or(64),"ReadonlyRootfs":service.read_only,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"Init":service.init,
-            "Mounts":mounts,"Tmpfs":{"/tmp":"rw,noexec,nosuid,size=16777216"},"ShmSize":service.limits.shared_memory_bytes.unwrap_or(67108864),
+            "Mounts":mounts,"ShmSize":service.limits.shared_memory_bytes.unwrap_or(67108864),
             "RestartPolicy":{"Name":"no"},"LogConfig":{"Type":"json-file","Config":{"max-size":"1m","max-file":"1"}}
         }});
+        // Writable image roots retain their ordinary /tmp capacity and execution
+        // semantics (installers extract and run tools there). Only explicit
+        // read-only roots need this bounded, non-executable scratch mount.
+        if service.read_only {
+            config["HostConfig"]["Tmpfs"] = json!({"/tmp":"rw,noexec,nosuid,size=16777216"});
+        }
         // Virtiofs preserves the host uid. Root services need DAC_OVERRIDE to
         // traverse/write an explicitly shared tree owned by that uid. Read-only
         // mounts still enforce read-only access; no other capabilities are added.

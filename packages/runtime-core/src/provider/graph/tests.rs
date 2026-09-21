@@ -122,6 +122,20 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
                     case != 1 && case != 5
                 );
                 let host = &prepared.configs["web"]["HostConfig"];
+                if case == 1 || case == 5 {
+                    // Explicit false and omitted read_only preserve image-layer /tmp.
+                    assert!(host.get("Tmpfs").is_none());
+                } else {
+                    assert_eq!(
+                        host["Tmpfs"],
+                        json!({"/tmp":"rw,noexec,nosuid,size=16777216"})
+                    );
+                }
+                // Other services remain explicitly read-only in the same graph.
+                assert_eq!(
+                    prepared.configs["init"]["HostConfig"]["Tmpfs"],
+                    json!({"/tmp":"rw,noexec,nosuid,size=16777216"})
+                );
                 assert_eq!(host["CapDrop"], json!(["ALL"]));
                 assert_eq!(host["SecurityOpt"], json!(["no-new-privileges"]));
                 assert!(host.get("Privileged").is_none());

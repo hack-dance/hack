@@ -21,6 +21,7 @@ pub struct PrivateInput(UnixStream);
 impl PrivateInput {
     /// Forward exactly one consumed credential to an already authenticated local
     /// exec stdin. No caller-visible bytes or durable representation is produced.
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn forward(
         self,
         stream: &mut UnixStream,

@@ -1,8 +1,13 @@
 //! Private Docker exec over the owned Unix endpoint. No long-lived Smol exec
 //! connection, host subprocess, credential argument, or request replay is used.
+#[cfg(target_os = "macos")]
 use super::{OwnedGuest, Transport};
-use crate::{CandidateError, provider::relay_auth::PrivateInput};
+use crate::CandidateError;
+#[cfg(target_os = "macos")]
+use crate::provider::relay_auth::PrivateInput;
+#[cfg(target_os = "macos")]
 use reqwest::Method;
+#[cfg(target_os = "macos")]
 use serde_json::json;
 use std::{
     io::{Read, Write},
@@ -30,6 +35,7 @@ pub(in crate::provider) struct RelayExec {
     received: usize,
 }
 impl RelayExec {
+    #[cfg(target_os = "macos")]
     pub(in crate::provider) fn launch(
         guest: &OwnedGuest<'_>,
         container: &str,

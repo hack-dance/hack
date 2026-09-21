@@ -96,9 +96,10 @@ impl NetworkIntent {
         pinned.verify(record)?;
         Ok(pinned)
     }
-    /// SmolVM may append its resolved DNS addresses again when building the
-    /// retained runtime config. Only this observation accepts equivalent bounded
-    /// sets; the durable provider database remains byte-for-byte policy-pinned.
+    /// Pinned SmolVM re-resolves approved hosts at each boot and appends public
+    /// addresses. Trust that provider resolution, not independent hostname proof:
+    /// runtime observations may contain bounded public additions, while the
+    /// durable provider database remains byte-for-byte policy-pinned.
     pub(super) fn verify_resources(&self, record: &Value) -> Result<(), CandidateError> {
         self.verify_resource_record(record, true)
     }
@@ -144,8 +145,9 @@ fn runtime_addresses_match(record: &Value, pinned: &[String]) -> bool {
     let Some(entries) = record.as_array() else {
         return false;
     };
-    // The pinned policy has at most 256 entries; one provider duplication is
-    // bounded independently of set cardinality, so repeats cannot bypass limits.
+    // The pinned policy has at most 256 entries. Bound the entire provider boot
+    // result, including duplicates and freshly resolved addresses, independently
+    // of set cardinality. Every durable address must remain present.
     if entries.is_empty() || entries.len() > 512 {
         return false;
     }
@@ -159,7 +161,7 @@ fn runtime_addresses_match(record: &Value, pinned: &[String]) -> bool {
         }
         observed.insert(cidr);
     }
-    observed == pinned.iter().map(String::as_str).collect()
+    pinned.iter().all(|cidr| observed.contains(cidr.as_str()))
 }
 
 fn invalid() -> CandidateError {
@@ -283,13 +285,15 @@ mod tests {
     }
 
     #[test]
-    fn retained_runtime_accepts_only_bounded_equal_address_sets() {
+    fn retained_runtime_accepts_bounded_public_dns_additions_preserving_all_pins() {
         let intent = NetworkIntent::approved_hosts(vec!["registry.example.com".into()]).unwrap();
         let record = json!({"network":true,"network_backend":"virtio-net",
             "allowed_cidrs":["1.1.1.1/32","8.8.8.8/32"],"dns_filter_hosts":["registry.example.com"]});
         let pinned = intent.pin(&record).unwrap();
         for addresses in [
             json!(["8.8.8.8/32", "1.1.1.1/32"]),
+            json!(["1.1.1.1/32", "8.8.8.8/32", "9.9.9.9/32"]),
+            json!(["2606:4700::6810:922/128", "8.8.8.8/32", "1.1.1.1/32"]),
             json!(["1.1.1.1/32", "8.8.8.8/32", "1.1.1.1/32", "8.8.8.8/32"]),
         ] {
             let mut runtime = record.clone();
@@ -302,7 +306,6 @@ mod tests {
             json!([]),
             Value::Null,
             json!(["1.1.1.1/32"]),
-            json!(["1.1.1.1/32", "8.8.8.8/32", "9.9.9.9/32"]),
             json!(["1.1.1.0/24", "8.8.8.8/32"]),
             json!(["1.1.1.1/32", "8.8.8.8/32", "100.96.0.1/32"]),
             json!(["1.1.1.1/32", "8.8.8.8/32", 42]),
@@ -310,6 +313,19 @@ mod tests {
         ] {
             let mut runtime = record.clone();
             runtime["allowed_cidrs"] = addresses;
+            assert!(pinned.verify_resources(&runtime).is_err());
+        }
+        for forbidden in [
+            "127.0.0.1/32",
+            "10.0.0.1/32",
+            "169.254.169.254/32",
+            "::1/128",
+            "fc00::1/128",
+            "2606:4700::/64",
+            "8.8.8.0/24",
+        ] {
+            let mut runtime = record.clone();
+            runtime["allowed_cidrs"] = json!(["1.1.1.1/32", "8.8.8.8/32", forbidden]);
             assert!(pinned.verify_resources(&runtime).is_err());
         }
         let mut oversized = record.clone();
@@ -324,6 +340,34 @@ mod tests {
         );
         assert!(pinned.verify_resources(&oversized).is_err());
         pinned.verify(&record).unwrap();
+    }
+
+    #[test]
+    fn rotating_provider_restart_fixture_does_not_modify_durable_intent() {
+        // Public addresses observed in the stopped six-host pool: creation pins
+        // remain in Smol's database; reboot appends fresh DNS results and repeats.
+        let intent = NetworkIntent::approved_hosts(vec![
+            "npm.pkg.github.com".into(),
+            "s3.us-east-1.amazonaws.com".into(),
+        ])
+        .unwrap();
+        let database = json!({"network":true,"network_backend":"virtio-net",
+            "allowed_cidrs":["140.82.113.34/32", "52.217.232.56/32"],
+            "dns_filter_hosts":["npm.pkg.github.com", "s3.us-east-1.amazonaws.com"]});
+        let pinned = intent.pin(&database).unwrap();
+        let before = serde_json::to_value(&pinned).unwrap();
+        let mut runtime = database.clone();
+        runtime["allowed_cidrs"] = json!([
+            "16.15.199.36/32",
+            "52.217.232.56/32",
+            "140.82.114.34/32",
+            "140.82.113.34/32",
+            "52.217.232.56/32"
+        ]);
+        pinned.verify_resources(&runtime).unwrap();
+        assert!(pinned.verify(&runtime).is_err());
+        pinned.verify(&database).unwrap();
+        assert_eq!(serde_json::to_value(&pinned).unwrap(), before);
     }
 
     #[test]

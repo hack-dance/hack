@@ -12,6 +12,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
+#[cfg(any(target_os = "macos", test))]
 pub(super) mod relay_exec;
 mod service_exec;
 mod stop;
@@ -309,6 +310,7 @@ impl<'a> Engine<'a> {
         Self::connect_mode(candidate, true)
     }
 
+    #[cfg(target_os = "macos")]
     pub(super) fn connect_cleanup_wait(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         Self::from_guest(OwnedGuest::connect_cleanup_wait(candidate)?, true)
     }

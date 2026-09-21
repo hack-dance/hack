@@ -436,3 +436,17 @@ owner-only mode 0400 with exact UID, regular-file, single-link, size, and no-fol
 checks. Named users/groups remain unsupported for private delivery and refuse
 instead of silently becoming root. An image with no user retains Docker's normal
 root default; an explicit Compose numeric user takes precedence.
+
+### Approved-host DNS on pool restart
+
+The pinned Smol provider re-resolves approved hosts at each boot and appends the
+results to its retained runtime CIDRs. The candidate accepts at most 512 runtime
+entries, including duplicates, only when all original pinned addresses remain
+present and every entry is a canonical public IPv4 `/32` or IPv6 `/128` address.
+Private, loopback, metadata, broader subnet, missing-pin and oversized results
+remain refused. The durable provider database must still match the approved host
+list and original CIDRs exactly; restarting does not expand the approved hosts.
+
+This audit trusts fresh DNS resolution by the pinned provider. It does not
+independently prove which hostname produced each added address. Existing dynamic
+DNS and descendant-host policy semantics remain unchanged.

@@ -370,6 +370,7 @@ impl<'a> OwnedGuest<'a> {
         Self::connect_mode(candidate, false, None)
     }
 
+    #[cfg(target_os = "macos")]
     pub(super) fn connect_cleanup_wait(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         Self::connect_mode(
             candidate,

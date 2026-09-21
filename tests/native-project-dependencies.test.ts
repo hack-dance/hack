@@ -45,13 +45,13 @@ test("dependency launchers add reaping init only when omitted and preserve expli
   ).toThrow("init: true");
   expect(refused.web.init).toBe(false);
 });
-test("explicit aliases on equal guest ports receive distinct relay slots per service", () => {
+test("equal endpoints share transport across services while same-service bindings remain distinct", () => {
   const selected = parse([
     binding(),
     binding("web", "other"),
     binding("worker"),
   ]);
-  expect(selected.map((entry) => entry.slot)).toEqual([0, 1, 2]);
+  expect(selected.map((entry) => entry.slot)).toEqual([0, 1, 0]);
   expect(selected[0]?.aliases).toEqual(["search.example.com"]);
   expect(selected[2]?.service).toBe("worker");
 });
@@ -116,4 +116,48 @@ test("selection files are bounded regular files; symlinks and malformed private 
     ).rejects.toThrow("values omitted");
   }
   expect(await readNativeHostDependencies({ services: ["web"] })).toEqual([]);
+});
+
+test("72 service-specific grants use six shared host transports", () => {
+  const services = Array.from({ length: 12 }, (_, i) => `service-${i}`);
+  const entries = services.flatMap((service) =>
+    Array.from({ length: 6 }, (_, endpoint) => ({
+      ...binding(service, `endpoint-${endpoint}`),
+      host_port: 8000 + endpoint,
+    }))
+  );
+  const selected = parseNativeHostDependencies({
+    value: { version: 1, dependencies: entries },
+    services,
+  });
+  expect(selected).toHaveLength(72);
+  expect(new Set(selected.map((entry) => entry.slot)).size).toBe(6);
+  for (const service of services) {
+    expect(
+      selected
+        .filter((entry) => entry.service === service)
+        .map((entry) => entry.slot)
+    ).toEqual([0, 1, 2, 3, 4, 5]);
+  }
+  expect(
+    new Set(selected.map((entry) => `${entry.service}:${entry.binding}`)).size
+  ).toBe(72);
+});
+
+test("logical grant bounds and endpoint identity remain independent of transport sharing", () => {
+  const services = Array.from({ length: 129 }, (_, i) => `service-${i}`);
+  const entries = services.map((service) => binding(service));
+  const select = (dependencies: unknown[]) =>
+    parseNativeHostDependencies({
+      value: { version: 1, dependencies },
+      services,
+    });
+  expect(select(entries.slice(0, 128))).toHaveLength(128);
+  expect(() => select(entries)).toThrow("values omitted");
+  expect(
+    select([
+      { ...binding("service-0"), host_pid: 123 },
+      { ...binding("service-1"), host_pid: 124 },
+    ]).map((entry) => entry.slot)
+  ).toEqual([0, 1]);
 });

@@ -18,6 +18,7 @@ pub use dependency_hosts::dependency_address;
 #[cfg(target_os = "macos")]
 pub mod foreground;
 mod startup;
+mod startup_failure;
 #[cfg(target_os = "macos")]
 pub use startup::{Dependency, HostRelayRuntime};
 mod archive;
@@ -27,6 +28,11 @@ mod bridges;
 pub use bridge_recovery::{export_bridge_recovery, inspect_bridge_recovery};
 pub(in crate::provider) use bridges::{initialize_owner_registry, verify_owner_registry};
 mod cleanup_enrollment;
+#[cfg(target_os = "macos")]
+mod dead_owner_cleanup;
+#[cfg(target_os = "macos")]
+pub use dead_owner_cleanup::recover_cleanup;
+
 mod config;
 mod dependency_cache;
 mod image_environment;
@@ -162,6 +168,9 @@ pub struct Resource {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
+    /// Most recent observed startup failure; retained after cleanup and replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_failure: Option<startup_failure::Failure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normalized_input: Option<NormalizedInputIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -425,7 +434,11 @@ fn load_at(
 ) -> Result<(Receipt, PathBuf), CandidateError> {
     state::check_private_directory(&root)?;
     let receipt: Receipt = state::read(&root.join("state.json"))?;
-    if receipt.version != 1
+    if receipt
+        .startup_failure
+        .as_ref()
+        .is_some_and(|failure| !failure.valid(&receipt))
+        || receipt.version != 1
         || receipt.run != run
         || receipt.owner != incarnation
         || !hex(&receipt.namespace, 64)
@@ -824,6 +837,13 @@ impl Driver for Session<'_, '_> {
                 service,
                 observation: Observation::Exited { code: 0 },
             } => self.record_cache_completion(service),
+            Event::Observed {
+                service,
+                observation,
+            } if observation.failed() => {
+                startup_failure::record(&mut self.receipt, service, observation)?;
+                self.save()
+            }
             Event::Observed { .. } => Ok(()),
             Event::Ready => {
                 if let Some(startup) = self.startup.as_mut() {
@@ -1238,6 +1258,7 @@ fn run_inputs(
         .map_err(state::io)?;
     let probe_states = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
     let receipt = Receipt {
+        startup_failure: None,
         normalized_input,
         relay_startup: None,
         relay_cleanup: None,

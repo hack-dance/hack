@@ -6,8 +6,10 @@ fn privateFile(path: []const u8, max: usize) ![]u8 {
     const file = std.fs.File{ .handle = fd };
     defer file.close();
     const info = try std.posix.fstat(fd);
+    // Owner-only mode0400 requires the exact UID. Docker may resolve a UID-only
+    // image User to another primary group; file GID grants no access here.
     if (!std.posix.S.ISREG(info.mode) or info.mode & 0o777 != 0o400 or
-        info.uid != std.posix.geteuid() or info.gid != std.os.linux.getegid() or info.nlink != 1 or info.size < 1 or info.size > max)
+        info.uid != std.posix.geteuid() or info.nlink != 1 or info.size < 1 or info.size > max)
         return error.UnsafeFile;
     return file.readToEndAlloc(allocator, max);
 }

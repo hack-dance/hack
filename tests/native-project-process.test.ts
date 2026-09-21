@@ -159,3 +159,35 @@ test("cancellation preserves the owner's graceful cleanup beyond five seconds", 
   ).rejects.toThrow("interrupted");
   expect(await Bun.file(marker).text()).toBe("cleaned");
 }, 15_000);
+
+test("early receiver rejection drains its safe code despite a broken private-input pipe", async () => {
+  const opts = await fixture(`
+    import { appendFileSync, closeSync } from "node:fs";
+    appendFileSync("attempts", "attempt\\n");
+    closeSync(0);
+    await Bun.sleep(20);
+    console.error(JSON.stringify({code:"graph_budget",message:"synthetic-private-detail"}));
+    process.exit(2);
+  `);
+  let failure = "";
+  let ready = 0;
+  try {
+    await serveNativeProjectGraph({
+      ...opts,
+      privateInput: new TextEncoder().encode(
+        "synthetic-private-payload".repeat(10_000)
+      ),
+      onReady: async () => {
+        ready++;
+      },
+    });
+  } catch (error) {
+    failure = String(error);
+  }
+  expect(failure).toContain("graph_budget");
+  expect(failure).not.toContain("synthetic-private");
+  expect(ready).toBe(0);
+  expect(await Bun.file(join(opts.projectRoot, "attempts")).text()).toBe(
+    "attempt\n"
+  );
+});

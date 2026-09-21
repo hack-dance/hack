@@ -116,6 +116,10 @@ pub(super) fn ordinary_mutation(root: &Path, receipt: &Receipt) -> Result<(), Ca
     Ok(())
 }
 pub(super) fn retention(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
+    #[cfg(target_os = "macos")]
+    if super::dead_owner_cleanup::retained(root, receipt)? {
+        return Ok(());
+    }
     retention_receipt(receipt, legacy(root)?)
 }
 /// Also used on the bounded exported receipt before resumed prune effects.

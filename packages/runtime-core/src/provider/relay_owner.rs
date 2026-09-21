@@ -277,6 +277,32 @@ impl RelayOwner {
         self.relay
             .admit(transport, &entry.endpoint, &entry.authority, budget)
     }
+    /// Select only among targets registered for this verified listener. The hint
+    /// grants no authority: challenge/proof/acceptance still precede upstream I/O.
+    fn admit_shared(
+        &mut self,
+        targets: &[Target],
+        transport: UnixStream,
+        deadline: Instant,
+        hello: &[u8],
+    ) -> Result<u64, CandidateError> {
+        let entry = targets
+            .iter()
+            .filter_map(|target| {
+                self.entries
+                    .get(&target.service)
+                    .filter(|entry| entry.target == *target && !entry.retired)
+            })
+            .find(|entry| entry.authority.matches_hello(hello))
+            .ok_or_else(refused)?;
+        self.relay.admit_hello(
+            transport,
+            &entry.endpoint,
+            &entry.authority,
+            deadline,
+            hello,
+        )
+    }
     pub fn tick(&mut self, max_wait: Duration) -> Result<(), CandidateError> {
         self.poll_tick(max_wait, &[]).map(|_| ())
     }

@@ -78,6 +78,18 @@ pub(super) fn resolve(image: &Value, create: &Value) -> Result<Resolved, Candida
     })
 }
 
+fn selected_user(image: &Value, create: &Value) -> Result<String, CandidateError> {
+    fn nonempty(value: Option<&Value>) -> Option<&Value> {
+        value.filter(|value| !value.is_null() && value.as_str() != Some(""))
+    }
+    let user = nonempty(create.get("User")).or_else(|| nonempty(image.get("User")));
+    let user = match user {
+        None => "",
+        Some(value) => value.as_str().ok_or_else(malformed)?,
+    };
+    super::launcher::identity(&json!({"User":user}))?;
+    Ok(user.into())
+}
 /// Materialize exactly the selected process for a private environment/dependency
 /// wrapper. All validation precedes mutation. Relative executable names remain
 /// unsupported here; private launch must never add ambient PATH resolution.
@@ -95,6 +107,8 @@ pub(super) fn apply_private(create: &mut Value, image: &Value) -> Result<(), Can
             "Private delivery requires a pinned absolute entrypoint; values omitted.",
         ));
     }
+    let user = selected_user(image, create)?;
+    create["User"] = json!(user);
     create["Entrypoint"] = json!(process.entrypoint);
     create["Cmd"] = json!(process.cmd);
     Ok(())
@@ -118,6 +132,36 @@ mod tests {
         assert_eq!(create["User"], "0:0");
     }
 
+    #[test]
+    fn private_wrapper_inherits_image_user_without_resolving_its_group() {
+        for user in ["1001:1002", "1001", "0:0", ""] {
+            let image = json!({"Entrypoint":["/image"],"User":user});
+            for mut create in [json!({}), json!({"User":null}), json!({"User":""})] {
+                apply_private(&mut create, &image).unwrap();
+                assert_eq!(create["User"], user);
+            }
+        }
+        let mut create = json!({"User":"2001:2002"});
+        apply_private(
+            &mut create,
+            &json!({"Entrypoint":["/image"],"User":"unselected-name"}),
+        )
+        .unwrap();
+        assert_eq!(create["User"], "2001:2002");
+        for user in [
+            json!("named"),
+            json!("1001:group"),
+            json!(true),
+            json!("4294967295"),
+        ] {
+            let mut create = json!({});
+            let before = create.clone();
+            assert!(
+                apply_private(&mut create, &json!({"Entrypoint":["/image"],"User":user})).is_err()
+            );
+            assert_eq!(create, before);
+        }
+    }
     #[test]
     fn null_inherits_and_explicit_empty_suppresses_defaults() {
         let image = json!({"Entrypoint":["/image"],"Cmd":["default", ""]});

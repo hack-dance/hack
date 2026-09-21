@@ -342,3 +342,38 @@ fn invalid_budget_and_revoked_authority_do_not_retain_transports() {
     assert_eq!(reactor.connections(), 0);
     no_backend(&listener);
 }
+
+#[test]
+fn buffered_hello_keeps_original_deadline_and_wrong_proof_never_connects() {
+    let (listener, endpoint, authority, credential) = fixture();
+    let mut reactor = reactor(2);
+    let (_, hello) = credential.begin().unwrap();
+    let (server, mut client) = transport_pair();
+    let deadline = Instant::now() + Duration::from_millis(20);
+    reactor
+        .admit_hello(server, &endpoint, &authority, deadline, &hello)
+        .unwrap();
+    assert_eq!(reactor.handshakes[0].deadline, deadline);
+    while reactor.connections() > 0 {
+        reactor.tick(Duration::from_millis(30)).unwrap();
+    }
+    no_backend(&listener);
+    let _ = client.read(&mut [0; 64]);
+    let (server, mut client) = transport_pair();
+    reactor
+        .admit_hello(
+            server,
+            &endpoint,
+            &authority,
+            Instant::now() + Duration::from_secs(1),
+            &hello,
+        )
+        .unwrap();
+    reactor.tick(Duration::ZERO).unwrap();
+    let mut challenge = [0; 64];
+    client.read_exact(&mut challenge).unwrap();
+    client.write_all(&[0; 32]).unwrap();
+    reactor.tick(Duration::ZERO).unwrap();
+    assert_eq!(reactor.connections(), 0);
+    no_backend(&listener);
+}

@@ -23,6 +23,7 @@ Usage:
   hack-local graph run|restart|restore --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
   hack-local graph inspect|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
+  hack-local graph recover-cleanup --run-id <32-hex> --expect-receipt <sha256> [--json]
   hack-local graph logs --run-id <32-hex> --service <name> [--tail <1..1000>] [--json]
   hack-local graph exec --run-id <32-hex> --service <name> [--workdir /path] [--timeout-seconds <1..120>] [--json] -- <program> [args...]
   hack-local graph dependency-plan --dependencies <reviewed.json> [--json]

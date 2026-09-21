@@ -60,6 +60,7 @@ async function fixture() {
   const deps: NonNullable<
     Parameters<typeof startNativeProjectHttps>[0]["dependencies"]
   > = {
+    checkPort: async () => {},
     permissionPort: async () => 18_443,
     adminReady: async () => true,
     invoke: async (request) => {
@@ -387,3 +388,20 @@ for (const changed of [false, true]) {
     }
   });
 }
+
+test("HTTPS port refusal happens before authority or certificate state is created", async () => {
+  const f = await fixture();
+  await expect(
+    startNativeProjectHttps({
+      ...f.opts,
+      dependencies: {
+        ...f.opts.dependencies,
+        checkPort: async () => {
+          throw new Error("Native HTTPS port 443 requires host permission.");
+        },
+      },
+    })
+  ).rejects.toThrow("requires host permission");
+  expect(f.children).toHaveLength(0);
+  await expect(access(join(f.root, "native-https"))).rejects.toThrow();
+});

@@ -165,7 +165,9 @@ impl HostRelayRuntime {
         dependencies: Vec<Dependency>,
         selected_run: Option<&str>,
     ) -> Result<Self, CandidateError> {
-        if !hex(expected_sha256, 64) || dependencies.len() > 32 {
+        if !hex(expected_sha256, 64)
+            || dependencies.len() > crate::provider::relay_auth::MAX_LOGICAL_BINDINGS
+        {
             return Err(refused());
         }
         let bytes = if dependencies.is_empty() {
@@ -204,15 +206,20 @@ impl HostRelayRuntime {
             owner.dependency_sockets.ok_or_else(refused)?.slots
         };
         let mut selected = BTreeMap::new();
-        let mut slots = std::collections::BTreeSet::new();
+        let mut slots = BTreeMap::new();
+        let mut service_slots = std::collections::BTreeSet::new();
         let mut ports = std::collections::BTreeSet::new();
         let mut aliases = std::collections::BTreeSet::new();
         for dependency in dependencies {
             let address = dependency_address(dependency.slot, &dependency.aliases)?;
+            let endpoint_generation = dependency.endpoint.generation()?;
             if dependency.service.is_empty()
                 || dependency.slot >= capacity
                 || dependency.port == 0
-                || !slots.insert(dependency.slot)
+                || slots
+                    .insert(dependency.slot, endpoint_generation)
+                    .is_some_and(|prior| prior != endpoint_generation)
+                || !service_slots.insert((dependency.service.clone(), dependency.slot))
                 || !binding_name(&dependency.binding)
                 || !ports.insert((dependency.service.clone(), address, dependency.port))
                 || !dependency
@@ -239,7 +246,7 @@ impl HostRelayRuntime {
             context,
             &control_root,
             slots
-                .into_iter()
+                .into_keys()
                 .map(|slot| ManagedSlot {
                     slot,
                     path: owner.short_home.join(format!("dependency-{slot:02}.sock")),
@@ -307,7 +314,7 @@ impl HostRelayRuntime {
             return Err(refused());
         }
         let run = self.run.as_deref().ok_or_else(refused)?;
-        let engine = Engine::connect_cleanup(candidate)?;
+        let engine = Engine::connect_cleanup_wait(candidate)?;
         for name in self.children.keys().cloned().collect::<Vec<_>>() {
             let child = self.children.get_mut(&name).ok_or_else(refused)?;
             engine
@@ -412,6 +419,7 @@ impl Driver for HostRelayRuntime {
                 binding.clone(),
                 Binding {
                     slot: dependency.slot,
+                    endpoint_generation: Some(dependency.endpoint.fingerprint()?),
                     port: dependency.port,
                     aliases: dependency.aliases.clone(),
                     process: None,
@@ -425,6 +433,14 @@ impl Driver for HostRelayRuntime {
             artifact: self.artifact_hash.clone(),
             services,
         });
+        if !receipt
+            .relay_startup
+            .as_ref()
+            .ok_or_else(refused)?
+            .valid(receipt)
+        {
+            return Err(refused());
+        }
         self.run = Some(receipt.run.clone());
         self.check(engine, receipt)?;
         state::write(&root.join("state.json"), receipt)?;
@@ -536,6 +552,10 @@ impl Driver for HostRelayRuntime {
             let (uid, gid) = launcher::identity(config)?;
             for (name, endpoint) in dependencies {
                 let binding = selected.bindings.get(&name).ok_or_else(refused)?;
+                if binding.endpoint_generation.as_deref() != Some(endpoint.fingerprint()?.as_str())
+                {
+                    return Err(refused());
+                }
                 let identity = host_relay::named_binding_identity(generation, &name, binding)?;
                 let grant = self
                     .managed

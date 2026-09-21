@@ -355,6 +355,7 @@ test("host listener selections are read after hooks and bound to the exact revie
     const input = await prepare(request);
     const compose = JSON.parse(input.normalizedComposeJson);
     compose.services.web.extra_hosts = ["search.example.com:host-gateway"];
+    compose.services.worker = { ...compose.services.web };
     return { ...input, normalizedComposeJson: JSON.stringify(compose) };
   };
   const binding = {
@@ -369,7 +370,10 @@ test("host listener selections are read after hooks and bound to the exact revie
   opts.before = async () => {
     await writeFile(
       path,
-      JSON.stringify({ version: 1, dependencies: [binding] })
+      JSON.stringify({
+        version: 1,
+        dependencies: [binding, { ...binding, service: "worker" }],
+      })
     );
     return await before();
   };
@@ -386,7 +390,10 @@ test("host listener selections are read after hooks and bound to the exact revie
         await readFile(String(request.args[3]), "utf8")
       );
       expect(selected.plan).toBe("a".repeat(64));
-      expect(selected.dependencies).toEqual([{ ...binding, slot: 0 }]);
+      expect(selected.dependencies).toEqual([
+        { ...binding, slot: 0 },
+        { ...binding, service: "worker", slot: 0 },
+      ]);
     }
     return await invoke(request);
   };

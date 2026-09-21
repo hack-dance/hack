@@ -2,6 +2,8 @@ import { isRecord } from "../lib/guards.ts";
 import {
   type NativeRuntimeSelection,
   readNativeFailureCode,
+  rethrowNativeInputFailure,
+  writeNativePrivateInput,
 } from "./native-runtime-client.ts";
 
 const RUN = /^[a-f0-9]{32}$/;
@@ -91,14 +93,14 @@ export async function serveNativeProjectGraph(opts: {
     terminate();
   }, opts.startupTimeoutMs);
   try {
-    if (opts.privateInput && child.stdin && typeof child.stdin !== "number") {
-      child.stdin.write(opts.privateInput);
-      await child.stdin.end();
-    }
+    const inputFailure = await writeNativePrivateInput(
+      child.stdin,
+      opts.privateInput
+    );
     ready = await consumeGraphOutput({
       output: child.stdout,
       run: opts.run,
-      interrupted: () => canceled || timedOut,
+      interrupted: () => canceled || timedOut || inputFailure !== undefined,
       onReady: async () => {
         await opts.onReady();
         clearTimeout(startupTimer);
@@ -106,6 +108,11 @@ export async function serveNativeProjectGraph(opts: {
     });
     const code = await child.exited;
     const failure = await failureCode;
+    rethrowNativeInputFailure(inputFailure, {
+      interrupted: timedOut || canceled,
+      code,
+      nativeCode: failure,
+    });
     if (timedOut || canceled || !ready) {
       throw new Error(
         `Native graph startup was interrupted or failed${failure ? ` (${failure})` : ""}; inspect owned state before retrying.`

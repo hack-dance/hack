@@ -52,6 +52,16 @@ impl Admission {
             end: None,
         })
     }
+    pub fn with_hello(mut self, hello: &[u8]) -> Result<Self, CandidateError> {
+        if Instant::now() >= self.deadline {
+            return Err(error());
+        }
+        let (server, challenge) = self.authority.challenge(hello)?;
+        self.server = Some(server);
+        self.output = challenge;
+        self.stage = Stage::Challenge;
+        Ok(self)
+    }
     pub fn events(&self) -> [libc::pollfd; 2] {
         let read = matches!(self.stage, Stage::Hello | Stage::Proof);
         [

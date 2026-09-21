@@ -27,7 +27,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 const BUDGET: Duration = Duration::from_secs(5);
 type Reply<T> = SyncSender<Result<T, CandidateError>>;
@@ -88,7 +88,8 @@ struct Slot {
     canonical_parent: PathBuf,
     provenance: Provenance,
     listener: UnixListener,
-    target: Option<(Target, Arc<AtomicBool>)>,
+    targets: Vec<(Target, Arc<AtomicBool>)>,
+    endpoint_generation: Option<[u8; 32]>,
 }
 impl Slot {
     fn bind(input: ManagedSlot) -> Result<Self, CandidateError> {
@@ -114,7 +115,8 @@ impl Slot {
             listener,
             canonical_parent,
             provenance: original,
-            target: None,
+            targets: Vec::new(),
+            endpoint_generation: None,
         };
         if provenance(&slot.path, &slot.canonical_parent)? != slot.provenance {
             return Err(refused());
@@ -148,11 +150,39 @@ impl Drop for Slot {
         }
     }
 }
+struct Preamble {
+    stream: UnixStream,
+    slot: u8,
+    deadline: Instant,
+    bytes: [u8; crate::provider::relay_auth::CLIENT_HELLO_BYTES],
+    used: usize,
+}
+impl Preamble {
+    fn progress(&mut self, readable: bool) -> Result<(), CandidateError> {
+        if Instant::now() >= self.deadline {
+            return Err(refused());
+        }
+        if readable {
+            match self.stream.read(&mut self.bytes[self.used..]) {
+                Ok(0) => return Err(refused()),
+                Ok(n) => self.used += n,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return Err(refused()),
+            }
+        }
+        Ok(())
+    }
+}
 struct Reactor {
     // Declaration order is intentional: revoke and close flows before discovery.
     owner: RelayOwner,
     control: ControlListener,
     slots: Vec<Slot>,
+    preambles: Vec<Preamble>,
     wake: UnixStream,
     commands: Receiver<Command>,
     stop: Arc<AtomicBool>,
@@ -187,11 +217,20 @@ impl Reactor {
                             let slot = self
                                 .slots
                                 .iter_mut()
-                                .find(|s| s.number == number && s.target.is_none())
+                                .find(|s| s.number == number)
                                 .ok_or_else(refused)?;
                             slot.verify()?;
+                            let generation = endpoint.generation()?;
+                            if slot
+                                .endpoint_generation
+                                .is_some_and(|old| old != generation)
+                            {
+                                return Err(refused());
+                            }
                             let grant = self.owner.register_graph(scope, service, endpoint)?;
-                            slot.target = Some((grant.target.clone(), Arc::clone(&canceled)));
+                            slot.endpoint_generation = Some(generation);
+                            slot.targets
+                                .push((grant.target.clone(), Arc::clone(&canceled)));
                             Ok(grant)
                         })();
                         if let Err(
@@ -212,7 +251,7 @@ impl Reactor {
                 }
             }
             for slot in &mut self.slots {
-                if let Some((target, canceled)) = &slot.target {
+                for (target, canceled) in &slot.targets {
                     if canceled.swap(false, Ordering::AcqRel) {
                         retire(&mut self.owner, target.clone())?;
                     }
@@ -222,7 +261,7 @@ impl Reactor {
                 break;
             }
             let control_enabled = self.owner.control_connections() < 32;
-            let flow_enabled = self.owner.connections() < 64;
+            let flow_enabled = self.owner.connections() + self.preambles.len() < 64;
             let mut fds = vec![self.wake.as_fd()];
             if control_enabled {
                 fds.push(self.control.as_fd());
@@ -230,9 +269,15 @@ impl Reactor {
             if flow_enabled {
                 fds.extend(self.slots.iter().map(|s| s.listener.as_fd()));
             }
-            let ready = self
-                .owner
-                .tick_with_wakeups(Duration::from_secs(60), &fds)?;
+            let preamble_offset = fds.len();
+            fds.extend(self.preambles.iter().map(|p| p.stream.as_fd()));
+            let wait = self
+                .preambles
+                .iter()
+                .map(|p| p.deadline.saturating_duration_since(Instant::now()))
+                .min()
+                .unwrap_or(Duration::from_secs(60));
+            let ready = self.owner.tick_with_wakeups(wait, &fds)?;
             drop(fds);
             if ready[0] != 0 {
                 let mut bytes = [0; 128];
@@ -253,6 +298,25 @@ impl Reactor {
             if control_enabled && ready[1] != 0 {
                 let _ = self.control.accept(&mut self.owner, BUDGET);
             }
+            for index in (0..self.preambles.len()).rev() {
+                let p = &mut self.preambles[index];
+                let failed = p.progress(ready[preamble_offset + index] != 0).is_err();
+                if failed || p.used == p.bytes.len() {
+                    let p = self.preambles.swap_remove(index);
+                    if !failed {
+                        let slot = self
+                            .slots
+                            .iter()
+                            .find(|s| s.number == p.slot)
+                            .ok_or_else(refused)?;
+                        slot.verify()?;
+                        let targets: Vec<_> = slot.targets.iter().map(|(t, _)| t.clone()).collect();
+                        let _ = self
+                            .owner
+                            .admit_shared(&targets, p.stream, p.deadline, &p.bytes);
+                    }
+                }
+            }
             let offset = 1 + usize::from(control_enabled);
             if flow_enabled {
                 for (slot, flags) in self.slots.iter().zip(&ready[offset..]) {
@@ -262,8 +326,15 @@ impl Reactor {
                     slot.verify()?;
                     match slot.listener.accept() {
                         Ok((stream, _)) => {
-                            if let Some((target, _)) = &slot.target {
-                                let _ = self.owner.admit(target, stream, BUDGET);
+                            if self.owner.connections() + self.preambles.len() < 64 {
+                                stream.set_nonblocking(true).map_err(|_| refused())?;
+                                self.preambles.push(Preamble {
+                                    stream,
+                                    slot: slot.number,
+                                    deadline: Instant::now() + BUDGET,
+                                    bytes: [0; crate::provider::relay_auth::CLIENT_HELLO_BYTES],
+                                    used: 0,
+                                });
                             }
                         }
                         Err(e)
@@ -333,7 +404,9 @@ impl ManagedOwner {
         let mut owner = RelayOwner::new(
             context,
             OwnerLimits {
-                registrations: 32,
+                // Retain old grants for cleanup: 72 initial plus 72 restored fit.
+                // Exhaustion refuses; this is not an unbounded restore history.
+                registrations: 256,
                 controls: 32,
                 relay: Limits {
                     max_flows: 64,
@@ -353,6 +426,7 @@ impl ManagedOwner {
             owner,
             control,
             slots,
+            preambles: Vec::new(),
             wake: read,
             commands: receiver,
             stop: Arc::clone(&stop),
@@ -492,7 +566,36 @@ mod tests {
         };
         let graph = GraphScope::new(context(), [3; 32]).unwrap();
         let grant = managed.register(graph, [4; 32], 0, endpoint()).unwrap();
-        assert!(managed.register(graph, [5; 32], 0, endpoint()).is_err());
+        let second = managed.register(graph, [5; 32], 0, endpoint()).unwrap();
+        assert_ne!(grant.target, second.target);
+        for selected in [&grant, &second] {
+            let mut transport = UnixStream::connect(&socket).unwrap();
+            transport
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            transport
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let (client, hello) = selected.credential.begin().unwrap();
+            transport.write_all(&hello[..11]).unwrap();
+            managed.verify_alive().unwrap();
+            transport.write_all(&hello[11..]).unwrap();
+            let mut challenge = [0; 64];
+            transport.read_exact(&mut challenge).unwrap();
+            let (finish, proof) = client.answer(&challenge).unwrap();
+            transport.write_all(&proof).unwrap();
+            let mut acceptance = [0; 32];
+            transport.read_exact(&mut acceptance).unwrap();
+            finish.accept(&acceptance).unwrap();
+        }
+
+        let other = TcpListener::bind("127.0.0.1:0").unwrap();
+        let foreign = HostEndpoint::capture(
+            std::process::id() as i32,
+            other.local_addr().unwrap().port(),
+        )
+        .unwrap();
+        assert!(managed.register(graph, [6; 32], 0, foreign).is_err());
         assert_eq!(
             managed.endpoint().incarnation(),
             PinnedEndpoint::load(&root.0, context())
@@ -592,5 +695,28 @@ mod tests {
         let mut byte = [0];
         a.read_exact(&mut byte).unwrap();
         assert_eq!(byte, [42]);
+    }
+    #[test]
+    fn split_preamble_retains_accept_deadline() {
+        let (stream, mut client) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut pending = Preamble {
+            stream,
+            slot: 0,
+            deadline,
+            bytes: [0; 136],
+            used: 0,
+        };
+        client.write_all(&[7; 8]).unwrap();
+        pending.progress(true).unwrap();
+        assert_eq!(pending.used, 8);
+        pending.progress(true).unwrap();
+        assert_eq!(pending.used, 8);
+        assert_eq!(pending.deadline, deadline);
+        pending.deadline = Instant::now();
+        client.write_all(&[7; 128]).unwrap();
+        assert!(pending.progress(true).is_err());
+        assert_eq!(pending.used, 8);
     }
 }

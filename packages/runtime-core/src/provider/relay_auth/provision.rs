@@ -19,6 +19,40 @@ const LENGTH: usize = 8 + 96 + 32;
 /// forwarding and failure revocation; creating this value proves none of those.
 pub struct PrivateInput(UnixStream);
 impl PrivateInput {
+    /// Forward exactly one consumed credential to an already authenticated local
+    /// exec stdin. No caller-visible bytes or durable representation is produced.
+    pub(crate) fn forward(
+        self,
+        stream: &mut UnixStream,
+        deadline: std::time::Instant,
+    ) -> Result<(), CandidateError> {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(refused)?;
+        // Poll-based receive also handles macOS rejecting SO_RCVTIMEO on the
+        // already closed writer half of this one-use anonymous channel.
+        let bytes = super::super::private_input::receive(
+            self.0.into(),
+            remaining.min(Duration::from_secs(5)),
+            LENGTH,
+        )?;
+        if bytes.len() != LENGTH || &bytes[..8] != MAGIC {
+            return Err(refused());
+        }
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(refused)?;
+        stream
+            .set_write_timeout(Some(remaining))
+            .map_err(|_| refused())?;
+        stream.write_all(&bytes[..]).map_err(|_| refused())?;
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .map_err(|_| refused())
+    }
+
     pub fn into_stdin(self) -> Stdio {
         Stdio::from(OwnedFd::from(self.0))
     }

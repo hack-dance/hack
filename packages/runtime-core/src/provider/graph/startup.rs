@@ -27,6 +27,9 @@ pub struct Service {
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     pub(crate) slot: u8,
+    /// Exact verified host listener generation. Required for shared physical slots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) endpoint_generation: Option<String>,
     pub(crate) port: u16,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) aliases: Vec<String>,
@@ -42,10 +45,14 @@ fn binding_name(name: &str) -> bool {
 impl Service {
     fn bindings_valid(&self) -> bool {
         !self.bindings.is_empty()
-            && self.bindings.len() <= 32
+            && self.bindings.len() <= crate::provider::relay_auth::MAX_LOGICAL_BINDINGS
             && self.bindings.iter().all(|(name, binding)| {
                 binding_name(name)
                     && binding.slot < 32
+                    && binding
+                        .endpoint_generation
+                        .as_deref()
+                        .is_none_or(|value| hex(value, 64))
                     && binding.port != 0
                     && dependency_address(binding.slot, &binding.aliases).is_ok()
                     && binding.process.is_none_or(|p| {
@@ -132,25 +139,28 @@ impl Startup {
                         }
                     }
             })
-            && self
-                .services
-                .values()
-                .flat_map(|s| s.bindings.values().map(|b| b.slot))
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                == self
-                    .services
-                    .values()
-                    .map(|s| s.bindings.len())
-                    .sum::<usize>()
+            && shared_slots_valid(self.services.values().flat_map(|s| s.bindings.values()))
             && self
                 .services
                 .values()
                 .map(|s| s.bindings.len())
                 .sum::<usize>()
-                <= 32
+                <= crate::provider::relay_auth::MAX_LOGICAL_BINDINGS
     }
 }
+/// Legacy unique slots remain readable; sharing never infers listener authority
+/// from a slot number, application alias or guest port.
+fn shared_slots_valid<'a>(bindings: impl Iterator<Item = &'a Binding>) -> bool {
+    let mut slots = BTreeMap::new();
+    bindings.into_iter().all(|binding| {
+        let generation = binding.endpoint_generation.as_deref();
+        match slots.insert(binding.slot, generation) {
+            None => true,
+            Some(previous) => generation.is_some() && previous == generation,
+        }
+    })
+}
+
 pub(super) fn valid_started(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64

@@ -122,3 +122,36 @@ test("structured failures expose only a bounded code, never their message", asyn
     "Native runtime request failed (source_conflict); inspect owned state before retrying."
   );
 });
+
+test("early structured rejection survives a full private-input pipe without replay", async () => {
+  const runtime = await fixture();
+  const marker = join(runtime.home, "attempts");
+  await Bun.write(
+    runtime.binary,
+    `#!${process.execPath}
+import { appendFileSync, closeSync } from "node:fs";
+appendFileSync(${JSON.stringify(marker)}, "attempt\\n");
+closeSync(0);
+await Bun.sleep(20);
+console.error(JSON.stringify({code:"graph_budget",message:"synthetic-private-diagnostic"}));
+process.exit(23);
+`
+  );
+  let failure = "";
+  try {
+    await invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args: [],
+      timeoutMs: 2000,
+      privateInput: new TextEncoder().encode(
+        "synthetic-private-payload".repeat(10_000)
+      ),
+    });
+  } catch (error) {
+    failure = String(error);
+  }
+  expect(failure).toContain("Native runtime request failed (graph_budget)");
+  expect(failure).not.toContain("synthetic-private");
+  expect(await Bun.file(marker).text()).toBe("attempt\n");
+});

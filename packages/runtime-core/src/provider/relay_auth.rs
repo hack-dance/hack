@@ -16,6 +16,8 @@ const MAGIC: &[u8; 8] = b"HKRA0001";
 const DOMAIN: &[u8] = b"Hack relay auth v1\0";
 const TTL: Duration = Duration::from_secs(5);
 pub const CLIENT_HELLO_BYTES: usize = 136;
+/// Logical grants are independent of the physical provider socket budget.
+pub const MAX_LOGICAL_BINDINGS: usize = 128;
 pub const SERVER_HELLO_BYTES: usize = 64;
 type HmacSha256 = Hmac<Sha256>;
 #[path = "relay_auth/provision.rs"]
@@ -259,6 +261,13 @@ impl Authority {
                 signal: Mutex::new(None),
             }),
         }
+    }
+    /// Routing hint only: callers must still complete this authority's handshake.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn matches_hello(&self, hello: &[u8]) -> bool {
+        hello.len() == CLIENT_HELLO_BYTES
+            && &hello[..8] == MAGIC
+            && hello[8..104] == self.core.binding.bytes()
     }
     pub fn challenge(
         &self,

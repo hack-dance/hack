@@ -121,3 +121,52 @@ test("unsupported changes and conflicts refuse without mutating input", () => {
     })
   ).toThrow("conflicts");
 });
+
+test("explicit host aliases preserve existing declarations and still require separate native grants", () => {
+  const original = input();
+  const compose = JSON.parse(original.normalizedComposeJson);
+  compose.services.web.extra_hosts = ["search.example.com:host-gateway"];
+  const source = {
+    ...original,
+    normalizedComposeJson: JSON.stringify(compose),
+  };
+  const adapted = adaptNativeProject({
+    input: source,
+    selection: {
+      version: 1,
+      additionalHostAliases: {
+        web: ["search.example.com", "host.docker.internal", "api.example.com"],
+      },
+    },
+  });
+  expect(
+    JSON.parse(adapted.normalizedComposeJson).services.web.extra_hosts
+  ).toEqual([
+    "search.example.com:host-gateway",
+    "host.docker.internal:host-gateway",
+    "api.example.com:host-gateway",
+  ]);
+  expect(source.normalizedComposeJson).not.toContain("api.example.com");
+  for (const aliases of [
+    ["*.example.com"],
+    ["host.docker.internal", "host.docker.internal"],
+    ["bad:8443"],
+  ]) {
+    expect(() =>
+      adaptNativeProject({
+        input: source,
+        selection: { version: 1, additionalHostAliases: { web: aliases } },
+      })
+    ).toThrow("values omitted");
+  }
+  compose.services.web.extra_hosts = { "api.example.com": "192.0.2.1" };
+  expect(() =>
+    adaptNativeProject({
+      input: { ...original, normalizedComposeJson: JSON.stringify(compose) },
+      selection: {
+        version: 1,
+        additionalHostAliases: { web: ["api.example.com"] },
+      },
+    })
+  ).toThrow("conflicts");
+});

@@ -149,6 +149,11 @@ pub(super) struct Pin {
 }
 impl Pin {
     pub fn load(candidate: &Candidate, run: &str) -> Result<Self, CandidateError> {
+        let pin = Self::read(candidate, run)?;
+        pin.verify()?;
+        Ok(pin)
+    }
+    fn read(candidate: &Candidate, run: &str) -> Result<Self, CandidateError> {
         let root = root(candidate, run)?;
         state::check_private_directory(&root).map_err(|_| refused())?;
         let mut file = OpenOptions::new()
@@ -182,7 +187,7 @@ impl Pin {
             bytes,
             record_id: id(&metadata),
         };
-        pin.verify()?;
+        pin.verify_files()?;
         Ok(pin)
     }
     fn verify_files(&self) -> Result<(), CandidateError> {
@@ -595,5 +600,35 @@ impl Retired {
             }
         }
         Ok(())
+    }
+}
+
+/// A held publication lock and unchanged record prove the old owner cannot return.
+pub(in crate::provider::graph) struct DeadOwner {
+    pin: Pin,
+    _lock: state::Lock,
+}
+impl DeadOwner {
+    pub(in crate::provider::graph) fn acquire(
+        candidate: &Candidate,
+        run: &str,
+    ) -> Result<Self, CandidateError> {
+        let lock = state::Lock::acquire_existing(&root(candidate, run)?)?;
+        let value = Self {
+            pin: Pin::read(candidate, run)?,
+            _lock: lock,
+        };
+        value.verify()?;
+        Ok(value)
+    }
+    pub(in crate::provider::graph) fn verify(&self) -> Result<(), CandidateError> {
+        self.pin.verify_files()?;
+        if identity::alive(self.pin.record.process.pid)? {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    pub(in crate::provider::graph) fn fingerprint(&self) -> String {
+        format!("{:x}", Sha256::digest(&self.pin.bytes))
     }
 }

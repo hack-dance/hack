@@ -12,6 +12,7 @@ fn receipt(index: usize) -> Receipt {
         plan_id: "d".repeat(64),
         phase: "stopped-data-retained".into(),
         environment_attached: false,
+        startup_failure: None,
         initializer_cache_release: BTreeMap::new(),
         source: None,
         readiness: BTreeMap::new(),

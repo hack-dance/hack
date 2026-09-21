@@ -58,14 +58,22 @@ test "$(sha256sum "$file" | cut -d' ' -f1)" = "$1"
 printf 'launcher-ready-v1\n'
 "#;
 
+/// Ownership for private files and helper execs, not Docker's resolved application
+/// group. UID-only User remains unchanged in create config so the Engine resolves
+/// its image passwd/group semantics; mode0400 payload access depends only on UID.
 pub(super) fn identity(config: &Value) -> Result<(u32, u32), CandidateError> {
-    let user = config["User"].as_str().unwrap_or("0:0");
-    let (uid, gid) = user.split_once(':').ok_or_else(|| {
-        error(
-            "environment_user",
-            "Environment delivery requires an explicit numeric UID:GID.",
-        )
-    })?;
+    let user = match config.get("User") {
+        None | Some(Value::Null) => "0:0",
+        Some(Value::String(user)) if user.is_empty() => "0:0",
+        Some(Value::String(user)) => user,
+        _ => {
+            return Err(error(
+                "environment_user",
+                "A numeric image or Compose user is required; values omitted.",
+            ));
+        }
+    };
+    let (uid, gid) = user.split_once(':').unwrap_or((user, "0"));
     let parse = |v: &str| -> Result<u32, CandidateError> {
         if v.is_empty() || v.len() > 10 || !v.bytes().all(|b| b.is_ascii_digit()) {
             return Err(error("environment_user", "Invalid numeric UID:GID."));
@@ -142,8 +150,8 @@ fn validate_health(config: &Value) -> Result<(), CandidateError> {
 }
 pub(super) fn attach(config: &mut Value, path: &str, launcher: &str) -> Result<(), CandidateError> {
     validate(config)?;
-    let (uid, gid) = identity(config)?;
-    config["User"] = json!(format!("{uid}:{gid}"));
+    // Preserve Docker's numeric UID-only group lookup and supplemental groups.
+    identity(config)?;
     if config["Healthcheck"]["Test"][0] == "CMD" {
         let mut test = vec![
             json!("CMD"),
@@ -271,8 +279,20 @@ mod tests {
         }
     }
     #[test]
+    fn uid_only_keeps_engine_group_resolution_while_private_files_use_owner_uid() {
+        let mut value = config();
+        value["User"] = json!("1001");
+        assert_eq!(identity(&value).unwrap(), (1001, 0));
+        attach(&mut value, "/private/payload", "/private/launcher").unwrap();
+        assert_eq!(value["User"], "1001");
+        for invalid in [json!(true), json!(1), json!("1001:staff"), json!("-1")] {
+            value["User"] = invalid;
+            assert!(identity(&value).is_err());
+        }
+    }
+    #[test]
     fn ambiguous_users_health_exec_and_mount_collisions_refuse_before_attachment() {
-        for user in ["bun", "1000", "-1:2", "1:4294967295", "1:", "1:2:3"] {
+        for user in ["bun", "-1:2", "1:4294967295", "1:", "1:2:3"] {
             let mut value = config();
             value["User"] = json!(user);
             assert!(validate(&value).is_err());

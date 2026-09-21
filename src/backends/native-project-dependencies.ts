@@ -82,14 +82,19 @@ export function parseNativeHostDependencies(opts: {
       ) &&
       Array.isArray(value.dependencies) &&
       value.dependencies.length > 0 &&
-      value.dependencies.length <= 32
+      value.dependencies.length <= 128
     )
   ) {
     throw refused();
   }
   const keys = new Set<string>();
   const aliases = new Set<string>();
-  return value.dependencies.map((entry, slot) => {
+  const transports = new Map<
+    string,
+    { slot: number; services: Set<string> }[]
+  >();
+  let nextSlot = 0;
+  return value.dependencies.map((entry) => {
     if (
       !(
         isRecord(entry) &&
@@ -125,10 +130,27 @@ export function parseNativeHostDependencies(opts: {
       }
       aliases.add(selected);
     }
+    // Share only the listening transport across services, never their grants.
+    // Native review still pins and compares the complete endpoint generation.
+    const endpoint = `${entry.host_pid}:${entry.host_port}`;
+    const selectedService = entry.service;
+    const available = transports.get(endpoint) ?? [];
+    let transport = available.find(
+      (item) => !item.services.has(selectedService)
+    );
+    if (!transport) {
+      if (nextSlot >= 32) {
+        throw refused();
+      }
+      transport = { slot: nextSlot++, services: new Set() };
+      available.push(transport);
+      transports.set(endpoint, available);
+    }
+    transport.services.add(entry.service);
     return {
       service: entry.service,
       binding: entry.binding,
-      slot,
+      slot: transport.slot,
       guest_port: entry.guest_port,
       host_port: entry.host_port,
       host_pid: entry.host_pid,

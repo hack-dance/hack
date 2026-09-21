@@ -12,6 +12,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
+pub(super) mod relay_exec;
 mod service_exec;
 mod stop;
 
@@ -308,12 +309,20 @@ impl<'a> Engine<'a> {
         Self::connect_mode(candidate, true)
     }
 
+    pub(super) fn connect_cleanup_wait(candidate: &'a Candidate) -> Result<Self, CandidateError> {
+        Self::from_guest(OwnedGuest::connect_cleanup_wait(candidate)?, true)
+    }
+
     fn connect_mode(candidate: &'a Candidate, cleanup_only: bool) -> Result<Self, CandidateError> {
         let guest = if cleanup_only {
             OwnedGuest::connect_cleanup(candidate)?
         } else {
             OwnedGuest::connect(candidate)?
         };
+        Self::from_guest(guest, cleanup_only)
+    }
+
+    fn from_guest(guest: OwnedGuest<'a>, cleanup_only: bool) -> Result<Self, CandidateError> {
         let transport = Transport::new(&guest.engine_socket()?, Duration::from_secs(40))?;
         let engine = Self {
             guest,

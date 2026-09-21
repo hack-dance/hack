@@ -15,7 +15,7 @@ pub enum Condition {
     Healthy,
     Completed,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Health {
     None,
@@ -23,7 +23,7 @@ pub enum Health {
     Healthy,
     Unhealthy,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Observation {
     Created,
@@ -43,7 +43,7 @@ impl Observation {
             Condition::Completed => self == Self::Exited { code: 0 },
         }
     }
-    fn failed(self) -> bool {
+    pub(crate) fn failed(self) -> bool {
         matches!(
             self,
             Self::Dead
@@ -244,7 +244,17 @@ fn inspect(
     if state.failed() {
         return Err(error(
             "graph_service_failed",
-            "An owned graph service failed; no further services will start.",
+            &match state {
+                Observation::Exited { code } => format!(
+                    "Owned graph service {name} exited with code {code}; no further services will start."
+                ),
+                Observation::Dead => format!(
+                    "Owned graph service {name} is dead or OOM-killed; no further services will start."
+                ),
+                _ => format!(
+                    "Owned graph service {name} is unhealthy; no further services will start."
+                ),
+            },
         ));
     }
     Ok(state)
@@ -620,12 +630,14 @@ mod tests {
         ] {
             let mut driver = driver();
             driver.states.insert(service.into(), state);
-            assert_eq!(
-                run(&graph(), &mut driver, Duration::from_secs(1))
-                    .unwrap_err()
-                    .code,
-                "graph_service_failed"
-            );
+            let failure = run(&graph(), &mut driver, Duration::from_secs(1)).unwrap_err();
+            assert_eq!(failure.code, "graph_service_failed");
+            assert!(failure.message.contains(service));
+            assert!(failure.message.contains(if service == "init" {
+                "code 23"
+            } else {
+                "unhealthy"
+            }));
             assert_eq!(driver.starts, starts);
         }
     }

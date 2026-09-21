@@ -385,6 +385,29 @@ impl RelayLoop {
         self.stats.peak_connections = self.stats.peak_connections.max(self.connections());
         Ok(id)
     }
+    /// Continue a bounded owner-selected preamble without renewing its deadline.
+    pub(super) fn admit_hello(
+        &mut self,
+        transport: UnixStream,
+        endpoint: &HostEndpoint,
+        authority: &Authority,
+        deadline: Instant,
+        hello: &[u8],
+    ) -> Result<u64, CandidateError> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || remaining > Duration::from_secs(5) {
+            return Err(error());
+        }
+        self.capacity()?;
+        let id = self.next_id.checked_add(1).ok_or_else(error)?;
+        let pending =
+            Admission::new(id, transport, endpoint, authority, deadline)?.with_hello(hello)?;
+        self.handshakes.push(pending);
+        self.next_id = id;
+        self.stats.pending_accepted += 1;
+        self.stats.peak_connections = self.stats.peak_connections.max(self.connections());
+        Ok(id)
+    }
     /// Accept at most one transport without blocking, after checking shared capacity.
     /// The owner supplies a private listener and must stop polling it while full;
     /// this method neither creates nor unlinks the socket pathname.

@@ -74,13 +74,18 @@ export async function invokeNativeRuntime(opts: {
     child.kill("SIGKILL");
   }, timeoutMs);
   try {
-    if (opts.privateInput && child.stdin && typeof child.stdin !== "number") {
-      child.stdin.write(opts.privateInput);
-      await child.stdin.end();
-    }
+    const inputFailure = await writeNativePrivateInput(
+      child.stdin,
+      opts.privateInput
+    );
     const bytes = await readBoundedOutput(child.stdout);
     const code = await child.exited;
     const failure = await failureCode;
+    rethrowNativeInputFailure(inputFailure, {
+      interrupted: timedOut,
+      code,
+      nativeCode: failure,
+    });
     if (timedOut || code !== 0) {
       throw new Error(
         timedOut
@@ -168,5 +173,35 @@ export async function readNativeFailureCode(
     return;
   } finally {
     reader.releaseLock();
+  }
+}
+
+/** Capture delivery failure while the caller drains and reaps the receiver, never replaying input. */
+export async function writeNativePrivateInput(
+  sink: Pick<Bun.FileSink, "write" | "end"> | number | null | undefined,
+  input: Uint8Array | undefined
+): Promise<{ error: unknown } | undefined> {
+  if (!(input && sink) || typeof sink === "number") {
+    return;
+  }
+  try {
+    sink.write(input);
+    await sink.end();
+  } catch (error) {
+    return { error };
+  }
+}
+
+/** Only a confirmed receiver rejection or interruption supersedes a delivery error. */
+export function rethrowNativeInputFailure(
+  failure: { error: unknown } | undefined,
+  result: { interrupted: boolean; code: number; nativeCode: string | undefined }
+): void {
+  if (
+    failure &&
+    !result.interrupted &&
+    !(result.code !== 0 && result.nativeCode)
+  ) {
+    throw failure.error;
   }
 }

@@ -16,6 +16,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
+import { checkNativeHttpsPort } from "./native-https-port.ts";
 import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
@@ -36,6 +37,7 @@ interface SpawnInput {
   readonly pipe: boolean;
 }
 interface Dependencies {
+  readonly checkPort: typeof checkNativeHttpsPort;
   readonly invoke: typeof invokeNativeRuntime;
   readonly spawn: (input: SpawnInput) => HttpsChild;
   readonly permissionPort: () => Promise<number>;
@@ -499,6 +501,7 @@ export async function startNativeProjectHttps(opts: {
   close(): Promise<void>;
 }> {
   const deps = {
+    checkPort: checkNativeHttpsPort,
     invoke: invokeNativeRuntime,
     spawn: spawnNativeHttpsChild,
     permissionPort,
@@ -536,6 +539,7 @@ export async function startNativeProjectHttps(opts: {
   if (home !== opts.runtime.home) {
     throw refused();
   }
+  await deps.checkPort(opts.httpsPort);
   await privateDirectory(home);
   const storage = join(home, "native-https");
   await privateDirectory(storage);

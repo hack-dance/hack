@@ -421,7 +421,12 @@ export async function startNativeProject(opts: {
         opts.scope.projectRoot,
         "--unfiltered-source",
         ...(hostDependencies.length > 0
-          ? ["--dependency-sockets", String(hostDependencies.length)]
+          ? [
+              "--dependency-sockets",
+              String(
+                new Set(hostDependencies.map((binding) => binding.slot)).size
+              ),
+            ]
           : []),
         ...(bridgeCapacity > 0
           ? ["--bridge-sockets", String(bridgeCapacity)]

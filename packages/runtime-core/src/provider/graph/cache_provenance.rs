@@ -389,6 +389,7 @@ mod tests {
             plan_id: "d".repeat(64),
             phase: "ready-observed".into(),
             environment_attached: false,
+            startup_failure: None,
             initializer_cache_release: BTreeMap::new(),
             source: None,
             readiness: BTreeMap::from([("deps".into(), Condition::Completed)]),

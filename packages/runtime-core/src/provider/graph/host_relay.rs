@@ -58,7 +58,7 @@ pub(super) fn cleanup_with_relay_expected(
     expected_generation: Option<(&str, std::time::Instant)>,
 ) -> Result<Receipt, CandidateError> {
     use crate::provider::relay_owner::lifecycle_intent::Coordinator;
-    let engine = Engine::connect_cleanup(candidate)?;
+    let engine = Engine::connect_cleanup_wait(candidate)?;
     let (mut receipt, root) = load(candidate, &engine, run)?;
     // Compare under the same mutation lease that performs cleanup. A stale client
     // cannot stop the newer execution between observation and retirement.
@@ -312,7 +312,7 @@ pub(super) fn require_acknowledged_enrollment(receipt: &Receipt) -> Result<(), C
     Ok(())
 }
 
-fn cleanup_preflight(
+pub(super) fn cleanup_preflight(
     engine: &Engine<'_>,
     receipt: &Receipt,
     root: &std::path::Path,
@@ -355,7 +355,7 @@ fn require_retained_volume(
         _ => Err(refused()),
     }
 }
-fn cleanup_effect(
+pub(super) fn cleanup_effect(
     receipt: &Receipt,
     boot: &str,
     remove_data: bool,
@@ -417,6 +417,30 @@ fn cleanup_effect(
             .ok_or_else(refused)?
             .push(json!(routes));
     }
+    // Preserve the historical cleanup digest when no listener generations were
+    // recorded. New receipts bind these pins even for aliasless dependencies.
+    let mut listeners = Vec::new();
+    if let Some(startup) = &receipt.relay_startup {
+        for (service_name, service) in &startup.services {
+            for (binding_name, binding) in &service.bindings {
+                if let Some(generation) = &binding.endpoint_generation {
+                    if !hex(generation, 64) {
+                        return Err(refused());
+                    }
+                    listeners.push(json!([
+                        service_name,
+                        service.generation,
+                        binding_name,
+                        binding.slot,
+                        generation
+                    ]));
+                }
+            }
+        }
+    }
+    if !listeners.is_empty() {
+        effect = json!(["hack-graph-relay-cleanup-listeners-v1", effect, listeners]);
+    }
     let outbound = receipt
         .resources
         .iter()
@@ -458,7 +482,7 @@ fn cleanup_requires_absence(
     Ok(resource.kind != Kind::Volume || remove_data)
 }
 
-fn inspect_cleanup(
+pub(super) fn inspect_cleanup(
     candidate: &Candidate,
     engine: &Engine<'_>,
     expected: &Receipt,
@@ -689,23 +713,38 @@ pub(super) fn named_binding_identity(
     binding: &startup::Binding,
 ) -> Result<[u8; 32], CandidateError> {
     let legacy = binding_identity(service, name)?;
-    if binding.aliases.is_empty() {
-        return Ok(legacy);
+    let base = if binding.aliases.is_empty() {
+        legacy
+    } else {
+        if binding.port == 0 {
+            return Err(refused());
+        }
+        let address = dependency_address(binding.slot, &binding.aliases)?;
+        let bytes = serde_json::to_vec(&json!([
+            "hack-graph-relay-named-dependency-v1",
+            legacy,
+            binding.slot,
+            address,
+            binding.port,
+            binding.aliases,
+        ]))
+        .map_err(|_| refused())?;
+        Sha256::digest(bytes).into()
+    };
+    match &binding.endpoint_generation {
+        None => Ok(base),
+        Some(generation) if hex(generation, 64) => {
+            let bytes = serde_json::to_vec(&json!([
+                "hack-graph-relay-listener-dependency-v1",
+                base,
+                binding.slot,
+                generation
+            ]))
+            .map_err(|_| refused())?;
+            Ok(Sha256::digest(bytes).into())
+        }
+        Some(_) => Err(refused()),
     }
-    if binding.port == 0 {
-        return Err(refused());
-    }
-    let address = dependency_address(binding.slot, &binding.aliases)?;
-    let bytes = serde_json::to_vec(&json!([
-        "hack-graph-relay-named-dependency-v1",
-        legacy,
-        binding.slot,
-        address,
-        binding.port,
-        binding.aliases,
-    ]))
-    .map_err(|_| refused())?;
-    Ok(Sha256::digest(bytes).into())
 }
 
 fn select(
@@ -921,6 +960,7 @@ mod tests {
                     bindings: BTreeMap::from([(
                         "search".into(),
                         startup::Binding {
+                            endpoint_generation: None,
                             slot: 0,
                             port: 443,
                             aliases,
@@ -933,6 +973,69 @@ mod tests {
             )]),
         }
     }
+    #[test]
+    fn retained_listener_generation_changes_grants_and_cleanup_authority() {
+        for aliases in [vec![], vec!["search.example".into()]] {
+            let (mut receipt, _, _) = fixture();
+            receipt.relay_startup = Some(startup_fixture(aliases));
+            let initial = cleanup_effect(&receipt, "boot", false, &json!([])).unwrap();
+            let binding =
+                receipt.relay_startup.as_ref().unwrap().services["web"].bindings["search"].clone();
+            let legacy = named_binding_identity([1; 32], "search", &binding).unwrap();
+            let mut pinned = binding.clone();
+            pinned.endpoint_generation = Some("1".repeat(64));
+            let first = named_binding_identity([1; 32], "search", &pinned).unwrap();
+            assert_ne!(legacy, first);
+            receipt
+                .relay_startup
+                .as_mut()
+                .unwrap()
+                .services
+                .get_mut("web")
+                .unwrap()
+                .bindings
+                .insert("search".into(), pinned.clone());
+            let first_cleanup = cleanup_effect(&receipt, "boot", false, &json!([])).unwrap();
+            assert_ne!(initial, first_cleanup);
+            pinned.endpoint_generation = Some("2".repeat(64));
+            assert_ne!(
+                first,
+                named_binding_identity([1; 32], "search", &pinned).unwrap()
+            );
+            receipt
+                .relay_startup
+                .as_mut()
+                .unwrap()
+                .services
+                .get_mut("web")
+                .unwrap()
+                .bindings
+                .insert("search".into(), pinned.clone());
+            assert_ne!(
+                first_cleanup,
+                cleanup_effect(&receipt, "boot", false, &json!([])).unwrap()
+            );
+            pinned.endpoint_generation = None;
+            assert_eq!(
+                legacy,
+                named_binding_identity([1; 32], "search", &pinned).unwrap()
+            );
+            receipt
+                .relay_startup
+                .as_mut()
+                .unwrap()
+                .services
+                .get_mut("web")
+                .unwrap()
+                .bindings
+                .insert("search".into(), pinned);
+            assert_eq!(
+                initial,
+                cleanup_effect(&receipt, "boot", false, &json!([])).unwrap()
+            );
+        }
+    }
+
     #[test]
     fn named_grant_identity_binds_alias_slot_address_and_port() {
         let startup = startup_fixture(vec!["search.example".into()]);

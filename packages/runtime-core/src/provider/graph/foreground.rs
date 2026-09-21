@@ -15,6 +15,7 @@ mod signals;
 #[cfg(test)]
 mod tests;
 mod transport;
+pub(in crate::provider::graph) use transport::DeadOwner;
 use transport::{Publication, WireRequest};
 fn refused() -> CandidateError {
     CandidateError::new(

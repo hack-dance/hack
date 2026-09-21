@@ -544,6 +544,7 @@ mod tests {
             relay_cleanup: None,
             probes: BTreeMap::new(),
             environment_attached: false,
+            startup_failure: None,
             initializer_cache_release: BTreeMap::new(),
         };
         fs::write(fixture.0.join("app.js"), "compatible changed source").unwrap();
@@ -631,6 +632,7 @@ mod tests {
             plan_id: review.plan_id,
             phase: "ready-observed".into(),
             environment_attached: false,
+            startup_failure: None,
             initializer_cache_release: BTreeMap::new(),
             relay_startup: None,
             relay_cleanup: None,

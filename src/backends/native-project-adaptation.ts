@@ -1,4 +1,5 @@
 import { isRecord } from "../lib/guards.ts";
+import { addNativeHostAliases } from "./native-project-host-aliases.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
 import { readNativeSelection } from "./native-project-selection.ts";
 import { applyNativeWorkspaceCache } from "./native-workspace-cache.ts";
@@ -8,6 +9,7 @@ const SELECTION_KEYS = new Set([
   "isolatedNetworks",
   "httpProbes",
   "additionalHostnames",
+  "additionalHostAliases",
   "workspaceCache",
 ]);
 const PROBE_KEYS = new Set([
@@ -185,6 +187,10 @@ export function adaptNativeProject(opts: {
     spec.healthcheck = { "x-hack-http": probe(value) };
   }
   addHostnames(compose.services, selection.additionalHostnames);
+  addNativeHostAliases({
+    services: compose.services,
+    selection: selection.additionalHostAliases,
+  });
   const normalizedComposeJson = JSON.stringify(compose);
   if (Buffer.byteLength(normalizedComposeJson) > 256 * 1024) {
     throw refused();

@@ -323,8 +323,13 @@ prepare current listeners before selection. For example:
 }
 ```
 
-Replace the example PID with the actual listener process. Up to 32 bindings and
-eight exact aliases per binding are supported; slots are assigned in file order.
+Replace the example PID with the actual listener process. Up to 128 service-specific
+bindings and eight exact aliases per binding are supported, within 32 listening transports shared with the pool's route bridges.
+Bindings in different services targeting the same pinned host listener can share
+a transport slot; authentication, cancellation and expiry remain per binding.
+The CLI groups selections by host PID and port in first-appearance order, and
+native review requires the complete captured endpoint identities to match.
+Multiple bindings within one service retain distinct slots.
 Aliases must match the service's declared `extra_hosts` entries targeting
 `host-gateway`. No general host-gateway access is enabled. Native dependency review
 pins the same-user process and exclusive loopback listener generation, then checks
@@ -335,8 +340,8 @@ host process; lifecycle hooks retain ownership of listeners they launch.
 Selected services receive `init: true` when omitted because the guest relay launcher
 requires a reaping init process. An explicit `init: false` is refused, not replaced.
 
-Fresh pools reserve dependency sockets from that selection. Existing pool capacity
-cannot be silently widened. The selection is copied into the temporary exact-plan
+Fresh pools reserve the number of distinct dependency transports from that
+selection. Existing pool capacity cannot be silently widened. The selection is copied into the temporary exact-plan
 dependency request and removed when foreground startup exits. No durable listener
 authority is inferred from a saved selection file. Image-only services omit graph
 shared-source mode; active project bind mounts still use the explicit project share.
@@ -352,6 +357,7 @@ adaptations are accepted:
   "isolatedNetworks": ["hack-dev"],
   "httpProbes": {"web": {"port": 3000, "path": "/health"}},
   "additionalHostnames": {"web": ["web.hack.local"]},
+  "additionalHostAliases": {"web": ["host.docker.internal"]},
   "workspaceCache": {
     "volume": "node_modules",
     "root": "/app",
@@ -363,8 +369,11 @@ adaptations are accepted:
 Networks must already be declared external; selection explicitly replaces their
 connectivity with the owned isolated network. Probes apply only when no existing
 healthcheck is present. Additional hostnames append to existing Caddy labels.
-Conflicts are refused. Choose actual application health endpoints; a probe is an
-application readiness contract, not a workaround for failed startup.
+Additional host aliases append explicit `host-gateway` declarations and still need
+separate pinned dependency selections; they do not enable general host access or
+override fixed-address aliases. Conflicts are refused. Choose actual application
+health endpoints; a probe is an application readiness contract, not a workaround
+for failed startup.
 
 The optional workspace cache layout mounts subdirectories of the existing declared
 dependency volume at each workspace's `node_modules`. This allows an installer to
@@ -386,8 +395,44 @@ foreground invocation; unexpected loss aborts the graph and reports failure.
 They close after graph cleanup, while private Caddy data and its CA remain under
 `<native-home>/native-https/data`. An occupied frontend owner is refused.
 
+The selected port must be available to the current host user. On hosts that restrict
+port 443, use an unprivileged test port such as 18443 or separately configure
+authorized host forwarding. Startup checks bind permission and leaves existing
+listeners untouched; it never elevates privileges automatically.
+
 Startup verifies each reviewed hostname using loopback, SNI, Host, and the private
 CA, without relying on DNS or installing system trust. This verifies TLS; HTTP
 status alone does not establish application health. The separately declared native
 HTTP readiness probes remain required. DNS and user-approved trust setup are
 separate prerequisites for normal browser access.
+
+### Explicit cleanup after a dead foreground owner
+
+`graph recover-cleanup --run-id <run> --expect-receipt <sha256>` is a retaining,
+explicit two-step recovery for a failed enrolled graph. Select the SHA256 of its
+private `state.json` receipt while the owned runtime is confirmed stopped. The
+first invocation records the exact receipt, dead foreground owner, and old boot;
+it returns `awaiting-runtime-start` without guest effects. After explicit ordinary
+`runtime up`, repeat the same command and original receipt hash. Recovery requires
+the same pool incarnation and the selected previous boot, removes only verified
+owned containers and networks, and retains named volumes and dependency caches.
+It neither marks incomplete package caches valid nor replays initializers.
+
+Recovery retains its own durable intent and completion evidence. It does not forge
+a relay acknowledgement or permit ordinary restore of the old enrolled graph;
+start a fresh graph in the same pool after cleanup. Missing or replaced foreground
+evidence, pending graph journals, unfinished explicit page-cache release, changed
+inventories, another boot rollover, and unsupported prior cleanup enrollment
+refuse. Preserve these files and use the reported reconciliation path rather than
+editing receipts. Receipt-only export/prune still requires its existing relay
+acknowledgement. Runtime restart and actual cleanup remain explicit operations.
+
+Private environment delivery preserves the selected numeric image or Compose
+`User`, including UID-only values. Docker resolves the application's primary and
+supplementary groups from the image; the wrapper does not replace them with group
+zero. UID-only private files and relay/probe helpers use group zero as their own
+storage/helper metadata, not as the application's identity. Payload files remain
+owner-only mode 0400 with exact UID, regular-file, single-link, size, and no-follow
+checks. Named users/groups remain unsupported for private delivery and refuse
+instead of silently becoming root. An image with no user retains Docker's normal
+root default; an explicit Compose numeric user takes precedence.

@@ -224,6 +224,35 @@ fn guest(
     Ok(response)
 }
 
+/// Retry only acquisition, never the verification callback or an admitted effect.
+/// The callback runs under the acquired lease and must reload current identity.
+fn operation_lease<T>(
+    root: &Path,
+    deadline: Option<Instant>,
+    verify: impl FnOnce() -> Result<T, CandidateError>,
+) -> Result<(state::Lock, T), CandidateError> {
+    let lock = loop {
+        if deadline.is_some_and(|limit| Instant::now() >= limit) {
+            return Err(CandidateError::new(
+                "provider_busy",
+                "Provider lease acquisition deadline expired; no operation was admitted.",
+            ));
+        }
+        match state::Lock::acquire(root) {
+            Ok(lock) => break lock,
+            Err(error) if error.code == "provider_busy" && deadline.is_some() => {
+                let remaining = deadline
+                    .expect("bounded acquisition")
+                    .saturating_duration_since(Instant::now());
+                std::thread::sleep(remaining.min(Duration::from_millis(50)));
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let current = verify()?;
+    Ok((lock, current))
+}
+
 /// Read-only observation takes no mutation lease and detects lifecycle changes around each read.
 pub(super) struct ObservedGuest<'a> {
     candidate: &'a Candidate,
@@ -334,16 +363,25 @@ impl<'a> OwnedGuest<'a> {
     }
 
     pub(super) fn connect(candidate: &'a Candidate) -> Result<Self, CandidateError> {
-        Self::connect_mode(candidate, true)
+        Self::connect_mode(candidate, true, None)
     }
 
     pub(super) fn connect_cleanup(candidate: &'a Candidate) -> Result<Self, CandidateError> {
-        Self::connect_mode(candidate, false)
+        Self::connect_mode(candidate, false, None)
+    }
+
+    pub(super) fn connect_cleanup_wait(candidate: &'a Candidate) -> Result<Self, CandidateError> {
+        Self::connect_mode(
+            candidate,
+            false,
+            Some(Instant::now() + Duration::from_secs(5)),
+        )
     }
 
     fn connect_mode(
         candidate: &'a Candidate,
         enforce_budget: bool,
+        deadline: Option<Instant>,
     ) -> Result<Self, CandidateError> {
         // Load before acquiring a lock: a read/transfer must not initialize absent state.
         reject_aliased_state(&root(candidate))?;
@@ -364,19 +402,21 @@ impl<'a> OwnedGuest<'a> {
                 "Start the owned candidate runtime before transferring source.",
             ));
         }
-        let lock = state::Lock::acquire(&root(candidate))?;
-        let current = Owner::load(candidate)?;
-        if current.token != owner.token
-            || current.phase != "running"
-            || current.guest_boot_id != owner.guest_boot_id
-        {
-            return Err(CandidateError::new(
-                "runtime_changed",
-                "Runtime identity changed before transfer.",
-            ));
-        }
-        verify_live(candidate, &current)?;
-        audit_boot(candidate, &current)?;
+        let (lock, current) = operation_lease(&root(candidate), deadline, || {
+            let current = Owner::load(candidate)?;
+            if current.token != owner.token
+                || current.phase != "running"
+                || current.guest_boot_id != owner.guest_boot_id
+            {
+                return Err(CandidateError::new(
+                    "runtime_changed",
+                    "Runtime identity changed before transfer.",
+                ));
+            }
+            verify_live(candidate, &current)?;
+            audit_boot(candidate, &current)?;
+            Ok(current)
+        })?;
         let guard = if enforce_budget && current.profile == super::Profile::Development {
             let sample = admission::operating_sample()?;
             let usage =
@@ -1569,6 +1609,77 @@ pub(super) fn kill_owned_vm_for_test(candidate: &Candidate) -> Result<(), Candid
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_operation_lease_waits_then_revalidates_without_replaying_effects() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "hkl-lease-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        struct Remove(std::path::PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _remove = Remove(root.clone());
+        state::private_directory(&root).unwrap();
+        let identity = root.join("identity");
+        std::fs::write(&identity, "original").unwrap();
+        for changed in [false, true] {
+            std::fs::write(&identity, "original").unwrap();
+            let held = state::Lock::acquire(&root).unwrap();
+            let calls = std::cell::Cell::new(0);
+            assert!(
+                matches!(operation_lease(&root, None, || { calls.set(1); Ok(()) }), Err(e) if e.code == "provider_busy")
+            );
+            let writer = identity.clone();
+            let worker = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                if changed {
+                    std::fs::write(writer, "replacement").unwrap();
+                }
+                drop(held);
+            });
+            let acquired =
+                operation_lease(&root, Some(Instant::now() + Duration::from_secs(2)), || {
+                    calls.set(calls.get() + 1);
+                    if std::fs::read_to_string(&identity).unwrap() != "original" {
+                        return Err(CandidateError::new(
+                            "runtime_changed",
+                            "Fixture identity changed.",
+                        ));
+                    }
+                    Ok(())
+                });
+            worker.join().unwrap();
+            assert_eq!(calls.get(), 1);
+            if changed {
+                assert!(matches!(acquired, Err(e) if e.code == "runtime_changed"));
+            } else {
+                assert!(acquired.is_ok());
+            }
+        }
+        let _held = state::Lock::acquire(&root).unwrap();
+        let called = std::cell::Cell::new(false);
+        let expired = operation_lease(
+            &root,
+            Some(Instant::now() + Duration::from_millis(75)),
+            || {
+                called.set(true);
+                Ok(())
+            },
+        );
+        assert!(matches!(expired, Err(e) if e.code == "provider_busy"));
+        assert!(!called.get());
+        assert_eq!(std::fs::read_to_string(&identity).unwrap(), "replacement");
+    }
 
     #[test]
     fn provider_command_enforces_strict_floor_only_for_approved_hosts() {

@@ -47,8 +47,9 @@ impl RelayLaunch<'_> {
 pub(crate) struct RelayChild {
     child: Option<Child>,
     status: Option<ExitStatus>,
-    stdout: ChildStdout,
-    stderr: ChildStderr,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    socket: Option<crate::provider::engine::relay_exec::RelayExec>,
     out: Vec<u8>,
     err: Vec<u8>,
     container: String,
@@ -164,8 +165,9 @@ impl RelayChild {
         let handle = Self {
             child: Some(child),
             status: None,
-            stdout,
-            stderr,
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+            socket: None,
             out: Vec::new(),
             err: Vec::new(),
             container: launch.container.into(),
@@ -178,22 +180,41 @@ impl RelayChild {
             gid: launch.gid,
             process: None,
         };
-        nonblocking(handle.stdout.as_raw_fd())?;
-        nonblocking(handle.stderr.as_raw_fd())?;
+        nonblocking(handle.stdout.as_ref().expect("pipe").as_raw_fd())?;
+        nonblocking(handle.stderr.as_ref().expect("pipe").as_raw_fd())?;
         Ok(handle)
     }
     fn drain(&mut self) -> Result<(), CandidateError> {
+        if let Some(socket) = &mut self.socket {
+            if socket.poll(&mut self.out, &mut self.err)? {
+                use std::os::unix::process::ExitStatusExt;
+                // This synthetic failure denotes lost transport, never guest exit.
+                self.status = Some(ExitStatus::from_raw(1 << 8));
+            }
+            return Ok(());
+        }
         let available = 4096_usize
             .checked_sub(self.out.len() + self.err.len())
             .ok_or_else(refused)?;
-        drain(&mut self.stdout, &mut self.out, available)?;
+        drain(
+            self.stdout.as_mut().ok_or_else(refused)?,
+            &mut self.out,
+            available,
+        )?;
         let available = 4096_usize
             .checked_sub(self.out.len() + self.err.len())
             .ok_or_else(refused)?;
-        drain(&mut self.stderr, &mut self.err, available)
+        drain(
+            self.stderr.as_mut().ok_or_else(refused)?,
+            &mut self.err,
+            available,
+        )
     }
     // May be called only after independent guest absence proof.
     fn reap_after_absence(&mut self) -> Result<(), CandidateError> {
+        // Closing this local descriptor is permitted only after independent STOP
+        // proof; transport EOF/Drop alone is never a guest-death assertion.
+        self.socket.take();
         if let Some(transport) = self.child.as_mut() {
             let status = match transport.try_wait().map_err(|_| refused())? {
                 Some(status) => status,
@@ -266,36 +287,39 @@ impl OwnedGuest<'_> {
         let slot = options.slot.to_string();
         let port = options.port.to_string();
         let address = options.address.to_string();
-        let child = command(self.candidate, &self.owner)
-            .args([
-                "machine",
-                "exec",
-                "--name",
-                &self.owner.machine,
-                "-i",
-                "--",
-                "/opt/hack-engine/docker",
-                "--host",
-                "unix:///run/hack-local/docker.sock",
-                "exec",
-                "-i",
-                "--user",
-                &user,
-                options.container,
-                "/run/hack-relay-guest",
-                "--slot",
-                &slot,
-                "--listen-port",
-                &port,
-                "--listen-address",
-                &address,
-            ])
-            .stdin(input.into_stdin())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|_| refused())?;
-        let handle = RelayChild::from_child(child, options, self.incarnation(), self.boot_id())?;
+        let socket = crate::provider::engine::relay_exec::RelayExec::launch(
+            self,
+            options.container,
+            &user,
+            &[
+                "/run/hack-relay-guest".into(),
+                "--slot".into(),
+                slot,
+                "--listen-port".into(),
+                port,
+                "--listen-address".into(),
+                address,
+            ],
+            input,
+        )?;
+        let handle = RelayChild {
+            child: None,
+            status: None,
+            stdout: None,
+            stderr: None,
+            socket: Some(socket),
+            out: Vec::new(),
+            err: Vec::new(),
+            container: options.container.into(),
+            runtime: self.incarnation().into(),
+            boot: self.boot_id().into(),
+            port: options.port,
+            address: options.address,
+            slot: options.slot,
+            uid: options.uid,
+            gid: options.gid,
+            process: None,
+        };
         self.verify()?;
         Ok(handle)
     }

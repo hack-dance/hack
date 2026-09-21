@@ -101,6 +101,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "inspect",
         "reconcile",
         "cleanup",
+        "recover-cleanup",
         "archive",
         "export",
         "reconcile-export",
@@ -236,6 +237,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 && key == "--expect-reservation")
             || (*action == "publish-bridge" && key == "--port")
             || (*action == "serve" && ["--dependencies", "--expect-dependencies"].contains(&key))
+            || (*action == "recover-cleanup" && key == "--expect-receipt")
             || key == "--run-id"
             || (["run", "serve", "restart", "restore"].contains(action)
                 && [
@@ -369,6 +371,18 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                     "unsupported_host",
                     "Graph dependency ownership requires macOS.",
                 ))
+            }
+        }
+        "recover-cleanup" => {
+            let expected = *singles.get("--expect-receipt").ok_or_else(invalid)?;
+            #[cfg(target_os = "macos")]
+            {
+                graph::recover_cleanup(candidate, run, expected)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = expected;
+                Err(invalid())
             }
         }
         "cleanup" => {

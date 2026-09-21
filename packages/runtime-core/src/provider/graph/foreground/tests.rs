@@ -342,3 +342,30 @@ fn retired_cleanup_guard_excludes_active_and_stale_publication() {
     fs::remove_file(path.join("owner.json")).unwrap();
     fs::remove_dir_all(path).unwrap();
 }
+
+#[test]
+fn dead_owner_selection_holds_lock_and_rejects_live_or_changed_records() {
+    let (_fixture, candidate, run) = fixture();
+    let path = root(&candidate, &run);
+    let published = Publication::bind(&candidate, &run).unwrap();
+    assert!(super::DeadOwner::acquire(&candidate, &run).is_err());
+    drop(published);
+    assert!(super::DeadOwner::acquire(&candidate, &run).is_err());
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("0.1")
+        .spawn()
+        .unwrap();
+    let identity = crate::provider::identity::observe(child.id() as i32).unwrap();
+    child.wait().unwrap();
+    let mut record: Value = crate::provider::state::read(&path.join("owner.json")).unwrap();
+    record["process"] = serde_json::to_value(identity).unwrap();
+    crate::provider::state::write(&path.join("owner.json"), &record).unwrap();
+    let guard = super::DeadOwner::acquire(&candidate, &run).unwrap();
+    assert!(super::DeadOwner::acquire(&candidate, &run).is_err());
+    assert_eq!(guard.fingerprint().len(), 64);
+    record["run"] = json!("f".repeat(32));
+    crate::provider::state::write(&path.join("owner.json"), &record).unwrap();
+    assert!(guard.verify().is_err());
+    drop(guard);
+    fs::remove_dir_all(path).unwrap();
+}

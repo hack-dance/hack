@@ -175,7 +175,7 @@ pub(super) fn release_guest_cache(
 
 // Keep this effect's connect and response inside one deadline, including a full
 // agent backlog. No thread or detached request outlives the caller.
-fn connect_until(path: &Path, deadline: Instant) -> Result<UnixStream, CandidateError> {
+pub(super) fn connect_until(path: &Path, deadline: Instant) -> Result<UnixStream, CandidateError> {
     if Instant::now() >= deadline {
         return Err(failure("Guest connect deadline expired."));
     }

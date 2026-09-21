@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
@@ -71,14 +71,16 @@ impl Selection {
         }
         let value: Self = serde_json::from_slice(bytes).map_err(|_| refused())?;
         let mut keys = BTreeSet::new();
-        let mut slots = BTreeSet::new();
+        let mut slots = BTreeMap::new();
+        let mut service_slots = BTreeSet::new();
         let mut ports = BTreeSet::new();
         let mut aliases = BTreeSet::new();
         if value.version != 1
             || !hex(&value.plan)
             || !hex(&value.artifact_sha256)
             || !value.artifact.is_absolute()
-            || value.dependencies.len() > 32
+            || value.dependencies.len()
+                > hack_runtime_core::provider::relay_auth::MAX_LOGICAL_BINDINGS
             || !value.dependencies.iter().all(|b| {
                 service_name(&b.service)
                     && name(&b.binding)
@@ -87,7 +89,10 @@ impl Selection {
                     && b.host_pid > 1
                     && b.host_port > 0
                     && keys.insert((&b.service, &b.binding))
-                    && slots.insert(b.slot)
+                    && slots
+                        .insert(b.slot, (b.host_pid, b.host_port))
+                        .is_none_or(|prior| prior == (b.host_pid, b.host_port))
+                    && service_slots.insert((&b.service, b.slot))
                     && graph::dependency_address(b.slot, &b.aliases).is_ok()
                     && ports.insert((
                         &b.service,
@@ -126,9 +131,17 @@ impl Selection {
     fn capture(&self) -> Result<(String, Vec<graph::Dependency>), CandidateError> {
         let mut evidence = Vec::new();
         let mut dependencies = Vec::new();
+        let mut slots = BTreeMap::new();
         for binding in &self.dependencies {
             let endpoint = HostEndpoint::capture(binding.host_pid, binding.host_port)?;
-            evidence.push(endpoint.fingerprint()?);
+            let fingerprint = endpoint.fingerprint()?;
+            if slots
+                .insert(binding.slot, fingerprint.clone())
+                .is_some_and(|prior| prior != fingerprint)
+            {
+                return Err(refused());
+            }
+            evidence.push(fingerprint);
             dependencies.push(graph::Dependency {
                 service: binding.service.clone(),
                 binding: binding.binding.clone(),
@@ -259,8 +272,19 @@ mod tests {
         document["dependencies"].as_array_mut().unwrap().truncate(1);
         document["dependencies"][0]["host_pid"] = json!(std::process::id());
         document["dependencies"][0]["host_port"] = json!(address.port());
+        let mut shared = document["dependencies"][0].clone();
+        shared["service"] = json!("worker");
+        document["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(shared);
         let selection = Selection::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
-        let (before, _) = selection.capture().unwrap();
+        let (before, bindings) = selection.capture().unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(
+            bindings[0].endpoint.fingerprint().unwrap(),
+            bindings[1].endpoint.fingerprint().unwrap()
+        );
         assert_eq!(before, selection.capture().unwrap().0);
         document["dependencies"][0]["binding"] = json!("other");
         let changed = Selection::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
@@ -273,5 +297,39 @@ mod tests {
         let replacement = TcpListener::bind(address).unwrap();
         assert_ne!(before, selection.capture().unwrap().0);
         drop(replacement);
+    }
+    #[test]
+    fn shared_listener_selection_accepts_72_bindings_but_not_foreign_endpoints() {
+        let mut document = value();
+        document["dependencies"] = json!(
+            (0..12)
+                .flat_map(|service| (0..6).map(move |slot| json!({
+                    "service":format!("service-{service}"), "binding":format!("binding-{slot}"),
+                    "slot":slot, "guest_port":9000+slot, "host_pid":42, "host_port":19000+slot,
+                    "aliases":[format!("dependency-{slot}.example")]
+                })))
+                .collect::<Vec<_>>()
+        );
+        assert!(Selection::parse(&serde_json::to_vec(&document).unwrap()).is_ok());
+        for (field, value) in [
+            ("host_pid", json!(43)),
+            ("host_port", json!(25000)),
+            ("slot", json!(32)),
+        ] {
+            let mut bad = document.clone();
+            bad["dependencies"][71][field] = value;
+            assert!(Selection::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
+        }
+        let mut duplicate = document.clone();
+        duplicate["dependencies"][71] = duplicate["dependencies"][70].clone();
+        assert!(Selection::parse(&serde_json::to_vec(&duplicate).unwrap()).is_err());
+        let first = document["dependencies"][0].clone();
+        while document["dependencies"].as_array().unwrap().len() <= 128 {
+            document["dependencies"]
+                .as_array_mut()
+                .unwrap()
+                .push(first.clone());
+        }
+        assert!(Selection::parse(&serde_json::to_vec(&document).unwrap()).is_err());
     }
 }

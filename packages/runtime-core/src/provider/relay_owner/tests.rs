@@ -341,3 +341,174 @@ fn graph_selection_refuses_unknown_scope_and_unscoped_registry() {
     assert_eq!(owner.entries.len(), 1);
     assert!(owner.entries.values().all(|entry| !entry.retired));
 }
+
+#[test]
+fn shared_listener_selects_distinct_credentials_and_retirement_is_per_grant() {
+    let mut owner = owner();
+    let (listener, first) = grant(&mut owner, 31);
+    let endpoint = HostEndpoint::capture(
+        std::process::id() as i32,
+        listener.local_addr().unwrap().port(),
+    )
+    .unwrap();
+    let second = owner.register([32; 32], endpoint).unwrap();
+    let targets = vec![first.target.clone(), second.target.clone()];
+    let mut clients = Vec::new();
+    for grant in [&first, &second] {
+        let (server, mut client) = pair();
+        let (start, hello) = grant.credential.begin().unwrap();
+        owner
+            .admit_shared(
+                &targets,
+                server,
+                Instant::now() + Duration::from_secs(1),
+                &hello,
+            )
+            .unwrap();
+        // Selecting a public hint must not open the backend.
+        assert!(listener.accept().is_err());
+        ticks(&mut owner, 2);
+        let mut response = [0; 64];
+        client.read_exact(&mut response).unwrap();
+        let (finish, proof) = start.answer(&response).unwrap();
+        client.write_all(&proof).unwrap();
+        ticks(&mut owner, 3);
+        let mut accepted = [0; 32];
+        client.read_exact(&mut accepted).unwrap();
+        let traffic = finish.accept(&accepted).unwrap().into_traffic();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let peer = loop {
+            assert!(Instant::now() < deadline);
+            owner.tick(Duration::from_millis(1)).unwrap();
+            match listener.accept() {
+                Ok((peer, _)) => break peer,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("{e}"),
+            }
+        };
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        clients.push((client, traffic, peer));
+    }
+    owner
+        .retire(&request(&owner, vec![first.target.clone()]))
+        .unwrap();
+    assert_eq!(clients[0].0.read(&mut [0]).unwrap(), 0);
+    let (client, traffic, peer) = &mut clients[1];
+    client
+        .write_all(&traffic.send.encode(Frame::Data(b"live")).unwrap())
+        .unwrap();
+    ticks(&mut owner, 3);
+    let mut bytes = [0; 4];
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut used = 0;
+    while used < bytes.len() {
+        assert!(Instant::now() < deadline);
+        owner.tick(Duration::from_millis(1)).unwrap();
+        match peer.read(&mut bytes[used..]) {
+            Ok(0) => panic!("unexpected EOF"),
+            Ok(n) => used += n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => panic!("{e}"),
+        }
+    }
+    assert_eq!(&bytes, b"live");
+    let (_, stale) = first.credential.begin().unwrap();
+    assert!(
+        owner
+            .admit_shared(
+                &targets,
+                pair().0,
+                Instant::now() + Duration::from_secs(1),
+                &stale
+            )
+            .is_err()
+    );
+    let (_, hello) = second.credential.begin().unwrap();
+    for altered in [
+        Vec::new(),
+        hello[..135].to_vec(),
+        {
+            let mut h = hello;
+            h[8] ^= 1;
+            h.to_vec()
+        },
+        {
+            let mut h = hello;
+            h[72] ^= 1;
+            h.to_vec()
+        },
+    ] {
+        assert!(
+            owner
+                .admit_shared(
+                    &targets,
+                    pair().0,
+                    Instant::now() + Duration::from_secs(1),
+                    &altered
+                )
+                .is_err()
+        );
+    }
+    assert!(
+        owner
+            .admit_shared(
+                &[first.target],
+                pair().0,
+                Instant::now() + Duration::from_secs(1),
+                &hello
+            )
+            .is_err()
+    );
+    assert!(
+        owner
+            .admit_shared(&targets, pair().0, Instant::now(), &hello)
+            .is_err()
+    );
+}
+
+#[test]
+fn retained_grant_budget_supports_full_app_restore_then_refuses_exhaustion() {
+    let mut owner = RelayOwner::new(
+        Context {
+            runtime: [1; 16],
+            boot: [2; 16],
+        },
+        OwnerLimits {
+            registrations: 256,
+            controls: 1,
+            relay: Limits {
+                max_flows: 8,
+                connect_timeout: Duration::from_secs(1),
+                idle_timeout: Duration::from_secs(2),
+            },
+        },
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = HostEndpoint::capture(
+        std::process::id() as i32,
+        listener.local_addr().unwrap().port(),
+    )
+    .unwrap();
+    for index in 0u16..256 {
+        let mut service = [9; 32];
+        service[..2].copy_from_slice(&index.to_be_bytes());
+        let grant = owner.register(service, endpoint.clone()).unwrap();
+        if index < 72 {
+            owner.retire(&request(&owner, vec![grant.target])).unwrap();
+        }
+        if index == 143 {
+            assert_eq!(owner.entries.len(), 144);
+            assert_eq!(
+                owner
+                    .entries
+                    .values()
+                    .filter(|entry| !entry.retired)
+                    .count(),
+                72
+            );
+        }
+    }
+    assert!(owner.register([10; 32], endpoint).is_err());
+    assert_eq!(owner.entries.len(), 256);
+}

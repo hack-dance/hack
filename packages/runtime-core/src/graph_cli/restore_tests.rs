@@ -256,3 +256,47 @@ fn initializer_cache_release_invalid_selection_is_pre_effect() {
     }
     assert!(!candidate.state_root.exists());
 }
+
+#[test]
+fn stopped_normalized_restore_refuses_unscoped_or_replayed_effect_flags() {
+    let fixture = Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    for args in [
+        vec![
+            "serve-restore",
+            "--run-id",
+            RUN,
+            "--project",
+            "/absent",
+            "--file",
+            "compose.yml",
+            "--expect-plan",
+            PLAN,
+            "--expect-generation",
+            GENERATION,
+        ],
+        vec![
+            "serve-restore",
+            "--run-id",
+            RUN,
+            "--release-initializer-cache",
+            "deps",
+        ],
+        vec!["restore-selection", "--run-id", RUN, "--environment-stdin"],
+        vec![
+            "restore-selection",
+            "--run-id",
+            RUN,
+            "--expect-generation",
+            GENERATION,
+        ],
+        vec!["restore-selection", "--run-id", RUN, "--remove-data"],
+    ] {
+        assert_eq!(
+            command(&candidate, &args).unwrap_err().code,
+            "graph_arguments"
+        );
+        assert!(!candidate.state_root.exists());
+        assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 0);
+    }
+}

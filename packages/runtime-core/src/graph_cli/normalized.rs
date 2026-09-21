@@ -38,6 +38,33 @@ pub(super) fn command(
             os::fd::{FromRawFd, OwnedFd},
             path::Path,
         };
+        let generation = if action == "serve-restore" {
+            let expected = singles
+                .get("--expect-generation")
+                .copied()
+                .ok_or_else(invalid)?;
+            if expected.len() != 64
+                || !expected
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(invalid());
+            }
+            let selected = graph::foreground::restore_selection(candidate, options.run.run_id)?;
+            if selected["generation"] != expected
+                || selected["plan"] != options.run.expected_plan
+                || selected["normalized_input"]["namespace"] != report.plan.namespace
+                || selected["normalized_input"]["original_compose_sha256"]
+                    != options.compose.expected_compose_sha256
+                || selected["normalized_input"]["normalized_compose_sha256"]
+                    != report.plan.compose_sha256
+            {
+                return Err(invalid());
+            }
+            Some(expected)
+        } else {
+            None
+        };
         let managed = if environment_stdin {
             // SAFETY: validity is checked before transferring this explicitly requested stdin descriptor.
             if unsafe { libc::fcntl(0, libc::F_GETFD) } < 0 {
@@ -73,14 +100,26 @@ pub(super) fn command(
             || Instant::now() + Duration::from_secs(120),
             |managed| managed.deadline(),
         );
-        encode(graph::foreground::serve_normalized_with_routes(
-            candidate,
-            options,
-            runtime,
-            values,
-            deadline,
-            route_slots,
-        )?)
+        if let Some(generation) = generation {
+            encode(graph::foreground::serve_restore_normalized_with_routes(
+                candidate,
+                options,
+                runtime,
+                values,
+                deadline,
+                route_slots,
+                generation,
+            )?)
+        } else {
+            encode(graph::foreground::serve_normalized_with_routes(
+                candidate,
+                options,
+                runtime,
+                values,
+                deadline,
+                route_slots,
+            )?)
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {

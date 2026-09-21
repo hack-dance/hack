@@ -963,3 +963,76 @@ test("normal startup defaults to public internet without per-host declarations",
   expect(up).toContain("--internet");
   expect(up).not.toContain("--allow-host");
 });
+
+test("startup persists exact normalized profiles for later restart", async () => {
+  const { opts } = await fixture();
+  let saved: NativeProjectRun | undefined;
+  opts.dependencies.save = async ({ run }) => {
+    saved = run;
+  };
+  opts.dependencies.remove = async ({ expected }) => {
+    expect(saved).toBe(expected);
+  };
+  await startNativeProject({ ...opts, profiles: ["worker", "qa", "worker"] });
+  expect(saved?.profiles).toEqual(["qa", "worker"]);
+});
+test("invalid profile selection refuses before lifecycle or runtime effects", async () => {
+  const { opts } = await fixture();
+  opts.dependencies.load = async () => {
+    throw new Error("unexpected access");
+  };
+  await expect(
+    startNativeProject({ ...opts, profiles: ["bad\nprofile"] })
+  ).rejects.toThrow("profiles");
+});
+
+test("restore startup passes the retained run and selected generation to its owner", async () => {
+  const { opts } = await fixture();
+  const saved = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+  };
+  const invoke = opts.dependencies.invoke!;
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.invoke = async (request) =>
+    request.args[1] === "restore-selection"
+      ? { ...saved, plan: saved.planId, generation: "2".repeat(64) }
+      : await invoke(request);
+  opts.dependencies.serve = async (request) => {
+    expect(request.run).toBe(saved.run);
+    expect(request.restore).toBe(true);
+    expect(request.args).toContain("--expect-generation");
+    expect(request.args).toContain("2".repeat(64));
+    return await serve(request);
+  };
+  expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
+});
+
+test("restore selection mismatch never starts a replacement graph", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) =>
+    request.args[1] === "restore-selection"
+      ? { run: "changed" }
+      : await invoke(request);
+  let served = false;
+  opts.dependencies.serve = async () => {
+    served = true;
+    return 0;
+  };
+  await expect(
+    startNativeProject({
+      ...opts,
+      restore: {
+        run: "1".repeat(32),
+        owner: "c".repeat(32),
+        namespace: "b".repeat(64),
+        planId: "a".repeat(64),
+      },
+    })
+  ).rejects.toThrow("selection changed");
+  expect(served).toBe(false);
+  expect(events.at(-1)).toBe("cleanup");
+});

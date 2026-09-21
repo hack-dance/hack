@@ -168,6 +168,12 @@ pub(super) fn valid_started(value: &str) -> bool {
         && !value.bytes().any(|b| b.is_ascii_control())
 }
 pub(super) trait Driver {
+    /// False until this driver can retire its own durable graph enrollment.
+    /// Existing drivers conservatively retain failed intent unless they opt in.
+    fn admission_started(&self) -> bool {
+        true
+    }
+
     fn check_cancelled(&self) -> Result<(), CandidateError> {
         Ok(())
     }

@@ -185,3 +185,28 @@ test("AWS startup selection roundtrips without admitting credentials or ambient 
     expect(await load(opts)).toBeNull();
   }
 });
+
+test("profile selectors roundtrip canonically while legacy absence stays unknown", async () => {
+  const opts = await fixture();
+  const selected = {
+    ...run,
+    effectiveEnvName: null,
+    aws: null,
+    profiles: ["qa", "worker"],
+  };
+  await save({ ...opts, run: selected });
+  expect(await load(opts)).toEqual(selected);
+  await remove({ ...opts, expected: selected });
+  for (const profiles of [
+    ["worker", "qa"],
+    ["qa", "qa"],
+    [""],
+    ["bad\nprofile"],
+  ]) {
+    await expect(
+      save({ ...opts, run: { ...selected, profiles } })
+    ).rejects.toThrow();
+  }
+  await save({ ...opts, run });
+  expect((await load(opts))?.profiles).toBeUndefined();
+});

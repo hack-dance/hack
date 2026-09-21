@@ -116,7 +116,53 @@ pub fn serve_normalized_with_routes(
         managed,
         deadline,
         route_slots,
-        Some(options.compose),
+        Some((options.compose, None)),
+    )
+}
+
+/// New foreground ownership after confirmed retirement, retaining the same run/data.
+pub fn serve_restore_normalized_with_routes(
+    candidate: &Candidate,
+    options: super::NormalizedRunOptions<'_>,
+    runtime: HostRelayRuntime,
+    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    deadline: Instant,
+    route_slots: &BTreeMap<String, u8>,
+    generation: &str,
+) -> Result<Receipt, CandidateError> {
+    serve_input(
+        candidate,
+        options.run,
+        runtime,
+        managed,
+        deadline,
+        route_slots,
+        Some((options.compose, Some(generation))),
+    )
+}
+/// Read-only selection requires an explicitly retired owner and acknowledged data retention.
+pub fn restore_selection(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
+    let retired = transport::Retired::acquire(candidate, run)?.ok_or_else(refused)?;
+    let engine = Engine::connect_cleanup(candidate)?;
+    let (receipt, root) = super::load(candidate, &engine, run)?;
+    if receipt.phase != "stopped-data-retained" || receipt.normalized_input.is_none() {
+        return Err(refused());
+    }
+    super::cleanup_enrollment::retention(&root, &receipt)?;
+    for resource in receipt.resources.values() {
+        let observed = super::inspect_resource(&engine, &receipt, resource)?;
+        if resource.kind == super::Kind::Volume {
+            if observed.is_none() {
+                return Err(refused());
+            }
+        } else if resource.phase != "absent" || observed.is_some() {
+            return Err(refused());
+        }
+    }
+    retired.verify()?;
+    Ok(
+        json!({"run":receipt.run,"owner":receipt.owner,"namespace":receipt.namespace,"plan":receipt.plan_id,
+        "generation":super::restore::restore_generation(&engine,&receipt)?,"normalized_input":receipt.normalized_input}),
     )
 }
 
@@ -127,12 +173,12 @@ fn serve_input<'a>(
     managed: &BTreeMap<String, BTreeMap<String, String>>,
     deadline: Instant,
     route_slots: &BTreeMap<String, u8>,
-    normalized: Option<crate::project::NormalizedComposeOptions<'a>>,
+    normalized: Option<(crate::project::NormalizedComposeOptions<'a>, Option<&str>)>,
 ) -> Result<Receipt, CandidateError> {
     if options.routing_enrolled != !route_slots.is_empty() {
         return Err(refused());
     }
-    if let Some(compose) = normalized {
+    if let Some((compose, _)) = normalized {
         super::compile_normalized_inputs(
             candidate,
             &super::NormalizedRunOptions {
@@ -147,16 +193,38 @@ fn serve_input<'a>(
         super::compile_environment_inputs_until(candidate, &options, managed, deadline)?;
     }
     let run_id = options.run_id.to_owned();
-    let mut publication = Publication::bind(candidate, options.run_id)?;
+    let fresh_generation = normalized.and_then(|(_, generation)| generation);
+    let mut publication = if fresh_generation.is_some() {
+        Publication::bind_retired(candidate, options.run_id)?
+    } else {
+        Publication::bind(candidate, options.run_id)?
+    };
     let signals = match signals::Events::new(&publication) {
         Ok(signals) => signals,
         Err(error) => {
-            finish_before_admission(&mut publication, candidate, &run_id, false)?;
+            if fresh_generation.is_some() {
+                // This publication is ours; no restore attempt has begun yet.
+                publication.finish()?;
+            } else {
+                finish_before_admission(&mut publication, candidate, &run_id, false)?;
+            }
             return Err(error);
         }
     };
     runtime.set_startup_cancellation(Some(signals::startup_pending));
-    let attempt = if let Some(compose) = normalized {
+    let attempt = if let Some((compose, Some(generation))) = normalized {
+        super::restore::restore_normalized_foreground(
+            candidate,
+            super::NormalizedRunOptions {
+                run: redelivery::options(&options),
+                compose,
+            },
+            managed,
+            deadline,
+            &mut runtime,
+            generation,
+        )
+    } else if let Some((compose, _)) = normalized {
         super::run_normalized_with_host_dependencies_until(
             candidate,
             super::NormalizedRunOptions {
@@ -180,6 +248,17 @@ fn serve_input<'a>(
     let receipt = match attempt {
         Ok(receipt) => receipt,
         Err(error) => {
+            if fresh_generation.is_some() && !runtime.admission_started() {
+                let engine = Engine::connect_cleanup(candidate)?;
+                let (retained, root) = super::load(candidate, &engine, &run_id)?;
+                if retained.phase == "stopped-data-retained"
+                    && std::fs::symlink_metadata(root.join("state.pending"))
+                        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                {
+                    publication.finish()?;
+                    return Err(error);
+                }
+            }
             if !finish_before_admission(
                 &mut publication,
                 candidate,

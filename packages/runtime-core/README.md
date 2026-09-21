@@ -582,3 +582,24 @@ and incomplete journal staging refuse. Running pools and mismatched startup
 requests refuse without changing policy. Host allowlisting remains opt-in through
 `--allow-host`, mutually exclusive with `--internet`; there is no automatic policy
 migration, restart or disk replacement.
+
+### Stopped normalized foreground restoration
+
+A normalized foreground graph that has completed owned cleanup to
+`stopped-data-retained` can start a new foreground owner with its existing run
+and retained volumes. Obtain `graph restore-selection --run-id RUN --json` after
+the candidate VM is running, then use `graph serve-restore` with the same reviewed
+normalized input, original Compose hash, namespace, plan, run, and returned
+`--expect-generation`. Supply the ordinary serve dependency plan, readiness,
+source, and route selections again. Supply fresh `--environment-stdin` only when
+managed values are needed; credentials and expired grants are never replayed.
+
+Selection binds the receipt, current VM boot and verified current volume
+observations. Restoration rechecks these before effects, requires the old owner
+publication and lock to be retired, and verifies the historical cleanup
+acknowledgment in its original boot context. A changed plan, missing volume,
+active owner, or stale selection is refused. The prior stopped receipt is archived
+before fresh dependency ownership is admitted. This does not enable file-based
+`graph restart`/`restore` or normalized live-owner redelivery, and does not replay
+initializer cache-release effects. Native same-run restoration and cross-boot
+volume continuity require separate runtime qualification.

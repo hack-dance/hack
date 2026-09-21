@@ -28,7 +28,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         return service_io::command(candidate, action, args);
     }
     let (arguments, normalized_selection) =
-        crate::normalized_cli::extract(args, ["run", "serve"].contains(action))?;
+        crate::normalized_cli::extract(args, ["run", "serve", "serve-restore"].contains(action))?;
     let args = arguments.as_slice();
     if *action == "owner-restore" {
         let options = restore_options(args)?;
@@ -95,6 +95,8 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     if ![
         "run",
         "serve",
+        "serve-restore",
+        "restore-selection",
         "owner-status",
         "restart",
         "restore",
@@ -137,7 +139,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         if key == "--shared-source" {
             if shared_source
                 || live_source
-                || !["run", "serve", "restart", "restore"].contains(action)
+                || !["run", "serve", "serve-restore", "restart", "restore"].contains(action)
             {
                 return Err(invalid());
             }
@@ -147,7 +149,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         if key == "--live-source" {
             if live_source
                 || shared_source
-                || !["run", "serve", "restart", "restore"].contains(action)
+                || !["run", "serve", "serve-restore", "restart", "restore"].contains(action)
             {
                 return Err(invalid());
             }
@@ -155,7 +157,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             continue;
         }
         if key == "--environment-stdin" {
-            if environment_stdin || *action != "serve" {
+            if environment_stdin || !["serve", "serve-restore"].contains(action) {
                 return Err(invalid());
             }
             environment_stdin = true;
@@ -195,7 +197,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             {
                 return Err(invalid());
             }
-        } else if key == "--route-slot" && *action == "serve" {
+        } else if key == "--route-slot" && ["serve", "serve-restore"].contains(action) {
             routes::insert(&mut route_slots, value)?;
         } else if key == "--hostname" && *action == "publish-bridge" {
             if hostnames.len() >= 8 {
@@ -205,7 +207,9 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 hack_runtime_core::provider::publication::normalize_hostname(value)
                     .map_err(|_| invalid())?,
             );
-        } else if key == "--ready" && ["run", "serve", "restart", "restore"].contains(action) {
+        } else if key == "--ready"
+            && ["run", "serve", "serve-restore", "restart", "restore"].contains(action)
+        {
             let (service, condition) = value.split_once('=').ok_or_else(invalid)?;
             let condition = match condition {
                 "started" => Condition::Started,
@@ -216,7 +220,9 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             if readiness.insert(service.to_owned(), condition).is_some() {
                 return Err(invalid());
             }
-        } else if key == "--profile" && ["run", "serve", "restart", "restore"].contains(action) {
+        } else if key == "--profile"
+            && ["run", "serve", "serve-restore", "restart", "restore"].contains(action)
+        {
             profiles.push(value.to_owned());
         } else if ([
             "reserve-bridge",
@@ -236,10 +242,12 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             .contains(action)
                 && key == "--expect-reservation")
             || (*action == "publish-bridge" && key == "--port")
-            || (*action == "serve" && ["--dependencies", "--expect-dependencies"].contains(&key))
+            || (["serve", "serve-restore"].contains(action)
+                && ["--dependencies", "--expect-dependencies"].contains(&key))
+            || (*action == "serve-restore" && key == "--expect-generation")
             || (*action == "recover-cleanup" && key == "--expect-receipt")
             || key == "--run-id"
-            || (["run", "serve", "restart", "restore"].contains(action)
+            || (["run", "serve", "serve-restore", "restart", "restore"].contains(action)
                 && [
                     "--project",
                     "--file",
@@ -271,6 +279,16 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph receipt."))
     };
     match *action {
+        "restore-selection" => {
+            #[cfg(target_os = "macos")]
+            {
+                graph::foreground::restore_selection(candidate, run)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(invalid())
+            }
+        }
         "reserve-bridge" => serde_json::to_value(graph::reserve_bridge(
             candidate,
             graph::ReserveBridgeOptions {
@@ -441,6 +459,9 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                     &route_slots,
                     environment_stdin,
                 );
+            }
+            if *action == "serve-restore" {
+                return Err(invalid());
             }
             if *action == "serve" {
                 #[cfg(target_os = "macos")]

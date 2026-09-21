@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
@@ -23,6 +23,7 @@ import {
 } from "./native-project-input.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import { serveNativeProjectGraph } from "./native-project-process.ts";
+import { selectNativeProjectRestore } from "./native-project-restore.ts";
 import { withNativeProjectReview } from "./native-project-review.ts";
 import {
   hasOnlyNativeSupportedLabels,
@@ -33,6 +34,7 @@ import {
   loadNativeProjectRun,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  normalizeNativeProfiles,
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "./native-project-run.ts";
@@ -434,6 +436,7 @@ export async function startNativeProject(opts: {
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
   readonly sharedSource: boolean;
+  readonly restore?: NativeProjectRun;
   readonly dependencyFile?: string;
   readonly adaptationFile?: string;
   readonly allowedHosts?: readonly string[];
@@ -443,6 +446,7 @@ export async function startNativeProject(opts: {
   readonly signal?: AbortSignal;
   readonly dependencies?: Partial<Dependencies>;
 }): Promise<number> {
+  const profiles = normalizeNativeProfiles(opts.profiles);
   const allowedHosts = validateNativeAllowedHosts(opts.allowedHosts);
   validateHttpsSelection(opts.https);
   if (!opts.sharedSource) {
@@ -569,7 +573,7 @@ export async function startNativeProject(opts: {
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       composeFile: opts.composeFile,
-      profiles: opts.profiles,
+      profiles,
       input: pinned,
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);
@@ -578,6 +582,13 @@ export async function startNativeProject(opts: {
           specs,
           capacity: bridgeCapacity,
         });
+        const runSelection = await selectNativeProjectRestore({
+          runtime: opts.runtime,
+          projectRoot: opts.scope.projectRoot,
+          restore: opts.restore,
+          review,
+          invoke: deps.invoke,
+        });
         const cache = await publishNativeCacheSource({
           runtime: opts.runtime,
           projectRoot: opts.scope.projectRoot,
@@ -585,7 +596,7 @@ export async function startNativeProject(opts: {
           invoke: deps.invoke,
         });
         const directory = await mkdtemp(join(tmpdir(), "hack-native-start-"));
-        const run = randomBytes(16).toString("hex");
+        const run = runSelection.run;
         let mapping: NativeProjectRun | undefined;
         let https:
           | Awaited<ReturnType<typeof startNativeProjectHttps>>
@@ -649,8 +660,10 @@ export async function startNativeProject(opts: {
               runtime: opts.runtime,
               projectRoot: opts.scope.projectRoot,
               run,
+              restore: runSelection.restoring,
               args: [
                 ...review.projectArgs,
+                ...runSelection.flags,
                 "--expect-plan",
                 review.planId,
                 ...nativeSharedSourceFlags(review.report.plan),
@@ -694,6 +707,7 @@ export async function startNativeProject(opts: {
                 const persistedMapping = {
                   ...readyMapping,
                   effectiveEnvName: input.effectiveEnvName,
+                  profiles,
                   aws: opts.aws
                     ? {
                         profile: opts.aws.profile,

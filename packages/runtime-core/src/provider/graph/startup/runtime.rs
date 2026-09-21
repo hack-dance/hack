@@ -343,6 +343,10 @@ impl HostRelayRuntime {
     }
 }
 impl Driver for HostRelayRuntime {
+    fn admission_started(&self) -> bool {
+        self.run.is_some()
+    }
+
     fn check_cancelled(&self) -> Result<(), CandidateError> {
         if self.startup_cancelled.is_some_and(|check| check()) {
             return Err(error(

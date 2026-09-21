@@ -12,7 +12,7 @@ pub struct NormalizedRunOptions<'a> {
 }
 
 /// Hash-only provenance. Normalized configuration and managed values are never journaled.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedInputIdentity {
     pub namespace: String,
@@ -35,7 +35,7 @@ impl NormalizedInputIdentity {
 pub(super) fn replay_refused() -> CandidateError {
     error(
         "graph_normalized_replay",
-        "Normalized graph restart/restore requires explicit normalized-input recovery, which is not implemented. Inspect or clean up this owned run; retained data is not removed.",
+        "Normalized graphs require stopped-owner serve-restore with explicit normalized input; file-based restart/restore is refused. Inspect or clean up this owned run; retained data is not removed.",
     )
 }
 pub(super) fn require_file_replay(receipt: &Receipt) -> Result<(), CandidateError> {

@@ -310,9 +310,20 @@ pub(super) struct Publication {
 }
 impl Publication {
     pub fn bind(candidate: &Candidate, run: &str) -> Result<Self, CandidateError> {
+        Self::bind_mode(candidate, run, false)
+    }
+    pub(super) fn bind_retired(candidate: &Candidate, run: &str) -> Result<Self, CandidateError> {
+        Self::bind_mode(candidate, run, true)
+    }
+    fn bind_mode(candidate: &Candidate, run: &str, retired: bool) -> Result<Self, CandidateError> {
         let root = root(candidate, run)?;
-        state::private_directory(&root).map_err(|_| refused())?;
-        let lock = state::Lock::acquire(&root).map_err(|_| refused())?;
+        let lock = if retired {
+            state::check_private_directory(&root).map_err(|_| refused())?;
+            state::Lock::acquire_existing(&root).map_err(|_| refused())?
+        } else {
+            state::private_directory(&root).map_err(|_| refused())?;
+            state::Lock::acquire(&root).map_err(|_| refused())?
+        };
         for name in ["control.sock", "owner.json"] {
             match fs::symlink_metadata(root.join(name)) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

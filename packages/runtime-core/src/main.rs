@@ -74,7 +74,7 @@ Usage:
   hack-local --version
   hack-local --help
 
-Normalized public input for project plan/capture/publish-source/verify-source and graph run/serve: --normalized-file <path> --expect-original <sha256> --expect-namespace <sha256>. Sync/enroll/restart/restore do not accept it.
+Normalized public input for project plan/capture/publish-source/verify-source and graph run/serve/serve-restore: --normalized-file <path> --expect-original <sha256> --expect-namespace <sha256>. Sync/enroll/restart/restore do not accept it. Stopped normalized graphs use graph restore-selection --run-id RUN --json, then graph serve-restore with the same run/plan, --expect-generation, and fresh serve dependency/environment/route selections.
 Build with: ./scripts/build-hack-local.sh
 Runtime commands affect only the candidate pool. Graph commands support a bounded pinned-image subset; full project up/exec/down remains unimplemented.
 The installed hack and its state are never used as a fallback.";

@@ -30,6 +30,24 @@ fn root(candidate: &Candidate, run: &str) -> std::path::PathBuf {
     .into()
 }
 #[test]
+fn fresh_restore_publication_requires_prior_retirement_and_exclusive_lock() {
+    let (_fixture, candidate, run) = fixture();
+    let path = root(&candidate, &run);
+    assert!(Publication::bind_retired(&candidate, &run).is_err());
+    assert!(!path.exists());
+    let mut first = Publication::bind(&candidate, &run).unwrap();
+    assert!(Publication::bind_retired(&candidate, &run).is_err());
+    first.finish().unwrap();
+    // Removed endpoint names do not authorize taking a still-held old owner lock.
+    assert!(Publication::bind_retired(&candidate, &run).is_err());
+    drop(first);
+    let mut second = Publication::bind_retired(&candidate, &run).unwrap();
+    assert!(Publication::bind_retired(&candidate, &run).is_err());
+    second.finish().unwrap();
+    drop(second);
+    fs::remove_dir_all(path).unwrap();
+}
+#[test]
 fn publication_serializes_and_pins_exact_server_socket() {
     let (_fixture, candidate, run) = fixture();
     let path = root(&candidate, &run);

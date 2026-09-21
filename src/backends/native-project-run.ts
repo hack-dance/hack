@@ -27,6 +27,8 @@ export type NativeProjectRun = {
   readonly planId: string;
   /** Absent in legacy mappings; null explicitly selects base-only values. */
   readonly effectiveEnvName?: string | null;
+  /** Exact selected Compose profiles; absent legacy mappings must not guess. */
+  readonly profiles?: readonly string[];
   /** Public startup selector only; null means no AWS adaptation. Never credentials. */
   readonly aws?: { readonly profile: string; readonly region?: string } | null;
 };
@@ -56,6 +58,38 @@ function validAws(value: unknown): boolean {
           AWS_REGION.test(value.region))))
   );
 }
+export function normalizeNativeProfiles(
+  profiles: readonly string[] = []
+): string[] {
+  if (
+    profiles.length > 64 ||
+    Buffer.byteLength(JSON.stringify(profiles)) > 4096 ||
+    profiles.some(
+      (profile) =>
+        typeof profile !== "string" ||
+        !profile ||
+        Buffer.byteLength(profile) > 256 ||
+        CONTROL.test(profile)
+    )
+  ) {
+    throw new Error(
+      "Native profiles require at most 64 bounded nonempty names."
+    );
+  }
+  return [...new Set(profiles)].sort();
+}
+function validProfiles(value: unknown): boolean {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+  try {
+    return (
+      JSON.stringify(normalizeNativeProfiles(value)) === JSON.stringify(value)
+    );
+  } catch {
+    return false;
+  }
+}
 function valid(value: unknown): value is NativeProjectRun {
   return (
     isRecord(value) &&
@@ -63,8 +97,10 @@ function valid(value: unknown): value is NativeProjectRun {
       "namespace,owner,planId,run",
       "effectiveEnvName,namespace,owner,planId,run",
       "aws,effectiveEnvName,namespace,owner,planId,run",
+      "aws,effectiveEnvName,namespace,owner,planId,profiles,run",
     ].includes(Object.keys(value).sort().join()) &&
     (!Object.hasOwn(value, "aws") || validAws(value.aws)) &&
+    (!Object.hasOwn(value, "profiles") || validProfiles(value.profiles)) &&
     (!Object.hasOwn(value, "effectiveEnvName") ||
       value.effectiveEnvName === null ||
       (typeof value.effectiveEnvName === "string" &&

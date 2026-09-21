@@ -26,6 +26,7 @@ export async function serveNativeProjectGraph(opts: {
   readonly projectRoot: string;
   readonly run: string;
   readonly args: readonly string[];
+  readonly restore?: boolean;
   readonly privateInput?: Uint8Array;
   readonly startupTimeoutMs: number;
   readonly signal?: AbortSignal;
@@ -54,7 +55,7 @@ export async function serveNativeProjectGraph(opts: {
       "--candidate-root",
       opts.runtime.home,
       "graph",
-      "serve",
+      opts.restore ? "serve-restore" : "serve",
       ...opts.args,
       "--run-id",
       opts.run,

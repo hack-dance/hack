@@ -25,6 +25,10 @@ if [ "$(zig version)" != 0.15.2 ]; then
   exit 69
 fi
 command -v python3 >/dev/null
+if [ "$(bun --version)" != 1.3.9 ]; then
+  echo "Pinned Bun 1.3.9 is required" >&2
+  exit 69
+fi
 stdlib=$(rustc --print target-libdir --target aarch64-unknown-linux-musl)
 set -- "$stdlib"/libstd-*.rlib
 if [ ! -f "$1" ]; then
@@ -58,10 +62,13 @@ cp "$guest" "$out/hack-relay-guest"
 chmod 755 "$out/hack-native" "$out/hack-relay-guest"
 python3 scripts/verify-native-relay.py "$out/hack-relay-guest"
 cp packages/runtime-core/provider-pins.json "$out/provider-pins.json"
+bun build index.ts --compile --outfile "$out/hack-cli"
+cp scripts/hack-v5.sh "$out/hack-v5"
+chmod 755 "$out/hack-cli" "$out/hack-v5"
 cp docs/guides/native-candidate.md "$out/README.md"
 (
   cd "$out"
-  shasum -a 256 hack-native hack-relay-guest provider-pins.json README.md > SHA256SUMS
+  shasum -a 256 hack-native hack-relay-guest hack-cli hack-v5 provider-pins.json README.md > SHA256SUMS
 )
 echo "Candidate bundle: $out"
 echo "Verify SHA256SUMS before copying. Create a separate mode-0700 candidate home."

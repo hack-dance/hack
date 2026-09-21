@@ -5,7 +5,7 @@ Hack's supported CLI. It does not replace `hack`, select a Docker context, migra
 projects, or install DNS or trust. Its graph commands support a bounded subset;
 this bundle is not application parity or release qualification.
 
-Build with the repository's pinned Rust 1.97.1 and Zig 0.15.2 toolchain, Python 3,
+Build with the repository's pinned Bun 1.3.9, Rust 1.97.1 and Zig 0.15.2 toolchain, Python 3,
 and the Rust `aarch64-unknown-linux-musl` standard library already installed. The
 build refuses missing prerequisites; it does not install toolchains:
 
@@ -14,7 +14,8 @@ mise exec -- scripts/build-native-candidate.sh /absolute/new/hack-native-bundle
 ```
 
 The destination must not exist. The bundle contains `hack-native`, the static Linux
-ARM64 `hack-relay-guest`, provider pins, this guide, and `SHA256SUMS`. The relay uses
+ARM64 `hack-relay-guest`, compiled normal CLI `hack-cli`, the `hack-v5` entrypoint,
+provider pins, this guide, and `SHA256SUMS`. The relay uses
 the committed guest Cargo lockfile and Zig linker wrapper, with a separate build
 target directory. Packaging verifies its ELF architecture and absence of an
 interpreter or shared-library requirements before publishing the bundle. It contains no provider installation, runtime
@@ -44,6 +45,23 @@ for this stable home; `channel` reports `installed-candidate`. State remains und
 `<home>/.hack-local`. Keep this home fixed across binary upgrades: receipts and
 child processes bind to its identity. Moving an executable is supported; moving
 an active home or adopting another installation's state is not.
+
+Run the normal project CLI through the bundle's `hack-v5` entrypoint:
+
+```sh
+export HACK_NATIVE_HOME=/absolute/private/candidate-home
+/absolute/copied/hack-native-bundle/hack-v5 ps --path /absolute/project
+```
+
+Keep the bundle together and invoke this entrypoint by its full path (do not copy
+or symlink only the script). It selects the adjacent executor even if inherited
+backend variables select another binary. It preserves arguments, exit codes and
+signals through `exec`, and never replaces the installed `hack`. Project-specific
+native adaptation, dependency and routing selections remain explicit; this entrypoint
+does not prepare a provider or migrate existing projects. The embedded frontend
+currently reports the repository package version; `hack-v5` identifies the opt-in
+candidate channel, not a published v5 release. Unsupported native workflows still
+report their existing refusal rather than falling back to Docker.
 
 Provider setup is separate and explicit. Obtain the exact archives identified in
 `provider-pins.json`, then run:

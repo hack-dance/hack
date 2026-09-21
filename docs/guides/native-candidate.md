@@ -262,8 +262,16 @@ mappings with missing selection, but refuse down hooks for those mappings rather
 than guessing an overlay. Missing selected overlay files also refuse before cleanup.
 Older binaries may reject extended mappings: this is backward state-reading
 compatibility, not support for rolling back binaries over new state.
-`restart` and `run` still refuse native selection;
-there is no silent fallback to the stable runtime. An uncertain shutdown retains
+Whole-project foreground `restart` retains the recorded environment, AWS selector,
+profiles, run identity and data volumes. It reviews the unchanged normalized plan
+before cleanup, saves a pending restart intent, and waits for the previous frontend
+to confirm graph, HTTPS and lifecycle cleanup before starting its replacement.
+Changed selections and unknown legacy startup/finalization records refuse before
+cleanup. A failed replacement retains its intent: retry `restart` after resolving
+the reported problem; a fresh `up` cannot bypass it. An interrupted operation lock
+requires ownership inspection rather than automatic removal. Restart does not
+implicitly migrate a shared pool's network policy or interrupt other projects.
+`run` still refuses native selection; there is no silent fallback to Compose. An uncertain shutdown retains
 its mapping and evidence for recovery; do not delete managed state to retry.
 
 After starting an owned native pool, `runtime ensure-image --reference REF --json`

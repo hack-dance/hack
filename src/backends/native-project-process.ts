@@ -69,7 +69,15 @@ export async function serveNativeProjectGraph(opts: {
       stderr: "pipe",
     }
   );
-  const failureCode = readNativeFailureCode(child.stderr);
+  // Descendants may inherit a pipe after the owned receiver exits. Its exit,
+  // not unrelated writers' EOF, bounds draining; final graph inspection remains
+  // the caller's authority for cleanup, regardless of a successful exit code.
+  const drain = new AbortController();
+  let drainTimer: ReturnType<typeof setTimeout> | undefined;
+  void child.exited.then(() => {
+    drainTimer = setTimeout(() => drain.abort(), 250);
+  });
+  const failureCode = readNativeFailureCode(child.stderr, drain.signal);
   let ready = false;
   let canceled = false;
   let timedOut = false;
@@ -106,6 +114,7 @@ export async function serveNativeProjectGraph(opts: {
     );
     ready = await consumeGraphOutput({
       output: child.stdout,
+      signal: drain.signal,
       run: opts.run,
       interrupted: () => canceled || timedOut || inputFailure !== undefined,
       onReady: async () => {
@@ -138,6 +147,8 @@ export async function serveNativeProjectGraph(opts: {
     }
     const exitCode = await child.exited;
     const nativeCode = await failureCode;
+    clearTimeout(drainTimer);
+    drain.abort();
     try {
       opts.onExitDiagnostic?.({
         exitCode,
@@ -151,12 +162,20 @@ export async function serveNativeProjectGraph(opts: {
 
 async function consumeGraphOutput(opts: {
   readonly output: ReadableStream<Uint8Array>;
+  readonly signal: AbortSignal;
   readonly run: string;
   readonly interrupted: () => boolean;
   readonly onReady: () => Promise<void>;
 }): Promise<boolean> {
   let ready = false;
   const reader = opts.output.getReader();
+  const cancel = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  opts.signal.addEventListener("abort", cancel, { once: true });
+  if (opts.signal.aborted) {
+    cancel();
+  }
   let total = 0;
   let line = "";
   const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -204,6 +223,7 @@ async function consumeGraphOutput(opts: {
       line = "";
     }
   } finally {
+    opts.signal.removeEventListener("abort", cancel);
     reader.releaseLock();
   }
   return ready;

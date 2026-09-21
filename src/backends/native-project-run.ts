@@ -6,11 +6,16 @@ import {
   mkdir,
   open,
   realpath,
+  rename,
   rmdir,
   unlink,
 } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { isRecord } from "../lib/guards.ts";
+import {
+  isNativeProjectFinalizationToken,
+  type NativeProjectFinalizationToken,
+} from "./native-project-finalization.ts";
 
 const HEX32 = /^[a-f0-9]{32}$/;
 const HEX64 = /^[a-f0-9]{64}$/;
@@ -220,7 +225,11 @@ async function verifyIgnore(ignore: string) {
     await fd.close();
   }
 }
-async function paths(opts: NativeProjectRunScope, create: boolean) {
+async function paths(
+  opts: NativeProjectRunScope,
+  create: boolean,
+  kind: "run" | "restart" = "run"
+) {
   const identity = await scope(opts);
   const internal = join(identity.projectDir, ".internal");
   const root = join(internal, "native-runs");
@@ -254,12 +263,121 @@ async function paths(opts: NativeProjectRunScope, create: boolean) {
   const key = createHash("sha256")
     .update(JSON.stringify(identity.branch))
     .digest("hex");
+  const suffix = kind === "restart" ? ".restart" : "";
   return {
     identity,
     root,
-    file: join(root, `${key}.json`),
-    lock: join(root, `${key}.lock`),
+    file: join(root, `${key}${suffix}.json`),
+    lock: join(root, `${key}${suffix}.lock`),
   };
+}
+
+export type NativeRestartIntent = {
+  readonly phase: "prepared" | "cleaned";
+  readonly run: NativeProjectRun;
+  readonly finalization: NativeProjectFinalizationToken;
+};
+/** Serialize cleanup and replacement hooks; uncertain abandoned ownership requires inspection. */
+export async function withNativeRestartLock<T>(
+  opts: NativeProjectRunScope,
+  action: (release: () => Promise<void>) => Promise<T>
+): Promise<T> {
+  const p = await paths(opts, true, "restart");
+  const lock = `${p.lock}.operation`;
+  try {
+    await mkdir(lock, { mode: 0o700 });
+  } catch {
+    throw new Error(
+      "Native restart is already owned or was interrupted; inspect the pending restart before recovery."
+    );
+  }
+  let released = false;
+  const release = async () => {
+    if (!released) {
+      await rmdir(lock);
+      released = true;
+    }
+  };
+  try {
+    return await action(release);
+  } finally {
+    await release();
+  }
+}
+function restartRecord(value: unknown, identity: unknown): NativeRestartIntent {
+  if (
+    !(
+      isRecord(value) && isNativeProjectFinalizationToken(value.finalization)
+    ) ||
+    (value.phase !== "prepared" && value.phase !== "cleaned")
+  ) {
+    throw refused();
+  }
+  const run = record(value, identity);
+  const finalization = value.finalization;
+  if (
+    run.run !== finalization.run ||
+    run.owner !== finalization.owner ||
+    run.namespace !== finalization.namespace ||
+    run.planId !== finalization.planId
+  ) {
+    throw refused();
+  }
+  return { phase: value.phase, run, finalization };
+}
+/** Persist the selected old owner before cleanup so a failed restart never falls back to fresh data. */
+export async function saveNativeRestartIntent(
+  opts: NativeProjectRunScope & { readonly intent: NativeRestartIntent }
+): Promise<void> {
+  const p = await paths(opts, true, "restart");
+  const value = { version: 1, scope: p.identity, ...opts.intent };
+  restartRecord(value, p.identity);
+  await mkdir(p.lock, { mode: 0o700 });
+  const temp = join(p.root, `${randomUUID()}.tmp`);
+  try {
+    await write(temp, JSON.stringify(value));
+    await link(temp, p.file);
+    await unlink(temp);
+    await sync(p.root);
+  } finally {
+    await unlink(temp).catch((error: unknown) => {
+      if (!isRecord(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    });
+    await rmdir(p.lock);
+  }
+}
+export async function loadNativeRestartIntent(
+  opts: NativeProjectRunScope
+): Promise<NativeRestartIntent | null> {
+  await scope(opts);
+  try {
+    const p = await paths(opts, false, "restart");
+    return restartRecord(await read(p.file), p.identity);
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return null;
+    }
+    throw refused();
+  }
+}
+/** Only readiness from the exact replacement may retire its pending restart intent. */
+export async function removeNativeRestartIntent(
+  opts: NativeProjectRunScope & { readonly expected: NativeRestartIntent }
+): Promise<void> {
+  const p = await paths(opts, false, "restart");
+  await mkdir(p.lock, { mode: 0o700 });
+  try {
+    const current = restartRecord(await read(p.file), p.identity);
+    if (JSON.stringify(current) !== JSON.stringify(opts.expected)) {
+      throw refused();
+    }
+    await unlink(p.file);
+    await sync(p.root);
+  } finally {
+    await rmdir(p.lock);
+  }
 }
 function record(value: unknown, identity: unknown): NativeProjectRun {
   if (
@@ -271,6 +389,12 @@ function record(value: unknown, identity: unknown): NativeProjectRun {
     throw refused();
   }
   return value.run;
+}
+/** Establish excluded metadata before source identity is reviewed. */
+export async function prepareNativeProjectRunStorage(
+  opts: NativeProjectRunScope
+): Promise<void> {
+  await paths(opts, true);
 }
 /** Read a mapping only; callers must still query native authority with every recorded identity. */
 export async function loadNativeProjectRun(
@@ -351,5 +475,35 @@ export async function removeNativeProjectRun(
     }
   } catch {
     throw refused();
+  }
+}
+
+/** Record completion of down hooks as well as backend cleanup before a retry can resume. */
+export async function completeNativeRestartCleanup(
+  opts: NativeProjectRunScope & { readonly expected: NativeRestartIntent }
+): Promise<NativeRestartIntent> {
+  const p = await paths(opts, false, "restart");
+  await mkdir(p.lock, { mode: 0o700 });
+  const temp = join(p.root, `${randomUUID()}.tmp`);
+  try {
+    const current = restartRecord(await read(p.file), p.identity);
+    if (JSON.stringify(current) !== JSON.stringify(opts.expected)) {
+      throw refused();
+    }
+    const intent: NativeRestartIntent = { ...current, phase: "cleaned" };
+    await write(
+      temp,
+      JSON.stringify({ version: 1, scope: p.identity, ...intent })
+    );
+    await rename(temp, p.file);
+    await sync(p.root);
+    return intent;
+  } finally {
+    await unlink(temp).catch((error: unknown) => {
+      if (!isRecord(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    });
+    await rmdir(p.lock);
   }
 }

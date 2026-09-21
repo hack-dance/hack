@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { beginNativeProjectFinalization } from "../src/backends/native-project-finalization.ts";
 import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
 import {
   parseNativeHttpsSelection,
@@ -37,7 +38,9 @@ async function fixture(withEnvironment = true) {
   const dependencies: NonNullable<
     Parameters<typeof startNativeProject>[0]["dependencies"]
   > = {
+    prepareStorage: async () => {},
     load: async () => null,
+    loadRestart: async () => null,
     save: async () => {
       events.push("save");
     },
@@ -1035,4 +1038,120 @@ test("restore selection mismatch never starts a replacement graph", async () => 
   ).rejects.toThrow("selection changed");
   expect(served).toBe(false);
   expect(events.at(-1)).toBe("cleanup");
+});
+
+test("restart callback follows ready and acknowledgement follows all finalizers", async () => {
+  const { opts, events } = await httpsFixture();
+  opts.dependencies.finalization = async (request) => {
+    const lifetime = await beginNativeProjectFinalization(request);
+    return {
+      ...lifetime,
+      complete: async () => {
+        await lifetime.complete();
+        events.push("finalized");
+      },
+    };
+  };
+  opts.dependencies.https = async () => ({
+    caPath: "/synthetic/root.crt",
+    httpsPort: 8443,
+    exited: new Promise(() => {}),
+    verifyHostname: async () => ({ statusCode: 200 }),
+    close: async () => {
+      events.push("https-close");
+    },
+  });
+  await startNativeProject({
+    ...opts,
+    https: httpsSelection,
+    onReady: async () => {
+      expect(events.at(-1)).toBe("ready");
+      expect(events).toContain("save");
+      events.push("restart-ready");
+    },
+  });
+  expect(events.indexOf("restart-ready")).toBeLessThan(
+    events.indexOf("remove")
+  );
+  expect(events.slice(-3)).toEqual(["https-close", "cleanup", "finalized"]);
+});
+
+test("failed HTTPS or lifecycle finalization never acknowledges cleanup", async () => {
+  for (const failed of ["https", "lifecycle"]) {
+    const { opts } = await httpsFixture();
+    let acknowledged = false;
+    opts.dependencies.finalization = async (request) => {
+      const lifetime = await beginNativeProjectFinalization(request);
+      return {
+        ...lifetime,
+        complete: async () => {
+          acknowledged = true;
+        },
+      };
+    };
+    opts.dependencies.https = async () => ({
+      caPath: "/synthetic/root.crt",
+      httpsPort: 8443,
+      exited: new Promise(() => {}),
+      verifyHostname: async () => ({ statusCode: 200 }),
+      close: async () => {
+        if (failed === "https") {
+          throw new Error("close failed");
+        }
+      },
+    });
+    if (failed === "lifecycle") {
+      opts.before = async () => ({
+        ready: async () => {},
+        cleanup: async () => {
+          throw new Error("close failed");
+        },
+      });
+    }
+    await expect(
+      startNativeProject({ ...opts, https: httpsSelection })
+    ).rejects.toThrow("close failed");
+    expect(acknowledged).toBe(false);
+  }
+});
+
+test("pending retained restart refuses fresh startup before effects", async () => {
+  const { opts, events } = await fixture(false);
+  const run = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+  };
+  const lifetime = await beginNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+  });
+  opts.dependencies.loadRestart = async () => ({
+    phase: "prepared",
+    run,
+    finalization: lifetime.token,
+  });
+  await expect(startNativeProject(opts)).rejects.toThrow("pending restart");
+  expect(events).toEqual([]);
+});
+
+test("startup prepares mapping storage before input and plan review", async () => {
+  const { opts, events } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  const review = opts.dependencies.review!;
+  opts.dependencies.prepareStorage = async (scope) => {
+    expect(scope).toEqual(opts.scope);
+    events.push("storage");
+  };
+  opts.dependencies.prepare = async (request) => {
+    expect(events[0]).toBe("storage");
+    events.push("input");
+    return await prepare(request);
+  };
+  opts.dependencies.review = async (request) => {
+    expect(events.indexOf("storage")).toBeLessThan(events.indexOf("input"));
+    return await review(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
 });

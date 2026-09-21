@@ -230,7 +230,7 @@ test("source CLI native ps reports not-started with Docker unavailable", async (
   }
 });
 
-test("unsupported native lifecycle commands refuse before Docker or project hooks", async () => {
+test("unsupported native forms and missing restart consent refuse before Docker or hooks", async () => {
   const { writeFile, readFile, chmod } = await import("node:fs/promises");
   const { resolve } = await import("node:path");
   const opts = await fixture(false);
@@ -287,9 +287,11 @@ test("unsupported native lifecycle commands refuse before Docker or project hook
       expect(stdout + stderr).toContain(
         operation === "up"
           ? "foreground whole-project startup only"
-          : operation === "exec"
-            ? "Native project has not been started"
-            : `Native runtime operation '${operation}' is unavailable`
+          : operation === "restart"
+            ? "Native restart requires HACK_NATIVE_SHARED_SOURCE=1"
+            : operation === "exec"
+              ? "Native project has not been started"
+              : `Native runtime operation '${operation}' is unavailable`
       );
     } finally {
       clearTimeout(timer);

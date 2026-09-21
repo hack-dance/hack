@@ -13,6 +13,7 @@ import {
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
+import { beginNativeProjectFinalization } from "./native-project-finalization.ts";
 import {
   isNativeHttpsProbePath,
   startNativeProjectHttps,
@@ -21,6 +22,7 @@ import {
   type NativeProjectInput,
   prepareNativeProjectInput,
 } from "./native-project-input.ts";
+import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import { serveNativeProjectGraph } from "./native-project-process.ts";
 import { selectNativeProjectRestore } from "./native-project-restore.ts";
@@ -32,9 +34,11 @@ import {
 } from "./native-project-routing.ts";
 import {
   loadNativeProjectRun,
+  loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
   normalizeNativeProfiles,
+  prepareNativeProjectRunStorage,
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "./native-project-run.ts";
@@ -51,7 +55,7 @@ export type NativeHttpsSelection = {
   readonly caddySha256: string;
   readonly httpsPort: number;
 };
-function validateHttpsSelection(
+export function validateHttpsSelection(
   selection: NativeHttpsSelection | undefined
 ): void {
   if (
@@ -144,32 +148,38 @@ type Hooks = {
 };
 type Dependencies = {
   prepare: typeof prepareNativeProjectInput;
+  prepareStorage: typeof prepareNativeProjectRunStorage;
   adaptAws: typeof adaptNativeAwsEnvironment;
   review: typeof withNativeProjectReview;
   serve: typeof serveNativeProjectGraph;
   https: typeof startNativeProjectHttps;
   invoke: typeof invokeNativeRuntime;
   load: typeof loadNativeProjectRun;
+  loadRestart: typeof loadNativeRestartIntent;
   save: typeof saveNativeProjectRun;
   remove: typeof removeNativeProjectRun;
+  finalization: typeof beginNativeProjectFinalization;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
+  prepareStorage: prepareNativeProjectRunStorage,
   adaptAws: adaptNativeAwsEnvironment,
   review: withNativeProjectReview,
   serve: serveNativeProjectGraph,
   https: startNativeProjectHttps,
   invoke: invokeNativeRuntime,
   load: loadNativeProjectRun,
+  loadRestart: loadNativeRestartIntent,
   save: saveNativeProjectRun,
   remove: removeNativeProjectRun,
+  finalization: beginNativeProjectFinalization,
 };
 function refused(): Error {
   return new Error(
     "Native foreground up cannot admit this configuration: routing, host dependencies, builds or unsupported runtime settings require explicit native support; configuration was not dropped."
   );
 }
-function services(
+export function prepareNativeProjectServices(
   input: NativeProjectInput,
   hasHostDependencies = false
 ): Record<string, Record<string, unknown>> {
@@ -428,6 +438,28 @@ function requireConfirmedCleanup(
     throw cleanupUnconfirmed(startupFailure, nativeCode);
   }
 }
+async function refusePendingFreshStart(
+  restore: NativeProjectRun | undefined,
+  scope: NativeProjectRunScope,
+  load: typeof loadNativeRestartIntent
+): Promise<void> {
+  if (!restore && (await load(scope))) {
+    throw new Error(
+      "Native project has a pending restart; use hack restart to resume retained data."
+    );
+  }
+}
+async function acknowledgeFinalization(
+  finalization:
+    | Awaited<ReturnType<typeof beginNativeProjectFinalization>>
+    | undefined,
+  graph: boolean,
+  https: boolean
+): Promise<void> {
+  if (graph && https) {
+    await finalization?.complete();
+  }
+}
 /** Explicit unfiltered project sharing; foreground only. Native refusal never falls back to Compose. */
 export async function startNativeProject(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -437,6 +469,7 @@ export async function startNativeProject(opts: {
   readonly profiles?: readonly string[];
   readonly sharedSource: boolean;
   readonly restore?: NativeProjectRun;
+  readonly onReady?: () => Promise<void>;
   readonly dependencyFile?: string;
   readonly adaptationFile?: string;
   readonly allowedHosts?: readonly string[];
@@ -455,11 +488,13 @@ export async function startNativeProject(opts: {
     );
   }
   const deps = { ...DEFAULTS, ...opts.dependencies };
+  await refusePendingFreshStart(opts.restore, opts.scope, deps.loadRestart);
   if (await deps.load(opts.scope)) {
     throw new Error(
       "Native project already has an owned run mapping; inspect it before starting another run."
     );
   }
+  await deps.prepareStorage(opts.scope);
   let input = await deps.prepare({
     ...opts.scope,
     composeFile: opts.composeFile,
@@ -469,7 +504,10 @@ export async function startNativeProject(opts: {
     input,
     path: opts.adaptationFile,
   });
-  let specs = services(input, opts.dependencyFile !== undefined);
+  let specs = prepareNativeProjectServices(
+    input,
+    opts.dependencyFile !== undefined
+  );
   const bridgeCapacity = nativeBridgeCapacity(specs);
   const artifact = join(dirname(opts.runtime.binary), "hack-relay-guest");
   const artifactFile = Bun.file(artifact);
@@ -496,6 +534,11 @@ export async function startNativeProject(opts: {
   process.on("SIGTERM", terminate);
   opts.signal?.addEventListener("abort", cancel, { once: true });
   let hooks: Hooks | undefined;
+  let finalization:
+    | Awaited<ReturnType<typeof beginNativeProjectFinalization>>
+    | undefined;
+  let graphCleanupConfirmed = false;
+  let httpsCleanupConfirmed = false;
   try {
     if (opts.signal?.aborted) {
       cancel();
@@ -506,7 +549,10 @@ export async function startNativeProject(opts: {
     hooks = await opts.before(input);
     if (opts.aws) {
       input = (await deps.adaptAws({ input, ...opts.aws })).input;
-      specs = services(input, opts.dependencyFile !== undefined);
+      specs = prepareNativeProjectServices(
+        input,
+        opts.dependencyFile !== undefined
+      );
     }
     const hostDependencies = await readNativeHostDependencies({
       path: opts.dependencyFile,
@@ -635,10 +681,11 @@ export async function startNativeProject(opts: {
             throw refused();
           }
           const invokeInspect = () =>
-            deps.invoke({
+            inspectNativeProjectGraph({
               runtime: opts.runtime,
-              cwd: opts.scope.projectRoot,
-              args: ["graph", "inspect", "--run-id", run, "--json"],
+              projectRoot: opts.scope.projectRoot,
+              run,
+              invoke: deps.invoke,
             });
           if (opts.https && routes.services.size > 0) {
             https = await deps.https({ runtime: opts.runtime, ...opts.https });
@@ -715,9 +762,14 @@ export async function startNativeProject(opts: {
                       }
                     : null,
                 };
+                finalization = await deps.finalization({
+                  scope: opts.scope,
+                  run: persistedMapping,
+                });
                 await deps.save({ ...opts.scope, run: persistedMapping });
                 mapping = persistedMapping;
                 await hooks?.ready?.();
+                await opts.onReady?.();
               },
             });
           } catch (error) {
@@ -741,6 +793,7 @@ export async function startNativeProject(opts: {
             review.planId
           );
           requireConfirmedCleanup(final, serveFailure, nativeExitCode);
+          graphCleanupConfirmed = true;
           if (mapping) {
             if (mapping.owner !== owned.owner) {
               throw refused();
@@ -758,6 +811,7 @@ export async function startNativeProject(opts: {
           httpsClosing = true;
           try {
             await https?.close();
+            httpsCleanupConfirmed = true;
           } finally {
             await rm(directory, { recursive: true, force: true });
           }
@@ -769,5 +823,10 @@ export async function startNativeProject(opts: {
     process.off("SIGTERM", terminate);
     opts.signal?.removeEventListener("abort", cancel);
     await hooks?.cleanup();
+    await acknowledgeFinalization(
+      finalization,
+      graphCleanupConfirmed,
+      httpsCleanupConfirmed
+    );
   }
 }

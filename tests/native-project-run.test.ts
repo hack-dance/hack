@@ -210,3 +210,58 @@ test("profile selectors roundtrip canonically while legacy absence stays unknown
   await save({ ...opts, run });
   expect((await load(opts))?.profiles).toBeUndefined();
 });
+
+test("restart intent survives mapping retirement and refuses mismatched removal", async () => {
+  const {
+    loadNativeRestartIntent,
+    saveNativeRestartIntent,
+    removeNativeRestartIntent,
+  } = await import("../src/backends/native-project-run.ts");
+  const opts = await fixture();
+  const intent = {
+    phase: "prepared" as const,
+    run,
+    finalization: {
+      version: 1 as const,
+      attempt: "e".repeat(32),
+      scope: "f".repeat(64),
+      run: run.run,
+      owner: run.owner,
+      namespace: run.namespace,
+      planId: run.planId,
+    },
+  };
+  await save({ ...opts, run });
+  await saveNativeRestartIntent({ ...opts, intent });
+  await remove({ ...opts, expected: run });
+  expect(await load(opts)).toBeNull();
+  expect(await loadNativeRestartIntent(opts)).toEqual(intent);
+  await expect(saveNativeRestartIntent({ ...opts, intent })).rejects.toThrow();
+  await expect(
+    removeNativeRestartIntent({
+      ...opts,
+      expected: {
+        ...intent,
+        finalization: { ...intent.finalization, attempt: "1".repeat(32) },
+      },
+    })
+  ).rejects.toThrow();
+  expect(await loadNativeRestartIntent(opts)).toEqual(intent);
+  await removeNativeRestartIntent({ ...opts, expected: intent });
+  expect(await loadNativeRestartIntent(opts)).toBeNull();
+});
+test("restart operation lock excludes overlap and releases at readiness", async () => {
+  const { withNativeRestartLock } = await import(
+    "../src/backends/native-project-run.ts"
+  );
+  const opts = await fixture();
+  await withNativeRestartLock(opts, async (release) => {
+    await expect(
+      withNativeRestartLock(opts, () => Promise.resolve())
+    ).rejects.toThrow("already owned");
+    await release();
+    expect(
+      await withNativeRestartLock(opts, () => Promise.resolve("next"))
+    ).toBe("next");
+  });
+});

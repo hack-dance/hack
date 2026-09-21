@@ -205,9 +205,17 @@ async function readBoundedOutput(
 
 /** Only the native structured error code leaves this boundary, never stderr messages. */
 export async function readNativeFailureCode(
-  stream: ReadableStream<Uint8Array>
+  stream: ReadableStream<Uint8Array>,
+  signal?: AbortSignal
 ): Promise<string | undefined> {
   const reader = stream.getReader();
+  const cancel = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  if (signal?.aborted) {
+    cancel();
+  }
   let bytes = 0;
   let text = "";
   const decoder = new TextDecoder();
@@ -236,6 +244,7 @@ export async function readNativeFailureCode(
   } catch {
     return;
   } finally {
+    signal?.removeEventListener("abort", cancel);
     reader.releaseLock();
   }
 }

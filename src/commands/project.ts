@@ -36,6 +36,11 @@ import {
   nativeProjectPs,
   requireComposeOperationAvailable,
 } from "../backends/native-project-observe.ts";
+import { restartNativeProject } from "../backends/native-project-restart.ts";
+import {
+  nativeRestartSelection,
+  preflightNativeRestart,
+} from "../backends/native-project-restart-preflight.ts";
 import {
   parseNativeHttpsSelection,
   startNativeProject,
@@ -5835,7 +5840,9 @@ async function handleNativeUp({
   ctx,
   args,
   native,
+  restart = false,
 }: {
+  readonly restart?: boolean;
   readonly ctx: CliContext;
   readonly args: UpArgs;
   readonly native: NonNullable<
@@ -5873,7 +5880,7 @@ async function handleNativeUp({
     projectName,
     branch,
   });
-  return await startNativeProject({
+  const startup: Parameters<typeof startNativeProject>[0] = {
     runtime: native,
     scope: {
       projectRoot: project.projectRoot,
@@ -5932,6 +5939,61 @@ async function handleNativeUp({
         },
       };
     },
+  };
+  if (!restart) {
+    return await startNativeProject(startup);
+  }
+  if (!startup.sharedSource) {
+    throw new CliUsageError(
+      "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 before cleanup."
+    );
+  }
+  return await restartNativeProject({
+    scope: startup.scope,
+    envName: startup.envName,
+    profiles: args.options.profile === undefined ? undefined : startup.profiles,
+    preflight: (run) =>
+      preflightNativeRestart({
+        runtime: native,
+        scope: startup.scope,
+        composeFile: startup.composeFile,
+        adaptationFile: startup.adaptationFile,
+        dependencyFile: startup.dependencyFile,
+        allowedHosts: startup.allowedHosts,
+        run,
+      }),
+    down: async () => {
+      const code = await handleDown({
+        ctx,
+        args: {
+          options: {
+            path: args.options.path,
+            project: args.options.project,
+            branch: args.options.branch,
+            env: undefined,
+            profile: undefined,
+            target: undefined,
+            json: false,
+            pruneCaches: false,
+            yes: false,
+          },
+          positionals: {},
+          raw: args.raw,
+        },
+      });
+      if (code !== 0) {
+        throw new Error(
+          "Native restart cleanup failed; retained data was not replaced."
+        );
+      }
+    },
+    start: ({ run, onReady }) =>
+      startNativeProject({
+        ...startup,
+        ...nativeRestartSelection({ run }),
+        restore: run,
+        onReady,
+      }),
   });
 }
 
@@ -7357,6 +7419,15 @@ async function handleRestart({
   readonly ctx: CliContext;
   readonly args: RestartArgs;
 }): Promise<number> {
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    return await handleNativeUp({
+      ctx,
+      args: { ...args, options: { ...args.options, detach: false } },
+      native,
+      restart: true,
+    });
+  }
   requireComposeOperationAvailable("restart");
   const json = args.options.json === true;
   if (!json) {

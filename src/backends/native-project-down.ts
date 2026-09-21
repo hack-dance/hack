@@ -4,6 +4,7 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import {
   loadNativeProjectRun,
   type NativeProjectRun,
@@ -75,11 +76,11 @@ export async function nativeProjectDown(opts: {
   }
   const invoke = opts.invoke ?? invokeNativeRuntime;
   const inspect = () =>
-    invoke({
+    inspectNativeProjectGraph({
       runtime: opts.runtime,
-      cwd: opts.scope.projectRoot,
-      args: ["graph", "inspect", "--run-id", run.run, "--json"],
-      timeoutMs: 30_000,
+      projectRoot: opts.scope.projectRoot,
+      run: run.run,
+      invoke,
     });
   const initial = await inspect();
   verify(initial, run, false);

@@ -221,3 +221,54 @@ test("readiness rejection retains identity while observing safe native cleanup c
   });
   expect(Bun.inspect(diagnostic)).not.toContain("synthetic-private-cleanup");
 });
+
+test("owned exit completes without waiting for descendant-held stdout and stderr", async () => {
+  const opts = await fixture(`
+    const keeper = Bun.spawn(["/bin/sh", "-c", "sleep 3"], {
+      stdin: "ignore", stdout: "inherit", stderr: "inherit", detached: true,
+    });
+    keeper.unref();
+    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
+    console.error(JSON.stringify({code:"graph_owner_recovery",message:"synthetic-private-detail"}));
+    process.exit(0);
+  `);
+  let diagnostic: unknown;
+  const started = performance.now();
+  const result = await serveNativeProjectGraph({
+    ...opts,
+    onReady: async () => {},
+    onExitDiagnostic: (value) => {
+      diagnostic = value;
+    },
+  });
+  expect(result).toBe(0);
+  expect(performance.now() - started).toBeLessThan(1500);
+  expect(diagnostic).toEqual({
+    exitCode: 0,
+    nativeCode: "graph_owner_recovery",
+  });
+  expect(Bun.inspect(diagnostic)).not.toContain("synthetic-private-detail");
+}, 6000);
+
+test("early native failure retains its safe code when descendant pipes stay open", async () => {
+  const opts = await fixture(`
+    const keeper = Bun.spawn(["/bin/sh", "-c", "sleep 3"], {
+      stdin: "ignore", stdout: "inherit", stderr: "inherit", detached: true,
+    });
+    keeper.unref();
+    console.error(JSON.stringify({code:"graph_budget",message:"synthetic-private-detail"}));
+    process.exit(2);
+  `);
+  let ready = false;
+  const started = performance.now();
+  await expect(
+    serveNativeProjectGraph({
+      ...opts,
+      onReady: async () => {
+        ready = true;
+      },
+    })
+  ).rejects.toThrow("graph_budget");
+  expect(ready).toBe(false);
+  expect(performance.now() - started).toBeLessThan(1500);
+}, 6000);

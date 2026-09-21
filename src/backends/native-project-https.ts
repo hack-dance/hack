@@ -22,6 +22,7 @@ import {
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
+const PROBE_PATH_BYTES = /^[\x21-\x7e]+$/;
 const HTTP_STATUS = /^HTTP\/1\.[01] ([2-5][0-9]{2})(?: [^\r\n]*)?$/;
 const SHA = /^[a-f0-9]{64}$/;
 const HOST =
@@ -463,12 +464,23 @@ async function validCa(path: string): Promise<Buffer> {
 /** Pin TCP to loopback independently of SNI and the HTTP Host authority.
  * Bun's HTTPS adapter refused this distinct transport/SNI selection in a real TLS control.
  */
+export function isNativeHttpsProbePath(path: unknown): path is string {
+  return (
+    typeof path === "string" &&
+    path.startsWith("/") &&
+    path.length <= 512 &&
+    PROBE_PATH_BYTES.test(path) &&
+    !path.includes("#")
+  );
+}
 export async function verifyNativeHttpsHostname(
   hostname: string,
   port: number,
-  caPath: string
+  caPath: string,
+  path: string
 ): Promise<{ statusCode: number }> {
   if (
+    !isNativeHttpsProbePath(path) ||
     hostname.length > 253 ||
     !HOST.test(hostname) ||
     !Number.isInteger(port) ||
@@ -511,7 +523,7 @@ export async function verifyNativeHttpsHostname(
       phase = "response";
       const authority = port === 443 ? hostname : `${hostname}:${port}`;
       socket.write(
-        `GET / HTTP/1.1\r\nHost: ${authority}\r\nConnection: close\r\n\r\n`
+        `GET ${path} HTTP/1.1\r\nHost: ${authority}\r\nConnection: close\r\n\r\n`
       );
     });
     socket.on("data", (data: Buffer) => {
@@ -565,7 +577,10 @@ export async function startNativeProjectHttps(opts: {
   readonly caPath: string;
   readonly httpsPort: number;
   readonly exited: Promise<{ component: string; code: number }>;
-  verifyHostname(hostname: string): Promise<{ statusCode: number }>;
+  verifyHostname(
+    hostname: string,
+    path: string
+  ): Promise<{ statusCode: number }>;
   close(): Promise<void>;
 }> {
   const deps = {
@@ -766,8 +781,8 @@ export async function startNativeProjectHttps(opts: {
       caPath,
       httpsPort: opts.httpsPort,
       exited,
-      verifyHostname: (hostname) =>
-        verifyNativeHttpsHostname(hostname, opts.httpsPort, caPath),
+      verifyHostname: (hostname, path) =>
+        verifyNativeHttpsHostname(hostname, opts.httpsPort, caPath, path),
       close,
     };
   } catch (error) {

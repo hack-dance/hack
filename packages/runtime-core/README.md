@@ -541,3 +541,9 @@ the container-owned writable layer and are discarded with container removal;
 source-bind protections and named-volume persistence are unchanged. Explicit
 `read_only: true` services retain the bounded 16 MiB `rw,noexec,nosuid` `/tmp`
 tmpfs contract.
+
+
+Compose services without `pids_limit` retain Docker's default PID policy; the
+candidate does not impose an implicit 64-task cap. Linux counts threads as tasks,
+so that cap can prevent Next.js/Bun workers from starting even without an OOM.
+Explicit supported PID limits remain enforced and verified (maximum 128).

@@ -191,3 +191,33 @@ test("early receiver rejection drains its safe code despite a broken private-inp
     "attempt\n"
   );
 });
+
+test("readiness rejection retains identity while observing safe native cleanup code", async () => {
+  const opts = await fixture(`
+    process.on("SIGTERM", () => {
+      console.error(JSON.stringify({code:"graph_owner_recovery",message:"synthetic-private-cleanup"}));
+      process.exit(2);
+    });
+    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
+    await Bun.sleep(10000);
+  `);
+  const failure = new Error("synthetic TLS failure");
+  let diagnostic: unknown;
+  await expect(
+    serveNativeProjectGraph({
+      ...opts,
+      onReady: async () => {
+        throw failure;
+      },
+      onExitDiagnostic: (value) => {
+        diagnostic = value;
+        throw new Error("observer failure");
+      },
+    })
+  ).rejects.toBe(failure);
+  expect(diagnostic).toEqual({
+    exitCode: 2,
+    nativeCode: "graph_owner_recovery",
+  });
+  expect(Bun.inspect(diagnostic)).not.toContain("synthetic-private-cleanup");
+});

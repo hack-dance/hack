@@ -328,10 +328,15 @@ pub(super) fn prepare_delivery(
         // Their contents are discarded when the container is removed; durable data uses named volumes.
         let mut config = json!({"Image":image,"Labels":labels,"HostConfig":{
             "NetworkMode":network,"Memory":service.limits.memory_bytes.unwrap_or(0),"NanoCpus":(service.limits.cpus.unwrap_or(0.0)*1e9) as u64,
-            "PidsLimit":service.limits.pids.unwrap_or(64),"ReadonlyRootfs":service.read_only,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"Init":service.init,
+            "ReadonlyRootfs":service.read_only,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"Init":service.init,
             "Mounts":mounts,"ShmSize":service.limits.shared_memory_bytes.unwrap_or(67108864),
             "RestartPolicy":{"Name":"no"},"LogConfig":{"Type":"json-file","Config":{"max-size":"1m","max-file":"1"}}
         }});
+        // An omitted Compose pids_limit leaves the engine default unchanged.
+        // Threads count toward this limit, so inventing a cap can stall dev servers.
+        if let Some(pids) = service.limits.pids {
+            config["HostConfig"]["PidsLimit"] = json!(pids);
+        }
         // Writable image roots retain their ordinary /tmp capacity and execution
         // semantics (installers extract and run tools there). Only explicit
         // read-only roots need this bounded, non-executable scratch mount.

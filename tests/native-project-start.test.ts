@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseNativeHttpsSelection,
+  reviewedNativeHttpsRoutes,
   startNativeProject,
 } from "../src/backends/native-project-start.ts";
 
@@ -619,10 +620,11 @@ test("routed HTTPS verification precedes readiness and closes after graph cleanu
       caPath: "/synthetic/root.crt",
       httpsPort: 8443,
       exited: new Promise(() => {}),
-      verifyHostname: async (hostname) => {
+      verifyHostname: async (hostname, path) => {
+        expect(path).toBe("/health");
         expect(hostname).toBe("web.example.com");
         events.push("https-verify");
-        return { statusCode: 403 };
+        return { statusCode: 200 };
       },
       close: async () => {
         events.push("https-close");
@@ -726,6 +728,17 @@ test("failed cleanup reports sanitized TLS failure and retained state without re
     },
     close: async () => {},
   });
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    try {
+      return await serve(request);
+    } finally {
+      request.onExitDiagnostic?.({
+        exitCode: 2,
+        nativeCode: "graph_owner_recovery",
+      });
+    }
+  };
   const invoke = opts.dependencies.invoke!;
   let inspections = 0;
   opts.dependencies.invoke = async (request) => {
@@ -750,6 +763,9 @@ test("failed cleanup reports sanitized TLS failure and retained state without re
     "runtime and bridge state may be retained"
   );
   expect((caught as Error).message).toContain("VERIFICATION_TIMEOUT_RESPONSE");
+  expect((caught as Error).message).toContain(
+    "Native exit diagnostic: graph_owner_recovery"
+  );
   expect((caught as Error).cause).toBeUndefined();
   expect(events).not.toContain("remove");
 });
@@ -774,4 +790,47 @@ test("final inspection failure reports uncertainty without echoing arbitrary fai
   expect(Bun.inspect(failure)).not.toContain("synthetic-private-canary");
   expect(JSON.stringify(failure)).not.toContain("synthetic-private-canary");
   expect(events).not.toContain("remove");
+});
+
+test("HTTPS route paths come only from reviewed native probes and conflicts refuse", () => {
+  const service = (path: string) => ({
+    routing: { hostnames: ["web.example.com"] },
+    healthcheck: { native_http: { path } },
+  });
+  expect(
+    reviewedNativeHttpsRoutes(
+      { services: { web: service("/api/health") } },
+      new Set(["web"])
+    )
+  ).toEqual([{ hostname: "web.example.com", path: "/api/health" }]);
+  expect(() =>
+    reviewedNativeHttpsRoutes(
+      { services: { web: service("/health"), other: service("/other") } },
+      new Set(["web", "other"])
+    )
+  ).toThrow();
+  expect(() =>
+    reviewedNativeHttpsRoutes(
+      { services: { web: { routing: { hostnames: ["web.example.com"] } } } },
+      new Set(["web"])
+    )
+  ).toThrow();
+});
+
+test("HTTPS startup refuses a non-2xx reviewed health response", async () => {
+  const { opts, events } = await httpsFixture();
+  opts.dependencies.https = async () => ({
+    caPath: "/synthetic/root.crt",
+    httpsPort: 8443,
+    exited: new Promise(() => {}),
+    verifyHostname: async () => ({ statusCode: 403 }),
+    close: async () => {
+      events.push("https-close");
+    },
+  });
+  await expect(
+    startNativeProject({ ...opts, https: httpsSelection })
+  ).rejects.toThrow("HTTP_STATUS_403");
+  expect(events).not.toContain("save");
+  expect(events).toContain("https-close");
 });

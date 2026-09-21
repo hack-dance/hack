@@ -13,7 +13,10 @@ import {
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
-import { startNativeProjectHttps } from "./native-project-https.ts";
+import {
+  isNativeHttpsProbePath,
+  startNativeProjectHttps,
+} from "./native-project-https.ts";
 import {
   type NativeProjectInput,
   prepareNativeProjectInput,
@@ -91,21 +94,25 @@ export function parseNativeHttpsSelection(
   validateHttpsSelection(selection);
   return selection;
 }
-function routeHostnames(
+export function reviewedNativeHttpsRoutes(
   plan: unknown,
   services: ReadonlySet<string>
-): readonly string[] {
+): readonly { hostname: string; path: string }[] {
   if (!(isRecord(plan) && isRecord(plan.services))) {
     throw refused();
   }
-  const names = new Set<string>();
+  const names = new Map<string, string>();
   for (const name of services) {
     const service = plan.services[name];
     if (
       !(
         isRecord(service) &&
         isRecord(service.routing) &&
-        Array.isArray(service.routing.hostnames)
+        Array.isArray(service.routing.hostnames) &&
+        isRecord(service.healthcheck) &&
+        service.healthcheck.disabled !== true &&
+        isRecord(service.healthcheck.native_http) &&
+        isNativeHttpsProbePath(service.healthcheck.native_http.path)
       )
     ) {
       throw refused();
@@ -114,10 +121,16 @@ function routeHostnames(
       if (typeof hostname !== "string") {
         throw refused();
       }
-      names.add(hostname);
+      const path = service.healthcheck.native_http.path;
+      if (names.has(hostname) && names.get(hostname) !== path) {
+        throw refused();
+      }
+      names.set(hostname, path);
     }
   }
-  return [...names].sort();
+  return [...names]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([hostname, path]) => ({ hostname, path }));
 }
 type Hooks = {
   readonly cleanup: () => Promise<void>;
@@ -252,8 +265,23 @@ async function verifyHttpsRoutes(
   if (!frontend) {
     return;
   }
-  for (const hostname of routeHostnames(plan, services)) {
-    await frontend.verifyHostname(hostname);
+  for (const { hostname, path } of reviewedNativeHttpsRoutes(plan, services)) {
+    const response = await frontend.verifyHostname(hostname, path);
+    if (
+      !Number.isInteger(response.statusCode) ||
+      response.statusCode < 200 ||
+      response.statusCode >= 300
+    ) {
+      const code =
+        Number.isInteger(response.statusCode) &&
+        response.statusCode >= 100 &&
+        response.statusCode <= 599
+          ? `HTTP_STATUS_${response.statusCode}`
+          : "HTTP_STATUS_INVALID";
+      throw new Error(
+        `Native HTTPS verification failed (${code}); peer values omitted.`
+      );
+    }
   }
 }
 function foregroundExitCode(opts: {
@@ -298,7 +326,10 @@ function environmentDelivery(
 const SAFE_STARTUP_DIAGNOSTIC =
   /^(Native (?:graph startup (?:failed|was interrupted or failed)|HTTPS verification failed)) \(([A-Za-z0-9_]{1,80})\); (?:inspect owned state before retrying\.|peer values omitted\.)$/;
 /** Preserve only the fixed diagnostic envelope emitted by the native clients. */
-function cleanupUnconfirmed(startupFailure?: unknown): Error {
+function cleanupUnconfirmed(
+  startupFailure?: unknown,
+  nativeCode?: string
+): Error {
   const message = startupFailure instanceof Error ? startupFailure.message : "";
   const diagnostic = SAFE_STARTUP_DIAGNOSTIC.exec(message);
   const startup =
@@ -306,12 +337,13 @@ function cleanupUnconfirmed(startupFailure?: unknown): Error {
       ? ""
       : ` Startup diagnostic: ${diagnostic ? `${diagnostic[1]} (${diagnostic[2]})` : "STARTUP_FAILURE (details omitted)"}.`;
   return new Error(
-    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startup}`
+    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startup}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}`
   );
 }
 function requireConfirmedCleanup(
   final: unknown,
-  startupFailure?: unknown
+  startupFailure?: unknown,
+  nativeCode?: string
 ): void {
   if (
     !(
@@ -328,7 +360,7 @@ function requireConfirmedCleanup(
         (!isRecord(value) || value.state !== "absent")
     )
   ) {
-    throw cleanupUnconfirmed(startupFailure);
+    throw cleanupUnconfirmed(startupFailure, nativeCode);
   }
 }
 /** Explicit unfiltered project sharing; foreground only. Native refusal never falls back to Compose. */
@@ -546,6 +578,7 @@ export async function startNativeProject(opts: {
           const delivery = environmentDelivery(input, review.planId, run);
           let code = 1;
           let serveFailure: unknown;
+          let nativeExitCode: string | undefined;
           try {
             code = await deps.serve({
               runtime: opts.runtime,
@@ -570,6 +603,9 @@ export async function startNativeProject(opts: {
               privateInput: delivery.payload,
               startupTimeoutMs: 300_000,
               signal: controller.signal,
+              onExitDiagnostic: (diagnostic) => {
+                nativeExitCode = diagnostic.nativeCode;
+              },
               onReady: async () => {
                 const readyMapping = authoritative(
                   await invokeInspect(),
@@ -604,7 +640,10 @@ export async function startNativeProject(opts: {
           try {
             final = await invokeInspect();
           } catch (inspectionFailure) {
-            throw cleanupUnconfirmed(serveFailure ?? inspectionFailure);
+            throw cleanupUnconfirmed(
+              serveFailure ?? inspectionFailure,
+              nativeExitCode
+            );
           }
           const owned = authoritative(
             final,
@@ -612,7 +651,7 @@ export async function startNativeProject(opts: {
             review.namespace,
             review.planId
           );
-          requireConfirmedCleanup(final, serveFailure);
+          requireConfirmedCleanup(final, serveFailure, nativeExitCode);
           if (mapping) {
             if (mapping.owner !== owned.owner) {
               throw refused();

@@ -156,6 +156,50 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
     assert!(!candidate.state_root.exists());
 }
 #[test]
+fn compose_pid_limit_is_opt_in_and_explicit_limits_remain_verified() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    for limit in [None, Some(64), Some(128), Some(129)] {
+        let mut document = compose(&format!("sha256:{}", "a".repeat(64)), "marker", false);
+        if let Some(limit) = limit {
+            document["services"]["web"]["pids_limit"] = json!(limit);
+        }
+        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let result = config::prepare(inputs, &goals(), &"a".repeat(32), &"b".repeat(32), None);
+        if limit == Some(129) {
+            assert_eq!(result.err().unwrap().code, "graph_budget");
+            continue;
+        }
+        let prepared = result.unwrap();
+        let host = &prepared.configs["web"]["HostConfig"];
+        assert_eq!(
+            host.get("PidsLimit"),
+            limit.map(|value| json!(value)).as_ref()
+        );
+        let mut observed = host.clone();
+        observed["PidsLimit"] = json!(0);
+        if limit.is_some() {
+            assert_eq!(
+                mismatch(host, &observed, "HostConfig").as_deref(),
+                Some("HostConfig.PidsLimit")
+            );
+        } else {
+            // Docker may materialize its own default; omission does not claim a limit.
+            assert!(mismatch(host, &observed, "HostConfig").is_none());
+        }
+    }
+    assert!(!candidate.state_root.exists());
+}
+#[test]
 fn compose_shared_memory_is_bounded_without_double_counting_memory() {
     let fixture = Fixture::new();
     let home = Fixture::new();

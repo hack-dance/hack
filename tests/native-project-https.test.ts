@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   type HttpsChild,
+  isNativeHttpsProbePath,
   nativeHttpsVerificationError,
   spawnNativeHttpsChild,
   startNativeProjectHttps,
@@ -522,20 +523,30 @@ while True:
   expect(Number.isInteger(port) && port > 0).toBe(true);
   const address = { port };
   expect(
-    await verifyNativeHttpsHostname("fixture.invalid", address.port, cert)
+    await verifyNativeHttpsHostname(
+      "fixture.invalid",
+      address.port,
+      cert,
+      "/health"
+    )
   ).toEqual({ statusCode: 204 });
   expect(JSON.parse(await readFile(seenPath, "utf8"))).toEqual({
     sni: "fixture.invalid",
-    request: `GET / HTTP/1.1\r\nHost: fixture.invalid:${address.port}\r\nConnection: close\r\n\r\n`,
+    request: `GET /health HTTP/1.1\r\nHost: fixture.invalid:${address.port}\r\nConnection: close\r\n\r\n`,
     remote: "127.0.0.1",
   });
   await expect(
-    verifyNativeHttpsHostname("wrong.invalid", address.port, cert)
+    verifyNativeHttpsHostname("wrong.invalid", address.port, cert, "/health")
   ).rejects.toThrow("Native HTTPS verification failed");
   const foreignCa = join(root, "foreign.pem");
   await writeFile(foreignCa, CURRENT_CA_PEM);
   await expect(
-    verifyNativeHttpsHostname("fixture.invalid", address.port, foreignCa)
+    verifyNativeHttpsHostname(
+      "fixture.invalid",
+      address.port,
+      foreignCa,
+      "/health"
+    )
   ).rejects.toThrow("Native HTTPS verification failed");
   for (const invalid of [
     "HTTP/1.1 100 Continue\r\n\r\n",
@@ -545,7 +556,34 @@ while True:
   ]) {
     await writeFile(responsePath, invalid);
     await expect(
-      verifyNativeHttpsHostname("fixture.invalid", address.port, cert)
+      verifyNativeHttpsHostname(
+        "fixture.invalid",
+        address.port,
+        cert,
+        "/health"
+      )
     ).rejects.toThrow("Native HTTPS verification failed");
+  }
+});
+
+test("HTTPS probe paths match native path bounds and reject request injection", () => {
+  for (const path of [
+    "/health",
+    "/api/health?ready=1",
+    `/${"a".repeat(511)}`,
+  ]) {
+    expect(isNativeHttpsProbePath(path)).toBe(true);
+  }
+  for (const path of [
+    undefined,
+    "",
+    "health",
+    "/bad path",
+    "/bad#fragment",
+    "/bad\r\nHost: evil",
+    "/é",
+    `/${"a".repeat(512)}`,
+  ]) {
+    expect(isNativeHttpsProbePath(path)).toBe(false);
   }
 });

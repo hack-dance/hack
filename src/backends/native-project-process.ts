@@ -10,6 +10,11 @@ const RUN = /^[a-f0-9]{32}$/;
 const MAX_OUTPUT = 16 * 1024 * 1024;
 const MAX_INPUT = 256 * 1024;
 
+export type NativeExitDiagnostic = {
+  readonly exitCode: number;
+  readonly nativeCode?: string;
+};
+
 /**
  * Keep the graph owner attached to the calling CLI until owned shutdown completes.
  * Startup values travel over stdin only. Readiness is a handshake, not application
@@ -25,6 +30,7 @@ export async function serveNativeProjectGraph(opts: {
   readonly startupTimeoutMs: number;
   readonly signal?: AbortSignal;
   readonly onReady: () => Promise<void>;
+  readonly onExitDiagnostic?: (diagnostic: NativeExitDiagnostic) => void;
 }): Promise<number> {
   if (
     !(RUN.test(opts.run) && Number.isSafeInteger(opts.startupTimeoutMs)) ||
@@ -128,6 +134,16 @@ export async function serveNativeProjectGraph(opts: {
     }
     if (killTimer) {
       clearTimeout(killTimer);
+    }
+    const exitCode = await child.exited;
+    const nativeCode = await failureCode;
+    try {
+      opts.onExitDiagnostic?.({
+        exitCode,
+        ...(nativeCode ? { nativeCode } : {}),
+      });
+    } catch {
+      // Observation must never replace the startup result or cleanup authority.
     }
   }
 }

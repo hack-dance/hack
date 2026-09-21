@@ -419,10 +419,12 @@ authorized host forwarding. Startup checks bind permission and leaves existing
 listeners untouched; it never elevates privileges automatically.
 
 Startup verifies each reviewed hostname using loopback, SNI, Host, and the private
-CA, without relying on DNS or installing system trust. This verifies TLS; HTTP
-status alone does not establish application health. The separately declared native
-HTTP readiness probes remain required. DNS and user-approved trust setup are
-separate prerequisites for normal browser access.
+CA, without relying on DNS or installing system trust. It requests the service's
+reviewed native HTTP health path and requires a 2xx response, matching the guest
+readiness policy. It does not render `/` merely to verify an alias. The guest
+readiness probes remain required; a health response does not establish a usable
+browser session. DNS and user-approved trust setup are separate prerequisites for
+normal browser access.
 
 The probe pins its TCP connection to loopback independently of SNI and Host.
 Failed HTTPS verification reports a reviewed TLS/transport error code or
@@ -431,7 +433,8 @@ Failed HTTPS verification reports a reviewed TLS/transport error code or
 checks succeed. Confirmed graph cleanup preserves the original startup error. If final
 inspection or cleanup cannot be confirmed, the error instead reports retained-state
 uncertainty alongside the sanitized startup diagnostic. Any published mapping remains
-intact; inspect owned runtime and bridge state before retrying.
+intact; inspect owned runtime and bridge state before retrying. A native cleanup
+error code is included when available, without its raw output or message.
 
 ### Explicit cleanup after a dead foreground owner
 

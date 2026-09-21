@@ -17,6 +17,18 @@ pub(super) fn current_source() -> String {
 pub(super) fn publish(engine: &Engine<'_>) -> Result<String, CandidateError> {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/environment-launcher"));
     let hash = format!("{:x}", Sha256::digest(bytes));
+    let input = transport(bytes)?;
+    let output = engine.guest().execute(PUBLISH, &[&hash], Some(&input))?;
+    if output != "launcher-ready-v1\n" {
+        return Err(error(
+            "environment_launcher",
+            "Launcher publication was not confirmed.",
+        ));
+    }
+    Ok(current_source())
+}
+#[cfg(feature = "environment-launcher")]
+fn transport(bytes: &[u8]) -> Result<String, CandidateError> {
     use std::io::Write;
     let mut compressed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     compressed.write_all(bytes).map_err(state::io)?;
@@ -28,14 +40,7 @@ pub(super) fn publish(engine: &Engine<'_>) -> Result<String, CandidateError> {
             "Compressed launcher exceeds the bounded transport profile.",
         ));
     }
-    let output = engine.guest().execute(PUBLISH, &[&hash], Some(&input))?;
-    if output != "launcher-ready-v1\n" {
-        return Err(error(
-            "environment_launcher",
-            "Launcher publication was not confirmed.",
-        ));
-    }
-    Ok(current_source())
+    Ok(input)
 }
 #[cfg(feature = "environment-launcher")]
 const PUBLISH: &str = r#"
@@ -317,4 +322,26 @@ mod tests {
         value["Entrypoint"] = json!(["app"]);
         assert!(validate(&value).is_err());
     }
+}
+
+#[cfg(all(test, feature = "environment-launcher"))]
+#[test]
+fn embedded_launcher_fits_exact_publication_transport_and_roundtrips() {
+    use std::io::Read;
+    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/environment-launcher"));
+    let encoded = transport(bytes).expect("built launcher must fit the publication budget");
+    assert!(encoded.len() <= 56 * 1024);
+    let compressed = base64::engine::general_purpose::STANDARD
+        .decode(&encoded)
+        .unwrap();
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(compressed.as_slice())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    assert_eq!(decoded.as_slice(), bytes);
+    eprintln!(
+        "launcher artifact bytes={} transport bytes={}",
+        bytes.len(),
+        encoded.len()
+    );
 }

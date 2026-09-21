@@ -287,6 +287,8 @@ fn dead_publication_recovery_requires_unchanged_receipt_and_socket() {
         };
         assert_eq!(pin.receipt.process.pid, child.0.id() as i32);
         assert!(pin.recover().is_err());
+        #[cfg(target_os = "macos")]
+        assert!(pin.verify_dead().is_err());
         child.0.kill().unwrap();
         child.0.wait().unwrap();
         let mut replacement = None;
@@ -296,10 +298,14 @@ fn dead_publication_recovery_requires_unchanged_receipt_and_socket() {
             fs::set_permissions(&pin.paths.socket, fs::Permissions::from_mode(0o600)).unwrap();
         }
         if replace_socket {
+            #[cfg(target_os = "macos")]
+            assert!(pin.verify_dead().is_err());
             assert!(pin.recover().is_err());
             assert!(pin.paths.socket.exists());
             assert!(pin.paths.receipt.exists());
         } else {
+            #[cfg(target_os = "macos")]
+            pin.verify_dead().unwrap();
             pin.recover().unwrap();
             pin.recover().unwrap();
             assert!(absent(&pin.paths.socket).unwrap());

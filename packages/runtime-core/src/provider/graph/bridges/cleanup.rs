@@ -9,6 +9,8 @@ pub(crate) struct Selection {
     boot: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     previous_boot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    predecessor_owner: Option<String>,
     run: String,
     plan: String,
     capacity: u8,
@@ -60,7 +62,17 @@ fn validate_selection(
     } else {
         None
     };
-    validate_bindings(receipt, selection, previous.as_deref())
+    validate_bindings(receipt, selection, previous.as_deref())?;
+    if let Some(expected) = &selection.predecessor_owner {
+        if predecessor_owner(
+            receipt,
+            selection.previous_boot.as_deref().ok_or_else(invalid)?,
+        )? != *expected
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
 }
 
 fn validate_bindings(
@@ -71,10 +83,21 @@ fn validate_bindings(
     if let Some(previous) = &selection.previous_boot {
         if previous == &selection.boot
             || previous_boot != Some(previous.as_str())
-            || selection.selected.is_empty()
+            || (selection.selected.is_empty() && selection.predecessor_owner.is_none())
         {
             return Err(invalid());
         }
+    }
+    if selection.predecessor_owner.as_ref().is_some_and(|hash| {
+        !hex(hash, 64)
+            || selection.previous_boot.is_none()
+            || !selection.selected.is_empty()
+            || !receipt
+                .relay_startup
+                .as_ref()
+                .is_some_and(|startup| startup.control_only && startup.services.is_empty())
+    }) {
+        return Err(invalid());
     }
     let store = Store {
         version: 1,
@@ -123,6 +146,7 @@ pub(crate) fn capture(
         owner: engine.guest().incarnation().into(),
         boot: engine.guest().boot_id().into(),
         previous_boot: None,
+        predecessor_owner: None,
         run: receipt.run.clone(),
         plan: receipt.plan_id.clone(),
         capacity: engine.guest().bridge_intent().map_or(0, |v| v.slots),
@@ -146,6 +170,24 @@ pub(crate) fn capture(
     Ok(selection)
 }
 
+fn predecessor_owner(receipt: &Receipt, previous: &str) -> Result<String, CandidateError> {
+    let startup = receipt
+        .relay_startup
+        .as_ref()
+        .filter(|s| s.control_only && s.services.is_empty())
+        .ok_or_else(invalid)?;
+    let pin = crate::provider::relay_owner::publication::PinnedEndpoint::load(
+        &startup.control_root,
+        super::super::host_relay::context(&receipt.owner, previous)?,
+    )?;
+    pin.verify_dead()?;
+    Ok(pin
+        .fingerprint()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 /// Explicit dead-owner recovery only: guest helper absence follows the audited
 /// immediate boot transition, never a fabricated live-helper observation.
 pub(crate) fn capture_previous_boot(
@@ -155,11 +197,12 @@ pub(crate) fn capture_previous_boot(
     previous: &str,
 ) -> Result<Selection, CandidateError> {
     let store = strict_store(candidate, engine)?;
-    let selection = Selection {
+    let mut selection = Selection {
         version: 1,
         owner: engine.guest().incarnation().into(),
         boot: engine.guest().boot_id().into(),
         previous_boot: Some(previous.into()),
+        predecessor_owner: None,
         run: receipt.run.clone(),
         plan: receipt.plan_id.clone(),
         capacity: engine.guest().bridge_intent().map_or(0, |v| v.slots),
@@ -179,6 +222,9 @@ pub(crate) fn capture_previous_boot(
             })
             .collect(),
     };
+    if selection.selected.is_empty() {
+        selection.predecessor_owner = Some(predecessor_owner(receipt, previous)?);
+    }
     validate_selection(engine, receipt, &selection)?;
     Ok(selection)
 }
@@ -312,6 +358,7 @@ mod tests {
             owner: "a".repeat(32),
             boot: "boot".into(),
             previous_boot: None,
+            predecessor_owner: None,
             run: "b".repeat(32),
             plan: "c".repeat(64),
             capacity: 0,
@@ -402,6 +449,22 @@ mod tests {
         assert!(remaining_matches(&store, &receipt, &selection).is_err());
         store.slots.clear();
         assert!(remaining_matches(&store, &receipt, &selection).is_ok());
+    }
+    #[test]
+    fn empty_prior_boot_requires_pinned_control_only_predecessor() {
+        let mut selection = selection(0);
+        selection.boot = "current".into();
+        selection.previous_boot = Some("prior".into());
+        let mut receipt: Receipt = serde_json::from_value(json!({"version":1,"run":selection.run,"owner":selection.owner,"namespace":"d".repeat(64),"plan_id":selection.plan,"phase":"ready-observed","readiness":{},"resources":{},"relay_startup":{"control_only":true,"guest_root":null,"control_root":"/private/owned","artifact":"e".repeat(64),"services":{}}})).unwrap();
+        assert!(validate_bindings(&receipt, &selection, Some("prior")).is_err());
+        selection.predecessor_owner = Some("f".repeat(64));
+        assert!(validate_bindings(&receipt, &selection, Some("prior")).is_ok());
+        assert!(validate_bindings(&receipt, &selection, Some("foreign")).is_err());
+        assert!(validate_bindings(&receipt, &selection, Some("current")).is_err());
+        receipt.relay_startup.as_mut().unwrap().control_only = false;
+        assert!(validate_bindings(&receipt, &selection, Some("prior")).is_err());
+        receipt.relay_startup = None;
+        assert!(validate_bindings(&receipt, &selection, Some("prior")).is_err());
     }
     fn pending(root: &std::path::Path, bytes: &[u8]) -> PathBuf {
         let path = root.join("relay-cleanup-bridges.pending");

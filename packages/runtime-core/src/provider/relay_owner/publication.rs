@@ -179,6 +179,16 @@ impl PinnedEndpoint {
             bytes,
         })
     }
+    /// Read-only predecessor proof: exact private receipt/socket, absent owner.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn verify_dead(&self) -> Result<(), CandidateError> {
+        self.verify_receipt()?;
+        self.verify_socket()?;
+        if identity::alive(self.receipt.process.pid)? {
+            return Err(refused());
+        }
+        Ok(())
+    }
     pub fn incarnation(&self) -> [u8; 16] {
         self.receipt.owner
     }

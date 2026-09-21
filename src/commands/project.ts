@@ -24,6 +24,8 @@ import {
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
+import { nativeProjectExec } from "../backends/native-project-exec.ts";
+import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
 import {
   nativeProjectLogs,
@@ -5899,18 +5901,15 @@ async function handleNativeUp({
         effectiveEnvName: input.effectiveEnvName,
         composeProject,
       });
+      const cleanup = adoptNativeLifecycleCleanup(lifecycle);
       if (lifecycle.code !== 0) {
-        await lifecycle.cleanup?.();
-        lifecycle.signalCleanup?.dispose();
+        await cleanup();
         throw new Error(
           "Native up lifecycle preparation failed; values omitted."
         );
       }
       return {
-        cleanup: async () => {
-          lifecycle.signalCleanup?.dispose();
-          await lifecycle.cleanup?.();
-        },
+        cleanup,
         ready: async () => {
           const code = await runLifecycleCommands({
             title: "Lifecycle (native up after)",
@@ -7984,7 +7983,12 @@ async function handleExec({
   readonly ctx: CliContext;
   readonly args: ExecArgs;
 }): Promise<number> {
-  requireComposeOperationAvailable("exec");
+  const native = resolveNativeRuntimeSelection();
+  if (native && (args.options.env || args.options.profile)) {
+    throw new CliUsageError(
+      "Native exec does not support --env or --profile changes; it uses the running service environment."
+    );
+  }
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -7998,6 +8002,26 @@ async function handleExec({
     // notice on stderr so it never corrupts captured output.
     noticeToStderr: true,
   });
+  if (native) {
+    const result = await nativeProjectExec({
+      runtime: native,
+      scope: {
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        nativeHome: native.home,
+        branch,
+      },
+      service: args.positionals.service ?? "",
+      argv: args.positionals.cmd,
+      workdir: args.options.workdir,
+    });
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    if (result.truncated) {
+      process.stderr.write("Native exec output was truncated.\n");
+    }
+    return result.exitCode;
+  }
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });

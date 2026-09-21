@@ -155,3 +155,39 @@ process.exit(23);
   expect(failure).not.toContain("synthetic-private");
   expect(await Bun.file(marker).text()).toBe("attempt\n");
 });
+
+test("exec accepts matching nonzero completion only through its explicit transport contract", async () => {
+  const runtime = await fixture();
+  const reply = {
+    exit_code: 7,
+    stdout_base64: "AP8=",
+    stderr_base64: "ZXJy",
+    truncated: false,
+  };
+  for (const variant of ["valid", "mismatch", "malformed", "native-error"]) {
+    await Bun.write(
+      runtime.binary,
+      `#!${process.execPath}\nconsole.log(${JSON.stringify(variant === "malformed" ? "not-json" : JSON.stringify({ ...reply, exit_code: variant === "mismatch" ? 8 : 7 }))});\n${variant === "native-error" ? 'console.error(JSON.stringify({code:"graph_service_exec",message:"synthetic-secret"}));' : ""}process.exit(7);`
+    );
+    const request = {
+      runtime,
+      cwd: runtime.home,
+      args: ["graph", "exec", "--json", "--", "true"],
+      serviceExecResponse: true,
+    };
+    if (variant === "valid") {
+      expect(await invokeNativeRuntime(request)).toEqual(reply);
+      await expect(
+        invokeNativeRuntime({ ...request, serviceExecResponse: false })
+      ).rejects.toThrow("request failed");
+      await expect(
+        invokeNativeRuntime({
+          ...request,
+          args: ["graph", "cleanup", "--json"],
+        })
+      ).rejects.toThrow("budget");
+    } else {
+      await expect(invokeNativeRuntime(request)).rejects.toThrow();
+    }
+  }
+});

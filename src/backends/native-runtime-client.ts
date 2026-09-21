@@ -40,10 +40,15 @@ export async function invokeNativeRuntime(opts: {
   readonly cwd: string;
   readonly timeoutMs?: number;
   readonly privateInput?: Uint8Array;
+  /** Only graph exec returns a command exit status alongside its JSON response. */
+  readonly serviceExecResponse?: boolean;
 }): Promise<unknown> {
   const timeoutMs = opts.timeoutMs ?? 180_000;
   if (
-    !Number.isSafeInteger(timeoutMs) ||
+    !(
+      validExecResponseSelection(opts.args, opts.serviceExecResponse) &&
+      Number.isSafeInteger(timeoutMs)
+    ) ||
     timeoutMs < 1 ||
     timeoutMs > 600_000 ||
     (opts.privateInput?.byteLength ?? 0) > MAX_PRIVATE_INPUT_BYTES
@@ -86,18 +91,13 @@ export async function invokeNativeRuntime(opts: {
       code,
       nativeCode: failure,
     });
-    if (timedOut || code !== 0) {
-      throw new Error(
-        timedOut
-          ? "Native runtime request timed out; inspect owned state before retrying."
-          : `Native runtime request failed${failure ? ` (${failure})` : ""}; inspect owned state before retrying.`
-      );
-    }
-    try {
-      return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
-    } catch {
-      throw new Error("Native runtime returned an invalid control response.");
-    }
+    return completionResponse(
+      bytes,
+      code,
+      timedOut,
+      failure,
+      opts.serviceExecResponse
+    );
   } finally {
     clearTimeout(timer);
     if (child.exitCode === null) {
@@ -105,6 +105,70 @@ export async function invokeNativeRuntime(opts: {
       await child.exited;
     }
   }
+}
+
+function completionResponse(
+  bytes: Uint8Array,
+  code: number,
+  timedOut: boolean,
+  failure: string | undefined,
+  serviceExecResponse?: boolean
+): unknown {
+  if (serviceExecResponse && !timedOut && !failure) {
+    return parseExecCompletion(bytes, code);
+  }
+  if (timedOut || code !== 0 || (serviceExecResponse && failure)) {
+    throw new Error(
+      timedOut
+        ? "Native runtime request timed out; inspect owned state before retrying."
+        : `Native runtime request failed${failure ? ` (${failure})` : ""}; inspect owned state before retrying.`
+    );
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+  } catch {
+    throw new Error("Native runtime returned an invalid control response.");
+  }
+}
+
+function validExecResponseSelection(
+  args: readonly string[],
+  selected?: boolean
+): boolean {
+  if (!selected) {
+    return true;
+  }
+  const separator = args.indexOf("--");
+  return (
+    args[0] === "graph" &&
+    args[1] === "exec" &&
+    separator > 2 &&
+    args.slice(2, separator).includes("--json")
+  );
+}
+
+function parseExecCompletion(bytes: Uint8Array, code: number): unknown {
+  let execResult: unknown;
+  try {
+    execResult = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    /* Refuse below without echoing output. */
+  }
+  if (
+    isRecord(execResult) &&
+    Number.isInteger(execResult.exit_code) &&
+    execResult.exit_code === code &&
+    code >= 0 &&
+    code <= 255 &&
+    typeof execResult.stdout_base64 === "string" &&
+    typeof execResult.stderr_base64 === "string" &&
+    typeof execResult.truncated === "boolean"
+  ) {
+    return execResult;
+  }
+  throw new Error(
+    "Native exec returned an invalid or inconsistent completion response; command effects may have occurred."
+  );
 }
 
 async function readBoundedOutput(

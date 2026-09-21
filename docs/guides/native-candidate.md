@@ -101,10 +101,11 @@ code. Retained exec output is limited to 1 MiB per stream.
 Exec is noninteractive: stdin is closed, no TTY is allocated, and arguments are passed
 literally without an implicit shell. The default wait is 30 seconds, configurable up
 to 120 with `--timeout-seconds`. Timeout or transport failure means completion is
-uncertain: the command may still run, and Hack does not replay it. Exec inherits the
-container's static environment; private values delivered only to the service's
-launcher are not automatically available to an exec command. This is not yet normal
-`hack exec` parity. Neither command persists application output in runtime receipts;
+uncertain: the command may still run, and Hack does not replay it. Exec inherits the container's static environment. When the selected service has a
+committed private environment attachment on the current boot, it reuses that
+service's exact read-only launcher mounts and original expiry. No values are copied
+into engine metadata, and exec never renews credentials. Managed exec requires an
+absolute executable path (for example `/bin/sh`); changing overlays is unsupported. Neither command persists application output in runtime receipts;
 output can contain sensitive application values and should be handled accordingly.
 
 ## Explicit normalized public Compose input
@@ -249,7 +250,7 @@ explicit native selections described below. Existing
 require successful initializer completion before dependent services start. Cache
 initializers receive immutable source mounts and writable named cache volumes;
 workspace installs that write elsewhere still require explicit volume mappings. Event Agent requires further integration and is not yet supported by this
-normal command. `down`, `restart`, `run` and `exec` still refuse native selection;
+normal command. `down`, `restart` and `run` still refuse native selection;
 there is no silent fallback to the stable runtime. An uncertain shutdown retains
 its mapping and evidence for recovery; do not delete managed state to retry.
 
@@ -501,3 +502,15 @@ redirect URLs never select network destinations. Response headers are bounded to
 8KiB; malformed headers and duplicate Location fields are refused. Only bounded
 headers are parsed and returned; unrelated repeated headers such as Set-Cookie
 are allowed.
+
+### Normal native exec
+
+With the same explicit native binary/home selection used for `up`, run
+`hack exec --path /absolute/project SERVICE -- /bin/echo hello`. The command targets
+the current owned project/branch mapping, preserves binary stdout/stderr and the
+command exit code, and never falls back to Compose. It is noninteractive, with a
+30-second observation budget; a timeout may leave the command running and is not
+retried. `--env` and `--profile` changes are refused. For a managed environment, use
+an absolute executable; its existing private lease must still be valid. Startup
+leases currently last at most five minutes; an expired launcher exits125 without
+executing the command. Fresh per-command environment delivery remains a parity gap.

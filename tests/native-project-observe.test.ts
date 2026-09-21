@@ -287,7 +287,9 @@ test("unsupported native lifecycle commands refuse before Docker or project hook
       expect(stdout + stderr).toContain(
         operation === "up"
           ? "foreground whole-project startup only"
-          : `Native runtime operation '${operation}' is unavailable`
+          : operation === "exec"
+            ? "Native project has not been started"
+            : `Native runtime operation '${operation}' is unavailable`
       );
     } finally {
       clearTimeout(timer);

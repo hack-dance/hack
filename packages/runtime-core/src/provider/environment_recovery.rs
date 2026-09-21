@@ -245,6 +245,61 @@ pub(super) fn graph_slots(
     }
     Ok(bindings)
 }
+/// Delivery authority for exec, unlike cleanup inventory: only a committed,
+/// current-boot, unique service allocation may be reused. The caller holds the
+/// guest lease and still verifies the exact container's read-only mounts.
+pub(super) fn active_exec_slot(
+    candidate: &Candidate,
+    guest: &OwnedGuest<'_>,
+    run: &str,
+    service: &str,
+    container: &str,
+) -> Result<Option<String>, CandidateError> {
+    active_exec_slot_for(
+        candidate,
+        guest.incarnation(),
+        guest.boot_id(),
+        run,
+        service,
+        container,
+    )
+}
+fn active_exec_slot_for(
+    candidate: &Candidate,
+    incarnation: &str,
+    boot: &str,
+    run: &str,
+    service: &str,
+    container: &str,
+) -> Result<Option<String>, CandidateError> {
+    if !hex(run, 32) || !hex(incarnation, 32) || !uuid(boot) || !super::environment::name(service) {
+        return Err(error());
+    }
+    let mut selected = None;
+    for slot in recorded_slots(candidate)? {
+        let intent = read_mode(candidate, &slot, incarnation, None, false)?;
+        let Some(binding) = &intent.graph else {
+            continue;
+        };
+        if binding.run != run || intent.service != service {
+            continue;
+        }
+        let pending = root(candidate).join(format!("{slot}.pending"));
+        match fs::symlink_metadata(pending) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(error()),
+        }
+        if intent.boot != boot
+            || binding.container != container
+            || retention::reserved(candidate, &slot)?
+            || selected.replace(slot).is_some()
+        {
+            return Err(error());
+        }
+    }
+    Ok(selected)
+}
+
 /// Canonical value-free identities, independent of active/archive file placement.
 #[cfg(target_os = "macos")]
 #[derive(Clone, PartialEq, Eq, Serialize)]
@@ -495,6 +550,52 @@ mod tests {
         }
         assert!(preflight_records(&fixture.0, 1).is_err());
         assert_eq!(fs::read_dir(directory).unwrap().count(), 4096);
+    }
+    #[test]
+    fn active_exec_requires_committed_current_unique_exact_service_intent() {
+        let fixture = Fixture::new();
+        let mut intent = fixture.intent();
+        let run = "c".repeat(32);
+        let container = format!("hkg-{run}-container-0");
+        intent.graph = Some(GraphBinding {
+            run: run.clone(),
+            container: container.clone(),
+        });
+        let select = |boot: &str, container: &str| {
+            active_exec_slot_for(
+                &fixture.0,
+                &intent.incarnation,
+                boot,
+                &run,
+                "web",
+                container,
+            )
+        };
+        assert_eq!(select(&intent.boot, &container).unwrap(), None);
+        let bytes = serde_json::to_vec(&intent).unwrap();
+        let pending = fixture.pending(&bytes, &intent.slot);
+        assert!(select(&intent.boot, &container).is_err());
+        assert!(pending.exists(), "exec must never promote pending intent");
+        let committed = root(&fixture.0).join(format!("{}.json", intent.slot));
+        fs::rename(&pending, &committed).unwrap();
+        assert_eq!(
+            select(&intent.boot, &container).unwrap(),
+            Some(intent.slot.clone())
+        );
+        assert!(select("dddddddd-dddd-4ddd-8ddd-dddddddddddd", &container).is_err());
+        assert!(select(&intent.boot, &format!("hkg-{run}-container-1")).is_err());
+        let mut second = intent.clone();
+        second.slot = format!("hack-env-lease-{}-{}", second.boot, "e".repeat(32));
+        state::write(
+            &root(&fixture.0).join(format!("{}.json", second.slot)),
+            &second,
+        )
+        .unwrap();
+        assert!(select(&intent.boot, &container).is_err());
+        fs::remove_file(root(&fixture.0).join(format!("{}.json", second.slot))).unwrap();
+        fixture.pending(&bytes, &intent.slot);
+        assert!(select(&intent.boot, &container).is_err());
+        assert_eq!(fs::read(committed).unwrap(), bytes);
     }
     impl Fixture {
         fn new() -> Self {

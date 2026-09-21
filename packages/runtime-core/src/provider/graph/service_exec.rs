@@ -92,9 +92,21 @@ pub fn service_exec(
     {
         return Err(refused());
     }
+    let selected = if receipt.environment_attached {
+        super::super::environment_recovery::active_exec_slot(
+            candidate,
+            engine.guest(),
+            &receipt.run,
+            options.service,
+            &resource.name,
+        )?
+    } else {
+        None
+    };
+    let argv = managed_exec_argv(&container, selected.as_deref(), options.argv)?;
     let result = engine.service_exec(
         options.expected_container,
-        options.argv,
+        &argv,
         options.workdir,
         options.timeout,
     )?;
@@ -115,6 +127,65 @@ pub fn service_exec(
         stderr_base64: base64::engine::general_purpose::STANDARD.encode(result.stderr),
         truncated: result.truncated,
     })
+}
+
+/// Reuse only the service's already attached environment. The guest launcher checks
+/// owner-only payload files and the original expiry; exec never renews the lease.
+fn managed_exec_argv(
+    container: &Value,
+    slot: Option<&str>,
+    argv: &[String],
+) -> Result<Vec<String>, CandidateError> {
+    const LAUNCHER: &str = "/run/hack-environment-launcher";
+    const PAYLOAD: &str = "/run/hack-environment.json";
+    const EXPIRY: &str = "/run/hack-environment.expires";
+    let mounts = container["HostConfig"]["Mounts"].as_array();
+    let selected = |target: &str| -> Result<Option<&Value>, CandidateError> {
+        let mut matches = mounts
+            .into_iter()
+            .flatten()
+            .filter(|m| m["Target"] == target);
+        let found = matches.next();
+        if matches.next().is_some() {
+            return Err(refused());
+        }
+        Ok(found)
+    };
+    let launcher = selected(LAUNCHER)?;
+    let payload = selected(PAYLOAD)?;
+    let expiry = selected(EXPIRY)?;
+    let Some(slot) = slot else {
+        if launcher.is_some() || payload.is_some() || expiry.is_some() {
+            return Err(refused());
+        }
+        return Ok(argv.to_vec());
+    };
+    let valid_mount = |mount: Option<&Value>, source: &str| {
+        mount.is_some_and(|m| m["Type"] == "bind" && m["Source"] == source && m["ReadOnly"] == true)
+    };
+    let launcher_source = launcher
+        .and_then(|m| m["Source"].as_str())
+        .ok_or_else(refused)?;
+    if !launcher_source
+        .strip_prefix("/storage/hack-environment-launcher/")
+        .is_some_and(|hash| hex(hash, 64))
+        || !valid_mount(launcher, launcher_source)
+        || !valid_mount(payload, &format!("/run/{slot}/values.json"))
+        || !valid_mount(expiry, &format!("/run/{slot}/expires"))
+    {
+        return Err(refused());
+    }
+    // Existing mounted launcher versions require an absolute executable. Refuse
+    // before creating an exec instead of silently dropping private environment.
+    if !argv.first().is_some_and(|arg| arg.starts_with('/')) {
+        return Err(error(
+            "graph_service_exec_path",
+            "Managed native exec requires an absolute executable path.",
+        ));
+    }
+    let mut wrapped = vec![LAUNCHER.into(), PAYLOAD.into(), EXPIRY.into()];
+    wrapped.extend_from_slice(argv);
+    Ok(wrapped)
 }
 
 fn binding<'a>(
@@ -146,6 +217,27 @@ fn binding<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn managed_exec_reuses_only_exact_readonly_bound_mounts() {
+        let slot = "owned-slot";
+        let args = vec!["/bin/sh".into(), "-c".into(), "exit 7".into()];
+        let mut container = json!({"HostConfig":{"Mounts":[
+            {"Type":"bind","Source":format!("/storage/hack-environment-launcher/{}", "a".repeat(64)),"Target":"/run/hack-environment-launcher","ReadOnly":true},
+            {"Type":"bind","Source":"/run/owned-slot/values.json","Target":"/run/hack-environment.json","ReadOnly":true},
+            {"Type":"bind","Source":"/run/owned-slot/expires","Target":"/run/hack-environment.expires","ReadOnly":true}
+        ]}});
+        let wrapped = managed_exec_argv(&container, Some(slot), &args).unwrap();
+        assert_eq!(&wrapped[3..], args);
+        assert_eq!(wrapped[0], "/run/hack-environment-launcher");
+        assert!(managed_exec_argv(&container, None, &args).is_err());
+        assert!(managed_exec_argv(&container, Some("another-slot"), &args).is_err());
+        assert!(managed_exec_argv(&container, Some(slot), &["bun".into()]).is_err());
+        container["HostConfig"]["Mounts"][1]["ReadOnly"] = json!(false);
+        assert!(managed_exec_argv(&container, Some(slot), &args).is_err());
+        let plain = json!({"HostConfig":{"Mounts":[]}});
+        assert_eq!(managed_exec_argv(&plain, None, &args).unwrap(), args);
+        assert!(managed_exec_argv(&plain, Some(slot), &args).is_err());
+    }
     #[test]
     fn rejects_unsafe_or_unbounded_arguments_before_connecting() {
         let run = "a".repeat(32);

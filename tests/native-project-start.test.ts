@@ -2,7 +2,10 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startNativeProject } from "../src/backends/native-project-start.ts";
+import {
+  parseNativeHttpsSelection,
+  startNativeProject,
+} from "../src/backends/native-project-start.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -502,4 +505,152 @@ test("routed startup reserves bridges and enrolls reviewed healthy services with
     return await serve(call);
   };
   expect(await startNativeProject(opts)).toBe(0);
+});
+
+const httpsSelection = {
+  caddyBinary: "/synthetic/caddy",
+  caddySha256: "a".repeat(64),
+  httpsPort: 8443,
+};
+async function httpsFixture() {
+  const result = await fixture(false);
+  const { opts } = result;
+  const prepare = opts.dependencies.prepare!;
+  const review = opts.dependencies.review!;
+  const probe = {
+    port: 3000,
+    path: "/health",
+    interval_ms: 100,
+    timeout_ms: 500,
+    retries: 3,
+    start_period_ms: 0,
+  };
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    return {
+      ...input,
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          web: {
+            image: `sha256:${"e".repeat(64)}`,
+            labels: {
+              caddy: "web.example.com",
+              "caddy.reverse_proxy": "{{upstreams 3000}}",
+              "caddy.tls": "internal",
+            },
+            healthcheck: { "x-hack-http": probe },
+          },
+        },
+      }),
+    };
+  };
+  opts.dependencies.review = async (request) =>
+    review({
+      ...request,
+      run: async (checked) =>
+        request.run({
+          ...checked,
+          report: {
+            plan: {
+              enrollment_compatible: true,
+              services: {
+                web: {
+                  active: true,
+                  routing: { port: 3000, hostnames: ["web.example.com"] },
+                  healthcheck: { native_http: probe, disabled: false },
+                },
+              },
+            },
+          },
+        }),
+    });
+  return result;
+}
+test("HTTPS selection requires all explicit canonical fields before effects", async () => {
+  expect(parseNativeHttpsSelection({})).toBeUndefined();
+  expect(
+    parseNativeHttpsSelection({
+      HACK_NATIVE_CADDY_BINARY: httpsSelection.caddyBinary,
+      HACK_NATIVE_CADDY_SHA256: httpsSelection.caddySha256,
+      HACK_NATIVE_HTTPS_PORT: "8443",
+    })
+  ).toEqual(httpsSelection);
+  for (const env of [
+    { HACK_NATIVE_CADDY_BINARY: "/caddy" },
+    {
+      HACK_NATIVE_CADDY_BINARY: "/caddy",
+      HACK_NATIVE_CADDY_SHA256: "a".repeat(64),
+      HACK_NATIVE_HTTPS_PORT: "08443",
+    },
+  ]) {
+    expect(() => parseNativeHttpsSelection(env)).toThrow();
+  }
+  const { opts, events } = await fixture(false);
+  await expect(
+    startNativeProject({ ...opts, https: { ...httpsSelection, httpsPort: 0 } })
+  ).rejects.toThrow();
+  expect(events).toEqual([]);
+});
+test("unrouted graphs do not start the selected HTTPS frontend", async () => {
+  const { opts } = await fixture(false);
+  opts.dependencies.https = async () => {
+    throw new Error("unexpected frontend");
+  };
+  expect(await startNativeProject({ ...opts, https: httpsSelection })).toBe(0);
+});
+test("routed HTTPS verification precedes readiness and closes after graph cleanup", async () => {
+  const { opts, events } = await httpsFixture();
+  opts.dependencies.https = async (selection) => {
+    expect(selection).toEqual({ runtime: opts.runtime, ...httpsSelection });
+    events.push("https-start");
+    return {
+      caPath: "/synthetic/root.crt",
+      httpsPort: 8443,
+      exited: new Promise(() => {}),
+      verifyHostname: async (hostname) => {
+        expect(hostname).toBe("web.example.com");
+        events.push("https-verify");
+        return { statusCode: 403 };
+      },
+      close: async () => {
+        events.push("https-close");
+      },
+    };
+  };
+  expect(await startNativeProject({ ...opts, https: httpsSelection })).toBe(0);
+  expect(events.indexOf("https-start")).toBeLessThan(
+    events.indexOf("https-verify")
+  );
+  expect(events.indexOf("https-verify")).toBeLessThan(events.indexOf("save"));
+  expect(events.indexOf("remove")).toBeLessThan(events.indexOf("https-close"));
+  expect(events.indexOf("https-close")).toBeLessThan(events.indexOf("cleanup"));
+});
+test("unexpected HTTPS owner exit aborts the graph and fails instead of returning interrupt status", async () => {
+  const { opts, events } = await httpsFixture();
+  let exit!: (value: { component: string; code: number }) => void;
+  const exited = new Promise<{ component: string; code: number }>((resolve) => {
+    exit = resolve;
+  });
+  opts.dependencies.https = async () => ({
+    caPath: "/synthetic/root.crt",
+    httpsPort: 8443,
+    exited,
+    verifyHostname: async () => ({ statusCode: 200 }),
+    close: async () => {
+      events.push("https-close");
+    },
+  });
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    await serve(request);
+    exit({ component: "caddy", code: 1 });
+    await Promise.resolve();
+    expect(request.signal?.aborted).toBe(true);
+    return 0;
+  };
+  await expect(
+    startNativeProject({ ...opts, https: httpsSelection })
+  ).rejects.toThrow("HTTPS owner exited unexpectedly");
+  expect(events.indexOf("remove")).toBeLessThan(events.indexOf("https-close"));
+  expect(events.at(-1)).toBe("cleanup");
 });

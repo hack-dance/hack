@@ -302,8 +302,8 @@ startup and enrolls only active routes from native review. Each routed service
 must already declare a matching `healthcheck.x-hack-http`; command healthchecks
 and missing probes are not replaced or inferred. Native review still validates
 hostnames, ports, networks and labels. Foreground graph ownership supervises and
-retires Unix route publishers. This enrollment does not start a hostname authority
-or Caddy HTTPS server, install trust, configure DNS, or widen an existing pool.
+retires Unix route publishers. Without explicit HTTPS selection, this enrollment does not start a hostname authority
+or Caddy HTTPS server. It never installs trust, configures DNS, or widens an existing pool.
 
 `HACK_NATIVE_DEPENDENCIES` selects an absolute path to a regular JSON file with
 explicit host listeners. The CLI reads it after lifecycle hooks, so a hook can
@@ -340,3 +340,54 @@ cannot be silently widened. The selection is copied into the temporary exact-pla
 dependency request and removed when foreground startup exits. No durable listener
 authority is inferred from a saved selection file. Image-only services omit graph
 shared-source mode; active project bind mounts still use the explicit project share.
+
+For projects whose checked-in Compose file needs explicit native health probes,
+`HACK_NATIVE_ADAPTATION` selects an absolute JSON file. This leaves the source file
+unchanged and preserves its identity in native review. Only the following bounded
+adaptations are accepted:
+
+```json
+{
+  "version": 1,
+  "isolatedNetworks": ["hack-dev"],
+  "httpProbes": {"web": {"port": 3000, "path": "/health"}},
+  "additionalHostnames": {"web": ["web.hack.local"]},
+  "workspaceCache": {
+    "volume": "node_modules",
+    "root": "/app",
+    "workspaces": ["apps/web", "packages/db"]
+  }
+}
+```
+
+Networks must already be declared external; selection explicitly replaces their
+connectivity with the owned isolated network. Probes apply only when no existing
+healthcheck is present. Additional hostnames append to existing Caddy labels.
+Conflicts are refused. Choose actual application health endpoints; a probe is an
+application readiness contract, not a workaround for failed startup.
+
+The optional workspace cache layout mounts subdirectories of the existing declared
+dependency volume at each workspace's `node_modules`. This allows an installer to
+populate nested workspace dependencies while its project source remains read-only.
+Every service already consuming the root dependency volume receives the same layout,
+including the root mount's read-only setting. Unrelated services are unchanged.
+The layout participates in native dependency-cache identity. This shares compatible
+workspace installations; it does not implement a cross-project package store or
+claim deduplication across different lockfiles.
+
+### Optional native HTTPS frontend
+
+For routed foreground startup, explicitly set all three public selections:
+`HACK_NATIVE_CADDY_BINARY` (absolute host Caddy executable),
+`HACK_NATIVE_CADDY_SHA256` (its lowercase SHA256), and
+`HACK_NATIVE_HTTPS_PORT` (1–65535, including 443). Unrouted graphs do not start
+this frontend. The selected process and managed hostname authority belong to the
+foreground invocation; unexpected loss aborts the graph and reports failure.
+They close after graph cleanup, while private Caddy data and its CA remain under
+`<native-home>/native-https/data`. An occupied frontend owner is refused.
+
+Startup verifies each reviewed hostname using loopback, SNI, Host, and the private
+CA, without relying on DNS or installing system trust. This verifies TLS; HTTP
+status alone does not establish application health. The separately declared native
+HTTP readiness probes remain required. DNS and user-approved trust setup are
+separate prerequisites for normal browser access.

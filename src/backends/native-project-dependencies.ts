@@ -1,9 +1,7 @@
-import { constants } from "node:fs";
-import { open } from "node:fs/promises";
-import { isAbsolute } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 
-const LIMIT = 65_536;
+import { readNativeSelection } from "./native-project-selection.ts";
+
 const SERVICE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const BINDING = /^[a-z0-9._-]{1,128}$/;
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -147,46 +145,11 @@ export async function readNativeHostDependencies(opts: {
   if (opts.path === undefined) {
     return [];
   }
-  if (!isAbsolute(opts.path)) {
-    throw refused();
-  }
   try {
-    const file = await open(
-      opts.path,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-    );
-    try {
-      const before = await file.stat();
-      if (
-        !before.isFile() ||
-        before.nlink !== 1 ||
-        before.size === 0 ||
-        before.size > LIMIT
-      ) {
-        throw refused();
-      }
-      const buffer = Buffer.alloc(LIMIT + 1);
-      const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
-      const after = await file.stat();
-      if (
-        bytesRead !== before.size ||
-        after.size !== before.size ||
-        after.mtimeMs !== before.mtimeMs ||
-        after.ctimeMs !== before.ctimeMs
-      ) {
-        throw refused();
-      }
-      return parseNativeHostDependencies({
-        value: JSON.parse(
-          new TextDecoder("utf-8", { fatal: true }).decode(
-            buffer.subarray(0, bytesRead)
-          )
-        ),
-        services: opts.services,
-      });
-    } finally {
-      await file.close();
-    }
+    return parseNativeHostDependencies({
+      value: await readNativeSelection(opts.path),
+      services: opts.services,
+    });
   } catch {
     throw refused();
   }

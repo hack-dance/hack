@@ -30,7 +30,10 @@ import {
   nativeProjectPs,
   requireComposeOperationAvailable,
 } from "../backends/native-project-observe.ts";
-import { startNativeProject } from "../backends/native-project-start.ts";
+import {
+  parseNativeHttpsSelection,
+  startNativeProject,
+} from "../backends/native-project-start.ts";
 import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
@@ -5876,7 +5879,9 @@ async function handleNativeUp({
     profiles: parseCsvList(args.options.profile),
     sharedSource: process.env.HACK_NATIVE_SHARED_SOURCE === "1",
     dependencyFile: process.env.HACK_NATIVE_DEPENDENCIES,
+    adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
     allowedHosts: parseNativeAllowedHosts(process.env.HACK_NATIVE_ALLOW_HOSTS),
+    https: parseNativeHttpsSelection(process.env),
     aws: process.env.HACK_NATIVE_AWS_PROFILE
       ? {
           profile: process.env.HACK_NATIVE_AWS_PROFILE,

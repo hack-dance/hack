@@ -1,9 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
+import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   nativeSharedSourceFlags,
   publishNativeCacheSource,
@@ -12,6 +13,7 @@ import {
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
+import { startNativeProjectHttps } from "./native-project-https.ts";
 import {
   type NativeProjectInput,
   prepareNativeProjectInput,
@@ -39,6 +41,84 @@ import {
 const SHA = /^[a-f0-9]{64}$/;
 const OWNER = /^[a-f0-9]{32}$/;
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
+export type NativeHttpsSelection = {
+  readonly caddyBinary: string;
+  readonly caddySha256: string;
+  readonly httpsPort: number;
+};
+function validateHttpsSelection(
+  selection: NativeHttpsSelection | undefined
+): void {
+  if (
+    selection &&
+    (!(
+      isAbsolute(selection.caddyBinary) &&
+      SHA.test(selection.caddySha256) &&
+      Number.isInteger(selection.httpsPort)
+    ) ||
+      selection.httpsPort < 1 ||
+      selection.httpsPort > 65_535)
+  ) {
+    throw new Error(
+      "Native HTTPS requires an absolute HACK_NATIVE_CADDY_BINARY, SHA256 pin and explicit HTTPS port; values omitted."
+    );
+  }
+}
+export function parseNativeHttpsSelection(
+  env: Readonly<Record<string, string | undefined>>
+): NativeHttpsSelection | undefined {
+  const binary = env.HACK_NATIVE_CADDY_BINARY,
+    hash = env.HACK_NATIVE_CADDY_SHA256,
+    port = env.HACK_NATIVE_HTTPS_PORT;
+  if (binary === undefined && hash === undefined && port === undefined) {
+    return undefined;
+  }
+  if (
+    binary === undefined ||
+    hash === undefined ||
+    port === undefined ||
+    String(Number(port)) !== port
+  ) {
+    throw new Error(
+      "Native HTTPS selection requires binary, SHA256 and port together; values omitted."
+    );
+  }
+  const selection = {
+    caddyBinary: binary,
+    caddySha256: hash,
+    httpsPort: Number(port),
+  };
+  validateHttpsSelection(selection);
+  return selection;
+}
+function routeHostnames(
+  plan: unknown,
+  services: ReadonlySet<string>
+): readonly string[] {
+  if (!(isRecord(plan) && isRecord(plan.services))) {
+    throw refused();
+  }
+  const names = new Set<string>();
+  for (const name of services) {
+    const service = plan.services[name];
+    if (
+      !(
+        isRecord(service) &&
+        isRecord(service.routing) &&
+        Array.isArray(service.routing.hostnames)
+      )
+    ) {
+      throw refused();
+    }
+    for (const hostname of service.routing.hostnames) {
+      if (typeof hostname !== "string") {
+        throw refused();
+      }
+      names.add(hostname);
+    }
+  }
+  return [...names].sort();
+}
 type Hooks = {
   readonly cleanup: () => Promise<void>;
   readonly ready?: () => Promise<void>;
@@ -48,6 +128,7 @@ type Dependencies = {
   adaptAws: typeof adaptNativeAwsEnvironment;
   review: typeof withNativeProjectReview;
   serve: typeof serveNativeProjectGraph;
+  https: typeof startNativeProjectHttps;
   invoke: typeof invokeNativeRuntime;
   load: typeof loadNativeProjectRun;
   save: typeof saveNativeProjectRun;
@@ -58,6 +139,7 @@ const DEFAULTS: Dependencies = {
   adaptAws: adaptNativeAwsEnvironment,
   review: withNativeProjectReview,
   serve: serveNativeProjectGraph,
+  https: startNativeProjectHttps,
   invoke: invokeNativeRuntime,
   load: loadNativeProjectRun,
   save: saveNativeProjectRun,
@@ -157,12 +239,33 @@ function authoritative(
   }
   return { run, owner: receipt.owner, namespace, planId };
 }
+function requireEnrollmentCompatible(plan: unknown): void {
+  if (!isRecord(plan) || plan.enrollment_compatible !== true) {
+    throw refused();
+  }
+}
+async function verifyHttpsRoutes(
+  frontend: Awaited<ReturnType<typeof startNativeProjectHttps>> | undefined,
+  plan: unknown,
+  services: ReadonlySet<string>
+): Promise<void> {
+  if (!frontend) {
+    return;
+  }
+  for (const hostname of routeHostnames(plan, services)) {
+    await frontend.verifyHostname(hostname);
+  }
+}
 function foregroundExitCode(opts: {
   aborted: boolean;
   interruptedExit: number;
   failure: unknown;
+  infrastructureFailure?: Error;
   code: number;
 }): number {
+  if (opts.infrastructureFailure) {
+    throw opts.infrastructureFailure;
+  }
   if (opts.aborted) {
     return opts.interruptedExit;
   }
@@ -229,13 +332,16 @@ export async function startNativeProject(opts: {
   readonly profiles?: readonly string[];
   readonly sharedSource: boolean;
   readonly dependencyFile?: string;
+  readonly adaptationFile?: string;
   readonly allowedHosts?: readonly string[];
+  readonly https?: NativeHttpsSelection;
   readonly aws?: { readonly profile: string; readonly region?: string };
   readonly before: (input: NativeProjectInput) => Promise<Hooks>;
   readonly signal?: AbortSignal;
   readonly dependencies?: Partial<Dependencies>;
 }): Promise<number> {
   const allowedHosts = validateNativeAllowedHosts(opts.allowedHosts);
+  validateHttpsSelection(opts.https);
   if (!opts.sharedSource) {
     throw new Error(
       "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 to share this exact project, including ignored files."
@@ -251,6 +357,10 @@ export async function startNativeProject(opts: {
     ...opts.scope,
     composeFile: opts.composeFile,
     envName: opts.envName,
+  });
+  input = await prepareNativeProjectAdaptation({
+    input,
+    path: opts.adaptationFile,
   });
   let specs = services(input, opts.dependencyFile !== undefined);
   const bridgeCapacity = nativeBridgeCapacity(specs);
@@ -352,12 +462,7 @@ export async function startNativeProject(opts: {
       profiles: opts.profiles,
       input: pinned,
       run: async (review) => {
-        if (
-          !isRecord(review.report.plan) ||
-          review.report.plan.enrollment_compatible !== true
-        ) {
-          throw refused();
-        }
+        requireEnrollmentCompatible(review.report.plan);
         const routes = reviewedNativeRoutes({
           plan: review.report.plan,
           specs,
@@ -372,6 +477,11 @@ export async function startNativeProject(opts: {
         const directory = await mkdtemp(join(tmpdir(), "hack-native-start-"));
         const run = randomBytes(16).toString("hex");
         let mapping: NativeProjectRun | undefined;
+        let https:
+          | Awaited<ReturnType<typeof startNativeProjectHttps>>
+          | undefined;
+        let httpsClosing = false;
+        let httpsFailure: Error | undefined;
         try {
           const dependencyFile = join(directory, "dependencies.json");
           await writeFile(
@@ -409,6 +519,17 @@ export async function startNativeProject(opts: {
               cwd: opts.scope.projectRoot,
               args: ["graph", "inspect", "--run-id", run, "--json"],
             });
+          if (opts.https && routes.services.size > 0) {
+            https = await deps.https({ runtime: opts.runtime, ...opts.https });
+            void https.exited.then(() => {
+              if (!httpsClosing) {
+                httpsFailure = new Error(
+                  "Native HTTPS owner exited unexpectedly; graph shutdown requested."
+                );
+                controller.abort();
+              }
+            });
+          }
           const delivery = environmentDelivery(input, review.planId, run);
           let code = 1;
           let serveFailure: unknown;
@@ -448,6 +569,14 @@ export async function startNativeProject(opts: {
                     "Native startup canceled before mapping publication."
                   );
                 }
+                await verifyHttpsRoutes(
+                  https,
+                  review.report.plan,
+                  routes.services
+                );
+                if (httpsFailure) {
+                  throw httpsFailure;
+                }
                 await deps.save({ ...opts.scope, run: mapping });
                 await hooks?.ready?.();
               },
@@ -480,10 +609,16 @@ export async function startNativeProject(opts: {
             aborted: controller.signal.aborted,
             interruptedExit,
             failure: serveFailure,
+            infrastructureFailure: httpsFailure,
             code,
           });
         } finally {
-          await rm(directory, { recursive: true, force: true });
+          httpsClosing = true;
+          try {
+            await https?.close();
+          } finally {
+            await rm(directory, { recursive: true, force: true });
+          }
         }
       },
     });

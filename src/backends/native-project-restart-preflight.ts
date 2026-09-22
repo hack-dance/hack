@@ -107,6 +107,16 @@ export async function preflightNativeRestart(opts: {
     }),
     opts.allowedHosts
   );
+  const admission = await deps.invoke({
+    runtime: opts.runtime,
+    cwd: opts.scope.projectRoot,
+    args: ["runtime", "probe", "--profile", "development", "--json"],
+  });
+  if (!isRecord(admission) || admission.admitted !== true) {
+    throw new Error(
+      "Native restart admission failed before cleanup; inspect runtime probe --profile development. The current graph was not stopped."
+    );
+  }
   let input = await deps.prepare({
     ...opts.scope,
     composeFile: opts.composeFile,

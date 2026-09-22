@@ -285,8 +285,9 @@ than guessing an overlay. Missing selected overlay files also refuse before clea
 Older binaries may reject extended mappings: this is backward state-reading
 compatibility, not support for rolling back binaries over new state.
 Whole-project foreground `restart` retains the recorded environment, AWS selector,
-profiles, run identity and data volumes. It reviews the unchanged normalized plan
-before cleanup, saves a pending restart intent, and waits for the previous frontend
+profiles, run identity and data volumes. It checks development runtime admission
+(including disk headroom) and reviews the unchanged normalized plan before cleanup.
+It saves a pending restart intent and waits for the previous frontend
 to confirm graph, HTTPS and lifecycle cleanup before starting its replacement.
 Changed selections and unknown legacy startup/finalization records refuse before
 cleanup. A failed replacement retains its intent: retry `restart` after resolving

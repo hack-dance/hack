@@ -190,6 +190,16 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
       adapt: async ({ input: prepared }) => prepared,
       dependencies: async () => [],
       invoke: async ({ args }) => {
+        if (args[1] === "probe") {
+          expect(args).toEqual([
+            "runtime",
+            "probe",
+            "--profile",
+            "development",
+            "--json",
+          ]);
+          return { admitted: true };
+        }
         expect(args).toEqual(["runtime", "status", "--json"]);
         return { network: "internet" };
       },
@@ -235,4 +245,31 @@ test("network mismatch refuses before an otherwise valid restart", async () => {
       ["example.com"]
     )
   ).not.toThrow();
+});
+
+test("restart preflight refuses failed or unknown admission before reading environment", async () => {
+  const { preflightNativeRestart } = await import(
+    "../src/backends/native-project-restart-preflight.ts"
+  );
+  for (const admission of [{ admitted: false }, {}, null]) {
+    const calls: string[] = [];
+    await expect(
+      preflightNativeRestart({
+        runtime: { binary: "/unused", home: "/candidate" },
+        scope,
+        composeFile: "/fixture/.hack/docker-compose.yml",
+        run,
+        dependencies: {
+          invoke: async ({ args }) => {
+            calls.push(String(args[1]));
+            return args[1] === "status" ? { network: "internet" } : admission;
+          },
+          prepare: async () => {
+            throw new Error("environment should not be read");
+          },
+        },
+      })
+    ).rejects.toThrow("admission failed before cleanup");
+    expect(calls).toEqual(["status", "probe"]);
+  }
 });

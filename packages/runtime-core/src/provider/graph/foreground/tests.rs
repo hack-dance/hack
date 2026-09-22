@@ -176,6 +176,7 @@ fn cross_process_status_waits_for_request_after_accept() {
                 run: run.clone(),
                 remove_data: None,
                 restore: None,
+                job: None,
             },
             Duration::from_secs(2),
         )

@@ -705,7 +705,8 @@ impl Session<'_, '_> {
             .get_mut(key)
             .ok_or_else(|| error("graph_service", "Unknown graph service."))?
             .phase = phase.into();
-        self.save()
+        self.save()?;
+        one_off::record_effect(&self.root, key, &self.receipt.resources[key])
     }
     fn create_resources(&mut self, retain_data: bool) -> Result<(), CandidateError> {
         let keys: Vec<_> = self

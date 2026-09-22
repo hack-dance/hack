@@ -1,6 +1,7 @@
 #[cfg(target_os = "macos")]
 mod environment;
 mod normalized;
+mod one_off;
 #[cfg(target_os = "macos")]
 mod relay;
 #[cfg(test)]
@@ -24,6 +25,9 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let Some((action, args)) = args.split_first() else {
         return Err(invalid());
     };
+    if ["run-selection", "run-service"].contains(action) {
+        return one_off::command(candidate, action, args);
+    }
     if ["logs", "exec", "exec-selection"].contains(action) {
         return service_io::command(candidate, action, args);
     }

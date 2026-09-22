@@ -474,6 +474,7 @@ fn private_owner_restore_preserves_data_and_retires_values() {
             version: 1,
             run: run.clone(),
             remove_data: None,
+            job: None,
             restore: Some(transport::RestoreRequest {
                 plan: plan.clone(),
                 generation: restored["generation"].as_str().unwrap().into(),

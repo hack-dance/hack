@@ -294,8 +294,20 @@ cleanup. A failed replacement retains its intent: retry `restart` after resolvin
 the reported problem; a fresh `up` cannot bypass it. An interrupted operation lock
 requires ownership inspection rather than automatic removal. Restart does not
 implicitly migrate a shared pool's network policy or interrupt other projects.
-`run` still refuses native selection; there is no silent fallback to Compose. An uncertain shutdown retains
-its mapping and evidence for recovery; do not delete managed state to retry.
+The in-development native `run` path requires a running project started by a
+matching candidate. It creates a separate service container with fresh managed
+environment values and the admitted image, mounts, dependency cache and network.
+It does not publish service ports or aliases. Commands are noninteractive and
+bounded to 300 seconds; omitted arguments retain the service's default command.
+The CLI returns command output and exit status only after owned job cleanup is
+confirmed. There is no automatic command replay or fallback to Compose.
+
+This path is not yet live-qualified: stopped-project bootstrap, interactive input,
+and repeated crash recovery after a restored one-off remain open. The first
+interrupted-job cleanup and parent normalization path also requires live
+qualification. An uncertain
+shutdown retains its mapping and evidence for recovery; do not delete managed
+state to retry.
 
 After starting an owned native pool, `runtime ensure-image --reference REF --json`
 resolves a public Docker Hub tag or accepts an explicit digest, reuses the verified

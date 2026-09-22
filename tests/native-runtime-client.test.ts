@@ -191,3 +191,32 @@ test("exec accepts matching nonzero completion only through its explicit transpo
     }
   }
 });
+
+test("run-service uses explicit command completion transport without accepting unrelated operations", async () => {
+  const runtime = await fixture();
+  const reply = {
+    job: "a".repeat(32),
+    cleanup_confirmed: true,
+    exit_code: 19,
+    stdout_base64: "AP8=",
+    stderr_base64: "",
+    truncated: false,
+  };
+  await Bun.write(
+    runtime.binary,
+    `#!${process.execPath}\nconsole.log(${JSON.stringify(JSON.stringify(reply))});process.exit(19);`
+  );
+  const request = {
+    runtime,
+    cwd: runtime.home,
+    serviceExecResponse: true,
+    args: ["graph", "run-service", "--json", "--"],
+  };
+  expect(await invokeNativeRuntime(request)).toEqual(reply);
+  await expect(
+    invokeNativeRuntime({
+      ...request,
+      args: ["graph", "run-selection", "--json", "--"],
+    })
+  ).rejects.toThrow("budget");
+});

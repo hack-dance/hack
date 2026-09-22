@@ -35,6 +35,7 @@ fn maximum_private_text_roundtrips_with_bounded_escaped_frame() {
         version: 1,
         run: "a".repeat(32),
         remove_data: None,
+        job: None,
         restore: Some(RestoreRequest {
             plan: "b".repeat(64),
             generation: "c".repeat(32),

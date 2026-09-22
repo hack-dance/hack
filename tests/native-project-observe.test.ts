@@ -291,7 +291,7 @@ test("unsupported native forms and missing restart consent refuse before Docker 
             ? "Native restart requires HACK_NATIVE_SHARED_SOURCE=1"
             : operation === "exec"
               ? "Native project has not been started"
-              : `Native runtime operation '${operation}' is unavailable`
+              : "Native run currently requires a started project"
       );
     } finally {
       clearTimeout(timer);

@@ -1,5 +1,5 @@
 //! Explicit recovery selects VM stop plus owner death before reboot, or a dead
-//! ready owner with exact reservations from the immediate predecessor boot.
+//! ready owner (including a journal-bound one-off) from the immediate predecessor boot.
 //! No endpoint-file deletion is treated as a relay retirement acknowledgement.
 use super::*;
 use crate::provider::{identity, lifecycle, state::Owner};
@@ -17,21 +17,17 @@ struct Intent {
     environment: Option<Value>,
     bridges: Option<bridges::cleanup::Selection>,
     complete_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    one_off_sha256: Option<String>,
 }
 fn refused() -> CandidateError {
     error(
         "graph_dead_owner_recovery",
-        "Dead-owner cleanup requires an exact stopped selection or ready graph from the immediate prior boot, an absent foreground owner, and unchanged verified inventories; evidence retained.",
+        "Dead-owner cleanup requires an exact stopped selection, ready graph, or validated interrupted one-off from the immediate prior boot, an absent foreground owner, and unchanged verified inventories; evidence retained.",
     )
 }
 fn digest(value: &[u8]) -> String {
     format!("{:x}", Sha256::digest(value))
-}
-fn receipt_digest(root: &std::path::Path) -> Result<String, CandidateError> {
-    let value: Receipt = state::read(&root.join("state.json"))?;
-    Ok(digest(
-        &serde_json::to_vec_pretty(&value).map_err(|_| refused())?,
-    ))
 }
 /// Digest of the canonical pretty-encoded state.json written by state::write.
 fn selected(receipt: &Receipt) -> Result<String, CandidateError> {
@@ -135,9 +131,20 @@ fn prepare(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     {
         return Err(refused());
     }
+    let old_boot = owner
+        .guest_boot_id
+        .or(owner.previous_guest_boot_id)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(refused)?;
+    let one_off_sha256 = if exists(&root.join("one-off.json"))? {
+        Some(one_off::recovery_selection(&root, &receipt, &old_boot)?)
+    } else {
+        None
+    };
     if receipt.relay_startup.is_none()
         || receipt.relay_cleanup.is_some()
-        || !["failed-retained", "preparing", "cleanup-intent"].contains(&receipt.phase.as_str())
+        || (!["failed-retained", "preparing", "cleanup-intent"].contains(&receipt.phase.as_str())
+            && one_off_sha256.is_none())
     {
         return Err(refused());
     }
@@ -145,16 +152,14 @@ fn prepare(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     if exists(&path)? {
         let intent: Intent = state::read(&path)?;
         validate(&intent, &receipt, expected, &dead.fingerprint())?;
+        if intent.one_off_sha256 != one_off_sha256 {
+            return Err(refused());
+        }
         return Ok(json!({"run":run,"phase":"awaiting-runtime-start","receipt_sha256":expected}));
     }
     if selected(&receipt)? != expected {
         return Err(refused());
     }
-    let old_boot = owner
-        .guest_boot_id
-        .or(owner.previous_guest_boot_id)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(refused)?;
     let intent = Intent {
         version: 1,
         original_sha256: expected.into(),
@@ -165,6 +170,7 @@ fn prepare(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         environment: None,
         bridges: None,
         complete_sha256: None,
+        one_off_sha256,
     };
     dead.verify()?;
     retain_interrupted_write(&root)?;
@@ -189,6 +195,17 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     let engine = Engine::connect_cleanup_wait(candidate)?;
     let dead = foreground::DeadOwner::acquire(candidate, run)?;
     let (receipt, root) = load(candidate, &engine, run)?;
+    if exists(&root.join("one-off-normalization.json"))? {
+        let intent: Intent = state::read(&root.join(FILE))?;
+        if intent.original_sha256 != expected || intent.owner_sha256 != dead.fingerprint() {
+            return Err(refused());
+        }
+        dead.verify()?;
+        let normalized = normalize_completed(candidate, &engine, &root, &intent)?;
+        return Ok(
+            json!({"run":run,"phase":normalized.phase,"recovered":true,"data_retained":true,"one_off_normalized":true}),
+        );
+    }
     no_pending(&root)?;
     let mut intent: Intent = if exists(&root.join(FILE))? {
         state::read(&root.join(FILE))?
@@ -196,7 +213,13 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         // A dead ready owner may be selected after exactly one already audited
         // restart. No additional restart is requested or inferred here.
         let owner = Owner::load(candidate)?;
-        if receipt.phase != "ready-observed"
+        let old_boot = owner.previous_guest_boot_id.ok_or_else(refused)?;
+        let one_off_sha256 = if exists(&root.join("one-off.json"))? {
+            Some(one_off::recovery_selection(&root, &receipt, &old_boot)?)
+        } else {
+            None
+        };
+        if (receipt.phase != "ready-observed" && one_off_sha256.is_none())
             || receipt.relay_startup.is_none()
             || receipt.relay_cleanup.is_some()
             || selected(&receipt)? != expected
@@ -206,7 +229,6 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             return Err(refused());
         }
         initializer_cache::require_resolved(&receipt)?;
-        let old_boot = owner.previous_guest_boot_id.ok_or_else(refused)?;
         let bridges =
             bridges::cleanup::capture_previous_boot(candidate, &engine, &receipt, &old_boot)?;
         let intent = Intent {
@@ -219,6 +241,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             environment: None,
             bridges: Some(bridges),
             complete_sha256: None,
+            one_off_sha256,
         };
         dead.verify()?;
         retain_interrupted_write(&root)?;
@@ -229,6 +252,17 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     let owner = Owner::load(candidate)?;
     let boot = engine.guest().boot_id();
     fresh_boot(&intent, owner.previous_guest_boot_id.as_deref(), boot)?;
+    if let Some(expected_job) = &intent.one_off_sha256 {
+        // Cleanup progress may change receipt phases; pin the original admitted
+        // parent/job selection and require the published job journal unchanged.
+        if one_off::recovery_selection(&root, &intent.original, &intent.old_boot)? != *expected_job
+        {
+            return Err(refused());
+        }
+        dead.verify()?;
+        one_off::retain_interrupted_cleanup(&root)?;
+    }
+
     host_relay::cleanup_preflight(&engine, &receipt, &root, false)?;
     for resource in receipt.resources.values() {
         inspect_resource(&engine, &receipt, resource)?;
@@ -257,6 +291,9 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         }
         host_relay::inspect_cleanup(candidate, &engine, &receipt, false, &environment, &bridges)?;
         dead.verify()?;
+        if intent.one_off_sha256.is_some() {
+            normalize_completed(candidate, &engine, &root, &intent)?;
+        }
         return Ok(
             json!({"run":run,"phase":"stopped-data-retained","recovered":true,"data_retained":true}),
         );
@@ -274,8 +311,138 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     intent.complete_sha256 = Some(selected(&cleaned)?);
     retain_interrupted_write(&root)?;
     state::write(&root.join(FILE), &intent)?;
+    if intent.one_off_sha256.is_some() {
+        normalize_completed(candidate, &engine, &root, &intent)?;
+    }
     Ok(json!({"run":run,"phase":"stopped-data-retained","recovered":true,"data_retained":true}))
 }
+/// A completed normalization changes only transient metadata. Keep the original
+/// completed receipt as the cleanup proof, and bind its projection separately.
+fn normalized_proof_receipt(
+    root: &std::path::Path,
+    receipt: &Receipt,
+    intent: &Intent,
+) -> Result<Receipt, CandidateError> {
+    if !exists(&root.join("one-off-normalization.json"))? {
+        return Ok(receipt.clone());
+    }
+    let normalization = one_off::normalization::Normalization::read(
+        root,
+        &digest(&serde_json::to_vec(intent).map_err(|_| refused())?),
+    )?;
+    if intent.one_off_sha256.as_deref()
+        != Some(digest(&serde_json::to_vec(&normalization.job).map_err(|_| refused())?).as_str())
+        || normalization.phase != one_off::normalization::Phase::Complete
+        || immutable(&normalization.after)? != immutable(receipt)?
+        || normalization.before.phase != "stopped-data-retained"
+        || intent.complete_sha256.as_deref() != Some(selected(&normalization.before)?.as_str())
+    {
+        return Err(refused());
+    }
+    Ok(normalization.before)
+}
+
+fn normalize_completed(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    root: &std::path::Path,
+    intent: &Intent,
+) -> Result<Receipt, CandidateError> {
+    use one_off::normalization::{Normalization, Phase};
+    let proof = digest(&serde_json::to_vec(intent).map_err(|_| refused())?);
+    let mut normalization = if exists(&root.join("one-off-normalization.json"))? {
+        Normalization::load(root, &proof)?
+    } else {
+        let before: Receipt = state::read(&root.join("state.json"))?;
+        validate(
+            intent,
+            &before,
+            &intent.original_sha256,
+            &intent.owner_sha256,
+        )?;
+        if before.phase != "stopped-data-retained"
+            || intent.complete_sha256.as_deref() != Some(selected(&before)?.as_str())
+        {
+            return Err(refused());
+        }
+        let job: one_off::JobIntent = state::read(&root.join("one-off.json"))?;
+        if intent.one_off_sha256.as_deref()
+            != Some(one_off::recovery_selection(root, &intent.original, &intent.old_boot)?.as_str())
+        {
+            return Err(refused());
+        }
+        Normalization::prepare(root, &before, &job, &proof)?
+    };
+    validate(
+        intent,
+        &normalization.before,
+        &intent.original_sha256,
+        &intent.owner_sha256,
+    )?;
+    if intent.new_boot.as_deref() != Some(engine.guest().boot_id())
+        || intent.complete_sha256.as_deref() != Some(selected(&normalization.before)?.as_str())
+        || intent.one_off_sha256.as_deref()
+            != Some(
+                digest(&serde_json::to_vec(&normalization.job).map_err(|_| refused())?).as_str(),
+            )
+    {
+        return Err(refused());
+    }
+    let service = format!("job-{}", normalization.job.job);
+    // Name absence also refuses a replacement with a different id, without ever
+    // authorizing removal of it or any parent resource.
+    crate::provider::engine::require_container_absent(
+        engine.guest(),
+        &normalization.job.container_name,
+    )?;
+    if normalization.phase == Phase::Prepared {
+        crate::provider::environment_recovery::archive_job(
+            candidate,
+            engine.guest(),
+            &normalization.before.run,
+            &service,
+            &normalization.job.container_name,
+            &root.join(format!("job-environment-{}", normalization.job.job)),
+        )?;
+        normalization.advance(root, Phase::EnvironmentArchived)?;
+    }
+    if normalization.phase == Phase::EnvironmentArchived {
+        normalization.publish_receipt(root)?;
+    }
+    if normalization.phase == Phase::ReceiptPublished {
+        let history = root.join("job-history");
+        state::private_directory(&history)?;
+        let destination = history.join(format!("{}.json", normalization.job.job));
+        if exists(&root.join("one-off.json"))? {
+            let job: one_off::JobIntent = state::read(&root.join("one-off.json"))?;
+            if serde_json::to_value(&job).map_err(|_| refused())?
+                != serde_json::to_value(&normalization.job).map_err(|_| refused())?
+                || exists(&destination)?
+            {
+                return Err(refused());
+            }
+            one_off::retain_interrupted_cleanup(root)?;
+            fs::rename(root.join("one-off.json"), &destination).map_err(state::io)?;
+            for path in [root, history.as_path()] {
+                fs::File::open(path)
+                    .and_then(|f| f.sync_all())
+                    .map_err(state::io)?;
+            }
+        }
+        let archived: one_off::JobIntent = state::read(&destination)?;
+        if serde_json::to_value(&archived).map_err(|_| refused())?
+            != serde_json::to_value(&normalization.job).map_err(|_| refused())?
+        {
+            return Err(refused());
+        }
+        normalization.advance(root, Phase::JournalArchived)?;
+    }
+    if normalization.phase == Phase::JournalArchived {
+        normalization.advance(root, Phase::Complete)?;
+    }
+    Ok(normalization.after)
+}
+
 /// Authorize a distinct explicit data-removal operation from a completed recovery.
 /// First admission matches the completed receipt exactly; retries additionally pin
 /// this immutable recovery proof while permitting only cleanup phase progress.
@@ -290,7 +457,8 @@ pub(super) fn removal_proof(
         return Err(refused());
     }
     let intent: Intent = state::read(&root.join(FILE))?;
-    validate(&intent, receipt, &intent.original_sha256, owner)?;
+    let original_receipt = normalized_proof_receipt(root, receipt, &intent)?;
+    validate(&intent, &original_receipt, &intent.original_sha256, owner)?;
     let complete = intent
         .complete_sha256
         .as_deref()
@@ -301,7 +469,8 @@ pub(super) fn removal_proof(
     }
     let proof = digest(&serde_json::to_vec(&intent).map_err(|_| refused())?);
     match expected {
-        None if receipt.phase == "stopped-data-retained" && selected(receipt)? == complete => {}
+        None if receipt.phase == "stopped-data-retained"
+            && selected(&original_receipt)? == complete => {}
         Some(value)
             if value == proof
                 && ["stopped-data-retained", "cleanup-intent", "removed"]
@@ -317,16 +486,21 @@ pub(super) fn retained(root: &std::path::Path, receipt: &Receipt) -> Result<bool
     if !exists(&root.join(FILE))? {
         return Ok(false);
     }
+    let current: Receipt = state::read(&root.join("state.json"))?;
+    if selected(&current)? != selected(receipt)? {
+        return Err(refused());
+    }
     let intent: Intent = state::read(&root.join(FILE))?;
+    let original_receipt = normalized_proof_receipt(root, receipt, &intent)?;
     validate(
         &intent,
-        receipt,
+        &original_receipt,
         &intent.original_sha256,
         &intent.owner_sha256,
     )?;
-    if intent.complete_sha256.as_deref() != Some(receipt_digest(root)?.as_str())
+    if intent.complete_sha256.as_deref() != Some(selected(&original_receipt)?.as_str())
         || receipt.phase != "stopped-data-retained"
-        || immutable(&intent.original)? != immutable(receipt)?
+        || immutable(&intent.original)? != immutable(&original_receipt)?
     {
         return Err(refused());
     }
@@ -354,8 +528,78 @@ mod tests {
             environment: None,
             bridges: None,
             complete_sha256: None,
+            one_off_sha256: None,
         }
     }
+    #[test]
+    fn normalized_completion_preserves_original_proof_and_rejects_altered_job() {
+        use one_off::normalization::{Normalization, Phase};
+        let (fixture, original, job) = one_off::tests::interrupted();
+        let mut recovered = original.clone();
+        recovered.phase = "stopped-data-retained".into();
+        for resource in recovered.resources.values_mut() {
+            resource.phase = "absent".into();
+        }
+        let mut proof = intent(&original);
+        proof.one_off_sha256 = Some(digest(&serde_json::to_vec(&job).unwrap()));
+        proof.new_boot = Some("new-boot".into());
+        proof.complete_sha256 = Some(selected(&recovered).unwrap());
+        state::write(&fixture.0.join(FILE), &proof).unwrap();
+        state::write(&fixture.0.join("state.json"), &recovered).unwrap();
+        let proof_hash = digest(&serde_json::to_vec(&proof).unwrap());
+        let mut normalization =
+            Normalization::prepare(&fixture.0, &recovered, &job, &proof_hash).unwrap();
+        normalization
+            .advance(&fixture.0, Phase::EnvironmentArchived)
+            .unwrap();
+        normalization.publish_receipt(&fixture.0).unwrap();
+        normalization
+            .advance(&fixture.0, Phase::JournalArchived)
+            .unwrap();
+        normalization.advance(&fixture.0, Phase::Complete).unwrap();
+        assert!(retained(&fixture.0, &normalization.after).unwrap());
+        let removal = removal_proof(
+            &fixture.0,
+            &normalization.after,
+            &proof.owner_sha256,
+            "new-boot",
+            None,
+        )
+        .unwrap();
+        let mut removing = normalization.after.clone();
+        removing.phase = "cleanup-intent".into();
+        assert_eq!(
+            removal_proof(
+                &fixture.0,
+                &removing,
+                &proof.owner_sha256,
+                "new-boot",
+                Some(&removal)
+            )
+            .unwrap(),
+            removal
+        );
+        // Keep the recovery hash constant while changing a non-projection job
+        // field: the independently pinned job hash must still reject it.
+        normalization.job.generation = "9".repeat(64);
+        state::write(
+            &fixture.0.join("one-off-normalization.json"),
+            &normalization,
+        )
+        .unwrap();
+        assert!(retained(&fixture.0, &normalization.after).is_err());
+        assert!(
+            removal_proof(
+                &fixture.0,
+                &normalization.after,
+                &proof.owner_sha256,
+                "new-boot",
+                None
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn completed_recovery_removal_pins_owner_boot_completion_and_resume() {
         let fixture = super::super::tests::Fixture::new();

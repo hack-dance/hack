@@ -524,6 +524,79 @@ rmdir "$root"
 printf 'environment-removed-v1\n'
 "#;
 
+/// Retire and archive only one transient service allocation. Other services in the
+/// same graph remain active; their allocation records must not move or expire.
+#[cfg(target_os = "macos")]
+pub(super) fn archive_job(
+    candidate: &Candidate,
+    guest: &OwnedGuest<'_>,
+    run: &str,
+    service: &str,
+    container: &str,
+    directory: &std::path::Path,
+) -> Result<(), CandidateError> {
+    state::private_directory(directory)?;
+    let matches = |intent: &Intent| -> Result<(), CandidateError> {
+        validate(intent, &intent.slot)?;
+        if intent.incarnation != guest.incarnation()
+            || intent.service != service
+            || !intent
+                .graph
+                .as_ref()
+                .is_some_and(|b| b.run == run && b.container == container)
+            || retention::reserved(candidate, &intent.slot)?
+        {
+            return Err(error());
+        }
+        Ok(())
+    };
+    let mut archived = std::collections::BTreeMap::new();
+    for entry in fs::read_dir(directory).map_err(state::io)? {
+        let entry = entry.map_err(state::io)?;
+        let intent: Intent = state::read_bounded(&entry.path(), 2048)?;
+        matches(&intent)?;
+        if entry.file_name().to_str() != Some(format!("{}.json", intent.slot).as_str())
+            || archived.insert(intent.slot.clone(), intent).is_some()
+            || archived.len() > 1
+        {
+            return Err(error());
+        }
+    }
+    let mut active = Vec::new();
+    for (slot, name, binding) in graph_slots(candidate, guest, run)? {
+        if name != service {
+            continue;
+        }
+        if binding.container != container {
+            return Err(error());
+        }
+        let intent = read_mode(candidate, &slot, guest.incarnation(), None, false)?;
+        matches(&intent)?;
+        if archived.contains_key(&slot) || !active.is_empty() || !archived.is_empty() {
+            return Err(error());
+        }
+        active.push(intent);
+    }
+    for intent in archived.values().chain(active.iter()) {
+        retire_intent(guest, intent)?;
+    }
+    for intent in active {
+        read(candidate, &intent.slot, guest.incarnation(), None)?;
+        let source = root(candidate).join(format!("{}.json", intent.slot));
+        let target = directory.join(format!("{}.json", intent.slot));
+        if target.symlink_metadata().is_ok() {
+            return Err(error());
+        }
+        fs::rename(source, target).map_err(state::io)?;
+        for parent in [directory, root(candidate).as_path()] {
+            fs::File::open(parent)
+                .and_then(|f| f.sync_all())
+                .map_err(state::io)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

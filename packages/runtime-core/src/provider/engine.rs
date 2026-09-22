@@ -270,6 +270,24 @@ impl<'a> Engine<'a> {
         self.guest.verify()?;
         Ok(Some(raw))
     }
+    #[cfg(target_os = "macos")]
+    pub(in crate::provider) fn job_logs(
+        &self,
+        id: &str,
+    ) -> Result<(Vec<u8>, Vec<u8>, bool), CandidateError> {
+        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(failure("Invalid job container identity."));
+        }
+        self.guest.verify()?;
+        let bytes = self.transport.request_bytes(
+            Method::GET,
+            &format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail=all"),
+            None,
+        )?;
+        let result = service_exec::decode(&bytes)?;
+        self.guest.verify()?;
+        Ok(result)
+    }
     pub(super) fn logs(&self, id: &str) -> Result<(String, String, bool), CandidateError> {
         self.logs_with_tail(id, "all")
     }

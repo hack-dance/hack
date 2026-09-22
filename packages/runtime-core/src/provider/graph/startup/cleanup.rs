@@ -39,6 +39,52 @@ pub(in crate::provider::graph) fn apply(
     }
     Ok(())
 }
+pub(in crate::provider::graph) fn retire_service(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    service: &str,
+) -> Result<(), CandidateError> {
+    let Some(startup) = &receipt.relay_startup else {
+        return Ok(());
+    };
+    let Some(selected) = startup.services.get(service) else {
+        return Ok(());
+    };
+    let generations = startup
+        .services
+        .values()
+        .map(|s| s.generation.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let identity = startup
+        .guest_root
+        .map(|(d, i)| format!("{d}:{i}"))
+        .ok_or_else(|| {
+            error(
+                "graph_startup_cleanup",
+                "Missing startup directory identity.",
+            )
+        })?;
+    let output = engine.guest().execute_cleanup(
+        SCRIPT,
+        &[
+            &receipt.run,
+            &receipt.owner,
+            &startup.artifact,
+            &generations,
+            "remove-generation",
+            &identity,
+            &selected.generation,
+        ],
+    )?;
+    if output != "startup-cleanup-v1\n" {
+        return Err(error(
+            "graph_startup_cleanup",
+            "One-off startup removal was not confirmed.",
+        ));
+    }
+    Ok(())
+}
 pub(in crate::provider::graph) fn absent(
     engine: &Engine<'_>,
     receipt: &Receipt,
@@ -139,6 +185,14 @@ for item in "$root"/* "$root"/.[!.]* "$root"/..?*; do
  ;;
  esac
 done
+if test "$5" = remove-generation; then
+ case " $4 " in *" $7 "*) ;; *) exit 61;; esac
+ directory="$root/$7"
+ if test -d "$directory"; then
+  for leaf in release pending; do if test -f "$directory/$leaf"; then rm "$directory/$leaf"; fi; done
+  rmdir "$directory"; sync -f "$root"
+ fi
+fi
 if test "$5" = remove; then
  for generation in $4; do
   directory="$root/$generation"

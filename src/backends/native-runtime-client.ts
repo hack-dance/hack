@@ -40,7 +40,7 @@ export async function invokeNativeRuntime(opts: {
   readonly cwd: string;
   readonly timeoutMs?: number;
   readonly privateInput?: Uint8Array;
-  /** Only graph exec returns a command exit status alongside its JSON response. */
+  /** Graph exec and run-service return command exit status alongside JSON. */
   readonly serviceExecResponse?: boolean;
 }): Promise<unknown> {
   const timeoutMs = opts.timeoutMs ?? 180_000;
@@ -141,7 +141,7 @@ function validExecResponseSelection(
   const separator = args.indexOf("--");
   return (
     args[0] === "graph" &&
-    args[1] === "exec" &&
+    ["exec", "run-service"].includes(args[1] ?? "") &&
     separator > 2 &&
     args.slice(2, separator).includes("--json")
   );

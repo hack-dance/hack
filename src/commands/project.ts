@@ -36,6 +36,7 @@ import {
   nativeProjectPs,
   requireComposeOperationAvailable,
 } from "../backends/native-project-observe.ts";
+import { nativeProjectOneOff } from "../backends/native-project-one-off.ts";
 import { restartNativeProject } from "../backends/native-project-restart.ts";
 import {
   nativeRestartSelection,
@@ -8006,6 +8007,18 @@ async function handlePs({
   return 0;
 }
 
+function validateRunBackendOptions(native: boolean, args: RunArgs): void {
+  if (!native) {
+    requireComposeOperationAvailable("run");
+    return;
+  }
+  if (args.options.env || args.options.profile) {
+    throw new CliUsageError(
+      "Native run uses the started project's environment and profiles; restart with the requested selections first."
+    );
+  }
+}
+
 async function handleRun({
   ctx,
   args,
@@ -8013,7 +8026,8 @@ async function handleRun({
   readonly ctx: CliContext;
   readonly args: RunArgs;
 }): Promise<number> {
-  requireComposeOperationAvailable("run");
+  const native = resolveNativeRuntimeSelection();
+  validateRunBackendOptions(Boolean(native), args);
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -8027,6 +8041,27 @@ async function handleRun({
     // notice on stderr so it never corrupts captured output.
     noticeToStderr: true,
   });
+  if (native) {
+    const result = await nativeProjectOneOff({
+      runtime: native,
+      scope: {
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        nativeHome: native.home,
+        branch,
+      },
+      service: args.positionals.service ?? "",
+      argv: args.positionals.cmd,
+      workdir: args.options.workdir,
+      composeFile: project.composeFile,
+    });
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    if (result.truncated) {
+      process.stderr.write("Native run output was truncated.\n");
+    }
+    return result.exitCode;
+  }
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });

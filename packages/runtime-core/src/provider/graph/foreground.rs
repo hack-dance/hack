@@ -6,6 +6,7 @@ use std::{
     io::Write,
     time::{Duration, Instant},
 };
+pub mod jobs;
 #[cfg(all(test, feature = "environment-launcher"))]
 mod native_test;
 mod publishers;
@@ -288,26 +289,50 @@ fn serve_input<'a>(
             .and_then(|_| stdout.flush())
             .map_err(|_| refused())?;
         drop(stdout);
+        let mut queued = None;
         loop {
-            if signals.wait()? {
+            if queued.is_none() && signals.wait()? {
                 cleanup_attempted = true;
                 return runtime.cleanup(candidate, false);
             }
-            let Some(mut stream) = publication.accept()? else {
-                continue;
-            };
-            let request: WireRequest = match transport::read(
-                &mut stream,
-                Duration::from_secs(5),
-                transport::REQUEST_LIMIT,
-            ) {
-                Ok(value) => value,
-                Err(_) => continue,
+            let (mut stream, request) = if let Some(pending) = queued.take() {
+                pending
+            } else {
+                let Some(mut stream) = publication.accept()? else {
+                    continue;
+                };
+                let request: WireRequest = match transport::read(
+                    &mut stream,
+                    Duration::from_secs(5),
+                    transport::REQUEST_LIMIT,
+                ) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                };
+                (stream, request)
             };
             if request.version != 1 || request.run != receipt.run {
                 continue;
             }
             publication.verify()?;
+            if let Some(job) = request.job {
+                if request.restore.is_some() || request.remove_data.is_some() {
+                    continue;
+                }
+                let response =
+                    match jobs::handle(candidate, &mut runtime, &receipt.run, job, &stream, || {
+                        let Ok(Some(incoming)) = publication.accept() else {
+                            return false;
+                        };
+                        queued = jobs::pending_cleanup(incoming, &receipt.run);
+                        queued.is_some()
+                    }) {
+                        Ok(value) => value,
+                        Err(error) => json!({"ok":false,"run":receipt.run,"code":error.code}),
+                    };
+                let _ = transport::write_job(&mut stream, &response, Duration::from_secs(5));
+                continue;
+            }
             if let Some(restore) = request.restore {
                 if request.remove_data.is_some() {
                     continue;
@@ -457,6 +482,7 @@ pub fn request(
             run: run.to_owned(),
             remove_data,
             restore: None,
+            job: None,
         },
         Duration::from_secs(5),
     )?;
@@ -486,6 +512,7 @@ pub fn restore_request(
         version: 1,
         run: run.into(),
         remove_data: None,
+        job: None,
         restore: Some(transport::RestoreRequest {
             plan: plan.into(),
             generation: expected_generation.into(),

@@ -1,5 +1,6 @@
 //! Foreground graph startup owner. Keys and child handles never enter receipts.
 use super::*;
+mod jobs;
 use crate::provider::{
     host_endpoint::HostEndpoint,
     lifecycle::{RelayChild, RelayLaunch},
@@ -19,6 +20,7 @@ use std::{
 
 /// One explicit host dependency for one service. The endpoint is a live captured
 /// generation, not a port number or implicit host-gateway route.
+#[derive(Clone)]
 pub struct Dependency {
     pub service: String,
     pub binding: String,
@@ -38,6 +40,8 @@ pub struct HostRelayRuntime {
     artifact_hash: String,
     dependencies: BTreeMap<(String, String), Dependency>,
     children: BTreeMap<(String, String), RelayChild>,
+    templates: BTreeMap<String, Value>,
+    job_targets: BTreeMap<String, Vec<crate::provider::relay_owner::Target>>,
     run: Option<String>,
     selected_run: Option<String>,
     startup_cancelled: Option<fn() -> bool>,
@@ -300,6 +304,8 @@ impl HostRelayRuntime {
             artifact_hash: expected_sha256.into(),
             dependencies: selected,
             children: BTreeMap::new(),
+            templates: BTreeMap::new(),
+            job_targets: BTreeMap::new(),
             run: None,
             selected_run: selected_run.map(str::to_owned),
             startup_cancelled: None,
@@ -351,7 +357,14 @@ impl HostRelayRuntime {
         if self.candidate != candidate.checkout {
             return Err(refused());
         }
-        let run = self.run.as_deref().ok_or_else(refused)?;
+        let run = self.run.clone().ok_or_else(refused)?;
+        if crate::provider::graph::directory(candidate, &run)?
+            .join("one-off.json")
+            .symlink_metadata()
+            .is_ok()
+        {
+            crate::provider::graph::one_off::runtime::finish(candidate, self, &run)?;
+        }
         let engine = Engine::connect_cleanup_wait(candidate)?;
         for name in self.children.keys().cloned().collect::<Vec<_>>() {
             let child = self.children.get_mut(&name).ok_or_else(refused)?;
@@ -362,7 +375,7 @@ impl HostRelayRuntime {
         }
         drop(engine);
         let receipt =
-            host_relay::cleanup_with_relay(candidate, run, remove_data, &self.endpoint())?;
+            host_relay::cleanup_with_relay(candidate, &run, remove_data, &self.endpoint())?;
         self.children.clear();
         Ok(receipt)
     }
@@ -492,6 +505,7 @@ impl Driver for HostRelayRuntime {
         {
             return Err(stage_refused("graph_startup_binding_validation"));
         }
+        self.templates = configs.clone();
         self.run = Some(receipt.run.clone());
         self.check(engine, receipt)?;
         state::write(&root.join("state.json"), receipt)?;
@@ -688,6 +702,9 @@ impl Driver for HostRelayRuntime {
                 .phase = Phase::Released;
             state::write(&root.join("state.json"), receipt)
         })();
+        if service.starts_with("job-") {
+            self.job_targets.insert(service.into(), targets.clone());
+        }
         if result.is_err() {
             // Try every selected retirement even if an earlier retirement refuses.
             let mut failure = None;

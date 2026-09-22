@@ -28,6 +28,25 @@ pub(super) struct WireRequest {
     pub remove_data: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore: Option<RestoreRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<JobRequest>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct JobRequest {
+    pub service: String,
+    pub command: Option<JobCommand>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct JobCommand {
+    pub plan: String,
+    pub generation: String,
+    pub boot: String,
+    pub argv: Vec<String>,
+    pub workdir: Option<String>,
+    pub timeout_seconds: u64,
+    pub environment: PrivateText,
 }
 const PRIVATE_LIMIT: usize = crate::provider::managed_environment::MAX_INPUT_BYTES;
 // JSON string escaping may double the private envelope, plus fixed routing metadata.
@@ -512,9 +531,24 @@ pub(super) fn write<T: Serialize>(
     value: &T,
     budget: Duration,
 ) -> Result<(), CandidateError> {
+    write_bounded(stream, value, budget, REQUEST_LIMIT)
+}
+pub(super) fn write_job<T: Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+    budget: Duration,
+) -> Result<(), CandidateError> {
+    write_bounded(stream, value, budget, 4 * 1024 * 1024)
+}
+fn write_bounded<T: Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+    budget: Duration,
+    limit: usize,
+) -> Result<(), CandidateError> {
     // Serialize directly into a fixed allocation: no intermediate private JSON
     // Vec or reallocating frame. serde parser scratch is not covered by this.
-    let mut frame = Zeroizing::new(vec![0; REQUEST_LIMIT + 4]);
+    let mut frame = Zeroizing::new(vec![0; limit + 4]);
     let length = {
         let mut cursor = std::io::Cursor::new(&mut frame[4..]);
         serde_json::to_writer(&mut cursor, value).map_err(|_| refused())?;
@@ -642,4 +676,24 @@ impl DeadOwner {
     pub(in crate::provider::graph) fn fingerprint(&self) -> String {
         format!("{:x}", Sha256::digest(&self.pin.bytes))
     }
+}
+
+/// Check only connection lifetime; never consume another frame as job input.
+pub(super) fn disconnected(stream: &UnixStream) -> bool {
+    let mut byte = 0_u8;
+    // SAFETY: the owned stream FD and single-byte writable buffer remain valid.
+    let count = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            (&mut byte as *mut u8).cast(),
+            1,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    count == 0
+        || (count < 0
+            && !matches!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ))
 }

@@ -277,7 +277,10 @@ fn run() -> Result<(), CandidateError> {
             let candidate = discover_candidate(&requested)?;
             let result = graph_cli::command(&candidate, arguments)?;
             print_json(&result)?;
-            if arguments.first() == Some(&"exec") {
+            if arguments
+                .first()
+                .is_some_and(|action| ["exec", "run-service"].contains(action))
+            {
                 let code = result["exit_code"].as_i64().ok_or_else(|| {
                     CandidateError::new("graph_exec_result", "Missing service command exit status.")
                 })?;

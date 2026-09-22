@@ -151,6 +151,40 @@ fn load(root: &Path, current: &Receipt) -> Result<History, CandidateError> {
     }
     Ok(history)
 }
+
+/// Recovery may supersede a prior cleanup sidecar only when durable history
+/// identifies a different, fully stopped container generation of this graph.
+pub(super) fn confirms_prior_generation(
+    root: &Path,
+    current: &Receipt,
+) -> Result<bool, CandidateError> {
+    let path = root.join(FILE);
+    if !exists(&path) {
+        return Ok(false);
+    }
+    let history: History = state::read_bounded(&path, BYTE_LIMIT as u64)?;
+    if history.version != 1
+        || history.run != current.run
+        || history.owner != current.owner
+        || history.namespace != current.namespace
+        || history.entries.is_empty()
+        || history.entries.len() > LIMIT
+        || history
+            .entries
+            .iter()
+            .any(|entry| validate(entry, current).is_err())
+    {
+        return Err(refused());
+    }
+    Ok(history.entries.iter().any(|entry| {
+        entry.resources.iter().any(|(key, resource)| {
+            resource.kind == Kind::Container
+                && resource.id.as_deref().is_some_and(|old| {
+                    current.resources.get(key).and_then(|now| now.id.as_deref()) != Some(old)
+                })
+        })
+    }))
+}
 fn next(root: &Path, current: &Receipt) -> Result<History, CandidateError> {
     let mut history = load(root, current)?;
     let same =

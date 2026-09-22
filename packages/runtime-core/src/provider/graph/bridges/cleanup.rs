@@ -277,6 +277,68 @@ fn selection_path(root: &std::path::Path) -> Result<PathBuf, CandidateError> {
     }
 }
 
+fn prior_generation(prior: &Selection, current: &Selection) -> bool {
+    prior.version == 1
+        && prior.owner == current.owner
+        && prior.boot == current.previous_boot.as_deref().unwrap_or_default()
+        && prior.previous_boot.is_none()
+        && prior.predecessor_owner.is_none()
+        && prior.run == current.run
+        && prior.plan == current.plan
+        && prior.capacity == current.capacity
+        && prior.selected.is_empty()
+        && !current.selected.is_empty()
+        && current.selected.values().all(|selected| {
+            selected
+                .assignment
+                .relay
+                .as_ref()
+                .is_some_and(|relay| relay.launch_serial > prior.serial)
+        })
+}
+
+/// A completed selection from an earlier restored generation may precede every
+/// currently reserved route. Capture its exact bytes in the recovery intent before
+/// replacing the sidecar; a partial or changed selection remains a refusal.
+pub(crate) fn capture_prior_generation(
+    root: &std::path::Path,
+    current: &Selection,
+) -> Result<Option<Value>, CandidateError> {
+    let path = selection_path(root)?;
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(state::io(error)),
+        Ok(_) => {}
+    }
+    let prior: Selection = state::read_bounded(&path, 65536)?;
+    if !prior_generation(&prior, current) {
+        return Err(invalid());
+    }
+    serde_json::to_value(prior).map(Some).map_err(|_| invalid())
+}
+
+pub(crate) fn verify_recovery_file(
+    root: &std::path::Path,
+    current: &Selection,
+    prior: Option<&Value>,
+) -> Result<(), CandidateError> {
+    let path = selection_path(root)?;
+    let observed: Value = match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && prior.is_none() => {
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(invalid()),
+        Err(error) => return Err(state::io(error)),
+        Ok(_) => state::read_bounded(&path, 65536)?,
+    };
+    let selected = serde_json::to_value(current).map_err(|_| invalid())?;
+    if prior == Some(&observed) || observed == selected {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}
+
 /// Call only after Coordinator::begin_graph admits a new operation and before effects.
 /// Its lock prevents replacing evidence for an unfinished earlier operation.
 pub(crate) fn persist(root: &std::path::Path, selection: &Selection) -> Result<(), CandidateError> {
@@ -465,6 +527,58 @@ mod tests {
         assert!(validate_bindings(&receipt, &selection, Some("prior")).is_err());
         receipt.relay_startup = None;
         assert!(validate_bindings(&receipt, &selection, Some("prior")).is_err());
+    }
+    #[test]
+    fn prior_generation_selection_is_retained_only_before_all_current_routes() {
+        let fixture = Fixture::new();
+        let mut current = selection(101);
+        current.boot = "current".into();
+        current.previous_boot = Some("prior".into());
+        current.capacity = 1;
+        current.selected.insert(
+            0,
+            Selected {
+                assignment: Assignment {
+                    reservation: "d".repeat(32),
+                    run: current.run.clone(),
+                    service: "web".into(),
+                    generation: "e".repeat(64),
+                    container_id: "f".repeat(64),
+                    network_id: "1".repeat(64),
+                    boot_id: "prior".into(),
+                    phase: "running".into(),
+                    relay: Some(relay::Relay {
+                        transport: relay::Transport::ReservationV1,
+                        launch_serial: 100,
+                        binary_sha256: "2".repeat(64),
+                        target_pid: 10,
+                        target_start: 10,
+                        port: 8080,
+                    }),
+                },
+                helper: None,
+            },
+        );
+        let mut prior = selection(99);
+        prior.boot = "prior".into();
+        prior.capacity = 1;
+        let path = fixture.0.join("relay-cleanup-bridges.json");
+        state::write(&path, &prior).unwrap();
+        let captured = capture_prior_generation(&fixture.0, &current)
+            .unwrap()
+            .unwrap();
+        verify_recovery_file(&fixture.0, &current, Some(&captured)).unwrap();
+        state::write(&path, &current).unwrap();
+        verify_recovery_file(&fixture.0, &current, Some(&captured)).unwrap();
+
+        prior.serial = 100;
+        state::write(&path, &prior).unwrap();
+        assert!(capture_prior_generation(&fixture.0, &current).is_err());
+        assert!(verify_recovery_file(&fixture.0, &current, Some(&captured)).is_err());
+        prior.serial = 99;
+        prior.boot = "foreign".into();
+        state::write(&path, &prior).unwrap();
+        assert!(capture_prior_generation(&fixture.0, &current).is_err());
     }
     fn pending(root: &std::path::Path, bytes: &[u8]) -> PathBuf {
         let path = root.join("relay-cleanup-bridges.pending");

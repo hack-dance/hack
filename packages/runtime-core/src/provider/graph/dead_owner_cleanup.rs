@@ -16,6 +16,8 @@ struct Intent {
     original: Receipt,
     environment: Option<Value>,
     bridges: Option<bridges::cleanup::Selection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prior_bridges: Option<Value>,
     complete_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     one_off_sha256: Option<String>,
@@ -169,6 +171,7 @@ fn prepare(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         original: receipt,
         environment: None,
         bridges: None,
+        prior_bridges: None,
         complete_sha256: None,
         one_off_sha256,
     };
@@ -223,14 +226,17 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             || receipt.relay_startup.is_none()
             || receipt.relay_cleanup.is_some()
             || selected(&receipt)? != expected
-            || exists(&root.join("relay-cleanup-bridges.json"))?
-            || exists(&root.join("relay-cleanup-bridges.pending"))?
         {
             return Err(refused());
         }
         initializer_cache::require_resolved(&receipt)?;
         let bridges =
             bridges::cleanup::capture_previous_boot(candidate, &engine, &receipt, &old_boot)?;
+        let prior_bridges = bridges::cleanup::capture_prior_generation(&root, &bridges)?;
+        if prior_bridges.is_some() && !restore_history::confirms_prior_generation(&root, &receipt)?
+        {
+            return Err(refused());
+        }
         let intent = Intent {
             version: 1,
             original_sha256: expected.into(),
@@ -240,6 +246,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             original: receipt.clone(),
             environment: None,
             bridges: Some(bridges),
+            prior_bridges,
             complete_sha256: None,
             one_off_sha256,
         };
@@ -278,6 +285,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         Some(selection) => selection.clone(),
         None => bridges::cleanup::capture(candidate, &engine, &receipt)?,
     };
+    bridges::cleanup::verify_recovery_file(&root, &bridges, intent.prior_bridges.as_ref())?;
     if intent
         .environment
         .as_ref()
@@ -527,6 +535,7 @@ mod tests {
             original: receipt.clone(),
             environment: None,
             bridges: None,
+            prior_bridges: None,
             complete_sha256: None,
             one_off_sha256: None,
         }

@@ -1,4 +1,5 @@
 //! Fresh owned graph attempts. Recovery only observes or cleans recorded resources; never replay.
+pub mod one_off;
 mod service_exec;
 pub use service_exec::{
     ServiceExecOptions, ServiceExecResult, service_exec, service_exec_generation,

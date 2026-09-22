@@ -39,6 +39,7 @@ pub(in crate::provider::graph) fn apply(
     }
     Ok(())
 }
+#[cfg(target_os = "macos")]
 pub(in crate::provider::graph) fn retire_service(
     engine: &Engine<'_>,
     receipt: &Receipt,

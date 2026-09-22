@@ -162,6 +162,7 @@ impl JobIntent {
 /// Validate an interrupted job against its original parent generation. Pending
 /// bytes never supply identity or effect authority; callers may retain them only
 /// after this published selection and foreground ownership have been checked.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn recovery_selection(
     root: &std::path::Path,
     receipt: &Receipt,
@@ -232,6 +233,7 @@ pub(super) fn recovery_selection(
     ))
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn retain_interrupted_cleanup(root: &std::path::Path) -> Result<(), CandidateError> {
     journal::retain_file(root, "one-off.pending", "one-off-recovery", 16 * 1024)?;
     Ok(())

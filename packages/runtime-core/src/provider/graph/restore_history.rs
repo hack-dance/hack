@@ -154,6 +154,7 @@ fn load(root: &Path, current: &Receipt) -> Result<History, CandidateError> {
 
 /// Recovery may supersede a prior cleanup sidecar only when durable history
 /// identifies a different, fully stopped container generation of this graph.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn confirms_prior_generation(
     root: &Path,
     current: &Receipt,

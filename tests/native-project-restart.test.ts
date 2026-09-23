@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { restartNativeProject } from "../src/backends/native-project-restart.ts";
 import { nativeRestartSelection } from "../src/backends/native-project-restart-preflight.ts";
 import type { NativeRestartIntent } from "../src/backends/native-project-run.ts";
@@ -284,6 +287,86 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
     "compatibility changed"
   );
   expect(calls).toEqual(["review"]);
+});
+
+test("preflight refuses a stale host listener before restart cleanup", async () => {
+  const { preflightNativeRestart } = await import(
+    "../src/backends/native-project-restart-preflight.ts"
+  );
+  const directory = await mkdtemp(
+    join(tmpdir(), "hack-restart-listener-test-")
+  );
+  try {
+    await writeFile(join(directory, "hack-relay-guest"), "relay fixture");
+    const calls: string[] = [];
+    const input = {
+      originalSha256: "1".repeat(64),
+      environmentFiles: [],
+      serviceNames: ["app"],
+      normalizedComposeJson: JSON.stringify({
+        services: { app: { image: `sha256:${"9".repeat(64)}` } },
+      }),
+      managedEnvironment: {},
+      lifecycleHostEnvironment: {},
+      effectiveEnvName: "qa",
+    };
+    await expect(
+      preflightNativeRestart({
+        runtime: { binary: join(directory, "hack-native"), home: "/candidate" },
+        scope,
+        composeFile: "/fixture/.hack/docker-compose.yml",
+        run,
+        dependencyFile: "/private/selection.json",
+        dependencies: {
+          prepare: async () => input,
+          adapt: async ({ input: prepared }) => prepared,
+          dependencies: async () => [
+            {
+              service: "app",
+              binding: "qa",
+              slot: 0,
+              guest_port: 8444,
+              aliases: ["qa.example.com"],
+              host_pid: 12_345,
+              host_port: 8444,
+            },
+          ],
+          invoke: async ({ args }) => {
+            calls.push(`${args[0]} ${args[1]}`);
+            if (args[1] === "status") {
+              return { network: "internet" };
+            }
+            if (args[1] === "probe") {
+              return { admitted: true };
+            }
+            expect(args.slice(0, 3)).toEqual([
+              "graph",
+              "dependency-plan",
+              "--dependencies",
+            ]);
+            const selection = JSON.parse(await readFile(args[3] ?? "", "utf8"));
+            expect(selection.plan).toBe(run.planId);
+            expect(selection.dependencies[0].host_pid).toBe(12_345);
+            throw new Error("process_identity_unavailable");
+          },
+          review: async (options) =>
+            await options.run({
+              planId: run.planId,
+              namespace: run.namespace,
+              report: {},
+              projectArgs: [],
+            }),
+        },
+      })
+    ).rejects.toThrow("host dependency listener is unavailable or changed");
+    expect(calls).toEqual([
+      "runtime status",
+      "runtime probe",
+      "graph dependency-plan",
+    ]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("unconfirmed down hooks cannot be silently skipped on resume", async () => {

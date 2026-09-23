@@ -415,9 +415,12 @@ export async function loadNativeProjectRun(
     throw refused();
   }
 }
-/** Publish once after authoritative graph admission; never overwrite an uncertain/live mapping. */
+/** Publish a new owner once, or replace its exact stopped mapping after restore. */
 export async function saveNativeProjectRun(
-  opts: NativeProjectRunScope & { readonly run: NativeProjectRun }
+  opts: NativeProjectRunScope & {
+    readonly run: NativeProjectRun;
+    readonly expected?: NativeProjectRun;
+  }
 ): Promise<void> {
   try {
     if (!valid(opts.run)) {
@@ -428,12 +431,28 @@ export async function saveNativeProjectRun(
     await mkdir(p.lock, { mode: 0o700 });
     const temp = join(p.root, `${randomUUID()}.tmp`);
     try {
+      if (opts.expected) {
+        const current = record(await read(p.file), p.identity);
+        if (
+          JSON.stringify(current) !== JSON.stringify(opts.expected) ||
+          current.run !== opts.run.run ||
+          current.owner !== opts.run.owner ||
+          current.namespace !== opts.run.namespace ||
+          current.planId !== opts.run.planId
+        ) {
+          throw refused();
+        }
+      }
       await write(
         temp,
         JSON.stringify({ version: 1, scope: p.identity, run: opts.run })
       );
-      await link(temp, p.file);
-      await unlink(temp);
+      if (opts.expected) {
+        await rename(temp, p.file);
+      } else {
+        await link(temp, p.file);
+        await unlink(temp);
+      }
       await sync(p.root);
     } finally {
       await unlink(temp).catch((error: unknown) => {

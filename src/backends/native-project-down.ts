@@ -9,7 +9,6 @@ import {
   loadNativeProjectRun,
   type NativeProjectRun,
   type NativeProjectRunScope,
-  removeNativeProjectRun,
 } from "./native-project-run.ts";
 import {
   invokeNativeRuntime,
@@ -91,7 +90,6 @@ export async function nativeProjectDown(opts: {
   ) {
     // Recovery already completed cleanup. Do not replay hooks or owned effects.
     verify(initial, run, true);
-    await removeNativeProjectRun({ ...opts.scope, expected: run });
     return {
       backend: "native",
       status: "stopped",
@@ -109,7 +107,6 @@ export async function nativeProjectDown(opts: {
     timeoutMs: 150_000,
   });
   verify(await inspect(), run, true);
-  await removeNativeProjectRun({ ...opts.scope, expected: run });
   await opts.after?.(run);
   return {
     backend: "native",

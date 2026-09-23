@@ -60,6 +60,33 @@ test("exclusive project/branch mapping roundtrips and exact cleanup preserves ot
   expect(await load(opts)).toBeNull();
   expect((await load({ ...opts, branch: "other" }))?.run).toBe("e".repeat(32));
 });
+test("retained run mapping is replaced only by the same confirmed owner", async () => {
+  const opts = await fixture();
+  await save({ ...opts, run });
+  const resumed = {
+    ...run,
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+  };
+  await expect(
+    save({ ...opts, run: resumed, expected: { ...run, owner: "f".repeat(32) } })
+  ).rejects.toThrow();
+  await expect(
+    save({
+      ...opts,
+      run: { ...resumed, run: "f".repeat(32) },
+      expected: run,
+    })
+  ).rejects.toThrow();
+  expect(await load(opts)).toEqual(run);
+  await save({ ...opts, run: resumed, expected: run });
+  expect(await load(opts)).toEqual(resumed);
+  await expect(
+    save({ ...opts, run: resumed, expected: run })
+  ).rejects.toThrow();
+  expect(await load(opts)).toEqual(resumed);
+});
 test("concurrent admission has one publisher and state stays ignored", async () => {
   const opts = await fixture();
   const results = await Promise.allSettled([

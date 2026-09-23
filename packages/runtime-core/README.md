@@ -615,6 +615,15 @@ normalized input, original Compose hash, namespace, plan, run, and returned
 source, and route selections again. Supply fresh `--environment-stdin` only when
 managed values are needed; credentials and expired grants are never replayed.
 
+The normal candidate CLI retains its scoped run mapping after confirmed `hack down`
+or foreground cleanup. A later `hack up` with that candidate home verifies the
+stopped owner, recorded environment/profile/AWS selections and current reviewed
+source contract, then uses this same-run restore path. Mapping publication after
+readiness compares the exact retained owner before replacing its record. An active,
+changed or uncertain mapping refuses before new graph effects. Earlier candidate
+builds removed the mapping on down; their retained volumes are not guessed or
+silently adopted by a fresh up and require explicit owned-state recovery.
+
 Selection binds the receipt, current VM boot and verified current volume
 observations. Restoration rechecks these before effects, requires the old owner
 publication and lock to be retired, and verifies the historical cleanup

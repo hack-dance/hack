@@ -60,7 +60,7 @@ async function fixture(saved = true) {
   return { scope, runtime: { binary: "/not-invoked", home: nativeHome } };
 }
 
-test("down invokes cleanup once then validates absence before mapping retirement and after hook", async () => {
+test("down invokes cleanup once and retains the stopped mapping for later up", async () => {
   const opts = await fixture();
   const events: string[] = [];
   let cleaned = false;
@@ -70,7 +70,7 @@ test("down invokes cleanup once then validates absence before mapping retirement
       events.push("before");
     },
     after: async () => {
-      expect(await loadNativeProjectRun(opts.scope)).toBeNull();
+      expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
       events.push("after");
     },
     invoke: async (request) => {
@@ -286,7 +286,7 @@ test("down environment preserves explicit base and named overlay while legacy re
     nativeDownEnvironment({ scope: opts.scope, run, serviceNames: ["web"] })
   ).rejects.toThrow("legacy");
 });
-test("before failure prevents cleanup; after failure follows confirmed retirement", async () => {
+test("before failure prevents cleanup; after failure retains the stopped mapping", async () => {
   for (const phase of ["before", "after"] as const) {
     const opts = await fixture();
     let cleaned = false;
@@ -314,9 +314,7 @@ test("before failure prevents cleanup; after failure follows confirmed retiremen
       })
     ).rejects.toBe(failure);
     expect(calls).toBe(phase === "before" ? 0 : 1);
-    expect(await loadNativeProjectRun(opts.scope)).toEqual(
-      phase === "before" ? run : null
-    );
+    expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
   }
 });
 
@@ -398,13 +396,16 @@ test("native down JSON isolates hook output and uses saved overlay through real 
     });
     expect(stderr).toContain("hook-before");
     expect(stderr).toContain("hook-after");
-    expect(await loadNativeProjectRun(opts.scope)).toBeNull();
+    expect(await loadNativeProjectRun(opts.scope)).toEqual({
+      ...run,
+      effectiveEnvName: "qa",
+    });
   } finally {
     clearTimeout(timer);
   }
 });
 
-test("recovered stopped graph retires mapping without replaying hooks or cleanup", async () => {
+test("recovered stopped graph keeps mapping without replaying hooks or cleanup", async () => {
   const opts = await fixture();
   const calls: string[] = [];
   const result = await nativeProjectDown({
@@ -425,7 +426,7 @@ test("recovered stopped graph retires mapping without replaying hooks or cleanup
   });
   expect(result.status).toBe("stopped");
   expect(calls).toEqual(["inspect"]);
-  expect(await loadNativeProjectRun(opts.scope)).toBeNull();
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
 test("stopped receipt with a remaining container preserves mapping", async () => {

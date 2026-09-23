@@ -280,8 +280,8 @@ project tree, including ignored files, with each mount's declared write mode. Us
 an explicitly prepared candidate home and the binary from a complete native bundle.
 It acquires public images, privately supplies managed environment values, runs
 lifecycle hooks, and publishes the run mapping after native readiness. Ctrl-C waits
-for owned cleanup and removes the mapping only after confirming cleanup; named
-volumes are retained. The VM remains available until explicit runtime shutdown.
+for owned cleanup and keeps the stopped run mapping and named volumes after
+confirming cleanup. The VM remains available until explicit runtime shutdown.
 
 This initial foreground path does not support detached/JSON startup, selected
 services or external networks. Routed services and host dependencies require the
@@ -290,11 +290,14 @@ explicit native selections described below. Existing
 require successful initializer completion before dependent services start. Cache
 initializers receive immutable source mounts and writable named cache volumes;
 workspace installs that write elsewhere still require explicit volume mappings.
-An isolated Event Agent trial reached 14-service native readiness and served its
-sign-in page and JavaScript chunks over CA-verified HTTPS. That smoke check does
-not yet establish ordinary browser trust, OAuth completion, or same-run restart
-after a frontend crash. Native `down` requests retaining cleanup from the graph owner and
-verifies container absence before retiring the exact run mapping. Down hooks resolve
+An isolated Event Agent trial reached 14-service native readiness, completed Google
+sign-in, and rendered authenticated search results and images over browser-trusted
+HTTPS. A normal `restart` kept its run and Redis data after a source edit. This does
+not establish every application workflow, crash recovery or comparative performance.
+Native `down` requests retaining cleanup from the graph owner and verifies container
+absence while keeping the exact run mapping. The next ordinary `up` verifies that
+stopped receipt and restores the same run and volumes. It refuses an active, changed
+or uncertain mapping rather than allocating a new data volume. Down hooks resolve
 fresh managed host values using the environment selection saved by `up`; hook output goes to stderr with `--json`. A before-hook failure
 prevents cleanup; an after-hook failure reports that graph cleanup already completed.
 Environment/profile/target changes and cache pruning remain unsupported.
@@ -307,7 +310,10 @@ Older binaries may reject extended mappings: this is backward state-reading
 compatibility, not support for rolling back binaries over new state.
 Whole-project foreground `restart` retains the recorded environment, AWS selector,
 profiles, run identity and data volumes. It checks development runtime admission
-(including disk headroom) and reviews the unchanged normalized plan before cleanup.
+(including disk headroom), reviews the normalized plan, and verifies each selected
+host dependency listener is still the pinned process before cleanup. Refresh a
+stale private `HACK_NATIVE_DEPENDENCIES` selection before retrying; the CLI does
+not adopt an unverified process at the same port.
 It saves a pending restart intent and waits for the previous frontend
 to confirm graph, HTTPS and lifecycle cleanup before starting its replacement.
 Changed selections and unknown legacy startup/finalization records refuse before
@@ -467,6 +473,10 @@ that identity again during admission. A stale PID, replaced listener, undeclared
 alias, extra field, symlink or malformed file refuses admission. This file contains
 selection metadata only, never credentials. It does not adopt or stop the selected
 host process; lifecycle hooks retain ownership of listeners they launch.
+Restart preflight checks those selected listeners before stopping the graph.
+Startup admission repeats the check after lifecycle hooks, so a listener that
+changes between preflight and startup still refuses without adopting it; the
+stopped run and its volumes remain available for a corrected retry.
 Selected services receive `init: true` when omitted because the guest relay launcher
 requires a reaping init process. An explicit `init: false` is refused, not replaced.
 

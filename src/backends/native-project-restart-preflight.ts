@@ -1,7 +1,12 @@
+import { createHash } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
+  type NativeHostDependency,
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
@@ -29,6 +34,73 @@ const DEFAULTS = {
   review: withNativeProjectReview,
 };
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
+const SHA = /^[a-f0-9]{64}$/;
+
+/** Check each currently selected host listener before restart can stop the graph. */
+async function verifyNativeRestartListeners(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly planId: string;
+  readonly dependencies: readonly NativeHostDependency[];
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<void> {
+  if (opts.dependencies.length === 0) {
+    return;
+  }
+  const artifact = join(dirname(opts.runtime.binary), "hack-relay-guest");
+  const file = Bun.file(artifact);
+  if (
+    !(await file.exists()) ||
+    file.size === 0 ||
+    file.size > 16 * 1024 * 1024
+  ) {
+    throw new Error(
+      "Native restart needs its bundled dependency relay before cleanup; the current graph was not stopped."
+    );
+  }
+  const artifactHash = createHash("sha256")
+    .update(new Uint8Array(await file.arrayBuffer()))
+    .digest("hex");
+  const directory = await mkdtemp(join(tmpdir(), "hack-native-restart-deps-"));
+  try {
+    const path = join(directory, "dependencies.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        plan: opts.planId,
+        artifact,
+        artifact_sha256: artifactHash,
+        dependencies: opts.dependencies,
+      }),
+      { mode: 0o600, flag: "wx" }
+    );
+    let result: unknown;
+    try {
+      result = await opts.invoke({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        args: ["graph", "dependency-plan", "--dependencies", path, "--json"],
+      });
+    } catch {
+      throw new Error(
+        "Native restart host dependency listener is unavailable or changed; refresh its private selection before restart. The current graph was not stopped."
+      );
+    }
+    if (
+      !isRecord(result) ||
+      result.plan_id !== opts.planId ||
+      typeof result.dependency_plan_id !== "string" ||
+      !SHA.test(result.dependency_plan_id)
+    ) {
+      throw new Error(
+        "Native restart host dependency selection was not confirmed; the current graph was not stopped."
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 export function requireNativeRestartNetwork(
   status: unknown,
@@ -182,6 +254,13 @@ export async function preflightNativeRestart(opts: {
           invoke: deps.invoke,
         });
       }
+      await verifyNativeRestartListeners({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        planId: review.planId,
+        dependencies,
+        invoke: deps.invoke,
+      });
     },
   });
 }

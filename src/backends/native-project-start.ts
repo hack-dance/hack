@@ -449,6 +449,156 @@ async function refusePendingFreshStart(
     );
   }
 }
+function confirmedRetainedGraph(
+  value: unknown,
+  run: NativeProjectRun
+): boolean {
+  if (
+    !isRecord(value) ||
+    value.journal_incomplete !== false ||
+    !isRecord(value.receipt) ||
+    !isRecord(value.observations)
+  ) {
+    return false;
+  }
+  const receipt = value.receipt;
+  const observations = value.observations;
+  if (
+    receipt.run !== run.run ||
+    receipt.owner !== run.owner ||
+    receipt.namespace !== run.namespace ||
+    receipt.plan_id !== run.planId ||
+    receipt.phase !== "stopped-data-retained" ||
+    !isRecord(receipt.resources)
+  ) {
+    return false;
+  }
+  return Object.values(receipt.resources).every((resource) => {
+    if (!isRecord(resource)) {
+      return false;
+    }
+    if (resource.kind !== "container") {
+      return true;
+    }
+    const observation = observations[`container:${resource.key}`];
+    return isRecord(observation) && observation.state === "absent";
+  });
+}
+function retainedStartupSelection(opts: {
+  readonly run: NativeProjectRun;
+  readonly envName?: string | null;
+  readonly profiles?: readonly string[];
+  readonly aws?: { readonly profile: string; readonly region?: string };
+}) {
+  const { run } = opts;
+  if (
+    run.effectiveEnvName === undefined ||
+    run.profiles === undefined ||
+    run.aws === undefined ||
+    (opts.envName !== undefined && opts.envName !== run.effectiveEnvName) ||
+    (opts.profiles !== undefined &&
+      JSON.stringify(normalizeNativeProfiles(opts.profiles)) !==
+        JSON.stringify(run.profiles)) ||
+    (opts.aws !== undefined &&
+      (opts.aws.profile !== run.aws?.profile ||
+        opts.aws.region !== run.aws?.region))
+  ) {
+    throw new Error(
+      "Native up cannot change the retained run's environment, profiles or AWS profile; data was not replaced."
+    );
+  }
+  return {
+    envName: run.effectiveEnvName,
+    profiles: run.profiles,
+    aws: run.aws ?? undefined,
+  };
+}
+async function selectNativeStartup(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly scope: NativeProjectRunScope;
+  readonly restore?: NativeProjectRun;
+  readonly envName?: string | null;
+  readonly profiles?: readonly string[];
+  readonly requestedProfiles: readonly string[];
+  readonly aws?: { readonly profile: string; readonly region?: string };
+  readonly load: typeof loadNativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+}) {
+  const retained = await opts.load(opts.scope);
+  if (retained) {
+    if (
+      opts.restore &&
+      JSON.stringify(opts.restore) !== JSON.stringify(retained)
+    ) {
+      throw new Error("Native retained run mapping changed before restore.");
+    }
+    const observed = await inspectNativeProjectGraph({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      run: retained.run,
+      invoke: opts.invoke,
+    });
+    if (!confirmedRetainedGraph(observed, retained)) {
+      throw new Error(
+        "Native project already has an owned run mapping that is not safely stopped; inspect it before starting another run."
+      );
+    }
+  }
+  const restore = opts.restore ?? retained ?? undefined;
+  const selection =
+    retained && !opts.restore
+      ? retainedStartupSelection({
+          run: retained,
+          envName: opts.envName,
+          profiles: opts.profiles,
+          aws: opts.aws,
+        })
+      : {
+          envName: opts.envName,
+          profiles: opts.requestedProfiles,
+          aws: opts.aws,
+        };
+  return { retained, restore, selection };
+}
+function selectedMapping(opts: {
+  readonly ready: NativeProjectRun;
+  readonly effectiveEnvName: string | null;
+  readonly profiles: readonly string[];
+  readonly aws?: { readonly profile: string; readonly region?: string };
+}): NativeProjectRun {
+  return {
+    ...opts.ready,
+    effectiveEnvName: opts.effectiveEnvName,
+    profiles: opts.profiles,
+    aws: opts.aws
+      ? {
+          profile: opts.aws.profile,
+          ...(opts.aws.region ? { region: opts.aws.region } : {}),
+        }
+      : null,
+  };
+}
+async function retireRemovedMapping(opts: {
+  readonly final: unknown;
+  readonly mapping: NativeProjectRun | undefined;
+  readonly owned: NativeProjectRun;
+  readonly scope: NativeProjectRunScope;
+  readonly remove: typeof removeNativeProjectRun;
+}): Promise<void> {
+  if (!opts.mapping) {
+    return;
+  }
+  if (opts.mapping.owner !== opts.owned.owner) {
+    throw refused();
+  }
+  if (
+    isRecord(opts.final) &&
+    isRecord(opts.final.receipt) &&
+    opts.final.receipt.phase === "removed"
+  ) {
+    await opts.remove({ ...opts.scope, expected: opts.mapping });
+  }
+}
 async function acknowledgeFinalization(
   finalization:
     | Awaited<ReturnType<typeof beginNativeProjectFinalization>>
@@ -479,7 +629,7 @@ export async function startNativeProject(opts: {
   readonly signal?: AbortSignal;
   readonly dependencies?: Partial<Dependencies>;
 }): Promise<number> {
-  const profiles = normalizeNativeProfiles(opts.profiles);
+  const requestedProfiles = normalizeNativeProfiles(opts.profiles);
   const allowedHosts = validateNativeAllowedHosts(opts.allowedHosts);
   validateHttpsSelection(opts.https);
   if (!opts.sharedSource) {
@@ -489,17 +639,33 @@ export async function startNativeProject(opts: {
   }
   const deps = { ...DEFAULTS, ...opts.dependencies };
   await refusePendingFreshStart(opts.restore, opts.scope, deps.loadRestart);
-  if (await deps.load(opts.scope)) {
-    throw new Error(
-      "Native project already has an owned run mapping; inspect it before starting another run."
-    );
-  }
+  const { retained, restore, selection } = await selectNativeStartup({
+    runtime: opts.runtime,
+    scope: opts.scope,
+    restore: opts.restore,
+    envName: opts.envName,
+    profiles: opts.profiles,
+    requestedProfiles,
+    aws: opts.aws,
+    load: deps.load,
+    invoke: deps.invoke,
+  });
+  const profiles = selection.profiles;
   await deps.prepareStorage(opts.scope);
   let input = await deps.prepare({
     ...opts.scope,
     composeFile: opts.composeFile,
-    envName: opts.envName,
+    envName: selection.envName,
   });
+  if (
+    retained &&
+    !opts.restore &&
+    input.effectiveEnvName !== selection.envName
+  ) {
+    throw new Error(
+      "Native retained environment selection changed; data was not replaced."
+    );
+  }
   input = await prepareNativeProjectAdaptation({
     input,
     path: opts.adaptationFile,
@@ -547,8 +713,8 @@ export async function startNativeProject(opts: {
       throw refused();
     }
     hooks = await opts.before(input);
-    if (opts.aws) {
-      input = (await deps.adaptAws({ input, ...opts.aws })).input;
+    if (selection.aws) {
+      input = (await deps.adaptAws({ input, ...selection.aws })).input;
       specs = prepareNativeProjectServices(
         input,
         opts.dependencyFile !== undefined
@@ -631,7 +797,7 @@ export async function startNativeProject(opts: {
         const runSelection = await selectNativeProjectRestore({
           runtime: opts.runtime,
           projectRoot: opts.scope.projectRoot,
-          restore: opts.restore,
+          restore,
           review,
           invoke: deps.invoke,
         });
@@ -737,7 +903,7 @@ export async function startNativeProject(opts: {
                   await invokeInspect(),
                   run,
                   review.namespace,
-                  opts.restore?.planId ?? review.planId
+                  restore?.planId ?? review.planId
                 );
                 if (controller.signal.aborted) {
                   throw new Error(
@@ -752,23 +918,22 @@ export async function startNativeProject(opts: {
                 if (httpsFailure) {
                   throw httpsFailure;
                 }
-                const persistedMapping = {
-                  ...readyMapping,
+                const persistedMapping = selectedMapping({
+                  ready: readyMapping,
                   effectiveEnvName: input.effectiveEnvName,
                   profiles,
-                  aws: opts.aws
-                    ? {
-                        profile: opts.aws.profile,
-                        ...(opts.aws.region ? { region: opts.aws.region } : {}),
-                      }
-                    : null,
-                };
+                  aws: selection.aws,
+                });
                 finalization = await deps.finalization({
                   scope: opts.scope,
                   run: persistedMapping,
                   httpsPort: https ? opts.https?.httpsPort : null,
                 });
-                await deps.save({ ...opts.scope, run: persistedMapping });
+                await deps.save({
+                  ...opts.scope,
+                  run: persistedMapping,
+                  ...(retained ? { expected: retained } : {}),
+                });
                 mapping = persistedMapping;
                 await hooks?.ready?.();
                 await opts.onReady?.();
@@ -792,16 +957,17 @@ export async function startNativeProject(opts: {
             final,
             run,
             review.namespace,
-            opts.restore?.planId ?? review.planId
+            restore?.planId ?? review.planId
           );
           requireConfirmedCleanup(final, serveFailure, nativeExitCode);
           graphCleanupConfirmed = true;
-          if (mapping) {
-            if (mapping.owner !== owned.owner) {
-              throw refused();
-            }
-            await deps.remove({ ...opts.scope, expected: mapping });
-          }
+          await retireRemovedMapping({
+            final,
+            mapping,
+            owned,
+            scope: opts.scope,
+            remove: deps.remove,
+          });
           return foregroundExitCode({
             aborted: controller.signal.aborted,
             interruptedExit,

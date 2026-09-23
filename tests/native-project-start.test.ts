@@ -84,6 +84,14 @@ async function fixture(withEnvironment = true) {
             namespace,
             plan_id: planId,
             phase: ready ? "ready-observed" : "stopped-data-retained",
+            resources: {
+              "container:web": {
+                kind: "container",
+                key: "web",
+                id: "f".repeat(64),
+                phase: "started",
+              },
+            },
           },
           observations: {
             "container:web": { state: ready ? "running" : "absent" },
@@ -137,7 +145,28 @@ async function fixture(withEnvironment = true) {
   };
   return { opts, events };
 }
-test("foreground saves only after authoritative readiness and removes only after cleanup", async () => {
+function stoppedGraph(run: NativeProjectRun) {
+  return {
+    journal_incomplete: false,
+    receipt: {
+      run: run.run,
+      owner: run.owner,
+      namespace: run.namespace,
+      plan_id: run.planId,
+      phase: "stopped-data-retained",
+      resources: {
+        "container:web": {
+          kind: "container",
+          key: "web",
+          id: "f".repeat(64),
+          phase: "started",
+        },
+      },
+    },
+    observations: { "container:web": { state: "absent" } },
+  };
+}
+test("foreground saves after readiness and retains mapping after confirmed stop", async () => {
   const { opts, events } = await fixture();
   expect(await startNativeProject(opts)).toBe(0);
   expect(events).toEqual([
@@ -148,7 +177,6 @@ test("foreground saves only after authoritative readiness and removes only after
     "save",
     "ready",
     "graph inspect",
-    "remove",
     "cleanup",
   ]);
 });
@@ -191,7 +219,7 @@ test("source opt-in and occupied mapping refuse before lifecycle or runtime effe
     planId: "d".repeat(64),
   });
   await expect(startNativeProject(opts)).rejects.toThrow("already");
-  expect(events).toEqual([]);
+  expect(events).toEqual(["graph inspect"]);
 });
 test("caller cancellation is forwarded and lifecycle cleanup remains owned", async () => {
   const { opts, events } = await fixture();
@@ -208,7 +236,7 @@ test("caller cancellation is forwarded and lifecycle cleanup remains owned", asy
   expect(events).not.toContain("save");
 });
 
-test("cancellation after readiness still retires mapping when final cleanup is authoritative", async () => {
+test("cancellation after readiness retains mapping when data is preserved", async () => {
   const { opts, events } = await fixture();
   const controller = new AbortController();
   const original = opts.dependencies.serve;
@@ -221,14 +249,15 @@ test("cancellation after readiness still retires mapping when final cleanup is a
     130
   );
   expect(events).toContain("save");
-  expect(events).toContain("remove");
+  expect(events).not.toContain("remove");
   expect(events.at(-1)).toBe("cleanup");
 });
 
 test("projects without managed values omit the private environment envelope", async () => {
   const { opts, events } = await fixture(false);
   expect(await startNativeProject(opts)).toBe(0);
-  expect(events).toContain("remove");
+  expect(events).toContain("save");
+  expect(events).not.toContain("remove");
 });
 
 test("AWS profile export follows native login hooks and precedes runtime effects", async () => {
@@ -651,7 +680,8 @@ test("routed HTTPS verification precedes readiness and closes after graph cleanu
     events.indexOf("https-verify")
   );
   expect(events.indexOf("https-verify")).toBeLessThan(events.indexOf("save"));
-  expect(events.indexOf("remove")).toBeLessThan(events.indexOf("https-close"));
+  expect(events).not.toContain("remove");
+  expect(events.indexOf("save")).toBeLessThan(events.indexOf("https-close"));
   expect(events.indexOf("https-close")).toBeLessThan(events.indexOf("cleanup"));
 });
 test("unexpected HTTPS owner exit aborts the graph and fails instead of returning interrupt status", async () => {
@@ -680,7 +710,7 @@ test("unexpected HTTPS owner exit aborts the graph and fails instead of returnin
   await expect(
     startNativeProject({ ...opts, https: httpsSelection })
   ).rejects.toThrow("HTTPS owner exited unexpectedly");
-  expect(events.indexOf("remove")).toBeLessThan(events.indexOf("https-close"));
+  expect(events).not.toContain("remove");
   expect(events.at(-1)).toBe("cleanup");
 });
 
@@ -999,6 +1029,65 @@ test("invalid profile selection refuses before lifecycle or runtime effects", as
   ).rejects.toThrow("profiles");
 });
 
+test("ordinary up reuses a stopped owned run and publishes its mapping by comparison", async () => {
+  const { opts, events } = await fixture();
+  const saved: NativeProjectRun = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+  };
+  opts.dependencies.load = async () => saved;
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "inspect" && events.length === 0) {
+      events.push("graph inspect");
+      return stoppedGraph(saved);
+    }
+    return request.args[1] === "restore-selection"
+      ? { ...saved, plan: saved.planId, generation: "2".repeat(64) }
+      : await invoke(request);
+  };
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    expect(request.run).toBe(saved.run);
+    expect(request.restore).toBe(true);
+    expect(request.args).toContain("--expect-generation");
+    return await serve(request);
+  };
+  opts.dependencies.save = async ({ expected, run }) => {
+    expect(expected).toEqual(saved);
+    expect(run.run).toBe(saved.run);
+    events.push("save");
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(events).toContain("save");
+  expect(events).not.toContain("remove");
+});
+test("retained startup selection mismatch refuses before lifecycle effects", async () => {
+  const { opts, events } = await fixture();
+  const saved: NativeProjectRun = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+  };
+  opts.dependencies.load = async () => saved;
+  opts.dependencies.invoke = async () => {
+    events.push("graph inspect");
+    return stoppedGraph(saved);
+  };
+  await expect(startNativeProject({ ...opts, envName: "qa" })).rejects.toThrow(
+    "cannot change the retained run"
+  );
+  expect(events).toEqual(["graph inspect"]);
+});
 test("restore startup passes the retained run and selected generation to its owner", async () => {
   const { opts } = await fixture();
   const saved = {
@@ -1133,7 +1222,7 @@ test("restart callback follows ready and acknowledgement follows all finalizers"
     },
   });
   expect(events.indexOf("restart-ready")).toBeLessThan(
-    events.indexOf("remove")
+    events.indexOf("https-close")
   );
   expect(events.slice(-3)).toEqual(["https-close", "cleanup", "finalized"]);
 });

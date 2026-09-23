@@ -10,7 +10,7 @@ use std::{
     io::{Read, Write},
     net::Shutdown,
     os::{
-        fd::{AsRawFd, RawFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::{
             fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
@@ -678,22 +678,59 @@ impl DeadOwner {
     }
 }
 
-/// Check only connection lifetime; never consume another frame as job input.
-pub(super) fn disconnected(stream: &UnixStream) -> bool {
-    let mut byte = 0_u8;
-    // SAFETY: the owned stream FD and single-byte writable buffer remain valid.
-    let count = unsafe {
-        libc::recv(
-            stream.as_raw_fd(),
-            (&mut byte as *mut u8).cast(),
-            1,
-            libc::MSG_PEEK | libc::MSG_DONTWAIT,
-        )
-    };
-    count == 0
-        || (count < 0
-            && !matches!(
-                std::io::Error::last_os_error().kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-            ))
+/// The framed client shuts down only its write side. A read-side EOF therefore
+/// cannot prove abandonment; EVFILT_WRITE reports EV_EOF when its read side closes.
+pub(super) struct ClientWatch {
+    queue: OwnedFd,
+}
+impl ClientWatch {
+    pub fn new(stream: &UnixStream) -> Result<Self, CandidateError> {
+        // SAFETY: kqueue creates a new owned descriptor or reports failure.
+        let fd = unsafe { libc::kqueue() };
+        if fd < 0 {
+            return Err(refused());
+        }
+        // SAFETY: the successful kqueue call transfers this descriptor to OwnedFd.
+        let queue = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: fd remains owned by queue for this fcntl operation.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(refused());
+        }
+        let change = libc::kevent {
+            ident: stream.as_raw_fd() as usize,
+            filter: libc::EVFILT_WRITE,
+            flags: libc::EV_ADD | libc::EV_ENABLE,
+            fflags: 0,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // SAFETY: changelist is initialized; the kernel copies it before return.
+        if unsafe { libc::kevent(fd, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) } < 0 {
+            return Err(refused());
+        }
+        Ok(Self { queue })
+    }
+    pub fn disconnected(&self) -> bool {
+        // SAFETY: kevent writes at most one initialized event to this local storage.
+        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+        let timeout = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: queue is owned; event and timeout remain live for this call.
+        let count = unsafe {
+            libc::kevent(
+                self.queue.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                &mut event,
+                1,
+                &timeout,
+            )
+        };
+        count < 0
+            || (count == 1
+                && (event.filter != libc::EVFILT_WRITE
+                    || event.flags & (libc::EV_EOF | libc::EV_ERROR) != 0))
+    }
 }

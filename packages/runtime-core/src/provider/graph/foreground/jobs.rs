@@ -76,7 +76,7 @@ fn response(value: Value, run: &str) -> Result<Value, CandidateError> {
     // The authenticated owner returns only its fixed error code. Keep the public
     // category stable, but expose a bounded token to distinguish refusal from
     // cleanup failure without forwarding arbitrary text from a wire response.
-    let detail = if value["run"] == run {
+    let cause = if value["run"] == run {
         value["code"]
             .as_str()
             .filter(|code| {
@@ -85,17 +85,24 @@ fn response(value: Value, run: &str) -> Result<Value, CandidateError> {
                         byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
                     })
             })
-            .map(|code| format!(" Owner code: {code}."))
-            .unwrap_or_default()
+            .map(str::to_owned)
     } else {
-        String::new()
+        None
     };
-    Err(CandidateError::new(
+    let detail = cause
+        .as_deref()
+        .map(|code| format!(" Owner code: {code}."))
+        .unwrap_or_default();
+    let error = CandidateError::new(
         "graph_one_off_failed",
         format!(
             "One-off request refused or cleanup is unconfirmed; inspect owned job state before retrying. No replay attempted.{detail}"
         ),
-    ))
+    );
+    Err(match cause {
+        Some(code) => error.with_cause_code(code),
+        None => error,
+    })
 }
 pub(super) fn handle(
     candidate: &Candidate,
@@ -126,6 +133,7 @@ pub(super) fn handle(
     }
     let managed =
         managed_environment::receive_forwarded(command.environment.as_bytes(), &command.plan, run)?;
+    let watch = transport::ClientWatch::new(stream)?;
     let deadline = Instant::now() + Duration::from_secs(command.timeout_seconds);
     runtime.set_startup_cancellation(Some(signals::startup_pending));
     let active = one_off::runtime::begin(
@@ -139,7 +147,7 @@ pub(super) fn handle(
     runtime.set_startup_cancellation(None);
     let result = match active {
         Ok(active) => one_off::runtime::observe(candidate, &active, deadline, || {
-            signals::startup_pending() || transport::disconnected(stream) || pending_cleanup()
+            signals::startup_pending() || watch.disconnected() || pending_cleanup()
         })
         .map(|output| (active.job, output)),
         Err(error) => Err(error),
@@ -198,6 +206,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, "graph_one_off_failed");
         assert!(error.message.contains("Owner code: graph_job_cleanup."));
+        assert_eq!(error.cause_code.as_deref(), Some("graph_job_cleanup"));
 
         for value in [
             json!({"ok":false,"run":"owned","code":"bad\ncode"}),
@@ -207,6 +216,7 @@ mod tests {
             let error = response(value, "owned").unwrap_err();
             assert_eq!(error.code, "graph_one_off_failed");
             assert!(!error.message.contains("Owner code:"));
+            assert!(error.cause_code.is_none());
         }
     }
 

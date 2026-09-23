@@ -86,9 +86,16 @@ impl HostRelayRuntime {
             .cloned()
             .collect();
         for child in keys {
-            engine.guest().stop_relay_listener(
+            let resource = receipt
+                .resources
+                .get(&format!("container:{key}"))
+                .filter(|resource| resource.kind == Kind::Container)
+                .ok_or_else(refused)?;
+            let container_id = resource.id.as_deref().ok_or_else(refused)?;
+            engine.guest().reap_relay_after_container_absence(
                 self.children.get_mut(&child).ok_or_else(refused)?,
-                Duration::from_secs(10),
+                container_id,
+                &resource.name,
             )?;
             self.children.remove(&child);
         }

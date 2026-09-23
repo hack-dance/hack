@@ -306,12 +306,16 @@ bounded to 300 seconds; omitted arguments retain the service's default command.
 The CLI returns command output and exit status only after owned job cleanup is
 confirmed. There is no automatic command replay or fallback to Compose.
 
-This path is not yet live-qualified: stopped-project bootstrap, interactive input,
-and repeated crash recovery after a restored one-off remain open. The first
-interrupted-job cleanup and parent normalization path also requires live
-qualification. An uncertain
-shutdown retains its mapping and evidence for recovery; do not delete managed
-state to retry.
+The running-project noninteractive path has a live Event Agent smoke check:
+`hack run www -- bun --version` completed after a same-run restart, and a command
+exiting 7 returned its stdout and exit status. Both left no job resource and
+preserved the healthy parent graph and its volume identities. An
+interrupted one-off also completed explicit dead-owner cleanup with data retained.
+Closing a live one-off client confirmed exact job removal while the parent remained
+`ready-observed`, with the same volumes and healthy HTTPS route.
+Stopped-project bootstrap, interactive input, and repeated crash recovery after a
+restored one-off remain open. An uncertain shutdown retains its mapping and evidence
+for recovery; do not delete managed state to retry.
 
 After starting an owned native pool, `runtime ensure-image --reference REF --json`
 resolves a public Docker Hub tag or accepts an explicit digest, reuses the verified

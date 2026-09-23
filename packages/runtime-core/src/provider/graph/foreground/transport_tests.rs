@@ -2,6 +2,26 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn framed_half_close_keeps_job_client_alive_until_reader_closes() {
+    let (mut client, mut server) = UnixStream::pair().unwrap();
+    let watch = ClientWatch::new(&server).unwrap();
+    write(
+        &mut client,
+        &json!({"version":1,"run":"owned","remove_data":null}),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let _: serde_json::Value = read(&mut server, Duration::from_secs(1), REQUEST_LIMIT).unwrap();
+    assert!(!watch.disconnected());
+    drop(client);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !watch.disconnected() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
 fn legacy_requests_and_private_schema_are_strict() {
     let request: WireRequest =
         serde_json::from_str(r#"{"version":1,"run":"run","remove_data":false}"#).unwrap();

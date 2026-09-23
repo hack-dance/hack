@@ -5,6 +5,8 @@ use serde::Serialize;
 pub struct CandidateError {
     pub code: &'static str,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause_code: Option<String>,
 }
 
 impl CandidateError {
@@ -12,6 +14,12 @@ impl CandidateError {
         Self {
             code,
             message: message.into(),
+            cause_code: None,
         }
+    }
+
+    pub fn with_cause_code(mut self, code: String) -> Self {
+        self.cause_code = Some(code);
+        self
     }
 }

@@ -2,6 +2,10 @@ import { isAbsolute } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 
 const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+interface NativeFailure {
+  readonly code: string;
+  readonly causeCode?: string;
+}
 
 export interface NativeRuntimeSelection {
   readonly binary: string;
@@ -72,7 +76,7 @@ export async function invokeNativeRuntime(opts: {
       stderr: "pipe",
     }
   );
-  const failureCode = readNativeFailureCode(child.stderr);
+  const failureDetails = readNativeFailure(child.stderr);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -85,11 +89,11 @@ export async function invokeNativeRuntime(opts: {
     );
     const bytes = await readBoundedOutput(child.stdout);
     const code = await child.exited;
-    const failure = await failureCode;
+    const failure = await failureDetails;
     rethrowNativeInputFailure(inputFailure, {
       interrupted: timedOut,
       code,
-      nativeCode: failure,
+      nativeCode: failure?.code,
     });
     return completionResponse(
       bytes,
@@ -111,7 +115,7 @@ function completionResponse(
   bytes: Uint8Array,
   code: number,
   timedOut: boolean,
-  failure: string | undefined,
+  failure: NativeFailure | undefined,
   serviceExecResponse?: boolean
 ): unknown {
   if (serviceExecResponse && !timedOut && !failure) {
@@ -121,7 +125,7 @@ function completionResponse(
     throw new Error(
       timedOut
         ? "Native runtime request timed out; inspect owned state before retrying."
-        : `Native runtime request failed${failure ? ` (${failure})` : ""}; inspect owned state before retrying.`
+        : `Native runtime request failed${failure ? ` (${failure.code}${failure.causeCode ? `: ${failure.causeCode}` : ""})` : ""}; inspect owned state before retrying.`
     );
   }
   try {
@@ -203,11 +207,11 @@ async function readBoundedOutput(
   return result;
 }
 
-/** Only the native structured error code leaves this boundary, never stderr messages. */
-export async function readNativeFailureCode(
+/** Only bounded native error codes leave this boundary, never stderr messages. */
+async function readNativeFailure(
   stream: ReadableStream<Uint8Array>,
   signal?: AbortSignal
-): Promise<string | undefined> {
+): Promise<NativeFailure | undefined> {
   const reader = stream.getReader();
   const cancel = () => {
     void reader.cancel().catch(() => undefined);
@@ -239,7 +243,14 @@ export async function readNativeFailureCode(
       typeof value.code === "string" &&
       ERROR_CODE.test(value.code)
     ) {
-      return value.code;
+      return {
+        code: value.code,
+        ...(value.code === "graph_one_off_failed" &&
+        typeof value.cause_code === "string" &&
+        ERROR_CODE.test(value.cause_code)
+          ? { causeCode: value.cause_code }
+          : {}),
+      };
     }
   } catch {
     return;
@@ -247,6 +258,13 @@ export async function readNativeFailureCode(
     signal?.removeEventListener("abort", cancel);
     reader.releaseLock();
   }
+}
+
+export async function readNativeFailureCode(
+  stream: ReadableStream<Uint8Array>,
+  signal?: AbortSignal
+): Promise<string | undefined> {
+  return (await readNativeFailure(stream, signal))?.code;
 }
 
 /** Capture delivery failure while the caller drains and reaps the receiver, never replaying input. */

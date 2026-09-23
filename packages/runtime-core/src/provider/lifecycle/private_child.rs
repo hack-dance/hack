@@ -409,6 +409,27 @@ impl OwnedGuest<'_> {
         child.reap_after_absence()?;
         Ok(())
     }
+
+    /// A removed container cannot be inspected by STOP. Prove that both its
+    /// recorded ID and graph name are absent before reaping the host transport;
+    /// Docker removal itself has already killed processes in that container.
+    pub(in crate::provider) fn reap_relay_after_container_absence(
+        &self,
+        child: &mut RelayChild,
+        container_id: &str,
+        container_name: &str,
+    ) -> Result<(), CandidateError> {
+        if child.runtime != self.incarnation()
+            || child.boot != self.boot_id()
+            || child.container != container_id
+        {
+            return Err(refused());
+        }
+        self.verify()?;
+        crate::provider::engine::require_container_absent(self, container_id)?;
+        crate::provider::engine::require_container_absent(self, container_name)?;
+        child.reap_after_absence()
+    }
 }
 // Container absence is not inferred from a failed Docker request. A stopped
 // container must still have its exact immutable identity and zero host PID.

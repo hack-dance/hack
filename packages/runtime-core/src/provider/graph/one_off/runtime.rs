@@ -192,17 +192,28 @@ pub fn finish(
                 .filter(|v| hex(v, 64))
                 .ok_or_else(refused)?;
             if value["State"]["Running"] == true {
-                engine.request(
-                    Method::POST,
-                    &format!("/v1.53/containers/{id}/stop?t=5"),
-                    None,
-                )?;
+                match engine.stop_containers(&[(id.to_owned(), 5)]) {
+                    Ok(()) => {}
+                    Err(error)
+                        if error.code == "engine_not_found"
+                            && inspect_resource(&engine, &receipt, &resource)?.is_none() => {}
+                    Err(error) => return Err(error),
+                }
             }
-            engine.request(
-                Method::DELETE,
-                &format!("/v1.53/containers/{id}?v=true"),
-                None,
-            )?;
+            if let Some(stopped) = inspect_resource(&engine, &receipt, &resource)? {
+                if stopped["State"]["Running"] != false {
+                    return Err(refused());
+                }
+                match engine.request(
+                    Method::DELETE,
+                    &format!("/v1.53/containers/{id}?v=true"),
+                    None,
+                ) {
+                    Ok(_) => {}
+                    Err(error) if error.code == "engine_not_found" => {}
+                    Err(error) => return Err(error),
+                }
+            }
         }
         if inspect_resource(&engine, &receipt, &resource)?.is_some() {
             return Err(refused());

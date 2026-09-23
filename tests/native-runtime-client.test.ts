@@ -23,6 +23,8 @@ async function fixture() {
     `#!${process.execPath}
 if (process.argv.includes("hang")) await Bun.sleep(60_000);
 if (process.argv.includes("structured")) { console.error(JSON.stringify({code:"source_conflict",message:"synthetic-secret-diagnostic"})); process.exit(23); }
+if (process.argv.includes("one-off-fail")) { console.error(JSON.stringify({code:"graph_one_off_failed",cause_code:"graph_one_off_cancelled",message:"synthetic-secret-diagnostic"})); process.exit(23); }
+if (process.argv.includes("one-off-unsafe")) { console.error(JSON.stringify({code:"graph_one_off_failed",cause_code:"synthetic-secret-diagnostic",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("fail")) { console.error("synthetic-secret-diagnostic"); process.exit(23); }
 if (process.argv.includes("overflow")) { process.stdout.write("x".repeat(17 * 1024 * 1024)); }
 else {
@@ -120,6 +122,22 @@ test("structured failures expose only a bounded code, never their message", asyn
     invokeNativeRuntime({ runtime, cwd: runtime.home, args: ["structured"] })
   ).rejects.toThrow(
     "Native runtime request failed (source_conflict); inspect owned state before retrying."
+  );
+});
+
+test("one-off failures expose only a validated owner cause code", async () => {
+  const runtime = await fixture();
+  await expect(
+    invokeNativeRuntime({ runtime, cwd: runtime.home, args: ["one-off-fail"] })
+  ).rejects.toThrow("graph_one_off_failed: graph_one_off_cancelled");
+  await expect(
+    invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args: ["one-off-unsafe"],
+    })
+  ).rejects.toThrow(
+    "Native runtime request failed (graph_one_off_failed); inspect owned state before retrying."
   );
 });
 

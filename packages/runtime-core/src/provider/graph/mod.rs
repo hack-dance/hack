@@ -34,6 +34,8 @@ mod cleanup_enrollment;
 mod dead_owner_cleanup;
 #[cfg(target_os = "macos")]
 pub use dead_owner_cleanup::recover_cleanup;
+#[cfg(target_os = "macos")]
+pub use dead_owner_cleanup::retire_recovered_publisher;
 
 mod config;
 mod dependency_cache;

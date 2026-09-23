@@ -313,6 +313,14 @@ also refuses while another packaged Hack frontend is running. The separate
 recovery marker records that the old owner was proved gone; it does not claim
 the old frontend ran its finalizers. A live or uncertain owner still refuses,
 and no managed state file should be edited to bypass the refusal.
+Before restore, the explicit recovery path also retires the exact dead graph
+publisher only when its completed dead-owner cleanup receipt, current boot,
+retained volumes, absent compute, and host relay cleanup still match. The
+publisher's socket and owner record are moved under a durable inode-pinned
+journal; interruption between those moves resumes against the same identities.
+The backend operation is also available as
+`graph retire-recovered-publisher --run-id RUN --expect-owner OWNER --json`.
+An ordinary clean restart does not run this recovery operation.
 The in-development native `run` path requires a running project started by a
 matching candidate. It creates a separate service container with fresh managed
 environment values and the admitted image, mounts, dependency cache and network.

@@ -37,7 +37,10 @@ import {
   requireComposeOperationAvailable,
 } from "../backends/native-project-observe.ts";
 import { nativeProjectOneOff } from "../backends/native-project-one-off.ts";
-import { verifyNativeFrontendRecovery } from "../backends/native-project-recovery.ts";
+import {
+  retireNativeRecoveredPublisher,
+  verifyNativeFrontendRecovery,
+} from "../backends/native-project-recovery.ts";
 import { restartNativeProject } from "../backends/native-project-restart.ts";
 import {
   nativeRestartSelection,
@@ -5998,6 +6001,12 @@ async function handleNativeUp({
                   ? token.httpsPort
                   : (startup.https?.httpsPort ?? null),
               legacy: token.version === 1,
+            }),
+          retirePublisher: async (run) =>
+            await retireNativeRecoveredPublisher({
+              runtime: native,
+              scope: startup.scope,
+              run,
             }),
         }
       : undefined,

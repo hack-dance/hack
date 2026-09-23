@@ -150,6 +150,10 @@ test("explicit dead-owner recovery runs after preflight and retained cleanup, be
         expect(selectedToken).toEqual(token);
         f.events.push("effects");
       },
+      retirePublisher: async (selected) => {
+        expect(selected).toEqual(run);
+        f.events.push("publisher-retired");
+      },
     },
     dependencies: {
       ...f.options.dependencies,
@@ -165,12 +169,35 @@ test("explicit dead-owner recovery runs after preflight and retained cleanup, be
     "preflight",
     "effects",
     "recovered",
+    "publisher-retired",
     "finalized",
     "start",
     "remove",
     "unlock",
     "serving",
   ]);
+});
+test("failed publisher retirement preserves pending restart and never starts replacement", async () => {
+  const f = fixture({ run, finalization: token, phase: "cleaned" });
+  await expect(
+    restartNativeProject({
+      ...f.options,
+      recovery: {
+        expectAttempt: token.attempt,
+        legacyPid: 52_141,
+        verifyEffects: async () => undefined,
+        retirePublisher: async () => {
+          throw new Error("publisher still owned");
+        },
+      },
+      dependencies: {
+        ...f.options.dependencies,
+        recover: async () => undefined,
+      },
+    })
+  ).rejects.toThrow("publisher still owned");
+  expect(f.state.pending?.phase).toBe("cleaned");
+  expect(f.events).not.toContain("start");
 });
 test("failed replacement never drops intent or falls back to a fresh run", async () => {
   const f = fixture();

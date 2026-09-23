@@ -2,7 +2,10 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { verifyNativeFrontendRecovery } from "../src/backends/native-project-recovery.ts";
+import {
+  retireNativeRecoveredPublisher,
+  verifyNativeFrontendRecovery,
+} from "../src/backends/native-project-recovery.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -108,4 +111,41 @@ test("changed graph, live effect, or failed legacy inventory refuses recovery", 
   await expect(verifyNativeFrontendRecovery(f.opts)).rejects.toThrow(
     "cannot prove"
   );
+});
+
+test("publisher retirement requests the exact run and owner, and rejects weak acknowledgement", async () => {
+  const f = await fixture();
+  const args: Array<readonly string[]> = [];
+  await retireNativeRecoveredPublisher({
+    runtime: f.opts.runtime,
+    scope: f.opts.scope,
+    run: f.opts.run,
+    invoke: async (input) => {
+      args.push(input.args);
+      return {
+        run: f.opts.run.run,
+        publisher_retired: true,
+        data_retained: true,
+      };
+    },
+  });
+  expect(args).toEqual([
+    [
+      "graph",
+      "retire-recovered-publisher",
+      "--run-id",
+      f.opts.run.run,
+      "--expect-owner",
+      f.opts.run.owner,
+      "--json",
+    ],
+  ]);
+  await expect(
+    retireNativeRecoveredPublisher({
+      runtime: f.opts.runtime,
+      scope: f.opts.scope,
+      run: f.opts.run,
+      invoke: async () => ({ publisher_retired: true }),
+    })
+  ).rejects.toThrow("cannot prove");
 });

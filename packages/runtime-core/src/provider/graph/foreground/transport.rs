@@ -16,7 +16,7 @@ use std::{
             net::{UnixListener, UnixStream},
         },
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -109,7 +109,7 @@ impl<'de> Deserialize<'de> for PrivateText {
         deserializer.deserialize_string(Visitor)
     }
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
     version: u8,
@@ -118,6 +118,273 @@ struct Record {
     process: ProcessIdentity,
     parent: (u64, u64),
     socket: (u64, u64),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Retirement {
+    version: u8,
+    candidate: PathBuf,
+    run: String,
+    receipt_sha256: String,
+    owner_sha256: String,
+    parent: (u64, u64),
+    lock: (u64, u64),
+    socket: (u64, u64),
+    record: (u64, u64),
+    owner: Record,
+}
+
+fn retirement_refused() -> CandidateError {
+    CandidateError::new(
+        "graph_publisher_retirement",
+        "Recovered graph publisher retirement requires exact dead-owner and retained-data proof; publication evidence was preserved.",
+    )
+}
+
+fn retirement_path(root: &Path, owner: &str) -> PathBuf {
+    root.join(format!("retirement-{owner}.json"))
+}
+
+fn retired_path(root: &Path, owner: &str, socket: bool) -> PathBuf {
+    // Keep the archived AF_UNIX pathname within macOS sun_path. The complete
+    // owner digest and exact inode identities remain in the immutable journal.
+    let short = owner.get(..24).unwrap_or(owner);
+    if socket {
+        root.join(format!("control-{short}.retired.sock"))
+    } else {
+        root.join(format!("owner-{short}.retired.json"))
+    }
+}
+
+fn metadata(path: &Path) -> Result<Option<fs::Metadata>, CandidateError> {
+    match fs::symlink_metadata(path) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(retirement_refused()),
+    }
+}
+
+/// A dead PID alone cannot prove that another process did not inherit the
+/// listener. A single nonblocking connect must report a refused socket.
+fn no_listener(path: &Path) -> Result<(), CandidateError> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    // SAFETY: sockaddr_un is plain C storage, populated before connect.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.is_empty() || bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+        return Err(retirement_refused());
+    }
+    address.sun_family = libc::AF_UNIX as _;
+    for (to, from) in address.sun_path.iter_mut().zip(bytes) {
+        *to = *from as _;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        address.sun_len =
+            (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as u8;
+    }
+    // SAFETY: socket returns a fresh owned descriptor or -1.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(retirement_refused());
+    }
+    // SAFETY: successful socket transfers this descriptor exactly once.
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    // SAFETY: fd remains owned by stream throughout this call.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+        || stream.set_nonblocking(true).is_err()
+    {
+        return Err(retirement_refused());
+    }
+    let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+    // SAFETY: the initialized address remains live for the synchronous connect.
+    let result = unsafe {
+        libc::connect(
+            fd,
+            (&address as *const libc::sockaddr_un).cast(),
+            length as libc::socklen_t,
+        )
+    };
+    if result != -1 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ECONNREFUSED) {
+        return Err(retirement_refused());
+    }
+    Ok(())
+}
+
+fn selected_retirement_path(
+    root: &Path,
+    owner: &str,
+    socket: bool,
+    expected: (u64, u64),
+) -> Result<(PathBuf, bool), CandidateError> {
+    let original = root.join(if socket { "control.sock" } else { "owner.json" });
+    let retired = retired_path(root, owner, socket);
+    let (path, current, is_original) = match (metadata(&original)?, metadata(&retired)?) {
+        (Some(found), None) => (original, found, true),
+        (None, Some(found)) => (retired, found, false),
+        _ => return Err(retirement_refused()),
+    };
+    if id(&current) != expected
+        || !private(&current)
+        || (socket && !current.file_type().is_socket())
+        || (!socket && (!current.is_file() || current.nlink() != 1 || current.len() > 8192))
+    {
+        return Err(retirement_refused());
+    }
+    Ok((path, is_original))
+}
+
+fn verify_retirement(
+    candidate: &Candidate,
+    run: &str,
+    expected_owner: &str,
+    expected_receipt: &str,
+    root: &Path,
+    lock: &state::Lock,
+    intent: &Retirement,
+) -> Result<(bool, bool), CandidateError> {
+    if intent.version != 1
+        || intent.candidate != candidate.checkout
+        || intent.run != run
+        || intent.owner_sha256 != expected_owner
+        || intent.receipt_sha256 != expected_receipt
+        || intent.parent != id(&fs::symlink_metadata(root).map_err(|_| retirement_refused())?)
+        || intent.lock != lock.identity().map_err(|_| retirement_refused())?
+        || intent.owner.parent != intent.parent
+        || intent.owner.socket != intent.socket
+        || intent.owner.candidate != candidate.checkout
+        || intent.owner.run != run
+        || identity::alive(intent.owner.process.pid).unwrap_or(true)
+    {
+        return Err(retirement_refused());
+    }
+    let (socket_path, socket_original) =
+        selected_retirement_path(root, expected_owner, true, intent.socket)?;
+    let (record_path, record_original) =
+        selected_retirement_path(root, expected_owner, false, intent.record)?;
+    // Socket retirement precedes record retirement. The inverse is foreign.
+    if socket_original && !record_original {
+        return Err(retirement_refused());
+    }
+    no_listener(&socket_path)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&record_path)
+        .map_err(|_| retirement_refused())?;
+    if id(&file.metadata().map_err(|_| retirement_refused())?) != intent.record {
+        return Err(retirement_refused());
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(8193)
+        .read_to_end(&mut bytes)
+        .map_err(|_| retirement_refused())?;
+    let record: Record = serde_json::from_slice(&bytes).map_err(|_| retirement_refused())?;
+    if record != intent.owner || format!("{:x}", Sha256::digest(&bytes)) != expected_owner {
+        return Err(retirement_refused());
+    }
+    Ok((socket_original, record_original))
+}
+
+/// Retire only the exact publisher proven dead by completed graph cleanup.
+/// Immutable journal publication precedes either pathname move. Original and
+/// retired inode identities make an interrupted first move resumable.
+pub(in crate::provider::graph) fn retire_recovered_publisher(
+    candidate: &Candidate,
+    run: &str,
+    expected_owner: &str,
+    expected_receipt: &str,
+) -> Result<(), CandidateError> {
+    if !super::super::hex(expected_owner, 64) || !super::super::hex(expected_receipt, 64) {
+        return Err(retirement_refused());
+    }
+    let root = root(candidate, run)?;
+    state::check_private_directory(&root).map_err(|_| retirement_refused())?;
+    let lock = state::Lock::acquire_existing(&root).map_err(|_| retirement_refused())?;
+    let path = retirement_path(&root, expected_owner);
+    let pending = path.with_extension("pending");
+    let name = pending
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(retirement_refused)?;
+    super::super::journal::retain_file(&root, name, "publisher-retirement-interrupted", 8192)?;
+    let intent: Retirement = if metadata(&path)?.is_some() {
+        state::read(&path).map_err(|_| retirement_refused())?
+    } else {
+        let pin = Pin::read(candidate, run)?;
+        if format!("{:x}", Sha256::digest(&pin.bytes)) != expected_owner
+            || identity::alive(pin.record.process.pid).unwrap_or(true)
+        {
+            return Err(retirement_refused());
+        }
+        no_listener(&root.join("control.sock"))?;
+        let selected = Retirement {
+            version: 1,
+            candidate: candidate.checkout.clone(),
+            run: run.into(),
+            receipt_sha256: expected_receipt.into(),
+            owner_sha256: expected_owner.into(),
+            parent: pin.record.parent,
+            lock: lock.identity().map_err(|_| retirement_refused())?,
+            socket: pin.record.socket,
+            record: pin.record_id,
+            owner: pin.record,
+        };
+        state::write(&path, &selected).map_err(|_| retirement_refused())?;
+        selected
+    };
+    let (socket_original, record_original) = verify_retirement(
+        candidate,
+        run,
+        expected_owner,
+        expected_receipt,
+        &root,
+        &lock,
+        &intent,
+    )?;
+    if socket_original {
+        fs::rename(
+            root.join("control.sock"),
+            retired_path(&root, expected_owner, true),
+        )
+        .map_err(|_| retirement_refused())?;
+        fs::File::open(&root)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| retirement_refused())?;
+    }
+    if record_original {
+        let _ = verify_retirement(
+            candidate,
+            run,
+            expected_owner,
+            expected_receipt,
+            &root,
+            &lock,
+            &intent,
+        )?;
+        fs::rename(
+            root.join("owner.json"),
+            retired_path(&root, expected_owner, false),
+        )
+        .map_err(|_| retirement_refused())?;
+        fs::File::open(&root)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| retirement_refused())?;
+    }
+    let (socket_original, record_original) = verify_retirement(
+        candidate,
+        run,
+        expected_owner,
+        expected_receipt,
+        &root,
+        &lock,
+        &intent,
+    )?;
+    if socket_original || record_original {
+        return Err(retirement_refused());
+    }
+    Ok(())
 }
 fn root(candidate: &Candidate, run: &str) -> Result<PathBuf, CandidateError> {
     if !super::super::hex(run, 32) {

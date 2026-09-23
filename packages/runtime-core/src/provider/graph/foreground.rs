@@ -17,6 +17,7 @@ mod signals;
 mod tests;
 mod transport;
 pub(in crate::provider::graph) use transport::DeadOwner;
+pub(in crate::provider::graph) use transport::retire_recovered_publisher as retire_publisher_path;
 use transport::{Publication, WireRequest};
 fn refused() -> CandidateError {
     CandidateError::new(

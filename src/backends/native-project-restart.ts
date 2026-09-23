@@ -46,6 +46,7 @@ export async function restartNativeProject(opts: {
       readonly run: NativeProjectRun;
       readonly token: NativeProjectFinalizationToken;
     }) => Promise<void>;
+    readonly retirePublisher: (run: NativeProjectRun) => Promise<void>;
   };
   readonly dependencies?: Partial<typeof DEFAULTS>;
 }): Promise<number> {
@@ -105,6 +106,7 @@ export async function restartNativeProject(opts: {
             token: selected.finalization,
           }),
       });
+      await recovery.retirePublisher(run);
     }
     await deps.wait({
       scope: opts.scope,

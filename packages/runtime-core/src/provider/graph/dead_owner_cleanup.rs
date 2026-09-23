@@ -107,6 +107,63 @@ pub fn recover_cleanup(
     }
     execute(candidate, run, expected)
 }
+
+/// The completed dead-owner cleanup receipt, not missing endpoint names, grants
+/// a separate explicit publisher retirement. This never removes graph volumes.
+pub fn retire_recovered_publisher(
+    candidate: &Candidate,
+    run: &str,
+    expected_owner: &str,
+) -> Result<Value, CandidateError> {
+    if !hex(expected_owner, 32) {
+        return Err(refused());
+    }
+    let engine = Engine::connect_cleanup_wait(candidate)?;
+    let (receipt, root) = load(candidate, &engine, run)?;
+    no_pending(&root)?;
+    if receipt.phase != "stopped-data-retained"
+        || receipt.owner != expected_owner
+        || receipt.normalized_input.is_none()
+        || !retained(&root, &receipt)?
+    {
+        return Err(refused());
+    }
+    let intent: Intent = state::read(&root.join(FILE))?;
+    let complete = selected(&receipt)?;
+    validate(
+        &intent,
+        &receipt,
+        &intent.original_sha256,
+        &intent.owner_sha256,
+    )?;
+    if intent.complete_sha256.as_deref() != Some(complete.as_str())
+        || intent.new_boot.as_deref() != Some(engine.guest().boot_id())
+        || intent.one_off_sha256.is_some()
+    {
+        return Err(refused());
+    }
+    initializer_cache::require_resolved(&receipt)?;
+    host_relay::cleanup_preflight(&engine, &receipt, &root, false)?;
+    for resource in receipt.resources.values() {
+        let observed = inspect_resource(&engine, &receipt, resource)?;
+        if (resource.kind == Kind::Volume && observed.is_none())
+            || (resource.kind != Kind::Volume && (resource.phase != "absent" || observed.is_some()))
+        {
+            return Err(refused());
+        }
+    }
+    let environment = environment::cleanup_inventory(candidate, &engine, &receipt, &root)?;
+    if intent.environment.as_ref()
+        != Some(&serde_json::to_value(&environment).map_err(|_| refused())?)
+    {
+        return Err(refused());
+    }
+    let bridges = intent.bridges.as_ref().ok_or_else(refused)?;
+    bridges::cleanup::verify_recovery_file(&root, bridges, intent.prior_bridges.as_ref())?;
+    host_relay::inspect_cleanup(candidate, &engine, &receipt, false, &environment, bridges)?;
+    foreground::retire_publisher_path(candidate, run, &intent.owner_sha256, &complete)?;
+    Ok(json!({"run":run,"publisher_retired":true,"data_retained":true}))
+}
 fn prepare(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, CandidateError> {
     let _lease = state::Lock::acquire_existing(&candidate.state_root.join("run/smolvm"))?;
     let owner = Owner::load(candidate)?;

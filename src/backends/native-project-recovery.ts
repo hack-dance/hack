@@ -210,3 +210,36 @@ export async function verifyNativeFrontendRecovery(
   }
   await noLifecycleEntries(opts.scope.projectDir);
 }
+
+/** The backend performs its own completed-cleanup and inode proof before moving
+ * the dead graph publisher's paths. A frontend marker alone is never authority.
+ */
+export async function retireNativeRecoveredPublisher(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+  readonly invoke?: typeof invokeNativeRuntime;
+}): Promise<void> {
+  const result = await (opts.invoke ?? invokeNativeRuntime)({
+    runtime: opts.runtime,
+    cwd: opts.scope.projectRoot,
+    args: [
+      "graph",
+      "retire-recovered-publisher",
+      "--run-id",
+      opts.run.run,
+      "--expect-owner",
+      opts.run.owner,
+      "--json",
+    ],
+    timeoutMs: 30_000,
+  });
+  if (
+    !isRecord(result) ||
+    result.run !== opts.run.run ||
+    result.publisher_retired !== true ||
+    result.data_retained !== true
+  ) {
+    throw refused();
+  }
+}

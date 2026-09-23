@@ -7,6 +7,7 @@ import {
 } from "./native-project-dependencies.ts";
 import { prepareNativeProjectInput } from "./native-project-input.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
+import { verifyNativeSourceCompatibility } from "./native-project-restore.ts";
 import { withNativeProjectReview } from "./native-project-review.ts";
 import {
   type NativeProjectRun,
@@ -166,16 +167,21 @@ export async function preflightNativeRestart(opts: {
     composeFile: opts.composeFile,
     profiles: selected.profiles,
     input: { ...input, normalizedComposeJson: JSON.stringify(compose) },
-    run: (review) => {
-      if (
-        review.namespace !== opts.run.namespace ||
-        review.planId !== opts.run.planId
-      ) {
+    run: async (review) => {
+      if (review.namespace !== opts.run.namespace) {
         throw new Error(
           "Native restart configuration changed; the current graph was not stopped."
         );
       }
-      return Promise.resolve();
+      if (review.planId !== opts.run.planId) {
+        await verifyNativeSourceCompatibility({
+          runtime: opts.runtime,
+          projectRoot: opts.scope.projectRoot,
+          saved: opts.run,
+          review,
+          invoke: deps.invoke,
+        });
+      }
     },
   });
 }

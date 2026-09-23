@@ -74,5 +74,55 @@ test("changed retained identity refuses without adopting volumes", async () => {
       review: { ...options.review, planId: "f".repeat(64) },
       invoke: async () => selected,
     })
-  ).rejects.toThrow("selection changed");
+  ).rejects.toThrow("compatibility changed");
+});
+
+test("changed source review retains the old cache publication after native compatibility proof", async () => {
+  const review = {
+    ...options.review,
+    planId: "f".repeat(64),
+    projectArgs: ["--project", "/fixture"],
+    report: {
+      plan: {
+        services: {
+          deps: { active: true, dependency_cache: { volume: "deps" } },
+        },
+      },
+    },
+  };
+  const result = await selectNativeProjectRestore({
+    ...options,
+    review,
+    restore: saved,
+    invoke: async ({ args }) => {
+      if (args[1] === "restore-selection") {
+        return selected;
+      }
+      expect(args).toEqual([
+        "graph",
+        "source-compatibility",
+        "--project",
+        "/fixture",
+        "--expect-plan",
+        review.planId,
+        "--run-id",
+        saved.run,
+        "--json",
+      ]);
+      return {
+        run: saved.run,
+        owner: saved.owner,
+        namespace: saved.namespace,
+        plan: saved.planId,
+        reviewed_plan: review.planId,
+        source_revision: "1".repeat(64),
+      };
+    },
+  });
+  expect(result).toEqual({
+    run: saved.run,
+    restoring: true,
+    flags: ["--expect-generation", selected.generation],
+    sourceRevision: "1".repeat(64),
+  });
 });

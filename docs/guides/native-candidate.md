@@ -97,6 +97,13 @@ requires its existing signature verification. No fallback to global providers or
 v4 state is enabled. Runtime startup is a further explicit operation subject to
 host resource admission. Read `--help` for the candidate command surface.
 
+The development profile reserves the declared 32 GiB storage disk and 10 GiB
+overlay ceiling plus 16 GiB of host disk space before startup. It reports host
+load but does not reject an interactive start solely because unrelated jobs raise
+the one-minute load average; memory pressure, thermal state and swapouts remain
+admission checks. The research profile keeps its separate 100 GiB disk and host
+load qualification envelope.
+
 The normal `hack-runtime-candidate` / `hack-local` development build remains bound
 to its source checkout, including when all Cargo features are enabled. Only the
 separate `hack-native` binary opts into installed-home discovery. Existing provider
@@ -156,11 +163,18 @@ secrets still use the separate `graph serve --environment-stdin` private envelop
 The file-based enrollment, source-sync, `graph restart`, and `graph restore`
 commands do not accept normalized input. A stopped normalized graph instead uses
 `graph restore-selection --run-id RUN_ID --json`, followed by `graph serve-restore`
-with the same run, plan and original input identity, the returned
-`--expect-generation`, and fresh environment, dependency and route selections.
+with the same run and original input identity, the returned
+`--expect-generation`, a freshly reviewed plan, and fresh environment, dependency
+and route selections.
 Normal foreground `hack restart` performs this selection and retained-data restore.
 It verifies the old containers and networks are absent and the retained volumes
 still have their recorded identities; it does not silently create replacement data.
+For a shared-source graph admitted with a retained compatibility contract, ordinary
+source-content edits may change the reviewed plan ID: restart checks the stable
+execution, exclusion, mount and dependency-cache inputs before cleanup and again
+under the provider lease. The original installer publication and graph ownership
+remain pinned. Changed configuration or cache inputs refuse before cleanup;
+older receipts without that contract continue to refuse source-edited restart.
 Source exclusions and runtime ownership checks remain in force. Existing commands
 without normalization flags keep their file-based behavior.
 

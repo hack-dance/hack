@@ -31,8 +31,13 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     if ["logs", "exec", "exec-selection"].contains(action) {
         return service_io::command(candidate, action, args);
     }
-    let (arguments, normalized_selection) =
-        crate::normalized_cli::extract(args, ["run", "serve", "serve-restore"].contains(action))?;
+    let (arguments, normalized_selection) = crate::normalized_cli::extract(
+        args,
+        ["run", "serve", "serve-restore", "source-compatibility"].contains(action),
+    )?;
+    if *action == "source-compatibility" && normalized_selection.is_none() {
+        return Err(invalid());
+    }
     let args = arguments.as_slice();
     if *action == "owner-restore" {
         let options = restore_options(args)?;
@@ -100,6 +105,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "run",
         "serve",
         "serve-restore",
+        "source-compatibility",
         "restore-selection",
         "owner-status",
         "restart",
@@ -226,7 +232,15 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 return Err(invalid());
             }
         } else if key == "--profile"
-            && ["run", "serve", "serve-restore", "restart", "restore"].contains(action)
+            && [
+                "run",
+                "serve",
+                "serve-restore",
+                "source-compatibility",
+                "restart",
+                "restore",
+            ]
+            .contains(action)
         {
             profiles.push(value.to_owned());
         } else if ([
@@ -253,7 +267,15 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             || (*action == "recover-cleanup" && key == "--expect-receipt")
             || (*action == "retire-recovered-publisher" && key == "--expect-owner")
             || key == "--run-id"
-            || (["run", "serve", "serve-restore", "restart", "restore"].contains(action)
+            || ([
+                "run",
+                "serve",
+                "serve-restore",
+                "source-compatibility",
+                "restart",
+                "restore",
+            ]
+            .contains(action)
                 && [
                     "--project",
                     "--file",
@@ -478,7 +500,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                     environment_stdin,
                 );
             }
-            if *action == "serve-restore" {
+            if ["serve-restore", "source-compatibility"].contains(action) {
                 return Err(invalid());
             }
             if *action == "serve" {

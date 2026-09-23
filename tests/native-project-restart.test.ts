@@ -251,6 +251,10 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
       adapt: async ({ input: prepared }) => prepared,
       dependencies: async () => [],
       invoke: async ({ args }) => {
+        if (args[0] === "graph") {
+          expect(args[1]).toBe("source-compatibility");
+          return {};
+        }
         if (args[1] === "probe") {
           expect(args).toEqual([
             "runtime",
@@ -277,7 +281,7 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
     },
   };
   await expect(preflightNativeRestart(options)).rejects.toThrow(
-    "configuration changed"
+    "compatibility changed"
   );
   expect(calls).toEqual(["review"]);
 });

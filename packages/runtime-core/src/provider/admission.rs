@@ -6,6 +6,30 @@ use std::path::Path;
 use std::time::Duration;
 
 pub const FREE_MEMORY_FLOOR: u64 = 16 * 1024 * 1024 * 1024;
+const RESEARCH_DISK_FLOOR_GIB: u64 = 100;
+const DEVELOPMENT_HOST_DISK_RESERVE_GIB: u64 = 16;
+
+fn disk_floor_bytes(profile: Profile) -> u64 {
+    let gib = match profile {
+        Profile::Research => RESEARCH_DISK_FLOOR_GIB,
+        // Reserve the declared VM storage and overlay ceilings plus space for
+        // host work. The research qualification floor is not a dev requirement.
+        Profile::Development => {
+            u64::from(profile.storage_gib() + profile.overlay_gib())
+                + DEVELOPMENT_HOST_DISK_RESERVE_GIB
+        }
+    };
+    gib * 1024 * 1024 * 1024
+}
+
+fn load_ceiling(profile: Profile) -> Option<f64> {
+    match profile {
+        Profile::Research => Some(8.0),
+        // Load average includes unrelated host jobs and is not a safety signal
+        // for an interactive development VM. Pressure and thermal checks remain.
+        Profile::Development => None,
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct Admission {
@@ -17,6 +41,7 @@ pub struct Admission {
     pub memory_budget_basis: &'static str,
     pub memory_pressure_normal: bool,
     pub disk_free_bytes: Option<u64>,
+    pub minimum_disk_free_bytes: u64,
     pub one_minute_load: Option<f64>,
     pub load_ceiling: Option<f64>,
     pub thermal_normal: bool,
@@ -156,6 +181,7 @@ pub fn probe_for(path: &Path, profile: Profile) -> Result<Admission, CandidateEr
         },
         memory_pressure_normal: false,
         disk_free_bytes: None,
+        minimum_disk_free_bytes: disk_floor_bytes(profile),
         one_minute_load: None,
         load_ceiling: None,
         thermal_normal: false,
@@ -219,18 +245,12 @@ pub fn probe_for(path: &Path, profile: Profile) -> Result<Admission, CandidateEr
         ));
     }
     result.one_minute_load = Some(loads[0]);
-    let load_ceiling = match profile {
-        Profile::Research => 8.0,
-        Profile::Development => std::thread::available_parallelism()
-            .map_err(|_| {
-                CandidateError::new("admission_unavailable", "Cannot observe CPU capacity.")
-            })?
-            .get() as f64,
-    };
-    result.load_ceiling = Some(load_ceiling);
-    if loads[0] >= load_ceiling {
+    result.load_ceiling = load_ceiling(profile);
+    if let Some(ceiling) = result.load_ceiling
+        && loads[0] >= ceiling
+    {
         result.reasons.push(format!(
-            "Host load is at or above this profile's ceiling of {load_ceiling}."
+            "Host load is at or above this profile's ceiling of {ceiling}."
         ));
     }
     let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
@@ -248,10 +268,16 @@ pub fn probe_for(path: &Path, profile: Profile) -> Result<Admission, CandidateEr
     let available = u64::try_from(available)
         .map_err(|_| CandidateError::new("admission_unavailable", "Invalid disk headroom."))?;
     result.disk_free_bytes = Some(available);
-    if available < 100 * 1024 * 1024 * 1024 {
-        result
-            .reasons
-            .push("Free disk is below the 100 GiB research floor.".into());
+    if available < result.minimum_disk_free_bytes {
+        result.reasons.push(
+            match profile {
+                Profile::Research => "Free disk is below the 100 GiB research floor.",
+                Profile::Development => {
+                    "Free disk is below the development VM storage and host reserve budget."
+                }
+            }
+            .into(),
+        );
     }
     let thermal = run(
         clean_command(Path::new("/usr/bin/pmset")).args(["-g", "therm"]),
@@ -308,6 +334,15 @@ pub fn sample_for(path: &Path, profile: Profile) -> Result<Vec<Admission>, Candi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn development_admission_uses_vm_capacity_instead_of_research_host_floors() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(disk_floor_bytes(Profile::Research), 100 * GIB);
+        assert_eq!(disk_floor_bytes(Profile::Development), 58 * GIB);
+        assert_eq!(load_ceiling(Profile::Research), Some(8.0));
+        assert_eq!(load_ceiling(Profile::Development), None);
+    }
 
     #[test]
     fn operating_diagnostics_identify_each_failed_predicate_and_observations() {

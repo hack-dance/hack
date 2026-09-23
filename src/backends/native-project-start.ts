@@ -7,7 +7,7 @@ import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   nativeSharedSourceFlags,
-  publishNativeCacheSource,
+  nativeStartCacheSource,
 } from "./native-project-cache.ts";
 import {
   prepareNativeDependencyServices,
@@ -635,10 +635,11 @@ export async function startNativeProject(opts: {
           review,
           invoke: deps.invoke,
         });
-        const cache = await publishNativeCacheSource({
+        const cache = await nativeStartCacheSource({
           runtime: opts.runtime,
           projectRoot: opts.scope.projectRoot,
           review,
+          restoreRevision: runSelection.sourceRevision,
           invoke: deps.invoke,
         });
         const directory = await mkdtemp(join(tmpdir(), "hack-native-start-"));
@@ -736,7 +737,7 @@ export async function startNativeProject(opts: {
                   await invokeInspect(),
                   run,
                   review.namespace,
-                  review.planId
+                  opts.restore?.planId ?? review.planId
                 );
                 if (controller.signal.aborted) {
                   throw new Error(
@@ -791,7 +792,7 @@ export async function startNativeProject(opts: {
             final,
             run,
             review.namespace,
-            review.planId
+            opts.restore?.planId ?? review.planId
           );
           requireConfirmedCleanup(final, serveFailure, nativeExitCode);
           graphCleanupConfirmed = true;

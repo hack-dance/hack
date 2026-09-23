@@ -57,18 +57,7 @@ export async function publishNativeCacheSource(opts: {
   readonly initializers: ReadonlySet<string>;
 }> {
   const plan = opts.review.report.plan;
-  if (!(isRecord(plan) && isRecord(plan.services))) {
-    throw new Error("Native cache review is invalid.");
-  }
-  const initializers = new Set<string>();
-  for (const [name, service] of Object.entries(plan.services)) {
-    if (!isRecord(service)) {
-      throw new Error("Native service review is invalid.");
-    }
-    if (service.active === true && isRecord(service.dependency_cache)) {
-      initializers.add(name);
-    }
-  }
+  const initializers = nativeCacheInitializers(plan);
   if (initializers.size === 0) {
     return { flags: [], initializers };
   }
@@ -98,4 +87,40 @@ export async function publishNativeCacheSource(opts: {
     );
   }
   return { flags: ["--source-revision", publication.revision], initializers };
+}
+
+export function nativeCacheInitializers(plan: unknown): ReadonlySet<string> {
+  if (!(isRecord(plan) && isRecord(plan.services))) {
+    throw new Error("Native cache review is invalid.");
+  }
+  const initializers = new Set<string>();
+  for (const [name, service] of Object.entries(plan.services)) {
+    if (!isRecord(service)) {
+      throw new Error("Native service review is invalid.");
+    }
+    if (service.active === true && isRecord(service.dependency_cache)) {
+      initializers.add(name);
+    }
+  }
+  return initializers;
+}
+
+/** A restoring graph keeps its admitted installer snapshot and cache identity. */
+export async function nativeStartCacheSource(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly review: NativeProjectReview;
+  readonly restoreRevision?: string;
+  readonly invoke?: typeof invokeNativeRuntime;
+}): ReturnType<typeof publishNativeCacheSource> {
+  if (opts.restoreRevision) {
+    if (!SHA.test(opts.restoreRevision)) {
+      throw new Error("Native retained cache source revision is invalid.");
+    }
+    return {
+      flags: ["--source-revision", opts.restoreRevision],
+      initializers: nativeCacheInitializers(opts.review.report.plan),
+    };
+  }
+  return await publishNativeCacheSource(opts);
 }

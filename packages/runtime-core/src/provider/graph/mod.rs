@@ -1372,6 +1372,57 @@ pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateEr
     let engine = Engine::connect_cleanup(candidate)?;
     inspect_using(candidate, &engine, run)
 }
+
+/// Read-only proof for a reviewed normalized shared-source plan before restart cleanup.
+/// Admission repeats the compatibility check while holding the provider lease.
+pub fn source_compatibility(
+    candidate: &Candidate,
+    run: &str,
+    plan_id: &str,
+    plan: &project::PlanData,
+    normalized: &NormalizedInputIdentity,
+) -> Result<Value, CandidateError> {
+    let refused = || {
+        error(
+            "graph_source_compatibility",
+            "Retained graph or reviewed shared source changed; the current graph was not stopped.",
+        )
+    };
+    let engine = Engine::connect_cleanup(candidate)?;
+    let (receipt, root) = load(candidate, &engine, run)?;
+    if !hex(plan_id, 64)
+        || project::identity(plan)? != plan_id
+        || receipt.plan_id == plan_id
+        || receipt.namespace != plan.namespace
+        || receipt.normalized_input.as_ref() != Some(normalized)
+        || !matches!(
+            receipt.phase.as_str(),
+            "ready-observed" | "stopped-data-retained"
+        )
+        || root.join("state.pending").exists()
+        || root.join("state.pending").is_symlink()
+    {
+        return Err(refused());
+    }
+    let revision = receipt
+        .source
+        .as_ref()
+        .map(|binding| binding.revision.as_str())
+        .ok_or_else(refused)?;
+    let cached = plan
+        .services
+        .values()
+        .any(|service| service.active && service.dependency_cache.is_some());
+    source::prepare_shared_changed(&engine, plan, &receipt, cached.then_some(revision))?;
+    Ok(json!({
+        "run": receipt.run,
+        "owner": receipt.owner,
+        "namespace": receipt.namespace,
+        "plan": receipt.plan_id,
+        "reviewed_plan": plan_id,
+        "source_revision": cached.then_some(revision),
+    }))
+}
 fn inspect_using(
     candidate: &Candidate,
     engine: &Engine<'_>,

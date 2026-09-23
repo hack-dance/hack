@@ -18,6 +18,33 @@ pub(super) fn command(
             "Normalized graph requires its current reviewed plan ID.",
         ));
     }
+    if action == "source-compatibility" {
+        if environment_stdin
+            || !route_slots.is_empty()
+            || options.run.live_source
+            || options.run.shared_source
+            || options.run.source_revision.is_some()
+            || !options.run.readiness.is_empty()
+            || singles.contains_key("--expect-generation")
+            || singles.contains_key("--timeout-seconds")
+        {
+            return Err(CandidateError::new(
+                "graph_arguments",
+                "Source compatibility accepts only a reviewed normalized selection and run ID.",
+            ));
+        }
+        return graph::source_compatibility(
+            candidate,
+            options.run.run_id,
+            &report.plan_id,
+            &report.plan,
+            &graph::NormalizedInputIdentity {
+                namespace: report.plan.namespace.clone(),
+                original_compose_sha256: options.compose.expected_compose_sha256.into(),
+                normalized_compose_sha256: report.plan.compose_sha256.clone(),
+            },
+        );
+    }
     let encode = |receipt| {
         serde_json::to_value(receipt)
             .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph receipt."))
@@ -52,7 +79,6 @@ pub(super) fn command(
             }
             let selected = graph::foreground::restore_selection(candidate, options.run.run_id)?;
             if selected["generation"] != expected
-                || selected["plan"] != options.run.expected_plan
                 || selected["normalized_input"]["namespace"] != report.plan.namespace
                 || selected["normalized_input"]["original_compose_sha256"]
                     != options.compose.expected_compose_sha256
@@ -60,6 +86,19 @@ pub(super) fn command(
                     != report.plan.compose_sha256
             {
                 return Err(invalid());
+            }
+            if selected["plan"] != options.run.expected_plan {
+                graph::source_compatibility(
+                    candidate,
+                    options.run.run_id,
+                    &report.plan_id,
+                    &report.plan,
+                    &graph::NormalizedInputIdentity {
+                        namespace: report.plan.namespace.clone(),
+                        original_compose_sha256: options.compose.expected_compose_sha256.into(),
+                        normalized_compose_sha256: report.plan.compose_sha256.clone(),
+                    },
+                )?;
             }
             Some(expected)
         } else {

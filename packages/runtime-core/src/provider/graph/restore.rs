@@ -120,7 +120,12 @@ fn verify_fresh(
     if !hex(fresh.generation, 64)
         || generation != fresh.generation
         || receipt.normalized_input.as_ref() != Some(&fresh.identity)
-        || plan != receipt.plan_id
+        || (plan != receipt.plan_id
+            && receipt
+                .source
+                .as_ref()
+                .and_then(|binding| binding.shared_contract.as_ref())
+                .is_none())
     {
         return Err(error(
             "graph_restore_refused",
@@ -400,6 +405,7 @@ fn retain_restore_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
     use std::{path::Path, time::Instant};
 
     #[test]
@@ -429,6 +435,50 @@ mod tests {
             assert!(verify_fresh(&receipt, &receipt.plan_id, &fresh, &generation).is_err());
         }
         assert!(normalized::require_file_replay(&receipt).is_err());
+    }
+    #[test]
+    fn changed_plan_requires_a_retained_shared_contract_before_any_restore_effect() {
+        let identity = NormalizedInputIdentity {
+            namespace: "c".repeat(64),
+            original_compose_sha256: "e".repeat(64),
+            normalized_compose_sha256: "f".repeat(64),
+        };
+        let mut receipt: Receipt = serde_json::from_value(json!({
+            "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),
+            "namespace":"c".repeat(64),"plan_id":"d".repeat(64),
+            "phase":"stopped-data-retained","readiness":{},"resources":{},
+            "normalized_input":identity,
+        }))
+        .unwrap();
+        let generation = "1".repeat(64);
+        let fresh = FreshOwnerRestore {
+            identity: identity.clone(),
+            generation: &generation,
+            deadline: Instant::now() + Duration::from_secs(30),
+        };
+        let changed = "2".repeat(64);
+        assert!(verify_fresh(&receipt, &changed, &fresh, &generation).is_err());
+        receipt.source = Some(serde_json::from_value(json!({
+            "shared": {
+                "project":"/tmp/fixture","guest_path":format!("/mnt/hack-projects/{:x}", sha2::Sha256::digest(b"/tmp/fixture")),
+                "device":1,"inode":1,"unfiltered_source":true
+            },
+            "shared_contract": {
+                "version":1,
+                "execution_sha256":"1".repeat(64),
+                "policy_sha256":"2".repeat(64),
+                "cache_inputs_sha256":"3".repeat(64),
+                "mount_roots_sha256":"4".repeat(64)
+            },
+            "revision":"5".repeat(64),
+            "archive_sha256":"6".repeat(64),
+            "selection_sha256":"7".repeat(64)
+        }))
+        .unwrap());
+        // This first gate only permits the under-lease semantic and source checks to run.
+        verify_fresh(&receipt, &changed, &fresh, &generation).unwrap();
+        receipt.source.as_mut().unwrap().shared_contract = None;
+        assert!(verify_fresh(&receipt, &changed, &fresh, &generation).is_err());
     }
     #[test]
     fn fresh_prepare_refusal_preserves_acknowledged_stopped_receipt() {

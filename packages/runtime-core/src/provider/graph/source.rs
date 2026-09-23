@@ -53,6 +53,32 @@ fn mounts(plan: &PlanData) -> impl Iterator<Item = &project::MountPlan> {
         .filter(|m| m.kind == "bind")
 }
 
+fn shared_paths(
+    engine: &Engine<'_>,
+    plan: &PlanData,
+    share: &super::super::ProjectShareIntent,
+) -> Result<BTreeMap<String, String>, CandidateError> {
+    share.validate()?;
+    if share.project != plan.source {
+        return Err(error(
+            "graph_shared_source",
+            "Shared project root differs from reviewed source.",
+        ));
+    }
+    let mut selected = BTreeMap::new();
+    for mount in mounts(plan) {
+        let path = share.bind_path(&mount.source)?;
+        engine.guest().execute(
+            "set -eu; test \"$(realpath -e -- \"$1\")\" = \"$1\"; test -f \"$1\" || test -d \"$1\"",
+            &[&path],
+            None,
+        )?;
+        selected.insert(mount.source.clone(), path);
+    }
+    engine.guest().execute("set -eu; test \"$(findmnt -n -o FSTYPE --mountpoint \"$1\")\" = virtiofs; case \",$(findmnt -n -o OPTIONS --mountpoint \"$1\"),\" in *,rw,*) ;; *) exit 1;; esac", &[&share.guest_path], None)?;
+    Ok(selected)
+}
+
 pub(super) fn requested(plan: &PlanData, revision: Option<&str>) -> Result<(), CandidateError> {
     if (mounts(plan).next().is_some()
         || plan
@@ -161,24 +187,7 @@ pub(super) fn prepare_mode(
             "Runtime has no approved project share.",
         )
     })?;
-    share.validate()?;
-    if share.project != plan.source {
-        return Err(error(
-            "graph_shared_source",
-            "Shared project root differs from reviewed source.",
-        ));
-    }
-    let mut selected = BTreeMap::new();
-    for mount in mounts(plan) {
-        let path = share.bind_path(&mount.source)?;
-        engine.guest().execute(
-            "set -eu; test \"$(realpath -e -- \"$1\")\" = \"$1\"; test -f \"$1\" || test -d \"$1\"",
-            &[&path],
-            None,
-        )?;
-        selected.insert(mount.source.clone(), path);
-    }
-    engine.guest().execute("set -eu; test \"$(findmnt -n -o FSTYPE --mountpoint \"$1\")\" = virtiofs; case \",$(findmnt -n -o OPTIONS --mountpoint \"$1\"),\" in *,rw,*) ;; *) exit 1;; esac", &[&share.guest_path], None)?;
+    let selected = shared_paths(engine, plan, share)?;
     let (manifest, archive_sha256) = if let Some(revision) = revision {
         let publication =
             super::super::source_transfer::load(candidate, &plan.namespace, revision)?;
@@ -292,11 +301,19 @@ pub(super) fn prepare_replay(
     non_secret_values: &BTreeMap<String, String>,
 ) -> Result<Option<Inputs>, CandidateError> {
     if shared || receipt.source.as_ref().is_some_and(|s| s.shared.is_some()) {
-        if !shared || live || inputs.review.plan_id != receipt.plan_id {
+        if !shared || live {
             return Err(error(
                 "graph_shared_source",
-                "Shared replay requires explicit unchanged source mode and review; replan after host edits.",
+                "Shared replay requires its original source mode.",
             ));
+        }
+        if inputs.review.plan_id != receipt.plan_id {
+            return Ok(Some(prepare_shared_changed(
+                engine,
+                &inputs.review.plan,
+                receipt,
+                revision,
+            )?));
         }
         let source = prepare_mode(
             engine.guest().candidate(),
@@ -379,6 +396,81 @@ pub(super) fn prepare_replay(
     // Always retain baseline manifest; the current snapshot is admission evidence.
     source.manifest = publication.manifest;
     Ok(Some(source))
+}
+
+/// Read-only compatibility proof, repeated under the provider lease during restore.
+/// The old publication remains the initializer mount and cache identity.
+pub(super) fn prepare_shared_changed(
+    engine: &Engine<'_>,
+    plan: &PlanData,
+    receipt: &Receipt,
+    revision: Option<&str>,
+) -> Result<Inputs, CandidateError> {
+    let binding = receipt
+        .source
+        .as_ref()
+        .ok_or_else(|| error("graph_shared_source", "Retained source binding is missing."))?;
+    let contract = binding
+        .shared_contract
+        .as_ref()
+        .filter(|_| receipt.normalized_input.is_some())
+        .ok_or_else(|| {
+            error(
+                "graph_shared_source",
+                "Changed shared-source review has no retained compatibility contract.",
+            )
+        })?;
+    let cached = plan
+        .services
+        .values()
+        .any(|service| service.active && service.dependency_cache.is_some());
+    if revision != cached.then_some(binding.revision.as_str()) {
+        return Err(error(
+            "graph_shared_source",
+            "Shared restore must retain its original cache publication.",
+        ));
+    }
+    let current = project::snapshot::capture_plan(plan)?;
+    contract.verify(plan, current.receipt())?;
+    let share = binding
+        .shared
+        .as_ref()
+        .ok_or_else(|| error("graph_shared_source", "Retained project share is missing."))?;
+    if engine.guest().project_share() != Some(share) {
+        return Err(error(
+            "graph_shared_source",
+            "Retained project share changed.",
+        ));
+    }
+    let paths = shared_paths(engine, plan, share)?;
+    let manifest = if cached {
+        let publication = super::super::source_transfer::load(
+            engine.guest().candidate(),
+            &receipt.namespace,
+            &binding.revision,
+        )?;
+        super::super::source_transfer::verify_published(engine.guest(), &publication)?;
+        if publication.namespace != receipt.namespace
+            || publication.provider_incarnation != receipt.owner
+            || publication.archive_sha256 != binding.archive_sha256
+            || publication.manifest.revision != binding.revision
+            || publication.manifest.selection_sha256 != binding.selection_sha256
+        {
+            return Err(error(
+                "graph_shared_source",
+                "Retained cache publication changed.",
+            ));
+        }
+        publication.manifest
+    } else {
+        current.receipt().clone()
+    };
+    Ok(Inputs {
+        current_manifest: Some(current.receipt().clone()),
+        manifest,
+        binding: binding.clone(),
+        paths,
+    })
 }
 
 fn replay_inputs(

@@ -358,7 +358,7 @@ test("invalid outbound selection refuses before lifecycle or preparation effects
   expect(events).toEqual([]);
 });
 
-test("host listener selections are read after hooks and bound to the exact reviewed plan", async () => {
+test("host listener selections replace stale pre-hook state and bind to the reviewed plan", async () => {
   const { opts } = await fixture(false);
   const path = join(opts.scope.projectRoot, "host-selection.json");
   const prepare = opts.dependencies.prepare!;
@@ -409,6 +409,16 @@ test("host listener selections are read after hooks and bound to the exact revie
     return await invoke(request);
   };
   await expect(startNativeProject(opts)).rejects.toThrow("cannot admit");
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      dependencies: [
+        { ...binding, host_pid: 999 },
+        { ...binding, service: "worker", host_pid: 999 },
+      ],
+    })
+  );
   expect(await startNativeProject({ ...opts, dependencyFile: path })).toBe(0);
 });
 
@@ -1011,6 +1021,58 @@ test("restore startup passes the retained run and selected generation to its own
     return await serve(request);
   };
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
+});
+
+test("changed shared source restores with old owner and cache publication", async () => {
+  const { opts, events } = await fixture();
+  const saved = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+  };
+  const currentPlan = "3".repeat(64);
+  const baseline = "4".repeat(64);
+  opts.dependencies.review = async (request) =>
+    await request.run({
+      planId: currentPlan,
+      namespace: saved.namespace,
+      projectArgs: ["--project", opts.scope.projectRoot],
+      report: {
+        plan: {
+          enrollment_compatible: true,
+          services: {
+            web: { active: true, dependency_cache: { volume: "deps" } },
+          },
+        },
+      },
+    });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "restore-selection") {
+      return { ...saved, plan: saved.planId, generation: "2".repeat(64) };
+    }
+    if (request.args[1] === "source-compatibility") {
+      return {
+        run: saved.run,
+        owner: saved.owner,
+        namespace: saved.namespace,
+        plan: saved.planId,
+        reviewed_plan: currentPlan,
+        source_revision: baseline,
+      };
+    }
+    return await invoke(request);
+  };
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    expect(request.restore).toBe(true);
+    expect(request.args).toContain(baseline);
+    expect(request.args).toContain(`${"web"}=completed`);
+    return await serve(request);
+  };
+  expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
+  expect(events).not.toContain("project publish-source");
 });
 
 test("restore selection mismatch never starts a replacement graph", async () => {

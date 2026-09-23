@@ -26,6 +26,33 @@ fn shared_and_filtered_source_modes_cannot_be_combined_or_used_for_inspection() 
     }
 }
 
+#[test]
+fn source_compatibility_without_normalized_review_refuses_before_state_access() {
+    let fixture = Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    assert_eq!(
+        command(
+            &candidate,
+            &[
+                "source-compatibility",
+                "--project",
+                "/fixture",
+                "--file",
+                "compose.yaml",
+                "--expect-plan",
+                PLAN,
+                "--run-id",
+                RUN,
+                "--json",
+            ],
+        )
+        .unwrap_err()
+        .code,
+        "graph_arguments"
+    );
+    assert!(!candidate.state_root.exists());
+}
+
 fn valid() -> Vec<&'static str> {
     vec![
         "--run-id",

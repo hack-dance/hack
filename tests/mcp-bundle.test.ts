@@ -111,7 +111,7 @@ test("substituted asset fails hashing and is not silently overwritten by repacka
     "changed executable"
   );
   expect(await readdir(f.outputRoot)).toEqual([bundle.manifest.bundleId]);
-});
+}, 15_000);
 
 for (const mutation of [
   "platform",

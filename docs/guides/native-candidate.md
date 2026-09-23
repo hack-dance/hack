@@ -122,9 +122,13 @@ to 120 with `--timeout-seconds`. Timeout or transport failure means completion i
 uncertain: the command may still run, and Hack does not replay it. Exec inherits the container's static environment. When the selected service has a
 committed private environment attachment on the current boot, it reuses that
 service's exact read-only launcher mounts and original expiry. No values are copied
-into engine metadata, and exec never renews credentials. Managed exec requires an
-absolute executable path (for example `/bin/sh`); changing overlays is unsupported. Neither command persists application output in runtime receipts;
-output can contain sensitive application values and should be handled accordingly.
+into engine metadata, and exec never renews credentials. With the current launcher,
+managed exec resolves a command name such as `bun` against PATH inside the selected
+container after applying its environment; an explicit path still runs literally.
+Older launcher mounts require a restart before using command names. Changing
+overlays is unsupported. Neither command persists application output in runtime
+receipts; output can contain sensitive application values and should be handled
+accordingly.
 
 ## Explicit normalized public Compose input
 
@@ -589,9 +593,10 @@ With the same explicit native binary/home selection used for `up`, run
 the current owned project/branch mapping, preserves binary stdout/stderr and the
 command exit code, and never falls back to Compose. It is noninteractive, with a
 30-second observation budget; a timeout may leave the command running and is not
-retried. `--env` and `--profile` changes are refused. For a managed environment, use
-an absolute executable. Normal `hack exec` resolves the saved startup overlay and
-AWS profile again, and delivers fresh selected-service values through private stdin.
+retried. `--env` and `--profile` changes are refused. A command name such as `bun`
+uses the selected container's PATH; no host PATH or implicit shell is used. Normal
+`hack exec` resolves the saved startup overlay and AWS profile again, and delivers
+fresh selected-service values through private stdin.
 Each request binds the reviewed plan, current container and generation, and has
 its own short ingress lifetime. Startup leases and files are not renewed or rewritten.
 The allocation is selected from the current container's exact read-only mounts and

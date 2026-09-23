@@ -37,8 +37,45 @@ fn freshValues(value: std.json.Value, started: u64, now: u64) !std.json.ObjectMa
     }
     return values.object;
 }
+/// Resolve a user exec in this container after applying its environment. Never
+/// consult a host PATH or start a shell. Startup and health still require an
+/// absolute executable and do not call this function.
+fn execCommand(args: []const [:0]u8, env: *const std.process.EnvMap) !void {
+    if (args.len == 0 or args[0].len == 0) return error.Arguments;
+    const command = args[0];
+    if (std.mem.indexOfScalar(u8, command, '/') != null) {
+        return std.process.execve(allocator, args, env);
+    }
+    const path = env.get("PATH") orelse "/usr/local/bin:/bin:/usr/bin";
+    if (path.len > 8192) return error.Arguments;
+    const argv = try allocator.alloc([]const u8, args.len);
+    defer allocator.free(argv);
+    for (args, 0..) |arg, i| argv[i] = arg;
+    var entries = std.mem.splitScalar(u8, path, ':');
+    var count: usize = 0;
+    var denied = false;
+    while (entries.next()) |entry| {
+        count += 1;
+        if (count > 128) return error.Arguments;
+        const directory = if (entry.len == 0) "." else entry;
+        if (directory.len + command.len + 2 > 4096) continue;
+        const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ directory, command });
+        defer allocator.free(candidate);
+        argv[0] = candidate;
+        switch (std.process.execve(allocator, argv, env)) {
+            error.FileNotFound, error.NotDir => continue,
+            error.AccessDenied => {
+                denied = true;
+                continue;
+            },
+            else => |err| return err,
+        }
+    }
+    if (denied) return error.AccessDenied;
+    return error.FileNotFound;
+}
 fn freshExec(args: []const [:0]u8) !void {
-    if (args.len < 3 or args.len > 4099 or !std.fs.path.isAbsolute(args[2])) return error.Arguments;
+    if (args.len < 3 or args.len > 4099) return error.Arguments;
     const started = try bootSeconds();
     var hello: [64]u8 = undefined;
     const text = try std.fmt.bufPrint(&hello, "HKEE1 {d}\n", .{started});
@@ -67,13 +104,14 @@ fn freshExec(args: []const [:0]u8) !void {
     }
     _ = try freshValues(parsed.value, started, try bootSeconds());
     // stdin was fully consumed to EOF; the command receives no secret input bytes.
-    return std.process.execve(allocator, args[2..], &env);
+    return execCommand(args[2..], &env);
 }
 fn run() !void {
     try std.posix.setrlimit(.CORE, .{ .cur = 0, .max = 0 });
     const raw = try std.process.argsAlloc(allocator);
     if (raw.len > 1 and std.mem.eql(u8, raw[1], "--exec-environment-stdin-v1")) return freshExec(raw);
     const health = raw.len > 1 and std.mem.eql(u8, raw[1], "--health");
+    const mounted_exec = raw.len > 1 and std.mem.eql(u8, raw[1], "--exec-mounted-v1");
     if (health) {
         const null_fd = try std.posix.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
         defer if (null_fd > 2) std.posix.close(null_fd);
@@ -81,8 +119,8 @@ fn run() !void {
         try std.posix.dup2(null_fd, 1);
         try std.posix.dup2(null_fd, 2);
     }
-    const args = if (health) raw[1..] else raw;
-    if (args.len < 4 or args.len > 4100 or !std.fs.path.isAbsolute(args[3])) return error.Arguments;
+    const args = if (health or mounted_exec) raw[1..] else raw;
+    if (args.len < 4 or args.len > 4100 or (!mounted_exec and !std.fs.path.isAbsolute(args[3]))) return error.Arguments;
     const payload = try privateFile(args[1], 32768);
     const expiry = try privateFile(args[2], 32);
     const deadline = try std.fmt.parseInt(u64, expiry, 10);
@@ -97,6 +135,7 @@ fn run() !void {
     const now = try std.posix.clock_gettime(.BOOTTIME);
     if (now.sec < 0 or @as(u64, @intCast(now.sec)) >= deadline) return error.Expired;
     // Successful exec replaces this process: no resident wrapper and no signal forwarding shim.
+    if (mounted_exec) return execCommand(args[3..], &env);
     return std.process.execve(allocator, args[3..], &env);
 }
 pub fn main() void {

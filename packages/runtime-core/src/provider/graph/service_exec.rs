@@ -135,12 +135,6 @@ fn service_exec_inner(
                 .filter(|v| !v.is_empty())
                 .ok_or_else(refused)?;
             require_current_launcher(&container, &super::launcher::current_source())?;
-            if !options.argv[0].starts_with('/') {
-                return Err(error(
-                    "graph_service_exec_path",
-                    "Managed native exec requires an absolute executable path.",
-                ));
-            }
             let mut argv = vec![
                 "/run/hack-environment-launcher".into(),
                 "--exec-environment-stdin-v1".into(),
@@ -175,6 +169,12 @@ fn service_exec_inner(
         } else {
             None
         };
+        if selected.is_some() && !options.argv[0].starts_with('/') {
+            #[cfg(all(target_os = "macos", feature = "environment-launcher"))]
+            require_current_launcher(&container, &super::launcher::current_source())?;
+            #[cfg(not(all(target_os = "macos", feature = "environment-launcher")))]
+            return Err(refused());
+        }
         let argv = managed_exec_argv(&container, selected.as_deref(), options.argv)?;
         engine.service_exec(
             options.expected_container,
@@ -294,15 +294,13 @@ fn managed_exec_argv(
     {
         return Err(refused());
     }
-    // Existing mounted launcher versions require an absolute executable. Refuse
-    // before creating an exec instead of silently dropping private environment.
+    let mut wrapped = vec![LAUNCHER.into()];
     if !argv.first().is_some_and(|arg| arg.starts_with('/')) {
-        return Err(error(
-            "graph_service_exec_path",
-            "Managed native exec requires an absolute executable path.",
-        ));
+        // The caller checked that this exact container mounts the current
+        // launcher before selecting the new PATH-aware mode.
+        wrapped.push("--exec-mounted-v1".into());
     }
-    let mut wrapped = vec![LAUNCHER.into(), PAYLOAD.into(), EXPIRY.into()];
+    wrapped.extend([PAYLOAD.into(), EXPIRY.into()]);
     wrapped.extend_from_slice(argv);
     Ok(wrapped)
 }
@@ -368,7 +366,17 @@ mod tests {
         assert_eq!(wrapped[0], "/run/hack-environment-launcher");
         assert!(managed_exec_argv(&container, None, &args).is_err());
         assert!(managed_exec_argv(&container, Some("another-slot"), &args).is_err());
-        assert!(managed_exec_argv(&container, Some(slot), &["bun".into()]).is_err());
+        assert_eq!(
+            managed_exec_argv(&container, Some(slot), &["bun".into(), "--version".into()]).unwrap(),
+            vec![
+                "/run/hack-environment-launcher",
+                "--exec-mounted-v1",
+                "/run/hack-environment.json",
+                "/run/hack-environment.expires",
+                "bun",
+                "--version"
+            ]
+        );
         container["HostConfig"]["Mounts"][1]["ReadOnly"] = json!(false);
         assert!(managed_exec_argv(&container, Some(slot), &args).is_err());
         let plain = json!({"HostConfig":{"Mounts":[]}});

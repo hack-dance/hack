@@ -567,11 +567,44 @@ pub(super) fn retained(root: &std::path::Path, receipt: &Receipt) -> Result<bool
     if !exists(&root.join(FILE))? {
         return Ok(false);
     }
+    if exists(&root.join("dead-owner-cleanup.pending"))? {
+        return Err(refused());
+    }
     let current: Receipt = state::read(&root.join("state.json"))?;
     if selected(&current)? != selected(receipt)? {
         return Err(refused());
     }
     let intent: Intent = state::read(&root.join(FILE))?;
+    // A successful restore retains the recovered generation in bounded history.
+    // Once a later generation has its own acknowledged ordinary cleanup, the
+    // old sidecar is historical evidence rather than current cleanup authority.
+    // Interrupted one-off normalization still needs its exact projection below.
+    if intent.one_off_sha256.is_none()
+        && intent.complete_sha256.as_deref() != Some(selected(receipt)?.as_str())
+    {
+        validate(
+            &intent,
+            &intent.original,
+            &intent.original_sha256,
+            &intent.owner_sha256,
+        )?;
+        if intent
+            .complete_sha256
+            .as_deref()
+            .is_none_or(|hash| !hex(hash, 64))
+            || intent.new_boot.as_deref().is_none_or(str::is_empty)
+            || intent.original.run != receipt.run
+            || intent.original.owner != receipt.owner
+            || intent.original.namespace != receipt.namespace
+            || intent.original.plan_id != receipt.plan_id
+            || receipt.phase != "stopped-data-retained"
+            || !restore_history::confirms_prior_generation(root, receipt)?
+        {
+            return Err(refused());
+        }
+        cleanup_enrollment::retention_receipt(receipt, false)?;
+        return Ok(false);
+    }
     let original_receipt = normalized_proof_receipt(root, receipt, &intent)?;
     validate(
         &intent,
@@ -873,5 +906,52 @@ mod tests {
         receipt.resources.get_mut("volume:data").unwrap().name = "foreign".into();
         state::write(&fixture.0.join("state.json"), &receipt).unwrap();
         assert!(retained(&fixture.0, &receipt).is_err());
+    }
+
+    #[test]
+    fn later_clean_generation_uses_its_own_retention_after_dead_owner_restore() {
+        let fixture = super::super::tests::Fixture::new();
+        let root = &fixture.0;
+        let original = partial();
+        let mut recovered = original.clone();
+        recovered.phase = "stopped-data-retained".into();
+        for resource in recovered.resources.values_mut() {
+            if resource.kind != Kind::Volume {
+                resource.phase = "absent".into();
+            }
+        }
+        let mut proof = intent(&original);
+        proof.new_boot = Some("new-boot".into());
+        proof.complete_sha256 = Some(selected(&recovered).unwrap());
+        state::write(&root.join(FILE), &proof).unwrap();
+        state::write(&root.join("state.json"), &recovered).unwrap();
+        assert!(retained(root, &recovered).unwrap());
+        restore_history::retain(root, &recovered).unwrap();
+
+        let mut later = recovered.clone();
+        later.relay_startup = None;
+        later.resources.get_mut("container:init").unwrap().id = Some("9".repeat(64));
+        state::write(&root.join("state.json"), &later).unwrap();
+        assert!(!retained(root, &later).unwrap());
+
+        let mut unacknowledged = later.clone();
+        unacknowledged.relay_startup = original.relay_startup.clone();
+        state::write(&root.join("state.json"), &unacknowledged).unwrap();
+        assert!(retained(root, &unacknowledged).is_err());
+        state::write(&root.join("state.json"), &later).unwrap();
+
+        for generation in 1..=10 {
+            restore_history::retain(root, &later).unwrap();
+            later.resources.get_mut("container:init").unwrap().id =
+                Some(format!("{generation:064x}"));
+            state::write(&root.join("state.json"), &later).unwrap();
+            assert!(!retained(root, &later).unwrap());
+        }
+
+        let mut foreign: serde_json::Value =
+            state::read(&root.join("restore-history.json")).unwrap();
+        foreign["entries"][0]["owner"] = json!("f".repeat(32));
+        state::write(&root.join("restore-history.json"), &foreign).unwrap();
+        assert!(retained(root, &later).is_err());
     }
 }

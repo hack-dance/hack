@@ -138,6 +138,40 @@ test("resume uses persisted intent without new capture or cleanup", async () => 
     "serving",
   ]);
 });
+test("explicit dead-owner recovery runs after preflight and retained cleanup, before replacement", async () => {
+  const f = fixture({ run, finalization: token, phase: "cleaned" });
+  await restartNativeProject({
+    ...f.options,
+    recovery: {
+      expectAttempt: token.attempt,
+      legacyPid: 52_141,
+      verifyEffects: async ({ run: selected, token: selectedToken }) => {
+        expect(selected).toEqual(run);
+        expect(selectedToken).toEqual(token);
+        f.events.push("effects");
+      },
+    },
+    dependencies: {
+      ...f.options.dependencies,
+      recover: async ({ expectAttempt, legacyPid, verifyEffects }) => {
+        expect(expectAttempt).toBe(token.attempt);
+        expect(legacyPid).toBe(52_141);
+        await verifyEffects();
+        f.events.push("recovered");
+      },
+    },
+  });
+  expect(f.events).toEqual([
+    "preflight",
+    "effects",
+    "recovered",
+    "finalized",
+    "start",
+    "remove",
+    "unlock",
+    "serving",
+  ]);
+});
 test("failed replacement never drops intent or falls back to a fresh run", async () => {
   const f = fixture();
   await expect(

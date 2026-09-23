@@ -1,5 +1,7 @@
 import {
   captureNativeProjectFinalization,
+  type NativeProjectFinalizationToken,
+  recoverNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "./native-project-finalization.ts";
 import { nativeRestartSelection } from "./native-project-restart-preflight.ts";
@@ -22,6 +24,7 @@ const DEFAULTS = {
   remove: removeNativeRestartIntent,
   lock: withNativeRestartLock,
   capture: captureNativeProjectFinalization,
+  recover: recoverNativeProjectFinalization,
   wait: waitNativeProjectFinalization,
 };
 
@@ -36,6 +39,14 @@ export async function restartNativeProject(opts: {
     run: NativeProjectRun;
     onReady: () => Promise<void>;
   }) => Promise<number>;
+  readonly recovery?: {
+    readonly expectAttempt: string;
+    readonly legacyPid?: number;
+    readonly verifyEffects: (input: {
+      readonly run: NativeProjectRun;
+      readonly token: NativeProjectFinalizationToken;
+    }) => Promise<void>;
+  };
   readonly dependencies?: Partial<typeof DEFAULTS>;
 }): Promise<number> {
   const deps = { ...DEFAULTS, ...opts.dependencies };
@@ -80,6 +91,21 @@ export async function restartNativeProject(opts: {
       );
     }
     const selected = intent;
+    const recovery = opts.recovery;
+    if (recovery) {
+      await deps.recover({
+        scope: opts.scope,
+        run,
+        token: selected.finalization,
+        expectAttempt: recovery.expectAttempt,
+        legacyPid: recovery.legacyPid,
+        verifyEffects: async () =>
+          await recovery.verifyEffects({
+            run,
+            token: selected.finalization,
+          }),
+      });
+    }
     await deps.wait({
       scope: opts.scope,
       run,

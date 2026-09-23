@@ -173,6 +173,9 @@ hack restart [services...] [options]
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--json` | Output JSON (machine-readable) |
+| `--recover-frontend` | Recover an interrupted native frontend after proving its owner and effects are gone |
+| `--expect-finalization-attempt <32-hex>` | Require this exact interrupted native frontend attempt |
+| `--expect-frontend-pid <pid>` | Previously observed frontend PID (required only for legacy v1 state) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

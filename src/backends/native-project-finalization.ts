@@ -18,8 +18,7 @@ import type {
 
 const HEX32 = /^[a-f0-9]{32}$/;
 const HEX64 = /^[a-f0-9]{64}$/;
-export type NativeProjectFinalizationToken = {
-  readonly version: 1;
+type FinalizationIdentity = {
   readonly attempt: string;
   readonly scope: string;
   readonly run: string;
@@ -27,14 +26,37 @@ export type NativeProjectFinalizationToken = {
   readonly namespace: string;
   readonly planId: string;
 };
+export type NativeProjectFinalizationToken = FinalizationIdentity &
+  (
+    | {
+        readonly version: 1;
+      }
+    | {
+        readonly version: 2;
+        /** A live or inaccessible PID refuses recovery; only ESRCH proves it exited. */
+        readonly pid: number;
+        readonly httpsPort: number | null;
+      }
+  );
 export function isNativeProjectFinalizationToken(
   value: unknown
 ): value is NativeProjectFinalizationToken {
   return (
     isRecord(value) &&
-    Object.keys(value).sort().join() ===
-      "attempt,namespace,owner,planId,run,scope,version" &&
-    value.version === 1 &&
+    (value.version === 1
+      ? Object.keys(value).sort().join() ===
+        "attempt,namespace,owner,planId,run,scope,version"
+      : value.version === 2 &&
+        Object.keys(value).sort().join() ===
+          "attempt,httpsPort,namespace,owner,pid,planId,run,scope,version" &&
+        typeof value.pid === "number" &&
+        Number.isSafeInteger(value.pid) &&
+        value.pid > 1 &&
+        (value.httpsPort === null ||
+          (typeof value.httpsPort === "number" &&
+            Number.isSafeInteger(value.httpsPort) &&
+            value.httpsPort > 0 &&
+            value.httpsPort <= 65_535))) &&
     [value.attempt, value.run, value.owner].every(
       (v) => typeof v === "string" && HEX32.test(v)
     ) &&
@@ -53,6 +75,9 @@ function same(
   b: NativeProjectFinalizationToken
 ): boolean {
   return (
+    a.version === b.version &&
+    (a.version === 1 ||
+      (b.version === 2 && a.pid === b.pid && a.httpsPort === b.httpsPort)) &&
     a.attempt === b.attempt &&
     a.scope === b.scope &&
     a.run === b.run &&
@@ -231,31 +256,38 @@ function matches(
 export async function beginNativeProjectFinalization(opts: {
   readonly scope: NativeProjectRunScope;
   readonly run: NativeProjectRun;
+  readonly httpsPort?: number | null;
 }): Promise<{
   readonly token: NativeProjectFinalizationToken;
   readonly complete: () => Promise<void>;
 }> {
   const { root, hash } = await selected(opts.scope, opts.run, true);
   const token: NativeProjectFinalizationToken = {
-    version: 1,
+    version: 2,
     attempt: randomBytes(16).toString("hex"),
     scope: hash,
     run: opts.run.run,
     owner: opts.run.owner,
     namespace: opts.run.namespace,
     planId: opts.run.planId,
+    pid: process.pid,
+    httpsPort: opts.httpsPort ?? null,
   };
+  if (!isNativeProjectFinalizationToken(token)) {
+    throw refused();
+  }
   await locked(root, async () => {
     const prior = await read(join(root, "active.json"));
     const completed = await read(join(root, "completed.json"));
+    const recovered = await read(join(root, "recovered.json"));
     if (
       (prior &&
         !(
           matches(prior, hash, opts.run) &&
-          completed &&
-          same(prior, completed)
+          ((completed && same(prior, completed)) ||
+            (recovered && same(prior, recovered)))
         )) ||
-      (!prior && completed)
+      (!prior && (completed || recovered))
     ) {
       throw refused();
     }
@@ -277,6 +309,70 @@ export async function beginNativeProjectFinalization(opts: {
       });
     },
   };
+}
+/** Explicit interrupted-owner recovery. A completed finalizer and a recovered
+ * dead owner remain distinct durable facts. Legacy tokens require a previously
+ * observed PID supplied by the operator and an additional process inventory
+ * in verifyEffects; they cannot be silently upgraded to v2 identities.
+ */
+export async function recoverNativeProjectFinalization(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+  readonly token: NativeProjectFinalizationToken;
+  readonly expectAttempt: string;
+  readonly legacyPid?: number;
+  readonly verifyEffects: () => Promise<void>;
+  readonly isDead?: (pid: number) => boolean;
+}): Promise<void> {
+  if (
+    !isNativeProjectFinalizationToken(opts.token) ||
+    opts.token.attempt !== opts.expectAttempt ||
+    (opts.token.version === 1 && opts.legacyPid === undefined) ||
+    (opts.token.version === 2 && opts.legacyPid !== undefined)
+  ) {
+    throw refused();
+  }
+  const pid = opts.token.version === 2 ? opts.token.pid : opts.legacyPid;
+  if (pid === undefined || !Number.isSafeInteger(pid) || pid <= 1) {
+    throw refused();
+  }
+  const { root, hash } = await selected(opts.scope, opts.run, false);
+  if (!matches(opts.token, hash, opts.run)) {
+    throw refused();
+  }
+  await locked(root, async () => {
+    const active = await read(join(root, "active.json"));
+    const completed = await read(join(root, "completed.json"));
+    const recovered = await read(join(root, "recovered.json"));
+    if (!(active && same(active, opts.token))) {
+      throw refused();
+    }
+    if (
+      (completed && same(completed, opts.token)) ||
+      (recovered && same(recovered, opts.token))
+    ) {
+      return;
+    }
+    const dead =
+      opts.isDead ??
+      ((candidate: number) => {
+        try {
+          process.kill(candidate, 0);
+          return false;
+        } catch (error) {
+          return isRecord(error) && error.code === "ESRCH";
+        }
+      });
+    if (!dead(pid)) {
+      throw refused();
+    }
+    await opts.verifyEffects();
+    // Recheck after asynchronous effects inspection, before durable publication.
+    if (!dead(pid)) {
+      throw refused();
+    }
+    await write(root, "recovered.json", opts.token);
+  });
 }
 /** Capture while the caller still holds the saved active mapping, before cleanup. */
 export async function captureNativeProjectFinalization(opts: {
@@ -314,12 +410,19 @@ export async function waitNativeProjectFinalization(opts: {
   }
   const end = performance.now() + timeout;
   while (true) {
+    const active = await read(join(root, "active.json"));
+    if (!(active && same(active, opts.token))) {
+      throw refused();
+    }
     const completed = await read(join(root, "completed.json"));
-    if (completed && same(completed, opts.token)) {
+    const recovered = await read(join(root, "recovered.json"));
+    if (
+      (completed && same(completed, opts.token)) ||
+      (recovered && same(recovered, opts.token))
+    ) {
       return;
     }
-    const active = await read(join(root, "active.json"));
-    if (!(active && same(active, opts.token)) || performance.now() >= end) {
+    if (performance.now() >= end) {
       throw refused();
     }
     await Bun.sleep(Math.min(100, Math.max(1, end - performance.now())));

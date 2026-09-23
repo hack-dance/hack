@@ -37,6 +37,7 @@ import {
   requireComposeOperationAvailable,
 } from "../backends/native-project-observe.ts";
 import { nativeProjectOneOff } from "../backends/native-project-one-off.ts";
+import { verifyNativeFrontendRecovery } from "../backends/native-project-recovery.ts";
 import { restartNativeProject } from "../backends/native-project-restart.ts";
 import {
   nativeRestartSelection,
@@ -307,6 +308,7 @@ const CADDY_LABEL_PATTERN = /^(\s*)caddy:\s*(.*)$/;
 
 /** Regex to check if a string starts with a URL scheme (e.g., "http://", "https://"). */
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
+const FINALIZATION_ATTEMPT = /^[a-f0-9]{32}$/;
 
 const optManual = defineOption({
   name: "manual",
@@ -394,6 +396,28 @@ const optYes = defineOption({
   long: "--yes",
   description: "Confirm --prune-caches without prompting",
 } as const);
+const optRecoverFrontend = defineOption({
+  name: "recoverFrontend",
+  type: "boolean",
+  long: "--recover-frontend",
+  description:
+    "Recover an interrupted native frontend after proving its owner and effects are gone",
+} as const);
+const optExpectFinalizationAttempt = defineOption({
+  name: "expectFinalizationAttempt",
+  type: "string",
+  long: "--expect-finalization-attempt",
+  valueHint: "<32-hex>",
+  description: "Require this exact interrupted native frontend attempt",
+} as const);
+const optExpectFrontendPid = defineOption({
+  name: "expectFrontendPid",
+  type: "number",
+  long: "--expect-frontend-pid",
+  valueHint: "<pid>",
+  description:
+    "Previously observed frontend PID (required only for legacy v1 state)",
+} as const);
 
 const initOptions = [
   optPath,
@@ -435,6 +459,9 @@ const restartOptions = [
   optProfile,
   optTarget,
   optJson,
+  optRecoverFrontend,
+  optExpectFinalizationAttempt,
+  optExpectFrontendPid,
 ] as const;
 const psOptions = [
   optPath,
@@ -5842,8 +5869,13 @@ async function handleNativeUp({
   args,
   native,
   restart = false,
+  recovery,
 }: {
   readonly restart?: boolean;
+  readonly recovery?: {
+    readonly expectAttempt: string;
+    readonly legacyPid?: number;
+  };
   readonly ctx: CliContext;
   readonly args: UpArgs;
   readonly native: NonNullable<
@@ -5953,6 +5985,22 @@ async function handleNativeUp({
     scope: startup.scope,
     envName: startup.envName,
     profiles: args.options.profile === undefined ? undefined : startup.profiles,
+    recovery: recovery
+      ? {
+          ...recovery,
+          verifyEffects: async ({ run, token }) =>
+            await verifyNativeFrontendRecovery({
+              runtime: native,
+              scope: startup.scope,
+              run,
+              httpsPort:
+                token.version === 2
+                  ? token.httpsPort
+                  : (startup.https?.httpsPort ?? null),
+              legacy: token.version === 1,
+            }),
+        }
+      : undefined,
     preflight: (run) =>
       preflightNativeRestart({
         runtime: native,
@@ -7420,6 +7468,21 @@ async function handleRestart({
   readonly ctx: CliContext;
   readonly args: RestartArgs;
 }): Promise<number> {
+  const recover = args.options.recoverFrontend === true;
+  const expectAttempt = args.options.expectFinalizationAttempt;
+  const legacyPid = args.options.expectFrontendPid;
+  if (
+    (recover &&
+      (typeof expectAttempt !== "string" ||
+        !FINALIZATION_ATTEMPT.test(expectAttempt) ||
+        (legacyPid !== undefined &&
+          (!Number.isSafeInteger(legacyPid) || legacyPid <= 1)))) ||
+    (!recover && (expectAttempt !== undefined || legacyPid !== undefined))
+  ) {
+    throw new CliUsageError(
+      "Native frontend recovery requires --recover-frontend and the exact --expect-finalization-attempt; legacy state also requires --expect-frontend-pid."
+    );
+  }
   const native = resolveNativeRuntimeSelection();
   if (native) {
     return await handleNativeUp({
@@ -7427,7 +7490,16 @@ async function handleRestart({
       args: { ...args, options: { ...args.options, detach: false } },
       native,
       restart: true,
+      recovery:
+        recover && expectAttempt
+          ? { expectAttempt, ...(legacyPid ? { legacyPid } : {}) }
+          : undefined,
     });
+  }
+  if (recover) {
+    throw new CliUsageError(
+      "Frontend recovery is available only for the native runtime."
+    );
   }
   requireComposeOperationAvailable("restart");
   const json = args.options.json === true;

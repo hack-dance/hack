@@ -765,6 +765,7 @@ export async function startNativeProject(opts: {
                 finalization = await deps.finalization({
                   scope: opts.scope,
                   run: persistedMapping,
+                  httpsPort: https ? opts.https?.httpsPort : null,
                 });
                 await deps.save({ ...opts.scope, run: persistedMapping });
                 mapping = persistedMapping;

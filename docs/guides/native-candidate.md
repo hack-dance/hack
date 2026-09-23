@@ -275,8 +275,11 @@ explicit native selections described below. Existing
 `hack.dependencies.*` cache declarations publish the reviewed source snapshot and
 require successful initializer completion before dependent services start. Cache
 initializers receive immutable source mounts and writable named cache volumes;
-workspace installs that write elsewhere still require explicit volume mappings. Event Agent requires further integration and is not yet supported by this
-normal command. Native `down` requests retaining cleanup from the graph owner and
+workspace installs that write elsewhere still require explicit volume mappings.
+An isolated Event Agent trial reached 14-service native readiness and served its
+sign-in page and JavaScript chunks over CA-verified HTTPS. That smoke check does
+not yet establish ordinary browser trust, OAuth completion, or same-run restart
+after a frontend crash. Native `down` requests retaining cleanup from the graph owner and
 verifies container absence before retiring the exact run mapping. Down hooks resolve
 fresh managed host values using the environment selection saved by `up`; hook output goes to stderr with `--json`. A before-hook failure
 prevents cleanup; an after-hook failure reports that graph cleanup already completed.
@@ -298,6 +301,18 @@ cleanup. A failed replacement retains its intent: retry `restart` after resolvin
 the reported problem; a fresh `up` cannot bypass it. An interrupted operation lock
 requires ownership inspection rather than automatic removal. Restart does not
 implicitly migrate a shared pool's network policy or interrupt other projects.
+When an interrupted frontend cannot write that final acknowledgement, an explicit
+`restart --recover-frontend --expect-finalization-attempt <32-hex>` can resume
+the saved, already-cleaned restart intent. New attempts retain their frontend
+PID and HTTPS port in the private token. Older v1 attempts additionally require
+`--expect-frontend-pid <previously-observed-pid>`; a guessed PID is not recovery
+evidence. Recovery requires the exact stopped graph receipt with its volumes
+present and containers/networks absent, no managed HTTPS authority or owner
+lock, a free recorded HTTPS port, and empty lifecycle state. Legacy recovery
+also refuses while another packaged Hack frontend is running. The separate
+recovery marker records that the old owner was proved gone; it does not claim
+the old frontend ran its finalizers. A live or uncertain owner still refuses,
+and no managed state file should be edited to bypass the refusal.
 The in-development native `run` path requires a running project started by a
 matching candidate. It creates a separate service container with fresh managed
 environment values and the admitted image, mounts, dependency cache and network.

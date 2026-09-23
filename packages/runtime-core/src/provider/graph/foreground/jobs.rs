@@ -67,13 +67,35 @@ fn send(
         Duration::from_secs(5),
     )?;
     let value: Value = transport::read(&mut stream, budget, 4 * 1024 * 1024)?;
-    if value["ok"] != true || value["run"] != run {
-        return Err(CandidateError::new(
-            "graph_one_off_failed",
-            "One-off request refused or cleanup is unconfirmed; inspect owned job state before retrying. No replay attempted.",
-        ));
+    response(value, run)
+}
+fn response(value: Value, run: &str) -> Result<Value, CandidateError> {
+    if value["ok"] == true && value["run"] == run {
+        return Ok(value);
     }
-    Ok(value)
+    // The authenticated owner returns only its fixed error code. Keep the public
+    // category stable, but expose a bounded token to distinguish refusal from
+    // cleanup failure without forwarding arbitrary text from a wire response.
+    let detail = if value["run"] == run {
+        value["code"]
+            .as_str()
+            .filter(|code| {
+                (1..=64).contains(&code.len())
+                    && code.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+            })
+            .map(|code| format!(" Owner code: {code}."))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    Err(CandidateError::new(
+        "graph_one_off_failed",
+        format!(
+            "One-off request refused or cleanup is unconfirmed; inspect owned job state before retrying. No replay attempted.{detail}"
+        ),
+    ))
 }
 pub(super) fn handle(
     candidate: &Candidate,
@@ -166,6 +188,27 @@ pub(super) fn pending_cleanup(
 mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn failed_response_preserves_bounded_owner_code_without_replaying() {
+        let error = response(
+            json!({"ok":false,"run":"owned","code":"graph_job_cleanup"}),
+            "owned",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "graph_one_off_failed");
+        assert!(error.message.contains("Owner code: graph_job_cleanup."));
+
+        for value in [
+            json!({"ok":false,"run":"owned","code":"bad\ncode"}),
+            json!({"ok":false,"run":"owned","code":"a".repeat(65)}),
+            json!({"ok":false,"run":"other","code":"graph_job_cleanup"}),
+        ] {
+            let error = response(value, "owned").unwrap_err();
+            assert_eq!(error.code, "graph_one_off_failed");
+            assert!(!error.message.contains("Owner code:"));
+        }
+    }
 
     #[test]
     fn cleanup_waits_for_job_and_preserves_remove_data_choice() {

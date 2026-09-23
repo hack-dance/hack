@@ -1810,6 +1810,7 @@ fn dependency_cache_graphs_share_only_verified_binding_and_pin_restore_targets()
             current_manifest: None,
             binding: SourceBinding {
                 shared: None,
+                shared_contract: None,
                 live: None,
                 revision: manifest.revision.clone(),
                 archive_sha256: "b".repeat(64),
@@ -2178,6 +2179,9 @@ fn shared_source_preserves_app_writes_but_freezes_cache_installer_inputs() {
         current_manifest: None,
         binding: SourceBinding {
             shared: Some(share),
+            shared_contract: Some(
+                project::live_source::Contract::from_plan(&review.plan, &manifest).unwrap(),
+            ),
             live: None,
             revision: manifest.revision.clone(),
             archive_sha256: "b".repeat(64),

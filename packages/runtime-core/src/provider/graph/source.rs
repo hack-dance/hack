@@ -10,6 +10,8 @@ pub struct SourceBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared: Option<super::super::ProjectShareIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_contract: Option<project::live_source::Contract>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<LiveBinding>,
     pub revision: String,
     pub archive_sha256: String,
@@ -27,6 +29,7 @@ impl SourceBinding {
             .iter()
             .all(|v| hex(v, 64))
             && !(self.live.is_some() && self.shared.is_some())
+            && (self.shared_contract.is_none() || self.shared.is_some())
             && self.live.as_ref().is_none_or(|live| live.workspace.valid())
             && self
                 .shared
@@ -208,6 +211,7 @@ pub(super) fn prepare_mode(
         current_manifest: None,
         binding: SourceBinding {
             shared: Some(share.clone()),
+            shared_contract: Some(project::live_source::Contract::from_plan(plan, &manifest)?),
             live: None,
             revision: manifest.revision.clone(),
             archive_sha256,
@@ -450,6 +454,7 @@ fn published_inputs(
         manifest: publication.manifest.clone(),
         binding: SourceBinding {
             shared: None,
+            shared_contract: None,
             live: None,
             revision: revision.into(),
             archive_sha256: publication.archive_sha256.clone(),
@@ -502,6 +507,7 @@ mod tests {
         };
         let binding = SourceBinding {
             shared: None,
+            shared_contract: None,
             revision: baseline.receipt().revision.clone(),
             archive_sha256: publication.archive_sha256.clone(),
             selection_sha256: baseline.receipt().selection_sha256.clone(),
@@ -639,6 +645,7 @@ mod tests {
             probes: BTreeMap::new(),
             source: Some(SourceBinding {
                 shared: None,
+                shared_contract: None,
                 revision: manifest.revision,
                 archive_sha256: "d".repeat(64),
                 selection_sha256: manifest.selection_sha256,
@@ -755,6 +762,7 @@ mod tests {
             manifest: manifest.clone(),
             binding: SourceBinding {
                 shared: None,
+                shared_contract: None,
                 live: None,
                 revision: manifest.revision.clone(),
                 archive_sha256: "b".repeat(64),
@@ -831,6 +839,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&receipt).unwrap(), value);
         let binding = SourceBinding {
             shared: None,
+            shared_contract: None,
             live: None,
             revision: "a".repeat(64),
             archive_sha256: "b".repeat(64),
@@ -857,5 +866,55 @@ mod tests {
         let decoded: Receipt =
             serde_json::from_value(serde_json::to_value(&receipt).unwrap()).unwrap();
         assert_eq!(decoded.source, receipt.source);
+    }
+
+    #[test]
+    fn shared_source_contract_round_trips_without_rewriting_legacy_bindings() {
+        let fixture = super::super::tests::Fixture::new();
+        let home = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&home.0).unwrap();
+        fs::write(
+            fixture.0.join("compose.yaml"),
+            format!(
+                "services:\n  web:\n    image: sha256:{}\n    read_only: true\n    network_mode: none\n    volumes: ['.:/app:ro']\n",
+                "a".repeat(64)
+            ),
+        )
+        .unwrap();
+        fs::write(fixture.0.join("app.js"), "initial").unwrap();
+        let review = project::plan(
+            &candidate,
+            PlanOptions {
+                project: &fixture.0,
+                compose_file: Path::new("compose.yaml"),
+                profiles: &[],
+            },
+        )
+        .unwrap();
+        let snapshot = project::snapshot::capture_plan(&review.plan).unwrap();
+        let contract =
+            project::live_source::Contract::from_plan(&review.plan, snapshot.receipt()).unwrap();
+        let binding = SourceBinding {
+            shared: Some(
+                super::super::super::ProjectShareIntent::approve(&fixture.0, true).unwrap(),
+            ),
+            shared_contract: Some(contract.clone()),
+            live: None,
+            revision: snapshot.receipt().revision.clone(),
+            archive_sha256: "b".repeat(64),
+            selection_sha256: snapshot.receipt().selection_sha256.clone(),
+        };
+        assert!(binding.valid());
+        let mut value = serde_json::to_value(&binding).unwrap();
+        assert!(value.get("shared_contract").is_some());
+        let decoded: SourceBinding = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(decoded, binding);
+        value.as_object_mut().unwrap().remove("shared_contract");
+        let legacy: SourceBinding = serde_json::from_value(value).unwrap();
+        assert!(legacy.valid());
+        assert!(legacy.shared_contract.is_none());
+        let mut invalid = binding;
+        invalid.shared = None;
+        assert!(!invalid.valid());
     }
 }

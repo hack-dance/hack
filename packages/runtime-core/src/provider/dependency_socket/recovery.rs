@@ -337,6 +337,7 @@ pub fn recover(candidate: &Candidate, expected: &str) -> Result<Value, Candidate
 mod tests {
     use super::*;
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -344,7 +345,12 @@ mod tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
-            let path = Path::new("/private/tmp").join(format!(
+            let base = if cfg!(target_os = "macos") {
+                PathBuf::from("/private/tmp")
+            } else {
+                std::env::temp_dir()
+            };
+            let path = base.join(format!(
                 "hkd-dr-{}-{}-{}",
                 std::process::id(),
                 NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed),
@@ -384,6 +390,34 @@ mod tests {
             }
         }
     }
+
+    fn stale(target: &Path) {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "provider::dependency_socket::recovery::tests::stale_socket_helper",
+            ])
+            .env("HACK_DEP_SOCKET_TEST_PATH", target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stale socket helper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess-only stale socket fixture"]
+    fn stale_socket_helper() {
+        let Some(target) = std::env::var_os("HACK_DEP_SOCKET_TEST_PATH") else {
+            return;
+        };
+        let listener = UnixListener::bind(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        drop(listener);
+    }
     impl Drop for Fixture {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
@@ -396,16 +430,11 @@ mod tests {
         let listener = fixture.bind(0);
         assert!(observed(&fixture.0, 0).is_err());
         drop(listener);
-        let stale = observed(&fixture.0, 0);
-        assert!(
-            stale.is_ok(),
-            "stale socket refused: {:?}, direct connect: {:?}",
-            stale,
-            UnixStream::connect(path(&fixture.0, 0))
-        );
-        assert!(stale.unwrap().is_some());
-
         let target = path(&fixture.0, 0);
+        fs::remove_file(&target).unwrap();
+        stale(&target);
+        assert!(observed(&fixture.0, 0).unwrap().is_some());
+
         fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(observed(&fixture.0, 0).is_err());
         fs::remove_file(&target).unwrap();
@@ -416,27 +445,16 @@ mod tests {
     #[test]
     fn partial_retry_accepts_absence_but_rejects_replacement() {
         let fixture = Fixture::new();
-        let first = fixture.bind(0);
-        let second = fixture.bind(1);
-        drop(first);
-        drop(second);
+        stale(&path(&fixture.0, 0));
+        stale(&path(&fixture.0, 1));
         let scope = fixture.scope(2);
-        let selected = current(scope.clone(), &fixture.0);
-        assert!(
-            selected.is_ok(),
-            "selection refused: {:?}, connects: {:?} {:?}",
-            selected,
-            UnixStream::connect(path(&fixture.0, 0)),
-            UnixStream::connect(path(&fixture.0, 1))
-        );
-        let selected = selected.unwrap();
+        let selected = current(scope.clone(), &fixture.0).unwrap();
         assert_eq!(matching(&selected, &scope, &fixture.0).unwrap(), 2);
 
         fs::remove_file(path(&fixture.0, 0)).unwrap();
         assert_eq!(matching(&selected, &scope, &fixture.0).unwrap(), 1);
         fs::remove_file(path(&fixture.0, 1)).unwrap();
-        let replacement = fixture.bind(1);
-        drop(replacement);
+        stale(&path(&fixture.0, 1));
         assert!(matching(&selected, &scope, &fixture.0).is_err());
         assert!(!same_scope(
             &selected,
@@ -456,9 +474,7 @@ mod tests {
         let alias = fixture.0.join("short");
         std::os::unix::fs::symlink(&canonical, &alias).unwrap();
         let target = path(&alias, 0);
-        let listener = UnixListener::bind(&target).unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
-        drop(listener);
+        stale(&target);
 
         assert!(observed(&canonical, 0).is_err());
         assert!(observed(&alias, 0).unwrap().is_some());

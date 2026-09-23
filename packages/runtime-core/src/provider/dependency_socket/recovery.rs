@@ -410,6 +410,14 @@ mod tests {
         );
     }
 
+    fn replace_with_new_stale(directory: &Path, slot: u8) {
+        let target = path(directory, slot);
+        // Keep the original inode linked so Linux cannot recycle its number.
+        // An unlink-then-bind fixture can otherwise produce a false match.
+        fs::rename(&target, directory.join(format!("original-{slot:02}.sock"))).unwrap();
+        stale(&target);
+    }
+
     #[test]
     #[ignore = "subprocess-only stale socket fixture"]
     fn stale_socket_helper() {
@@ -455,8 +463,7 @@ mod tests {
 
         fs::remove_file(path(&fixture.0, 0)).unwrap();
         assert_eq!(matching(&selected, &scope, &fixture.0).unwrap(), 1);
-        fs::remove_file(path(&fixture.0, 1)).unwrap();
-        stale(&path(&fixture.0, 1));
+        replace_with_new_stale(&fixture.0, 1);
         assert!(matching(&selected, &scope, &fixture.0).is_err());
         assert!(!same_scope(
             &selected,
@@ -560,8 +567,7 @@ mod tests {
         pool.stale(0);
         let first = inspect(&pool.candidate).unwrap();
         let hash = first["sha256"].as_str().unwrap();
-        fs::remove_file(pool.socket(0)).unwrap();
-        pool.stale(0);
+        replace_with_new_stale(&pool.owner.short_home, 0);
         assert_eq!(
             recover(&pool.candidate, hash).unwrap_err().code,
             "dependency_socket_recovery"

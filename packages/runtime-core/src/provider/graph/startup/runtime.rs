@@ -87,6 +87,38 @@ fn verify_exited_listener(
     };
     Err(stage_refused(code))
 }
+fn verify_endpoint_generations(
+    dependencies: &BTreeMap<(String, String), Dependency>,
+    startup: &Startup,
+) -> Result<(), CandidateError> {
+    let mut generations = BTreeMap::new();
+    for ((service, name), dependency) in dependencies {
+        let binding = startup
+            .services
+            .get(service)
+            .and_then(|service| service.bindings.get(name))
+            .ok_or_else(|| stage_refused("graph_dependency_endpoint_changed"))?;
+        if binding.slot != dependency.slot
+            || binding.port != dependency.port
+            || binding.aliases != dependency.aliases
+        {
+            return Err(stage_refused("graph_dependency_endpoint_changed"));
+        }
+        let generation = match generations.entry(dependency.slot) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
+                dependency
+                    .endpoint
+                    .fingerprint()
+                    .map_err(|_| stage_refused("graph_dependency_endpoint_changed"))?,
+            ),
+        };
+        if binding.endpoint_generation.as_deref() != Some(generation.as_str()) {
+            return Err(stage_refused("graph_dependency_endpoint_changed"));
+        }
+    }
+    Ok(())
+}
 fn validate_routes<'a>(
     dependencies: impl Iterator<Item = &'a Dependency>,
     inputs: &project::inputs::ExecutionInputs,
@@ -421,6 +453,19 @@ impl Driver for HostRelayRuntime {
         root: &Path,
     ) -> Result<(), CandidateError> {
         self.check(engine, receipt)?;
+        if matches!(
+            receipt.phase.as_str(),
+            "preparing" | "restoring" | "ready-observed"
+        ) && !self.dependencies.is_empty()
+        {
+            verify_endpoint_generations(
+                &self.dependencies,
+                receipt
+                    .relay_startup
+                    .as_ref()
+                    .ok_or_else(|| stage_refused("graph_dependency_endpoint_changed"))?,
+            )?;
+        }
         for ((name, _), child) in &mut self.children {
             if child.poll_exit()?.is_some() {
                 let resource = receipt
@@ -801,6 +846,84 @@ mod route_tests {
                 .code,
             "graph_startup_listener_oom"
         );
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn released_dependency_detects_host_listener_rotation_without_adopting_it() {
+        use std::{net::TcpListener, thread};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let endpoint = HostEndpoint::capture(std::process::id() as i32, address.port()).unwrap();
+        let pinned = endpoint.fingerprint().unwrap();
+        let key = ("web".to_owned(), "content".to_owned());
+        let mut dependencies = BTreeMap::from([(
+            key,
+            Dependency {
+                service: "web".into(),
+                binding: "content".into(),
+                slot: 0,
+                port: 8443,
+                aliases: vec!["content.example".into()],
+                endpoint,
+            },
+        )]);
+        let startup = Startup {
+            control_only: false,
+            guest_root: Some((1, 1)),
+            control_root: PathBuf::from("/tmp/fixture-control"),
+            artifact: "a".repeat(64),
+            services: BTreeMap::from([(
+                "web".into(),
+                Service {
+                    generation: "b".repeat(32),
+                    bindings: BTreeMap::from([(
+                        "content".into(),
+                        Binding {
+                            slot: 0,
+                            endpoint_generation: Some(pinned.clone()),
+                            port: 8443,
+                            aliases: vec!["content.example".into()],
+                            process: None,
+                        },
+                    )]),
+                    phase: Phase::Released,
+                    started_at: Some("fixture-start".into()),
+                },
+            )]),
+        };
+        verify_endpoint_generations(&dependencies, &startup).unwrap();
+
+        drop(listener);
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let replacement = loop {
+            match TcpListener::bind(address) {
+                Ok(replacement) => break replacement,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AddrInUse
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("replacement listener could not bind: {error}"),
+            }
+        };
+        let current = HostEndpoint::capture(std::process::id() as i32, address.port()).unwrap();
+        assert_ne!(current.fingerprint().unwrap(), pinned);
+        assert_eq!(
+            verify_endpoint_generations(&dependencies, &startup)
+                .unwrap_err()
+                .code,
+            "graph_dependency_endpoint_changed"
+        );
+        dependencies.values_mut().next().unwrap().endpoint = current;
+        assert_eq!(
+            verify_endpoint_generations(&dependencies, &startup)
+                .unwrap_err()
+                .code,
+            "graph_dependency_endpoint_changed"
+        );
+        drop(replacement);
     }
     #[test]
     fn restored_dependency_container_accepts_only_new_start_intent() {

@@ -415,10 +415,20 @@ pub fn capture(
     environment_files: &BTreeSet<String>,
     expected_selection: &str,
 ) -> Result<Snapshot, CandidateError> {
+    capture_after_inventory(project, environment_files, expected_selection, || {})
+}
+
+fn capture_after_inventory(
+    project: &Path,
+    environment_files: &BTreeSet<String>,
+    expected_selection: &str,
+    after_inventory: impl FnOnce(),
+) -> Result<Snapshot, CandidateError> {
     let selected = selection(project, environment_files)?;
     if selected.metadata_sha256 != expected_selection {
         return Err(changed());
     }
+    after_inventory();
     let root = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -498,4 +508,44 @@ pub fn capture(
         },
         files,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, path::PathBuf};
+
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn source_replacement_after_inventory_refuses_capture() {
+        let root = Fixture(std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-snapshot-replacement-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        fs::create_dir(&root.0).unwrap();
+        let project = root.0.join("project");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("app.js"), "original").unwrap();
+        fs::write(root.0.join("replacement.js"), "replacement").unwrap();
+        let environments = BTreeSet::new();
+        let reviewed = selection(&project, &environments).unwrap().metadata_sha256;
+
+        let result = capture_after_inventory(&project, &environments, &reviewed, || {
+            fs::rename(root.0.join("replacement.js"), project.join("app.js")).unwrap();
+        });
+        assert_eq!(
+            result.err().expect("capture must refuse").code,
+            "source_changed"
+        );
+    }
 }

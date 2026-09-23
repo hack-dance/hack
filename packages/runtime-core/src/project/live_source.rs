@@ -308,6 +308,20 @@ mod tests {
         fs::remove_file(source.join("new.js")).unwrap();
         let (changed, snapshot) = capture(&candidate, &source);
         contract.verify(&changed.plan, snapshot.receipt()).unwrap();
+        fs::create_dir(source.join("node_modules")).unwrap();
+        fs::write(source.join("node_modules/generated.js"), "ignored output").unwrap();
+        let replacement = source.parent().unwrap().join("atomic-app.js");
+        fs::write(&replacement, "atomic editor save").unwrap();
+        fs::rename(replacement, source.join("app.js")).unwrap();
+        let (changed, snapshot) = capture(&candidate, &source);
+        assert!(
+            !snapshot
+                .receipt()
+                .entries
+                .iter()
+                .any(|entry| entry.path.starts_with("node_modules/"))
+        );
+        contract.verify(&changed.plan, snapshot.receipt()).unwrap();
         let encoded = serde_json::to_string(&contract).unwrap();
         assert!(!encoded.contains("GITHUB_TOKEN") && !encoded.contains("app.js"));
     }

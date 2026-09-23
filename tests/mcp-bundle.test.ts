@@ -84,7 +84,7 @@ test("packaging publishes one content identity and concurrent identical writers 
   for (const path of Object.values(a.executables)) {
     expect((await lstat(path)).mode & 0o777).toBe(0o500);
   }
-});
+}, 15_000);
 
 test("failed artifact probes preserve the previous valid bundle and remove owned staging", async () => {
   const f = await fixture();

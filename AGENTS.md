@@ -116,6 +116,10 @@ for breaking changes. Describe the final behavior, validation, release signal, a
 material remaining gaps in the PR. Let the repository's release workflow publish;
 verify the release and installed executable separately.
 
+Base v5 candidate and prerelease implementation PRs on the protected `next` branch;
+keep stable-line work targeted at `main`. Verify each PR's base and exact-head checks
+before reporting readiness. This does not authorize a merge or publication.
+
 Record useful decisions or regressions in the closest source, test, or doc. When fclt
 is available and writeback is authorized, use a project writeback with a concrete
 asset and evidence. Drafting does not authorize global promotion or canonical apply.

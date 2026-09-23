@@ -44,6 +44,8 @@ Usage:
   hack-local runtime lookup-hostname --hostname <name> [--json]
   hack-local runtime publication-recovery [--json]
   hack-local runtime recover-publications --expect-sha256 <sha256> [--json]
+  hack-local runtime dependency-socket-recovery [--json]
+  hack-local runtime recover-dependency-sockets --expect-sha256 <sha256> [--json]
   hack-local runtime bridge-recovery [--json]
   hack-local runtime export-bridge-recovery --slot <1..8> --expect-sha256 <sha256> [--json]
   hack-local runtime engine-info [--json]
@@ -514,6 +516,34 @@ fn run() -> Result<(), CandidateError> {
         ] => {
             print_json(
                 &hack_runtime_core::provider::publication::recovery::recover(
+                    &discover_candidate(&requested)?,
+                    hash,
+                )?,
+            )?;
+        }
+        ["runtime", "dependency-socket-recovery"]
+        | ["runtime", "dependency-socket-recovery", "--json"] => {
+            print_json(
+                &hack_runtime_core::provider::dependency_socket_recovery::inspect(
+                    &discover_candidate(&requested)?,
+                )?,
+            )?;
+        }
+        [
+            "runtime",
+            "recover-dependency-sockets",
+            "--expect-sha256",
+            hash,
+        ]
+        | [
+            "runtime",
+            "recover-dependency-sockets",
+            "--expect-sha256",
+            hash,
+            "--json",
+        ] => {
+            print_json(
+                &hack_runtime_core::provider::dependency_socket_recovery::recover(
                     &discover_candidate(&requested)?,
                     hash,
                 )?,

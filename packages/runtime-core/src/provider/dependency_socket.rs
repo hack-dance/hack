@@ -9,6 +9,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod recovery;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DependencySocketIntent {

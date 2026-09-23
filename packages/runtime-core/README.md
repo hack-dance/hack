@@ -129,6 +129,18 @@ history format. Stable v4 uses its separate state and is unaffected.
 
 ## Foreground graph dependency owner (candidate macOS path)
 
+If an interrupted foreground owner leaves private dependency socket paths after
+the provider has stopped, normal `hack up` still refuses to adopt or replace them.
+`hack-local runtime dependency-socket-recovery --json` selects only owned, unlistened
+socket inodes in that stopped pool and returns an exact SHA-256 selection. After
+review, `hack-local runtime recover-dependency-sockets --expect-sha256 <hash> --json`
+retires just those inodes. The operation holds the provider lock, journals its
+selection before the first unlink, and can resume a partial unlink against the same
+identities. A live listener, changed inode, nonprivate path, unconfirmed stopped
+state or changed provider identity refuses recovery. VM disks and graph data remain.
+This is cooperative same-user recovery for a stopped pool, not adoption of an
+unreceipted active relay or proof of application readiness.
+
 TERM and INT are checked during initial graph startup, including readiness waits
 and before new service effects. Cancellation enters owned cleanup while preserving
 persistent data. Checks occur between bounded operations; an in-flight operation

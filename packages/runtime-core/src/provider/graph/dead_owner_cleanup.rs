@@ -283,7 +283,23 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     let environment_value = serde_json::to_value(&environment).map_err(|_| refused())?;
     let bridges = match &intent.bridges {
         Some(selection) => selection.clone(),
-        None => bridges::cleanup::capture(candidate, &engine, &receipt)?,
+        None => {
+            // A stopped-VM selection cannot capture helpers until its audited
+            // successor boot. The retained reservations still belong to the
+            // previous boot, so same-boot observation would reject them.
+            let selection = bridges::cleanup::capture_previous_boot(
+                candidate,
+                &engine,
+                &receipt,
+                &intent.old_boot,
+            )?;
+            let prior = bridges::cleanup::capture_prior_generation(&root, &selection)?;
+            if prior.is_some() && !restore_history::confirms_prior_generation(&root, &receipt)? {
+                return Err(refused());
+            }
+            intent.prior_bridges = prior;
+            selection
+        }
     };
     bridges::cleanup::verify_recovery_file(&root, &bridges, intent.prior_bridges.as_ref())?;
     if intent

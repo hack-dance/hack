@@ -232,7 +232,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         initializer_cache::require_resolved(&receipt)?;
         let bridges =
             bridges::cleanup::capture_previous_boot(candidate, &engine, &receipt, &old_boot)?;
-        let prior_bridges = bridges::cleanup::capture_prior_generation(&root, &bridges)?;
+        let prior_bridges = bridges::cleanup::capture_prior_generation(&root, &bridges, &receipt)?;
         if prior_bridges.is_some() && !restore_history::confirms_prior_generation(&root, &receipt)?
         {
             return Err(refused());
@@ -293,7 +293,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
                 &receipt,
                 &intent.old_boot,
             )?;
-            let prior = bridges::cleanup::capture_prior_generation(&root, &selection)?;
+            let prior = bridges::cleanup::capture_prior_generation(&root, &selection, &receipt)?;
             if prior.is_some() && !restore_history::confirms_prior_generation(&root, &receipt)? {
                 return Err(refused());
             }

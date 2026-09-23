@@ -159,9 +159,40 @@ pub(super) fn confirms_prior_generation(
     root: &Path,
     current: &Receipt,
 ) -> Result<bool, CandidateError> {
+    let Some(history) = verified_for_recovery(root, current)? else {
+        return Ok(false);
+    };
+    Ok(history.entries.iter().any(|entry| {
+        entry.resources.iter().any(|(key, resource)| {
+            resource.kind == Kind::Container
+                && resource.id.as_deref().is_some_and(|old| {
+                    current.resources.get(key).and_then(|now| now.id.as_deref()) != Some(old)
+                })
+        })
+    }))
+}
+
+/// A superseded bridge sidecar must bind to the most recent fully stopped
+/// generation, not merely to some older container in the bounded history.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn latest_for_bridge_recovery(
+    root: &Path,
+    current: &Receipt,
+) -> Result<Option<Receipt>, CandidateError> {
+    Ok(
+        verified_for_recovery(root, current)?
+            .and_then(|history| history.entries.into_iter().last()),
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn verified_for_recovery(
+    root: &Path,
+    current: &Receipt,
+) -> Result<Option<History>, CandidateError> {
     let path = root.join(FILE);
     if !exists(&path) {
-        return Ok(false);
+        return Ok(None);
     }
     let history: History = state::read_bounded(&path, BYTE_LIMIT as u64)?;
     if history.version != 1
@@ -177,14 +208,7 @@ pub(super) fn confirms_prior_generation(
     {
         return Err(refused());
     }
-    Ok(history.entries.iter().any(|entry| {
-        entry.resources.iter().any(|(key, resource)| {
-            resource.kind == Kind::Container
-                && resource.id.as_deref().is_some_and(|old| {
-                    current.resources.get(key).and_then(|now| now.id.as_deref()) != Some(old)
-                })
-        })
-    }))
+    Ok(Some(history))
 }
 fn next(root: &Path, current: &Receipt) -> Result<History, CandidateError> {
     let mut history = load(root, current)?;

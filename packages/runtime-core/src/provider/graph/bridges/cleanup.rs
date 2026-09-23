@@ -277,7 +277,7 @@ fn selection_path(root: &std::path::Path) -> Result<PathBuf, CandidateError> {
     }
 }
 
-fn prior_generation(prior: &Selection, current: &Selection) -> bool {
+fn prior_generation(prior: &Selection, current: &Selection, stopped: Option<&Receipt>) -> bool {
     prior.version == 1
         && prior.owner == current.owner
         && prior.boot == current.previous_boot.as_deref().unwrap_or_default()
@@ -286,7 +286,6 @@ fn prior_generation(prior: &Selection, current: &Selection) -> bool {
         && prior.run == current.run
         && prior.plan == current.plan
         && prior.capacity == current.capacity
-        && prior.selected.is_empty()
         && !current.selected.is_empty()
         && current.selected.values().all(|selected| {
             selected
@@ -294,6 +293,26 @@ fn prior_generation(prior: &Selection, current: &Selection) -> bool {
                 .relay
                 .as_ref()
                 .is_some_and(|relay| relay.launch_serial > prior.serial)
+        })
+        && (prior.selected.is_empty()
+            || stopped.is_some_and(|receipt| stopped_prior_bindings(prior, receipt)))
+}
+
+fn stopped_prior_bindings(prior: &Selection, receipt: &Receipt) -> bool {
+    receipt.relay_cleanup.as_ref().is_some_and(|cleanup| {
+        cleanup.phase() == super::super::cleanup_enrollment::Phase::Confirmed
+    }) && validate_bindings(receipt, prior, None).is_ok()
+        && prior.selected.values().all(|selected| {
+            let assignment = &selected.assignment;
+            receipt
+                .resources
+                .get(&format!("container:{}", assignment.service))
+                .is_some_and(|resource| resource.phase == "absent")
+                && receipt.resources.values().any(|resource| {
+                    resource.kind == Kind::Network
+                        && resource.id.as_deref() == Some(assignment.network_id.as_str())
+                        && resource.phase == "absent"
+                })
         })
 }
 
@@ -303,6 +322,7 @@ fn prior_generation(prior: &Selection, current: &Selection) -> bool {
 pub(crate) fn capture_prior_generation(
     root: &std::path::Path,
     current: &Selection,
+    receipt: &Receipt,
 ) -> Result<Option<Value>, CandidateError> {
     let path = selection_path(root)?;
     match fs::symlink_metadata(&path) {
@@ -311,7 +331,12 @@ pub(crate) fn capture_prior_generation(
         Ok(_) => {}
     }
     let prior: Selection = state::read_bounded(&path, 65536)?;
-    if !prior_generation(&prior, current) {
+    let stopped = if prior.selected.is_empty() {
+        None
+    } else {
+        super::super::restore_history::latest_for_bridge_recovery(root, receipt)?
+    };
+    if !prior_generation(&prior, current, stopped.as_ref()) {
         return Err(invalid());
     }
     serde_json::to_value(prior).map(Some).map_err(|_| invalid())
@@ -559,12 +584,18 @@ mod tests {
                 helper: None,
             },
         );
+        let receipt: Receipt = serde_json::from_value(json!({
+            "version":1,"run":current.run,"owner":current.owner,
+            "namespace":"3".repeat(64),"plan_id":current.plan,
+            "phase":"ready-observed","readiness":{},"resources":{}
+        }))
+        .unwrap();
         let mut prior = selection(99);
         prior.boot = "prior".into();
         prior.capacity = 1;
         let path = fixture.0.join("relay-cleanup-bridges.json");
         state::write(&path, &prior).unwrap();
-        let captured = capture_prior_generation(&fixture.0, &current)
+        let captured = capture_prior_generation(&fixture.0, &current, &receipt)
             .unwrap()
             .unwrap();
         verify_recovery_file(&fixture.0, &current, Some(&captured)).unwrap();
@@ -573,12 +604,104 @@ mod tests {
 
         prior.serial = 100;
         state::write(&path, &prior).unwrap();
-        assert!(capture_prior_generation(&fixture.0, &current).is_err());
+        assert!(capture_prior_generation(&fixture.0, &current, &receipt).is_err());
         assert!(verify_recovery_file(&fixture.0, &current, Some(&captured)).is_err());
         prior.serial = 99;
         prior.boot = "foreign".into();
         state::write(&path, &prior).unwrap();
-        assert!(capture_prior_generation(&fixture.0, &current).is_err());
+        assert!(capture_prior_generation(&fixture.0, &current, &receipt).is_err());
+    }
+    #[test]
+    fn prior_routed_generation_requires_exact_latest_stopped_receipt() {
+        let fixture = Fixture::new();
+        let old_boot = "11111111-1111-1111-1111-111111111111";
+        let new_boot = "22222222-2222-2222-2222-222222222222";
+        let mut current = selection(2);
+        current.boot = new_boot.into();
+        current.previous_boot = Some(old_boot.into());
+        current.capacity = 1;
+        let assignment = Assignment {
+            reservation: "d".repeat(32),
+            run: current.run.clone(),
+            service: "web".into(),
+            generation: "e".repeat(64),
+            container_id: "f".repeat(64),
+            network_id: "1".repeat(64),
+            boot_id: old_boot.into(),
+            phase: "running".into(),
+            relay: Some(relay::Relay {
+                transport: relay::Transport::ReservationV1,
+                launch_serial: 1,
+                binary_sha256: "2".repeat(64),
+                target_pid: 10,
+                target_start: 10,
+                port: 8080,
+            }),
+        };
+        let mut prior = selection(1);
+        prior.boot = old_boot.into();
+        prior.capacity = 1;
+        prior.selected.insert(
+            0,
+            Selected {
+                assignment: assignment.clone(),
+                helper: Some(
+                    serde_json::from_value(json!({
+                        "pid":10,"start":10,"executable_device":1,"executable_inode":1,
+                        "socket_device":1,"socket_inode":1,"kernel_socket_inode":1
+                    }))
+                    .unwrap(),
+                ),
+            },
+        );
+        let mut newer = assignment.clone();
+        newer.container_id = "a".repeat(64);
+        newer.network_id = "b".repeat(64);
+        newer.relay.as_mut().unwrap().launch_serial = 2;
+        current.selected.insert(
+            0,
+            Selected {
+                assignment: newer,
+                helper: None,
+            },
+        );
+        let mut stopped: Receipt = serde_json::from_value(json!({
+            "version":1,"run":current.run,"owner":current.owner,
+            "namespace":"3".repeat(64),"plan_id":current.plan,
+            "phase":"stopped-data-retained","readiness":{},"resources":{
+                "container:web":{"kind":"container","key":"web","name":"old-web",
+                    "id":assignment.container_id,"image":null,"phase":"absent"},
+                "network:default":{"kind":"network","key":"default","name":"old-network",
+                    "id":assignment.network_id,"image":null,"phase":"absent"}
+            },
+            "relay_cleanup":{"version":1,"runtime":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "boot":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "operation":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "effect":vec![1;32],
+                "control_root":"/private/old","phase":"confirmed"}
+        }))
+        .unwrap();
+        let path = fixture.0.join("relay-cleanup-bridges.json");
+        state::write(&path, &prior).unwrap();
+        let mut active = stopped.clone();
+        active.phase = "ready-observed".into();
+        active.relay_cleanup = None;
+        active.resources.get_mut("container:web").unwrap().id = Some("a".repeat(64));
+        active.resources.get_mut("network:default").unwrap().id = Some("b".repeat(64));
+        assert!(capture_prior_generation(&fixture.0, &current, &active).is_err());
+        super::super::restore_history::retain(&fixture.0, &stopped).unwrap();
+        assert!(
+            capture_prior_generation(&fixture.0, &current, &active)
+                .unwrap()
+                .is_some()
+        );
+        stopped.resources.get_mut("container:web").unwrap().id = Some("c".repeat(64));
+        super::super::restore_history::retain(&fixture.0, &stopped).unwrap();
+        assert!(capture_prior_generation(&fixture.0, &current, &active).is_err());
+        stopped.resources.get_mut("container:web").unwrap().id = Some(assignment.container_id);
+        stopped.resources.get_mut("container:web").unwrap().phase = "started".into();
+        super::super::restore_history::retain(&fixture.0, &stopped).unwrap();
+        assert!(capture_prior_generation(&fixture.0, &current, &active).is_err());
     }
     fn pending(root: &std::path::Path, bytes: &[u8]) -> PathBuf {
         let path = root.join("relay-cleanup-bridges.pending");

@@ -89,6 +89,83 @@ fn retain_interrupted_write(root: &std::path::Path) -> Result<(), CandidateError
     )?;
     Ok(())
 }
+
+/// Supersede only a completed prior recovery whose exact stopped receipt is in
+/// bounded history and whose containers were replaced. An atomic rename keeps
+/// the old value-free proof if selection or publication is interrupted.
+fn archive_completed_prior(
+    root: &std::path::Path,
+    current: &Receipt,
+    expected: &str,
+    dead_owner: &str,
+    boot: &str,
+) -> Result<(), CandidateError> {
+    let path = root.join(FILE);
+    if !exists(&path)? {
+        return Ok(());
+    }
+    let prior: Intent = state::read(&path)?;
+    if prior.original_sha256 == expected && prior.owner_sha256 == dead_owner {
+        return Ok(());
+    }
+    if current.phase != "ready-observed"
+        || selected(current)? != expected
+        || prior.one_off_sha256.is_some()
+        || prior
+            .complete_sha256
+            .as_deref()
+            .is_none_or(|hash| !hex(hash, 64))
+        || prior
+            .new_boot
+            .as_deref()
+            .is_none_or(|old| old.is_empty() || old == boot)
+        || prior.original.run != current.run
+        || prior.original.owner != current.owner
+        || prior.original.namespace != current.namespace
+        || prior.original.plan_id != current.plan_id
+        || exists(&root.join("dead-owner-cleanup.pending"))?
+    {
+        return Err(refused());
+    }
+    let complete = prior.complete_sha256.as_deref().ok_or_else(refused)?;
+    let stopped =
+        restore_history::completed_for_recovery(root, current, complete)?.ok_or_else(refused)?;
+    validate(
+        &prior,
+        &stopped,
+        &prior.original_sha256,
+        &prior.owner_sha256,
+    )?;
+    if !stopped.resources.iter().any(|(key, resource)| {
+        resource.kind == Kind::Container
+            && resource.id.as_deref().is_some_and(|old| {
+                current.resources.get(key).and_then(|now| now.id.as_deref()) != Some(old)
+            })
+    }) {
+        return Err(refused());
+    }
+    let mut archived = 0;
+    for entry in fs::read_dir(root).map_err(state::io)? {
+        let name = entry.map_err(state::io)?.file_name();
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with("dead-owner-cleanup-retired-"))
+        {
+            archived += 1;
+            if archived >= 8 {
+                return Err(refused());
+            }
+        }
+    }
+    let target = root.join(format!("dead-owner-cleanup-retired-{complete}.json"));
+    if exists(&target)? {
+        return Err(refused());
+    }
+    fs::rename(&path, &target).map_err(state::io)?;
+    fs::File::open(root)
+        .and_then(|file| file.sync_all())
+        .map_err(state::io)
+}
 /// Normally select while stopped, then call after explicit runtime up. A dead
 /// ready owner with exact previous-boot reservations can be selected on the
 /// immediate successor boot without another restart.
@@ -267,6 +344,13 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         );
     }
     no_pending(&root)?;
+    archive_completed_prior(
+        &root,
+        &receipt,
+        expected,
+        &dead.fingerprint(),
+        engine.guest().boot_id(),
+    )?;
     let mut intent: Intent = if exists(&root.join(FILE))? {
         state::read(&root.join(FILE))?
     } else {
@@ -953,5 +1037,107 @@ mod tests {
         foreign["entries"][0]["owner"] = json!("f".repeat(32));
         state::write(&root.join("restore-history.json"), &foreign).unwrap();
         assert!(retained(root, &later).is_err());
+    }
+
+    #[test]
+    fn repeated_dead_owner_recovery_archives_only_exact_completed_generation() {
+        let fixture = super::super::tests::Fixture::new();
+        let root = &fixture.0;
+        let original = partial();
+        let mut stopped = original.clone();
+        stopped.phase = "stopped-data-retained".into();
+        for resource in stopped.resources.values_mut() {
+            if resource.kind != Kind::Volume {
+                resource.phase = "absent".into();
+            }
+        }
+        restore_history::retain(root, &stopped).unwrap();
+        let mut proof = intent(&original);
+        proof.new_boot = Some("prior-boot".into());
+        let complete = selected(&stopped).unwrap();
+        proof.complete_sha256 = Some(complete.clone());
+        state::write(&root.join(FILE), &proof).unwrap();
+        let mut current = stopped.clone();
+        current.phase = "ready-observed".into();
+        current.resources.get_mut("container:init").unwrap().id = Some("9".repeat(64));
+        let selected_current = selected(&current).unwrap();
+        archive_completed_prior(
+            root,
+            &current,
+            &selected_current,
+            &"2".repeat(64),
+            "current-boot",
+        )
+        .unwrap();
+        assert!(!root.join(FILE).exists());
+        assert!(
+            root.join(format!("dead-owner-cleanup-retired-{complete}.json"))
+                .exists()
+        );
+        archive_completed_prior(
+            root,
+            &current,
+            &selected_current,
+            &"2".repeat(64),
+            "current-boot",
+        )
+        .unwrap();
+        state::write(&root.join(FILE), &proof).unwrap();
+        current.resources.get_mut("container:init").unwrap().id =
+            stopped.resources["container:init"].id.clone();
+        let same_generation = selected(&current).unwrap();
+        assert!(
+            archive_completed_prior(
+                root,
+                &current,
+                &same_generation,
+                &"2".repeat(64),
+                "current-boot",
+            )
+            .is_err()
+        );
+        assert!(root.join(FILE).exists());
+    }
+
+    #[test]
+    fn repeated_recovery_refuses_unproven_prior_completion_without_moving_evidence() {
+        let fixture = super::super::tests::Fixture::new();
+        let root = &fixture.0;
+        let original = partial();
+        let mut stopped = original.clone();
+        stopped.phase = "stopped-data-retained".into();
+        let mut current = stopped.clone();
+        current.phase = "ready-observed".into();
+        current.resources.get_mut("container:init").unwrap().id = Some("9".repeat(64));
+        let mut proof = intent(&original);
+        proof.new_boot = Some("prior-boot".into());
+        proof.complete_sha256 = Some(selected(&stopped).unwrap());
+        state::write(&root.join(FILE), &proof).unwrap();
+        let attempt = || {
+            archive_completed_prior(
+                root,
+                &current,
+                &selected(&current).unwrap(),
+                &"2".repeat(64),
+                "current-boot",
+            )
+        };
+        assert!(attempt().is_err(), "missing durable history must refuse");
+        restore_history::retain(root, &stopped).unwrap();
+        proof.complete_sha256 = Some("8".repeat(64));
+        state::write(&root.join(FILE), &proof).unwrap();
+        assert!(attempt().is_err(), "forged completed digest must refuse");
+        assert!(root.join(FILE).exists());
+        assert_eq!(
+            fs::read_dir(root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("dead-owner-cleanup-retired-"))
+                .count(),
+            0
+        );
     }
 }

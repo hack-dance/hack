@@ -172,6 +172,31 @@ pub(super) fn confirms_prior_generation(
     }))
 }
 
+/// A prior recovery sidecar may be archived only against its exact completed
+/// receipt, never just any older generation in the bounded history.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn completed_for_recovery(
+    root: &Path,
+    current: &Receipt,
+    expected: &str,
+) -> Result<Option<Receipt>, CandidateError> {
+    if !hex(expected, 64) {
+        return Err(refused());
+    }
+    let Some(history) = verified_for_recovery(root, current)? else {
+        return Ok(None);
+    };
+    history
+        .entries
+        .into_iter()
+        .find_map(|entry| match digest(&entry) {
+            Ok(actual) if actual == expected => Some(Ok(entry)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .transpose()
+}
+
 /// A superseded bridge sidecar must bind to the most recent fully stopped
 /// generation, not merely to some older container in the bounded history.
 #[cfg(target_os = "macos")]

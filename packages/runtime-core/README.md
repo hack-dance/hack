@@ -584,6 +584,15 @@ private/loopback/metadata boundary. This is not restricted package egress, TLS
 verification, or application authorization. It adds no inbound ports, host gateway
 alias or cross-VM network. Internal Docker networks remain internal.
 
+The development profile's guest allocation is 6 GiB; guest allocation plus
+2 GiB is a provisional provider-footprint estimate, not a hard operating cap.
+Before new effects, the candidate requires normal macOS memory pressure,
+unchanged swapouts, and at least 2 GiB of estimated host headroom plus any
+provider footprint above that estimate. A larger healthy application graph can
+therefore continue operating, while its excess footprint consumes an equal
+amount of the allowed headroom. `runtime status` reports the actual provider
+footprint separately; this admission rule does not qualify its efficiency.
+
 An existing owned pool changes policy only while stopped through
 `runtime network internet --json`, then an explicit up with `--internet`.
 The operation verifies the dead retained process, owner registry, exact disks and

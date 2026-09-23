@@ -115,18 +115,21 @@ pub fn validate_operating(
     profile: Profile,
 ) -> Result<(), CandidateError> {
     let budget = (u64::from(profile.memory_mib()) + 2048) * 1024 * 1024;
-    let headroom_floor = 2 * 1024 * 1024 * 1024;
+    // A provider can exceed the provisional guest-plus-overhead estimate while
+    // the host remains healthy. Require matching additional host headroom for
+    // that excess instead of permanently fencing an already-running graph.
+    let excess_footprint = footprint.saturating_sub(budget);
+    let headroom_floor = (2_u64 * 1024 * 1024 * 1024).saturating_add(excess_footprint);
     let headroom_failed = sample.free_plus_file_cache_estimate_bytes < headroom_floor;
     let pressure_failed = !sample.memory_pressure_normal;
     let swap_failed = sample.swapouts != baseline_swapouts;
-    let footprint_failed = footprint > budget;
-    if headroom_failed || pressure_failed || swap_failed || footprint_failed {
+    if headroom_failed || pressure_failed || swap_failed {
         // Fixed labels and numeric observations only: callers can safely classify
         // the failed predicates without capturing provider output or environment.
         return Err(CandidateError::new(
             "runtime_pressure",
             format!(
-                "Development effects paused: runtime_pressure headroom_failed={headroom_failed} pressure_failed={pressure_failed} swap_failed={swap_failed} footprint_failed={footprint_failed} headroom_bytes={} headroom_floor_bytes={headroom_floor} swapouts_baseline={baseline_swapouts} swapouts_current={} provider_footprint_bytes={footprint} provider_budget_bytes={budget}. Inspect and stop owned capacity if pressure persists.",
+                "Development effects paused: runtime_pressure headroom_failed={headroom_failed} pressure_failed={pressure_failed} swap_failed={swap_failed} headroom_bytes={} headroom_floor_bytes={headroom_floor} swapouts_baseline={baseline_swapouts} swapouts_current={} provider_footprint_bytes={footprint} provider_budget_bytes={budget} provider_excess_bytes={excess_footprint}. Inspect and stop owned capacity if pressure persists.",
                 sample.free_plus_file_cache_estimate_bytes, sample.swapouts,
             ),
         ));
@@ -316,42 +319,42 @@ mod tests {
                 true,
                 42,
                 budget,
-                "headroom_failed=true pressure_failed=false swap_failed=false footprint_failed=false",
+                "headroom_failed=true pressure_failed=false swap_failed=false",
             ),
             (
                 floor,
                 false,
                 42,
                 budget,
-                "headroom_failed=false pressure_failed=true swap_failed=false footprint_failed=false",
+                "headroom_failed=false pressure_failed=true swap_failed=false",
             ),
             (
                 floor,
                 true,
                 43,
                 budget,
-                "headroom_failed=false pressure_failed=false swap_failed=true footprint_failed=false",
+                "headroom_failed=false pressure_failed=false swap_failed=true",
             ),
             (
                 floor,
                 true,
                 41,
                 budget,
-                "headroom_failed=false pressure_failed=false swap_failed=true footprint_failed=false",
+                "headroom_failed=false pressure_failed=false swap_failed=true",
             ),
             (
                 floor,
                 true,
                 42,
                 budget + 1,
-                "headroom_failed=false pressure_failed=false swap_failed=false footprint_failed=true",
+                "headroom_failed=true pressure_failed=false swap_failed=false",
             ),
             (
                 0,
                 false,
                 u64::MAX,
                 u64::MAX,
-                "headroom_failed=true pressure_failed=true swap_failed=true footprint_failed=true",
+                "headroom_failed=true pressure_failed=true swap_failed=true",
             ),
         ] {
             let sample = OperatingSample {
@@ -363,10 +366,12 @@ mod tests {
             let error =
                 validate_operating(&sample, 42, footprint, Profile::Development).unwrap_err();
             assert_eq!(error.code, "runtime_pressure");
+            let expected_excess = footprint.saturating_sub(budget);
+            let expected_floor = floor.saturating_add(expected_excess);
             assert_eq!(
                 error.message,
                 format!(
-                    "Development effects paused: runtime_pressure {flags} headroom_bytes={headroom} headroom_floor_bytes=2147483648 swapouts_baseline=42 swapouts_current={swapouts} provider_footprint_bytes={footprint} provider_budget_bytes=8589934592. Inspect and stop owned capacity if pressure persists."
+                    "Development effects paused: runtime_pressure {flags} headroom_bytes={headroom} headroom_floor_bytes={expected_floor} swapouts_baseline=42 swapouts_current={swapouts} provider_footprint_bytes={footprint} provider_budget_bytes=8589934592 provider_excess_bytes={expected_excess}. Inspect and stop owned capacity if pressure persists."
                 )
             );
         }
@@ -384,13 +389,15 @@ mod tests {
             };
             assert!(validate_operating(&sample, u64::MAX, budget, profile).is_ok());
             assert!(validate_operating(&sample, u64::MAX, budget + 1, profile).is_err());
-            sample.free_plus_file_cache_estimate_bytes -= 1;
+            sample.free_plus_file_cache_estimate_bytes += 1;
+            assert!(validate_operating(&sample, u64::MAX, budget + 1, profile).is_ok());
+            sample.free_plus_file_cache_estimate_bytes -= 2;
             assert!(validate_operating(&sample, u64::MAX, 0, profile).is_err());
         }
     }
 
     #[test]
-    fn development_budget_keeps_research_separate_and_checks_live_reserve() {
+    fn development_headroom_scales_with_provider_excess_and_checks_live_reserve() {
         assert_eq!(
             Profile::Research.minimum_free_memory_bytes(),
             FREE_MEMORY_FLOOR
@@ -406,8 +413,13 @@ mod tests {
             validate_operating(&sample, 42, 7 * 1024 * 1024 * 1024, Profile::Development).is_ok()
         );
         assert!(
-            validate_operating(&sample, 42, 9 * 1024 * 1024 * 1024, Profile::Development).is_err()
+            validate_operating(&sample, 42, 9 * 1024 * 1024 * 1024, Profile::Development).is_ok()
         );
+        assert!(
+            validate_operating(&sample, 42, 13 * 1024 * 1024 * 1024, Profile::Development).is_err()
+        );
+        sample.free_plus_file_cache_estimate_bytes = 30 * 1024 * 1024 * 1024;
+        assert!(validate_operating(&sample, 42, 9_966_855_840, Profile::Development).is_ok());
         sample.swapouts += 1;
         assert!(validate_operating(&sample, 42, 0, Profile::Development).is_err());
         sample.swapouts = 42;

@@ -113,6 +113,30 @@ fn missing_owner_requires_explicit_recovery_without_creating_state() {
     assert!(!path.exists());
 }
 #[test]
+fn owner_cleanup_refusal_exposes_only_bounded_code() {
+    let run = "a".repeat(32);
+    for response in [
+        json!({"ok":false,"code":"graph_relay_identity"}),
+        json!({"ok":false,"run":run,"code":"graph_relay_identity"}),
+    ] {
+        let error = validate_owner_response(response, &run).unwrap_err();
+        assert_eq!(error.code, "graph_owner_recovery");
+        assert_eq!(error.cause_code.as_deref(), Some("graph_relay_identity"));
+    }
+    for response in [
+        json!({"ok":false,"run":"b".repeat(32),"code":"graph_relay_identity"}),
+        json!({"ok":false,"code":"secret value"}),
+        json!({"ok":true,"run":"b".repeat(32),"code":"graph_relay_identity"}),
+    ] {
+        assert!(
+            validate_owner_response(response, &run)
+                .unwrap_err()
+                .cause_code
+                .is_none()
+        );
+    }
+}
+#[test]
 fn abandoned_client_does_not_stop_owner() {
     const CHILD_PATH: &str = "HACK_FOREGROUND_TEST_ABANDONED";
     if let Some(path) = std::env::var_os(CHILD_PATH) {

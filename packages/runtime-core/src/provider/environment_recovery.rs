@@ -88,6 +88,9 @@ fn validate(intent: &Intent, slot: &str) -> Result<(), CandidateError> {
     Ok(())
 }
 const MAX_INTENT_ENTRIES: usize = 4096;
+// A graph can retain several generations of immutable service lease evidence.
+// Keep this below the global bound while permitting repeated normal restarts.
+const MAX_GRAPH_INTENT_ENTRIES: usize = 256;
 
 /// Retired and uncertain entries still reserve history capacity. This never removes evidence.
 pub(super) fn preflight_records(
@@ -335,7 +338,7 @@ pub(super) fn graph_inventory(
                 g.run == run && containers.get(&intent.service) == Some(&g.container)
             })
             || retention::reserved(candidate, &intent.slot)?
-            || selected.len() >= 72
+            || selected.len() >= MAX_GRAPH_INTENT_ENTRIES
             || selected.insert(intent.slot.clone(), intent).is_some()
         {
             return Err(error());
@@ -358,7 +361,7 @@ pub(super) fn graph_inventory(
             }
             state::check_private_directory(archive)?;
             for (index, entry) in fs::read_dir(archive).map_err(state::io)?.enumerate() {
-                if index >= 72 {
+                if index >= MAX_GRAPH_INTENT_ENTRIES {
                     return Err(error());
                 }
                 let entry = entry.map_err(state::io)?;
@@ -420,7 +423,7 @@ pub(super) fn archive_graph(
     };
     let mut archived = std::collections::BTreeMap::new();
     for (index, entry) in fs::read_dir(directory).map_err(state::io)?.enumerate() {
-        if index >= 72 {
+        if index >= MAX_GRAPH_INTENT_ENTRIES {
             return Err(error());
         }
         let entry = entry.map_err(state::io)?;
@@ -436,7 +439,8 @@ pub(super) fn archive_graph(
     for (slot, _, _) in graph_slots(candidate, guest, run)? {
         let intent = read_mode(candidate, &slot, guest.incarnation(), None, false)?;
         matches(&intent)?;
-        if archived.contains_key(&slot) || active.len() + archived.len() >= 72 {
+        if archived.contains_key(&slot) || active.len() + archived.len() >= MAX_GRAPH_INTENT_ENTRIES
+        {
             return Err(error());
         }
         active.push(intent);
@@ -829,24 +833,57 @@ mod tests {
         let containers = std::collections::BTreeMap::from([("web".into(), container)]);
         let archive = fixture.0.state_root.join("graph-environment-archive");
         state::private_directory(&archive).unwrap();
-        for index in 0..72 {
+        for index in 0..MAX_GRAPH_INTENT_ENTRIES {
             intent.slot = format!("hack-env-lease-{}-{index:032x}", intent.boot);
             state::write(&archive.join(format!("{}.json", intent.slot)), &intent).unwrap();
         }
         let inventory =
             graph_inventory(&fixture.0, &intent.incarnation, &run, &containers, &archive).unwrap();
-        assert_eq!(inventory.intents.len(), 72);
+        assert_eq!(inventory.intents.len(), MAX_GRAPH_INTENT_ENTRIES);
         assert!(
             inventory
                 .intents
                 .windows(2)
                 .all(|pair| pair[0].slot < pair[1].slot)
         );
-        intent.slot = format!("hack-env-lease-{}-{:032x}", intent.boot, 72);
+        intent.slot = format!(
+            "hack-env-lease-{}-{:032x}",
+            intent.boot, MAX_GRAPH_INTENT_ENTRIES
+        );
         fixture.pending(&serde_json::to_vec(&intent).unwrap(), &intent.slot);
         assert!(
             graph_inventory(&fixture.0, &intent.incarnation, &run, &containers, &archive).is_err()
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn graph_inventory_accepts_repeated_start_history_beyond_old_limit() {
+        let fixture = Fixture::new();
+        let mut intent = fixture.intent();
+        let run = "a".repeat(32);
+        let container = format!("hkg-{run}-container-0");
+        intent.graph = Some(GraphBinding {
+            run: run.clone(),
+            container: container.clone(),
+        });
+        for index in 0..84 {
+            intent.slot = format!("hack-env-lease-{}-{index:032x}", intent.boot);
+            state::write(
+                &root(&fixture.0).join(format!("{}.json", intent.slot)),
+                &intent,
+            )
+            .unwrap();
+        }
+        let inventory = graph_inventory(
+            &fixture.0,
+            &intent.incarnation,
+            &run,
+            &std::collections::BTreeMap::from([("web".into(), container)]),
+            &fixture.0.state_root.join("graph-environment-archive"),
+        )
+        .unwrap();
+        assert_eq!(inventory.intents.len(), 84);
     }
 
     #[test]

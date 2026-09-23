@@ -400,7 +400,7 @@ fn serve_input<'a>(
                     Err(error) => {
                         let _ = transport::write(
                             &mut stream,
-                            &json!({"ok":false,"code":error.code}),
+                            &json!({"ok":false,"run":receipt.run,"code":error.code}),
                             Duration::from_secs(5),
                         );
                         continue;
@@ -488,10 +488,36 @@ pub fn request(
         Duration::from_secs(5),
     )?;
     let response: Value = transport::read(&mut stream, Duration::from_secs(120), 256 * 1024)?;
+    validate_owner_response(response, run)
+}
+
+fn validate_owner_response(response: Value, run: &str) -> Result<Value, CandidateError> {
     if response.get("ok") != Some(&Value::Bool(true))
         || response.get("run").and_then(Value::as_str) != Some(run)
     {
-        return Err(refused());
+        // Older foreground owners omit `run` from a cleanup refusal. The
+        // pinned local socket still authenticates this exact owner; expose
+        // only its bounded error code, never arbitrary response text.
+        let cause = response
+            .get("code")
+            .and_then(Value::as_str)
+            .filter(|code| {
+                (1..=64).contains(&code.len())
+                    && code.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+            })
+            .filter(|_| {
+                response.get("ok") == Some(&Value::Bool(false))
+                    && response
+                        .get("run")
+                        .and_then(Value::as_str)
+                        .is_none_or(|actual| actual == run)
+            });
+        return Err(match cause {
+            Some(code) => refused().with_cause_code(code.to_owned()),
+            None => refused(),
+        });
     }
     Ok(response)
 }

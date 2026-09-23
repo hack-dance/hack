@@ -336,6 +336,8 @@ pub fn recover(candidate: &Candidate, expected: &str) -> Result<Value, Candidate
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    use crate::provider::{NetworkIntent, Profile};
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -478,5 +480,143 @@ mod tests {
 
         assert!(observed(&canonical, 0).is_err());
         assert!(observed(&alias, 0).unwrap().is_some());
+    }
+
+    #[cfg(target_os = "macos")]
+    struct StoppedPool {
+        _fixture: Fixture,
+        candidate: Candidate,
+        owner: state::Owner,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl StoppedPool {
+        fn new(slots: u8) -> Self {
+            let fixture = Fixture::new();
+            let candidate = Candidate::discover(&fixture.0).unwrap();
+            let mut owner = state::Owner::create_with_dependencies(
+                &candidate,
+                Profile::Research,
+                None,
+                NetworkIntent::Isolated,
+                Some(DependencySocketIntent::new(slots).unwrap()),
+            )
+            .unwrap();
+            let data = owner.real_data_dir(&candidate).unwrap();
+            state::private_directory(&data).unwrap();
+            fs::write(data.join("name"), &owner.machine).unwrap();
+            let mut disk = vec![0_u8; 2048];
+            disk[1024 + 56..1024 + 58].copy_from_slice(&[0x53, 0xef]);
+            disk[1024 + 104..1024 + 120].copy_from_slice(&[1; 16]);
+            fs::write(data.join("storage.raw"), disk).unwrap();
+            owner.storage =
+                Some(crate::provider::identity::disk(&data.join("storage.raw")).unwrap());
+            owner.process = Some(ProcessIdentity {
+                pid: i32::MAX,
+                start_micros: 1,
+                uid: unsafe { libc::geteuid() },
+                executable: PathBuf::from("/bin/false"),
+            });
+            owner.guest_boot_id = Some("boot-1".into());
+            owner.phase = "stopped".into();
+            owner.save(&candidate).unwrap();
+            Self {
+                _fixture: fixture,
+                candidate,
+                owner,
+            }
+        }
+
+        fn stale(&self, slot: u8) {
+            stale(&path(&self.owner.short_home, slot));
+        }
+
+        fn socket(&self, slot: u8) -> PathBuf {
+            path(&self.owner.short_home, slot)
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for StoppedPool {
+        fn drop(&mut self) {
+            fs::remove_file(&self.owner.short_home).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stopped_pool_recovery_refuses_live_replaced_and_changed_owner_sockets() {
+        let pool = StoppedPool::new(1);
+        let listener = UnixListener::bind(pool.socket(0)).unwrap();
+        fs::set_permissions(pool.socket(0), fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            inspect(&pool.candidate).unwrap_err().code,
+            "dependency_socket_recovery"
+        );
+        assert!(pool.socket(0).exists());
+        drop(listener);
+        fs::remove_file(pool.socket(0)).unwrap();
+
+        pool.stale(0);
+        let first = inspect(&pool.candidate).unwrap();
+        let hash = first["sha256"].as_str().unwrap();
+        fs::remove_file(pool.socket(0)).unwrap();
+        pool.stale(0);
+        assert_eq!(
+            recover(&pool.candidate, hash).unwrap_err().code,
+            "dependency_socket_recovery"
+        );
+        assert!(pool.socket(0).exists());
+
+        let second = inspect(&pool.candidate).unwrap();
+        let hash = second["sha256"].as_str().unwrap();
+        let mut changed = state::Owner::load(&pool.candidate).unwrap();
+        changed.guest_boot_id = Some("boot-2".into());
+        changed.save(&pool.candidate).unwrap();
+        assert_eq!(
+            recover(&pool.candidate, hash).unwrap_err().code,
+            "dependency_socket_recovery"
+        );
+        assert!(pool.socket(0).exists());
+        changed.guest_boot_id = Some("boot-1".into());
+        changed.process.as_mut().unwrap().start_micros += 1;
+        changed.save(&pool.candidate).unwrap();
+        assert_eq!(
+            recover(&pool.candidate, hash).unwrap_err().code,
+            "dependency_socket_recovery"
+        );
+        assert!(pool.socket(0).exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stopped_pool_recovery_resumes_exact_partial_unlink_and_keeps_disk() {
+        let pool = StoppedPool::new(2);
+        pool.stale(0);
+        pool.stale(1);
+        let selection = inspect(&pool.candidate).unwrap();
+        let hash = selection["sha256"].as_str().unwrap();
+        let (scope, directory) = stopped(&pool.candidate).unwrap();
+        let selected = current(scope, &directory).unwrap();
+        assert_eq!(digest(&selected).unwrap(), hash);
+        let root = journal(&pool.candidate);
+        state::private_directory(&root).unwrap();
+        state::write(&root.join(format!("{hash}.json")), &selected).unwrap();
+        fs::remove_file(pool.socket(0)).unwrap();
+
+        let resumable = inspect(&pool.candidate).unwrap();
+        assert_eq!(resumable["resumable"], true);
+        assert_eq!(resumable["remaining"], 1);
+        let recovered = recover(&pool.candidate, hash).unwrap();
+        assert_eq!(recovered["removed"], 1);
+        assert_eq!(recovered["already_absent"], 1);
+        assert_eq!(recovered["data_retained"], true);
+        assert!(!pool.socket(0).exists());
+        assert!(!pool.socket(1).exists());
+        assert_eq!(inspect(&pool.candidate).unwrap()["recoverable"], false);
+        assert_eq!(
+            state::Owner::load(&pool.candidate).unwrap().storage,
+            pool.owner.storage
+        );
     }
 }

@@ -5,7 +5,11 @@ use std::{
     net::{Shutdown, TcpListener},
     os::{
         fd::AsRawFd,
-        unix::{fs::PermissionsExt, net::UnixStream, process::CommandExt},
+        unix::{
+            fs::PermissionsExt,
+            net::{UnixListener, UnixStream},
+            process::CommandExt,
+        },
     },
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -440,7 +444,7 @@ fn reused_socket_rejects_old_reservation_and_expiring_partial_handshakes() {
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => (),
             other => panic!("invalid handshake remained usable: {other:?}"),
         }
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(6));
         let mut observed = libc::pollfd {
             fd: target.as_raw_fd(),
             events: libc::POLLIN,
@@ -1023,6 +1027,46 @@ fn unix_publication_streams_and_preserves_occupied_or_replaced_frontend() {
         .unwrap();
     assert_eq!(aliased.status.code(), Some(78));
     assert!(!fresh.socket.exists());
+}
+
+#[test]
+fn unix_publication_survives_a_delayed_private_upstream_ack() {
+    let root = PathBuf::from(format!(
+        "/tmp/hkr-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let upstream = root.join("delayed.sock");
+    let listener = UnixListener::bind(&upstream).unwrap();
+    fs::set_permissions(&upstream, fs::Permissions::from_mode(0o700)).unwrap();
+    let token = "abababababababababababababababab";
+    let mut publisher = frontend_publisher(&upstream, token, 0, None, true);
+    let server = thread::spawn(move || {
+        let (mut connection, _) = listener.accept().unwrap();
+        connection
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reservation = [0; 36];
+        connection.read_exact(&mut reservation).unwrap();
+        assert_eq!(&reservation[..4], b"HKR1");
+        assert_eq!(&reservation[4..], token.as_bytes());
+        thread::sleep(Duration::from_millis(1500));
+        connection.write_all(&[1]).unwrap();
+        let mut request = [0; 4];
+        connection.read_exact(&mut request).unwrap();
+        assert_eq!(&request, b"ping");
+        connection.write_all(b"pong").unwrap();
+    });
+    let mut client = publisher.connect();
+    client.write_all(b"ping").unwrap();
+    let mut response = [0; 4];
+    client.read_exact(&mut response).unwrap();
+    assert_eq!(&response, b"pong");
+    server.join().unwrap();
+    publisher.stop();
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

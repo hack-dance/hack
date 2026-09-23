@@ -25,6 +25,8 @@
 
 #define CONNECTIONS 32
 #define CAPACITY 16384
+/* Guest CPU contention may delay the reservation ACK; bound it independently of stream idle. */
+#define HANDSHAKE_TIMEOUT_MS 5000
 struct flow {
     int fd[2], connecting, awaiting, publishing, eof[2], shut[2];
     size_t used[2];
@@ -50,6 +52,9 @@ static int64_t now_ms(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts)) return -1;
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+static int64_t handshake_budget(long idle) {
+    return idle < HANDSHAKE_TIMEOUT_MS ? idle : HANDSHAKE_TIMEOUT_MS;
 }
 static int configure(int fd) {
     int flags = fcntl(fd, F_GETFL);
@@ -346,7 +351,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < CONNECTIONS; i++) {
             struct flow *flow = &flows[i];
             if (flow->fd[0] >= 0) {
-                int64_t budget = (flow->awaiting || flow->publishing) && idle > 1000 ? 1000 : idle;
+                int64_t budget = flow->awaiting || flow->publishing ? handshake_budget(idle) : idle;
                 int64_t remaining = budget - (now - flow->activity);
                 if (remaining <= 0) release(flow);
                 else if (timeout < 0 || remaining < timeout) timeout = (int)remaining;
@@ -382,7 +387,7 @@ int main(int argc, char **argv) {
                 short events = descriptors[1 + i*2 + side].revents;
                 if (!events) continue;
                 if (flow->awaiting) {
-                    if (now_ms()-flow->activity >= (idle < 1000 ? idle : 1000)) { release(flow); break; }
+                    if (now_ms()-flow->activity >= handshake_budget(idle)) { release(flow); break; }
                     if (events & (POLLERR | POLLNVAL)) { release(flow); break; }
                     if (side == 0 && (events & (POLLIN | POLLHUP))) {
                         ssize_t n = recv(flow->fd[0], flow->data[0]+flow->used[0],
@@ -411,7 +416,7 @@ int main(int argc, char **argv) {
                 }
                 if (flow->publishing) {
                     int64_t checked = now_ms();
-                    if (checked < 0 || checked-flow->activity >= (idle < 1000 ? idle : 1000) ||
+                    if (checked < 0 || checked-flow->activity >= handshake_budget(idle) ||
                         (events & (POLLERR | POLLNVAL))) { release(flow); break; }
                     if (flow->publishing == 1 && (events & POLLOUT)) {
                         ssize_t n = send(flow->fd[1], flow->data[0], flow->used[0], 0);

@@ -174,7 +174,7 @@ pub(super) fn confirms_prior_generation(
 
 /// A prior recovery sidecar may be archived only against its exact completed
 /// receipt, never just any older generation in the bounded history.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 pub(super) fn completed_for_recovery(
     root: &Path,
     current: &Receipt,

@@ -174,7 +174,7 @@ pub(super) fn confirms_prior_generation(
 
 /// A superseded bridge sidecar must bind to the most recent fully stopped
 /// generation, not merely to some older container in the bounded history.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 pub(super) fn latest_for_bridge_recovery(
     root: &Path,
     current: &Receipt,

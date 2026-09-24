@@ -1,5 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,7 +23,9 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "hack-frontend-recovery-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-frontend-recovery-"))
+  );
   roots.push(root);
   const projectDir = join(root, ".hack");
   const lifecycle = join(projectDir, ".internal/lifecycle");
@@ -78,6 +88,34 @@ test("recovery requires stopped owned graph, vacant HTTPS, and empty lifecycle",
   expect(f.events).toEqual(["processes", "graph", "authority", "port"]);
 });
 
+test("recovery cleans owned lifecycle only after graph, authority and port proof", async () => {
+  const f = await fixture();
+  await writeFile(join(f.lifecycle, "state.json"), '{"entries":[{}]}');
+  const cleanupLifecycle = async () => {
+    f.events.push("lifecycle");
+    await writeFile(join(f.lifecycle, "state.json"), '{"entries":[]}');
+  };
+  await verifyNativeFrontendRecovery({ ...f.opts, cleanupLifecycle });
+  expect(f.events).toEqual([
+    "processes",
+    "graph",
+    "authority",
+    "port",
+    "lifecycle",
+  ]);
+  const changed = structuredClone(f.receipt);
+  changed.observations["container:app"].state = "present";
+  f.events.length = 0;
+  await expect(
+    verifyNativeFrontendRecovery({
+      ...f.opts,
+      inspect: async () => changed,
+      cleanupLifecycle,
+    })
+  ).rejects.toThrow("cannot prove");
+  expect(f.events).not.toContain("lifecycle");
+});
+
 test("changed graph, live effect, or failed legacy inventory refuses recovery", async () => {
   const f = await fixture();
   const changed = structuredClone(f.receipt);
@@ -103,14 +141,36 @@ test("changed graph, live effect, or failed legacy inventory refuses recovery", 
     })
   ).rejects.toThrow("another frontend is live");
   await mkdir(join(f.root, "native-https/owner.lock"), { recursive: true });
-  await expect(verifyNativeFrontendRecovery(f.opts)).rejects.toThrow(
-    "cannot prove"
-  );
-  await rm(join(f.root, "native-https/owner.lock"), { recursive: true });
+  await chmod(join(f.root, "native-https/owner.lock"), 0o700);
+  await verifyNativeFrontendRecovery(f.opts);
+  await expect(
+    lstat(join(f.root, "native-https/owner.lock"))
+  ).rejects.toMatchObject({ code: "ENOENT" });
   await writeFile(join(f.lifecycle, "state.json"), '{"entries":[{}]}');
   await expect(verifyNativeFrontendRecovery(f.opts)).rejects.toThrow(
     "cannot prove"
   );
+});
+
+test("recovery preserves an occupied or unverifiable HTTPS lock", async () => {
+  const f = await fixture();
+  const lock = join(f.root, "native-https/owner.lock");
+  await mkdir(lock, { recursive: true, mode: 0o700 });
+  await writeFile(join(lock, "owned-state"), "keep");
+  await expect(verifyNativeFrontendRecovery(f.opts)).rejects.toThrow(
+    "cannot prove"
+  );
+  await lstat(join(lock, "owned-state"));
+  await rm(join(lock, "owned-state"));
+  await chmod(lock, 0o755);
+  await expect(verifyNativeFrontendRecovery(f.opts)).rejects.toThrow(
+    "cannot prove"
+  );
+  await chmod(lock, 0o700);
+  await expect(
+    verifyNativeFrontendRecovery({ ...f.opts, httpsPort: null })
+  ).rejects.toThrow("cannot prove");
+  await lstat(lock);
 });
 
 test("publisher retirement requests the exact run and owner, and rejects weak acknowledgement", async () => {

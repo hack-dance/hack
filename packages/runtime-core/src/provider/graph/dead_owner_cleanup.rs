@@ -108,7 +108,11 @@ fn archive_completed_prior(
     if prior.original_sha256 == expected && prior.owner_sha256 == dead_owner {
         return Ok(());
     }
-    if current.phase != "ready-observed"
+    let interrupted_enrollment = current.phase == "cleanup-intent"
+        && current.relay_cleanup.as_ref().is_some_and(|marker| {
+            marker.valid() && marker.phase == cleanup_enrollment::Phase::Pending
+        });
+    if (current.phase != "ready-observed" && !interrupted_enrollment)
         || selected(current)? != expected
         || prior.one_off_sha256.is_some()
         || prior
@@ -166,6 +170,37 @@ fn archive_completed_prior(
         .and_then(|file| file.sync_all())
         .map_err(state::io)
 }
+
+/// A bridge sidecar from a restored generation can be superseded only when
+/// its exact stopped receipt and selected bridge assignments have a completed,
+/// archived dead-owner recovery proof.
+pub(super) fn retired_prior_bridges(
+    root: &std::path::Path,
+    receipt: &Receipt,
+    selection: &bridges::cleanup::Selection,
+) -> Result<bool, CandidateError> {
+    let complete = selected(receipt)?;
+    let path = root.join(format!("dead-owner-cleanup-retired-{complete}.json"));
+    if !exists(&path)? {
+        return Ok(false);
+    }
+    let intent: Intent = state::read(&path)?;
+    validate(
+        &intent,
+        receipt,
+        &intent.original_sha256,
+        &intent.owner_sha256,
+    )?;
+    if receipt.phase != "stopped-data-retained"
+        || intent.complete_sha256.as_deref() != Some(complete.as_str())
+        || intent.new_boot.as_deref().is_none_or(str::is_empty)
+        || intent.bridges.as_ref() != Some(selection)
+        || intent.one_off_sha256.is_some()
+    {
+        return Err(refused());
+    }
+    Ok(true)
+}
 /// Normally select while stopped, then call after explicit runtime up. A dead
 /// ready owner with exact previous-boot reservations can be selected on the
 /// immediate successor boot without another restart.
@@ -214,7 +249,7 @@ pub fn retire_recovered_publisher(
         &intent.owner_sha256,
     )?;
     if intent.complete_sha256.as_deref() != Some(complete.as_str())
-        || intent.new_boot.as_deref() != Some(engine.guest().boot_id())
+        || intent.new_boot.as_deref().is_none_or(str::is_empty)
         || intent.one_off_sha256.is_some()
     {
         return Err(refused());
@@ -237,8 +272,20 @@ pub fn retire_recovered_publisher(
     }
     let bridges = intent.bridges.as_ref().ok_or_else(refused)?;
     bridges::cleanup::verify_recovery_file(&root, bridges, intent.prior_bridges.as_ref())?;
-    host_relay::inspect_cleanup(candidate, &engine, &receipt, false, &environment, bridges)?;
-    foreground::retire_publisher_path(candidate, run, &intent.owner_sha256, &complete)?;
+    if intent.new_boot.as_deref() == Some(engine.guest().boot_id()) {
+        host_relay::inspect_cleanup(candidate, &engine, &receipt, false, &environment, bridges)?;
+        foreground::retire_publisher_path(candidate, run, &intent.owner_sha256, &complete)?;
+    } else {
+        // A later VM boot has a new bridge registry generation. Recheck the
+        // retained graph and immutable prior proof, then require the publisher
+        // to have been fully retired under the original recovery boot.
+        foreground::verify_recovered_publisher_retired(
+            candidate,
+            run,
+            &intent.owner_sha256,
+            &complete,
+        )?;
+    }
     Ok(json!({"run":run,"publisher_retired":true,"data_retained":true}))
 }
 fn prepare(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, CandidateError> {
@@ -363,9 +410,20 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         } else {
             None
         };
-        if (receipt.phase != "ready-observed" && one_off_sha256.is_none())
+        let interrupted_enrollment = receipt.phase == "cleanup-intent"
+            && receipt.relay_cleanup.as_ref().is_some_and(|marker| {
+                marker.valid()
+                    && marker.phase == cleanup_enrollment::Phase::Pending
+                    && host_relay::context(&receipt.owner, &old_boot).is_ok_and(|context| {
+                        marker.runtime == context.runtime && marker.boot == context.boot
+                    })
+            })
+            && exists(&root.join("relay-cleanup-bridges.json"))?;
+        if (receipt.phase != "ready-observed"
+            && !interrupted_enrollment
+            && one_off_sha256.is_none())
             || receipt.relay_startup.is_none()
-            || receipt.relay_cleanup.is_some()
+            || (receipt.relay_cleanup.is_some() && !interrupted_enrollment)
             || selected(&receipt)? != expected
         {
             return Err(refused());
@@ -729,6 +787,40 @@ mod tests {
             complete_sha256: None,
             one_off_sha256: None,
         }
+    }
+    #[test]
+    fn archived_bridge_proof_requires_exact_stopped_receipt_and_selection() {
+        let fixture = super::super::tests::Fixture::new();
+        let original = partial();
+        let mut stopped = original.clone();
+        stopped.phase = "stopped-data-retained".into();
+        let selection: bridges::cleanup::Selection = serde_json::from_value(json!({
+            "version":1,"owner":original.owner,"boot":"prior-boot",
+            "run":original.run,"plan":original.plan_id,"capacity":0,
+            "serial":1,"selected":{}
+        }))
+        .unwrap();
+        let mut proof = intent(&original);
+        proof.new_boot = Some("prior-boot".into());
+        proof.complete_sha256 = Some(selected(&stopped).unwrap());
+        proof.bridges = Some(selection.clone());
+        let path = fixture.0.join(format!(
+            "dead-owner-cleanup-retired-{}.json",
+            selected(&stopped).unwrap()
+        ));
+        assert!(!retired_prior_bridges(&fixture.0, &stopped, &selection).unwrap());
+        state::write(&path, &proof).unwrap();
+        assert!(retired_prior_bridges(&fixture.0, &stopped, &selection).unwrap());
+        let changed: bridges::cleanup::Selection = serde_json::from_value(json!({
+            "version":1,"owner":original.owner,"boot":"other-boot",
+            "run":original.run,"plan":original.plan_id,"capacity":0,
+            "serial":1,"selected":{}
+        }))
+        .unwrap();
+        assert!(retired_prior_bridges(&fixture.0, &stopped, &changed).is_err());
+        proof.complete_sha256 = Some("f".repeat(64));
+        state::write(&path, &proof).unwrap();
+        assert!(retired_prior_bridges(&fixture.0, &stopped, &selection).is_err());
     }
     #[test]
     fn normalized_completion_preserves_original_proof_and_rejects_altered_job() {

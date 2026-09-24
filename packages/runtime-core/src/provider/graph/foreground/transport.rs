@@ -386,6 +386,38 @@ pub(in crate::provider::graph) fn retire_recovered_publisher(
     }
     Ok(())
 }
+
+/** A later boot may resume frontend recovery only after retirement was fully
+ * recorded. This read-only proof never begins or completes a partial move.
+ */
+pub(in crate::provider::graph) fn verify_recovered_publisher_retired(
+    candidate: &Candidate,
+    run: &str,
+    expected_owner: &str,
+    expected_receipt: &str,
+) -> Result<(), CandidateError> {
+    if !super::super::hex(expected_owner, 64) || !super::super::hex(expected_receipt, 64) {
+        return Err(retirement_refused());
+    }
+    let root = root(candidate, run)?;
+    state::check_private_directory(&root).map_err(|_| retirement_refused())?;
+    let lock = state::Lock::acquire_existing(&root).map_err(|_| retirement_refused())?;
+    let intent: Retirement =
+        state::read(&retirement_path(&root, expected_owner)).map_err(|_| retirement_refused())?;
+    let (socket_original, record_original) = verify_retirement(
+        candidate,
+        run,
+        expected_owner,
+        expected_receipt,
+        &root,
+        &lock,
+        &intent,
+    )?;
+    if socket_original || record_original {
+        return Err(retirement_refused());
+    }
+    Ok(())
+}
 fn root(candidate: &Candidate, run: &str) -> Result<PathBuf, CandidateError> {
     if !super::super::hex(run, 32) {
         return Err(refused());

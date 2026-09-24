@@ -283,6 +283,75 @@ test("source CLI native ps reports not-started with Docker unavailable", async (
     await child.exited;
   }
 });
+test("plain native ps warns when the foreground owner has died despite running containers", async () => {
+  const { writeFile, chmod } = await import("node:fs/promises");
+  const { resolve } = await import("node:path");
+  const opts = await fixture();
+  await writeFile(
+    join(opts.scope.projectDir, "hack.config.json"),
+    '{"name":"native-observe"}'
+  );
+  await writeFile(
+    join(opts.scope.projectDir, "docker-compose.yml"),
+    "services:\n  web:\n    image: example:public\n"
+  );
+  const binary = join(opts.scope.projectRoot, "fake-native");
+  await writeFile(
+    binary,
+    `#!/bin/sh
+if [ "$3" = graph ] && [ "$4" = inspect ]; then
+  cat <<'JSON'
+${JSON.stringify(snapshot(true))}
+JSON
+  exit 0
+fi
+if [ "$3" = graph ] && [ "$4" = owner-status ]; then
+  echo '{"code":"graph_owner_recovery"}' >&2
+  exit 1
+fi
+exit 2
+`
+  );
+  await chmod(binary, 0o700);
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      resolve(import.meta.dir, "../index.ts"),
+      "ps",
+      "--path",
+      opts.scope.projectRoot,
+    ],
+    {
+      env: {
+        PATH: "/usr/bin:/bin",
+        HOME: opts.scope.projectRoot,
+        HACK_HOME: join(opts.scope.projectRoot, "isolated-global"),
+        HACK_RUNTIME_BACKEND: "native",
+        HACK_NATIVE_BINARY: binary,
+        HACK_NATIVE_HOME: opts.scope.nativeHome,
+        HACK_LOGGER: "console",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(code).toBe(0);
+    expect(stdout).toContain("web");
+    expect(stderr).toContain("owner is unconfirmed");
+    expect(stderr).toContain("not usable readiness");
+  } finally {
+    clearTimeout(timer);
+    child.kill("SIGKILL");
+    await child.exited;
+  }
+});
 
 test("unsupported native forms and missing restart consent refuse before Docker or hooks", async () => {
   const { writeFile, readFile, chmod } = await import("node:fs/promises");

@@ -34,11 +34,21 @@ impl Engine<'_> {
         let result = batch(
             &self.transport.client,
             stops,
-            Instant::now() + Duration::from_secs(40),
+            Instant::now() + stop_budget(stops),
         );
         self.guest.verify()?;
         result
     }
+}
+
+/// The guest engine may serialize stop requests even when the host dispatches
+/// them together. Allow the declared grace of every selected container while
+/// retaining a finite bound below the foreground cleanup request timeout.
+fn stop_budget(stops: &[(String, u64)]) -> Duration {
+    let seconds = stops.iter().fold(30_u64, |total, (_, grace)| {
+        total.saturating_add((*grace).max(1))
+    });
+    Duration::from_secs(seconds.clamp(40, 540))
 }
 
 fn batch(
@@ -108,6 +118,18 @@ mod tests {
             .is_err()
         );
         assert!(validate(&[("a".repeat(64), 0), ("b".repeat(64), 30)]).is_ok());
+    }
+
+    #[test]
+    fn stop_budget_covers_guest_serialization_without_exceeding_request_bound() {
+        let stops = (0..14)
+            .map(|n| (format!("{n:064x}"), 10))
+            .collect::<Vec<_>>();
+        assert_eq!(stop_budget(&stops), Duration::from_secs(170));
+        let largest = (0..32)
+            .map(|n| (format!("{n:064x}"), 30))
+            .collect::<Vec<_>>();
+        assert_eq!(stop_budget(&largest), Duration::from_secs(540));
     }
 
     #[test]

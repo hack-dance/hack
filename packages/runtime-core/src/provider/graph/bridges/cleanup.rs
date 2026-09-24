@@ -223,7 +223,43 @@ pub(crate) fn capture_previous_boot(
             .collect(),
     };
     if selection.selected.is_empty() {
-        selection.predecessor_owner = Some(predecessor_owner(receipt, previous)?);
+        let interrupted = receipt.phase == "cleanup-intent"
+            && receipt.relay_cleanup.as_ref().is_some_and(|marker| {
+                marker.valid() && marker.phase == super::super::cleanup_enrollment::Phase::Pending
+            });
+        if interrupted {
+            let root = super::super::directory(candidate, &receipt.run)?;
+            let prior: Selection = state::read_bounded(&selection_path(&root)?, 65536)?;
+            if prior.version != 1
+                || prior.owner != selection.owner
+                || prior.boot != previous
+                || prior.previous_boot.is_some()
+                || prior.predecessor_owner.is_some()
+                || prior.run != selection.run
+                || prior.plan != selection.plan
+                || prior.capacity != selection.capacity
+                || prior.selected.is_empty()
+                || prior.serial > selection.serial
+                || validate_bindings(receipt, &prior, None).is_err()
+            {
+                return Err(invalid());
+            }
+            selection.selected = prior
+                .selected
+                .into_iter()
+                .map(|(slot, selected)| {
+                    (
+                        slot,
+                        Selected {
+                            assignment: selected.assignment,
+                            helper: None,
+                        },
+                    )
+                })
+                .collect();
+        } else {
+            selection.predecessor_owner = Some(predecessor_owner(receipt, previous)?);
+        }
     }
     validate_selection(engine, receipt, &selection)?;
     Ok(selection)
@@ -277,7 +313,39 @@ fn selection_path(root: &std::path::Path) -> Result<PathBuf, CandidateError> {
     }
 }
 
-fn prior_generation(prior: &Selection, current: &Selection, stopped: Option<&Receipt>) -> bool {
+fn prior_generation(
+    root: &std::path::Path,
+    prior: &Selection,
+    current: &Selection,
+    stopped: Option<&Receipt>,
+    receipt: &Receipt,
+) -> bool {
+    let interrupted_release = receipt.phase == "cleanup-intent"
+        && receipt.relay_cleanup.as_ref().is_some_and(|marker| {
+            marker.valid() && marker.phase == super::super::cleanup_enrollment::Phase::Pending
+        })
+        && prior.version == 1
+        && prior.owner == current.owner
+        && prior.boot == current.previous_boot.as_deref().unwrap_or_default()
+        && prior.previous_boot.is_none()
+        && prior.predecessor_owner.is_none()
+        && prior.run == current.run
+        && prior.plan == current.plan
+        && prior.capacity == current.capacity
+        && prior.serial <= current.serial
+        && !prior.selected.is_empty()
+        && prior.selected.len() == current.selected.len()
+        && prior.selected.iter().all(|(slot, selected)| {
+            current
+                .selected
+                .get(slot)
+                .is_some_and(|now| now.assignment == selected.assignment && now.helper.is_none())
+        })
+        && validate_bindings(receipt, prior, None).is_ok()
+        && validate_bindings(receipt, current, Some(&prior.boot)).is_ok();
+    if interrupted_release {
+        return true;
+    }
     prior.version == 1
         && prior.owner == current.owner
         && prior.boot == current.previous_boot.as_deref().unwrap_or_default()
@@ -295,13 +363,17 @@ fn prior_generation(prior: &Selection, current: &Selection, stopped: Option<&Rec
                 .is_some_and(|relay| relay.launch_serial > prior.serial)
         })
         && (prior.selected.is_empty()
-            || stopped.is_some_and(|receipt| stopped_prior_bindings(prior, receipt)))
+            || stopped.is_some_and(|receipt| stopped_prior_bindings(root, prior, receipt)))
 }
 
-fn stopped_prior_bindings(prior: &Selection, receipt: &Receipt) -> bool {
-    receipt.relay_cleanup.as_ref().is_some_and(|cleanup| {
-        cleanup.phase() == super::super::cleanup_enrollment::Phase::Confirmed
-    }) && validate_bindings(receipt, prior, None).is_ok()
+fn stopped_prior_bindings(root: &std::path::Path, prior: &Selection, receipt: &Receipt) -> bool {
+    let acknowledged =
+        receipt.relay_cleanup.as_ref().is_some_and(|cleanup| {
+            cleanup.phase() == super::super::cleanup_enrollment::Phase::Confirmed
+        }) || super::super::dead_owner_cleanup::retired_prior_bridges(root, receipt, prior)
+            .unwrap_or(false);
+    acknowledged
+        && validate_bindings(receipt, prior, None).is_ok()
         && prior.selected.values().all(|selected| {
             let assignment = &selected.assignment;
             receipt
@@ -336,7 +408,7 @@ pub(crate) fn capture_prior_generation(
     } else {
         super::super::restore_history::latest_for_bridge_recovery(root, receipt)?
     };
-    if !prior_generation(&prior, current, stopped.as_ref()) {
+    if !prior_generation(root, &prior, current, stopped.as_ref(), receipt) {
         return Err(invalid());
     }
     serde_json::to_value(prior).map(Some).map_err(|_| invalid())
@@ -702,6 +774,89 @@ mod tests {
         stopped.resources.get_mut("container:web").unwrap().phase = "started".into();
         super::super::restore_history::retain(&fixture.0, &stopped).unwrap();
         assert!(capture_prior_generation(&fixture.0, &current, &active).is_err());
+    }
+    #[test]
+    fn interrupted_release_reuses_only_the_exact_prior_bridge_selection() {
+        let fixture = Fixture::new();
+        let old_boot = "11111111-1111-1111-1111-111111111111";
+        let mut prior = selection(2);
+        prior.boot = old_boot.into();
+        prior.capacity = 1;
+        let assignment = Assignment {
+            reservation: "d".repeat(32),
+            run: prior.run.clone(),
+            service: "web".into(),
+            generation: "e".repeat(64),
+            container_id: "f".repeat(64),
+            network_id: "1".repeat(64),
+            boot_id: old_boot.into(),
+            phase: "running".into(),
+            relay: Some(relay::Relay {
+                transport: relay::Transport::ReservationV1,
+                launch_serial: 1,
+                binary_sha256: "2".repeat(64),
+                target_pid: 10,
+                target_start: 10,
+                port: 8080,
+            }),
+        };
+        prior.selected.insert(
+            0,
+            Selected {
+                assignment: assignment.clone(),
+                helper: Some(
+                    serde_json::from_value(json!({
+                        "pid":10,"start":10,"executable_device":1,"executable_inode":1,
+                        "socket_device":1,"socket_inode":1,"kernel_socket_inode":1
+                    }))
+                    .unwrap(),
+                ),
+            },
+        );
+        let mut current = selection(2);
+        current.boot = "22222222-2222-2222-2222-222222222222".into();
+        current.previous_boot = Some(old_boot.into());
+        current.capacity = 1;
+        current.selected.insert(
+            0,
+            Selected {
+                assignment: assignment.clone(),
+                helper: None,
+            },
+        );
+        let mut receipt: Receipt = serde_json::from_value(json!({
+            "version":1,"run":current.run,"owner":current.owner,
+            "namespace":"3".repeat(64),"plan_id":current.plan,
+            "phase":"cleanup-intent","readiness":{},"resources":{
+                "container:web":{"kind":"container","key":"web","name":"owned-web",
+                    "id":assignment.container_id,"image":null,"phase":"started"},
+                "network:default":{"kind":"network","key":"default","name":"owned-network",
+                    "id":assignment.network_id,"image":null,"phase":"created"}
+            },
+            "relay_cleanup":{"version":1,"runtime":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "boot":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "operation":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "effect":vec![1;32],
+                "control_root":"/private/owned","phase":"pending"}
+        }))
+        .unwrap();
+        assert!(prior_generation(
+            &fixture.0, &prior, &current, None, &receipt
+        ));
+        receipt.phase = "ready-observed".into();
+        assert!(!prior_generation(
+            &fixture.0, &prior, &current, None, &receipt
+        ));
+        receipt.phase = "cleanup-intent".into();
+        current
+            .selected
+            .get_mut(&0)
+            .unwrap()
+            .assignment
+            .container_id = "9".repeat(64);
+        assert!(!prior_generation(
+            &fixture.0, &prior, &current, None, &receipt
+        ));
     }
     fn pending(root: &std::path::Path, bytes: &[u8]) -> PathBuf {
         let path = root.join("relay-cleanup-bridges.pending");

@@ -104,7 +104,7 @@ export async function nativeProjectDown(opts: {
     runtime: opts.runtime,
     cwd: opts.scope.projectRoot,
     args: ["graph", "cleanup", "--run-id", run.run, "--json"],
-    timeoutMs: 150_000,
+    timeoutMs: 590_000,
   });
   verify(await inspect(), run, true);
   await opts.after?.(run);

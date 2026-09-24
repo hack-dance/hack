@@ -29,8 +29,11 @@ fn recovered_publisher_retirement_is_exact_and_idempotent() {
     let (_fixture, candidate, run, owner, root) = abandoned_publisher();
     let receipt = "f".repeat(64);
     assert!(Retired::acquire(&candidate, &run).unwrap().is_none());
+    assert!(verify_recovered_publisher_retired(&candidate, &run, &owner, &receipt).is_err());
     assert!(retire_recovered_publisher(&candidate, &run, &"0".repeat(64), &receipt).is_err());
     retire_recovered_publisher(&candidate, &run, &owner, &receipt).unwrap();
+    verify_recovered_publisher_retired(&candidate, &run, &owner, &receipt).unwrap();
+    assert!(verify_recovered_publisher_retired(&candidate, &run, &owner, &"e".repeat(64)).is_err());
     assert!(
         root.join("retirement-".to_owned() + &owner + ".json")
             .is_file()

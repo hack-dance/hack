@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { lstat, open, realpath, rmdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import { checkNativeHttpsPort } from "./native-https-port.ts";
@@ -31,6 +31,48 @@ async function absent(path: string): Promise<void> {
     throw refused();
   }
   throw refused();
+}
+
+/** Retire only the empty HTTPS lock left by a verified dead frontend. The
+ * caller has already checked the stopped graph, authority, port and hooks.
+ */
+async function retireOrphanedHttpsLock(path: string): Promise<void> {
+  let before: Awaited<ReturnType<typeof lstat>>;
+  try {
+    before = await lstat(path);
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return;
+    }
+    throw refused();
+  }
+  let resolved: string;
+  try {
+    resolved = await realpath(path);
+  } catch {
+    throw refused();
+  }
+  if (
+    !before.isDirectory() ||
+    before.uid !== process.getuid?.() ||
+    (before.mode & 0o777) !== 0o700 ||
+    resolved !== path
+  ) {
+    throw refused();
+  }
+  const after = await lstat(path);
+  if (
+    !after.isDirectory() ||
+    after.dev !== before.dev ||
+    after.ino !== before.ino
+  ) {
+    throw refused();
+  }
+  try {
+    await rmdir(path);
+  } catch {
+    throw refused();
+  }
 }
 
 async function noLifecycleEntries(projectDir: string): Promise<void> {
@@ -120,6 +162,7 @@ type RecoveryOptions = {
   readonly inspect?: typeof inspectNativeProjectGraph;
   readonly checkPort?: typeof checkNativeHttpsPort;
   readonly inspectLegacyProcesses?: typeof noOtherHackFrontends;
+  readonly cleanupLifecycle?: () => Promise<void>;
 };
 
 async function verifyStoppedGraph(opts: RecoveryOptions): Promise<void> {
@@ -204,11 +247,17 @@ export async function verifyNativeFrontendRecovery(
   ) {
     throw refused();
   }
-  await absent(join(opts.runtime.home, "native-https/owner.lock"));
   if (opts.httpsPort !== null) {
     await (opts.checkPort ?? checkNativeHttpsPort)(opts.httpsPort);
   }
+  await opts.cleanupLifecycle?.();
   await noLifecycleEntries(opts.scope.projectDir);
+  const lock = join(opts.runtime.home, "native-https/owner.lock");
+  if (opts.httpsPort === null) {
+    await absent(lock);
+  } else {
+    await retireOrphanedHttpsLock(lock);
+  }
 }
 
 /** The backend performs its own completed-cleanup and inode proof before moving

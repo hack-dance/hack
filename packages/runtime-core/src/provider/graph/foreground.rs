@@ -18,6 +18,7 @@ mod tests;
 mod transport;
 pub(in crate::provider::graph) use transport::DeadOwner;
 pub(in crate::provider::graph) use transport::retire_recovered_publisher as retire_publisher_path;
+pub(in crate::provider::graph) use transport::verify_recovered_publisher_retired;
 use transport::{Publication, WireRequest};
 fn refused() -> CandidateError {
     CandidateError::new(
@@ -487,7 +488,7 @@ pub fn request(
         },
         Duration::from_secs(5),
     )?;
-    let response: Value = transport::read(&mut stream, Duration::from_secs(120), 256 * 1024)?;
+    let response: Value = transport::read(&mut stream, Duration::from_secs(570), 256 * 1024)?;
     validate_owner_response(response, run)
 }
 

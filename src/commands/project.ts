@@ -6001,6 +6001,14 @@ async function handleNativeUp({
                   ? token.httpsPort
                   : (startup.https?.httpsPort ?? null),
               legacy: token.version === 1,
+              cleanupLifecycle: async () =>
+                await stopLifecycleProcesses({
+                  project,
+                  cfg,
+                  projectName: sanitizeProjectSlug(projectName),
+                  branch,
+                  composeProject,
+                }),
             }),
           retirePublisher: async (run) =>
             await retireNativeRecoveredPublisher({
@@ -7964,6 +7972,36 @@ async function maybeManageProjectLogsAfterDown(opts: {
   });
 }
 
+async function displayNativePs(
+  result: Awaited<ReturnType<typeof nativeProjectPs>>,
+  json: boolean
+): Promise<void> {
+  if (json) {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+  if (result.status === "owner_unconfirmed") {
+    logger.warn({
+      message:
+        "Native graph owner is unconfirmed. Service rows are observations, not usable readiness; explicit retaining recovery is required.",
+    });
+  } else if (result.status === "runtime_degraded") {
+    logger.warn({
+      message:
+        "Native graph owner reported a degraded runtime. Service rows do not prove usable readiness; inspect graph owner-status.",
+    });
+  }
+  await display.table({
+    columns: ["NATIVE SERVICE", "CONTAINER", "STATE", "HEALTH"],
+    rows: result.items.map((item) => [
+      item.service,
+      item.container ?? "",
+      item.state,
+      item.health ?? "",
+    ]),
+  });
+}
+
 async function handlePs({
   ctx,
   args,
@@ -7997,19 +8035,7 @@ async function handlePs({
         branch,
       },
     });
-    if (json) {
-      process.stdout.write(`${JSON.stringify(result)}\n`);
-    } else {
-      await display.table({
-        columns: ["NATIVE SERVICE", "CONTAINER", "STATE", "HEALTH"],
-        rows: result.items.map((item) => [
-          item.service,
-          item.container ?? "",
-          item.state,
-          item.health ?? "",
-        ]),
-      });
-    }
+    await displayNativePs(result, json);
     return 0;
   }
   const profiles = parseCsvList(args.options.profile);

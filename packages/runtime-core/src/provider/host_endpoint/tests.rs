@@ -36,6 +36,79 @@ fn discovery_requires_the_exact_executable_and_live_exclusive_listener() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn executable_pinned_discovery_follows_a_new_listener_process() {
+    use std::process::{Child, Command, Stdio};
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reserved.local_addr().unwrap().port();
+    drop(reserved);
+    let spawn = || {
+        OwnedChild(
+            Command::new(&executable)
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "provider::host_endpoint::tests::discovery_listener_child",
+                    "--test-threads=1",
+                ])
+                .env("HACK_DISCOVERY_LISTENER_PORT", port.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        )
+    };
+    let await_discovery = |child: &mut OwnedChild| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(found) = HostEndpoint::discover(&executable, port) {
+                assert_eq!(found.0, child.0.id() as i32);
+                return found;
+            }
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "listener child exited"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "listener child was not discovered"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let mut first = spawn();
+    let previous = await_discovery(&mut first);
+    first.0.kill().unwrap();
+    assert!(first.0.wait().unwrap().code().is_none());
+    assert!(HostEndpoint::capture(previous.0, port).is_err());
+    let mut second = spawn();
+    let current = await_discovery(&mut second);
+    assert_ne!(previous.0, current.0);
+    assert_ne!(previous.1, current.1);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "owned subprocess fixture for executable_pinned_discovery_follows_a_new_listener_process"]
+fn discovery_listener_child() {
+    let port: u16 = std::env::var("HACK_DISCOVERY_LISTENER_PORT")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let _listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+    thread::sleep(Duration::from_secs(30));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn accepted_stream_preserves_payload_and_half_close() {
     let (listener, endpoint) = fixture();
     listener.set_nonblocking(true).unwrap();

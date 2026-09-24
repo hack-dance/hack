@@ -28,6 +28,7 @@ Usage:
   hack-local graph logs --run-id <32-hex> --service <name> [--tail <1..1000>] [--json]
   hack-local graph exec --run-id <32-hex> --service <name> [--workdir /path] [--timeout-seconds <1..120>] [--json] -- <program> [args...]
   hack-local graph dependency-plan --dependencies <reviewed.json> [--json]
+  hack-local graph dependency-discover --host-port <port> --executable <absolute-path> [--json]
   hack-local graph serve --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... --dependencies <reviewed.json> --expect-dependencies <sha256> [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
   hack-local graph owner-status --run-id <32-hex> [--json]
   hack-local graph storage-inventory [--json]

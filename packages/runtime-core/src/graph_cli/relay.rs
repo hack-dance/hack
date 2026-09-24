@@ -40,6 +40,8 @@ struct Binding {
     aliases: Vec<String>,
     host_pid: i32,
     host_port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_executable: Option<PathBuf>,
 }
 fn hex(value: &str) -> bool {
     value.len() == 64
@@ -88,6 +90,12 @@ impl Selection {
                     && b.guest_port > 0
                     && b.host_pid > 1
                     && b.host_port > 0
+                    && b.host_executable.as_ref().is_none_or(|path| {
+                        path.is_absolute()
+                            && path.to_str().is_some_and(|text| {
+                                !text.is_empty() && text.len() <= 1024 && !text.contains('\0')
+                            })
+                    })
                     && keys.insert((&b.service, &b.binding))
                     && slots
                         .insert(b.slot, (b.host_pid, b.host_port))
@@ -134,6 +142,9 @@ impl Selection {
         let mut slots = BTreeMap::new();
         for binding in &self.dependencies {
             let endpoint = HostEndpoint::capture(binding.host_pid, binding.host_port)?;
+            if let Some(executable) = &binding.host_executable {
+                endpoint.require_executable(executable)?;
+            }
             let fingerprint = endpoint.fingerprint()?;
             if slots
                 .insert(binding.slot, fingerprint.clone())
@@ -155,6 +166,10 @@ impl Selection {
             .map_err(|_| refused())?;
         Ok((format!("{:x}", Sha256::digest(bytes)), dependencies))
     }
+}
+pub(super) fn discover(executable: &Path, port: u16) -> Result<Value, CandidateError> {
+    let (pid, fingerprint) = HostEndpoint::discover(executable, port)?;
+    Ok(json!({"host_pid":pid,"endpoint_fingerprint":fingerprint}))
 }
 pub(super) fn plan(path: &Path) -> Result<Value, CandidateError> {
     let selection = Selection::read(path)?;

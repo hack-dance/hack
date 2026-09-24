@@ -118,6 +118,62 @@ test("selection files are bounded regular files; symlinks and malformed private 
   expect(await readNativeHostDependencies({ services: ["web"] })).toEqual([]);
 });
 
+test("executable-pinned selection refreshes one current PID per shared listener after hooks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-dependencies-refresh-"));
+  roots.push(root);
+  const path = join(root, "selection.json");
+  const executable = "/usr/local/bin/synthetic-tunnel";
+  const selected = [binding(), binding("worker")].map((entry) => {
+    const { host_pid: _stale, ...intent } = entry;
+    return { ...intent, host_executable: executable };
+  });
+  await writeFile(path, JSON.stringify({ version: 1, dependencies: selected }));
+  const calls: unknown[] = [];
+  const discover = async (request: {
+    readonly hostPort: number;
+    readonly executable: string;
+  }) => {
+    calls.push(request);
+    return { host_pid: 456, endpoint_fingerprint: "a".repeat(64) };
+  };
+  const result = await readNativeHostDependencies({
+    path,
+    services: ["web", "worker"],
+    discover,
+  });
+  expect(calls).toEqual([{ hostPort: 8443, executable }]);
+  expect(result.map((entry) => [entry.host_pid, entry.slot])).toEqual([
+    [456, 0],
+    [456, 0],
+  ]);
+  expect(result[0]?.host_executable).toBe(executable);
+  await expect(
+    readNativeHostDependencies({ path, services: ["web", "worker"] })
+  ).rejects.toThrow("values omitted");
+  await expect(
+    readNativeHostDependencies({
+      path,
+      services: ["web", "worker"],
+      discover: async () => ({
+        host_pid: 456,
+        endpoint_fingerprint: "invalid",
+      }),
+    })
+  ).rejects.toThrow("values omitted");
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      dependencies: [{ ...selected[0], host_executable: "relative/tunnel" }],
+    })
+  );
+  calls.length = 0;
+  await expect(
+    readNativeHostDependencies({ path, services: ["web"], discover })
+  ).rejects.toThrow("values omitted");
+  expect(calls).toEqual([]);
+});
+
 test("72 service-specific grants use six shared host transports", () => {
   const services = Array.from({ length: 12 }, (_, i) => `service-${i}`);
   const entries = services.flatMap((service) =>

@@ -467,6 +467,17 @@ prepare current listeners before selection. For example:
 
 Replace the example PID with the actual listener process. Up to 128 service-specific
 bindings and eight exact aliases per binding are supported, within 32 listening transports shared with the pool's route bridges.
+For a listener started or rotated by a lifecycle hook, replace `host_pid` with
+`"host_executable": "/absolute/path/to/the/listener-binary"`. Hack discovers
+the current PID after the hooks and again before restart cleanup, requiring one
+same-user process with that exact executable and an exclusive IPv4 loopback
+listener on `host_port`. It passes the discovered PID to native review without
+rewriting the private selection file. The native dependency plan pins the
+process and socket generation again before admitting the graph. A missing,
+ambiguous, wrong-executable or substituted listener refuses; an already running
+graph stays up when restart preflight refuses. Fixed `host_pid` selections remain
+supported. Active-graph listener rotation still requires a separate rebind path;
+this selection handles startup and restart admission.
 Bindings in different services targeting the same pinned host listener can share
 a transport slot; authentication, cancellation and expiry remain per binding.
 The CLI groups selections by host PID and port in first-appearance order, and

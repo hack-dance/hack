@@ -451,6 +451,49 @@ test("host listener selections replace stale pre-hook state and bind to the revi
   expect(await startNativeProject({ ...opts, dependencyFile: path })).toBe(0);
 });
 
+test("host listener discovery after hooks binds the current executable-pinned PID", async () => {
+  const { opts, events } = await fixture(false);
+  const path = join(opts.scope.projectRoot, "host-selection.json");
+  const before = opts.before;
+  opts.before = async () => {
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        dependencies: [
+          {
+            service: "web",
+            binding: "search",
+            guest_port: 443,
+            host_port: 8443,
+            host_executable: "/usr/local/bin/synthetic-tunnel",
+            aliases: ["search.example.com"],
+          },
+        ],
+      })
+    );
+    return await before();
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "dependency-discover") {
+      expect(events).toContain("before");
+      return { host_pid: 456, endpoint_fingerprint: "e".repeat(64) };
+    }
+    if (request.args[1] === "dependency-plan") {
+      const selection = JSON.parse(
+        await readFile(String(request.args[3]), "utf8")
+      );
+      expect(selection.dependencies[0].host_pid).toBe(456);
+      expect(selection.dependencies[0].host_executable).toBe(
+        "/usr/local/bin/synthetic-tunnel"
+      );
+    }
+    return await invoke(request);
+  };
+  expect(await startNativeProject({ ...opts, dependencyFile: path })).toBe(0);
+});
+
 test("invalid listener selection cleans lifecycle hooks before runtime effects", async () => {
   const { opts, events } = await fixture(false);
   const path = join(opts.scope.projectRoot, "host-selection.json");

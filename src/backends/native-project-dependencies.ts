@@ -1,11 +1,17 @@
+import { isAbsolute } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 
 import { readNativeSelection } from "./native-project-selection.ts";
+import {
+  invokeNativeRuntime,
+  type NativeRuntimeSelection,
+} from "./native-runtime-client.ts";
 
 const SERVICE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const BINDING = /^[a-z0-9._-]{1,128}$/;
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const NUMERIC_HOST = /^[0-9.]+$/;
+const FINGERPRINT = /^[a-f0-9]{64}$/;
 const FIELDS = new Set([
   "service",
   "binding",
@@ -13,6 +19,7 @@ const FIELDS = new Set([
   "aliases",
   "host_pid",
   "host_port",
+  "host_executable",
 ]);
 
 export type NativeHostDependency = {
@@ -23,6 +30,7 @@ export type NativeHostDependency = {
   readonly aliases: readonly string[];
   readonly host_pid: number;
   readonly host_port: number;
+  readonly host_executable?: string;
 };
 
 /** The guest relay launcher requires a reaping init process; honor an explicit refusal. */
@@ -110,6 +118,11 @@ export function parseNativeHostDependencies(opts: {
         Number.isSafeInteger(entry.host_pid) &&
         entry.host_pid > 1 &&
         entry.host_pid <= 2_147_483_647 &&
+        (entry.host_executable === undefined ||
+          (typeof entry.host_executable === "string" &&
+            isAbsolute(entry.host_executable) &&
+            entry.host_executable.length <= 1024 &&
+            !entry.host_executable.includes("\0"))) &&
         Array.isArray(entry.aliases) &&
         entry.aliases.length > 0 &&
         entry.aliases.length <= 8 &&
@@ -154,6 +167,9 @@ export function parseNativeHostDependencies(opts: {
       guest_port: entry.guest_port,
       host_port: entry.host_port,
       host_pid: entry.host_pid,
+      ...(entry.host_executable === undefined
+        ? {}
+        : { host_executable: entry.host_executable }),
       aliases: entry.aliases,
     };
   });
@@ -163,16 +179,106 @@ export function parseNativeHostDependencies(opts: {
 export async function readNativeHostDependencies(opts: {
   readonly path?: string;
   readonly services: readonly string[];
+  readonly discover?: (selection: {
+    readonly hostPort: number;
+    readonly executable: string;
+  }) => Promise<{
+    readonly host_pid: number;
+    readonly endpoint_fingerprint: string;
+  }>;
 }): Promise<NativeHostDependency[]> {
   if (opts.path === undefined) {
     return [];
   }
   try {
+    const value = await readNativeSelection(opts.path);
+    if (!(isRecord(value) && Array.isArray(value.dependencies))) {
+      throw refused();
+    }
+    // Validate the complete intent before invoking native process discovery.
+    const provisional = {
+      ...value,
+      dependencies: value.dependencies.map((entry) =>
+        isRecord(entry) && entry.host_executable !== undefined
+          ? { ...entry, host_pid: entry.host_pid ?? 2 }
+          : entry
+      ),
+    };
+    parseNativeHostDependencies({
+      value: provisional,
+      services: opts.services,
+    });
+    const resolved = new Map<string, number>();
+    const dependencies: unknown[] = [];
+    for (const entry of value.dependencies) {
+      if (!isRecord(entry) || entry.host_executable === undefined) {
+        dependencies.push(entry);
+        continue;
+      }
+      if (!opts.discover) {
+        throw refused();
+      }
+      const executable = String(entry.host_executable);
+      const hostPort = Number(entry.host_port);
+      const key = `${executable}\0${hostPort}`;
+      let hostPid = resolved.get(key);
+      if (hostPid === undefined) {
+        const discovered = await opts.discover({ executable, hostPort });
+        if (
+          !Number.isSafeInteger(discovered.host_pid) ||
+          discovered.host_pid <= 1 ||
+          discovered.host_pid > 2_147_483_647 ||
+          !FINGERPRINT.test(discovered.endpoint_fingerprint)
+        ) {
+          throw refused();
+        }
+        hostPid = discovered.host_pid;
+        resolved.set(key, hostPid);
+      }
+      dependencies.push({ ...entry, host_pid: hostPid });
+    }
     return parseNativeHostDependencies({
-      value: await readNativeSelection(opts.path),
+      value: { ...value, dependencies },
       services: opts.services,
     });
   } catch {
     throw refused();
   }
+}
+
+/** The native backend binds the discovered PID to an exact process/listener generation. */
+export async function discoverNativeHostDependency(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly hostPort: number;
+  readonly executable: string;
+  readonly invoke?: typeof invokeNativeRuntime;
+}): Promise<{
+  readonly host_pid: number;
+  readonly endpoint_fingerprint: string;
+}> {
+  const result = await (opts.invoke ?? invokeNativeRuntime)({
+    runtime: opts.runtime,
+    cwd: opts.projectRoot,
+    args: [
+      "graph",
+      "dependency-discover",
+      "--host-port",
+      String(opts.hostPort),
+      "--executable",
+      opts.executable,
+      "--json",
+    ],
+  });
+  if (
+    !isRecord(result) ||
+    typeof result.host_pid !== "number" ||
+    typeof result.endpoint_fingerprint !== "string"
+  ) {
+    throw refused();
+  }
+  return {
+    host_pid: result.host_pid,
+    endpoint_fingerprint: result.endpoint_fingerprint,
+  };
 }

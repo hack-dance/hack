@@ -10,6 +10,7 @@ import {
   nativeStartCacheSource,
 } from "./native-project-cache.ts";
 import {
+  discoverNativeHostDependency,
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
@@ -723,6 +724,14 @@ export async function startNativeProject(opts: {
     const hostDependencies = await readNativeHostDependencies({
       path: opts.dependencyFile,
       services: Object.keys(specs),
+      discover: (selection) =>
+        discoverNativeHostDependency({
+          runtime: opts.runtime,
+          projectRoot: opts.scope.projectRoot,
+          hostPort: selection.hostPort,
+          executable: selection.executable,
+          invoke: deps.invoke,
+        }),
     });
     prepareNativeDependencyServices({
       dependencies: hostDependencies,

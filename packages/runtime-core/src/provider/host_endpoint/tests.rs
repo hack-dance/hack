@@ -22,6 +22,20 @@ fn fixture() -> (TcpListener, HostEndpoint) {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn discovery_requires_the_exact_executable_and_live_exclusive_listener() {
+    let (listener, endpoint) = fixture();
+    let port = listener.local_addr().unwrap().port();
+    let (pid, fingerprint) = HostEndpoint::discover(&endpoint.process.executable, port).unwrap();
+    assert_eq!(pid, std::process::id() as i32);
+    assert_eq!(fingerprint, endpoint.fingerprint().unwrap());
+    assert!(HostEndpoint::discover(Path::new("/bin/sh"), port).is_err());
+    assert!(endpoint.require_executable(Path::new("/bin/sh")).is_err());
+    drop(listener);
+    assert!(HostEndpoint::discover(&endpoint.process.executable, port).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn accepted_stream_preserves_payload_and_half_close() {
     let (listener, endpoint) = fixture();
     listener.set_nonblocking(true).unwrap();

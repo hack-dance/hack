@@ -225,6 +225,14 @@ files outside the reviewed project: writing a new file into its inventoried sour
 after planning invalidates the executable plan. `graph serve` validates executable
 inputs before creating relay owners and revalidates again at graph admission.
 
+An optional `host_executable` absolute path on each binding pins the exact
+same-user executable as well as the PID and listener. The frontend can obtain the
+current PID with `graph dependency-discover --host-port PORT --executable PATH
+--json` after lifecycle hooks, then place that PID and executable in the reviewed
+selection. Discovery refuses a missing, ambiguous, wildcard, shared or
+wrong-executable listener. It does not authorize a port by itself; `dependency-plan`
+and `serve` recapture the selected process and socket generation.
+
 Run `graph serve` with the usual `graph run` project/file/plan/run/readiness options,
 plus `--dependencies FILE --expect-dependencies ID`. It remains foreground, prints
 one compact `graph_foreground_ready` JSON line after startup, and prints its final

@@ -4,7 +4,7 @@
 //! Native identity protects against endpoint replacement, not a malicious authorized peer.
 use super::relay_auth::AuthorizedSession;
 use crate::CandidateError;
-use std::{net::TcpStream, time::Duration};
+use std::{net::TcpStream, path::Path, time::Duration};
 
 fn refused() -> CandidateError {
     CandidateError::new(
@@ -45,6 +45,87 @@ unsafe extern "C" {
 }
 
 impl HostEndpoint {
+    /// Discover one same-user exclusive loopback listener from an explicitly
+    /// selected executable. A port alone is never sufficient authority.
+    pub fn discover(executable: &Path, port: u16) -> Result<(i32, String), CandidateError> {
+        #[cfg(target_os = "macos")]
+        {
+            const LIMIT: usize = 8192;
+            const PROC_ALL_PIDS: u32 = 1;
+            if port == 0 || !executable.is_absolute() {
+                return Err(refused());
+            }
+            let expected = executable.canonicalize().map_err(|_| refused())?;
+            let mut pids = [0_i32; LIMIT];
+            // SAFETY: libproc receives a writable fixed-size PID array and retains no pointer.
+            let bytes = unsafe {
+                libc::proc_listpids(
+                    PROC_ALL_PIDS,
+                    0,
+                    pids.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&pids) as i32,
+                )
+            };
+            if bytes <= 0
+                || bytes as usize >= std::mem::size_of_val(&pids)
+                || bytes as usize % std::mem::size_of::<i32>() != 0
+            {
+                return Err(refused());
+            }
+            let uid = unsafe { libc::geteuid() };
+            let mut found = None;
+            for pid in pids[..bytes as usize / std::mem::size_of::<i32>()]
+                .iter()
+                .copied()
+                .filter(|pid| *pid > 1)
+            {
+                let Ok(process) = super::identity::observe(pid) else {
+                    continue;
+                };
+                if process.uid != uid || process.executable != expected {
+                    continue;
+                }
+                let Ok(endpoint) = Self::capture(pid, port) else {
+                    continue;
+                };
+                if found.is_some() {
+                    return Err(refused());
+                }
+                found = Some((pid, endpoint.fingerprint()?));
+            }
+            found.ok_or_else(refused)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (executable, port);
+            Err(CandidateError::new(
+                "unsupported_host",
+                "Native host endpoint discovery requires macOS.",
+            ))
+        }
+    }
+
+    /// Validate the reviewed executable again when the graph captures a PID.
+    pub fn require_executable(&self, executable: &Path) -> Result<(), CandidateError> {
+        #[cfg(target_os = "macos")]
+        {
+            if !executable.is_absolute()
+                || executable.canonicalize().map_err(|_| refused())? != self.process.executable
+            {
+                return Err(refused());
+            }
+            self.verify(0).map(|_| ())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = executable;
+            Err(CandidateError::new(
+                "unsupported_host",
+                "Native host endpoint identity requires macOS.",
+            ))
+        }
+    }
+
     /// Review identity for an explicit dependency selection. Revalidates the native
     /// listener; a later capture must match before issuing any capability.
     pub fn fingerprint(&self) -> Result<String, CandidateError> {

@@ -6,6 +6,7 @@ import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
+  discoverNativeHostDependency,
   type NativeHostDependency,
   prepareNativeDependencyServices,
   readNativeHostDependencies,
@@ -209,6 +210,14 @@ export async function preflightNativeRestart(opts: {
   const dependencies = await deps.dependencies({
     path: opts.dependencyFile,
     services: Object.keys(specs),
+    discover: (selection) =>
+      discoverNativeHostDependency({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        hostPort: selection.hostPort,
+        executable: selection.executable,
+        invoke: deps.invoke,
+      }),
   });
   prepareNativeDependencyServices({ dependencies, services: specs });
   for (const spec of Object.values(specs)) {

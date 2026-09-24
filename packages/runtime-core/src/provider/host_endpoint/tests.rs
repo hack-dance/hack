@@ -662,7 +662,20 @@ fn backend_fin_does_not_bypass_listener_replacement() {
     peer.shutdown(std::net::Shutdown::Write).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let _replacement = TcpListener::bind(("127.0.0.1", port)).unwrap();
+    // Parallel subprocess fixtures can briefly inherit the closing listener
+    // during fork/exec. Require a real replacement within a bounded window.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let _replacement = loop {
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => break listener,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AddrInUse && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => panic!("Replacement listener could not bind: {error}"),
+        }
+    };
     assert!(pending.progress().is_err());
     assert!(pending.stream.is_none());
     assert_eq!(peer.read(&mut [0]).unwrap(), 0);

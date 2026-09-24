@@ -119,6 +119,14 @@ pub(super) fn handle(
     if snapshot.receipt.phase != "ready-observed" {
         return Err(refused());
     }
+    // A ready receipt alone cannot authorize traffic through a dependency that
+    // has rotated since startup. Check this owner's live endpoints before
+    // returning a selection or admitting a one-off container.
+    {
+        let engine = Engine::connect(candidate)?;
+        let (mut receipt, root) = super::super::load(candidate, &engine, run)?;
+        startup::Driver::verify(runtime, &engine, &mut receipt, &root)?;
+    }
     let Some(command) = request.command else {
         let mut result = serde_json::to_value(selected).map_err(|_| refused())?;
         result["ok"] = json!(true);

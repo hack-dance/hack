@@ -137,6 +137,7 @@ export async function nativeProjectExec(opts: {
   }
   const service = before.items.find((item) => item.service === opts.service);
   if (
+    before.status !== "observed" ||
     before.phase !== "ready-observed" ||
     service?.state !== "running" ||
     !service.container
@@ -192,6 +193,7 @@ export async function nativeProjectExec(opts: {
     stderr = decode(value.stderr_base64);
   const after = await nativeProjectPs(opts);
   if (
+    after.status !== "observed" ||
     after.run !== before.run ||
     after.items.find((item) => item.service === opts.service)?.container !==
       service.container

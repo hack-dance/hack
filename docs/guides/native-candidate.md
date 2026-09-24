@@ -274,8 +274,14 @@ Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME` selects native observations for normal `hack ps` and bounded
 `hack logs SERVICE --no-follow`. They verify the project/branch run mapping
 against the current native graph. Logs do not support following or Loki options.
-A project with no admitted mapping reports not started. Foreground whole-project
-`hack up` additionally requires `HACK_NATIVE_SHARED_SOURCE=1`: it exposes the exact
+A project with no admitted mapping reports not started. `hack ps` keeps container
+observations separate from the last graph receipt. For a ready foreground graph,
+it also checks the live owner: `owner_unconfirmed` means the
+owner could not be authenticated, while `runtime_degraded` means its runtime check
+failed. Neither status permits a new `hack exec`, even if containers still appear
+running; inspect the owner and use explicit retaining recovery before restarting.
+Foreground whole-project `hack up` additionally requires
+`HACK_NATIVE_SHARED_SOURCE=1`: it exposes the exact
 project tree, including ignored files, with each mount's declared write mode. Use
 an explicitly prepared candidate home and the binary from a complete native bundle.
 It acquires public images, privately supplies managed environment values, runs

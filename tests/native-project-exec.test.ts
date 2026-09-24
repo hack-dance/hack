@@ -99,6 +99,32 @@ test("invalid arguments and absent mapping never execute", async () => {
     ).rejects.toThrow("requires");
   }
 });
+test("dead foreground owner refuses one-off exec before command effects", async () => {
+  const opts = await fixture();
+  let executions = 0;
+  await expect(
+    nativeProjectExec({
+      ...opts,
+      service: "web",
+      argv: ["true"],
+      invoke: async (request) => {
+        if (request.args[1] === "inspect") {
+          const value = snapshot();
+          return {
+            ...value,
+            receipt: { ...value.receipt, relay_startup: {} },
+          };
+        }
+        if (request.args[1] === "owner-status") {
+          throw new Error("graph_owner_recovery");
+        }
+        executions++;
+        throw new Error("unexpected effect");
+      },
+    })
+  ).rejects.toThrow("unconfirmed");
+  expect(executions).toBe(0);
+});
 test("foreign receipt refuses before exec and changed container after exec is uncertain without replay", async () => {
   const opts = await fixture();
   let executions = 0;

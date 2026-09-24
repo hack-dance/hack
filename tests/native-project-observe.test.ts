@@ -21,12 +21,13 @@ const run = {
   planId: "d".repeat(64),
 };
 const id = "e".repeat(64);
-function snapshot() {
+function snapshot(foreground = false) {
   return {
     receipt: {
       ...run,
       plan_id: run.planId,
       phase: "ready-observed",
+      ...(foreground ? { relay_startup: {} } : {}),
       resources: {
         "container:web": {
           kind: "container",
@@ -95,6 +96,59 @@ test("ps returns current native observations and refuses each ownership mismatch
   await expect(
     nativeProjectPs({ ...opts, invoke: async () => value })
   ).rejects.toThrow();
+});
+test("ps distinguishes a live foreground owner from historical ready containers", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  const owner = {
+    ok: true,
+    run: run.run,
+    plan: run.planId,
+    phase: "ready-observed",
+    foreground_alive: true,
+    runtime_verified: true,
+  };
+  const invoke = async (request: { args: readonly string[] }) => {
+    calls.push(request.args[1]!);
+    return request.args[1] === "inspect" ? snapshot(true) : owner;
+  };
+  expect(await nativeProjectPs({ ...opts, invoke })).toMatchObject({
+    status: "observed",
+    phase: "ready-observed",
+  });
+  expect(calls).toEqual(["inspect", "owner-status"]);
+  const failed = await nativeProjectPs({
+    ...opts,
+    invoke: async (request) => {
+      if (request.args[1] === "inspect") {
+        return snapshot(true);
+      }
+      throw new Error("graph_owner_recovery");
+    },
+  });
+  expect(failed).toMatchObject({
+    status: "owner_unconfirmed",
+    phase: "ready-observed",
+    items: [{ service: "web", state: "running" }],
+  });
+  expect(
+    await nativeProjectPs({
+      ...opts,
+      invoke: async (request) =>
+        request.args[1] === "inspect"
+          ? snapshot(true)
+          : { ...owner, runtime_verified: false },
+    })
+  ).toMatchObject({ status: "runtime_degraded" });
+  expect(
+    await nativeProjectPs({
+      ...opts,
+      invoke: async (request) =>
+        request.args[1] === "inspect"
+          ? snapshot(true)
+          : { ...owner, run: "foreign" },
+    })
+  ).toMatchObject({ status: "owner_unconfirmed" });
 });
 test("bounded logs verify current container before and after using exact CLI contract", async () => {
   const opts = await fixture();

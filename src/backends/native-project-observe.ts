@@ -32,7 +32,7 @@ function refused(): Error {
 function inspected(
   value: unknown,
   expected: NativeProjectRun
-): { items: Item[]; phase: string } {
+): { items: Item[]; phase: string; foreground: boolean } {
   if (
     !(
       isRecord(value) &&
@@ -67,7 +67,12 @@ function inspected(
   if (items.length > 32) {
     throw refused();
   }
-  return { items, phase: receipt.phase };
+  return {
+    items,
+    phase: receipt.phase,
+    foreground:
+      receipt.relay_startup !== null && receipt.relay_startup !== undefined,
+  };
 }
 function containerItem(
   resource: Record<string, unknown>,
@@ -119,11 +124,40 @@ export async function nativeProjectPs(opts: Options) {
     };
   }
   const snapshot = await inspect(opts, run);
+  let status: "observed" | "owner_unconfirmed" | "runtime_degraded" =
+    "observed";
+  if (snapshot.foreground && snapshot.phase === "ready-observed") {
+    try {
+      const owner = await (opts.invoke ?? invokeNativeRuntime)({
+        runtime: opts.runtime,
+        cwd: opts.scope.projectRoot,
+        args: ["graph", "owner-status", "--run-id", run.run, "--json"],
+        timeoutMs: 15_000,
+      });
+      if (
+        !isRecord(owner) ||
+        owner.ok !== true ||
+        owner.run !== run.run ||
+        owner.plan !== run.planId ||
+        owner.phase !== snapshot.phase ||
+        owner.foreground_alive !== true ||
+        typeof owner.runtime_verified !== "boolean"
+      ) {
+        status = "owner_unconfirmed";
+      } else if (!owner.runtime_verified) {
+        status = "runtime_degraded";
+      }
+    } catch {
+      // Keep current container observations, but never call a stale ready receipt healthy.
+      status = "owner_unconfirmed";
+    }
+  }
   return {
     backend: "native" as const,
-    status: "observed" as const,
+    status,
     run: run.run,
-    ...snapshot,
+    items: snapshot.items,
+    phase: snapshot.phase,
   };
 }
 /** Native logs are a bounded, single-service snapshot; no polling or Compose fallback. */

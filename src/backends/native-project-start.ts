@@ -180,6 +180,12 @@ function refused(): Error {
     "Native foreground up cannot admit this configuration: routing, host dependencies, builds or unsupported runtime settings require explicit native support; configuration was not dropped."
   );
 }
+
+function requireActiveStartup(signal: AbortSignal): void {
+  if (signal.aborted) {
+    throw refused();
+  }
+}
 export function prepareNativeProjectServices(
   input: NativeProjectInput,
   hasHostDependencies = false
@@ -710,9 +716,7 @@ export async function startNativeProject(opts: {
     if (opts.signal?.aborted) {
       cancel();
     }
-    if (controller.signal.aborted) {
-      throw refused();
-    }
+    requireActiveStartup(controller.signal);
     hooks = await opts.before(input);
     if (selection.aws) {
       input = (await deps.adaptAws({ input, ...selection.aws })).input;
@@ -721,6 +725,7 @@ export async function startNativeProject(opts: {
         opts.dependencyFile !== undefined
       );
     }
+    const dependencyDiscoveryDeadline = performance.now() + 60_000;
     const hostDependencies = await readNativeHostDependencies({
       path: opts.dependencyFile,
       services: Object.keys(specs),
@@ -731,8 +736,13 @@ export async function startNativeProject(opts: {
           hostPort: selection.hostPort,
           executable: selection.executable,
           invoke: deps.invoke,
+          wait: {
+            deadlineMs: dependencyDiscoveryDeadline,
+            signal: controller.signal,
+          },
         }),
     });
+    requireActiveStartup(controller.signal);
     prepareNativeDependencyServices({
       dependencies: hostDependencies,
       services: specs,

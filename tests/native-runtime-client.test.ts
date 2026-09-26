@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   invokeNativeRuntime,
+  NativeRuntimeRequestError,
   resolveNativeRuntimeSelection,
 } from "../src/backends/native-runtime-client.ts";
 
@@ -81,6 +82,22 @@ test("managed input uses stdin with EOF and is absent from argv and inherited en
     } else {
       process.env.HACK_RUNTIME_CLIENT_CANARY = prior;
     }
+  }
+});
+
+test("native failure preserves only its validated structured code", async () => {
+  const runtime = await fixture();
+  try {
+    await invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args: ["structured"],
+    });
+    throw new Error("expected structured native refusal");
+  } catch (error) {
+    expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+    expect(error).toMatchObject({ nativeCode: "source_conflict" });
+    expect(String(error)).not.toContain("synthetic-secret-diagnostic");
   }
 });
 

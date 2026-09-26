@@ -1,9 +1,11 @@
 import { isAbsolute } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { isRecord } from "../lib/guards.ts";
 
 import { readNativeSelection } from "./native-project-selection.ts";
 import {
   invokeNativeRuntime,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -246,39 +248,98 @@ export async function readNativeHostDependencies(opts: {
   }
 }
 
-/** The native backend binds the discovered PID to an exact process/listener generation. */
+type NativeDependencyWait = {
+  readonly deadlineMs: number;
+  readonly signal: AbortSignal;
+};
+
+function remainingDiscoveryTime(
+  wait?: NativeDependencyWait
+): number | undefined {
+  if (!wait) {
+    return undefined;
+  }
+  const remaining = wait.deadlineMs - performance.now();
+  if (wait.signal.aborted || !Number.isFinite(remaining) || remaining <= 0) {
+    throw refused();
+  }
+  return remaining;
+}
+
+async function waitForNextDiscovery(opts: {
+  readonly wait?: NativeDependencyWait;
+  readonly error: unknown;
+}): Promise<boolean> {
+  if (
+    !opts.wait ||
+    opts.wait.signal.aborted ||
+    !(opts.error instanceof NativeRuntimeRequestError) ||
+    opts.error.nativeCode !== "host_endpoint_identity"
+  ) {
+    return false;
+  }
+  const remaining = remainingDiscoveryTime(opts.wait);
+  try {
+    await delay(Math.min(500, remaining ?? 0), undefined, {
+      signal: opts.wait.signal,
+    });
+  } catch {
+    throw refused();
+  }
+  return true;
+}
+
+/**
+ * Discover a pinned listener, optionally waiting for a persistent startup hook.
+ * Only read-only endpoint identity refusals retry; all bindings share the caller's
+ * deadline. A successful discovery still needs dependency-plan/admission review.
+ */
 export async function discoverNativeHostDependency(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly hostPort: number;
   readonly executable: string;
   readonly invoke?: typeof invokeNativeRuntime;
+  readonly wait?: NativeDependencyWait;
 }): Promise<{
   readonly host_pid: number;
   readonly endpoint_fingerprint: string;
 }> {
-  const result = await (opts.invoke ?? invokeNativeRuntime)({
-    runtime: opts.runtime,
-    cwd: opts.projectRoot,
-    args: [
-      "graph",
-      "dependency-discover",
-      "--host-port",
-      String(opts.hostPort),
-      "--executable",
-      opts.executable,
-      "--json",
-    ],
-  });
-  if (
-    !isRecord(result) ||
-    typeof result.host_pid !== "number" ||
-    typeof result.endpoint_fingerprint !== "string"
-  ) {
-    throw refused();
+  while (true) {
+    const remaining = remainingDiscoveryTime(opts.wait);
+    try {
+      const result = await (opts.invoke ?? invokeNativeRuntime)({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        ...(remaining === undefined
+          ? {}
+          : { timeoutMs: Math.max(1, Math.min(2000, Math.ceil(remaining))) }),
+        args: [
+          "graph",
+          "dependency-discover",
+          "--host-port",
+          String(opts.hostPort),
+          "--executable",
+          opts.executable,
+          "--json",
+        ],
+      });
+      remainingDiscoveryTime(opts.wait);
+      if (
+        !isRecord(result) ||
+        typeof result.host_pid !== "number" ||
+        typeof result.endpoint_fingerprint !== "string"
+      ) {
+        throw refused();
+      }
+      return {
+        host_pid: result.host_pid,
+        endpoint_fingerprint: result.endpoint_fingerprint,
+      };
+    } catch (error) {
+      if (!(await waitForNextDiscovery({ wait: opts.wait, error }))) {
+        throw error;
+      }
+    }
   }
-  return {
-    host_pid: result.host_pid,
-    endpoint_fingerprint: result.endpoint_fingerprint,
-  };
 }

@@ -7,6 +7,19 @@ interface NativeFailure {
   readonly causeCode?: string;
 }
 
+/** Structured native codes remain safe to inspect without exposing subprocess diagnostics. */
+export class NativeRuntimeRequestError extends Error {
+  readonly nativeCode: string | undefined;
+
+  constructor(opts: {
+    readonly message: string;
+    readonly nativeCode?: string;
+  }) {
+    super(opts.message);
+    this.nativeCode = opts.nativeCode;
+  }
+}
+
 export interface NativeRuntimeSelection {
   readonly binary: string;
   readonly home: string;
@@ -122,11 +135,12 @@ function completionResponse(
     return parseExecCompletion(bytes, code);
   }
   if (timedOut || code !== 0 || (serviceExecResponse && failure)) {
-    throw new Error(
-      timedOut
+    throw new NativeRuntimeRequestError({
+      message: timedOut
         ? "Native runtime request timed out; inspect owned state before retrying."
-        : `Native runtime request failed${failure ? ` (${failure.code}${failure.causeCode ? `: ${failure.causeCode}` : ""})` : ""}; inspect owned state before retrying.`
-    );
+        : `Native runtime request failed${failure ? ` (${failure.code}${failure.causeCode ? `: ${failure.causeCode}` : ""})` : ""}; inspect owned state before retrying.`,
+      nativeCode: timedOut ? undefined : failure?.code,
+    });
   }
   try {
     return JSON.parse(new TextDecoder().decode(bytes)) as unknown;

@@ -478,6 +478,12 @@ ambiguous, wrong-executable or substituted listener refuses; an already running
 graph stays up when restart preflight refuses. Fixed `host_pid` selections remain
 supported. Active-graph listener rotation still requires a separate rebind path;
 this selection handles startup and restart admission.
+Startup allows up to 60 seconds total for persistent hooks to create all selected
+listeners, with cancellable waits and bounded read-only discovery requests. It
+retries only native endpoint-identity refusals; malformed selections and other
+failures stop immediately. A listener must pass the complete ownership checks
+before any VM or graph effects. Restart preflight does not wait or stop the graph
+when its current selection cannot be verified.
 Bindings in different services targeting the same pinned host listener can share
 a transport slot; authentication, cancellation and expiry remain per binding.
 The CLI groups selections by host PID and port in first-appearance order, and

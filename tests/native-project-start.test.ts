@@ -10,6 +10,7 @@ import {
   startNativeProject,
   verifyHttpsRoutes,
 } from "../src/backends/native-project-start.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -494,6 +495,69 @@ test("host listener discovery after hooks binds the current executable-pinned PI
   expect(await startNativeProject({ ...opts, dependencyFile: path })).toBe(0);
 });
 
+test("a delayed hook listener gates runtime effects and cancellation cleans hooks", async () => {
+  for (const cancel of [false, true]) {
+    const { opts, events } = await fixture(false);
+    const path = join(opts.scope.projectRoot, "host-selection.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        dependencies: [
+          {
+            service: "web",
+            binding: "search",
+            guest_port: 443,
+            host_port: 8443,
+            host_executable: "/usr/local/bin/synthetic-tunnel",
+            aliases: ["search.example.com"],
+          },
+        ],
+      })
+    );
+    const controller = new AbortController();
+    const invoke = opts.dependencies.invoke!;
+    let discoveries = 0;
+    let verified = false;
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "dependency-discover") {
+        expect(events).toContain("before");
+        discoveries++;
+        if (discoveries === 1) {
+          if (cancel) {
+            queueMicrotask(() => controller.abort());
+          }
+          throw new NativeRuntimeRequestError({
+            message: "listener is not ready yet",
+            nativeCode: "host_endpoint_identity",
+          });
+        }
+        verified = true;
+        return { host_pid: 456, endpoint_fingerprint: "e".repeat(64) };
+      }
+      if (request.args[1] === "up") {
+        expect(verified).toBe(true);
+      }
+      return await invoke(request);
+    };
+    const startup = startNativeProject({
+      ...opts,
+      dependencyFile: path,
+      signal: controller.signal,
+    });
+    if (cancel) {
+      await expect(startup).rejects.toThrow("values omitted");
+      expect(events).toEqual(["before", "cleanup"]);
+      expect(discoveries).toBe(1);
+    } else {
+      expect(await startup).toBe(0);
+      expect(discoveries).toBe(2);
+      expect(events).toContain("runtime up");
+      expect(events.at(-1)).toBe("cleanup");
+    }
+  }
+});
+
 test("invalid listener selection cleans lifecycle hooks before runtime effects", async () => {
   const { opts, events } = await fixture(false);
   const path = join(opts.scope.projectRoot, "host-selection.json");
@@ -507,6 +571,51 @@ test("invalid listener selection cleans lifecycle hooks before runtime effects",
   await expect(
     startNativeProject({ ...opts, dependencyFile: path })
   ).rejects.toThrow("values omitted");
+  expect(events).toEqual(["before", "cleanup"]);
+});
+
+test("cancellation after successful listener discovery still prevents runtime admission", async () => {
+  const { opts, events } = await fixture(false);
+  const path = join(opts.scope.projectRoot, "host-selection.json");
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      dependencies: [
+        {
+          service: "web",
+          binding: "search",
+          guest_port: 443,
+          host_port: 8443,
+          host_executable: "/usr/local/bin/synthetic-tunnel",
+          aliases: ["search.example.com"],
+        },
+      ],
+    })
+  );
+  const controller = new AbortController();
+  const invoke = opts.dependencies.invoke!;
+  let runtimeAdmissions = 0;
+  opts.dependencies.invoke = async (call) => {
+    if (call.args[0] !== "graph" || call.args[1] !== "dependency-discover") {
+      if (call.args[0] === "runtime" && call.args[1] === "up") {
+        runtimeAdmissions++;
+      }
+      return await invoke(call);
+    }
+    queueMicrotask(() =>
+      queueMicrotask(() => queueMicrotask(() => controller.abort()))
+    );
+    return { host_pid: 456, endpoint_fingerprint: "e".repeat(64) };
+  };
+  await expect(
+    startNativeProject({
+      ...opts,
+      dependencyFile: path,
+      signal: controller.signal,
+    })
+  ).rejects.toThrow();
+  expect(runtimeAdmissions).toBe(0);
   expect(events).toEqual(["before", "cleanup"]);
 });
 

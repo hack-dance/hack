@@ -1,12 +1,14 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  discoverNativeHostDependency,
   parseNativeHostDependencies,
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "../src/backends/native-project-dependencies.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -30,6 +32,171 @@ function parse(dependencies: unknown[]) {
     services: ["web", "worker"],
   });
 }
+
+const discovery = {
+  runtime: { binary: "/synthetic/native", home: "/synthetic/home" },
+  projectRoot: "/synthetic/project",
+  executable: "/synthetic/tunnel",
+  hostPort: 8443,
+};
+function unavailableListener() {
+  return new NativeRuntimeRequestError({
+    message: "Native runtime request failed (host_endpoint_identity)",
+    nativeCode: "host_endpoint_identity",
+  });
+}
+
+test("startup discovery waits for a delayed listener and keeps immediate preflight unchanged", async () => {
+  let calls = 0;
+  const invoke = async () => {
+    if (++calls === 1) {
+      throw unavailableListener();
+    }
+    return { host_pid: 456, endpoint_fingerprint: "e".repeat(64) };
+  };
+  await expect(
+    discoverNativeHostDependency({ ...discovery, invoke })
+  ).rejects.toThrow("host_endpoint_identity");
+  expect(calls).toBe(1);
+  calls = 0;
+  expect(
+    await discoverNativeHostDependency({
+      ...discovery,
+      invoke,
+      wait: {
+        deadlineMs: performance.now() + 2000,
+        signal: new AbortController().signal,
+      },
+    })
+  ).toEqual({ host_pid: 456, endpoint_fingerprint: "e".repeat(64) });
+  expect(calls).toBe(2);
+});
+
+test("startup discovery stops on cancellation and never accepts a late query result", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const waiting = discoverNativeHostDependency({
+    ...discovery,
+    wait: { deadlineMs: performance.now() + 2000, signal: controller.signal },
+    invoke: async () => {
+      calls++;
+      queueMicrotask(() => controller.abort());
+      throw unavailableListener();
+    },
+  });
+  await expect(waiting).rejects.toThrow();
+  expect(calls).toBe(1);
+  const late = new AbortController();
+  await expect(
+    discoverNativeHostDependency({
+      ...discovery,
+      wait: { deadlineMs: performance.now() + 2000, signal: late.signal },
+      invoke: async () => {
+        late.abort();
+        return { host_pid: 456, endpoint_fingerprint: "e".repeat(64) };
+      },
+    })
+  ).rejects.toThrow("values omitted");
+});
+
+test("startup discovery deadline bounds missing listeners and subsequent bindings", async () => {
+  const wait = {
+    deadlineMs: performance.now() + 30,
+    signal: new AbortController().signal,
+  };
+  let calls = 0;
+  const invoke = async () => {
+    calls++;
+    throw unavailableListener();
+  };
+  await expect(
+    discoverNativeHostDependency({ ...discovery, wait, invoke })
+  ).rejects.toThrow("values omitted");
+  const exhaustedCalls = calls;
+  await expect(
+    discoverNativeHostDependency({
+      ...discovery,
+      hostPort: 8444,
+      wait,
+      invoke,
+    })
+  ).rejects.toThrow("values omitted");
+  expect(calls).toBe(exhaustedCalls);
+});
+
+test("startup discovery does not retry unrelated failures or malformed results", async () => {
+  for (const error of [
+    new Error("synthetic failure"),
+    new NativeRuntimeRequestError({
+      message: "native refusal",
+      nativeCode: "candidate_ownership",
+    }),
+  ]) {
+    let calls = 0;
+    await expect(
+      discoverNativeHostDependency({
+        ...discovery,
+        wait: {
+          deadlineMs: performance.now() + 2000,
+          signal: new AbortController().signal,
+        },
+        invoke: async () => {
+          calls++;
+          throw error;
+        },
+      })
+    ).rejects.toThrow();
+    expect(calls).toBe(1);
+  }
+  let malformedCalls = 0;
+  await expect(
+    discoverNativeHostDependency({
+      ...discovery,
+      wait: {
+        deadlineMs: performance.now() + 2000,
+        signal: new AbortController().signal,
+      },
+      invoke: async () => {
+        malformedCalls++;
+        return { password: "synthetic-do-not-print" };
+      },
+    })
+  ).rejects.toThrow("values omitted");
+  expect(malformedCalls).toBe(1);
+});
+
+test("discovery bounds each request by remaining time and never retries a timed-out query", async () => {
+  const now = spyOn(performance, "now").mockReturnValue(100);
+  try {
+    for (const [deadlineMs, timeoutMs] of [
+      [5000, 2000],
+      [100.5, 1],
+    ] as const) {
+      await discoverNativeHostDependency({
+        ...discovery,
+        wait: { deadlineMs, signal: new AbortController().signal },
+        invoke: async (request) => {
+          expect(request.timeoutMs).toBe(timeoutMs);
+          return { host_pid: 456, endpoint_fingerprint: "e".repeat(64) };
+        },
+      });
+    }
+    let calls = 0;
+    await expect(
+      discoverNativeHostDependency({
+        ...discovery,
+        wait: { deadlineMs: 5000, signal: new AbortController().signal },
+        invoke: async () => {
+          calls++;
+          throw new NativeRuntimeRequestError({ message: "request timed out" });
+        },
+      })
+    ).rejects.toThrow("request timed out");
+    expect(calls).toBe(1);
+  } finally {
+    now.mockRestore();
+  }
+});
 test("dependency launchers add reaping init only when omitted and preserve explicit refusal", () => {
   const dependencies = parse([binding()]);
   const services: Record<string, Record<string, unknown>> = {

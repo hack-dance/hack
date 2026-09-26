@@ -7,7 +7,7 @@ export function renderAgentInitPatterns(): string {
     "",
     "Use these patterns to identify dependencies and ops steps during hack init.",
     "For the full agent-assisted onboarding flow, run `hack agent onboard`",
-    "(or `hack init --with claude|codex|both` in a fresh repo); see",
+    "(or `hack init --with claude|codex` in a fresh repo); see",
     "docs/guides/agent-first-setup.md.",
     "",
     "Repo signals to scan:",

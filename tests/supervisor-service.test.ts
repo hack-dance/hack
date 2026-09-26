@@ -91,6 +91,82 @@ test("Supervisor service cancels running jobs", async () => {
   expect(job?.status).toBe("cancelled");
 });
 
+test("cancellation waits for startup publication after observing running", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "hack-supervisor-service-"));
+  const projectDir = join(tempDir, ".hack");
+  const gap = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const published = Promise.withResolvers<void>();
+  const cancelRead = Promise.withResolvers<void>();
+  const service = createSupervisorService({
+    createStore: async (opts) => {
+      const store = await createJobStore(opts);
+      return {
+        ...store,
+        readJobMeta: async (input) => {
+          const meta = await store.readJobMeta(input);
+          if (meta?.status === "running") {
+            cancelRead.resolve();
+          }
+          return meta;
+        },
+        appendEvent: async (input) => {
+          if (input.type !== "job.started") {
+            return await store.appendEvent(input);
+          }
+          gap.resolve();
+          await release.promise;
+          try {
+            return await store.appendEvent(input);
+          } finally {
+            published.resolve();
+          }
+        },
+      };
+    },
+  });
+  const created = await service.createJob({
+    projectDir,
+    runner: "generic",
+    command: [process.execPath, "-e", "setTimeout(() => {}, 5000)"],
+  });
+  await gap.promise;
+  const store = await createJobStore({ projectDir });
+  expect((await store.readJobMeta({ jobId: created.jobId }))?.status).toBe(
+    "running"
+  );
+  let settled = false;
+  const cancellation = service
+    .cancelJob({ projectDir, jobId: created.jobId })
+    .finally(() => {
+      settled = true;
+    });
+  try {
+    await cancelRead.promise;
+    // Allow the cancellation continuation to run while startup remains explicitly
+    // blocked. This is an event-loop handoff, not a race against an elapsed delay.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    release.resolve();
+    expect(await cancellation).toEqual({ ok: true, status: "cancelled" });
+    expect((await created.run).status).toBe("cancelled");
+    expect((await store.readJobMeta({ jobId: created.jobId }))?.status).toBe(
+      "cancelled"
+    );
+    expect(
+      (await store.readEvents({ jobId: created.jobId })).map(
+        (event) => event.type
+      )
+    ).toEqual(["job.created", "job.starting", "job.started", "job.cancelled"]);
+  } finally {
+    release.resolve();
+    await published.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await service.cancelJob({ projectDir, jobId: created.jobId });
+    await created.run;
+  }
+});
+
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -39,3 +39,30 @@ test("project config schema exposes browser host preference values", () => {
     "dev",
   ]);
 });
+
+test("global service templates prefer hack.local and retain legacy routes", async () => {
+  const { renderGlobalCaddyCompose, renderGlobalLoggingCompose } = await import(
+    "../src/templates.ts"
+  );
+  const caddy = Bun.YAML.parse(renderGlobalCaddyCompose());
+  const logging = Bun.YAML.parse(renderGlobalLoggingCompose());
+  expect(caddy).toMatchObject({
+    services: {
+      caddy: { labels: { caddy: "schemas.hack.local, schemas.hack" } },
+    },
+  });
+  expect(logging).toMatchObject({
+    services: {
+      loki: { labels: { caddy: "loki.hack.local, loki.hack" } },
+      grafana: { labels: { caddy: "logs.hack.local, logs.hack" } },
+    },
+  });
+  expect(
+    JSON.parse(
+      renderProjectConfigJson({ name: "demo", devHost: "custom.example" })
+    )
+  ).toMatchObject({
+    dev_host: "custom.example",
+    $schema: "https://schemas.hack.local/hack.config.schema.json",
+  });
+});

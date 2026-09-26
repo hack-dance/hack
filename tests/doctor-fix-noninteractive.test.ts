@@ -32,6 +32,17 @@ const runCalls: string[][] = [];
 const execCalls: string[][] = [];
 const noteCalls: string[] = [];
 
+const dnsMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "node:dns/promises",
+  overrides: {
+    lookup: async () => {
+      // Exercise missing-DNS remediation without depending on host resolvers.
+      throw new Error("Fixture DNS is not configured");
+    },
+  },
+});
+
 const clackMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "@clack/prompts",
@@ -98,6 +109,7 @@ let originalMutagenPath: string | undefined;
 let originalLogger: string | undefined;
 
 beforeAll(() => {
+  dnsMock.activate();
   clackMock.activate();
   shellMock.activate();
   osMock.activate();
@@ -141,6 +153,7 @@ afterEach(async () => {
 });
 
 afterAll(() => {
+  dnsMock.deactivate();
   clackMock.deactivate();
   shellMock.deactivate();
   osMock.deactivate();

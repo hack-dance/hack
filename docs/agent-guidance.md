@@ -10,7 +10,7 @@ Do not ship provider model pins or copy global instruction packs into this plugi
 | --- | --- |
 | Root `AGENTS.md` | Contributor baseline; root `CLAUDE.md` imports it |
 | `apps/macos/AGENTS.md` | Explicit maintenance of the unsupported native app |
-| `WORKFLOW.md`, `.factory/` | Repository validation and optional Factory mission adapter |
+| `.ai/skills/` | Contributor quality, verification, work units, performance and TLA+ workflows |
 | `src/agents/instruction-source.ts` | Project AGENTS/CLAUDE snippets, standalone/shared Hack skill, Cursor rules, session primer, native plugin skill/rule |
 | `src/agents/onboarding-prompt.ts` | `hack agent onboard`, init handoff, and MCP onboarding prompt |
 | `src/agents/hack-init-skill.ts` | Thin Claude/Codex/plugin adapter that fetches onboarding guidance |

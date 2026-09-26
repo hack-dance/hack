@@ -322,6 +322,26 @@ Linked worktree behavior:
   selection determines which instance's resolved env is the one actually injected, so keep the
   key readable from every checkout that runs `hack up`
 
+Linked worktrees also read the primary checkout's eligible local YAML overrides
+(`hack.env.local.yaml`, or its legacy-compatible local-default path, and the selected
+`hack.env.<overlay>.local.yaml`). Resolution order is checkout tracked default and
+overlay, primary local default and overlay, then checkout local default and overlay.
+The resolved file list includes inherited paths. Primary tracked configuration,
+legacy `.env`, runtime state and unrelated ignored files are not inherited.
+
+Local values override inherited values. A YAML `null` entry explicitly removes a
+value supplied by earlier layers; deleting the entry instead reveals the earlier
+value again. `hack env unset KEY --local` in an inheriting linked worktree records
+that removal without modifying the primary file. A later `set --local` replaces it.
+Inheritance reads current files each time and never copies them into the worktree.
+Invalid inherited files and redirected file paths fail explicitly.
+
+Set `worktree.inherit_local: false` in the checkout's Hack config to disable local
+file inheritance. CI (`CI=1` or `CI=true`) and slim/Codex execution mode disable it
+automatically. This setting does not change the existing secret-key lookup order
+below. Missing primary local files are optional; retained encrypted values still
+require the selected checkout's valid decryption key.
+
 Full read order for decrypting secrets (first match wins):
 
 1. checkout-local `.hack.secret.key`

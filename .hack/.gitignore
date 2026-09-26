@@ -1,0 +1,9 @@
+# managed by hack — machine-local generated files (do not edit between markers)
+.internal/
+.branch/
+.env
+.env.state.json
+hack.env.local.yaml
+hack.env.*.local.yaml
+tickets/
+# end managed by hack

@@ -1,0 +1,9 @@
+version = 1
+
+[project]
+repository_id = "repo_bbfbab4e77ef08e5cad98c86"
+sources = ["git", "writebacks"]
+guidance = []
+cadence = "on-demand"
+scheduling = false
+managed_rendering = false

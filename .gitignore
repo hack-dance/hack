@@ -87,3 +87,32 @@ REVIEW.md
 dist
 
 .tmp
+
+# v5 candidate build and runtime state; never shares the installed v4 home
+.hack-local/
+packages/runtime-core/target/
+
+# Local planning, historical evidence and retired documentation
+/_docs/
+/specs/
+/SPECS/
+/.factory/
+/WORKFLOW.md
+/REVIEW.md
+/TODO.md
+/docs/plans
+/docs/specs/
+
+# TLA sources/configs belong in tests/models/tla; generated checker state does not.
+/tests/models/tla/**/states/
+/tests/models/tla/**/*.toolbox/
+/tests/models/tla/**/*_TTrace_*.tla
+/tests/models/tla/**/*_TTrace_*.cfg
+/tests/models/tla/**/*_TE.tla
+/tests/models/tla/**/*_TE.cfg
+/tests/models/tla/**/MC.out
+/tests/models/tla/**/MC.err
+/tests/models/tla/**/.apalache/
+
+# Python harness bytecode
+__pycache__/

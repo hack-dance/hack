@@ -7,6 +7,73 @@ on:
   pull_request:
 
 jobs:
+  state-models:
+    name: Runtime state models
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.3.9"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install mise for model-helper contract tests
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: "2026.9.12"
+          install: false
+          cache: false
+          env: false
+      - name: Fetch pinned model checker
+        run: curl --fail --location --retry 2 --max-time 60 https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar --output "$RUNNER_TEMP/tla2tools.jar"
+      - name: Check evidence validation and models
+        env:
+          TLA2TOOLS_JAR: ${{ runner.temp }}/tla2tools.jar
+        run: |
+          python3 -m unittest discover -s .ai/skills/hack-repo-tla/tests
+          bun test tests/tla-result.test.ts
+          bun run test:models
+
+  runtime-core:
+    name: Candidate core (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - name: Install pinned Zig for guest helpers
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: "2026.9.12"
+          install_args: zig
+          add_shims_to_path: false
+          cache: false
+          env: false
+      - name: Check candidate formatting
+        run: cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check
+      - name: Lint candidate core
+        run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --jobs 2 -- -D warnings
+      - name: Test candidate isolation contracts
+        run: cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --jobs 2
+      - name: Build and inspect local candidate
+        run: |
+          mise exec zig -- ./scripts/build-hack-local.sh
+          ./hack-local info --json
+
   secret-scan:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
@@ -87,6 +154,11 @@ jobs:
         run: bun install
       - name: Create isolated Hack network
         run: docker network create --subnet 172.30.0.0/16 hack-dev
+      - name: Prepare offline cache fixture images
+        run: |
+          docker pull alpine:3.20
+          docker pull alpine:3.22
+          docker pull node:24.11.0-bookworm-slim
       - name: Run local and Docker E2E
         run: HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun run test:e2e:local:docker
       - name: Smoke container resource metadata without optional fields

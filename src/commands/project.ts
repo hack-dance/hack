@@ -24,6 +24,33 @@ import {
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
+import {
+  nativeDownEnvironment,
+  nativeProjectDown,
+} from "../backends/native-project-down.ts";
+import { nativeProjectExec } from "../backends/native-project-exec.ts";
+import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
+import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
+import {
+  nativeProjectLogs,
+  nativeProjectPs,
+  requireComposeOperationAvailable,
+} from "../backends/native-project-observe.ts";
+import { nativeProjectOneOff } from "../backends/native-project-one-off.ts";
+import {
+  retireNativeRecoveredPublisher,
+  verifyNativeFrontendRecovery,
+} from "../backends/native-project-recovery.ts";
+import { restartNativeProject } from "../backends/native-project-restart.ts";
+import {
+  nativeRestartSelection,
+  preflightNativeRestart,
+} from "../backends/native-project-restart-preflight.ts";
+import {
+  parseNativeHttpsSelection,
+  startNativeProject,
+} from "../backends/native-project-start.ts";
+import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
@@ -52,6 +79,7 @@ import { globalUp } from "../commands/global.ts";
 import {
   DEFAULT_GRAFANA_HOST,
   DEFAULT_INGRESS_NETWORK,
+  DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_TLD,
   DEFAULT_PROJECT_TLD,
   GLOBAL_CADDY_COMPOSE_FILENAME,
@@ -106,6 +134,10 @@ import {
   okResult,
 } from "../lib/cli-result.ts";
 import {
+  DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+  resolveComposeStartupTimeoutMs,
+} from "../lib/compose-startup-budget.ts";
+import {
   buildStartupIncompleteMessage,
   type ComposeServiceState,
   classifyComposeStartupState,
@@ -114,8 +146,12 @@ import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import {
   resolveDependencyCacheBootstrapServices,
   resolveDependencyCacheOverride,
+  resolveDependencyCacheProgress,
 } from "../lib/dependency-cache.ts";
-import { bootstrapDependencyCaches } from "../lib/dependency-cache-bootstrap.ts";
+import {
+  bootstrapDependencyCaches,
+  dependencyCacheBootstrapFailure,
+} from "../lib/dependency-cache-bootstrap.ts";
 import { removeDisposableCacheVolumes } from "../lib/disposable-cache-volumes.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
@@ -128,10 +164,12 @@ import {
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
 import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
+import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import {
   appendLifecycleLogRecord,
@@ -168,6 +206,7 @@ import {
   readProjectConfig,
   readProjectDevHost,
   resolveProjectOauthAliasHost,
+  resolveProjectRouteBaseHosts,
   resolveWorktreeAutoBranch,
   sanitizeBranchSlug,
   sanitizeProjectSlug,
@@ -215,6 +254,7 @@ import {
   preflightRegistryCredentials,
   RegistryCredentialPreflightError,
 } from "../lib/registry-credential-preflight.ts";
+import { canReuseRunningDependencyCache } from "../lib/run-dependency-cache.ts";
 import { buildRuntimeHostMetadataOverride } from "../lib/runtime-host-metadata.ts";
 import {
   type RuntimeProject,
@@ -271,6 +311,7 @@ const CADDY_LABEL_PATTERN = /^(\s*)caddy:\s*(.*)$/;
 
 /** Regex to check if a string starts with a URL scheme (e.g., "http://", "https://"). */
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
+const FINALIZATION_ATTEMPT = /^[a-f0-9]{32}$/;
 
 const optManual = defineOption({
   name: "manual",
@@ -300,7 +341,8 @@ const optDevHost = defineOption({
   type: "string",
   long: "--dev-host",
   valueHint: "<host>",
-  description: "DEV_HOST override",
+  description:
+    "DEV_HOST override (new projects default to <project>.hack.local)",
 } as const);
 
 const optOauth = defineOption({
@@ -329,7 +371,7 @@ const optWith = defineOption({
   name: "with",
   type: "string",
   long: "--with",
-  valueHint: "<claude|codex|both>",
+  valueHint: "<claude|codex>",
   description:
     "After init, hand the onboarding prompt to an agent CLI (prints the prompt when the CLI is missing or the run is non-interactive)",
 } as const);
@@ -356,6 +398,28 @@ const optYes = defineOption({
   type: "boolean",
   long: "--yes",
   description: "Confirm --prune-caches without prompting",
+} as const);
+const optRecoverFrontend = defineOption({
+  name: "recoverFrontend",
+  type: "boolean",
+  long: "--recover-frontend",
+  description:
+    "Recover an interrupted native frontend after proving its owner and effects are gone",
+} as const);
+const optExpectFinalizationAttempt = defineOption({
+  name: "expectFinalizationAttempt",
+  type: "string",
+  long: "--expect-finalization-attempt",
+  valueHint: "<32-hex>",
+  description: "Require this exact interrupted native frontend attempt",
+} as const);
+const optExpectFrontendPid = defineOption({
+  name: "expectFrontendPid",
+  type: "number",
+  long: "--expect-frontend-pid",
+  valueHint: "<pid>",
+  description:
+    "Previously observed frontend PID (required only for legacy v1 state)",
 } as const);
 
 const initOptions = [
@@ -398,6 +462,9 @@ const restartOptions = [
   optProfile,
   optTarget,
   optJson,
+  optRecoverFrontend,
+  optExpectFinalizationAttempt,
+  optExpectFrontendPid,
 ] as const;
 const psOptions = [
   optPath,
@@ -853,9 +920,22 @@ function startupSnapshotIsIncomplete(opts: {
   return opts.states.length === 0 || opts.failed.length > 0;
 }
 
+function reportComposeStartupBudget(opts: {
+  readonly startupTimeoutMs: number;
+  readonly detach: boolean;
+  readonly repair?: boolean;
+}): void {
+  if (opts.detach) {
+    logger.step({
+      message: `Compose ${opts.repair ? "repair" : "startup"}: launch and dependency wait (budget ${opts.startupTimeoutMs} ms)`,
+    });
+  }
+}
+
 function composeStartupFailure(
   code: number,
-  action: string
+  action: string,
+  startupTimeoutMs: number
 ): {
   readonly code: "E_COMPOSE_FAILED" | "E_STARTUP_TIMEOUT";
   readonly message: string;
@@ -863,7 +943,7 @@ function composeStartupFailure(
   return code === 124
     ? {
         code: "E_STARTUP_TIMEOUT",
-        message: `${action} timed out; the Compose process group was terminated and the runtime may require repair.`,
+        message: `${action} exceeded its detached Compose startup budget of ${startupTimeoutMs} ms (HACK_COMPOSE_STARTUP_TIMEOUT_MS). The Compose process group was terminated; inspect hack ps and hack logs before retrying. Containers may still be running. This limit covers Compose launch and dependency waiting, not lifecycle hooks or application readiness.`,
       }
     : {
         code: "E_COMPOSE_FAILED",
@@ -1000,9 +1080,7 @@ async function buildBranchComposeOverride(opts: {
     return null;
   }
 
-  const baseHosts = [opts.devHost, opts.aliasHost].filter(
-    (host): host is string => typeof host === "string" && host.length > 0
-  );
+  const baseHosts = resolveProjectRouteBaseHosts(opts);
 
   const overrideServices: Record<string, { labels: Record<string, string> }> =
     {};
@@ -1108,47 +1186,6 @@ function parseLabelEntry(opts: {
 
 function cleanupYaml(yaml: string): string {
   return yaml.replaceAll(/: \n/g, ":\n");
-}
-
-async function readInternalExtraHostsFile(opts: {
-  readonly projectDir: string;
-}): Promise<Record<string, string>> {
-  const path = resolve(opts.projectDir, ".internal", "extra-hosts.json");
-  const text = await readTextFile(path);
-  if (!text) {
-    return {};
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return {};
-  }
-
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return {};
-  }
-
-  const out: Record<string, string> = {};
-  for (const [keyRaw, valueRaw] of Object.entries(
-    parsed as Record<string, unknown>
-  )) {
-    const key = keyRaw.trim();
-    if (key.length === 0) {
-      continue;
-    }
-    if (typeof valueRaw !== "string") {
-      continue;
-    }
-    const value = valueRaw.trim();
-    if (value.length === 0) {
-      continue;
-    }
-    out[key] = value;
-  }
-
-  return out;
 }
 
 function ensureTrailingNewline(text: string): string {
@@ -1654,6 +1691,7 @@ async function runLifecycleCommands(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly projectDir: string;
   readonly composeProject: string;
+  readonly routeStdoutToStderr?: boolean;
   readonly onPersistentCommand?: (opts: {
     readonly command: ProjectLifecycleCommand;
     readonly index: number;
@@ -1719,7 +1757,7 @@ async function runLifecycleCommands(opts: {
 
     const stdoutTask = streamLifecycleCommandOutput({
       stream: proc.stdout,
-      output: "stdout",
+      output: opts.routeStdoutToStderr ? "stderr" : "stdout",
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
       service: serviceName,
@@ -2979,8 +3017,9 @@ async function resolveInternalComposeOverride(opts: {
 }): Promise<string | null> {
   const internal = resolveInternalSettings(opts.cfg);
 
-  const managedExtraHosts = await readInternalExtraHostsFile({
-    projectDir: opts.project.projectDir,
+  const { hosts: managedExtraHosts } = await resolveInternalExtraHosts({
+    ...opts.project,
+    staticHosts: internal.extraHosts ?? undefined,
   });
   if (!shouldBuildInternalOverride({ internal, managedExtraHosts })) {
     return null;
@@ -3002,16 +3041,14 @@ async function resolveInternalComposeOverride(opts: {
     aliasHost: opts.aliasHost ?? null,
   });
   const tls = await resolveInternalTlsPaths({ enabled: internal.tls });
-  if (!(dns.dnsServer || tls.caPath || dns.caddyIp)) {
-    return null;
-  }
-
   const extraHosts = buildInternalExtraHosts({
     caddyIp: dns.caddyIp,
     caddyHosts: dns.caddyHosts,
-    internalExtraHosts: internal.extraHosts,
     managedExtraHosts,
   });
+  if (!(dns.dnsServer || tls.caPath || Object.keys(extraHosts).length > 0)) {
+    return null;
+  }
   const text = renderInternalOverride({
     services,
     dnsServer: dns.dnsServer,
@@ -3105,9 +3142,10 @@ async function resolveCaddyHostsForBranch(opts: {
 
   const devHost =
     opts.devHost ?? (await resolveBranchDevHost({ project: opts.project }));
-  const baseHosts = [devHost, opts.aliasHost ?? null].filter(
-    (host): host is string => typeof host === "string" && host.length > 0
-  );
+  const baseHosts = resolveProjectRouteBaseHosts({
+    devHost,
+    aliasHost: opts.aliasHost,
+  });
   if (baseHosts.length === 0) {
     return caddyHosts;
   }
@@ -3151,14 +3189,12 @@ async function resolveInternalTlsPaths(opts: {
 function buildInternalExtraHosts(opts: {
   readonly caddyIp: string | null;
   readonly caddyHosts: readonly string[];
-  readonly internalExtraHosts: Record<string, string> | null;
   readonly managedExtraHosts: Record<string, string>;
 }): Record<string, string> {
   return {
     ...(opts.caddyIp && opts.caddyHosts.length > 0
       ? buildExtraHostsMap({ hosts: opts.caddyHosts, ip: opts.caddyIp })
       : {}),
-    ...(opts.internalExtraHosts ? opts.internalExtraHosts : {}),
     ...opts.managedExtraHosts,
   };
 }
@@ -3741,7 +3777,7 @@ async function promptInitDevHost(opts: {
   readonly slug: string;
   readonly devHostOption: string | undefined;
 }): Promise<string | null> {
-  const defaultHost = `${opts.slug}.${DEFAULT_PROJECT_TLD}`;
+  const defaultHost = `${opts.slug}.${DEFAULT_NEW_PROJECT_TLD}`;
   const initialHost = (opts.devHostOption ?? defaultHost).trim();
   const devHost = await text({
     message: "DEV_HOST:",
@@ -3752,6 +3788,16 @@ async function promptInitDevHost(opts: {
     return null;
   }
   return devHost.trim();
+}
+
+/** A skipped init must describe the existing setup, not the new-project default. */
+async function resolveExistingInitHost(repoRoot: string): Promise<string> {
+  const project = await findProjectContext(repoRoot);
+  const configured = project ? await readProjectDevHost(project) : null;
+  return (
+    configured ??
+    `${defaultProjectSlugFromPath(repoRoot)}.${DEFAULT_PROJECT_TLD}`
+  );
 }
 
 function validateInitOauthTld(value: string | undefined): string | undefined {
@@ -3935,7 +3981,7 @@ async function handleInit({
         withValue,
         mode: "existing-project",
         projectName: slug,
-        devHost,
+        devHost: await resolveExistingInitHost(repoRoot),
       });
     }
     return 0;
@@ -4085,7 +4131,7 @@ async function handleInitAuto({
         withValue,
         mode: "existing-project",
         projectName: slug,
-        devHost,
+        devHost: await resolveExistingInitHost(repoRoot),
       });
       return 0;
     }
@@ -4195,7 +4241,7 @@ function resolveInitWithOption(opts: {
   const parsed = parseOnboardingWith({ value: opts.withRaw });
   if (!parsed) {
     throw new CliUsageError(
-      `Invalid --with "${opts.withRaw}". Use claude, codex, or both.`
+      `Invalid --with "${opts.withRaw}". Choose one agent: claude or codex.`
     );
   }
   return parsed;
@@ -4268,7 +4314,7 @@ function resolveInitDevHost(opts: {
   readonly slug: string;
   readonly devHostOpt?: string;
 }): string {
-  const fallback = `${opts.slug}.${DEFAULT_PROJECT_TLD}`;
+  const fallback = `${opts.slug}.${DEFAULT_NEW_PROJECT_TLD}`;
   const raw = (opts.devHostOpt ?? fallback).trim();
   const error = validateDevHost({ value: raw });
   if (error) {
@@ -4484,12 +4530,14 @@ function buildCaddyHostLabelValue(opts: {
   if (!opts.oauth.enabled) {
     return opts.primaryHost;
   }
-  if (!opts.primaryHost.endsWith(`.${DEFAULT_PROJECT_TLD}`)) {
+  const tld = normalizeOauthTld(opts.oauth.tld);
+  const aliasHost = resolveProjectOauthAliasHost({
+    devHost: opts.primaryHost,
+    oauth: { enabled: true, tld },
+  });
+  if (!aliasHost) {
     return opts.primaryHost;
   }
-
-  const tld = normalizeOauthTld(opts.oauth.tld);
-  const aliasHost = `${opts.primaryHost}.${tld}`;
 
   const uniq = new Set<string>();
   const out: string[] = [];
@@ -4541,10 +4589,13 @@ function expandCaddyHostsWithOauthAliases(opts: {
   }
 
   for (const host of opts.hosts) {
-    if (!host.endsWith(`.${DEFAULT_PROJECT_TLD}`)) {
+    const alias = resolveProjectOauthAliasHost({
+      devHost: host,
+      oauth: { enabled: true, tld: opts.tld },
+    });
+    if (!alias) {
       continue;
     }
-    const alias = `${host}.${opts.tld}`;
     if (seen.has(alias)) {
       continue;
     }
@@ -5484,8 +5535,10 @@ function renderHackFolderReadme(opts: {
   const oauthTld = oauthEnabled
     ? normalizeOauthTld(opts.oauth?.tld ?? DEFAULT_OAUTH_ALIAS_TLD)
     : null;
-  const oauthHost =
-    oauthEnabled && oauthTld ? `${opts.devHost}.${oauthTld}` : null;
+  const oauthHost = resolveProjectOauthAliasHost({
+    devHost: opts.devHost,
+    oauth: { enabled: oauthEnabled, tld: oauthTld ?? undefined },
+  });
 
   return [
     "# hack local dev",
@@ -5542,7 +5595,7 @@ function renderHackFolderReadme(opts: {
     "",
     "## Logs (Grafana + Loki)",
     "",
-    "- Open Grafana: https://logs.hack",
+    `- Open Grafana: https://${DEFAULT_GRAFANA_HOST}`,
     "- Default credentials: `admin` / `admin`",
     "",
     "In **Explore**, try queries like:",
@@ -5814,6 +5867,202 @@ async function runRemoteLifecycleCommand(opts: {
   });
 }
 
+async function handleNativeUp({
+  ctx,
+  args,
+  native,
+  restart = false,
+  recovery,
+}: {
+  readonly restart?: boolean;
+  readonly recovery?: {
+    readonly expectAttempt: string;
+    readonly legacyPid?: number;
+  };
+  readonly ctx: CliContext;
+  readonly args: UpArgs;
+  readonly native: NonNullable<
+    ReturnType<typeof resolveNativeRuntimeSelection>
+  >;
+}): Promise<number> {
+  if (
+    args.options.detach ||
+    args.options.json ||
+    args.options.target ||
+    args.positionals.services?.length
+  ) {
+    throw new CliUsageError(
+      "Native up currently supports foreground whole-project startup only; detach, JSON, target and service selection are unavailable."
+    );
+  }
+  const project = await resolveProjectForArgs({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+    touchRegistration: false,
+  });
+  const branch = await resolveEffectiveBranchForCommand({
+    project,
+    branchOption: args.options.branch,
+  });
+  const cfg = await readProjectConfig(project);
+  if (cfg.parseError) {
+    throw new CliUsageError(
+      "Native up requires valid project configuration; values omitted."
+    );
+  }
+  const projectName = await resolveComposeProjectName({ project, cfg });
+  const composeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
+  const startup: Parameters<typeof startNativeProject>[0] = {
+    runtime: native,
+    scope: {
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      nativeHome: native.home,
+      branch,
+    },
+    composeFile: project.composeFile,
+    envName: resolveRequestedEnvName({ envOption: args.options.env }),
+    profiles: parseCsvList(args.options.profile),
+    sharedSource: process.env.HACK_NATIVE_SHARED_SOURCE === "1",
+    dependencyFile: process.env.HACK_NATIVE_DEPENDENCIES,
+    adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
+    allowedHosts: parseNativeAllowedHosts(process.env.HACK_NATIVE_ALLOW_HOSTS),
+    https: parseNativeHttpsSelection(process.env),
+    aws: process.env.HACK_NATIVE_AWS_PROFILE
+      ? {
+          profile: process.env.HACK_NATIVE_AWS_PROFILE,
+          region: process.env.HACK_NATIVE_AWS_REGION,
+        }
+      : undefined,
+    before: async (input) => {
+      const lifecycle = await runLifecycleUpBeforeAndProcesses({
+        title: "Lifecycle (native up before)",
+        project,
+        cfg,
+        projectName,
+        branch,
+        env: input.lifecycleHostEnvironment,
+        effectiveEnvName: input.effectiveEnvName,
+        composeProject,
+      });
+      const cleanup = adoptNativeLifecycleCleanup(lifecycle);
+      if (lifecycle.code !== 0) {
+        await cleanup();
+        throw new Error(
+          "Native up lifecycle preparation failed; values omitted."
+        );
+      }
+      return {
+        cleanup,
+        ready: async () => {
+          const code = await runLifecycleCommands({
+            title: "Lifecycle (native up after)",
+            commands: cfg.lifecycle?.up?.after,
+            projectRoot: project.projectRoot,
+            env: input.lifecycleHostEnvironment,
+            projectDir: project.projectDir,
+            composeProject,
+          });
+          if (code !== 0) {
+            throw new Error(
+              "Native up lifecycle readiness hook failed; values omitted."
+            );
+          }
+        },
+      };
+    },
+  };
+  if (!restart) {
+    return await startNativeProject(startup);
+  }
+  if (!startup.sharedSource) {
+    throw new CliUsageError(
+      "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 before cleanup."
+    );
+  }
+  return await restartNativeProject({
+    scope: startup.scope,
+    envName: startup.envName,
+    profiles: args.options.profile === undefined ? undefined : startup.profiles,
+    recovery: recovery
+      ? {
+          ...recovery,
+          verifyEffects: async ({ run, token }) =>
+            await verifyNativeFrontendRecovery({
+              runtime: native,
+              scope: startup.scope,
+              run,
+              httpsPort:
+                token.version === 2
+                  ? token.httpsPort
+                  : (startup.https?.httpsPort ?? null),
+              legacy: token.version === 1,
+              cleanupLifecycle: async () =>
+                await stopLifecycleProcesses({
+                  project,
+                  cfg,
+                  projectName: sanitizeProjectSlug(projectName),
+                  branch,
+                  composeProject,
+                }),
+            }),
+          retirePublisher: async (run) =>
+            await retireNativeRecoveredPublisher({
+              runtime: native,
+              scope: startup.scope,
+              run,
+            }),
+        }
+      : undefined,
+    preflight: (run) =>
+      preflightNativeRestart({
+        runtime: native,
+        scope: startup.scope,
+        composeFile: startup.composeFile,
+        adaptationFile: startup.adaptationFile,
+        dependencyFile: startup.dependencyFile,
+        allowedHosts: startup.allowedHosts,
+        run,
+      }),
+    down: async () => {
+      const code = await handleDown({
+        ctx,
+        args: {
+          options: {
+            path: args.options.path,
+            project: args.options.project,
+            branch: args.options.branch,
+            env: undefined,
+            profile: undefined,
+            target: undefined,
+            json: false,
+            pruneCaches: false,
+            yes: false,
+          },
+          positionals: {},
+          raw: args.raw,
+        },
+      });
+      if (code !== 0) {
+        throw new Error(
+          "Native restart cleanup failed; retained data was not replaced."
+        );
+      }
+    },
+    start: ({ run, onReady }) =>
+      startNativeProject({
+        ...startup,
+        ...nativeRestartSelection({ run }),
+        restore: run,
+        onReady,
+      }),
+  });
+}
+
 async function handleUp({
   ctx,
   args,
@@ -5821,6 +6070,10 @@ async function handleUp({
   readonly ctx: CliContext;
   readonly args: UpArgs;
 }): Promise<number> {
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    return await handleNativeUp({ ctx, args, native });
+  }
   const json = args.options.json === true;
   if (!json) {
     return await runUpCommand({ ctx, args, json: false });
@@ -5851,6 +6104,10 @@ async function runUpCommand({
   readonly json: boolean;
   readonly startedAtMs?: number;
 }): Promise<number> {
+  const detach = args.options.detach || json;
+  const startupTimeoutMs = detach
+    ? resolveComposeStartupTimeoutMs()
+    : DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
   let project: Awaited<ReturnType<typeof requireProjectContext>>;
   try {
     project = await resolveProjectForArgs({
@@ -5874,9 +6131,6 @@ async function runUpCommand({
     }
     throw error;
   }
-  // `--json` implies detach: machine-readable output requires the command to
-  // return instead of streaming compose logs on stdout.
-  const detach = args.options.detach || json;
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
@@ -5945,37 +6199,6 @@ async function runUpCommand({
   const aliasHost = resolveBranchAliasHost({ devHost, cfg });
   const internalSettings = resolveInternalSettings(cfg);
   await maybePromptToStartGlobal({ internal: internalSettings });
-  const internalOverride = await resolveInternalComposeOverride({
-    project,
-    cfg,
-    branch,
-    devHost,
-    aliasHost,
-  });
-  const composeFiles =
-    branch && devHost
-      ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
-      : [project.composeFile];
-  const composeFilesWithInternal = internalOverride
-    ? [...composeFiles, internalOverride]
-    : composeFiles;
-  const dependencyCache = await resolveDependencyCacheOverride({
-    projectRoot: project.projectRoot,
-    projectDir: project.projectDir,
-    projectName,
-    composeFile: project.composeFile,
-  });
-  const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
-    ? [...composeFilesWithInternal, dependencyCache.overridePath]
-    : composeFilesWithInternal;
-  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
-    project,
-    composeFiles: composeFilesWithRuntimeOverrides,
-    branch,
-    devHost,
-    aliasHost,
-    composeProject: composeProjectName ?? baseProjectName,
-  });
 
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const requestedServices = resolveRequestedComposeServices({
@@ -5983,11 +6206,19 @@ async function runUpCommand({
     available: allServiceNames,
   });
   const serviceScoped = requestedServices.length > 0;
+  const scopedDependencyCache = serviceScoped
+    ? await resolveDependencyCacheOverride({
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        projectName,
+        composeFile: project.composeFile,
+      })
+    : null;
   const targetServices = serviceScoped ? requestedServices : allServiceNames;
-  const cacheBootstrapServices = serviceScoped
+  const cacheBootstrapServices = scopedDependencyCache
     ? await resolveDependencyCacheBootstrapServices({
         composeFile: project.composeFile,
-        cache: dependencyCache,
+        cache: scopedDependencyCache,
         targetServices,
       })
     : [];
@@ -6001,11 +6232,6 @@ async function runUpCommand({
     allServiceNames,
     envName,
   });
-  const composeFilesWithEnv = [
-    ...composeFilesWithRuntimeOverrides,
-    ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
-    ...envOverrides.composeFiles,
-  ];
 
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
@@ -6075,7 +6301,55 @@ async function runUpCommand({
     lifecycleSignalCleanup ??
     installLifecycleSignalCleanup({ cleanup: lifecycleCleanup });
   try {
+    // Hooks may register or remove runtime aliases; render overrides only after
+    // successful preparation, while lifecycle cleanup remains installed.
+    const internalOverride = await resolveInternalComposeOverride({
+      project,
+      cfg,
+      branch,
+      devHost,
+      aliasHost,
+    });
+    const composeFiles =
+      branch && devHost
+        ? await resolveBranchComposeFiles({
+            project,
+            branch,
+            devHost,
+            aliasHost,
+          })
+        : [project.composeFile];
+    const composeFilesWithInternal = internalOverride
+      ? [...composeFiles, internalOverride]
+      : composeFiles;
+    const dependencyCache =
+      scopedDependencyCache ??
+      (await resolveDependencyCacheOverride({
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        projectName,
+        composeFile: project.composeFile,
+      }));
+    reportDependencyCacheFallback(dependencyCache);
+    const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
+      ? [...composeFilesWithInternal, dependencyCache.overridePath]
+      : composeFilesWithInternal;
+    const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
+      project,
+      composeFiles: composeFilesWithRuntimeOverrides,
+      branch,
+      devHost,
+      aliasHost,
+      composeProject: composeProjectName ?? baseProjectName,
+    });
+    const composeFilesWithEnv = [
+      ...composeFilesWithRuntimeOverrides,
+      ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
+      ...envOverrides.composeFiles,
+    ];
+    reportComposeStartupBudget({ startupTimeoutMs, detach });
     const bootstrapCode = await bootstrapDependencyCaches({
+      timeoutMs: detach ? startupTimeoutMs : undefined,
       services: cacheBootstrapServices,
       composeFiles: composeFilesWithEnv,
       composeProject: composeProjectName,
@@ -6084,19 +6358,26 @@ async function runUpCommand({
       env: envOverrides.env,
     });
     if (bootstrapCode !== 0) {
+      const failure = dependencyCacheBootstrapFailure({
+        code: bootstrapCode,
+        timeoutMs: detach ? startupTimeoutMs : undefined,
+      });
       if (json) {
         return emitLifecycleResult({
-          result: errorResult({
-            code: "E_DEPENDENCY_BOOTSTRAP_FAILED",
-            message:
-              "Dependency cache initialization failed; consumers were not changed",
-          }),
+          result: errorResult(failure),
           exitCode: bootstrapCode,
         });
       }
+      logger.error({ message: failure.message });
       return bootstrapCode;
     }
     const upCode = await composeRuntimeBackend.up({
+      dependencyProgress: resolveDependencyCacheProgress({
+        cache: dependencyCache,
+        project: composeProjectName,
+        baseProject: baseProjectName,
+      }),
+      startupTimeoutMs,
       composeFiles: composeFilesWithEnv,
       composeProject: composeProjectName,
       profiles,
@@ -6114,7 +6395,11 @@ async function runUpCommand({
         composeProject: lifecycleComposeProject,
       });
       if (json) {
-        const failure = composeStartupFailure(upCode, "docker compose up");
+        const failure = composeStartupFailure(
+          upCode,
+          "docker compose up",
+          startupTimeoutMs
+        );
         return emitLifecycleResult({
           result: errorResult({
             code: failure.code,
@@ -6124,6 +6409,13 @@ async function runUpCommand({
           exitCode: upCode,
         });
       }
+      logger.error({
+        message: composeStartupFailure(
+          upCode,
+          "docker compose up",
+          startupTimeoutMs
+        ).message,
+      });
       return upCode;
     }
 
@@ -6220,6 +6512,13 @@ async function runUpCommand({
       }),
       exitCode: 0,
     });
+  } catch (error: unknown) {
+    await lifecycleCleanup?.();
+    await removeProjectRuntimeStateEntry({
+      projectDir: project.projectDir,
+      composeProject: lifecycleComposeProject,
+    });
+    throw error;
   } finally {
     signalCleanup.dispose();
   }
@@ -6288,6 +6587,105 @@ async function handleDown({
   readonly ctx: CliContext;
   readonly args: DownArgs;
 }): Promise<number> {
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    if (args.options.json) {
+      setLoggerBackendOverride({ backend: "console" });
+    }
+    if (
+      [
+        args.options.env,
+        args.options.profile,
+        args.options.target,
+        args.options.pruneCaches,
+        args.options.yes,
+      ].some(Boolean)
+    ) {
+      throw new CliUsageError(
+        "Native down preserves data and does not support --env, --profile, --target, --prune-caches or --yes."
+      );
+    }
+    const project = await resolveProjectForArgs({
+      ctx,
+      pathOpt: args.options.path,
+      projectOpt: args.options.project,
+      touchRegistration: false,
+    });
+    const branch = await resolveEffectiveBranchForCommand({
+      project,
+      branchOption: args.options.branch,
+      noticeToStderr: args.options.json === true,
+    });
+    const cfg = await readProjectConfig(project);
+    if (cfg.parseError) {
+      throw new CliUsageError(
+        "Native down requires valid lifecycle configuration; values omitted."
+      );
+    }
+    const scope = {
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      nativeHome: native.home,
+      branch,
+    };
+    let lifecycleEnv: Readonly<Record<string, string>> = {};
+    const hasHooks = Boolean(
+      cfg.lifecycle?.down?.before?.length || cfg.lifecycle?.down?.after?.length
+    );
+    const composeProject = resolveLifecycleComposeProjectName({
+      projectName: sanitizeProjectSlug(
+        await resolveComposeProjectName({ project, cfg })
+      ),
+      branch,
+    });
+    const hook = async (phase: "before" | "after") => {
+      const code = await runLifecycleCommands({
+        title: `Lifecycle (native down ${phase})`,
+        commands: cfg.lifecycle?.down?.[phase],
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        composeProject,
+        env: lifecycleEnv,
+        routeStdoutToStderr: args.options.json === true,
+      });
+      if (code !== 0) {
+        throw new Error(
+          `Native down ${phase} hook failed (exit ${code})${phase === "after" ? "; native graph cleanup was confirmed and data retained" : "; cleanup was not requested"}.`
+        );
+      }
+    };
+    const result = await nativeProjectDown({
+      runtime: native,
+      scope,
+      before: async (run) => {
+        if (!hasHooks) {
+          return;
+        }
+        lifecycleEnv = await nativeDownEnvironment({
+          scope,
+          run,
+          serviceNames: await readComposeServiceNames(project.composeFile),
+        });
+        await hook("before");
+      },
+      after: async () => {
+        if (hasHooks) {
+          await hook("after");
+        }
+      },
+    });
+    if (args.options.json) {
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    } else {
+      logger.info({
+        message:
+          result.status === "stopped"
+            ? "Native project stopped; data retained."
+            : "Native project is not started.",
+      });
+    }
+    return 0;
+  }
   const json = args.options.json === true;
   if (!json) {
     return await runDownCommand({ ctx, args, json: false });
@@ -6656,6 +7054,7 @@ async function runRestartDownPhase(opts: {
 }
 
 async function runRestartUpPhase(opts: {
+  readonly startupTimeoutMs: number;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly baseProjectName: string;
@@ -6667,7 +7066,10 @@ async function runRestartUpPhase(opts: {
   readonly envName?: string | null;
   readonly detach?: boolean;
   readonly routeStdoutToStderr?: boolean;
-}): Promise<number> {
+}): Promise<{
+  readonly code: number;
+  readonly phase: "compose" | "lifecycle";
+}> {
   await maybeSyncOauthAliasesInCompose({ project: opts.project });
 
   const devHost = await resolveRuntimeDevHost({
@@ -6675,42 +7077,6 @@ async function runRestartUpPhase(opts: {
     branch: opts.branch,
   });
   const aliasHost = resolveBranchAliasHost({ devHost, cfg: opts.cfg });
-  const internalOverride = await resolveInternalComposeOverride({
-    project: opts.project,
-    cfg: opts.cfg,
-    branch: opts.branch,
-    devHost,
-    aliasHost,
-  });
-  const composeFiles =
-    opts.branch && devHost
-      ? await resolveBranchComposeFiles({
-          project: opts.project,
-          branch: opts.branch,
-          devHost,
-          aliasHost,
-        })
-      : [opts.project.composeFile];
-  const composeFilesWithInternal = internalOverride
-    ? [...composeFiles, internalOverride]
-    : composeFiles;
-  const dependencyCache = await resolveDependencyCacheOverride({
-    projectRoot: opts.project.projectRoot,
-    projectDir: opts.project.projectDir,
-    projectName: opts.projectName,
-    composeFile: opts.project.composeFile,
-  });
-  const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
-    ? [...composeFilesWithInternal, dependencyCache.overridePath]
-    : composeFilesWithInternal;
-  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
-    project: opts.project,
-    composeFiles: composeFilesWithRuntimeOverrides,
-    branch: opts.branch,
-    devHost,
-    aliasHost,
-    composeProject: opts.composeProjectName ?? opts.baseProjectName,
-  });
 
   const targetServices = await readComposeServiceNames(
     opts.project.composeFile
@@ -6728,11 +7094,6 @@ async function runRestartUpPhase(opts: {
     targetServices,
     envByService: envOverrides.preflightEnvByService,
   });
-  const composeFilesWithEnv = [
-    ...composeFilesWithRuntimeOverrides,
-    ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
-    ...envOverrides.composeFiles,
-  ];
 
   await persistProjectRuntimeEnvSelection({
     projectDir: opts.project.projectDir,
@@ -6754,7 +7115,7 @@ async function runRestartUpPhase(opts: {
       composeProject: opts.lifecycleComposeProject,
     });
     if (lifecycleUp.code !== 0) {
-      return lifecycleUp.code;
+      return { code: lifecycleUp.code, phase: "lifecycle" };
     }
     if (lifecycleUp.sessionName) {
       logger.info({
@@ -6769,14 +7130,68 @@ async function runRestartUpPhase(opts: {
         ? error.message
         : "Failed to start lifecycle setup";
     logger.error({ message });
-    return 1;
+    return { code: 1, phase: "lifecycle" };
   }
 
   const signalCleanup =
     lifecycleSignalCleanup ??
     installLifecycleSignalCleanup({ cleanup: lifecycleCleanup });
   try {
+    // Hooks may register or remove runtime aliases; render overrides only after
+    // successful preparation, while lifecycle cleanup remains installed.
+    const internalOverride = await resolveInternalComposeOverride({
+      project: opts.project,
+      cfg: opts.cfg,
+      branch: opts.branch,
+      devHost,
+      aliasHost,
+    });
+    const composeFiles =
+      opts.branch && devHost
+        ? await resolveBranchComposeFiles({
+            project: opts.project,
+            branch: opts.branch,
+            devHost,
+            aliasHost,
+          })
+        : [opts.project.composeFile];
+    const composeFilesWithInternal = internalOverride
+      ? [...composeFiles, internalOverride]
+      : composeFiles;
+    const dependencyCache = await resolveDependencyCacheOverride({
+      projectRoot: opts.project.projectRoot,
+      projectDir: opts.project.projectDir,
+      projectName: opts.projectName,
+      composeFile: opts.project.composeFile,
+    });
+    reportDependencyCacheFallback(dependencyCache);
+    const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
+      ? [...composeFilesWithInternal, dependencyCache.overridePath]
+      : composeFilesWithInternal;
+    const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
+      project: opts.project,
+      composeFiles: composeFilesWithRuntimeOverrides,
+      branch: opts.branch,
+      devHost,
+      aliasHost,
+      composeProject: opts.composeProjectName ?? opts.baseProjectName,
+    });
+    const composeFilesWithEnv = [
+      ...composeFilesWithRuntimeOverrides,
+      ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
+      ...envOverrides.composeFiles,
+    ];
+    reportComposeStartupBudget({
+      startupTimeoutMs: opts.startupTimeoutMs,
+      detach: opts.detach === true,
+    });
     const upCode = await composeRuntimeBackend.up({
+      dependencyProgress: resolveDependencyCacheProgress({
+        cache: dependencyCache,
+        project: opts.composeProjectName,
+        baseProject: opts.baseProjectName,
+      }),
+      startupTimeoutMs: opts.startupTimeoutMs,
       composeFiles: composeFilesWithEnv,
       composeProject: opts.composeProjectName,
       profiles: opts.profiles,
@@ -6787,7 +7202,18 @@ async function runRestartUpPhase(opts: {
       forceRecreate: true,
     });
     if (upCode !== 0) {
+      reportComposeStartupBudget({
+        startupTimeoutMs: opts.startupTimeoutMs,
+        detach: true,
+        repair: true,
+      });
       const repairCode = await composeRuntimeBackend.up({
+        dependencyProgress: resolveDependencyCacheProgress({
+          cache: dependencyCache,
+          project: opts.composeProjectName,
+          baseProject: opts.baseProjectName,
+        }),
+        startupTimeoutMs: opts.startupTimeoutMs,
         composeFiles: composeFilesWithEnv,
         composeProject: opts.composeProjectName,
         profiles: opts.profiles,
@@ -6813,7 +7239,7 @@ async function runRestartUpPhase(opts: {
           composeProject: opts.lifecycleComposeProject,
         });
       }
-      return upCode;
+      return { code: upCode, phase: "compose" };
     }
 
     const upAfter = await runLifecycleCommands({
@@ -6827,7 +7253,14 @@ async function runRestartUpPhase(opts: {
     if (upAfter !== 0) {
       await lifecycleCleanup?.();
     }
-    return upAfter;
+    return { code: upAfter, phase: "lifecycle" };
+  } catch (error: unknown) {
+    await lifecycleCleanup?.();
+    await removeProjectRuntimeStateEntry({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.lifecycleComposeProject,
+    });
+    throw error;
   } finally {
     signalCleanup.dispose();
   }
@@ -6859,6 +7292,7 @@ type TargetedServiceRestartResult =
  * individual Compose service.
  */
 async function runTargetedServiceRestart(opts: {
+  readonly startupTimeoutMs: number;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly baseProjectName: string;
@@ -6920,6 +7354,7 @@ async function runTargetedServiceRestart(opts: {
     targetServices: preparedServices,
     envByService: envOverrides.preflightEnvByService,
   });
+  reportDependencyCacheFallback(dependencyCache);
   const composeFilesWithRuntimeOverrides = [
     ...composeFiles,
     ...(internalOverride ? [internalOverride] : []),
@@ -6939,6 +7374,7 @@ async function runTargetedServiceRestart(opts: {
     ...envOverrides.composeFiles,
   ];
   const bootstrapCode = await bootstrapDependencyCaches({
+    timeoutMs: opts.startupTimeoutMs,
     services: cacheBootstrapServices,
     composeFiles: composeFilesWithEnv,
     composeProject: opts.composeProjectName,
@@ -6947,17 +7383,30 @@ async function runTargetedServiceRestart(opts: {
     env: envOverrides.env,
   });
   if (bootstrapCode !== 0) {
+    const failure = dependencyCacheBootstrapFailure({
+      code: bootstrapCode,
+      timeoutMs: opts.startupTimeoutMs,
+    });
     return {
       ok: false,
       code: bootstrapCode,
-      errorCode: "E_DEPENDENCY_BOOTSTRAP_FAILED",
-      message:
-        "Dependency cache initialization failed; consumers were not changed",
+      errorCode: failure.code,
+      message: failure.message,
       running: [],
       completed: [],
     };
   }
+  reportComposeStartupBudget({
+    startupTimeoutMs: opts.startupTimeoutMs,
+    detach: true,
+  });
   const code = await composeRuntimeBackend.up({
+    dependencyProgress: resolveDependencyCacheProgress({
+      cache: dependencyCache,
+      project: opts.composeProjectName,
+      baseProject: opts.baseProjectName,
+    }),
+    startupTimeoutMs: opts.startupTimeoutMs,
     composeFiles: composeFilesWithEnv,
     composeProject: opts.composeProjectName,
     profiles: opts.profiles,
@@ -6970,7 +7419,11 @@ async function runTargetedServiceRestart(opts: {
     routeStdoutToStderr: opts.routeStdoutToStderr,
   });
   if (code !== 0) {
-    const failure = composeStartupFailure(code, "Targeted service restart");
+    const failure = composeStartupFailure(
+      code,
+      "Targeted service restart",
+      opts.startupTimeoutMs
+    );
     return {
       ok: false,
       code,
@@ -7032,6 +7485,40 @@ async function handleRestart({
   readonly ctx: CliContext;
   readonly args: RestartArgs;
 }): Promise<number> {
+  const recover = args.options.recoverFrontend === true;
+  const expectAttempt = args.options.expectFinalizationAttempt;
+  const legacyPid = args.options.expectFrontendPid;
+  if (
+    (recover &&
+      (typeof expectAttempt !== "string" ||
+        !FINALIZATION_ATTEMPT.test(expectAttempt) ||
+        (legacyPid !== undefined &&
+          (!Number.isSafeInteger(legacyPid) || legacyPid <= 1)))) ||
+    (!recover && (expectAttempt !== undefined || legacyPid !== undefined))
+  ) {
+    throw new CliUsageError(
+      "Native frontend recovery requires --recover-frontend and the exact --expect-finalization-attempt; legacy state also requires --expect-frontend-pid."
+    );
+  }
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    return await handleNativeUp({
+      ctx,
+      args: { ...args, options: { ...args.options, detach: false } },
+      native,
+      restart: true,
+      recovery:
+        recover && expectAttempt
+          ? { expectAttempt, ...(legacyPid ? { legacyPid } : {}) }
+          : undefined,
+    });
+  }
+  if (recover) {
+    throw new CliUsageError(
+      "Frontend recovery is available only for the native runtime."
+    );
+  }
+  requireComposeOperationAvailable("restart");
   const json = args.options.json === true;
   if (!json) {
     return await runRestartCommand({ ctx, args, json: false });
@@ -7071,6 +7558,7 @@ async function runRestartCommand({
   readonly json: boolean;
   readonly startedAtMs?: number;
 }): Promise<number> {
+  const startupTimeoutMs = resolveComposeStartupTimeoutMs();
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -7130,6 +7618,7 @@ async function runRestartCommand({
   });
   if (requestedServices.length > 0) {
     const result = await runTargetedServiceRestart({
+      startupTimeoutMs,
       project,
       cfg,
       baseProjectName,
@@ -7143,6 +7632,9 @@ async function runRestartCommand({
       routeStdoutToStderr: json,
     });
     if (!json) {
+      if (!result.ok) {
+        logger.error({ message: result.message });
+      }
       return result.code;
     }
     if (!result.ok) {
@@ -7225,7 +7717,8 @@ async function runRestartCommand({
     composeProject: lifecycleComposeProject,
   });
 
-  const upCode = await runRestartUpPhase({
+  const upOutcome = await runRestartUpPhase({
+    startupTimeoutMs,
     project,
     cfg,
     baseProjectName,
@@ -7239,11 +7732,19 @@ async function runRestartCommand({
     routeStdoutToStderr: json,
   });
 
+  const upCode = upOutcome.code;
   if (upCode !== 0) {
+    const failure =
+      upOutcome.phase === "compose"
+        ? composeStartupFailure(upCode, "Restart up phase", startupTimeoutMs)
+        : {
+            code: "E_LIFECYCLE_FAILED" as const,
+            message: `Restart lifecycle hook failed (exit ${upCode})`,
+          };
     if (!json) {
+      logger.error({ message: failure.message });
       return upCode;
     }
-    const failure = composeStartupFailure(upCode, "Restart up phase");
     return emitLifecycleResult({
       result: errorResult({
         code: failure.code,
@@ -7471,6 +7972,36 @@ async function maybeManageProjectLogsAfterDown(opts: {
   });
 }
 
+async function displayNativePs(
+  result: Awaited<ReturnType<typeof nativeProjectPs>>,
+  json: boolean
+): Promise<void> {
+  if (json) {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+  if (result.status === "owner_unconfirmed") {
+    logger.warn({
+      message:
+        "Native graph owner is unconfirmed. Service rows are observations, not usable readiness; explicit retaining recovery is required.",
+    });
+  } else if (result.status === "runtime_degraded") {
+    logger.warn({
+      message:
+        "Native graph owner reported a degraded runtime. Service rows do not prove usable readiness; inspect graph owner-status.",
+    });
+  }
+  await display.table({
+    columns: ["NATIVE SERVICE", "CONTAINER", "STATE", "HEALTH"],
+    rows: result.items.map((item) => [
+      item.service,
+      item.container ?? "",
+      item.state,
+      item.health ?? "",
+    ]),
+  });
+}
+
 async function handlePs({
   ctx,
   args,
@@ -7490,6 +8021,23 @@ async function handlePs({
     branchOption: args.options.branch,
     noticeToStderr: json,
   });
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    if (args.options.profile) {
+      throw new CliUsageError("Native ps does not support profile filtering.");
+    }
+    const result = await nativeProjectPs({
+      runtime: native,
+      scope: {
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        nativeHome: native.home,
+        branch,
+      },
+    });
+    await displayNativePs(result, json);
+    return 0;
+  }
   const profiles = parseCsvList(args.options.profile);
 
   const cfg = await readProjectConfig(project);
@@ -7566,6 +8114,18 @@ async function handlePs({
   return 0;
 }
 
+function validateRunBackendOptions(native: boolean, args: RunArgs): void {
+  if (!native) {
+    requireComposeOperationAvailable("run");
+    return;
+  }
+  if (args.options.env || args.options.profile) {
+    throw new CliUsageError(
+      "Native run uses the started project's environment and profiles; restart with the requested selections first."
+    );
+  }
+}
+
 async function handleRun({
   ctx,
   args,
@@ -7573,10 +8133,13 @@ async function handleRun({
   readonly ctx: CliContext;
   readonly args: RunArgs;
 }): Promise<number> {
+  const native = resolveNativeRuntimeSelection();
+  validateRunBackendOptions(Boolean(native), args);
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
+    touchRegistration: false,
   });
   const branch = await resolveEffectiveBranchForCommand({
     project,
@@ -7585,6 +8148,27 @@ async function handleRun({
     // notice on stderr so it never corrupts captured output.
     noticeToStderr: true,
   });
+  if (native) {
+    const result = await nativeProjectOneOff({
+      runtime: native,
+      scope: {
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        nativeHome: native.home,
+        branch,
+      },
+      service: args.positionals.service ?? "",
+      argv: args.positionals.cmd,
+      workdir: args.options.workdir,
+      composeFile: project.composeFile,
+    });
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    if (result.truncated) {
+      process.stderr.write("Native run output was truncated.\n");
+    }
+    return result.exitCode;
+  }
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
@@ -7621,6 +8205,9 @@ async function handleRun({
   const composeFiles = branch
     ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
     : [project.composeFile];
+  const composeFilesWithInternal = internalOverride
+    ? [...composeFiles, internalOverride]
+    : composeFiles;
   const projectName = sanitizeProjectSlug(baseProjectName);
   const dependencyCache = await resolveDependencyCacheOverride({
     projectRoot: project.projectRoot,
@@ -7628,14 +8215,13 @@ async function handleRun({
     projectName,
     composeFile: project.composeFile,
   });
-  const composeFilesWithInternal = [
-    ...composeFiles,
-    ...(internalOverride ? [internalOverride] : []),
-    ...(dependencyCache.overridePath ? [dependencyCache.overridePath] : []),
-  ];
+  reportDependencyCacheFallback(dependencyCache);
+  const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
+    ? [...composeFilesWithInternal, dependencyCache.overridePath]
+    : composeFilesWithInternal;
   const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
     project,
-    composeFiles: composeFilesWithInternal,
+    composeFiles: composeFilesWithRuntimeOverrides,
     branch,
     devHost,
     aliasHost,
@@ -7657,7 +8243,7 @@ async function handleRun({
     envName,
   });
   const composeFilesWithEnv = [
-    ...composeFilesWithInternal,
+    ...composeFilesWithRuntimeOverrides,
     ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
     ...envOverrides.composeFiles,
   ];
@@ -7678,15 +8264,21 @@ async function handleRun({
   if (bootstrapCode !== 0) {
     return bootstrapCode;
   }
-  const stackIsRunning = await resolveCanSkipRunDependencies({
-    composeFiles: composeFilesWithEnv,
-    composeProjectKey: composeProjectName ?? baseProjectName,
-    composeProject: composeProjectName,
-    project,
-    profiles,
-    effectiveEnvName: envOverrides.effectiveEnvName,
-    service,
-  });
+  const stackIsRunning =
+    !dependencyCache.sharingDisabledReason &&
+    (await resolveCanSkipRunDependencies({
+      composeFiles: composeFilesWithEnv,
+      composeProjectKey: composeProjectName ?? baseProjectName,
+      composeProject: composeProjectName,
+      project,
+      profiles,
+      effectiveEnvName: envOverrides.effectiveEnvName,
+      cacheVolumeNames: dependencyCache.volumes.map(
+        (volume) => volume.resolvedName
+      ),
+      env: envOverrides.env,
+      service,
+    }));
   return await composeRuntimeBackend.run({
     composeFiles: composeFilesWithEnv,
     composeProject: composeProjectName,
@@ -7707,10 +8299,17 @@ async function handleExec({
   readonly ctx: CliContext;
   readonly args: ExecArgs;
 }): Promise<number> {
+  const native = resolveNativeRuntimeSelection();
+  if (native && (args.options.env || args.options.profile)) {
+    throw new CliUsageError(
+      "Native exec does not support --env or --profile changes; it uses the running service environment."
+    );
+  }
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
+    touchRegistration: false,
   });
   const branch = await resolveEffectiveBranchForCommand({
     project,
@@ -7719,6 +8318,27 @@ async function handleExec({
     // notice on stderr so it never corrupts captured output.
     noticeToStderr: true,
   });
+  if (native) {
+    const result = await nativeProjectExec({
+      runtime: native,
+      scope: {
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        nativeHome: native.home,
+        branch,
+      },
+      service: args.positionals.service ?? "",
+      argv: args.positionals.cmd,
+      workdir: args.options.workdir,
+      composeFile: project.composeFile,
+    });
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    if (result.truncated) {
+      process.stderr.write("Native exec output was truncated.\n");
+    }
+    return result.exitCode;
+  }
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
@@ -7813,6 +8433,17 @@ async function handleExec({
   });
 }
 
+function reportDependencyCacheFallback(cache: {
+  readonly sharingDisabledReason?: string;
+}): void {
+  if (cache.sharingDisabledReason) {
+    logger.warn({
+      message:
+        "Shared dependency cache disabled: installer image/build inputs and platform must be explicit and resolved. Using the original Compose volume configuration.",
+    });
+  }
+}
+
 async function resolveCanSkipRunDependencies(opts: {
   readonly composeFiles: readonly string[];
   readonly composeProjectKey: string;
@@ -7821,6 +8452,8 @@ async function resolveCanSkipRunDependencies(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly effectiveEnvName: string | null;
   readonly service: string;
+  readonly cacheVolumeNames: readonly string[];
+  readonly env?: Record<string, string>;
 }): Promise<boolean> {
   const runtimeState = await readProjectRuntimeStateEntry({
     projectDir: opts.project.projectDir,
@@ -7835,17 +8468,29 @@ async function resolveCanSkipRunDependencies(opts: {
     composeProject: opts.composeProject,
     profiles: opts.profiles,
     cwd: dirname(opts.project.composeFile),
+    env: opts.env,
   });
   if (psResult.exitCode !== 0) {
     return false;
   }
 
   const runningServices = parseJsonLines(psResult.stdout);
-  return runningServices.some((entry) => {
+  const runningTarget = runningServices.find((entry) => {
     const service = getString(entry, "Service")?.trim();
     const state = getString(entry, "State")?.trim().toLowerCase();
     return service === opts.service && state === "running";
   });
+  return (
+    runningTarget !== undefined &&
+    (await canReuseRunningDependencyCache({
+      containerId: getString(runningTarget, "ID"),
+      composeProject: opts.composeProjectKey,
+      service: opts.service,
+      volumeNames: opts.cacheVolumeNames,
+      cwd: dirname(opts.project.composeFile),
+      env: opts.env,
+    }))
+  );
 }
 
 async function resolveExecTargetReady(opts: {
@@ -8205,6 +8850,63 @@ async function resolveLifecycleLogCompanion(opts: {
   return { logPath };
 }
 
+async function handleNativeLogs({
+  args,
+  project,
+  branch,
+  native,
+}: {
+  readonly args: LogsArgs;
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly branch: string | null;
+  readonly native: NonNullable<
+    ReturnType<typeof resolveNativeRuntimeSelection>
+  >;
+}): Promise<number> {
+  const json = args.options.json === true;
+  const service = args.positionals.service;
+  const tail = args.options.tail ?? 200;
+  const follow = !args.options.noFollow;
+  if (
+    [
+      args.options.profile,
+      args.options.compose,
+      args.options.loki,
+      args.options.services,
+      args.options.query,
+      args.options.since,
+      args.options.until,
+      args.options.pretty,
+    ].some(Boolean)
+  ) {
+    throw new CliUsageError(
+      "Native logs support only a service, --no-follow, --tail and --json."
+    );
+  }
+  const result = await nativeProjectLogs({
+    runtime: native,
+    scope: {
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      nativeHome: native.home,
+      branch,
+    },
+    service,
+    tail,
+    follow,
+  });
+  if (json) {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  } else {
+    process.stderr.write(
+      `Native logs: ${result.service}${result.truncated ? " (truncated)" : ""}\n`
+    );
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+  }
+  return 0;
+}
+
 async function handleLogs({
   ctx,
   args,
@@ -8227,6 +8929,10 @@ async function handleLogs({
   const follow = !args.options.noFollow;
   const tail = args.options.tail ?? 200;
   const service = args.positionals.service;
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    return await handleNativeLogs({ args, project, branch, native });
+  }
   const profiles = parseCsvList(args.options.profile);
   const format = resolveLogFormat({ json, pretty: args.options.pretty });
   const timeRange = parseLogTimeRange({
@@ -8432,9 +9138,7 @@ async function handleOpen({
     }
   }
   const aliasHost = resolveBranchAliasHost({ devHost, cfg });
-  const baseHosts = [devHost, aliasHost].filter(
-    (host): host is string => typeof host === "string" && host.length > 0
-  );
+  const baseHosts = resolveProjectRouteBaseHosts({ devHost, aliasHost });
 
   const targetRaw = (args.positionals.target ?? "").trim();
   const preferenceRaw = args.options.prefer;
@@ -8466,7 +9170,8 @@ async function handleOpen({
     branch && usesProjectBaseHost
       ? applyBranchToHost({ host: rawHost, branch, baseHosts })
       : rawHost;
-  const url = resolveOpenUrl({ targetRaw, resolvedHost });
+  const grafanaHost = await resolveOpenGrafanaHost(targetRaw);
+  const url = resolveOpenUrl({ targetRaw, resolvedHost, grafanaHost });
 
   if (json) {
     process.stdout.write(`${JSON.stringify({ url }, null, 2)}\n`);
@@ -8553,12 +9258,28 @@ function resolveRawHost(opts: {
 /**
  * Resolves the final URL to open based on target input.
  */
-function resolveOpenUrl(opts: {
+async function resolveOpenGrafanaHost(
+  target: string
+): Promise<string | undefined> {
+  if (target !== "logs") {
+    return undefined;
+  }
+  const host = await resolveInstalledGrafanaHost();
+  if (!host) {
+    throw new CliUsageError(
+      "Cannot identify a configured global Grafana route; review the global logging Compose file or pass an explicit URL."
+    );
+  }
+  return host;
+}
+
+export function resolveOpenUrl(opts: {
+  readonly grafanaHost?: string;
   readonly targetRaw: string;
   readonly resolvedHost: string;
 }): string {
   if (opts.targetRaw === "logs") {
-    return `https://${DEFAULT_GRAFANA_HOST}`;
+    return `https://${opts.grafanaHost ?? DEFAULT_GRAFANA_HOST}`;
   }
   if (hasUrlScheme(opts.targetRaw)) {
     return opts.targetRaw;

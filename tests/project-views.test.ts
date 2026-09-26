@@ -19,12 +19,20 @@ import type {
 } from "../src/lib/runtime-projects.ts";
 
 let tempDir: string | null = null;
+let originalGlobalConfigPath: string | undefined;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "hack-views-"));
+  originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
+  process.env.HACK_GLOBAL_CONFIG_PATH = join(tempDir, "global.config.json");
 });
 
 afterEach(async () => {
+  if (originalGlobalConfigPath === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
+  } else {
+    process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
+  }
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;

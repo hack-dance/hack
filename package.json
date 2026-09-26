@@ -15,6 +15,9 @@
   "scripts": {
     "dev": "bun run --cwd packages/cli dev",
     "build": "bun run --cwd packages/cli build",
+    "build:local": "sh scripts/build-hack-local.sh",
+    "test:local": "cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --jobs 2",
+    "check:local": "cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check && cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --jobs 2 -- -D warnings",
     "build:runtime-image": "bun run --cwd packages/cli build:runtime-image",
     "build:node-runtime-image": "bun run --cwd packages/cli build:node-runtime-image",
     "build:slim-runtime-image": "bun run --cwd packages/cli build:slim-runtime-image",
@@ -57,6 +60,7 @@
     "typecheck": "bun run turbo:typecheck",
     "uninstall:local": "bun run --cwd packages/cli uninstall:local",
     "test": "bun run turbo:test",
+    "test:models": "bun run scripts/check-tla-models.ts",
     "test:e2e:local": "bun tests/e2e/run.ts",
     "test:e2e:local:docker": "HACK_E2E_DOCKER=1 bun tests/e2e/run.ts",
     "test:e2e:gateway": "bun run scripts/gateway-e2e.ts",

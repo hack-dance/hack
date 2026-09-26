@@ -3,7 +3,11 @@ import { agentDocsSyncScenario } from "./scenarios/agent-docs-sync.ts";
 import { automationCheckScenario } from "./scenarios/automation-check.ts";
 import { cachePruneScenario } from "./scenarios/cache-prune.ts";
 import { dependencyCacheScenario } from "./scenarios/dependency-cache.ts";
+import { dependencyCacheBootstrapScenario } from "./scenarios/dependency-cache-bootstrap.ts";
+import { dependencyCachePackageScenario } from "./scenarios/dependency-cache-package.ts";
+import { dependencyCacheProtocolScenario } from "./scenarios/dependency-cache-protocol.ts";
 import { doctorScenario } from "./scenarios/doctor.ts";
+import { domainMigrationScenario } from "./scenarios/domain-migration.ts";
 import { envSecretsScenario } from "./scenarios/env-secrets.ts";
 import { initScenario } from "./scenarios/init.ts";
 import { lifecycleHostProcessScenario } from "./scenarios/lifecycle-host-process.ts";
@@ -21,6 +25,7 @@ import { worktreeSecretsScenario } from "./scenarios/worktree-secrets.ts";
  *   bun tests/e2e/run.ts                    # tier 1 (local) scenarios
  *   HACK_E2E_DOCKER=1 bun tests/e2e/run.ts  # + tier 2 (docker) scenarios
  *   bun tests/e2e/run.ts --only=init,doctor # subset by name
+ *   # Host-ingress scenarios require explicit --only plus their prerequisites.
  *   bun tests/e2e/run.ts --list             # list scenarios and exit
  *   HACK_E2E_KEEP=1 ...                     # keep temp fixtures for debugging
  *   HACK_E2E_CLI_BIN=./dist/hack ...        # exercise the compiled binary
@@ -43,6 +48,10 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   lifecycleSessionRecoveryScenario,
   cachePruneScenario,
   dependencyCacheScenario,
+  dependencyCacheBootstrapScenario,
+  dependencyCacheProtocolScenario,
+  dependencyCachePackageScenario,
+  domainMigrationScenario,
   upDownScenario,
   lifecycleHostProcessScenario,
   worktreeParallelUpScenario,

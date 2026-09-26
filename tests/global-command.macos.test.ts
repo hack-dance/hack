@@ -3,9 +3,11 @@ import {
   afterEach,
   beforeAll,
   beforeEach,
+  test as bunTest,
   expect,
-  test,
+  spyOn,
 } from "bun:test";
+import { X509Certificate } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -21,7 +23,11 @@ import {
 } from "../src/constants.ts";
 import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
 import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
+import { CURRENT_CA_PEM, OLD_CA_PEM } from "./helpers/ca-certificates.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
+
+// These fixtures exercise macOS host commands and require that platform.
+const test = bunTest.skipIf(process.platform !== "darwin");
 
 const runCalls: string[][] = [];
 const execCalls: string[][] = [];
@@ -33,6 +39,7 @@ let execMockResponder:
   | null = null;
 
 let tempDir: string | null = null;
+const originalMcpCommand = process.env.HACK_MCP_COMMAND;
 let originalHome: string | undefined;
 let originalLogger: string | undefined;
 let originalUser: string | undefined;
@@ -220,6 +227,7 @@ beforeAll(() => {
 });
 
 beforeEach(async () => {
+  process.env.HACK_MCP_COMMAND = "/usr/local/bin/hack";
   originalHome = process.env.HOME;
   originalLogger = process.env.HACK_LOGGER;
   originalUser = process.env.USER;
@@ -249,6 +257,11 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  if (originalMcpCommand === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_MCP_COMMAND");
+  } else {
+    process.env.HACK_MCP_COMMAND = originalMcpCommand;
+  }
   resetNoInteractiveFlagForTests();
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
@@ -322,6 +335,19 @@ test("global install keeps container ip host dns when bridge ip is reachable", a
   expect(await readDnsmasqConf(tempDir!)).toContain(
     `address=/.hack/${DEFAULT_CADDY_IP}`
   );
+  expect(await readDnsmasqConf(tempDir!)).toContain(
+    `address=/.hack.local/${DEFAULT_CADDY_IP}`
+  );
+  expect(await readDnsmasqConf(tempDir!)).toContain(
+    `address=/.hack.gy/${DEFAULT_CADDY_IP}`
+  );
+  expect(
+    runCalls.some(
+      (cmd) =>
+        cmd[0] === "sudo" &&
+        cmd.some((arg) => arg.endsWith("> /etc/resolver/hack.local"))
+    )
+  ).toBe(true);
   expect(runCalls).toEqual(
     expect.arrayContaining([
       [
@@ -390,6 +416,9 @@ test("global install falls back to localhost host dns when bridge ip is unreacha
   expect(code).toBe(0);
   expect(await readDnsmasqConf(tempDir!)).toContain(
     `address=/.hack/${DEFAULT_HOST_DNS_IP}`
+  );
+  expect(await readDnsmasqConf(tempDir!)).toContain(
+    `address=/.hack.local/${DEFAULT_HOST_DNS_IP}`
   );
 });
 
@@ -947,10 +976,7 @@ test("global trust prepares host runtime trust env for future shells", async () 
     "caddy-local-authority.crt"
   );
   await mkdir(dirname(localCaPath), { recursive: true });
-  await writeFile(
-    localCaPath,
-    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
-  );
+  await writeFile(localCaPath, CURRENT_CA_PEM);
 
   execMockResponder = (cmd) => {
     if (
@@ -964,9 +990,9 @@ test("global trust prepares host runtime trust env for future shells", async () 
     if (
       cmd[0] === "security" &&
       cmd[1] === "find-certificate" &&
-      cmd[2] === "-c"
+      cmd[4] === "/Library/Keychains/System.keychain"
     ) {
-      return { exitCode: 0, stdout: "already trusted", stderr: "" };
+      return { exitCode: 0, stdout: CURRENT_CA_PEM, stderr: "" };
     }
     if (
       cmd[0] === "security" &&
@@ -1003,7 +1029,7 @@ test("global trust prepares host runtime trust env for future shells", async () 
   );
 
   expect(code).toBe(0);
-  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+  expect(await Bun.file(bundlePath).text()).toContain(CURRENT_CA_PEM.trim());
   expect(await Bun.file(bundlePath).text()).toContain("SYSTEM");
   expect(await Bun.file(envScriptPath).text()).toContain("NODE_EXTRA_CA_CERTS");
   expect(execCalls).toEqual(
@@ -1019,13 +1045,6 @@ test("global trust prepares host runtime trust env for future shells", async () 
   );
   expect(execCalls).not.toEqual(
     expect.arrayContaining([
-      expect.arrayContaining([
-        "security",
-        "find-certificate",
-        "-a",
-        "-p",
-        "/Library/Keychains/System.keychain",
-      ]),
       expect.arrayContaining([
         "security",
         "find-certificate",
@@ -1070,10 +1089,7 @@ test("global trust still prepares host TLS env when keychain trust is declined",
     "caddy-local-authority.crt"
   );
   await mkdir(dirname(localCaPath), { recursive: true });
-  await writeFile(
-    localCaPath,
-    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
-  );
+  await writeFile(localCaPath, CURRENT_CA_PEM);
 
   execMockResponder = (cmd) => {
     if (
@@ -1121,7 +1137,7 @@ test("global trust still prepares host TLS env when keychain trust is declined",
   expect(code).toBe(0);
   // Declining the System keychain step (browser trust) no longer blocks
   // Bun/Node/curl/git trust env, which is independent of the keychain.
-  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+  expect(await Bun.file(bundlePath).text()).toContain(CURRENT_CA_PEM.trim());
   expect(await fileExists(envScriptPath)).toBe(true);
   expect(runCalls).toEqual(
     expect.arrayContaining([
@@ -1158,10 +1174,7 @@ test("global trust falls back to an existing exported CA when Caddy is unavailab
     "caddy-local-authority.crt"
   );
   await mkdir(dirname(localCaPath), { recursive: true });
-  await writeFile(
-    localCaPath,
-    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
-  );
+  await writeFile(localCaPath, CURRENT_CA_PEM);
 
   execMockResponder = (cmd) => {
     if (cmd[0] === "docker" && cmd[1] === "info") {
@@ -1170,9 +1183,9 @@ test("global trust falls back to an existing exported CA when Caddy is unavailab
     if (
       cmd[0] === "security" &&
       cmd[1] === "find-certificate" &&
-      cmd[2] === "-c"
+      cmd[4] === "/Library/Keychains/System.keychain"
     ) {
-      return { exitCode: 0, stdout: "already trusted", stderr: "" };
+      return { exitCode: 0, stdout: CURRENT_CA_PEM, stderr: "" };
     }
     if (
       cmd[0] === "security" &&
@@ -1209,7 +1222,7 @@ test("global trust falls back to an existing exported CA when Caddy is unavailab
   );
 
   expect(code).toBe(0);
-  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+  expect(await Bun.file(bundlePath).text()).toContain(CURRENT_CA_PEM.trim());
   expect(await Bun.file(bundlePath).text()).toContain("SYSTEM");
   expect(await Bun.file(envScriptPath).text()).toContain("NODE_EXTRA_CA_CERTS");
   expect(runCalls).toEqual(
@@ -1240,10 +1253,7 @@ test("global trust proceeds under --no-interactive when sudo is passwordless", a
     "caddy-local-authority.crt"
   );
   await mkdir(dirname(localCaPath), { recursive: true });
-  await writeFile(
-    localCaPath,
-    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
-  );
+  await writeFile(localCaPath, CURRENT_CA_PEM);
 
   execMockResponder = (cmd) => {
     if (
@@ -1260,11 +1270,17 @@ test("global trust proceeds under --no-interactive when sudo is passwordless", a
     if (
       cmd[0] === "security" &&
       cmd[1] === "find-certificate" &&
-      cmd[2] === "-c"
+      cmd[4] === "/Library/Keychains/System.keychain"
     ) {
-      // Not yet trusted: fast-path lookup misses so the confirmed flow
-      // proceeds to the `sudo security add-trusted-cert` install.
-      return { exitCode: 1, stdout: "", stderr: "" };
+      // A same-name old root must not bypass installation of the current CA.
+      const installed = runCalls.some((call) =>
+        call.includes("add-trusted-cert")
+      );
+      return {
+        exitCode: 0,
+        stdout: installed ? CURRENT_CA_PEM : OLD_CA_PEM,
+        stderr: "",
+      };
     }
     if (
       cmd[0] === "security" &&
@@ -1311,7 +1327,7 @@ test("global trust proceeds under --no-interactive when sudo is passwordless", a
       ],
     ])
   );
-  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+  expect(await Bun.file(bundlePath).text()).toContain(CURRENT_CA_PEM.trim());
 });
 
 test("global trust skips the keychain step under --no-interactive when sudo needs a password, but still writes host trust env", async () => {
@@ -1331,10 +1347,7 @@ test("global trust skips the keychain step under --no-interactive when sudo need
     "caddy-local-authority.crt"
   );
   await mkdir(dirname(localCaPath), { recursive: true });
-  await writeFile(
-    localCaPath,
-    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
-  );
+  await writeFile(localCaPath, CURRENT_CA_PEM);
 
   execMockResponder = (cmd) => {
     if (
@@ -1356,7 +1369,7 @@ test("global trust skips the keychain step under --no-interactive when sudo need
     if (
       cmd[0] === "security" &&
       cmd[1] === "find-certificate" &&
-      cmd[2] === "-c"
+      cmd[4] === "/Library/Keychains/System.keychain"
     ) {
       return { exitCode: 1, stdout: "", stderr: "" };
     }
@@ -1403,7 +1416,7 @@ test("global trust skips the keychain step under --no-interactive when sudo need
       expect.arrayContaining(["sudo", "security", "add-trusted-cert"]),
     ])
   );
-  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+  expect(await Bun.file(bundlePath).text()).toContain(CURRENT_CA_PEM.trim());
   expect(await Bun.file(bundlePath).text()).toContain("SYSTEM");
   expect(await Bun.file(envScriptPath).text()).toContain("NODE_EXTRA_CA_CERTS");
   expect(runCalls).toEqual(
@@ -1429,10 +1442,7 @@ test("global install still prepares host TLS env when keychain trust is declined
     "caddy-local-authority.crt"
   );
   await mkdir(dirname(localCaPath), { recursive: true });
-  await writeFile(
-    localCaPath,
-    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
-  );
+  await writeFile(localCaPath, CURRENT_CA_PEM);
 
   execMockResponder = (cmd) => {
     if (
@@ -1480,6 +1490,101 @@ test("global install still prepares host TLS env when keychain trust is declined
   expect(code).toBe(0);
   // Same contract as `global trust`: declining the System keychain step
   // (browser trust) must not block the Bun/Node/curl/git host trust env.
-  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+  expect(await Bun.file(bundlePath).text()).toContain(CURRENT_CA_PEM.trim());
   expect(await fileExists(envScriptPath)).toBe(true);
+});
+
+for (const invalidCase of [
+  "malformed",
+  "expired",
+  "not-yet-valid",
+  "second-cert",
+  "garbage",
+  "oversized",
+] as const) {
+  test(`global trust never installs an ${invalidCase} CA`, async () => {
+    const caddyCompose = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_CADDY_DIR_NAME,
+      GLOBAL_CADDY_COMPOSE_FILENAME
+    );
+    await writeComposeFile(caddyCompose);
+    const localCaPath = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_CADDY_DIR_NAME,
+      "pki",
+      "caddy-local-authority.crt"
+    );
+    await mkdir(dirname(localCaPath), { recursive: true });
+    const contents = {
+      malformed: "not a certificate",
+      expired: CURRENT_CA_PEM,
+      "not-yet-valid": CURRENT_CA_PEM,
+      "second-cert": CURRENT_CA_PEM + OLD_CA_PEM,
+      garbage: `${CURRENT_CA_PEM}unreviewed trailing payload`,
+      oversized: CURRENT_CA_PEM + " ".repeat(64 * 1024),
+    };
+    await writeFile(localCaPath, contents[invalidCase]);
+    const certificate = new X509Certificate(CURRENT_CA_PEM);
+    let now = Date.parse(certificate.validFrom) + 1000;
+    if (invalidCase === "expired") {
+      now = Date.parse(certificate.validTo) + 1000;
+    }
+    if (invalidCase === "not-yet-valid") {
+      now = Date.parse(certificate.validFrom) - 1000;
+    }
+    const clock = spyOn(Date, "now").mockReturnValue(now);
+    execMockResponder = (cmd) =>
+      cmd[0] === "docker" && cmd.includes("ps")
+        ? { exitCode: 0, stdout: "caddy-123\n", stderr: "" }
+        : null;
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      expect(await runCli(["global", "trust", "--no-interactive"])).toBe(1);
+      expect(
+        await Bun.file(
+          join(dirname(localCaPath), "caddy-host-trust-bundle.pem")
+        ).exists()
+      ).toBe(false);
+      expect(
+        await Bun.file(
+          join(dirname(localCaPath), "caddy-host-trust-env.sh")
+        ).exists()
+      ).toBe(false);
+      expect(runCalls.some((cmd) => cmd[0] === "launchctl")).toBe(false);
+      expect(runCalls.some((cmd) => cmd.includes("add-trusted-cert"))).toBe(
+        false
+      );
+      expect(execCalls.some((cmd) => cmd[0] === "sudo")).toBe(false);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+}
+
+test("global DNS setup adds hack.local while retaining legacy and custom domains", async () => {
+  await prepareManagedTools(tempDir!);
+  const conf = join(tempDir!, "brew-prefix", "etc", "dnsmasq.conf");
+  await mkdir(dirname(conf), { recursive: true });
+  await writeFile(
+    conf,
+    `# user configuration\naddress=/.custom.test/192.0.2.42\naddress=/.hack/${DEFAULT_CADDY_IP}\naddress=/.hack.gy/${DEFAULT_CADDY_IP}\n`
+  );
+  reachabilityByHost = {
+    [DEFAULT_CADDY_IP]: true,
+    [DEFAULT_HOST_DNS_IP]: true,
+  };
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(await runCli(["global", "install"])).toBe(0);
+  const updated = await readDnsmasqConf(tempDir!);
+  expect(updated).toContain(
+    "# user configuration\naddress=/.custom.test/192.0.2.42"
+  );
+  for (const domain of ["hack", "hack.local", "hack.gy"]) {
+    expect(
+      updated.split(`address=/.${domain}/${DEFAULT_CADDY_IP}`)
+    ).toHaveLength(2);
+  }
 });

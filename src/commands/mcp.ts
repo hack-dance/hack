@@ -10,9 +10,13 @@ import {
 import { optPath } from "../cli/options.ts";
 import type { AgentDocTarget } from "../mcp/agent-docs.ts";
 import { upsertAgentDocs } from "../mcp/agent-docs.ts";
+import {
+  type McpBundleSelection,
+  prepareMcpBundleLaunch,
+} from "../mcp/bundle-launch.ts";
 import type { McpInstallScope, McpTarget } from "../mcp/install.ts";
 import { installMcpConfig, renderMcpConfigSnippet } from "../mcp/install.ts";
-import { startMcpServer } from "../mcp/server.ts";
+import { serveMcp } from "../mcp/serve.ts";
 import { logger } from "../ui/logger.ts";
 
 const optScope = defineOption({
@@ -73,7 +77,32 @@ const optClaudeMd = defineOption({
   description: "Update CLAUDE.md with hack usage",
 } as const);
 
+const optBundle = defineOption({
+  name: "bundle",
+  type: "string",
+  long: "--bundle",
+  valueHint: "<directory>",
+  description: "Select a verified candidate MCP bundle (requires --cli)",
+} as const);
+const optCandidateCli = defineOption({
+  name: "candidateCli",
+  type: "string",
+  long: "--cli",
+  valueHint: "<executable>",
+  description: "Pin the Hack executable used by candidate MCP tools",
+} as const);
+const optRuntimeDirectory = defineOption({
+  name: "runtimeDirectory",
+  type: "string",
+  long: "--runtime-directory",
+  valueHint: "<directory>",
+  description: "Select a private candidate MCP socket directory",
+} as const);
+
 const installOptions = [
+  optBundle,
+  optCandidateCli,
+  optRuntimeDirectory,
   optScope,
   optPath,
   optAll,
@@ -85,6 +114,9 @@ const installOptions = [
   optClaudeMd,
 ] as const;
 const printOptions = [
+  optBundle,
+  optCandidateCli,
+  optRuntimeDirectory,
   optScope,
   optPath,
   optAll,
@@ -144,13 +176,7 @@ async function handleMcpServe({
   readonly ctx: CliContext;
   readonly args: ServeArgs;
 }): Promise<number> {
-  if (process.stdout.isTTY) {
-    process.stderr.write(
-      "MCP server running on stdio (waiting for client)...\n"
-    );
-  }
-  await startMcpServer();
-  return 0;
+  return await serveMcp();
 }
 
 async function handleMcpInstall({
@@ -180,6 +206,7 @@ async function handleMcpInstall({
     targets,
     scope,
     projectRoot,
+    bundle: selectBundle({ ctx, args }),
   });
 
   let exitCode = logMcpInstallResults({ results });
@@ -291,9 +318,13 @@ async function handleMcpPrint({
     return 1;
   }
 
+  const bundle = selectBundle({ ctx, args });
+  const launch = bundle
+    ? await prepareMcpBundleLaunch({ selection: bundle, createRuntime: false })
+    : undefined;
   let exitCode = 0;
   const snippets = targets.map((target) =>
-    renderMcpConfigSnippet({ target, scope, projectRoot })
+    renderMcpConfigSnippet({ target, scope, projectRoot, launch })
   );
 
   for (const [index, snippet] of snippets.entries()) {
@@ -439,4 +470,27 @@ function dedupeDocTargets(opts: {
     out.push(target);
   }
   return out;
+}
+
+function selectBundle(opts: {
+  readonly ctx: CliContext;
+  readonly args: InstallArgs | PrintArgs;
+}): McpBundleSelection | undefined {
+  const { bundle, candidateCli, runtimeDirectory } = opts.args.options;
+  if (!bundle) {
+    if (candidateCli || runtimeDirectory) {
+      throw new CliUsageError("--cli and --runtime-directory require --bundle");
+    }
+    return undefined;
+  }
+  if (!candidateCli) {
+    throw new CliUsageError("--bundle requires an explicit --cli executable");
+  }
+  return {
+    directory: resolve(opts.ctx.cwd, bundle),
+    cli: resolve(opts.ctx.cwd, candidateCli),
+    ...(runtimeDirectory
+      ? { runtimeDirectory: resolve(opts.ctx.cwd, runtimeDirectory) }
+      : {}),
+  };
 }

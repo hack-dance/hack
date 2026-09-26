@@ -151,3 +151,9 @@ test("onboarding preserves trust and ownership without imposing a full migration
     expect(prompt).not.toMatch(/`hack (?:node|remote|gateway|dispatch)\b/);
   }
 });
+
+test("new-project guidance uses hack.local without rewriting existing host examples", () => {
+  expect(NEW_PROJECT_PROMPT).toContain("<project>.hack.local");
+  expect(EXISTING_PROJECT_PROMPT).toContain("dev_host (myapp.hack)");
+  expect(NEW_PROJECT_PROMPT).toContain("public-resolvable `*.hack.gy`");
+});

@@ -1,0 +1,72 @@
+[
+  {
+    "input": "echo hello",
+    "compose": ["echo", "hello"],
+    "candidate_refuses": false
+  },
+  {
+    "input": "echo \"a b\" '' c\\ d",
+    "compose": ["echo", "a b", "", "c d"],
+    "candidate_refuses": false
+  },
+  {
+    "input": "printf \"%s\" \"a\\qb\"",
+    "compose": ["printf", "%s", "aqb"],
+    "candidate_refuses": false
+  },
+  {
+    "input": "echo ab\"cd\"'ef'",
+    "compose": ["echo", "abcdef"],
+    "candidate_refuses": false
+  },
+  {
+    "input": "echo \"\" \"λ雪\"",
+    "compose": ["echo", "", "λ雪"],
+    "candidate_refuses": false
+  },
+  {
+    "input": "echo a\\\nb",
+    "compose": ["echo", "a\nb"],
+    "candidate_refuses": false
+  },
+  {
+    "input": "echo a\nb",
+    "compose": ["echo", "a", "b"],
+    "candidate_refuses": false
+  },
+  {
+    "input": "echo #word",
+    "compose": ["echo", "#word"],
+    "candidate_refuses": false
+  },
+  {
+    "input": "/bin/sh -c 'echo a; echo b'",
+    "compose": ["/bin/sh", "-c", "echo a; echo b"],
+    "candidate_refuses": false
+  },
+  {
+    "input": "echo 'a\\b'",
+    "compose": ["echo", "a\\b"],
+    "candidate_refuses": false
+  },
+  {
+    "input": "echo \"a\\\\b\"",
+    "compose": ["echo", "a\\b"],
+    "candidate_refuses": false
+  },
+  {
+    "input": "echo \"unterminated",
+    "compose": null,
+    "candidate_refuses": true
+  },
+  {
+    "input": "echo trailing\\",
+    "compose": null,
+    "candidate_refuses": true
+  },
+  {
+    "input": "echo a;b",
+    "compose": ["echo", "a"],
+    "candidate_refuses": true
+  }
+]

@@ -20,6 +20,65 @@ HACK_E2E_REQUIRE_TMUX=1 bun tests/e2e/run.ts --only=lifecycle-session-recovery
 Exit codes: `0` all pass/skip, `1` any scenario failed, `2` isolation canary
 failed (nothing ran).
 
+## Command-path cache regressions
+
+`bun test tests/e2e/run-dependency-cache.test.ts` runs the real source CLI in
+isolated child homes against a recording Docker stub. It covers linked-worktree
+cache selection, changed fingerprints, dependency-skip decisions and container
+inspection failures. It runs in the normal Bun suite without a Docker daemon;
+its passing result proves command assembly and decisions, not mounted data.
+The separate live cache qualification (local `_docs/docs/plans/v5/run-cache-parity-20260916.md`)
+records compiled-CLI volume readback and cleanup against an isolated engine.
+
+The `dependency-cache`, `dependency-cache-protocol`, and
+`dependency-cache-package` Docker scenarios use standalone, network-disabled
+containers and exact ownership labels for cleanup. Prepare `alpine:3.20`,
+`alpine:3.22`, and `node:24.11.0-bookworm-slim` locally first; CI pulls these before
+the scenarios. Tests resolve installed repository digests and refuse missing
+prerequisites rather than downloading during qualification. The package scenario
+packs a local npm package and installs its real lockfile offline; it does not test
+registry access, private credentials, or Bun installation.
+
+```sh
+HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_CLI_BIN=./dist/hack bun tests/e2e/run.ts --only=dependency-cache,dependency-cache-protocol,dependency-cache-package
+```
+
+Image invalidation checks use distinct installed digests. On ARM64, platform
+invalidation changes `linux/arm64` to `linux/arm64/v8`; this verifies declared
+platform identity, not cross-architecture package compatibility.
+
+## Domain migration routing qualification
+
+The `domain-migration` scenario belongs to the separate `host-ingress` tier and is
+excluded from the default local/Docker suite. Select it explicitly with
+`--only=domain-migration`; missing prerequisites then fail the run rather than skip.
+Docker skip enforcement remains unchanged for the portable Docker tier.
+
+This scenario requires `HACK_E2E_DOMAIN_ROUTING=1`,
+a locally installed `node:24.11.0-bookworm-slim` image, existing Caddy ingress on
+`hack-dev`, and its exported public CA (default `~/.hack/caddy/pki/caddy-local-authority.crt`,
+override with `HACK_E2E_DOMAIN_CA`). It makes no global DNS or trust changes.
+Build the current host CLI first with `bun run build`.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_DOMAIN_ROUTING=1 bun tests/e2e/run.ts --only=domain-migration
+```
+
+By default, probes use `--resolve` with the published localhost ingress
+(`HACK_E2E_DOMAIN_INGRESS` overrides `127.0.0.1`). This proves old/new/branch route
+responses and TLS, including a separate `/usr/bin/curl` probe without a CA override;
+it does not prove host DNS or browser permission. Both probes use `/usr/bin/curl`
+to qualify the macOS system client rather than an arbitrary PATH installation.
+Both probes check the exact fixture
+container identity. The scenario uses isolated Hack state, retains legacy routes,
+and verifies owned containers and networks are gone after Hack-managed teardown.
+
+After the operator has configured native DNS, add `HACK_E2E_DOMAIN_DNS=1` to the
+same command. That mode omits `--resolve` from **both** probes and requires native
+hostname resolution and trusted TLS for every old/new/branch name. It never falls
+back to explicit address resolution. Browser permission still requires separate
+verification.
+
 ## Isolation model (HACK_HOME)
 
 Every CLI invocation runs with `HACK_HOME=<fresh tempdir>` plus

@@ -57,11 +57,14 @@ function verify(value: unknown, run: NativeProjectRun, stopped: boolean): void {
     }
   }
 }
-/** Retaining cleanup only; lifecycle hooks surround confirmed native cleanup, never Compose. */
+/** Retaining cleanup only. Retire owned host processes after confirmed compute
+ * absence, including a previously recovered stop; user hooks are not replayed.
+ */
 export async function nativeProjectDown(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly before?: (run: NativeProjectRun) => Promise<void>;
+  readonly retireHostProcesses?: (run: NativeProjectRun) => Promise<void>;
   readonly after?: (run: NativeProjectRun) => Promise<void>;
   readonly invoke?: typeof invokeNativeRuntime;
 }) {
@@ -88,8 +91,9 @@ export async function nativeProjectDown(opts: {
     isRecord(initial.receipt) &&
     initial.receipt.phase === "stopped-data-retained"
   ) {
-    // Recovery already completed cleanup. Do not replay hooks or owned effects.
+    // Recovery already stopped compute. User hooks and guest cleanup must not replay.
     verify(initial, run, true);
+    await opts.retireHostProcesses?.(run);
     return {
       backend: "native",
       status: "stopped",
@@ -107,6 +111,7 @@ export async function nativeProjectDown(opts: {
     timeoutMs: 590_000,
   });
   verify(await inspect(), run, true);
+  await opts.retireHostProcesses?.(run);
   await opts.after?.(run);
   return {
     backend: "native",

@@ -301,7 +301,11 @@ sign-in, and rendered authenticated search results and images over browser-trust
 HTTPS. A normal `restart` kept its run and Redis data after a source edit. This does
 not establish every application workflow, crash recovery or comparative performance.
 Native `down` requests retaining cleanup from the graph owner and verifies container
-absence while keeping the exact run mapping. The next ordinary `up` verifies that
+absence while keeping the exact run mapping. It then retires that branch's owned host
+lifecycle processes before running after hooks. A previously recovered stopped graph
+also retires remaining owned host processes without replaying hooks or guest cleanup;
+uncertain ownership refuses retirement and leaves the retained mapping intact.
+The next ordinary `up` verifies that
 stopped receipt and restores the same run and volumes. It refuses an active, changed
 or uncertain mapping rather than allocating a new data volume. Down hooks resolve
 fresh managed host values using the environment selection saved by `up`; hook output goes to stderr with `--json`. A before-hook failure

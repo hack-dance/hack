@@ -69,6 +69,9 @@ test("down invokes cleanup once and retains the stopped mapping for later up", a
     before: async () => {
       events.push("before");
     },
+    retireHostProcesses: async () => {
+      events.push("retire-host");
+    },
     after: async () => {
       expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
       events.push("after");
@@ -95,6 +98,7 @@ test("down invokes cleanup once and retains the stopped mapping for later up", a
     "inspect",
     "cleanup",
     "inspect",
+    "retire-host",
     "after",
   ]);
 });
@@ -104,6 +108,9 @@ test("unconfirmed cleanup retains mapping and skips after hook", async () => {
   await expect(
     nativeProjectDown({
       ...opts,
+      retireHostProcesses: async () => {
+        throw new Error("unexpected host retirement");
+      },
       after: async () => {
         throw new Error("unexpected after");
       },
@@ -405,11 +412,15 @@ test("native down JSON isolates hook output and uses saved overlay through real 
   }
 });
 
-test("recovered stopped graph keeps mapping without replaying hooks or cleanup", async () => {
+test("recovered stopped graph retires host processes without replaying hooks or compute cleanup", async () => {
   const opts = await fixture();
   const calls: string[] = [];
   const result = await nativeProjectDown({
     ...opts,
+    retireHostProcesses: async (selected) => {
+      expect(selected).toEqual(run);
+      calls.push("retire-host");
+    },
     before: async () => {
       throw new Error("replayed before");
     },
@@ -425,7 +436,7 @@ test("recovered stopped graph keeps mapping without replaying hooks or cleanup",
     },
   });
   expect(result.status).toBe("stopped");
-  expect(calls).toEqual(["inspect"]);
+  expect(calls).toEqual(["inspect", "retire-host"]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
@@ -434,6 +445,9 @@ test("stopped receipt with a remaining container preserves mapping", async () =>
   await expect(
     nativeProjectDown({
       ...opts,
+      retireHostProcesses: async () => {
+        throw new Error("unexpected host retirement");
+      },
       invoke: async () => {
         const value = snapshot();
         value.receipt.phase = "stopped-data-retained";
@@ -441,5 +455,27 @@ test("stopped receipt with a remaining container preserves mapping", async () =>
       },
     })
   ).rejects.toThrow("unconfirmed");
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("host retirement failure preserves confirmed stopped state and skips after hooks", async () => {
+  const opts = await fixture();
+  await expect(
+    nativeProjectDown({
+      ...opts,
+      retireHostProcesses: async () => {
+        throw new Error("host ownership uncertain");
+      },
+      after: async () => {
+        throw new Error("unexpected after hook");
+      },
+      invoke: async () => {
+        const value = snapshot();
+        value.receipt.phase = "stopped-data-retained";
+        value.observations["container:web"].state = "absent";
+        return value;
+      },
+    })
+  ).rejects.toThrow("host ownership uncertain");
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });

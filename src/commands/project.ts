@@ -6632,10 +6632,11 @@ async function handleDown({
     const hasHooks = Boolean(
       cfg.lifecycle?.down?.before?.length || cfg.lifecycle?.down?.after?.length
     );
+    const projectName = sanitizeProjectSlug(
+      await resolveComposeProjectName({ project, cfg })
+    );
     const composeProject = resolveLifecycleComposeProjectName({
-      projectName: sanitizeProjectSlug(
-        await resolveComposeProjectName({ project, cfg })
-      ),
+      projectName,
       branch,
     });
     const hook = async (phase: "before" | "after") => {
@@ -6657,6 +6658,15 @@ async function handleDown({
     const result = await nativeProjectDown({
       runtime: native,
       scope,
+      retireHostProcesses: async () => {
+        await stopLifecycleProcesses({
+          project,
+          cfg,
+          projectName,
+          branch,
+          composeProject,
+        });
+      },
       before: async (run) => {
         if (!hasHooks) {
           return;

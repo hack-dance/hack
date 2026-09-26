@@ -97,6 +97,10 @@ The default private build includes native HTTP graph probes (local `_docs/docs/p
 and requires Zig 0.15.2 plus a host C compiler.
 [Provider pins](provider-pins.json) record the exact package inputs; the engine runs inside the VM.
 
+Source binaries embed their build checkout. If a copied Cargo target directory
+retains a different checkout identity, use a fresh `--target-dir` for checks and
+tests; Cargo reporting a cached binary as fresh does not qualify that identity.
+
 `provider/` separates bounded child processes, artifact verification, admission, private ownership,
 native process/disk identity, guest protocol, and lifecycle decisions. Guest requests use a bounded
 connection to the existing socket; they cannot silently start or recover a VM. Failed operations
@@ -126,6 +130,49 @@ identity and named data remain outside history retirement. Archive/export retain
 the bounded window rather than a complete lifetime log. Use the current candidate
 for migrated private state; older experimental candidates do not understand this
 history format. Stable v4 uses its separate state and is unaffected.
+
+## Named-volume integrity qualification
+
+The ignored Apple Silicon macOS fixture
+`owned_named_volume_integrity_survives_container_restart` writes a synthetic
+64 MiB corpus into one owned named volume. It fsyncs files and directories,
+atomically replaces one file, and checks independent block and whole-file hashes
+against a Rust-generated manifest across two managed container-only stop/start
+cycles. Provider boot/process/disk, container and volume directory identities must
+remain unchanged. A disposable one-byte corruption must fail the verifier at the
+expected block and also change the independently read whole-file digest.
+
+Prepare a new mode-0700 candidate home outside repository and application homes
+using the [native candidate setup](../../docs/guides/native-candidate.md). Only the
+preparation operation lock may preexist; prior runtime or graph state is refused.
+The fixture boots its own isolated development VM, publishes no host ports and
+uses no application source or credentials. Set these explicit inputs:
+
+- `HACK_VOLUME_INTEGRITY_ROOT`: the new, prepared candidate home.
+- `HACK_VOLUME_INTEGRITY_IMAGE`: an exact Linux ARM64 Bun image content ID
+  (`sha256:<config digest>`) containing `/usr/local/bin/bun`.
+- `HACK_VOLUME_INTEGRITY_IMAGE_ARCHIVE`: its local Docker image archive.
+- `HACK_VOLUME_INTEGRITY_IMAGE_SHA256`: the archive's SHA-256, distinct from the
+  image content ID or registry manifest digest.
+
+Compile the test first with the same Cargo selection and `--no-run`, so compilation
+does not consume the runtime deadline. Run once under a 300-second external
+watchdog that forwards ordinary cancellation to the exact owned test process;
+do not force-kill a VM or replay uncertain effects:
+
+```sh
+mise exec -- cargo test --locked --manifest-path packages/runtime-core/Cargo.toml \
+  --target-dir .hack-local/target --jobs 2 --lib \
+  provider::graph::shutdown::native_test::integrity::owned_named_volume_integrity_survives_container_restart \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+Success verifies graph resource removal and stops the VM. Assertion failure retains
+the fixture volume for inspection and attempts managed shutdown; external
+cancellation can skip unwinding, so inspect owned state before any recovery. Hash,
+identity and phase evidence is private candidate review data, not tracked source.
+Same-boot reads may use guest page cache: this fixture does not qualify VM-shutdown
+durability, crash/power-loss safety, framework concurrency or application readiness.
 
 ## Foreground graph dependency owner (candidate macOS path)
 

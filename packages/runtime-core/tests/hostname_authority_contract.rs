@@ -58,7 +58,32 @@ impl Authority {
         assert_eq!(unsafe { libc::poll(&mut fd, 1, 3000) }, 1);
         let mut line = String::new();
         BufReader::new(output).read_line(&mut line).unwrap();
-        assert_eq!(line, "ready\n");
+        if line != "ready\n" {
+            // EOF before ready otherwise hides the candidate's structured refusal.
+            // Reap only the exact child handle before reading its bounded diagnostic.
+            drop(child.stdin.take());
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    break child.wait().unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let mut diagnostic = String::new();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .take(8192)
+                .read_to_string(&mut diagnostic)
+                .unwrap();
+            fs::remove_dir_all(&root).unwrap();
+            panic!("authority startup: {status}; expected ready, got {line:?}; {diagnostic}");
+        }
         Self {
             child,
             root,

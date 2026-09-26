@@ -3,6 +3,9 @@
 use super::super::*;
 use std::{io::Read, path::Path, time::Instant};
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod integrity;
+
 struct Cleanup<'a> {
     candidate: &'a Candidate,
     run: String,

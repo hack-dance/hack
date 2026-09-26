@@ -2,6 +2,7 @@
 use hack_runtime_core::node::{self, Mutation, Receipt, Request, Store};
 use serde_json::Value;
 use std::io::{Read, Write};
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -106,11 +107,23 @@ struct Node {
 }
 impl Node {
     fn new() -> Self {
-        let root = checkout().join(format!(
-            ".hack-local/t{}-{}",
-            std::process::id(),
-            SERIAL.fetch_add(1, Ordering::SeqCst)
-        ));
+        // Supervisors require checkout-local state. Use a short, exclusively created
+        // directory so Darwin's Unix socket limit also permits nested worktrees.
+        let state = checkout().join(".hack-local");
+        std::fs::create_dir_all(&state).unwrap();
+        let root = (0..256)
+            .find_map(|_| {
+                let path = state.join(format!(
+                    "{:02x}",
+                    SERIAL.fetch_add(1, Ordering::SeqCst) % 256
+                ));
+                match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+                    Ok(()) => Some(path),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    Err(error) => panic!("node fixture directory: {error}"),
+                }
+            })
+            .expect("no unowned short node fixture directory is available");
         Store::open(&root, true).unwrap();
         let mut node = Self { root, child: None };
         node.start();

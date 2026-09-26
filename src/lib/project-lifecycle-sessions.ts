@@ -203,6 +203,9 @@ export async function inspectLifecycleSession(opts: {
   });
 }
 
+/** Concurrent finalizers may have already removed the session. Accept only a
+ * fresh, explicit absence proof; missing owner metadata alone is insufficient.
+ */
 export async function killLifecycleSessionWithOwnership(opts: {
   readonly backend: MuxBackend;
   readonly sessionName: string;
@@ -213,10 +216,20 @@ export async function killLifecycleSessionWithOwnership(opts: {
       name: opts.sessionName,
     })) ?? null;
   if (observedToken !== opts.ownershipToken) {
-    return false;
+    if (observedToken !== null) {
+      return false;
+    }
+    return (
+      (await opts.backend.readSessionPresence?.({ name: opts.sessionName })) ===
+      "absent"
+    );
   }
   const result = await opts.backend.killSession({ name: opts.sessionName });
-  return result.exitCode === 0;
+  return (
+    result.exitCode === 0 ||
+    (await opts.backend.readSessionPresence?.({ name: opts.sessionName })) ===
+      "absent"
+  );
 }
 
 export async function killInspectedLifecycleSession(opts: {

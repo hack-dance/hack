@@ -305,6 +305,9 @@ absence while keeping the exact run mapping. It then retires that branch's owned
 lifecycle processes before running after hooks. A previously recovered stopped graph
 also retires remaining owned host processes without replaying hooks or guest cleanup;
 uncertain ownership refuses retirement and leaves the retained mapping intact.
+If the foreground owner concurrently retires its tmux session, cleanup accepts a
+fresh explicit absence proof. Missing ownership metadata or an unsuccessful query
+alone does not prove absence, and retirement preserves any replacement owner's state.
 The next ordinary `up` verifies that
 stopped receipt and restores the same run and volumes. It refuses an active, changed
 or uncertain mapping rather than allocating a new data volume. Down hooks resolve

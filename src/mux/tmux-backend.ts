@@ -9,6 +9,29 @@ import type {
 
 const LIFECYCLE_OWNER_OPTION = "@hack_lifecycle_owner";
 const LIFECYCLE_OWNER_ENV = "HACK_LIFECYCLE_OWNER_TOKEN";
+const NO_TMUX_SERVER = /^no server running on [^\r\n]+$/;
+const MISSING_TMUX_SOCKET =
+  /^error connecting to [^\r\n]+ \(No such file or directory\)$/;
+
+/** Accept only tmux's explicit absence diagnostics; other failures remain unknown. */
+export function classifyTmuxSessionPresence(opts: {
+  readonly result: ExecResult;
+  readonly name: string;
+}): "present" | "absent" | "unknown" {
+  if (opts.result.exitCode === 0) {
+    return "present";
+  }
+  const diagnostic = opts.result.stderr.trim();
+  if (
+    opts.result.exitCode === 1 &&
+    (diagnostic === `can't find session: ${opts.name}` ||
+      NO_TMUX_SERVER.test(diagnostic) ||
+      MISSING_TMUX_SOCKET.test(diagnostic))
+  ) {
+    return "absent";
+  }
+  return "unknown";
+}
 
 function parseIntOrNull(value: string | undefined): number | null {
   const n = Number.parseInt(value ?? "", 10);
@@ -157,6 +180,16 @@ export function createTmuxBackend(): MuxBackend {
     });
   };
 
+  const readSessionPresence = async (opts: { readonly name: string }) => {
+    if (!available) {
+      return "unknown" as const;
+    }
+    const result = await exec(["tmux", "has-session", "-t", `=${opts.name}`], {
+      stdin: "ignore",
+    });
+    return classifyTmuxSessionPresence({ result, name: opts.name });
+  };
+
   const readLifecycleOwnerToken = async (opts: {
     readonly name: string;
   }): Promise<string | null> => {
@@ -240,6 +273,7 @@ export function createTmuxBackend(): MuxBackend {
     listSessions,
     createSession,
     killSession,
+    readSessionPresence,
     readLifecycleOwnerToken,
     listSessionWindowNames,
     execInSession,

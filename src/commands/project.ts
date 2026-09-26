@@ -2686,10 +2686,18 @@ async function stopLifecycleProcesses(opts: {
     }),
   });
 
-  await removeLifecycleStateEntry({
-    projectDir: opts.project.projectDir,
-    composeProject: opts.composeProject,
-  });
+  if (lifecycleEntry.ownershipToken) {
+    await removeLifecycleStateEntryIfOwned({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+      ownershipToken: lifecycleEntry.ownershipToken,
+    });
+  } else {
+    await removeLifecycleStateEntry({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+    });
+  }
 }
 
 async function stopLifecycleProcessesBestEffort(

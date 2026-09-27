@@ -22,6 +22,7 @@ const FIELDS = new Set([
   "host_pid",
   "host_port",
   "host_executable",
+  "host_supervisor_depth",
 ]);
 
 export type NativeHostDependency = {
@@ -33,6 +34,7 @@ export type NativeHostDependency = {
   readonly host_pid: number;
   readonly host_port: number;
   readonly host_executable?: string;
+  readonly host_supervisor_depth?: number;
 };
 
 /** The guest relay launcher requires a reaping init process; honor an explicit refusal. */
@@ -77,6 +79,48 @@ function hostname(value: unknown): value is string {
   );
 }
 
+function validSupervisorDepth(entry: Record<string, unknown>): boolean {
+  return (
+    entry.host_supervisor_depth === undefined ||
+    (entry.host_executable !== undefined &&
+      typeof entry.host_supervisor_depth === "number" &&
+      Number.isInteger(entry.host_supervisor_depth) &&
+      entry.host_supervisor_depth >= 1 &&
+      entry.host_supervisor_depth <= 8)
+  );
+}
+
+function hostAuthority(entry: Record<string, unknown>) {
+  return {
+    ...(typeof entry.host_executable === "string"
+      ? { host_executable: entry.host_executable }
+      : {}),
+    ...(typeof entry.host_supervisor_depth === "number"
+      ? { host_supervisor_depth: entry.host_supervisor_depth }
+      : {}),
+  };
+}
+
+function requireSameEndpointPolicy(opts: {
+  readonly policies: Map<string, string>;
+  readonly endpoint: string;
+  readonly authority: ReturnType<typeof hostAuthority>;
+}): void {
+  const policy = JSON.stringify(
+    opts.authority.host_executable === undefined
+      ? null
+      : [
+          opts.authority.host_executable,
+          opts.authority.host_supervisor_depth ?? 1,
+        ]
+  );
+  const prior = opts.policies.get(opts.endpoint);
+  if (prior !== undefined && prior !== policy) {
+    throw refused();
+  }
+  opts.policies.set(opts.endpoint, policy);
+}
+
 /** Native dependency-plan pins the live process/listener identity after this structural check. */
 export function parseNativeHostDependencies(opts: {
   readonly value: unknown;
@@ -103,6 +147,7 @@ export function parseNativeHostDependencies(opts: {
     string,
     { slot: number; services: Set<string> }[]
   >();
+  const endpointPolicies = new Map<string, string>();
   let nextSlot = 0;
   return value.dependencies.map((entry) => {
     if (
@@ -125,6 +170,7 @@ export function parseNativeHostDependencies(opts: {
             isAbsolute(entry.host_executable) &&
             entry.host_executable.length <= 1024 &&
             !entry.host_executable.includes("\0"))) &&
+        validSupervisorDepth(entry) &&
         Array.isArray(entry.aliases) &&
         entry.aliases.length > 0 &&
         entry.aliases.length <= 8 &&
@@ -148,6 +194,12 @@ export function parseNativeHostDependencies(opts: {
     // Share only the listening transport across services, never their grants.
     // Native review still pins and compares the complete endpoint generation.
     const endpoint = `${entry.host_pid}:${entry.host_port}`;
+    const authority = hostAuthority(entry);
+    requireSameEndpointPolicy({
+      policies: endpointPolicies,
+      endpoint,
+      authority,
+    });
     const selectedService = entry.service;
     const available = transports.get(endpoint) ?? [];
     let transport = available.find(
@@ -169,9 +221,7 @@ export function parseNativeHostDependencies(opts: {
       guest_port: entry.guest_port,
       host_port: entry.host_port,
       host_pid: entry.host_pid,
-      ...(entry.host_executable === undefined
-        ? {}
-        : { host_executable: entry.host_executable }),
+      ...authority,
       aliases: entry.aliases,
     };
   });

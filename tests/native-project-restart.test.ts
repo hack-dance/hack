@@ -2,8 +2,12 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readNativeHostDependencies } from "../src/backends/native-project-dependencies.ts";
 import { restartNativeProject } from "../src/backends/native-project-restart.ts";
-import { nativeRestartSelection } from "../src/backends/native-project-restart-preflight.ts";
+import {
+  nativeRestartSelection,
+  preflightNativeRestart,
+} from "../src/backends/native-project-restart-preflight.ts";
 import type { NativeRestartIntent } from "../src/backends/native-project-run.ts";
 
 const run = {
@@ -140,6 +144,20 @@ test("resume uses persisted intent without new capture or cleanup", async () => 
     "unlock",
     "serving",
   ]);
+});
+test("only a cleaned intent without a current mapping selects cleaned retry preflight", async () => {
+  for (const current of [null, run]) {
+    const f = fixture({ run, finalization: token, phase: "cleaned" });
+    await restartNativeProject({
+      ...f.options,
+      preflight: async (selected, { cleanedRetry }) => {
+        expect(selected).toEqual(run);
+        expect(cleanedRetry).toBe(current === null);
+      },
+      dependencies: { ...f.options.dependencies, load: async () => current },
+    });
+    expect(f.events.includes("down")).toBe(current !== null);
+  }
 });
 test("explicit dead-owner recovery runs after preflight and retained cleanup, before replacement", async () => {
   const f = fixture({ run, finalization: token, phase: "cleaned" });
@@ -373,6 +391,7 @@ test("unconfirmed down hooks cannot be silently skipped on resume", async () => 
   const f = fixture({ run, finalization: token, phase: "prepared" });
   await expect(restartNativeProject(f.options)).rejects.toThrow("down hooks");
   expect(f.events).not.toContain("start");
+  expect(f.events).not.toContain("preflight");
 });
 
 test("network mismatch refuses before an otherwise valid restart", async () => {
@@ -419,5 +438,197 @@ test("restart preflight refuses failed or unknown admission before reading envir
       })
     ).rejects.toThrow("admission failed before cleanup");
     expect(calls).toEqual(["status", "probe"]);
+  }
+});
+
+async function listenerIntentFixture() {
+  const directory = await mkdtemp(join(tmpdir(), "hack-restart-intent-test-"));
+  const path = join(directory, "dependencies.json");
+  const selection = {
+    version: 1,
+    dependencies: [
+      {
+        service: "app",
+        binding: "qa",
+        guest_port: 8444,
+        aliases: ["qa.example.com"],
+        host_port: 8444,
+        host_executable: "/usr/bin/ssh",
+      },
+    ],
+  };
+  await writeFile(path, JSON.stringify(selection), { mode: 0o600 });
+  await writeFile(join(directory, "hack-relay-guest"), "relay fixture");
+  const calls: string[] = [];
+  const input = {
+    originalSha256: "1".repeat(64),
+    environmentFiles: [],
+    serviceNames: ["app"],
+    normalizedComposeJson: JSON.stringify({
+      services: { app: { image: `sha256:${"9".repeat(64)}` } },
+    }),
+    managedEnvironment: {},
+    lifecycleHostEnvironment: {},
+    effectiveEnvName: "qa",
+  };
+  const options: Parameters<typeof preflightNativeRestart>[0] = {
+    runtime: { binary: join(directory, "hack-native"), home: "/candidate" },
+    scope,
+    composeFile: "/fixture/.hack/docker-compose.yml",
+    run,
+    dependencyFile: path,
+    dependencies: {
+      prepare: async ({ envName }) => {
+        expect(envName).toBe("qa");
+        return input;
+      },
+      adapt: async ({ input: prepared }) => prepared,
+      invoke: async ({ args }) => {
+        calls.push(`${args[0]} ${args[1]}`);
+        if (args[1] === "status") {
+          return { network: "internet" };
+        }
+        if (args[1] === "probe") {
+          return { admitted: true };
+        }
+        expect(args[1]).toBe("dependency-discover");
+        throw new Error("host_endpoint_identity");
+      },
+      review: async (review) => {
+        calls.push("review");
+        expect(
+          JSON.parse(review.input.normalizedComposeJson).services.app.init
+        ).toBe(true);
+        return await review.run({
+          planId: run.planId,
+          namespace: run.namespace,
+          report: {},
+          projectArgs: [],
+        });
+      },
+    },
+  };
+  return { directory, path, selection, calls, options };
+}
+
+test("cleaned retry with absent listeners reaches startup hooks before actual identity capture", async () => {
+  const listener = await listenerIntentFixture();
+  try {
+    const f = fixture({ run, finalization: token, phase: "cleaned" });
+    const captured: number[] = [];
+    let hookStarted = false;
+    expect(
+      await restartNativeProject({
+        ...f.options,
+        preflight: async (selected, { cleanedRetry }) => {
+          expect(cleanedRetry).toBe(true);
+          await preflightNativeRestart({
+            ...listener.options,
+            run: selected,
+            cleanedRetry,
+          });
+        },
+        start: async ({ onReady }) => {
+          f.events.push("up.before");
+          hookStarted = true;
+          // Normal startup reads this same intent after its hook has launched the
+          // listener. The earlier provisional PID must never become authority.
+          const dependencies = await readNativeHostDependencies({
+            path: listener.path,
+            services: ["app"],
+            discover: async ({ hostPort, executable }) => {
+              expect(hookStarted).toBe(true);
+              expect(hostPort).toBe(8444);
+              expect(executable).toBe("/usr/bin/ssh");
+              return { host_pid: 12_345, endpoint_fingerprint: "8".repeat(64) };
+            },
+          });
+          captured.push(
+            ...dependencies.map((dependency) => dependency.host_pid)
+          );
+          await onReady();
+          return 0;
+        },
+      })
+    ).toBe(0);
+    expect(captured).toEqual([12_345]);
+    expect(listener.calls).toEqual([
+      "runtime status",
+      "runtime probe",
+      "review",
+    ]);
+    expect(f.events).toEqual(["finalized", "up.before", "remove", "unlock"]);
+    expect(JSON.parse(await readFile(listener.path, "utf8"))).toEqual(
+      listener.selection
+    );
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
+test("active restart still refuses absent or wrong-executable listeners before cleanup", async () => {
+  const listener = await listenerIntentFixture();
+  try {
+    const f = fixture();
+    await expect(
+      restartNativeProject({
+        ...f.options,
+        preflight: async (selected, { cleanedRetry }) => {
+          expect(cleanedRetry).toBe(false);
+          await preflightNativeRestart({
+            ...listener.options,
+            run: selected,
+            cleanedRetry,
+          });
+        },
+      })
+    ).rejects.toThrow("bounded explicit listener selection; values omitted");
+    expect(listener.calls).toEqual([
+      "runtime status",
+      "runtime probe",
+      "graph dependency-discover",
+    ]);
+    expect(f.events).toEqual([]);
+    expect(f.state.pending).toBeNull();
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
+test("malformed dependency intent refuses cleaned retry without capture or startup hooks", async () => {
+  const listener = await listenerIntentFixture();
+  try {
+    for (const binding of [
+      { ...listener.selection.dependencies[0], host_executable: "relative" },
+      { ...listener.selection.dependencies[0], aliases: ["127.0.0.1"] },
+      { ...listener.selection.dependencies[0], host_pid: 0 },
+      {
+        ...listener.selection.dependencies[0],
+        unexpected: "sensitive-fixture-value",
+      },
+    ]) {
+      listener.calls.length = 0;
+      await writeFile(
+        listener.path,
+        JSON.stringify({ version: 1, dependencies: [binding] })
+      );
+      const f = fixture({ run, finalization: token, phase: "cleaned" });
+      await expect(
+        restartNativeProject({
+          ...f.options,
+          preflight: async (selected, { cleanedRetry }) =>
+            await preflightNativeRestart({
+              ...listener.options,
+              run: selected,
+              cleanedRetry,
+            }),
+        })
+      ).rejects.toThrow("dependency intent is invalid; values omitted");
+      expect(listener.calls).toEqual(["runtime status", "runtime probe"]);
+      expect(f.events).toEqual([]);
+      expect(f.state.pending?.phase).toBe("cleaned");
+    }
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
   }
 });

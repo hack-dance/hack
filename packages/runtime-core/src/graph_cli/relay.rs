@@ -42,6 +42,15 @@ struct Binding {
     host_port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_executable: Option<PathBuf>,
+    #[serde(
+        default,
+        deserialize_with = "supervisor_depth",
+        skip_serializing_if = "Option::is_none"
+    )]
+    host_supervisor_depth: Option<u8>,
+}
+fn supervisor_depth<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<Option<u8>, D::Error> {
+    u8::deserialize(decoder).map(Some)
 }
 fn hex(value: &str) -> bool {
     value.len() == 64
@@ -96,10 +105,28 @@ impl Selection {
                                 !text.is_empty() && text.len() <= 1024 && !text.contains('\0')
                             })
                     })
+                    && b.host_supervisor_depth
+                        .is_none_or(|depth| (1..=8).contains(&depth) && b.host_executable.is_some())
                     && keys.insert((&b.service, &b.binding))
                     && slots
-                        .insert(b.slot, (b.host_pid, b.host_port))
-                        .is_none_or(|prior| prior == (b.host_pid, b.host_port))
+                        .insert(
+                            b.slot,
+                            (
+                                b.host_pid,
+                                b.host_port,
+                                &b.host_executable,
+                                b.host_supervisor_depth.unwrap_or(1),
+                            ),
+                        )
+                        .is_none_or(|prior| {
+                            prior
+                                == (
+                                    b.host_pid,
+                                    b.host_port,
+                                    &b.host_executable,
+                                    b.host_supervisor_depth.unwrap_or(1),
+                                )
+                        })
                     && service_slots.insert((&b.service, b.slot))
                     && graph::dependency_address(b.slot, &b.aliases).is_ok()
                     && ports.insert((
@@ -140,23 +167,41 @@ impl Selection {
         let mut evidence = Vec::new();
         let mut dependencies = Vec::new();
         let mut slots = BTreeMap::new();
+        let mut refresh_policies = BTreeMap::new();
         for binding in &self.dependencies {
             let endpoint = HostEndpoint::capture(binding.host_pid, binding.host_port)?;
             let refresh = binding
                 .host_executable
                 .as_ref()
                 .map(|executable| {
-                    graph::RefreshPolicy::capture(&endpoint, executable, binding.host_port)
+                    graph::RefreshPolicy::capture(
+                        &endpoint,
+                        executable,
+                        binding.host_port,
+                        binding.host_supervisor_depth.unwrap_or(1),
+                    )
                 })
                 .transpose()?;
             let fingerprint = endpoint.fingerprint()?;
+            if refresh_policies
+                .insert(binding.slot, refresh.clone())
+                .is_some_and(|prior| prior != refresh)
+            {
+                return Err(refused());
+            }
             if slots
                 .insert(binding.slot, fingerprint.clone())
                 .is_some_and(|prior| prior != fingerprint)
             {
                 return Err(refused());
             }
-            evidence.push(fingerprint);
+            evidence.push((
+                fingerprint,
+                refresh
+                    .as_ref()
+                    .map(graph::RefreshPolicy::review_fingerprint)
+                    .transpose()?,
+            ));
             dependencies.push(graph::Dependency {
                 service: binding.service.clone(),
                 binding: binding.binding.clone(),
@@ -282,6 +327,53 @@ mod tests {
         let mut bad = value();
         bad["version"] = json!(2);
         assert!(Selection::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
+    }
+    #[test]
+    fn supervisor_depth_requires_executable_selection_and_shared_slot_policy_agreement() {
+        let mut selected = value();
+        selected["dependencies"].as_array_mut().unwrap().truncate(1);
+        selected["dependencies"][0]["host_executable"] = json!("/reviewed/tunnel");
+        for depth in [1, 2, 8] {
+            selected["dependencies"][0]["host_supervisor_depth"] = json!(depth);
+            let parsed = Selection::parse(&serde_json::to_vec(&selected).unwrap()).unwrap();
+            assert_eq!(parsed.dependencies[0].host_supervisor_depth, Some(depth));
+        }
+        for depth in [
+            json!(0),
+            json!(9),
+            json!(256),
+            json!(-1),
+            json!(1.5),
+            json!("2"),
+            Value::Null,
+        ] {
+            selected["dependencies"][0]["host_supervisor_depth"] = depth;
+            assert!(Selection::parse(&serde_json::to_vec(&selected).unwrap()).is_err());
+        }
+        selected["dependencies"][0]["host_supervisor_depth"] = json!(2);
+        selected["dependencies"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("host_executable");
+        assert!(Selection::parse(&serde_json::to_vec(&selected).unwrap()).is_err());
+        selected["dependencies"][0]["host_executable"] = json!("/reviewed/tunnel");
+        let mut shared = selected["dependencies"][0].clone();
+        shared["service"] = json!("worker");
+        selected["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(shared);
+        assert!(Selection::parse(&serde_json::to_vec(&selected).unwrap()).is_ok());
+        selected["dependencies"][1]["host_supervisor_depth"] = json!(1);
+        assert!(Selection::parse(&serde_json::to_vec(&selected).unwrap()).is_err());
+        selected["dependencies"][0]["host_supervisor_depth"] = json!(1);
+        selected["dependencies"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("host_supervisor_depth");
+        assert!(Selection::parse(&serde_json::to_vec(&selected).unwrap()).is_ok());
+        selected["dependencies"][1]["host_executable"] = json!("/other/tunnel");
+        assert!(Selection::parse(&serde_json::to_vec(&selected).unwrap()).is_err());
     }
     #[test]
     fn review_digest_binds_configuration_and_live_listener_generation() {

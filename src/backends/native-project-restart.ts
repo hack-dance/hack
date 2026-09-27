@@ -33,7 +33,10 @@ export async function restartNativeProject(opts: {
   readonly scope: NativeProjectRunScope;
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
-  readonly preflight: (run: NativeProjectRun) => Promise<void>;
+  readonly preflight: (
+    run: NativeProjectRun,
+    options: { readonly cleanedRetry: boolean }
+  ) => Promise<void>;
   readonly down: () => Promise<unknown>;
   readonly start: (options: {
     run: NativeProjectRun;
@@ -74,7 +77,14 @@ export async function restartNativeProject(opts: {
       envName: opts.envName,
       profiles: opts.profiles,
     });
-    await opts.preflight(run);
+    if (!current && intent && intent.phase !== "cleaned") {
+      throw new Error(
+        "Native restart cleanup or down hooks were interrupted; inspect the pending intent before recovery."
+      );
+    }
+    await opts.preflight(run, {
+      cleanedRetry: !current && intent?.phase === "cleaned",
+    });
     if (!intent) {
       intent = {
         phase: "prepared",

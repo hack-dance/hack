@@ -301,6 +301,7 @@ impl HostRelayRuntime {
         };
         let mut selected = BTreeMap::new();
         let mut slots = BTreeMap::new();
+        let mut refresh_policies = BTreeMap::new();
         let mut service_slots = std::collections::BTreeSet::new();
         let mut ports = std::collections::BTreeSet::new();
         let mut aliases = std::collections::BTreeSet::new();
@@ -313,6 +314,9 @@ impl HostRelayRuntime {
                 || slots
                     .insert(dependency.slot, endpoint_generation)
                     .is_some_and(|prior| prior != endpoint_generation)
+                || refresh_policies
+                    .insert(dependency.slot, dependency.refresh.clone())
+                    .is_some_and(|prior| prior != dependency.refresh)
                 || !service_slots.insert((dependency.service.clone(), dependency.slot))
                 || !binding_name(&dependency.binding)
                 || !ports.insert((dependency.service.clone(), address, dependency.port))

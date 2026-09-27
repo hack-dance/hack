@@ -6026,7 +6026,7 @@ async function handleNativeUp({
             }),
         }
       : undefined,
-    preflight: (run) =>
+    preflight: (run, { cleanedRetry }) =>
       preflightNativeRestart({
         runtime: native,
         scope: startup.scope,
@@ -6035,6 +6035,7 @@ async function handleNativeUp({
         dependencyFile: startup.dependencyFile,
         allowedHosts: startup.allowedHosts,
         run,
+        cleanedRetry,
       }),
     down: async () => {
       const code = await handleDown({

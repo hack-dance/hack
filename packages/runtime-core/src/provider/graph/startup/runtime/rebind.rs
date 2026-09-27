@@ -7,6 +7,8 @@ use std::{collections::BTreeSet, fs, path::PathBuf};
 
 const JOURNAL: &str = "dependency-rebind.json";
 mod archive;
+#[cfg(test)]
+mod nested_tests;
 pub(super) use archive::after_cleanup as archive_after_cleanup;
 
 fn rejected() -> CandidateError {
@@ -22,17 +24,22 @@ fn child_stage<T>(
 
 /// In-memory authority for an executable-selected tunnel to follow its original
 /// same-user supervisor. A port or a matching executable alone cannot grant it.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RefreshPolicy {
     executable: PathBuf,
     host_port: u16,
     supervisor: identity::ProcessIdentity,
+    intermediate_executables: Vec<PathBuf>,
 }
 impl RefreshPolicy {
+    /// Select exactly this many native ancestry links (1..=8). The final ancestor
+    /// remains pinned by full identity; only intermediate identities may rotate,
+    /// preserving their reviewed executable paths and same-user lineage.
     pub fn capture(
         endpoint: &HostEndpoint,
         executable: &Path,
         host_port: u16,
+        supervisor_depth: u8,
     ) -> Result<Self, CandidateError> {
         if host_port == 0 || !executable.is_absolute() {
             return Err(rejected());
@@ -46,13 +53,32 @@ impl RefreshPolicy {
         if selected.fingerprint()? != endpoint.fingerprint()? {
             return Err(rejected());
         }
-        let supervisor = identity::parent(&process).map_err(|_| rejected())?;
+        let mut lineage = identity::lineage(&process, supervisor_depth).map_err(|_| rejected())?;
+        let supervisor = lineage.pop().ok_or_else(rejected)?;
         validate_supervisor(&process, &supervisor)?;
         Ok(Self {
             executable,
             host_port,
             supervisor,
+            intermediate_executables: lineage
+                .into_iter()
+                .map(|parent| parent.executable)
+                .collect(),
         })
+    }
+
+    /// Binds native review to the selected anchor and intermediate executable
+    /// chain as well as depth. Contains no process arguments or credentials.
+    pub fn review_fingerprint(&self) -> Result<String, CandidateError> {
+        let bytes = serde_json::to_vec(&(
+            "hack-dependency-refresh-policy-v1",
+            &self.executable,
+            self.host_port,
+            &self.supervisor,
+            &self.intermediate_executables,
+        ))
+        .map_err(|_| rejected())?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
     }
 
     fn validate(&self, endpoint: &HostEndpoint) -> Result<(), CandidateError> {
@@ -60,8 +86,10 @@ impl RefreshPolicy {
             .require_executable(&self.executable)
             .map_err(|_| rejected())?;
         let process = endpoint.process_identity();
-        let parent = identity::parent(&process).map_err(|_| rejected())?;
-        validate_replacement(self, &process, &parent)?;
+        let depth =
+            u8::try_from(self.intermediate_executables.len() + 1).map_err(|_| rejected())?;
+        let lineage = identity::lineage(&process, depth).map_err(|_| rejected())?;
+        validate_replacement(self, &process, &lineage)?;
         let current = identity::observe(self.supervisor.pid).map_err(|_| rejected())?;
         identity::verify(
             &self.supervisor,
@@ -108,12 +136,24 @@ fn validate_supervisor(
 fn validate_replacement(
     policy: &RefreshPolicy,
     process: &identity::ProcessIdentity,
-    parent: &identity::ProcessIdentity,
+    lineage: &[identity::ProcessIdentity],
 ) -> Result<(), CandidateError> {
-    validate_supervisor(process, parent)?;
+    let (anchor, intermediate) = lineage.split_last().ok_or_else(rejected)?;
+    let mut seen = BTreeSet::from([process.pid]);
+    for parent in lineage {
+        validate_supervisor(process, parent)?;
+        if !seen.insert(parent.pid) {
+            return Err(rejected());
+        }
+    }
     if policy.host_port == 0
         || process.executable != policy.executable
-        || parent != &policy.supervisor
+        || anchor != &policy.supervisor
+        || intermediate.len() != policy.intermediate_executables.len()
+        || !intermediate
+            .iter()
+            .zip(&policy.intermediate_executables)
+            .all(|(parent, executable)| &parent.executable == executable)
     {
         return Err(rejected());
     }
@@ -175,6 +215,10 @@ fn selections(
     }
     let mut result = Vec::new();
     for (slot, keys) in groups {
+        let policy = &dependencies[keys.first().ok_or_else(rejected)?].refresh;
+        if keys.iter().any(|key| &dependencies[key].refresh != policy) {
+            return Err(rejected());
+        }
         let mut old = None;
         let mut healthy = 0;
         for key in &keys {

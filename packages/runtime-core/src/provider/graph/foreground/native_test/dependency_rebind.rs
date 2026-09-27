@@ -129,6 +129,32 @@ fn snapshot(candidate: &Candidate, run: &str, deadline: Instant) -> graph::Snaps
     }
 }
 
+fn registered_targets(candidate: &Candidate, receipt: &graph::Receipt) -> Value {
+    use crate::provider::relay_owner::{SelectionRequest, publication::PinnedEndpoint};
+    let engine = graph::Engine::connect_cleanup(candidate).unwrap();
+    let context =
+        graph::host_relay::context(engine.guest().incarnation(), engine.guest().boot_id()).unwrap();
+    let scope = graph::host_relay::graph_scope(context, &receipt.run).unwrap();
+    let endpoint = PinnedEndpoint::load(
+        &receipt.relay_startup.as_ref().unwrap().control_root,
+        context,
+    )
+    .unwrap();
+    let request = SelectionRequest::new(endpoint.incarnation(), [21; 16], scope).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut exchange = endpoint.select(request, Duration::from_secs(3)).unwrap();
+    loop {
+        if let Some(selected) = exchange.progress().unwrap() {
+            return serde_json::to_value(selected.targets()).unwrap();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "owned registration observation timed out"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 fn await_rebound(
     candidate: &Candidate,
     run: &str,
@@ -178,6 +204,22 @@ struct RetainedIdentity<'a> {
 }
 impl RetainedIdentity<'_> {
     fn preserved(&self, before: &graph::Receipt, after: &graph::Receipt, owner: &Process) {
+        self.verify(before, after, owner, true);
+    }
+    fn unchanged(&self, before: &graph::Receipt, after: &graph::Receipt, owner: &Process) {
+        assert_eq!(
+            serde_json::to_value(before).unwrap(),
+            serde_json::to_value(after).unwrap()
+        );
+        self.verify(before, after, owner, false);
+    }
+    fn verify(
+        &self,
+        before: &graph::Receipt,
+        after: &graph::Receipt,
+        owner: &Process,
+        replaced_helpers: bool,
+    ) {
         let Self {
             binary,
             candidate,
@@ -217,10 +259,17 @@ impl RetainedIdentity<'_> {
             let new = &after_startup.services[service];
             assert_eq!(old.generation, new.generation);
             assert_eq!(old.started_at, new.started_at);
-            assert_ne!(
-                old.bindings["default"].process,
-                new.bindings["default"].process
-            );
+            if replaced_helpers {
+                assert_ne!(
+                    old.bindings["default"].process,
+                    new.bindings["default"].process
+                );
+            } else {
+                assert_eq!(
+                    old.bindings["default"].process,
+                    new.bindings["default"].process
+                );
+            }
             let resource = &after.resources[&format!("container:{service}")];
             assert_eq!(
                 graph::inspect_resource(&engine, after, resource)
@@ -388,6 +437,60 @@ fn foreground_traffic_wake_and_explicit_refresh_preserve_graph() {
     );
 
     let port = backend.port;
+    let root = graph::directory(&candidate, &run).unwrap();
+    let original_generation = graph::service_exec_generation(&before).unwrap();
+    let targets = registered_targets(&candidate, &before);
+    assert_eq!(targets.as_array().unwrap().len(), 2);
+    // The wrapper may need seconds to reopen its listener. Failed authenticated
+    // traffic during that gap must not turn a preflight refusal into effects.
+    backend.stop();
+    let gap_rejected = exec(&binary, &candidate, &run, "web", "dependency", deadline);
+    assert_ne!(gap_rejected["exit_code"], 0);
+    let gap_status = checked_cli(
+        "listener-gap-status",
+        &binary,
+        &candidate,
+        &["graph", "owner-status", "--run-id", &run, "--json"],
+        deadline,
+    );
+    assert_eq!(gap_status["foreground_alive"], true);
+    assert_eq!(gap_status["runtime_verified"], false);
+    assert_eq!(
+        gap_status["runtime_error"],
+        "graph_dependency_endpoint_changed"
+    );
+    assert_eq!(gap_status["generation"], original_generation);
+    assert!(owner.poll().is_none());
+    let gap = snapshot(&candidate, &run, deadline);
+    assert!(!gap.journal_incomplete);
+    assert_eq!(gap.receipt.phase, "ready-observed");
+    assert!(!root.join("dependency-rebind.json").exists());
+    assert!(!root.join("dependency-rebind.pending").exists());
+    assert_eq!(registered_targets(&candidate, &gap.receipt), targets);
+    retained.unchanged(&before, &gap.receipt, &owner);
+    backend = RestartableBackend::start(port);
+    let gap_endpoint = backend.endpoint().fingerprint().unwrap();
+    let gap_refreshed = checked_cli(
+        "listener-gap-refresh",
+        &binary,
+        &candidate,
+        &["graph", "refresh-dependencies", "--run-id", &run, "--json"],
+        deadline,
+    );
+    let recovered_gap =
+        await_rebound(&candidate, &run, &gap_endpoint, &mut owner, deadline).receipt;
+    assert_eq!(gap_refreshed["changed_slots"], json!([0]));
+    retained.preserved(&before, &recovered_gap, &owner);
+    backend.assert_no_traffic();
+    for service in ["web", "search"] {
+        assert_eq!(
+            exec(&binary, &candidate, &run, service, "dependency", deadline)["exit_code"],
+            0
+        );
+    }
+    backend.traffic(2);
+    backend.assert_no_traffic();
+
     backend.stop();
     backend = RestartableBackend::start(port);
     let automatic_endpoint = backend.endpoint().fingerprint().unwrap();
@@ -405,7 +508,7 @@ fn foreground_traffic_wake_and_explicit_refresh_preserve_graph() {
     )
     .receipt;
     backend.assert_no_traffic();
-    retained.preserved(&before, &automatic, &owner);
+    retained.preserved(&recovered_gap, &automatic, &owner);
     assert_eq!(
         exec(&binary, &candidate, &run, "web", "dependency", deadline)["exit_code"],
         0
@@ -511,6 +614,6 @@ fn foreground_traffic_wake_and_explicit_refresh_preserve_graph() {
     assert!(transport::Pin::load(&candidate, &run).is_err());
     backend.stop();
     println!(
-        "graph-foreground-rebind-qualified-v1 automatic_wake=1 explicit_wire=1 replayed_requests=0 shared_bindings=2 retained_containers=2 retained_boot=1 retained_data=1 owner_reaped=1 retired_owned_resources_removed=1"
+        "graph-foreground-rebind-qualified-v1 listener_gap_refusal=1 listener_gap_recovered=1 automatic_wake=1 explicit_wire=1 replayed_requests=0 shared_bindings=2 retained_containers=2 retained_boot=1 retained_data=1 owner_reaped=1 retired_owned_resources_removed=1"
     );
 }

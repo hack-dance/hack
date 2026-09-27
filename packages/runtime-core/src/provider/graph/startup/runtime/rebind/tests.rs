@@ -38,9 +38,10 @@ fn replacement_requires_original_supervisor_generation_executable_and_user() {
         executable: "/usr/bin/tunnel".into(),
         host_port: 8443,
         supervisor: supervisor.clone(),
+        intermediate_executables: Vec::new(),
     };
     let replacement = process(42, "/usr/bin/tunnel");
-    validate_replacement(&policy, &replacement, &supervisor).unwrap();
+    validate_replacement(&policy, &replacement, std::slice::from_ref(&supervisor)).unwrap();
     for parent in [
         identity::ProcessIdentity {
             pid: 41,
@@ -59,9 +60,16 @@ fn replacement_requires_original_supervisor_generation_executable_and_user() {
             ..supervisor.clone()
         },
     ] {
-        assert!(validate_replacement(&policy, &replacement, &parent).is_err());
+        assert!(validate_replacement(&policy, &replacement, &[parent]).is_err());
     }
-    assert!(validate_replacement(&policy, &process(42, "/usr/bin/other"), &supervisor).is_err());
+    assert!(
+        validate_replacement(
+            &policy,
+            &process(42, "/usr/bin/other"),
+            std::slice::from_ref(&supervisor)
+        )
+        .is_err()
+    );
     assert!(
         validate_replacement(
             &policy,
@@ -69,7 +77,7 @@ fn replacement_requires_original_supervisor_generation_executable_and_user() {
                 uid: 502,
                 ..replacement
             },
-            &supervisor
+            std::slice::from_ref(&supervisor)
         )
         .is_err()
     );
@@ -80,6 +88,58 @@ fn replacement_requires_original_supervisor_generation_executable_and_user() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn wrapped_policy_rotates_only_intermediate_identities_under_exact_anchor_and_chain() {
+    let supervisor = process(40, "/reviewed/wrapper");
+    let policy = RefreshPolicy {
+        executable: "/reviewed/listener".into(),
+        host_port: 8443,
+        supervisor: supervisor.clone(),
+        intermediate_executables: vec!["/reviewed/aws".into()],
+    };
+    let replacement = process(42, "/reviewed/listener");
+    let rotated = identity::ProcessIdentity {
+        start_micros: 20,
+        ..process(43, "/reviewed/aws")
+    };
+    let good = vec![rotated.clone(), supervisor.clone()];
+    validate_replacement(&policy, &replacement, &good).unwrap();
+    for lineage in [
+        vec![],
+        vec![supervisor.clone()],
+        vec![rotated.clone(), process(41, "/reviewed/wrapper")],
+        vec![
+            rotated.clone(),
+            identity::ProcessIdentity {
+                start_micros: 11,
+                ..supervisor.clone()
+            },
+        ],
+        vec![process(43, "/other/aws"), supervisor.clone()],
+        vec![
+            identity::ProcessIdentity {
+                uid: 502,
+                ..rotated.clone()
+            },
+            supervisor.clone(),
+        ],
+        vec![process(42, "/reviewed/aws"), supervisor.clone()],
+        vec![rotated.clone(), rotated, supervisor],
+    ] {
+        assert!(validate_replacement(&policy, &replacement, &lineage).is_err());
+    }
+    let fingerprint = policy.review_fingerprint().unwrap();
+    let mut changed = policy.clone();
+    changed.supervisor.start_micros += 1;
+    assert_ne!(fingerprint, changed.review_fingerprint().unwrap());
+    changed = policy.clone();
+    changed.intermediate_executables.clear();
+    assert_ne!(fingerprint, changed.review_fingerprint().unwrap());
+    changed = policy;
+    changed.intermediate_executables[0] = "/other/aws".into();
+    assert_ne!(fingerprint, changed.review_fingerprint().unwrap());
 }
 
 fn startup(generation: &str, services: &[&str]) -> Startup {
@@ -166,10 +226,29 @@ fn healthy_fixed_selection_is_noop_and_complete_shared_slot_refreshes_together()
     ]);
     assert!(selections(&dependencies, &startup).unwrap().is_empty());
     let executable = std::env::current_exe().unwrap();
-    let policy = RefreshPolicy::capture(&endpoint, &executable, address.port()).unwrap();
+    let policy = RefreshPolicy::capture(&endpoint, &executable, address.port(), 1).unwrap();
     for dependency in dependencies.values_mut() {
         dependency.refresh = Some(policy.clone());
     }
+    for kind in 0..3 {
+        let mut different = policy.clone();
+        match kind {
+            0 => different.supervisor.start_micros += 1,
+            1 => different
+                .intermediate_executables
+                .push("/other/parent".into()),
+            _ => different.executable = "/other/listener".into(),
+        }
+        dependencies
+            .get_mut(&("web".into(), "content".into()))
+            .unwrap()
+            .refresh = Some(different);
+        assert!(selections(&dependencies, &startup).is_err());
+    }
+    dependencies
+        .get_mut(&("web".into(), "content".into()))
+        .unwrap()
+        .refresh = Some(policy);
     drop(listener);
     let _replacement = replace(address);
     let selected = selections(&dependencies, &startup).unwrap();
@@ -204,26 +283,44 @@ fn capture_rejects_different_port_executable_and_unbounded_selection() {
     .unwrap();
     let executable = std::env::current_exe().unwrap();
     assert!(
-        RefreshPolicy::capture(&endpoint, &executable, second.local_addr().unwrap().port())
-            .is_err()
+        RefreshPolicy::capture(
+            &endpoint,
+            &executable,
+            second.local_addr().unwrap().port(),
+            1
+        )
+        .is_err()
     );
     assert!(
         RefreshPolicy::capture(
             &endpoint,
             Path::new("/usr/bin/true"),
-            first.local_addr().unwrap().port()
+            first.local_addr().unwrap().port(),
+            1
         )
         .is_err()
     );
-    assert!(RefreshPolicy::capture(&endpoint, &executable, 0).is_err());
+    assert!(RefreshPolicy::capture(&endpoint, &executable, 0, 1).is_err());
     assert!(
         RefreshPolicy::capture(
             &endpoint,
             Path::new("relative"),
-            first.local_addr().unwrap().port()
+            first.local_addr().unwrap().port(),
+            1
         )
         .is_err()
     );
+    for depth in [0, 9, 255] {
+        assert!(
+            RefreshPolicy::capture(
+                &endpoint,
+                &executable,
+                first.local_addr().unwrap().port(),
+                depth
+            )
+            .is_err()
+        );
+    }
 }
 
 fn receipt() -> Receipt {

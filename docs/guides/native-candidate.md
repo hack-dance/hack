@@ -372,7 +372,11 @@ It saves a pending restart intent and waits for the previous frontend
 to confirm graph, HTTPS and lifecycle cleanup before starting its replacement.
 Changed selections and unknown legacy startup/finalization records refuse before
 cleanup. A failed replacement retains its intent: retry `restart` after resolving
-the reported problem; a fresh `up` cannot bypass it. An interrupted operation lock
+the reported problem; a fresh `up` cannot bypass it. When the saved intent confirms
+cleanup and the old run mapping is absent, retry still reviews the public dependency
+intent and all source, plan, environment, network and admission checks. It captures
+listener identities after the startup hooks recreate them, rather than requiring
+already stopped listeners before those hooks run. An interrupted operation lock
 requires ownership inspection rather than automatic removal. Restart does not
 implicitly migrate a shared pool's network policy or interrupt other projects.
 When an interrupted frontend cannot write that final acknowledgement, an explicit
@@ -525,6 +529,20 @@ process and socket generation again before admitting the graph. A missing,
 ambiguous, wrong-executable or substituted listener refuses; an already running
 graph stays up when restart preflight refuses. Fixed `host_pid` selections remain
 supported and carry no permission to follow a replacement process.
+
+Executable selections may also set `"host_supervisor_depth": 2` when a retained
+wrapper launches a replaceable session process which launches the listener.
+The depth is an integer from 1 through 8 and defaults to 1 (the immediate parent);
+it is forbidden with a fixed-PID-only selector. Hack captures exactly that
+many ancestry links, pins the final ancestor's PID, native start time, user and
+executable, and retains the intermediate executable paths in order. A retry may
+replace intermediate processes only beneath that exact live ancestor, with the
+same executable chain and user. Native review rechecks the complete bounded
+lineage twice; it never searches for a common ancestor or infers a stable wrapper.
+Bindings sharing one listening transport must select the same executable, depth
+and reviewed ownership policy. A replaced ancestor, changed chain, adopted
+listener or inconsistent shared selection refuses before relay grants change.
+
 Startup allows up to 60 seconds total for persistent hooks to create all selected
 listeners, with cancellable waits and bounded read-only discovery requests. It
 retries only native endpoint-identity refusals; malformed selections and other
@@ -541,7 +559,8 @@ With a packaged candidate, invoke it as:
 ```
 
 Only `host_executable` selections can follow a replacement, using the original
-executable, host port and unchanged same-user supervisor identity. A matching
+executable, host port and unchanged same-user ancestor selected by
+`host_supervisor_depth`, retaining the reviewed intermediate executable chain. A matching
 executable or port alone is insufficient. Missing or ambiguous listeners,
 replaced supervisors, fixed-PID drift and changed ownership refuse. The owner
 retains the admitted services, bindings, aliases, guest ports and transport slots;

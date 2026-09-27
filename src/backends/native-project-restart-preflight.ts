@@ -8,6 +8,7 @@ import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   discoverNativeHostDependency,
   type NativeHostDependency,
+  parseNativeHostDependencies,
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
@@ -20,6 +21,7 @@ import {
   type NativeProjectRunScope,
   normalizeNativeProfiles,
 } from "./native-project-run.ts";
+import { readNativeSelection } from "./native-project-selection.ts";
 import { prepareNativeProjectServices } from "./native-project-start.ts";
 import {
   invokeNativeRuntime,
@@ -37,13 +39,14 @@ const DEFAULTS = {
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const SHA = /^[a-f0-9]{64}$/;
 
-/** Check each currently selected host listener before restart can stop the graph. */
+/** Review the relay artifact and, for an active graph, its selected live listeners. */
 async function verifyNativeRestartListeners(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly planId: string;
   readonly dependencies: readonly NativeHostDependency[];
   readonly invoke: typeof invokeNativeRuntime;
+  readonly cleanedRetry: boolean;
 }): Promise<void> {
   if (opts.dependencies.length === 0) {
     return;
@@ -62,6 +65,9 @@ async function verifyNativeRestartListeners(opts: {
   const artifactHash = createHash("sha256")
     .update(new Uint8Array(await file.arrayBuffer()))
     .digest("hex");
+  if (opts.cleanedRetry) {
+    return;
+  }
   const directory = await mkdtemp(join(tmpdir(), "hack-native-restart-deps-"));
   try {
     const path = join(directory, "dependencies.json");
@@ -100,6 +106,41 @@ async function verifyNativeRestartListeners(opts: {
     }
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A confirmed cleaned retry has no listener authority to capture yet. Validate
+ * only the complete public intent; normal startup captures it after before hooks.
+ * The provisional PID never reaches native dependency-plan or graph admission.
+ */
+async function readNativeRestartDependencyIntent(opts: {
+  readonly path?: string;
+  readonly services: readonly string[];
+}): Promise<NativeHostDependency[]> {
+  if (opts.path === undefined) {
+    return [];
+  }
+  try {
+    const value = await readNativeSelection(opts.path);
+    if (!(isRecord(value) && Array.isArray(value.dependencies))) {
+      throw new Error("Invalid dependency intent");
+    }
+    return parseNativeHostDependencies({
+      services: opts.services,
+      value: {
+        ...value,
+        dependencies: value.dependencies.map((entry) =>
+          isRecord(entry) && entry.host_executable !== undefined
+            ? { ...entry, host_pid: entry.host_pid ?? 2 }
+            : entry
+        ),
+      },
+    });
+  } catch {
+    throw new Error(
+      "Native restart dependency intent is invalid; values omitted."
+    );
   }
 }
 
@@ -166,6 +207,7 @@ export async function preflightNativeRestart(opts: {
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
   readonly run: NativeProjectRun;
+  readonly cleanedRetry?: boolean;
   readonly adaptationFile?: string;
   readonly dependencyFile?: string;
   readonly allowedHosts?: readonly string[];
@@ -207,18 +249,23 @@ export async function preflightNativeRestart(opts: {
     input,
     opts.dependencyFile !== undefined
   );
-  const dependencies = await deps.dependencies({
-    path: opts.dependencyFile,
-    services: Object.keys(specs),
-    discover: (selection) =>
-      discoverNativeHostDependency({
-        runtime: opts.runtime,
-        projectRoot: opts.scope.projectRoot,
-        hostPort: selection.hostPort,
-        executable: selection.executable,
-        invoke: deps.invoke,
-      }),
-  });
+  const dependencies = opts.cleanedRetry
+    ? await readNativeRestartDependencyIntent({
+        path: opts.dependencyFile,
+        services: Object.keys(specs),
+      })
+    : await deps.dependencies({
+        path: opts.dependencyFile,
+        services: Object.keys(specs),
+        discover: (selection) =>
+          discoverNativeHostDependency({
+            runtime: opts.runtime,
+            projectRoot: opts.scope.projectRoot,
+            hostPort: selection.hostPort,
+            executable: selection.executable,
+            invoke: deps.invoke,
+          }),
+      });
   prepareNativeDependencyServices({ dependencies, services: specs });
   for (const spec of Object.values(specs)) {
     const image = String(spec.image);
@@ -269,6 +316,7 @@ export async function preflightNativeRestart(opts: {
         planId: review.planId,
         dependencies,
         invoke: deps.invoke,
+        cleanedRetry: opts.cleanedRetry === true,
       });
     },
   });

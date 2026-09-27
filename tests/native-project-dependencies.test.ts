@@ -222,6 +222,52 @@ test("equal endpoints share transport across services while same-service binding
   expect(selected[0]?.aliases).toEqual(["search.example.com"]);
   expect(selected[2]?.service).toBe("worker");
 });
+
+test("wrapped supervisors require an explicit bounded executable selector", () => {
+  const selected = {
+    ...binding(),
+    host_executable: "/synthetic/tunnel",
+    host_supervisor_depth: 2,
+  };
+  expect(parse([selected])[0]?.host_supervisor_depth).toBe(2);
+  expect(
+    parse([{ ...selected, host_supervisor_depth: 8 }])[0]?.host_supervisor_depth
+  ).toBe(8);
+  for (const depth of [
+    null,
+    "2",
+    0,
+    -1,
+    1.5,
+    9,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ]) {
+    expect(() =>
+      parse([{ ...selected, host_supervisor_depth: depth }])
+    ).toThrow("values omitted");
+  }
+  expect(() => parse([{ ...binding(), host_supervisor_depth: 2 }])).toThrow(
+    "values omitted"
+  );
+});
+
+test("shared listener transports reject differing supervisor authority", () => {
+  const first = { ...binding(), host_executable: "/synthetic/tunnel" };
+  const second = { ...binding("worker"), host_executable: "/synthetic/tunnel" };
+  expect(
+    parse([first, { ...second, host_supervisor_depth: 1 }]).map(
+      (item) => item.slot
+    )
+  ).toEqual([0, 0]);
+  for (const replacement of [
+    { ...second, host_supervisor_depth: 2 },
+    { ...second, host_executable: "/synthetic/foreign" },
+    binding("worker"),
+  ]) {
+    expect(() => parse([first, replacement])).toThrow("values omitted");
+  }
+});
 test("ambiguous, undeclared, wildcard or credential-bearing dependencies refuse without values", () => {
   const bad = [
     [],
@@ -292,7 +338,11 @@ test("executable-pinned selection refreshes one current PID per shared listener 
   const executable = "/usr/local/bin/synthetic-tunnel";
   const selected = [binding(), binding("worker")].map((entry) => {
     const { host_pid: _stale, ...intent } = entry;
-    return { ...intent, host_executable: executable };
+    return {
+      ...intent,
+      host_executable: executable,
+      host_supervisor_depth: 2,
+    };
   });
   await writeFile(path, JSON.stringify({ version: 1, dependencies: selected }));
   const calls: unknown[] = [];
@@ -314,6 +364,7 @@ test("executable-pinned selection refreshes one current PID per shared listener 
     [456, 0],
   ]);
   expect(result[0]?.host_executable).toBe(executable);
+  expect(result.map((entry) => entry.host_supervisor_depth)).toEqual([2, 2]);
   await expect(
     readNativeHostDependencies({ path, services: ["web", "worker"] })
   ).rejects.toThrow("values omitted");
@@ -335,6 +386,17 @@ test("executable-pinned selection refreshes one current PID per shared listener 
     })
   );
   calls.length = 0;
+  await expect(
+    readNativeHostDependencies({ path, services: ["web"], discover })
+  ).rejects.toThrow("values omitted");
+  expect(calls).toEqual([]);
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      dependencies: [{ ...selected[0], host_supervisor_depth: 9 }],
+    })
+  );
   await expect(
     readNativeHostDependencies({ path, services: ["web"], discover })
   ).rejects.toThrow("values omitted");

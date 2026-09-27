@@ -570,7 +570,13 @@ fn qualify_active_rebind(refreshable: bool, cancel_after_fence: bool) {
     let mut backend = RestartableBackend::start(0);
     let endpoint = backend.endpoint();
     let refresh = refreshable.then(|| {
-        RefreshPolicy::capture(&endpoint, &std::env::current_exe().unwrap(), backend.port).unwrap()
+        RefreshPolicy::capture(
+            &endpoint,
+            &std::env::current_exe().unwrap(),
+            backend.port,
+            1,
+        )
+        .unwrap()
     });
     let mut runtime = HostRelayRuntime::new(
         &candidate,
@@ -749,9 +755,13 @@ fn qualify_active_rebind(refreshable: bool, cancel_after_fence: bool) {
                 super::super::restore::restore_generation(&engine, &cleaned).unwrap();
             drop(engine);
             let endpoint = backend.endpoint();
-            let refresh =
-                RefreshPolicy::capture(&endpoint, &std::env::current_exe().unwrap(), backend.port)
-                    .unwrap();
+            let refresh = RefreshPolicy::capture(
+                &endpoint,
+                &std::env::current_exe().unwrap(),
+                backend.port,
+                1,
+            )
+            .unwrap();
             let mut fresh = HostRelayRuntime::new_for_run(
                 &candidate,
                 &artifact,

@@ -136,6 +136,39 @@ pub fn parent(recorded: &ProcessIdentity) -> Result<ProcessIdentity, CandidateEr
     Ok(supervisor)
 }
 
+/// Capture exactly the selected number of same-user ancestors, nearest first.
+/// Both complete native snapshots must agree; no common-ancestor search, adopted
+/// process, cycle, or partial chain can authorize a supervisor. This runs only
+/// at explicit review/admission boundaries, never as an idle ancestry poll.
+#[cfg(target_os = "macos")]
+pub fn lineage(
+    recorded: &ProcessIdentity,
+    depth: u8,
+) -> Result<Vec<ProcessIdentity>, CandidateError> {
+    if !(1..=8).contains(&depth) {
+        return Err(parent_refused());
+    }
+    let snapshot = || {
+        let mut ancestors = Vec::with_capacity(usize::from(depth));
+        let mut child = recorded.clone();
+        let mut seen = std::collections::BTreeSet::from([child.pid]);
+        for _ in 0..depth {
+            let ancestor = parent(&child)?;
+            if ancestor.uid != recorded.uid || !seen.insert(ancestor.pid) {
+                return Err(parent_refused());
+            }
+            child = ancestor.clone();
+            ancestors.push(ancestor);
+        }
+        Ok(ancestors)
+    };
+    let first = snapshot()?;
+    if first != snapshot()? {
+        return Err(parent_refused());
+    }
+    Ok(first)
+}
+
 #[cfg(target_os = "macos")]
 fn parent_refused() -> CandidateError {
     CandidateError::new(

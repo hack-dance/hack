@@ -222,6 +222,9 @@ test("corrupt bundle refuses before runtime or client configuration creation", a
 test("unsafe runtime directory and long socket paths refuse without chmod or aliases", async () => {
   const f = await fixture();
   await mkdir(f.selection.runtimeDirectory, { mode: 0o755 });
+  // mkdir applies umask; establish the unsafe mode this refusal test exercises.
+  await chmod(f.selection.runtimeDirectory, 0o755);
+  expect((await lstat(f.selection.runtimeDirectory)).mode & 0o777).toBe(0o755);
   await expect(
     prepareMcpBundleLaunch({ selection: f.selection, createRuntime: true })
   ).rejects.toThrow("private");

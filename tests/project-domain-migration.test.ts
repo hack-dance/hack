@@ -29,6 +29,9 @@ async function fixture() {
   roots.push(root);
   await writeFile(join(root, "hack.config.json"), config, { mode: 0o640 });
   await writeFile(join(root, "docker-compose.yml"), compose, { mode: 0o600 });
+  // Mode restoration needs exact starting permissions, independent of the caller's umask.
+  await chmod(join(root, "hack.config.json"), 0o640);
+  await chmod(join(root, "docker-compose.yml"), 0o600);
   return root;
 }
 afterEach(async () => {
@@ -38,6 +41,12 @@ afterEach(async () => {
 });
 test("preview has no effects; private journal restores exact bytes and modes", async () => {
   const projectDir = await fixture();
+  expect((await lstat(join(projectDir, "hack.config.json"))).mode & 0o777).toBe(
+    0o640
+  );
+  expect(
+    (await lstat(join(projectDir, "docker-compose.yml"))).mode & 0o777
+  ).toBe(0o600);
   const plan = await preview({ projectDir });
   expect(plan.toHost).toBe("demo.hack.local");
   expect(

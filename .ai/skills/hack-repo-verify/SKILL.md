@@ -37,6 +37,10 @@ For native setup use root `mise.toml`, the Bun pin in `package.json`, and
 `bun run test:local`. Add `--all-features` to equivalent Cargo commands for feature
 changes; the toolchain Rust tasks already enable all features. Keep default coverage.
 
+`bun run privacy:check` scans Git-tracked files. Stage reviewed new source/tests
+before the final gate, or rerun it after staging: an earlier pass does not cover
+untracked candidate additions. Keep private artifacts excluded from the index.
+
 ## Match the harness to the claim
 
 | Change | Existing loop and required observation |

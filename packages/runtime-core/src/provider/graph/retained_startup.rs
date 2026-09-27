@@ -345,7 +345,9 @@ mod tests {
                     fixture
                         .candidate
                         .state_root
-                        .join("run/smolvm/home/.smolvm/storage-template.ext4.zst"),
+                        .join("run/smolvm")
+                        .join("home")
+                        .join(".smolvm/storage-template.ext4.zst"),
                 )
                 .unwrap(),
                 "live-pid" => {
@@ -395,7 +397,9 @@ mod tests {
                     !fixture
                         .candidate
                         .state_root
-                        .join("run/smolvm/home/.smolvm/storage-template.ext4.zst")
+                        .join("run/smolvm")
+                        .join("home")
+                        .join(".smolvm/storage-template.ext4.zst")
                         .exists()
                 );
             }

@@ -18,6 +18,15 @@ const run = {
   planId: "d".repeat(64),
 };
 const id = "e".repeat(64);
+function refreshed() {
+  return {
+    ok: true,
+    ...run,
+    plan: run.planId,
+    generation: "f".repeat(64),
+    changed_slots: [],
+  };
+}
 function snapshot() {
   return {
     receipt: {
@@ -64,6 +73,9 @@ test("native exec preserves literal argv, binary output and nonzero completion",
     workdir: "/app",
     invoke: async (request) => {
       count++;
+      if (request.args[1] === "refresh-dependencies") {
+        return refreshed();
+      }
       if (request.args[1] === "inspect") {
         return snapshot();
       }
@@ -77,7 +89,7 @@ test("native exec preserves literal argv, binary output and nonzero completion",
       };
     },
   });
-  expect(count).toBe(3);
+  expect(count).toBe(4);
   expect(result).toEqual({
     exitCode: 23,
     stdout: Buffer.from([0, 255, 10]),
@@ -108,6 +120,9 @@ test("dead foreground owner refuses one-off exec before command effects", async 
       service: "web",
       argv: ["true"],
       invoke: async (request) => {
+        if (request.args[1] === "refresh-dependencies") {
+          return refreshed();
+        }
         if (request.args[1] === "inspect") {
           const value = snapshot();
           return {
@@ -129,6 +144,9 @@ test("foreign receipt refuses before exec and changed container after exec is un
   const opts = await fixture();
   let executions = 0;
   const invoke = async (request: { args: readonly string[] }) => {
+    if (request.args[1] === "refresh-dependencies") {
+      return refreshed();
+    }
     if (request.args[1] === "exec") {
       executions++;
       return {
@@ -152,6 +170,9 @@ test("foreign receipt refuses before exec and changed container after exec is un
       service: "web",
       argv: ["true"],
       invoke: async (request) => {
+        if (request.args[1] === "refresh-dependencies") {
+          return refreshed();
+        }
         if (request.args[1] === "exec") {
           executions++;
           return {
@@ -209,6 +230,9 @@ test("malformed exec output refuses without replay", async () => {
         service: "web",
         argv: ["true"],
         invoke: async (request) => {
+          if (request.args[1] === "refresh-dependencies") {
+            return refreshed();
+          }
           if (request.args[1] === "inspect") {
             return snapshot();
           }
@@ -259,11 +283,17 @@ test("fresh exec sends environment only through private stdin and clears its buf
   const opts = await freshFixture({ FIXTURE: "private-fixture-value" });
   let payload: Uint8Array | undefined;
   let executions = 0;
+  const calls: string[] = [];
   const result = await nativeProjectExec({
     ...opts,
     service: "web",
     argv: ["/bin/true"],
     invoke: async (request) => {
+      calls.push(String(request.args[1]));
+      if (request.args[1] === "refresh-dependencies") {
+        expect(request.privateInput).toBeUndefined();
+        return { ...refreshed(), changed_slots: [0, 3] };
+      }
       if (request.args[1] === "inspect") {
         return snapshot();
       }
@@ -287,6 +317,13 @@ test("fresh exec sends environment only through private stdin and clears its buf
   });
   expect(result.exitCode).toBe(7);
   expect(executions).toBe(1);
+  expect(calls).toEqual([
+    "refresh-dependencies",
+    "inspect",
+    "exec-selection",
+    "exec",
+    "inspect",
+  ]);
   expect(payload?.every((byte) => byte === 0)).toBe(true);
 });
 test("empty managed environment uses ordinary exec without a private launcher", async () => {
@@ -296,6 +333,9 @@ test("empty managed environment uses ordinary exec without a private launcher", 
     service: "web",
     argv: ["/bin/true"],
     invoke: async (request) => {
+      if (request.args[1] === "refresh-dependencies") {
+        return refreshed();
+      }
       if (request.args[1] === "inspect") {
         return snapshot();
       }
@@ -324,6 +364,9 @@ test("fresh exec clears private input on transport failure and never retries", a
       service: "web",
       argv: ["/bin/true"],
       invoke: async (request) => {
+        if (request.args[1] === "refresh-dependencies") {
+          return refreshed();
+        }
         if (request.args[1] === "inspect") {
           return snapshot();
         }
@@ -349,6 +392,9 @@ test("changed exec selection refuses before private environment delivery", async
       service: "web",
       argv: ["/bin/true"],
       invoke: async (request) => {
+        if (request.args[1] === "refresh-dependencies") {
+          return refreshed();
+        }
         if (request.args[1] === "inspect") {
           return snapshot();
         }
@@ -361,4 +407,31 @@ test("changed exec selection refuses before private environment delivery", async
     })
   ).rejects.toThrow("unconfirmed");
   expect(executions).toBe(0);
+});
+
+test("failed dependency refresh refuses before exec inspection or private preparation without replay", async () => {
+  const opts = await freshFixture({ FIXTURE: "private-fixture-value" });
+  await writeFile(
+    join(opts.scope.projectDir, "hack.env.default.yaml"),
+    "malformed: ["
+  );
+  for (const lostReply of [false, true]) {
+    const calls: string[] = [];
+    await expect(
+      nativeProjectExec({
+        ...opts,
+        service: "web",
+        argv: ["true"],
+        invoke: async (request) => {
+          calls.push(String(request.args[1]));
+          expect(request.privateInput).toBeUndefined();
+          if (lostReply) {
+            throw new Error("private-synthetic-diagnostic");
+          }
+          return { ...refreshed(), owner: "0".repeat(32) };
+        },
+      })
+    ).rejects.toThrow("dependency refresh identity or outcome is unconfirmed");
+    expect(calls).toEqual(["refresh-dependencies"]);
+  }
 });

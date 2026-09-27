@@ -1,5 +1,6 @@
 import { isRecord } from "../lib/guards.ts";
 import { prepareNativeExecEnvironment } from "./native-exec-environment.ts";
+import { refreshNativeProjectDependencies } from "./native-project-dependency-refresh.ts";
 import { nativeProjectPs } from "./native-project-observe.ts";
 import type { NativeProjectRunScope } from "./native-project-run.ts";
 import { loadNativeProjectRun } from "./native-project-run.ts";
@@ -129,6 +130,7 @@ export async function nativeProjectExec(opts: {
       "Native exec requires one service and bounded command arguments with an optional absolute workdir."
     );
   }
+  const refreshed = await refreshNativeProjectDependencies(opts);
   const before = await nativeProjectPs(opts);
   if (!before.run) {
     throw new Error(
@@ -137,6 +139,9 @@ export async function nativeProjectExec(opts: {
   }
   const service = before.items.find((item) => item.service === opts.service);
   if (
+    before.run !== refreshed.mapping.run ||
+    JSON.stringify(await loadNativeProjectRun(opts.scope)) !==
+      JSON.stringify(refreshed.mapping) ||
     before.status !== "observed" ||
     before.phase !== "ready-observed" ||
     service?.state !== "running" ||

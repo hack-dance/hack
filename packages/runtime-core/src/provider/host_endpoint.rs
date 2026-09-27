@@ -23,6 +23,18 @@ pub struct HostEndpoint {
     listener: NativeIdentity,
     #[cfg(target_os = "macos")]
     port: u16,
+    #[cfg(target_os = "macos")]
+    notification: Option<IdentityNotification>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct IdentityNotification(std::sync::Arc<dyn Fn() + Send + Sync>);
+#[cfg(target_os = "macos")]
+impl std::fmt::Debug for IdentityNotification {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("IdentityNotification")
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -45,6 +57,32 @@ unsafe extern "C" {
 }
 
 impl HostEndpoint {
+    /// Captured identity, without a fresh process scan. This remains available after
+    /// the original process exits; it is selection evidence, not current authority.
+    #[cfg(target_os = "macos")]
+    pub fn process_identity(&self) -> super::identity::ProcessIdentity {
+        self.process.clone()
+    }
+
+    /// Owner-local event sink. Ordinary capture/discovery/verification never notifies;
+    /// only an authenticated connection's failed native identity check does.
+    #[cfg(target_os = "macos")]
+    pub(super) fn with_identity_notification(
+        mut self,
+        notification: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        self.notification = Some(IdentityNotification(notification));
+        self
+    }
+
+    #[cfg(target_os = "macos")]
+    fn verify_admission(&self, peer_port: u16) -> Result<bool, CandidateError> {
+        self.verify(peer_port).inspect_err(|_| {
+            if let Some(notification) = &self.notification {
+                (notification.0)();
+            }
+        })
+    }
     /// Discover one same-user exclusive loopback listener from an explicitly
     /// selected executable. A port alone is never sufficient authority.
     pub fn discover(executable: &Path, port: u16) -> Result<(i32, String), CandidateError> {
@@ -175,6 +213,7 @@ impl HostEndpoint {
                 process,
                 listener,
                 port,
+                notification: None,
             };
             endpoint.verify(0)?;
             Ok(endpoint)
@@ -203,7 +242,7 @@ impl HostEndpoint {
         #[cfg(target_os = "macos")]
         {
             let deadline = std::time::Instant::now() + budget;
-            self.verify(0)?;
+            session.with_active(|| self.verify_admission(0))??;
             let guard = session.effect_guard();
             let stream = pending::connect(self.port, deadline, &guard)?;
             Ok(PendingConnection {
@@ -358,21 +397,30 @@ impl PendingConnection {
         }
         let stream = self.stream.as_ref().ok_or_else(refused)?;
         if stream.take_error().map_err(|_| refused())?.is_some() {
+            // A TCP error is not itself drift. Inspect only this authenticated
+            // failure path so listener death notifies, while ordinary resets do not.
+            self.guard
+                .with_active(|| self.endpoint.verify_admission(0))??;
             return Err(refused());
         }
         match stream.peer_addr() {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {
-                self.endpoint.verify(0)?;
+                self.guard
+                    .with_active(|| self.endpoint.verify_admission(0))??;
                 return Ok(false);
             }
             Err(_) => return Err(refused()),
         }
         let peer_port = stream.local_addr().map_err(|_| refused())?.port();
-        if !self.endpoint.verify(peer_port)? {
+        if !self
+            .guard
+            .with_active(|| self.endpoint.verify_admission(peer_port))??
+        {
             return Ok(false);
         }
-        self.endpoint.verify(0)?;
+        self.guard
+            .with_active(|| self.endpoint.verify_admission(0))??;
         if std::time::Instant::now() >= self.deadline {
             return Err(timeout());
         }

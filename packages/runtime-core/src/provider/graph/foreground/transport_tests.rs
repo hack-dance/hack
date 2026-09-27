@@ -180,6 +180,7 @@ fn maximum_private_text_roundtrips_with_bounded_escaped_frame() {
     let private = "\\".repeat(PRIVATE_LIMIT);
     let request = WireRequest {
         version: 1,
+        refresh_dependencies: None,
         run: "a".repeat(32),
         remove_data: None,
         job: None,
@@ -199,6 +200,20 @@ fn maximum_private_text_roundtrips_with_bounded_escaped_frame() {
         received.restore.unwrap().environment.as_bytes(),
         private.as_bytes()
     );
+}
+
+#[test]
+fn dependency_refresh_is_an_exclusive_strict_metadata_request() {
+    let mut value = json!({"version":1,"run":"a".repeat(32),"remove_data":null,
+        "refresh_dependencies":{"plan":"b".repeat(64),"generation":"c".repeat(64),"boot":"boot"}});
+    let request: WireRequest = serde_json::from_value(value.clone()).unwrap();
+    assert!(request.exclusive());
+    value["remove_data"] = json!(false);
+    let request: WireRequest = serde_json::from_value(value.clone()).unwrap();
+    assert!(!request.exclusive());
+    value["remove_data"] = serde_json::Value::Null;
+    value["refresh_dependencies"]["host_port"] = json!(8443);
+    assert!(serde_json::from_value::<WireRequest>(value).is_err());
 }
 
 #[test]

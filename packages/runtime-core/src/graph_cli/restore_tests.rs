@@ -327,3 +327,24 @@ fn stopped_normalized_restore_refuses_unscoped_or_replayed_effect_flags() {
         assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 0);
     }
 }
+
+#[test]
+fn dependency_refresh_refuses_new_authority_or_private_input_flags() {
+    let fixture = Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    for flags in [
+        vec!["--host-port", "8443"],
+        vec!["--dependencies", "/absent"],
+        vec!["--environment-stdin"],
+        vec!["--remove-data"],
+        vec!["--expect-generation", GENERATION],
+    ] {
+        let mut args = vec!["refresh-dependencies", "--run-id", RUN];
+        args.extend(flags);
+        assert_eq!(
+            command(&candidate, &args).unwrap_err().code,
+            "graph_arguments"
+        );
+        assert!(!candidate.state_root.exists());
+    }
+}

@@ -1,5 +1,6 @@
 import { isRecord } from "../lib/guards.ts";
 import { prepareNativeExecEnvironment } from "./native-exec-environment.ts";
+import { refreshNativeProjectDependencies } from "./native-project-dependency-refresh.ts";
 import {
   loadNativeProjectRun,
   type NativeProjectRunScope,
@@ -60,6 +61,10 @@ export async function nativeProjectOneOff(opts: {
     throw new Error(
       "Native run currently requires a started project; run up first."
     );
+  }
+  const refreshed = await refreshNativeProjectDependencies(opts);
+  if (JSON.stringify(refreshed.mapping) !== JSON.stringify(mapping)) {
+    throw refused();
   }
   const invoke = opts.invoke ?? invokeNativeRuntime;
   const selected = await invoke({

@@ -35,6 +35,15 @@ const completion = {
   stderr_base64: "ZXJy",
   truncated: false,
 };
+function refreshed() {
+  return {
+    ok: true,
+    ...run,
+    plan: run.planId,
+    generation: selection.generation,
+    changed_slots: [],
+  };
+}
 async function fixture(saved = true) {
   const projectRoot = await realpath(
     await mkdtemp(join(tmpdir(), "native-one-off-"))
@@ -60,14 +69,18 @@ async function fixture(saved = true) {
 test("one-off preserves default command or literal argv and fresh private delivery", async () => {
   const opts = await fixture();
   for (const argv of [[], ["/bin/echo", "a b", "$(literal)"]]) {
-    let calls = 0;
+    const calls: string[] = [];
     let payload: Uint8Array | undefined;
     const result = await nativeProjectOneOff({
       ...opts,
       argv,
       workdir: "/app",
       invoke: async (request) => {
-        calls++;
+        calls.push(String(request.args[1]));
+        if (request.args[1] === "refresh-dependencies") {
+          expect(request.privateInput).toBeUndefined();
+          return { ...refreshed(), changed_slots: [0, 3] };
+        }
         if (request.args[1] === "run-selection") {
           return selection;
         }
@@ -84,7 +97,11 @@ test("one-off preserves default command or literal argv and fresh private delive
         return completion;
       },
     });
-    expect(calls).toBe(2);
+    expect(calls).toEqual([
+      "refresh-dependencies",
+      "run-selection",
+      "run-service",
+    ]);
     expect(payload?.every((byte) => byte === 0)).toBe(true);
     expect(result).toEqual({
       exitCode: 7,
@@ -102,6 +119,9 @@ test("stale selection and missing project never request a job", async () => {
       ...opts,
       argv: [],
       invoke: async (request) => {
+        if (request.args[1] === "refresh-dependencies") {
+          return refreshed();
+        }
         if (request.args[1] !== "run-selection") {
           mutations++;
         }
@@ -130,6 +150,9 @@ test("unconfirmed cleanup or transport failure never replays and wipes delivery"
         ...opts,
         argv: ["/bin/true"],
         invoke: async (request) => {
+          if (request.args[1] === "refresh-dependencies") {
+            return refreshed();
+          }
           if (request.args[1] === "run-selection") {
             return selection;
           }
@@ -176,9 +199,40 @@ test("environment preparation cannot authorize a job after the project mapping c
       },
       invoke: async (request) => {
         calls.push(String(request.args[1]));
+        if (request.args[1] === "refresh-dependencies") {
+          return refreshed();
+        }
         return selection;
       },
     })
   ).rejects.toThrow("unconfirmed");
-  expect(calls).toEqual(["run-selection"]);
+  expect(calls).toEqual(["refresh-dependencies", "run-selection"]);
+});
+
+test("failed dependency refresh refuses before one-off selection or private preparation without replay", async () => {
+  const opts = await fixture();
+  for (const lostReply of [false, true]) {
+    const calls: string[] = [];
+    let prepared = 0;
+    await expect(
+      nativeProjectOneOff({
+        ...opts,
+        argv: [],
+        environment: async () => {
+          prepared++;
+          return { TOKEN: "synthetic-private-value" };
+        },
+        invoke: async (request) => {
+          calls.push(String(request.args[1]));
+          expect(request.privateInput).toBeUndefined();
+          if (lostReply) {
+            throw new Error("private-synthetic-diagnostic");
+          }
+          return { ...refreshed(), changed_slots: [0, 0] };
+        },
+      })
+    ).rejects.toThrow("dependency refresh identity or outcome is unconfirmed");
+    expect(calls).toEqual(["refresh-dependencies"]);
+    expect(prepared).toBe(0);
+  }
 });

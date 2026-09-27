@@ -197,6 +197,7 @@ fn cross_process_status_waits_for_request_after_accept() {
             &mut stream,
             &transport::WireRequest {
                 version: 1,
+                refresh_dependencies: None,
                 run: run.clone(),
                 remove_data: None,
                 restore: None,
@@ -348,6 +349,16 @@ fn retained_publisher_exit_wakes_owner_and_retired_watch_does_not() {
     events.unwatch_child(&retired).unwrap();
     retired.kill().unwrap();
     retired.wait().unwrap();
+    // A retained dependency notification wakes this same queue without a timer
+    // or being mistaken for a cleanup signal.
+    let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+    use std::os::fd::AsFd;
+    events.watch_read(receiver.as_fd()).unwrap();
+    sender.write_all(b"D").unwrap();
+    assert!(!events.wait().unwrap());
+    let mut notice = [0];
+    std::io::Read::read_exact(&mut receiver, &mut notice).unwrap();
+    assert_eq!(notice, [b'D']);
     let _client = Pin::load(&candidate, &run).unwrap().connect().unwrap();
     assert!(!events.wait().unwrap());
     drop(events);

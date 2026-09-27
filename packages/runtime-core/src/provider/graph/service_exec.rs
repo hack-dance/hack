@@ -93,6 +93,7 @@ fn service_exec_inner(
     validate(&options)?;
     let engine = Engine::connect(candidate)?;
     let (receipt, root) = load(candidate, &engine, options.run)?;
+    super::startup::require_dependency_rebind_complete(&root, &receipt)?;
     let pending = root.join("state.pending");
     let pending = match pending.symlink_metadata() {
         Ok(_) => true,

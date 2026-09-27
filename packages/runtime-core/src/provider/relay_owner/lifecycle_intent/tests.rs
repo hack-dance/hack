@@ -817,6 +817,14 @@ fn enrolled_confirmation_requires_caller_acknowledgement_before_any_rollover() {
     let inspection = Inspection::load(&root.0, context()).unwrap();
     assert_eq!(inspection.phase, Phase::Confirmed);
     assert!(inspection.acknowledgement_pending);
+    assert!(
+        registration(&root.0).is_ok(),
+        "ordinary registration keeps its existing contract"
+    );
+    assert!(
+        registration_for_replacement(&root.0).is_err(),
+        "compaction cannot discard unacknowledged retirement evidence"
+    );
     assert!(Coordinator::begin(&server.endpoint, server.mutation()).is_err());
     assert!(Coordinator::begin_graph(&server.endpoint, scope, EFFECT).is_err());
     assert!(
@@ -835,6 +843,7 @@ fn enrolled_confirmation_requires_caller_acknowledgement_before_any_rollover() {
         "idempotent acknowledgement must not rewrite"
     );
     drop(recovered);
+    assert!(registration_for_replacement(&root.0).is_ok());
     assert!(
         !Inspection::load(&root.0, context())
             .unwrap()

@@ -472,6 +472,7 @@ fn private_owner_restore_preserves_data_and_retires_values() {
         &mut socket,
         &WireRequest {
             version: 1,
+            refresh_dependencies: None,
             run: run.clone(),
             remove_data: None,
             job: None,
@@ -536,4 +537,5 @@ fn private_owner_restore_preserves_data_and_retires_values() {
     }
 }
 
+mod dependency_rebind;
 mod startup_cancellation;

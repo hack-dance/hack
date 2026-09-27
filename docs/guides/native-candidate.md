@@ -315,8 +315,11 @@ A project with no admitted mapping reports not started. `hack ps` keeps containe
 observations separate from the last graph receipt. For a ready foreground graph,
 it also checks the live owner: `owner_unconfirmed` means the
 owner could not be authenticated, while `runtime_degraded` means its runtime check
-failed. Neither status permits a new `hack exec`, even if containers still appear
-running; inspect the owner and use explicit retaining recovery before restarting.
+failed. Native `exec` and `run` refresh admitted host dependencies once before
+command selection and managed environment preparation. They proceed only with
+fresh ownership and runtime proof, even if containers still appear running.
+Unconfirmed ownership or an incomplete refresh requires inspection and explicit
+retaining recovery; command requests are never replayed.
 Foreground whole-project `hack up` additionally requires
 `HACK_NATIVE_SHARED_SOURCE=1`: it exposes the exact
 project tree, including ignored files, with each mount's declared write mode. Use
@@ -361,9 +364,10 @@ compatibility, not support for rolling back binaries over new state.
 Whole-project foreground `restart` retains the recorded environment, AWS selector,
 profiles, run identity and data volumes. It checks development runtime admission
 (including disk headroom), reviews the normalized plan, and verifies each selected
-host dependency listener is still the pinned process before cleanup. Refresh a
-stale private `HACK_NATIVE_DEPENDENCIES` selection before retrying; the CLI does
-not adopt an unverified process at the same port.
+host dependency listener before cleanup. Executable selections rediscover the
+current listener; fixed-PID selections require a deliberate update when their
+listener changes. Preflight remains immediate and does not adopt an unverified
+process at the same port.
 It saves a pending restart intent and waits for the previous frontend
 to confirm graph, HTTPS and lifecycle cleanup before starting its replacement.
 Changed selections and unknown legacy startup/finalization records refuse before
@@ -520,14 +524,43 @@ rewriting the private selection file. The native dependency plan pins the
 process and socket generation again before admitting the graph. A missing,
 ambiguous, wrong-executable or substituted listener refuses; an already running
 graph stays up when restart preflight refuses. Fixed `host_pid` selections remain
-supported. Active-graph listener rotation still requires a separate rebind path;
-this selection handles startup and restart admission.
+supported and carry no permission to follow a replacement process.
 Startup allows up to 60 seconds total for persistent hooks to create all selected
 listeners, with cancellable waits and bounded read-only discovery requests. It
 retries only native endpoint-identity refusals; malformed selections and other
 failures stop immediately. A listener must pass the complete ownership checks
 before any VM or graph effects. Restart preflight does not wait or stop the graph
 when its current selection cannot be verified.
+
+For an already ready foreground graph, `graph refresh-dependencies --run-id RUN
+--json` asks its authenticated live owner to refresh stale admitted listeners.
+With a packaged candidate, invoke it as:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph refresh-dependencies --run-id RUN_ID --json
+```
+
+Only `host_executable` selections can follow a replacement, using the original
+executable, host port and unchanged same-user supervisor identity. A matching
+executable or port alone is insufficient. Missing or ambiguous listeners,
+replaced supervisors, fixed-PID drift and changed ownership refuse. The owner
+retains the admitted services, bindings, aliases, guest ports and transport slots;
+the request cannot add or edit them. Successful refresh changes affected relay
+generations without restarting application containers or replacing volumes.
+An unchanged graph returns a verified no-op.
+
+Native `hack exec` and `hack run` make this request once with a 180-second frontend
+budget before selecting their command or reading managed environment values.
+`ps` and `logs` remain observations and do not request refresh. Authenticated relay
+traffic reports a stale endpoint to the foreground owner, which attempts bounded
+refresh without idle polling. The affected application request can fail; it is
+never replayed, and later traffic can use a verified replacement. The explicit
+operation is also available before traffic. Refresh does not renew startup
+environment allocations. A lost reply or interrupted transition is never replayed.
+Partial transitions remain fenced and refuse new admission; inspect owned state and
+complete retaining cleanup/restart to rebuild the relays. Ordinary recovery keeps
+the run's persistent volumes. Do not delete managed journals or mappings to retry.
+
 Bindings in different services targeting the same pinned host listener can share
 a transport slot; authentication, cancellation and expiry remain per binding.
 The CLI groups selections by host PID and port in first-appearance order, and

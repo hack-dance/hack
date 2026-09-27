@@ -16,6 +16,31 @@ pinned artifact. Each check has a 120-second timeout, 512 MiB Java heap, two wor
 and bounded output; temporary TLC metadata is removed after success or failure.
 No credentials or running VM are needed.
 
+## Active dependency rebinding
+
+`dependency-rebind/Rebind.tla` checks one physical slot shared by two logical
+bindings, with old and replacement generations. The 21-state positive model
+requires reviewed ownership, a slot fence, retirement and stream drain for both
+bindings, replacement readiness, and durable receipt commit before admission.
+Cancellation or owner death leaves admission closed. The negative control releases
+after review alone and must violate `NoEarlyAdmission` in the same `Release` state
+with old streams present and no committed replacement. CI rejects other failures.
+
+| Model action | Implementation boundary under `packages/runtime-core/src/` |
+| --- | --- |
+| `Review` | `provider/graph/startup/runtime/rebind.rs` executable, exclusive listener, and retained supervisor checks |
+| `Fence` / `Retire` | `provider/relay_owner/managed.rs` slot admission fence, batch revocation and stream drain |
+| `Register` | Fresh grants and exact owned guest helper replacement in `provider/graph/startup/runtime/rebind.rs` |
+| `Commit` / `Release` | Synced receipt and completion journal before `ManagedOwner::complete_rebind` |
+| `Cancel` / `Crash` | Fenced incomplete journal and explicit owned cleanup; no replay |
+
+The model abstracts individual registration steps for two bindings and assumes
+atomic revocation/drain and durable commit. It does not prove native process or
+supervisor identity, credential secrecy, filesystem durability, partial multi-slot
+activation, real guest readiness, application health, or performance. Rust tests
+and live replacement traffic remain required. There is no fairness or eventual
+recovery claim.
+
 ## Graph admission
 
 `graph-admission/Admission.tla` checks the smallest admission race: two clients

@@ -1,6 +1,7 @@
 /* Graph application: readiness is impossible until its first dependency succeeds. */
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -72,10 +73,26 @@ static int health(void) {
     return used == sizeof(healthy)-1 && !memcmp(response, healthy, used) ? 0 : 78;
 }
 int main(int argc, char **argv) {
-    if (argc != 2 || (strcmp(argv[1], "serve") && strcmp(argv[1], "serve-two") && strcmp(argv[1], "health"))) return 64;
+    if (argc != 2 || (strcmp(argv[1], "serve") && strcmp(argv[1], "serve-two") && strcmp(argv[1], "health") && strcmp(argv[1], "dependency") && strcmp(argv[1], "write-data") && strcmp(argv[1], "read-data"))) return 64;
     signal(SIGPIPE, SIG_IGN);
-    alarm(!strcmp(argv[1], "health") ? 3 : 60);
+    alarm(!strcmp(argv[1], "serve") || !strcmp(argv[1], "serve-two") ? 180 : 10);
     if (!strcmp(argv[1], "health")) return health();
+    if (!strcmp(argv[1], "dependency")) return dependency(25252);
+    if (!strcmp(argv[1], "write-data") || !strcmp(argv[1], "read-data")) {
+        static const unsigned char marker[] = "retained-dependency-rebind-v1\n";
+        int writing = !strcmp(argv[1], "write-data");
+        int fd = open("/data/hack-rebind-marker", (writing ? O_WRONLY | O_CREAT | O_EXCL : O_RDONLY) | O_NOFOLLOW, 0600);
+        if (fd < 0) return 84;
+        if (writing) {
+            if (send_all(fd, marker, sizeof(marker)-1) || fsync(fd)) { close(fd); return 85; }
+        } else {
+            unsigned char value[sizeof(marker)];
+            ssize_t size = read(fd, value, sizeof(value));
+            if (size != sizeof(marker)-1 || memcmp(value, marker, sizeof(marker)-1)) { close(fd); return 86; }
+        }
+        close(fd);
+        return 0;
+    }
     int result = dependency(25252);
     if (result) return result;
     if (!strcmp(argv[1], "serve-two")) {

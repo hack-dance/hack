@@ -31,6 +31,31 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     if ["logs", "exec", "exec-selection"].contains(action) {
         return service_io::command(candidate, action, args);
     }
+    if *action == "refresh-dependencies" {
+        let run = match *args {
+            ["--run-id", run] | ["--run-id", run, "--json"]
+                if run.len() == 32
+                    && run
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
+            {
+                run
+            }
+            _ => return Err(invalid()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            return graph::foreground::refresh_dependencies_request(candidate, run);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = run;
+            return Err(CandidateError::new(
+                "unsupported_host",
+                "Dependency refresh requires macOS.",
+            ));
+        }
+    }
     let (arguments, normalized_selection) = crate::normalized_cli::extract(
         args,
         ["run", "serve", "serve-restore", "source-compatibility"].contains(action),

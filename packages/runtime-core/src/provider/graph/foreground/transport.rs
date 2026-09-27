@@ -30,6 +30,29 @@ pub(super) struct WireRequest {
     pub restore: Option<RestoreRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<JobRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_dependencies: Option<DependencyRefreshRequest>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DependencyRefreshRequest {
+    pub plan: String,
+    pub generation: String,
+    pub boot: String,
+}
+impl WireRequest {
+    pub fn exclusive(&self) -> bool {
+        [
+            self.remove_data.is_some(),
+            self.restore.is_some(),
+            self.job.is_some(),
+            self.refresh_dependencies.is_some(),
+        ]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count()
+            <= 1
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -1,6 +1,7 @@
 //! Foreground graph startup owner. Keys and child handles never enter receipts.
 use super::*;
 mod jobs;
+mod rebind;
 use crate::provider::{
     host_endpoint::HostEndpoint,
     lifecycle::{RelayChild, RelayLaunch},
@@ -11,6 +12,22 @@ use crate::provider::{
     },
 };
 use base64::Engine as _;
+pub use rebind::RefreshPolicy;
+pub(super) fn require_dependency_rebind_complete(
+    root: &Path,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    rebind::require_complete(root, receipt)
+}
+
+pub(super) fn archive_dependency_rebind_after_cleanup(
+    root: &Path,
+    original: &Receipt,
+    cleaned: &Receipt,
+    boot: &str,
+) -> Result<(), CandidateError> {
+    rebind::archive_after_cleanup(root, original, cleaned, boot)
+}
 use sha2::{Digest, Sha256};
 use std::{
     io::Read,
@@ -28,6 +45,9 @@ pub struct Dependency {
     pub port: u16,
     pub aliases: Vec<String>,
     pub endpoint: HostEndpoint,
+    /// An executable selection may follow its original stable supervisor. Fixed
+    /// PID selections deliberately carry no refresh authority.
+    pub refresh: Option<RefreshPolicy>,
 }
 /// Must outlive the graph using it. Drop revokes host grants and closes transport
 /// handles; it does not claim guest processes were stopped or persistent data removed.
@@ -353,6 +373,13 @@ impl HostRelayRuntime {
     pub fn endpoint(&self) -> PinnedEndpoint {
         self.managed.endpoint()
     }
+    /// Event-driven notification only; draining does not authorize replacement.
+    pub fn dependency_notification_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.managed.notification_fd()
+    }
+    pub fn drain_dependency_notifications(&self) -> Result<bool, CandidateError> {
+        self.managed.drain_notifications()
+    }
     /// Stop only recorded listener generations, then use enrolled retirement and
     /// graph cleanup. A failed stop or uncertain journal remains retained.
     pub(in crate::provider::graph) fn admission_started(&self) -> bool {
@@ -397,7 +424,12 @@ impl HostRelayRuntime {
         {
             crate::provider::graph::one_off::runtime::finish(candidate, self, &run)?;
         }
+        if let Some(receipt) = self.cleanup_incomplete_rebind(candidate, &run, remove_data)? {
+            return Ok(receipt);
+        }
         let engine = Engine::connect_cleanup_wait(candidate)?;
+        let (before, root) = crate::provider::graph::load(candidate, &engine, &run)?;
+        let boot = engine.guest().boot_id().to_owned();
         for name in self.children.keys().cloned().collect::<Vec<_>>() {
             let child = self.children.get_mut(&name).ok_or_else(refused)?;
             engine
@@ -409,6 +441,9 @@ impl HostRelayRuntime {
         let receipt =
             host_relay::cleanup_with_relay(candidate, &run, remove_data, &self.endpoint())?;
         self.children.clear();
+        let cleanup_engine = Engine::connect_cleanup_wait(candidate)?;
+        startup::verify_cleanup(&cleanup_engine, &receipt)?;
+        rebind::archive_after_cleanup(&root, &before, &receipt, &boot)?;
         Ok(receipt)
     }
     fn check(&self, engine: &Engine<'_>, receipt: &Receipt) -> Result<(), CandidateError> {
@@ -453,6 +488,12 @@ impl Driver for HostRelayRuntime {
         root: &Path,
     ) -> Result<(), CandidateError> {
         self.check(engine, receipt)?;
+        if matches!(
+            receipt.phase.as_str(),
+            "preparing" | "restoring" | "ready-observed"
+        ) {
+            rebind::require_complete(root, receipt)?;
+        }
         if matches!(
             receipt.phase.as_str(),
             "preparing" | "restoring" | "ready-observed"
@@ -866,6 +907,7 @@ mod route_tests {
                 port: 8443,
                 aliases: vec!["content.example".into()],
                 endpoint,
+                refresh: None,
             },
         )]);
         let startup = Startup {
@@ -997,6 +1039,7 @@ mod route_tests {
                 port: 443,
                 aliases: vec!["one.example".into()],
                 endpoint: endpoint.clone(),
+                refresh: None,
             },
             Dependency {
                 service: "web".into(),
@@ -1005,6 +1048,7 @@ mod route_tests {
                 port: 443,
                 aliases: vec!["two.example".into()],
                 endpoint,
+                refresh: None,
             },
         ];
         HostRelayRuntime::validate_inputs(&dependencies, &inputs).unwrap();

@@ -285,6 +285,33 @@ plus `--dependencies FILE --expect-dependencies ID`. It remains foreground, prin
 one compact `graph_foreground_ready` JSON line after startup, and prints its final
 receipt on exit. Keep that process supervised. This is not detached startup.
 
+An active ready foreground graph supports explicit
+`graph refresh-dependencies --run-id RUN --json`. The private control connection
+authenticates the live owner, which derives the current plan and receipt generation
+and rechecks them before effects. Refresh follows only originally admitted
+`host_executable` selectors whose replacement has the same executable, host port
+and unchanged same-user supervisor identity. Fixed-PID drift, missing or ambiguous
+listeners and replaced supervisors refuse. The admitted service/binding/alias/port
+and shared-slot layout cannot change through this operation.
+
+Refresh retires affected grants before replacing their relay generation; successful
+completion retains application container and volume identities. An unchanged
+selection is a verified no-op. The public response contains `ok`, `run`, `plan`,
+`owner`, `namespace`, the current 64-hex `generation` and bounded unique `changed_slots`;
+it contains no credentials. A partial transition retains its journal and fences
+admission rather than replaying effects. Inspect the owner and use owned retaining
+cleanup/restart for recovery; never remove managed evidence to bypass refusal.
+
+The native frontend requests refresh once before `exec`/`run` selection or private
+environment preparation, with a 180-second request budget. A lost or malformed
+reply refuses command admission without replay. Read-only `ps`/`logs` do not initiate
+refresh. Authenticated relay traffic can notify the owner of endpoint drift, causing
+a bounded refresh attempt without idle polling. The first affected application
+request can fail and is never replayed; subsequent traffic requires a verified
+replacement. Restart preflight remains an immediate ownership check.
+This operation does not renew startup environment allocations or adopt a new
+supervisor, and source/unit checks alone do not qualify real tunnel recovery.
+
 For read-only project mounts, publish the reviewed project with
 `project publish-source --project DIR --file FILE --expect-plan PLAN --json`, then
 pass its returned revision as `--source-revision` to the graph command. Graph

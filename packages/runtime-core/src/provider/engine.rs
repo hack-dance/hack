@@ -326,6 +326,37 @@ impl<'a> Engine<'a> {
         Self::connect_mode(candidate, false)
     }
 
+    /// Wait only for the mutation lease. A busy acquisition admits no operation;
+    /// other verification or transport failures are returned without replay.
+    #[cfg(target_os = "macos")]
+    pub(super) fn connect_until(
+        candidate: &'a Candidate,
+        deadline: std::time::Instant,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Self, CandidateError> {
+        loop {
+            if cancelled() {
+                return Err(CandidateError::new(
+                    "provider_acquisition_cancelled",
+                    "Provider acquisition was cancelled before admission.",
+                ));
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(CandidateError::new(
+                    "provider_busy",
+                    "Provider lease acquisition expired before admission.",
+                ));
+            }
+            match Self::connect(candidate) {
+                Err(error) if error.code == "provider_busy" => {
+                    std::thread::sleep(remaining.min(Duration::from_millis(50)))
+                }
+                result => return result,
+            }
+        }
+    }
+
     pub(super) fn connect_cleanup(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         Self::connect_mode(candidate, true)
     }
@@ -521,6 +552,38 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::net::UnixListener;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bounded_acquisition_cancellation_and_expiry_do_not_initialize_state() {
+        use std::os::unix::fs::DirBuilderExt;
+        let path = std::env::temp_dir().join(format!(
+            "hack-engine-acquire-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
+        let candidate = Candidate::discover(&path).unwrap();
+        let cancelled = Engine::connect_until(
+            &candidate,
+            std::time::Instant::now() + Duration::from_secs(1),
+            || true,
+        );
+        assert_eq!(
+            cancelled.err().unwrap().code,
+            "provider_acquisition_cancelled"
+        );
+        let expired = Engine::connect_until(&candidate, std::time::Instant::now(), || false);
+        assert_eq!(expired.err().unwrap().code, "provider_busy");
+        assert!(!candidate.state_root.exists());
+        std::fs::remove_dir(path).unwrap();
+    }
 
     #[test]
     fn logs_preserve_streams_bound_output_and_reject_partial_frames() {

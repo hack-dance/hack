@@ -237,7 +237,13 @@ mod tests {
         Candidate,
         project::{self, PlanOptions, snapshot},
     };
-    use std::{collections::BTreeSet, fs, path::PathBuf};
+    use std::{
+        collections::BTreeSet,
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
     struct Fixture(PathBuf);
     impl Drop for Fixture {
         fn drop(&mut self) {
@@ -246,12 +252,13 @@ mod tests {
     }
     fn fixture() -> (Fixture, Candidate, PathBuf) {
         let root = std::env::temp_dir().join(format!(
-            "hklive-{}-{}",
+            "hklive-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
         let source = root.join("project");

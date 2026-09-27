@@ -31,6 +31,7 @@ Usage:
   hack-local graph dependency-discover --host-port <port> --executable <absolute-path> [--json]
   hack-local graph serve --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... --dependencies <reviewed.json> --expect-dependencies <sha256> [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
   hack-local graph owner-status --run-id <32-hex> [--json]
+  hack-local graph refresh-dependencies --run-id <32-hex> [--json]
   hack-local graph storage-inventory [--json]
   hack-local runtime probe [--json]
   hack-local runtime publication-hostnames [--json]

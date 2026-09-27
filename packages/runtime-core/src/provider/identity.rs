@@ -81,6 +81,77 @@ pub fn observe(_pid: i32) -> Result<ProcessIdentity, CandidateError> {
     ))
 }
 
+/// Capture a retained supervisor, never an adopted or PID-only parent. Both
+/// identities and the parent relationship are rechecked around observation.
+#[cfg(target_os = "macos")]
+pub fn parent(recorded: &ProcessIdentity) -> Result<ProcessIdentity, CandidateError> {
+    fn parent_pid(child: &ProcessIdentity) -> Result<i32, CandidateError> {
+        verify(child, &observe(child.pid)?, &child.executable, unsafe {
+            libc::geteuid()
+        })?;
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        // SAFETY: libproc receives correctly sized writable output storage.
+        let count = unsafe {
+            libc::proc_pidinfo(
+                child.pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+            )
+        };
+        if count as usize != std::mem::size_of::<libc::proc_bsdinfo>() {
+            return Err(parent_refused());
+        }
+        // SAFETY: libproc filled the complete output record above.
+        let info = unsafe { info.assume_init() };
+        let start = info
+            .pbi_start_tvsec
+            .checked_mul(1_000_000)
+            .and_then(|value| value.checked_add(info.pbi_start_tvusec));
+        let pid = i32::try_from(info.pbi_ppid).map_err(|_| parent_refused())?;
+        if pid <= 1 || info.pbi_uid != child.uid || start != Some(child.start_micros) {
+            return Err(parent_refused());
+        }
+        verify(child, &observe(child.pid)?, &child.executable, child.uid)?;
+        Ok(pid)
+    }
+    let pid = parent_pid(recorded)?;
+    let supervisor = observe(pid)?;
+    verify(
+        &supervisor,
+        &observe(pid)?,
+        &supervisor.executable,
+        recorded.uid,
+    )?;
+    if parent_pid(recorded)? != pid {
+        return Err(parent_refused());
+    }
+    verify(
+        &supervisor,
+        &observe(pid)?,
+        &supervisor.executable,
+        recorded.uid,
+    )?;
+    Ok(supervisor)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn parent(_recorded: &ProcessIdentity) -> Result<ProcessIdentity, CandidateError> {
+    Err(CandidateError::new(
+        "unsupported_host",
+        "Native supervisor inspection requires macOS.",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn parent_refused() -> CandidateError {
+    CandidateError::new(
+        "process_parent_identity",
+        "An unchanged, same-user native supervisor is required; adopted or uncertain processes were refused.",
+    )
+}
+
 pub fn verify(
     recorded: &ProcessIdentity,
     observed: &ProcessIdentity,
@@ -222,6 +293,17 @@ pub fn terminate(recorded: &ProcessIdentity, binary: &Path) -> Result<(), Candid
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_parent_rejects_a_reused_child_identity() {
+        let current = observe(std::process::id() as i32).unwrap();
+        let supervisor = parent(&current).unwrap();
+        assert_eq!(supervisor.uid, current.uid);
+        assert_ne!(supervisor.pid, current.pid);
+        let mut changed = current;
+        changed.start_micros += 1;
+        assert!(parent(&changed).is_err());
+    }
     #[cfg(target_os = "macos")]
     #[test]
     fn native_memory_footprint_is_observed_for_the_current_process() {

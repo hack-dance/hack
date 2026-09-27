@@ -142,9 +142,13 @@ impl Selection {
         let mut slots = BTreeMap::new();
         for binding in &self.dependencies {
             let endpoint = HostEndpoint::capture(binding.host_pid, binding.host_port)?;
-            if let Some(executable) = &binding.host_executable {
-                endpoint.require_executable(executable)?;
-            }
+            let refresh = binding
+                .host_executable
+                .as_ref()
+                .map(|executable| {
+                    graph::RefreshPolicy::capture(&endpoint, executable, binding.host_port)
+                })
+                .transpose()?;
             let fingerprint = endpoint.fingerprint()?;
             if slots
                 .insert(binding.slot, fingerprint.clone())
@@ -160,6 +164,7 @@ impl Selection {
                 port: binding.guest_port,
                 aliases: binding.aliases.clone(),
                 endpoint,
+                refresh,
             });
         }
         let bytes = serde_json::to_vec(&("hack-graph-dependencies-v1", self, evidence))

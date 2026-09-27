@@ -6,11 +6,13 @@ use std::{
     io::Write,
     time::{Duration, Instant},
 };
+mod dependency_refresh;
 pub mod jobs;
 #[cfg(all(test, feature = "environment-launcher"))]
 mod native_test;
 mod publishers;
 pub(in crate::provider::graph) mod redelivery;
+pub use dependency_refresh::request as refresh_dependencies_request;
 mod retained_data;
 mod signals;
 #[cfg(test)]
@@ -283,6 +285,7 @@ fn serve_input<'a>(
             return runtime.cleanup(candidate, false);
         }
         publishers.start(candidate, &receipt, &signals, deadline, route_slots)?;
+        signals.watch_read(runtime.dependency_notification_fd())?;
         let ready =
             json!({"kind":"graph_foreground_ready","run":receipt.run,"phase":receipt.phase});
         let mut stdout = std::io::stdout().lock();
@@ -296,6 +299,12 @@ fn serve_input<'a>(
             if queued.is_none() && signals.wait()? {
                 cleanup_attempted = true;
                 return runtime.cleanup(candidate, false);
+            }
+            if queued.is_none() && runtime.drain_dependency_notifications()? {
+                // Authenticated traffic reports drift once; there is no idle scan.
+                // A refusal preserves the graph and leaves changed grants closed.
+                let _ =
+                    dependency_refresh::automatic(candidate, &mut runtime, &receipt.run, &signals);
             }
             let (mut stream, request) = if let Some(pending) = queued.take() {
                 pending
@@ -313,10 +322,25 @@ fn serve_input<'a>(
                 };
                 (stream, request)
             };
-            if request.version != 1 || request.run != receipt.run {
+            if request.version != 1 || request.run != receipt.run || !request.exclusive() {
                 continue;
             }
             publication.verify()?;
+            if let Some(refresh) = request.refresh_dependencies {
+                let response = match dependency_refresh::handle(
+                    candidate,
+                    &mut runtime,
+                    &receipt.run,
+                    refresh,
+                    &stream,
+                    &signals,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => json!({"ok":false,"run":receipt.run,"code":error.code}),
+                };
+                let _ = transport::write(&mut stream, &response, Duration::from_secs(5));
+                continue;
+            }
             if let Some(job) = request.job {
                 if request.restore.is_some() || request.remove_data.is_some() {
                     continue;
@@ -481,6 +505,7 @@ pub fn request(
         &mut stream,
         &WireRequest {
             version: 1,
+            refresh_dependencies: None,
             run: run.to_owned(),
             remove_data,
             restore: None,
@@ -538,6 +563,7 @@ pub fn restore_request(
     let bytes = managed.forward(plan, run)?;
     let request = WireRequest {
         version: 1,
+        refresh_dependencies: None,
         run: run.into(),
         remove_data: None,
         job: None,

@@ -3,6 +3,20 @@ import { verifyFiniteModelResult } from "./tla-result.ts";
 // Bounds and witnesses are reviewed contracts, not learned from each run.
 const contracts = [
   {
+    name: "dependency-rebind",
+    module: "Rebind",
+    states: 21,
+    invariant: "NoEarlyAdmission",
+    action: "Release",
+    fields: [
+      'phase = "active"',
+      "admitted = TRUE",
+      "revoked = {}",
+      "streams = {1, 2}",
+      "committed = FALSE",
+    ],
+  },
+  {
     name: "relay-lifecycle-barrier",
     module: "Barrier",
     states: 1590,

@@ -514,6 +514,12 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         }
         host_relay::inspect_cleanup(candidate, &engine, &receipt, false, &environment, &bridges)?;
         dead.verify()?;
+        startup::archive_dependency_rebind_after_cleanup(
+            &root,
+            &intent.original,
+            &receipt,
+            &intent.old_boot,
+        )?;
         if intent.one_off_sha256.is_some() {
             normalize_completed(candidate, &engine, &root, &intent)?;
         }
@@ -531,6 +537,12 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     let cleaned = cleanup_owned(candidate, &engine, receipt, &root, false)?;
     host_relay::inspect_cleanup(candidate, &engine, &cleaned, false, &environment, &bridges)?;
     dead.verify()?;
+    startup::archive_dependency_rebind_after_cleanup(
+        &root,
+        &intent.original,
+        &cleaned,
+        &intent.old_boot,
+    )?;
     intent.complete_sha256 = Some(selected(&cleaned)?);
     retain_interrupted_write(&root)?;
     state::write(&root.join(FILE), &intent)?;

@@ -50,6 +50,7 @@ pub fn service_selection(
     })?;
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
+    super::startup::require_dependency_rebind_complete(&root, &receipt)?;
     if journal_pending(&root)? {
         return Err(refused());
     }

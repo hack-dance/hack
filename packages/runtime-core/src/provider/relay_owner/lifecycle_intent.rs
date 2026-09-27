@@ -263,11 +263,21 @@ pub(super) struct Registration {
     _store: Store,
 }
 pub(super) fn registration(root: &Path) -> Result<Registration, CandidateError> {
+    registration_guard(root, false)
+}
+/// Replacement compacts retired targets, so even confirmed retirement must have
+/// its caller acknowledgement persisted before old evidence may disappear.
+pub(super) fn registration_for_replacement(root: &Path) -> Result<Registration, CandidateError> {
+    registration_guard(root, true)
+}
+fn registration_guard(
+    root: &Path,
+    require_acknowledged: bool,
+) -> Result<Registration, CandidateError> {
     let store = Store::open(root)?;
-    if store
-        .read()?
-        .is_some_and(|s| s.record.phase != Phase::Confirmed)
-    {
+    if store.read()?.is_some_and(|s| {
+        s.record.phase != Phase::Confirmed || (require_acknowledged && s.record.ack_required)
+    }) {
         return Err(refused());
     }
     Ok(Registration { _store: store })

@@ -359,7 +359,43 @@ pub(super) fn attach(
 #[cfg(target_os = "macos")]
 mod runtime;
 #[cfg(target_os = "macos")]
-pub use runtime::{Dependency, HostRelayRuntime};
+pub use runtime::{Dependency, HostRelayRuntime, RefreshPolicy};
+
+/// Incomplete native dependency mutation cannot authorize a fresh execution.
+/// Observation and explicit owned cleanup remain independent of this gate.
+pub(super) fn require_dependency_rebind_complete(
+    root: &Path,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    #[cfg(target_os = "macos")]
+    {
+        runtime::require_dependency_rebind_complete(root, receipt)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (root, receipt);
+        Ok(())
+    }
+}
+
+/// Explicit owned cleanup preserves dependency refresh evidence before a later
+/// restore may create new helper generations. This never replays the refresh.
+pub(super) fn archive_dependency_rebind_after_cleanup(
+    root: &Path,
+    original: &Receipt,
+    cleaned: &Receipt,
+    boot: &str,
+) -> Result<(), CandidateError> {
+    #[cfg(target_os = "macos")]
+    {
+        runtime::archive_dependency_rebind_after_cleanup(root, original, cleaned, boot)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (root, original, cleaned, boot);
+        Ok(())
+    }
+}
 
 pub(super) fn guest_directory(run: &str, generation: &str) -> String {
     format!("/storage/hack-graph-startup/{run}/{generation}")
@@ -375,4 +411,4 @@ mod cleanup;
 pub(super) use cleanup::{absent as verify_cleanup, apply as cleanup_guest};
 
 #[cfg(all(test, target_os = "macos"))]
-mod native_test;
+pub(super) mod native_test;

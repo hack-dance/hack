@@ -86,13 +86,105 @@ fn executable_pinned_discovery_follows_a_new_listener_process() {
     };
     let mut first = spawn();
     let previous = await_discovery(&mut first);
+    let captured = HostEndpoint::capture(previous.0, port).unwrap();
+    let original_identity = captured.process_identity();
     first.0.kill().unwrap();
     assert!(first.0.wait().unwrap().code().is_none());
     assert!(HostEndpoint::capture(previous.0, port).is_err());
+    assert_eq!(captured.process_identity(), original_identity);
     let mut second = spawn();
     let current = await_discovery(&mut second);
     assert_ne!(previous.0, current.0);
     assert_ne!(previous.1, current.1);
+}
+
+#[cfg(target_os = "macos")]
+fn authorized(
+    endpoint: &HostEndpoint,
+) -> (
+    super::super::relay_auth::Authority,
+    super::super::relay_auth::AuthorizedSession,
+) {
+    use super::super::relay_auth::{Authority, Binding, Credential};
+    let credential = Credential::generate(Binding {
+        owner: [1; 16],
+        boot: [2; 16],
+        endpoint: endpoint.generation().unwrap(),
+        service: [3; 32],
+    })
+    .unwrap();
+    let authority = Authority::new(&credential);
+    let (client, hello) = credential.begin().unwrap();
+    let (server, challenge) = authority.challenge(&hello).unwrap();
+    let (finish, proof) = client.answer(&challenge).unwrap();
+    let (session, acceptance) = server.finish(&proof).unwrap();
+    finish.accept(&acceptance).unwrap();
+    (authority, session)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn identity_notifications_require_authenticated_checks_and_ignore_revocation_or_timeout() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (listener, endpoint) = fixture();
+    let failures = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&failures);
+    let endpoint = endpoint.with_identity_notification(Arc::new(move || {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }));
+    let (authority, session) = authorized(&endpoint);
+    let mut pending = endpoint
+        .begin_connect(Duration::from_secs(1), &session)
+        .unwrap();
+    pending.deadline = Instant::now();
+    assert_eq!(
+        pending.progress().unwrap_err().code,
+        "host_endpoint_timeout"
+    );
+    assert_eq!(failures.load(Ordering::Relaxed), 0);
+    drop(listener);
+    assert!(endpoint.fingerprint().is_err());
+    assert_eq!(failures.load(Ordering::Relaxed), 0);
+    assert!(
+        endpoint
+            .begin_connect(Duration::from_secs(1), &session)
+            .is_err()
+    );
+    assert_eq!(failures.load(Ordering::Relaxed), 1);
+    authority.revoke();
+    assert!(
+        endpoint
+            .begin_connect(Duration::from_secs(1), &session)
+            .is_err()
+    );
+    assert_eq!(failures.load(Ordering::Relaxed), 1);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn pending_accepted_identity_failure_emits_one_terminal_notification() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (listener, endpoint) = fixture();
+    let failures = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&failures);
+    let endpoint = endpoint.with_identity_notification(Arc::new(move || {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }));
+    let (_authority, session) = authorized(&endpoint);
+    let mut pending = endpoint
+        .begin_connect(Duration::from_secs(1), &session)
+        .unwrap();
+    drop(listener);
+    assert!(pending.progress().is_err());
+    assert_eq!(failures.load(Ordering::Relaxed), 1);
+    assert!(pending.progress().is_err());
+    assert_eq!(failures.load(Ordering::Relaxed), 1);
 }
 
 #[cfg(target_os = "macos")]

@@ -59,6 +59,7 @@ fn send(
         &mut stream,
         &WireRequest {
             version: 1,
+            refresh_dependencies: None,
             run: run.into(),
             remove_data: None,
             restore: None,
@@ -189,7 +190,7 @@ pub(super) fn pending_cleanup(
     if request.version != 1 || request.run != run {
         return None;
     }
-    if request.remove_data.is_some() && request.restore.is_none() && request.job.is_none() {
+    if request.exclusive() && request.remove_data.is_some() {
         return Some((stream, request));
     }
     let _ = transport::write(
@@ -252,6 +253,7 @@ mod tests {
         for request in [
             json!({"version":1,"run":"owned","remove_data":null}),
             json!({"version":1,"run":"owned","remove_data":true,"job":{"service":"web","command":null}}),
+            json!({"version":1,"run":"owned","remove_data":true,"refresh_dependencies":{"plan":"p","generation":"g","boot":"b"}}),
         ] {
             let (mut client, server) = UnixStream::pair().unwrap();
             transport::write(&mut client, &request, Duration::from_secs(1)).unwrap();

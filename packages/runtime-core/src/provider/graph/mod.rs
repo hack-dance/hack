@@ -22,7 +22,7 @@ pub mod foreground;
 mod startup;
 mod startup_failure;
 #[cfg(target_os = "macos")]
-pub use startup::{Dependency, HostRelayRuntime};
+pub use startup::{Dependency, HostRelayRuntime, RefreshPolicy};
 mod archive;
 pub use archive::archive;
 mod bridge_recovery;
@@ -1430,8 +1430,9 @@ fn inspect_using(
 ) -> Result<Snapshot, CandidateError> {
     let (receipt, root) = load(candidate, engine, run)?;
     let mut observations = BTreeMap::new();
-    let journal_incomplete =
-        root.join("state.pending").exists() || root.join("state.pending").is_symlink();
+    let journal_incomplete = root.join("state.pending").exists()
+        || root.join("state.pending").is_symlink()
+        || startup::require_dependency_rebind_complete(&root, &receipt).is_err();
     let mut networks = BTreeMap::new();
     for (key, resource) in receipt
         .resources

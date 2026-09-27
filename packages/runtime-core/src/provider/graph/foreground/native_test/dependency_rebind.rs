@@ -172,7 +172,7 @@ fn await_rebound(
         let receipt = state::read::<graph::Receipt>(&root.join("state.json"));
         if let (Ok(journal), Ok(receipt)) = (journal, receipt) {
             let current = receipt.relay_startup.as_ref().is_some_and(|startup| {
-                ["web", "search"].iter().all(|name| {
+                ["web", "search", "init"].iter().all(|name| {
                     startup.services[*name].bindings["default"]
                         .endpoint_generation
                         .as_deref()
@@ -180,6 +180,8 @@ fn await_rebound(
                 })
             });
             if current && journal["phase"] == "completed" {
+                assert_eq!(journal["completed_services"], json!(["init"]));
+                assert!(journal["processes"].get("init").is_none());
                 let snapshot = snapshot(candidate, run, deadline);
                 assert!(!snapshot.journal_incomplete);
                 assert_eq!(snapshot.receipt.phase, "ready-observed");
@@ -278,6 +280,29 @@ impl RetainedIdentity<'_> {
                 true
             );
         }
+        let old = &before.relay_startup.as_ref().unwrap().services["init"];
+        let new = &after.relay_startup.as_ref().unwrap().services["init"];
+        assert_eq!(old.generation, new.generation);
+        assert_eq!(old.started_at, new.started_at);
+        if replaced_helpers {
+            assert_eq!(new.phase, graph::startup::Phase::Completed);
+            assert!(
+                new.bindings
+                    .values()
+                    .all(|binding| binding.process.is_none())
+            );
+        }
+        let resource = &after.resources["container:init"];
+        let terminal = graph::inspect_resource(&engine, after, resource)
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal["State"]["Running"], false);
+        assert_eq!(terminal["State"]["ExitCode"], 0);
+        assert_eq!(terminal["State"]["Pid"], 0);
+        assert_eq!(
+            terminal["State"]["StartedAt"].as_str(),
+            new.started_at.as_deref()
+        );
         drop(engine);
         for service in ["web", "search"] {
             let result = exec(
@@ -312,9 +337,11 @@ fn foreground_traffic_wake_and_explicit_refresh_preserve_graph() {
     let app = json!({"image":image,"read_only":true,"network_mode":"none","init":true,"user":"0:0",
         "entrypoint":["/bin/hack-graph-startup-app","serve"],"command":[],"volumes":["data:/data"],
         "healthcheck":{"test":["CMD","/bin/hack-graph-startup-app","health"],"interval":"200ms","timeout":"2s","retries":10,"start_period":"500ms"}});
+    let job = json!({"image":image,"read_only":true,"network_mode":"none","init":true,"user":"0:0",
+        "entrypoint":["/bin/hack-graph-startup-app","complete"],"command":[]});
     state::write(
         &fixture.0.join("compose.yaml"),
-        &json!({"services":{"web":app,"search":app},"volumes":{"data":{}}}),
+        &json!({"services":{"web":app,"search":app,"init":job},"volumes":{"data":{}}}),
     )
     .unwrap();
     let review = project::plan(
@@ -333,7 +360,7 @@ fn foreground_traffic_wake_and_explicit_refresh_preserve_graph() {
     let mut backend = RestartableBackend::start(0);
     let endpoint = backend.endpoint();
     let selection = selection_fixture.0.join("dependencies.json");
-    let bindings = ["web", "search"].map(|service| {
+    let bindings = ["web", "search", "init"].map(|service| {
         json!({
             "service":service,"binding":"default","slot":0,"guest_port":25252,
             "host_pid":endpoint.process_identity().pid,"host_port":backend.port,
@@ -377,6 +404,8 @@ fn foreground_traffic_wake_and_explicit_refresh_preserve_graph() {
             "web=healthy",
             "--ready",
             "search=healthy",
+            "--ready",
+            "init=completed",
             "--timeout-seconds",
             "60",
             "--dependencies",
@@ -440,7 +469,7 @@ fn foreground_traffic_wake_and_explicit_refresh_preserve_graph() {
     let root = graph::directory(&candidate, &run).unwrap();
     let original_generation = graph::service_exec_generation(&before).unwrap();
     let targets = registered_targets(&candidate, &before);
-    assert_eq!(targets.as_array().unwrap().len(), 2);
+    assert_eq!(targets.as_array().unwrap().len(), 3);
     // The wrapper may need seconds to reopen its listener. Failed authenticated
     // traffic during that gap must not turn a preflight refusal into effects.
     backend.stop();
@@ -481,6 +510,13 @@ fn foreground_traffic_wake_and_explicit_refresh_preserve_graph() {
         await_rebound(&candidate, &run, &gap_endpoint, &mut owner, deadline).receipt;
     assert_eq!(gap_refreshed["changed_slots"], json!([0]));
     retained.preserved(&before, &recovered_gap, &owner);
+    assert_eq!(
+        registered_targets(&candidate, &recovered_gap)
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     backend.assert_no_traffic();
     for service in ["web", "search"] {
         assert_eq!(
@@ -614,6 +650,6 @@ fn foreground_traffic_wake_and_explicit_refresh_preserve_graph() {
     assert!(transport::Pin::load(&candidate, &run).is_err());
     backend.stop();
     println!(
-        "graph-foreground-rebind-qualified-v1 listener_gap_refusal=1 listener_gap_recovered=1 automatic_wake=1 explicit_wire=1 replayed_requests=0 shared_bindings=2 retained_containers=2 retained_boot=1 retained_data=1 owner_reaped=1 retired_owned_resources_removed=1"
+        "graph-foreground-rebind-qualified-v1 listener_gap_refusal=1 listener_gap_recovered=1 automatic_wake=1 explicit_wire=1 replayed_requests=0 shared_bindings=3 running_bindings=2 completed_bindings_retired=1 retained_containers=3 retained_boot=1 retained_data=1 owner_reaped=1 retired_owned_resources_removed=1"
     );
 }

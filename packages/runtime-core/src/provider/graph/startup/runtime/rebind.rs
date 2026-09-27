@@ -219,6 +219,12 @@ fn selections(
         if keys.iter().any(|key| &dependencies[key].refresh != policy) {
             return Err(rejected());
         }
+        if keys
+            .iter()
+            .all(|key| startup.services[&key.0].phase == Phase::Completed)
+        {
+            continue;
+        }
         let mut old = None;
         let mut healthy = 0;
         for key in &keys {
@@ -285,6 +291,10 @@ struct RebindJournal {
     phase: String,
     slots: BTreeMap<u8, JournalSlot>,
     processes: BTreeMap<String, BTreeMap<String, crate::provider::lifecycle::RelayProcess>>,
+    /// Additive journal field; Completed receipts require this owner to clean up.
+    /// Older bundles are not compatible with the new active-state phase.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    completed_services: BTreeSet<String>,
     completed_generation: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
@@ -305,8 +315,9 @@ fn existing(root: &Path, receipt: &Receipt) -> Result<Option<RebindJournal>, Can
                 || journal.owner != receipt.owner
                 || !hex(&journal.operation, 32)
                 || !hex(&journal.expected_generation, 64)
-                || journal.slots.is_empty()
+                || (journal.slots.is_empty() && journal.completed_services.is_empty())
                 || journal.slots.len() > 32
+                || journal.completed_services.len() > 32
                 || !journal
                     .slots
                     .values()
@@ -322,6 +333,14 @@ pub(super) fn require_complete(root: &Path, receipt: &Receipt) -> Result<(), Can
     if pending_journal(root)? {
         return Err(stage_refused("graph_dependency_rebind_incomplete"));
     }
+    let completed: BTreeSet<_> = receipt
+        .relay_startup
+        .as_ref()
+        .into_iter()
+        .flat_map(|startup| startup.services.iter())
+        .filter(|(_, service)| service.phase == Phase::Completed)
+        .map(|(name, _)| name.clone())
+        .collect();
     if let Some(journal) = existing(root, receipt)? {
         if journal.phase == "cleaned" && receipt.phase != "ready-observed" {
             return Ok(());
@@ -335,6 +354,25 @@ pub(super) fn require_complete(root: &Path, receipt: &Receipt) -> Result<(), Can
             return Err(stage_refused("graph_dependency_rebind_incomplete"));
         }
         if receipt.phase == "ready-observed" {
+            if completed != journal.completed_services {
+                return Err(stage_refused("graph_dependency_rebind_incomplete"));
+            }
+            for name in &completed {
+                let service = &receipt
+                    .relay_startup
+                    .as_ref()
+                    .ok_or_else(rejected)?
+                    .services[name];
+                if receipt.readiness.get(name) != Some(&Condition::Completed)
+                    || service
+                        .bindings
+                        .values()
+                        .any(|binding| binding.process.is_some())
+                    || journal.processes.contains_key(name)
+                {
+                    return Err(stage_refused("graph_dependency_rebind_incomplete"));
+                }
+            }
             for slot in journal.slots.values() {
                 for (service, name) in &slot.bindings {
                     let binding = receipt
@@ -343,13 +381,18 @@ pub(super) fn require_complete(root: &Path, receipt: &Receipt) -> Result<(), Can
                         .and_then(|startup| startup.services.get(service))
                         .and_then(|service| service.bindings.get(name))
                         .ok_or_else(rejected)?;
-                    if binding.endpoint_generation.as_deref() != Some(slot.after.as_str())
-                        || binding.process
-                            != journal
-                                .processes
-                                .get(service)
-                                .and_then(|processes| processes.get(name))
-                                .copied()
+                    if binding.endpoint_generation.as_deref() != Some(slot.after.as_str()) {
+                        return Err(stage_refused("graph_dependency_rebind_incomplete"));
+                    }
+                    if completed.contains(service) {
+                        continue;
+                    }
+                    if binding.process
+                        != journal
+                            .processes
+                            .get(service)
+                            .and_then(|processes| processes.get(name))
+                            .copied()
                         || binding.process.is_none()
                     {
                         return Err(stage_refused("graph_dependency_rebind_incomplete"));
@@ -357,6 +400,8 @@ pub(super) fn require_complete(root: &Path, receipt: &Receipt) -> Result<(), Can
                 }
             }
         }
+    } else if receipt.phase == "ready-observed" && !completed.is_empty() {
+        return Err(stage_refused("graph_dependency_rebind_incomplete"));
     }
     Ok(())
 }
@@ -466,10 +511,66 @@ impl HostRelayRuntime {
         {
             return Err(rejected());
         }
+        // Review every already terminal job, including bindings on unchanged
+        // slots. A terminal phase means ALL its historical grants were retired.
+        // This staged receipt is not published until the journal and effects finish.
+        let mut terminal = BTreeMap::new();
+        let mut retire_keys = Vec::new();
+        let mut retire_identities = Vec::new();
+        let mut completed_services = BTreeSet::new();
+        let startup = receipt.relay_startup.as_ref().ok_or_else(rejected)?;
+        for (name, service) in &startup.services {
+            check_cancelled()?;
+            let resource = receipt
+                .resources
+                .get(&format!("container:{name}"))
+                .ok_or_else(rejected)?;
+            let observed = inspect_resource(&engine, &receipt, resource)?.ok_or_else(rejected)?;
+            if service.phase != Phase::Completed && observed["State"]["Running"] == true {
+                continue;
+            }
+            let generation = completed_generation(
+                &receipt,
+                engine.guest().boot_id(),
+                resource,
+                &observed,
+                service,
+            )?;
+            completed_services.insert(name.clone());
+            terminal.insert(name.clone(), (resource.clone(), generation));
+            if service.phase == Phase::Completed {
+                continue;
+            }
+            for (binding_name, binding) in &service.bindings {
+                let key = (name.clone(), binding_name.clone());
+                if binding.process.is_none() || !self.children.contains_key(&key) {
+                    return Err(rejected());
+                }
+                retire_identities.push(host_relay::named_binding_identity(
+                    generation,
+                    binding_name,
+                    binding,
+                )?);
+                retire_keys.push(key);
+            }
+        }
+        for name in &completed_services {
+            let service = receipt
+                .relay_startup
+                .as_mut()
+                .ok_or_else(rejected)?
+                .services
+                .get_mut(name)
+                .ok_or_else(rejected)?;
+            service.phase = Phase::Completed;
+            for binding in service.bindings.values_mut() {
+                binding.process = None;
+            }
+        }
         let startup = receipt.relay_startup.as_ref().ok_or_else(rejected)?;
         let selected = selections(&self.dependencies, startup)?;
         check_cancelled()?;
-        if selected.is_empty() {
+        if selected.is_empty() && retire_keys.is_empty() {
             return response(&receipt, &[]);
         }
         let mut containers = BTreeMap::new();
@@ -477,6 +578,9 @@ impl HostRelayRuntime {
             for key in &slot.keys {
                 check_cancelled()?;
                 let service = startup.services.get(&key.0).ok_or_else(rejected)?;
+                if service.phase == Phase::Completed {
+                    continue;
+                }
                 if service.phase != Phase::Released
                     || service.bindings[&key.1].process.is_none()
                     || !self.children.contains_key(key)
@@ -530,6 +634,7 @@ impl HostRelayRuntime {
             expected_generation: expected_generation.into(),
             phase: "prepared".into(),
             processes: BTreeMap::new(),
+            completed_services,
             completed_generation: None,
             slots: selected
                 .iter()
@@ -552,6 +657,23 @@ impl HostRelayRuntime {
         state::write(&root.join(JOURNAL), &journal)?;
         let mut fences: Vec<(u8, SlotFence)> = Vec::new();
         let result = (|| {
+            check_cancelled()?;
+            if !retire_identities.is_empty() {
+                // The journal precedes revocation, including completed-only
+                // operations. A crash can never present this retirement as ready.
+                self.managed.retire_bindings(scope, &retire_identities)?;
+                for key in &retire_keys {
+                    check_cancelled()?;
+                    child_stage(
+                        engine.guest().stop_relay_listener(
+                            self.children.get_mut(key).ok_or_else(rejected)?,
+                            Duration::from_secs(10),
+                        ),
+                        "graph_dependency_rebind_stop",
+                    )?;
+                    self.children.remove(key);
+                }
+            }
             for slot in &selected {
                 check_cancelled()?;
                 fences.push((
@@ -569,6 +691,9 @@ impl HostRelayRuntime {
                     .1;
                 for key in &slot.keys {
                     check_cancelled()?;
+                    if journal.completed_services.contains(&key.0) {
+                        continue;
+                    }
                     child_stage(
                         engine.guest().stop_relay_listener(
                             self.children.get_mut(key).ok_or_else(rejected)?,
@@ -652,6 +777,24 @@ impl HostRelayRuntime {
                 }
             }
             check_cancelled()?;
+            for (name, (resource, generation)) in &terminal {
+                let observed =
+                    inspect_resource(&engine, &receipt, resource)?.ok_or_else(rejected)?;
+                if completed_generation(
+                    &receipt,
+                    engine.guest().boot_id(),
+                    resource,
+                    &observed,
+                    &receipt
+                        .relay_startup
+                        .as_ref()
+                        .ok_or_else(rejected)?
+                        .services[name],
+                )? != *generation
+                {
+                    return Err(rejected());
+                }
+            }
             for slot in &selected {
                 for key in &slot.keys {
                     self.dependencies[key]
@@ -659,9 +802,11 @@ impl HostRelayRuntime {
                         .as_ref()
                         .ok_or_else(rejected)?
                         .validate(&slot.endpoint)?;
-                    let child = self.children.get_mut(key).ok_or_else(rejected)?;
-                    if child.poll_exit()?.is_some() {
-                        return Err(rejected());
+                    if !journal.completed_services.contains(&key.0) {
+                        let child = self.children.get_mut(key).ok_or_else(rejected)?;
+                        if child.poll_exit()?.is_some() {
+                            return Err(rejected());
+                        }
                     }
                     let binding = receipt
                         .relay_startup
@@ -672,7 +817,11 @@ impl HostRelayRuntime {
                         .and_then(|service| service.bindings.get_mut(&key.1))
                         .ok_or_else(rejected)?;
                     binding.endpoint_generation = Some(slot.fingerprint.clone());
-                    binding.process = Some(journal.processes[&key.0][&key.1]);
+                    binding.process = journal
+                        .processes
+                        .get(&key.0)
+                        .and_then(|processes| processes.get(&key.1))
+                        .copied();
                 }
             }
             if !receipt
@@ -699,12 +848,14 @@ impl HostRelayRuntime {
             journal.phase = "committed".into();
             state::write(&root.join(JOURNAL), &journal)?;
             check_cancelled()?;
-            self.managed.complete_rebinds(
-                &fences
-                    .iter()
-                    .map(|(_, fence)| fence.clone())
-                    .collect::<Vec<_>>(),
-            )?;
+            if !fences.is_empty() {
+                self.managed.complete_rebinds(
+                    &fences
+                        .iter()
+                        .map(|(_, fence)| fence.clone())
+                        .collect::<Vec<_>>(),
+                )?;
+            }
             check_cancelled()?;
             journal.phase = "completed".into();
             state::write(&root.join(JOURNAL), &journal)?;

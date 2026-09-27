@@ -569,12 +569,41 @@ pub(super) fn inspected_generation(
     resource: &Resource,
     value: &Value,
 ) -> Result<[u8; 32], CandidateError> {
+    if value["State"]["Running"] != true {
+        return Err(refused());
+    }
+    inspected_identity_generation(receipt, boot, resource, value)
+}
+/// Only a successfully exited container can supply a terminal relay identity.
+/// The caller additionally checks declared Completed readiness and exact StartedAt.
+pub(super) fn inspected_completed_generation(
+    receipt: &Receipt,
+    boot: &str,
+    resource: &Resource,
+    value: &Value,
+) -> Result<[u8; 32], CandidateError> {
+    if value["State"]["Running"] != false
+        || value["State"]["Status"] != "exited"
+        || value["State"]["Pid"] != 0
+        || value["State"]["ExitCode"] != 0
+        || value["State"]["Dead"] != false
+        || value["State"]["OOMKilled"] != false
+    {
+        return Err(refused());
+    }
+    inspected_identity_generation(receipt, boot, resource, value)
+}
+fn inspected_identity_generation(
+    receipt: &Receipt,
+    boot: &str,
+    resource: &Resource,
+    value: &Value,
+) -> Result<[u8; 32], CandidateError> {
     context(&receipt.owner, boot)?;
     if resource.kind != Kind::Container
         || resource.id.as_deref() != value["Id"].as_str()
         || !resource.id.as_deref().is_some_and(|id| hex(id, 64))
         || resource.image.as_deref() != value["Image"].as_str()
-        || value["State"]["Running"] != true
         || value["State"]["Dead"] == true
         || value["State"]["OOMKilled"] == true
     {

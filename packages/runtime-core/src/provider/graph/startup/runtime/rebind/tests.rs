@@ -332,6 +332,72 @@ fn receipt() -> Receipt {
     .unwrap()
 }
 #[test]
+fn terminal_identity_uses_real_resource_key_and_refuses_unexpected_or_failed_exit() {
+    let mut receipt = receipt();
+    receipt
+        .readiness
+        .insert("db-ops".into(), Condition::Completed);
+    let resource: Resource = serde_json::from_value(json!({
+        "kind":"container","key":"db-ops","name":"owned-db-ops","id":"7".repeat(64),
+        "image":"sha256:".to_string()+&"8".repeat(64),"phase":"started"
+    }))
+    .unwrap();
+    receipt
+        .resources
+        .insert("container:db-ops".into(), resource.clone());
+    let service = startup(&"6".repeat(64), &["db-ops"])
+        .services
+        .remove("db-ops")
+        .unwrap();
+    let observed = json!({"Id":resource.id,"Image":resource.image,
+        "State":{"Status":"exited","Running":false,"Pid":0,"ExitCode":0,"Dead":false,"OOMKilled":false,"StartedAt":"fixture-start"}});
+    let generation =
+        completed_generation(&receipt, &"9".repeat(32), &resource, &observed, &service).unwrap();
+    let mut running = observed.clone();
+    running["State"]["Running"] = json!(true);
+    assert_eq!(
+        generation,
+        host_relay::inspected_generation(&receipt, &"9".repeat(32), &resource, &running).unwrap()
+    );
+    assert!(
+        host_relay::inspected_generation(&receipt, &"9".repeat(32), &resource, &observed).is_err()
+    );
+    for condition in [Condition::Started, Condition::Healthy] {
+        receipt.readiness.insert("db-ops".into(), condition);
+        assert!(
+            completed_generation(&receipt, &"9".repeat(32), &resource, &observed, &service)
+                .is_err()
+        );
+    }
+    receipt
+        .readiness
+        .insert("db-ops".into(), Condition::Completed);
+    for (field, value) in [
+        ("ExitCode", json!(1)),
+        ("Running", json!(true)),
+        ("Pid", json!(42)),
+        ("Dead", json!(true)),
+        ("OOMKilled", json!(true)),
+        ("Status", json!("dead")),
+        ("StartedAt", json!("different-start")),
+        ("ExitCode", Value::Null),
+    ] {
+        let mut changed = observed.clone();
+        changed["State"][field] = value;
+        assert!(
+            completed_generation(&receipt, &"9".repeat(32), &resource, &changed, &service).is_err(),
+            "accepted {field}"
+        );
+    }
+    for field in ["Id", "Image"] {
+        let mut changed = observed.clone();
+        changed[field] = json!("different-identity");
+        assert!(
+            completed_generation(&receipt, &"9".repeat(32), &resource, &changed, &service).is_err()
+        );
+    }
+}
+#[test]
 fn incomplete_journal_blocks_ready_operations_and_is_never_replayed() {
     let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
         "hack-rebind-journal-{}-{}",
@@ -366,6 +432,7 @@ fn incomplete_journal_blocks_ready_operations_and_is_never_replayed() {
                     .unwrap(),
             )]),
         )]),
+        completed_services: BTreeSet::new(),
         completed_generation: None,
     };
     require_complete(&root, &receipt).unwrap();
@@ -471,6 +538,7 @@ fn exact_owned_cleanup_archives_partial_rebind_and_unblocks_fresh_restore() {
             },
         )]),
         processes: BTreeMap::new(),
+        completed_services: BTreeSet::new(),
         completed_generation: None,
     };
     state::write(&root.join(JOURNAL), &journal).unwrap();
@@ -564,6 +632,7 @@ fn terminal_refresh_proofs_do_not_pin_old_helpers_across_owned_restore() {
         boot: "old-boot".into(),
         expected_generation: "5".repeat(64),
         phase: "completed".into(),
+        completed_services: BTreeSet::new(),
         completed_generation: Some(service_exec_generation(&original).unwrap()),
         slots: BTreeMap::from([(
             0,
@@ -598,4 +667,186 @@ fn terminal_refresh_proofs_do_not_pin_old_helpers_across_owned_restore() {
     archive_after_cleanup(&root, &original, &cleaned, "old-boot").unwrap();
     require_complete(&root, &restored).unwrap();
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn completed_journal_requires_explicit_terminal_state_and_never_fabricates_helpers() {
+    let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+        "hack-rebind-terminal-{}-{}",
+        std::process::id(),
+        probes::token().unwrap()
+    ));
+    state::private_directory(&root).unwrap();
+    let mut receipt = receipt();
+    receipt
+        .readiness
+        .insert("init".into(), Condition::Completed);
+    receipt.relay_startup = Some(startup(&"6".repeat(64), &["web", "init"]));
+    let selected = receipt
+        .relay_startup
+        .as_mut()
+        .unwrap()
+        .services
+        .get_mut("init")
+        .unwrap();
+    selected.phase = Phase::Completed;
+    selected.bindings.get_mut("content").unwrap().process = None;
+    assert!(require_complete(&root, &receipt).is_err());
+    let journal = RebindJournal {
+        version: 1,
+        operation: "4".repeat(32),
+        run: receipt.run.clone(),
+        owner: receipt.owner.clone(),
+        boot: "fixture-boot".into(),
+        expected_generation: "7".repeat(64),
+        phase: "completed".into(),
+        slots: BTreeMap::from([(
+            0,
+            JournalSlot {
+                before: "5".repeat(64),
+                after: "6".repeat(64),
+                bindings: vec![
+                    ("web".into(), "content".into()),
+                    ("init".into(), "content".into()),
+                ],
+            },
+        )]),
+        processes: BTreeMap::from([(
+            "web".into(),
+            BTreeMap::from([(
+                "content".into(),
+                receipt.relay_startup.as_ref().unwrap().services["web"].bindings["content"]
+                    .process
+                    .unwrap(),
+            )]),
+        )]),
+        completed_services: BTreeSet::from(["init".into()]),
+        completed_generation: Some(service_exec_generation(&receipt).unwrap()),
+    };
+    state::write(&root.join(JOURNAL), &journal).unwrap();
+    require_complete(&root, &receipt).unwrap();
+    for condition in [Condition::Started, Condition::Healthy] {
+        let mut changed = receipt.clone();
+        changed.readiness.insert("init".into(), condition);
+        assert!(require_complete(&root, &changed).is_err());
+    }
+    for phase in [Phase::Released, Phase::Provisioned, Phase::Prepared] {
+        let mut changed = receipt.clone();
+        changed
+            .relay_startup
+            .as_mut()
+            .unwrap()
+            .services
+            .get_mut("init")
+            .unwrap()
+            .phase = phase;
+        assert!(require_complete(&root, &changed).is_err());
+    }
+    let mut changed = receipt.clone();
+    changed
+        .relay_startup
+        .as_mut()
+        .unwrap()
+        .services
+        .get_mut("web")
+        .unwrap()
+        .bindings
+        .get_mut("content")
+        .unwrap()
+        .process = None;
+    assert!(require_complete(&root, &changed).is_err());
+    let mut encoded = serde_json::to_value(&journal).unwrap();
+    encoded["processes"]["init"] = encoded["processes"]["web"].clone();
+    state::write(&root.join(JOURNAL), &encoded).unwrap();
+    assert!(require_complete(&root, &receipt).is_err());
+    encoded
+        .as_object_mut()
+        .unwrap()
+        .remove("completed_services");
+    encoded["processes"].as_object_mut().unwrap().remove("init");
+    state::write(&root.join(JOURNAL), &encoded).unwrap();
+    assert!(require_complete(&root, &receipt).is_err());
+    // A completed-only operation still has durable intent and must not replay.
+    let mut terminal_only = receipt.clone();
+    terminal_only
+        .relay_startup
+        .as_mut()
+        .unwrap()
+        .services
+        .remove("web");
+    let mut encoded = serde_json::to_value(journal).unwrap();
+    encoded["slots"] = json!({});
+    encoded["processes"] = json!({});
+    state::write(&root.join(JOURNAL), &encoded).unwrap();
+    require_complete(&root, &terminal_only).unwrap();
+    for phase in ["prepared", "fenced", "provisioning", "committed", "failed"] {
+        encoded["phase"] = json!(phase);
+        state::write(&root.join(JOURNAL), &encoded).unwrap();
+        assert!(require_complete(&root, &terminal_only).is_err());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn mixed_completed_binding_retains_metadata_across_noop_and_second_rotation() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let endpoint = HostEndpoint::capture(std::process::id() as i32, address.port()).unwrap();
+    let policy = RefreshPolicy::capture(
+        &endpoint,
+        &std::env::current_exe().unwrap(),
+        address.port(),
+        1,
+    )
+    .unwrap();
+    let mut startup = startup(&endpoint.fingerprint().unwrap(), &["web", "init"]);
+    let completed = startup.services.get_mut("init").unwrap();
+    completed.phase = Phase::Completed;
+    completed.bindings.get_mut("content").unwrap().process = None;
+    let mut dependencies = BTreeMap::from([
+        (
+            ("web".into(), "content".into()),
+            dependency("web", &endpoint, Some(policy.clone())),
+        ),
+        (
+            ("init".into(), "content".into()),
+            dependency("init", &endpoint, Some(policy)),
+        ),
+    ]);
+    assert!(selections(&dependencies, &startup).unwrap().is_empty());
+    drop(listener);
+    let replacement = replace(address);
+    let first = selections(&dependencies, &startup).unwrap().remove(0);
+    for key in &first.keys {
+        dependencies.get_mut(key).unwrap().endpoint = first.endpoint.clone();
+        startup
+            .services
+            .get_mut(&key.0)
+            .unwrap()
+            .bindings
+            .get_mut(&key.1)
+            .unwrap()
+            .endpoint_generation = Some(first.fingerprint.clone());
+    }
+    assert!(
+        startup.services["init"].bindings["content"]
+            .process
+            .is_none()
+    );
+    assert!(selections(&dependencies, &startup).unwrap().is_empty());
+    drop(replacement);
+    let replacement = replace(address);
+    let second = selections(&dependencies, &startup).unwrap().remove(0);
+    assert_ne!(first.fingerprint, second.fingerprint);
+    assert_eq!(second.keys.len(), 2);
+    assert!(
+        startup.services["init"].bindings["content"]
+            .process
+            .is_none()
+    );
+    startup.services.remove("web");
+    dependencies.remove(&("web".into(), "content".into()));
+    drop(replacement);
+    assert!(selections(&dependencies, &startup).unwrap().is_empty());
+    verify_endpoint_generations(&dependencies, &startup).unwrap();
 }

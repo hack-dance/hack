@@ -1,7 +1,19 @@
 import { expect, test } from "bun:test";
-import { runtimeModels } from "../scripts/lib/tla-runtime-models.ts";
+import {
+  runtimeModelControlConfig,
+  runtimeModels,
+} from "../scripts/lib/tla-runtime-models.ts";
 
-for (const model of runtimeModels) {
+const contracts = runtimeModels.flatMap((model) => [
+  model,
+  ...("additionalControls" in model
+    ? (model.additionalControls ?? []).map((control) => ({
+        ...control,
+        name: `${model.name}/${control.name}`,
+      }))
+    : []),
+]);
+for (const model of contracts) {
   test(`${model.name}: evidence must establish exploration and the intended failure`, () => {
     const positive = `Model checking completed. No error has been found.\n${model.states} distinct states found, 0 states left on queue.`;
     expect(
@@ -35,3 +47,23 @@ for (const model of runtimeModels) {
     }
   });
 }
+
+test("runtime model config selection rejects paths and arbitrary filenames", () => {
+  expect(runtimeModelControlConfig("mixed-completed")).toBe(
+    "mixed-completed.cfg"
+  );
+  for (const name of [
+    "../positive",
+    "/tmp/control",
+    "mixed.cfg",
+    "",
+    "a".repeat(65),
+    "mixed/completed",
+    "negative\0",
+    "Mixed",
+  ]) {
+    expect(() => runtimeModelControlConfig(name)).toThrow(
+      "Invalid runtime model control name"
+    );
+  }
+});

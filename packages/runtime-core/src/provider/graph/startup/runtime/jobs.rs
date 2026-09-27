@@ -1,5 +1,14 @@
 //! One-off containers borrow the owner's verified endpoints, never old grants.
 use super::*;
+fn prepare_job(mut original: Service) -> Result<Service, CandidateError> {
+    original.generation = crate::provider::graph::probes::token()?;
+    original.phase = Phase::Prepared;
+    original.started_at = None;
+    for binding in original.bindings.values_mut() {
+        binding.process = None;
+    }
+    Ok(original)
+}
 impl HostRelayRuntime {
     pub(in crate::provider::graph) fn job_template(
         &self,
@@ -32,13 +41,7 @@ impl HostRelayRuntime {
         {
             return Err(refused());
         }
-        let mut selected = original;
-        selected.generation = crate::provider::graph::probes::token()?;
-        selected.phase = Phase::Prepared;
-        selected.started_at = None;
-        for binding in selected.bindings.values_mut() {
-            binding.process = None;
-        }
+        let selected = prepare_job(original)?;
         let dependencies: Vec<_> = self
             .dependencies
             .iter()
@@ -103,5 +106,42 @@ impl HostRelayRuntime {
         self.job_targets.remove(key);
         self.dependencies.retain(|(service, _), _| service != key);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn completed_template_gets_fresh_job_intent_not_stopped_container_attachment() {
+        let original = Service {
+            generation: "a".repeat(32),
+            phase: Phase::Completed,
+            started_at: Some("original-start".into()),
+            bindings: BTreeMap::from([(
+                "default".into(),
+                Binding {
+                    slot: 0,
+                    endpoint_generation: Some("b".repeat(64)),
+                    port: 25252,
+                    aliases: Vec::new(),
+                    process: None,
+                },
+            )]),
+        };
+        let selected = prepare_job(original.clone()).unwrap();
+        assert_eq!(selected.phase, Phase::Prepared);
+        assert_eq!(selected.started_at, None);
+        assert_ne!(selected.generation, original.generation);
+        assert_eq!(
+            selected.bindings["default"].endpoint_generation,
+            original.bindings["default"].endpoint_generation
+        );
+        assert!(
+            selected
+                .bindings
+                .values()
+                .all(|binding| binding.process.is_none())
+        );
     }
 }

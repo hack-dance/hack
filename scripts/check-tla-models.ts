@@ -9,7 +9,10 @@ import {
   verifyRestoreHistoryModelResult,
 } from "./lib/tla-result.ts";
 
-import { runtimeModels } from "./lib/tla-runtime-models.ts";
+import {
+  runtimeModelControlConfig,
+  runtimeModels,
+} from "./lib/tla-runtime-models.ts";
 
 const expectedSha =
   "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88";
@@ -50,12 +53,19 @@ try {
     const source = resolve(import.meta.dir, "../tests/models/tla", model.name);
     const directory = resolve(scratch, model.name, "source");
     await cp(source, directory, { recursive: true });
-    for (const negative of [false, true]) {
+    const controls = [
+      { name: "positive", negative: false, verify: model.verify },
+      { name: "negative", negative: true, verify: model.verify },
+      ...("additionalControls" in model
+        ? (model.additionalControls ?? [])
+        : []),
+    ];
+    for (const control of controls) {
+      const { negative, name } = control;
       const module =
         negative && "negativeModule" in model
           ? (model.negativeModule ?? model.module)
           : model.module;
-      const name = negative ? "negative" : "positive";
       const result = spawnSync(
         process.env.JAVA_BIN ?? "java",
         [
@@ -68,7 +78,7 @@ try {
           "-metadir",
           resolve(scratch, model.name, name),
           "-config",
-          resolve(directory, `${name}.cfg`),
+          resolve(directory, runtimeModelControlConfig(name)),
           resolve(directory, `${module}.tla`),
         ],
         {
@@ -81,7 +91,7 @@ try {
       const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
       if (
         result.error ||
-        !model.verify({ negative, exitCode: result.status, output })
+        !control.verify({ negative, exitCode: result.status, output })
       ) {
         process.stderr.write(output);
         throw new Error(

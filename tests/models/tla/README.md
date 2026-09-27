@@ -19,27 +19,51 @@ No credentials or running VM are needed.
 ## Active dependency rebinding
 
 `dependency-rebind/Rebind.tla` checks one physical slot shared by two logical
-bindings, with old and replacement generations. The 21-state positive model
-requires reviewed ownership, a slot fence, retirement and stream drain for both
-bindings, replacement readiness, and durable receipt commit before admission.
-Cancellation or owner death leaves admission closed. The negative control releases
-after review alone and must violate `NoEarlyAdmission` in the same `Release` state
-with old streams present and no committed replacement. CI rejects other failures.
+bindings, with old and replacement generations. The unchanged all-running control
+explores 21 states. A mixed running/completed control explores 19: the terminal
+target must have declared `Completed` readiness and an observed successful exit.
+Both targets' old grants and streams retire, but only the running target receives
+a replacement grant/helper. The completed service retains its generation/StartedAt;
+a shared slot's endpoint generation may change without readmitting that service.
+The wholly completed control explores 18 states and ends
+with target admission closed after retirement, without a replacement grant.
+
+The barrier requires reviewed ownership, fenced target admission, retirement and
+stream drain for all historical bindings, replacement readiness for running targets,
+and durable receipt commit before activation. Cancellation or owner death leaves
+admission closed. A fence here means closed target authority, not necessarily a
+closed physical host socket or a concrete `SlotFence` token for terminal-only slots.
+The implementation can still accept a bounded unauthenticated preamble.
+
+Two refusal controls each explore exactly two states (initial and owner crash):
+an unexpected exit under Started/Healthy readiness and a failed Completed job
+cannot pass review. Guard-removal controls must exit with TLC code 12 and violate
+`NoWrongTerminalReadiness` in one `Review` state containing `completed = {2}`,
+`reviewed = TRUE` and `admitted = FALSE`. The original premature-release control
+still violates `NoEarlyAdmission` in one `Release` state with old streams present,
+unrevoked targets and no committed replacement. CI rejects other failures.
 
 | Model action | Implementation boundary under `packages/runtime-core/src/` |
 | --- | --- |
-| `Review` | `provider/graph/startup/runtime/rebind.rs` executable, exclusive listener, and retained supervisor checks |
+| `Review` / `completed` | `provider/graph/startup/runtime/rebind.rs` executable, exclusive listener and supervisor checks; exact stopped exit-0 identity with declared Completed readiness; `RebindJournal.completed_services` |
 | `Fence` / `Retire` | `provider/relay_owner/managed.rs` slot admission fence, batch revocation and stream drain |
-| `Register` | Fresh grants and exact owned guest helper replacement in `provider/graph/startup/runtime/rebind.rs` |
-| `Commit` / `Release` | Synced receipt and completion journal before `ManagedOwner::complete_rebind` |
+| `Register` | Fresh grants and exact owned guest helper replacement for running services only in `provider/graph/startup/runtime/rebind.rs` |
+| `Commit` / `Release` | Synced receipt and committed nonterminal journal before atomic `ManagedOwner::complete_rebinds`; completed terminal journal follows activation |
+| `CloseTerminal` | Scoped retirement of all terminal services' historical bindings, without replacement registration or activation; `Phase::Completed` retains service generation/StartedAt with `binding.process = None` |
 | `Cancel` / `Crash` | Fenced incomplete journal and explicit owned cleanup; no replay |
 
 The model abstracts individual registration steps for two bindings and assumes
-atomic revocation/drain and durable commit. It does not prove native process or
-supervisor identity, credential secrecy, filesystem durability, partial multi-slot
-activation, real guest readiness, application health, or performance. Rust tests
-and live replacement traffic remain required. There is no fairness or eventual
-recovery claim.
+atomic revocation/drain and durable commit. Successful terminal observations remain
+fixed during this finite operation; source must recheck exact container Id, image,
+StartedAt, exited status, zero PID/exit code, and false Dead/OOM before effects and
+commit. Completed services retire all their historical bindings across slots; one
+binding per target represents that set here. Helper `None` is valid only for a
+journaled Completed service with declared Completed readiness, never for Released
+or an unjournaled terminal service. The model does not prove these inspection and
+helper-identity checks, native process/supervisor identity, credential secrecy,
+filesystem durability, partial multi-slot activation, real guest readiness,
+application health, or performance. Rust tests and live replacement traffic remain
+required. There is no fairness or eventual recovery claim.
 
 ## Graph admission
 

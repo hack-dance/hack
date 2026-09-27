@@ -100,6 +100,9 @@ pub(crate) enum Phase {
     ProvisionIntent,
     Provisioned,
     Released,
+    /// Successful declared job; its historical relay capabilities are retired.
+    /// Retained identity does not authorize attachment or execution in this container.
+    Completed,
 }
 impl Startup {
     pub(super) fn valid(&self, receipt: &Receipt) -> bool {
@@ -136,6 +139,14 @@ impl Startup {
                                 .as_ref()
                                 .is_some_and(|s| valid_started(s))
                                 && service.all_provisioned()
+                        }
+                        Phase::Completed => {
+                            receipt.readiness.get(name) == Some(&Condition::Completed)
+                                && service
+                                    .started_at
+                                    .as_ref()
+                                    .is_some_and(|s| valid_started(s))
+                                && service.bindings.values().all(|b| b.process.is_none())
                         }
                     }
             })

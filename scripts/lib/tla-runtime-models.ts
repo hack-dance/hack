@@ -1,7 +1,30 @@
 import { verifyFiniteModelResult } from "./tla-result.ts";
 
+type ModelResult = {
+  readonly negative: boolean;
+  readonly exitCode: number | null;
+  readonly output: string;
+};
+type ModelContract = {
+  readonly name: string;
+  readonly module: string;
+  readonly negativeModule?: string;
+  readonly states: number;
+  readonly invariant: string;
+  readonly action: string;
+  readonly fields: readonly string[];
+  readonly additionalControls?: readonly {
+    readonly name: string;
+    readonly negative: boolean;
+    readonly states?: number;
+    readonly invariant?: string;
+    readonly action?: string;
+    readonly fields?: readonly string[];
+  }[];
+};
+
 // Bounds and witnesses are reviewed contracts, not learned from each run.
-const contracts = [
+const contracts: readonly ModelContract[] = [
   {
     name: "dependency-rebind",
     module: "Rebind",
@@ -14,6 +37,36 @@ const contracts = [
       "revoked = {}",
       "streams = {1, 2}",
       "committed = FALSE",
+    ],
+    additionalControls: [
+      { name: "mixed-completed", negative: false, states: 19 },
+      { name: "all-completed", negative: false, states: 18 },
+      { name: "refused-readiness", negative: false, states: 2 },
+      { name: "refused-failed-completed", negative: false, states: 2 },
+      {
+        name: "wrong-readiness",
+        negative: true,
+        invariant: "NoWrongTerminalReadiness",
+        action: "Review",
+        fields: [
+          'phase = "reviewed"',
+          "completed = {2}",
+          "reviewed = TRUE",
+          "admitted = FALSE",
+        ],
+      },
+      {
+        name: "failed-completed",
+        negative: true,
+        invariant: "NoWrongTerminalReadiness",
+        action: "Review",
+        fields: [
+          'phase = "reviewed"',
+          "completed = {2}",
+          "reviewed = TRUE",
+          "admitted = FALSE",
+        ],
+      },
     ],
   },
   {
@@ -126,9 +179,28 @@ const contracts = [
 
 export const runtimeModels = contracts.map((contract) => ({
   ...contract,
-  verify: (result: {
-    negative: boolean;
-    exitCode: number | null;
-    output: string;
-  }) => verifyFiniteModelResult({ ...result, ...contract }),
+  verify: (result: ModelResult) =>
+    verifyFiniteModelResult({ ...result, ...contract }),
+  additionalControls: (contract.additionalControls ?? []).map((control) => {
+    const selected = {
+      ...control,
+      states: control.states ?? contract.states,
+      invariant: control.invariant ?? contract.invariant,
+      action: control.action ?? contract.action,
+      fields: control.fields ?? contract.fields,
+    };
+    return {
+      ...selected,
+      verify: (result: ModelResult) =>
+        verifyFiniteModelResult({ ...selected, ...result }),
+    };
+  }),
 }));
+
+/** Config names are fixed case metadata, never filesystem paths. */
+export function runtimeModelControlConfig(name: string): string {
+  if (!/^[a-z][a-z0-9-]{0,63}$/.test(name)) {
+    throw new Error("Invalid runtime model control name.");
+  }
+  return `${name}.cfg`;
+}

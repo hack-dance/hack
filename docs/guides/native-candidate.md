@@ -571,6 +571,29 @@ the request cannot add or edit them. Successful refresh changes affected relay
 generations without restarting application containers or replacing volumes.
 An unchanged graph returns a verified no-op.
 
+A service declared `completed` that has successfully exited can share those
+dependencies with running services. Refresh checks its exact container, image and
+original start time, and requires exited state, PID zero, exit code zero and no
+dead or OOM state. It journals retirement before revoking every historical binding
+and proving the old helpers absent. Its receipt then records `relay_startup` phase
+`completed` with no helper process records; it receives no replacement grant or
+helper. Running siblings still refresh together. Started/healthy services that
+exit, and failed completed jobs, refuse this path. One-off commands retain the
+admitted template and create fresh job intent; this state never permits exec in
+the stopped container.
+
+If a physical dependency slot is used only by completed jobs and its host listener
+rotates, later one-off commands using that slot currently refuse until an ordinary
+owned restart. One-off commands can still use an unchanged listener, or a slot
+whose running siblings have refreshed it. Terminal-only slot re-admission remains
+an open dependency-refresh limitation.
+
+The rebind journal's optional `completed_services` field records that terminal
+retirement explicitly. Older journals without the field remain readable, but a
+previous bundle cannot be assumed to understand the new completed startup phase.
+Use the current owning bundle for retaining cleanup and journal archival before
+selecting an older bundle; do not substitute an older binary against active state.
+
 Native `hack exec` and `hack run` make this request once with a 180-second frontend
 budget before selecting their command or reading managed environment values.
 `ps` and `logs` remain observations and do not request refresh. Authenticated relay

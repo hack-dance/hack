@@ -41,6 +41,7 @@ enum Command {
         Reply<Grant>,
     ),
     Retire(Target, Reply<Acknowledgement>),
+    RetireBindings(GraphScope, Vec<[u8; 32]>, Reply<Acknowledgement>),
     BeginRebind(
         GraphScope,
         u8,
@@ -299,6 +300,12 @@ struct Reactor {
     notifications: Arc<Notifications>,
 }
 fn retire(owner: &mut RelayOwner, target: Target) -> Result<Acknowledgement, CandidateError> {
+    retire_targets(owner, vec![target])
+}
+fn retire_targets(
+    owner: &mut RelayOwner,
+    targets: Vec<Target>,
+) -> Result<Acknowledgement, CandidateError> {
     let mut operation = [0; 16];
     fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut operation))
@@ -307,10 +314,37 @@ fn retire(owner: &mut RelayOwner, target: Target) -> Result<Acknowledgement, Can
         version: 1,
         owner: owner.incarnation(),
         operation,
-        targets: vec![target],
+        targets,
     })
 }
 impl Reactor {
+    fn retire_bindings(
+        &mut self,
+        scope: GraphScope,
+        services: Vec<[u8; 32]>,
+    ) -> Result<Acknowledgement, CandidateError> {
+        if !self.owner.matches_context(scope.context)
+            || services.is_empty()
+            || services.len() > crate::provider::relay_auth::MAX_LOGICAL_BINDINGS
+            || services.iter().collect::<BTreeSet<_>>().len() != services.len()
+        {
+            return Err(refused());
+        }
+        let targets = services
+            .into_iter()
+            .map(|service| {
+                self.owner
+                    .entries
+                    .get(&service)
+                    .filter(|entry| entry.graph == Some(scope.id))
+                    .map(|entry| entry.target.clone())
+                    .ok_or_else(refused)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Validate the complete scoped batch before synchronous revocation. Retain
+        // retired registrations for cleanup acknowledgements; never re-arm them.
+        retire_targets(&mut self.owner, targets)
+    }
     fn begin_rebind(
         &mut self,
         scope: GraphScope,
@@ -614,6 +648,10 @@ impl Reactor {
                     }
                     Command::Retire(target, reply) => {
                         let result = retire(&mut self.owner, target);
+                        let _ = reply.try_send(result);
+                    }
+                    Command::RetireBindings(scope, services, reply) => {
+                        let result = self.retire_bindings(scope, services);
                         let _ = reply.try_send(result);
                     }
                     Command::BeginRebind(scope, slot, expected, canceled, reply) => {
@@ -955,6 +993,17 @@ impl ManagedOwner {
     pub(crate) fn retire(&self, target: Target) -> Result<Acknowledgement, CandidateError> {
         let (reply, receiver) = mpsc::sync_channel(1);
         self.send(Command::Retire(target, reply))?;
+        receiver.recv_timeout(BUDGET).map_err(|_| refused())?
+    }
+    /// Revoke an exact original graph's named bindings as one reactor batch.
+    /// Reply loss is uncertain retirement; callers must retain intent and clean up.
+    pub(crate) fn retire_bindings(
+        &self,
+        scope: GraphScope,
+        services: &[[u8; 32]],
+    ) -> Result<Acknowledgement, CandidateError> {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.send(Command::RetireBindings(scope, services.to_vec(), reply))?;
         receiver.recv_timeout(BUDGET).map_err(|_| refused())?
     }
     /// Caller holds the VM mutation lease and has selected the complete slot under
@@ -1353,6 +1402,99 @@ mod tests {
             Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
             result => panic!("retirement left a transport open: {result:?}"),
         }
+    }
+    #[test]
+    fn completed_bindings_retire_as_exact_scoped_batch_and_are_never_replaced() {
+        let fixture = fixture(2);
+        let scope = GraphScope::new(context(), [3; 32]).unwrap();
+        let foreign = GraphScope::new(context(), [8; 32]).unwrap();
+        let old = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = captured(&old);
+        let expected = endpoint.generation().unwrap();
+        let active = fixture
+            .owner
+            .register(scope, [4; 32], 0, endpoint.clone())
+            .unwrap();
+        let completed = fixture
+            .owner
+            .register(scope, [5; 32], 0, endpoint.clone())
+            .unwrap();
+        let completed_other_slot = fixture
+            .owner
+            .register(scope, [6; 32], 1, endpoint.clone())
+            .unwrap();
+        let unrelated = fixture
+            .owner
+            .register(foreign, [9; 32], 1, endpoint)
+            .unwrap();
+        let mut stream = authenticate(&fixture.sockets[0], &completed.credential).unwrap();
+        for identities in [
+            vec![],
+            vec![[5; 32], [5; 32]],
+            vec![[5; 32], [9; 32]],
+            vec![[5; 32], [42; 32]],
+        ] {
+            assert!(fixture.owner.retire_bindings(scope, &identities).is_err());
+            assert!(authenticate(&fixture.sockets[0], &completed.credential).is_ok());
+        }
+        fixture
+            .owner
+            .retire_bindings(scope, &[[5; 32], [6; 32]])
+            .unwrap();
+        closed(&mut stream);
+        assert!(authenticate(&fixture.sockets[0], &completed.credential).is_err());
+        assert!(authenticate(&fixture.sockets[1], &completed_other_slot.credential).is_err());
+        assert!(authenticate(&fixture.sockets[1], &unrelated.credential).is_ok());
+        let fence = fixture.owner.begin_rebind(scope, 0, expected).unwrap();
+        let next = TcpListener::bind("127.0.0.1:0").unwrap();
+        let fresh = fixture
+            .owner
+            .register_replacement(&fence, [4; 32], captured(&next))
+            .unwrap();
+        // Only the running sibling contributes to the fresh grant count.
+        fixture.owner.complete_rebind(&fence).unwrap();
+        assert!(authenticate(&fixture.sockets[0], &active.credential).is_err());
+        assert!(authenticate(&fixture.sockets[0], &completed.credential).is_err());
+        assert!(authenticate(&fixture.sockets[0], &fresh.credential).is_ok());
+        let second = fixture
+            .owner
+            .begin_rebind(scope, 0, captured(&next).generation().unwrap())
+            .unwrap();
+        let last = TcpListener::bind("127.0.0.1:0").unwrap();
+        let latest = fixture
+            .owner
+            .register_replacement(&second, [4; 32], captured(&last))
+            .unwrap();
+        fixture.owner.complete_rebind(&second).unwrap();
+        assert!(authenticate(&fixture.sockets[0], &completed.credential).is_err());
+        assert!(authenticate(&fixture.sockets[0], &latest.credential).is_ok());
+    }
+    #[test]
+    fn completed_only_retirement_reply_loss_leaves_all_credentials_revoked() {
+        let fixture = fixture(1);
+        let scope = GraphScope::new(context(), [3; 32]).unwrap();
+        let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = captured(&backend);
+        let generation = endpoint.generation().unwrap();
+        let first = fixture
+            .owner
+            .register(scope, [4; 32], 0, endpoint.clone())
+            .unwrap();
+        let second = fixture.owner.register(scope, [5; 32], 0, endpoint).unwrap();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        fixture
+            .owner
+            .send(Command::RetireBindings(
+                scope,
+                vec![[4; 32], [5; 32]],
+                reply,
+            ))
+            .unwrap();
+        fixture.owner.verify_alive().unwrap();
+        assert!(authenticate(&fixture.sockets[0], &first.credential).is_err());
+        assert!(authenticate(&fixture.sockets[0], &second.credential).is_err());
+        assert!(fixture.owner.begin_rebind(scope, 0, generation).is_err());
     }
     #[test]
     fn shared_slot_rebind_drains_prehello_and_opens_only_complete_fresh_grants() {

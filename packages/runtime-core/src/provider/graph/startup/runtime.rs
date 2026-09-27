@@ -113,16 +113,24 @@ fn verify_endpoint_generations(
 ) -> Result<(), CandidateError> {
     let mut generations = BTreeMap::new();
     for ((service, name), dependency) in dependencies {
-        let binding = startup
+        let selected = startup
             .services
             .get(service)
-            .and_then(|service| service.bindings.get(name))
+            .ok_or_else(|| stage_refused("graph_dependency_endpoint_changed"))?;
+        let binding = selected
+            .bindings
+            .get(name)
             .ok_or_else(|| stage_refused("graph_dependency_endpoint_changed"))?;
         if binding.slot != dependency.slot
             || binding.port != dependency.port
             || binding.aliases != dependency.aliases
         {
             return Err(stage_refused("graph_dependency_endpoint_changed"));
+        }
+        // A completed job has no admitted relay or live endpoint obligation.
+        // Its exact stopped container identity is verified separately below.
+        if selected.phase == Phase::Completed {
+            continue;
         }
         let generation = match generations.entry(dependency.slot) {
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -138,6 +146,22 @@ fn verify_endpoint_generations(
         }
     }
     Ok(())
+}
+fn completed_generation(
+    receipt: &Receipt,
+    boot: &str,
+    resource: &Resource,
+    observed: &Value,
+    service: &Service,
+) -> Result<[u8; 32], CandidateError> {
+    if resource.kind != Kind::Container
+        || receipt.readiness.get(&resource.key) != Some(&Condition::Completed)
+        || !matches!(service.phase, Phase::Released | Phase::Completed)
+        || observed["State"]["StartedAt"].as_str() != service.started_at.as_deref()
+    {
+        return Err(stage_refused("graph_dependency_completed_identity"));
+    }
+    host_relay::inspected_completed_generation(receipt, boot, resource, observed)
 }
 fn validate_routes<'a>(
     dependencies: impl Iterator<Item = &'a Dependency>,
@@ -510,6 +534,25 @@ impl Driver for HostRelayRuntime {
                     .as_ref()
                     .ok_or_else(|| stage_refused("graph_dependency_endpoint_changed"))?,
             )?;
+        }
+        if let Some(startup) = &receipt.relay_startup {
+            for (name, service) in &startup.services {
+                if service.phase == Phase::Completed {
+                    let resource = receipt
+                        .resources
+                        .get(&format!("container:{name}"))
+                        .ok_or_else(refused)?;
+                    let observed =
+                        inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
+                    completed_generation(
+                        receipt,
+                        engine.guest().boot_id(),
+                        resource,
+                        &observed,
+                        service,
+                    )?;
+                }
+            }
         }
         for ((name, _), child) in &mut self.children {
             if child.poll_exit()?.is_some() {

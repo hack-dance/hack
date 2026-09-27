@@ -114,6 +114,35 @@ fn startup() -> Startup {
     }
 }
 #[test]
+fn completed_service_requires_declared_readiness_and_no_historical_helper() {
+    let mut receipt = receipt();
+    receipt.readiness.insert("web".into(), Condition::Completed);
+    let mut value = startup();
+    let selected = value.services.get_mut("web").unwrap();
+    selected.phase = Phase::Completed;
+    selected.started_at = Some("2026-09-27T03:55:59Z".into());
+    assert!(value.valid(&receipt));
+    for condition in [Condition::Started, Condition::Healthy] {
+        receipt.readiness.insert("web".into(), condition);
+        assert!(!value.valid(&receipt));
+    }
+    receipt.readiness.insert("web".into(), Condition::Completed);
+    for phase in [Phase::Provisioned, Phase::Released] {
+        value.services.get_mut("web").unwrap().phase = phase;
+        assert!(!value.valid(&receipt));
+    }
+    let selected = value.services.get_mut("web").unwrap();
+    selected.phase = Phase::Completed;
+    selected.bindings.get_mut("default").unwrap().process =
+        Some(crate::provider::lifecycle::RelayProcess {
+            pid: 42,
+            start: 123,
+            address: "127.0.0.1".parse().unwrap(),
+            port: 25252,
+        });
+    assert!(!value.valid(&receipt));
+}
+#[test]
 fn gate_wraps_environment_launch_and_health_without_changing_identity_or_stdin() {
     let mut value = config();
     launcher::attach(

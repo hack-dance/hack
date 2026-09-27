@@ -73,9 +73,10 @@ static int health(void) {
     return used == sizeof(healthy)-1 && !memcmp(response, healthy, used) ? 0 : 78;
 }
 int main(int argc, char **argv) {
-    if (argc != 2 || (strcmp(argv[1], "serve") && strcmp(argv[1], "serve-two") && strcmp(argv[1], "health") && strcmp(argv[1], "dependency") && strcmp(argv[1], "write-data") && strcmp(argv[1], "read-data"))) return 64;
+    if (argc != 2 || (strcmp(argv[1], "serve") && strcmp(argv[1], "serve-two") && strcmp(argv[1], "complete") && strcmp(argv[1], "health") && strcmp(argv[1], "dependency") && strcmp(argv[1], "write-data") && strcmp(argv[1], "read-data"))) return 64;
     signal(SIGPIPE, SIG_IGN);
     alarm(!strcmp(argv[1], "serve") || !strcmp(argv[1], "serve-two") ? 180 : 10);
+    if (!strcmp(argv[1], "complete")) return 0;
     if (!strcmp(argv[1], "health")) return health();
     if (!strcmp(argv[1], "dependency")) return dependency(25252);
     if (!strcmp(argv[1], "write-data") || !strcmp(argv[1], "read-data")) {

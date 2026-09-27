@@ -72,6 +72,10 @@ mod storage_inventory;
 pub use retention::{prune, reconcile_export};
 pub use storage_inventory::inventory as storage_inventory;
 mod restore;
+#[cfg(target_os = "macos")]
+pub(in crate::provider) mod retained_startup;
+#[cfg(target_os = "macos")]
+pub use retained_startup::preflight as retained_startup_preflight;
 mod restore_history;
 mod routes;
 mod service_logs;

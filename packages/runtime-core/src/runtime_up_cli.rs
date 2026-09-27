@@ -11,6 +11,7 @@ pub struct Options {
     pub bridges: Option<BridgeIntent>,
     pub dependencies: Option<DependencySocketIntent>,
     pub project_share: Option<PathBuf>,
+    pub retained: Option<(String, String)>,
 }
 
 fn invalid() -> CandidateError {
@@ -29,9 +30,17 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
     let mut internet = false;
     let mut project_share = None;
     let mut unfiltered_source = false;
+    let mut retained_run = None;
+    let mut retained_selection = None;
     let mut args = args.iter();
     while let Some(key) = args.next() {
         match *key {
+            "--expect-retained-run" if retained_run.is_none() => {
+                retained_run = Some(args.next().ok_or_else(invalid)?.to_string());
+            }
+            "--expect-retained-selection" if retained_selection.is_none() => {
+                retained_selection = Some(args.next().ok_or_else(invalid)?.to_string());
+            }
             "--project-share" if project_share.is_none() => {
                 let path = PathBuf::from(args.next().ok_or_else(invalid)?);
                 if !path.is_absolute() {
@@ -64,6 +73,22 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
         }
     }
     let profile = profile.ok_or_else(invalid)?;
+    let retained = match (retained_run, retained_selection) {
+        (None, None) => None,
+        (Some(run), Some(selection))
+            if run.len() == 32
+                && selection.len() == 64
+                && run
+                    .bytes()
+                    .chain(selection.bytes())
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && project_share.is_some()
+                && profile == Profile::Development =>
+        {
+            Some((run, selection))
+        }
+        _ => return Err(invalid()),
+    };
     if (internet && !hosts.is_empty())
         || unfiltered_source != project_share.is_some()
         || (project_share.is_some() && profile != Profile::Development)
@@ -88,12 +113,77 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
         bridges,
         dependencies,
         project_share,
+        retained,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_selection_requires_one_exact_paired_development_share() {
+        let run = "a".repeat(32);
+        let selection = "b".repeat(64);
+        let base = [
+            "--profile",
+            "development",
+            "--project-share",
+            "/fixture",
+            "--unfiltered-source",
+        ];
+        let mut args = base.to_vec();
+        args.extend([
+            "--expect-retained-run",
+            &run,
+            "--expect-retained-selection",
+            &selection,
+        ]);
+        assert_eq!(
+            parse(&args).unwrap().retained,
+            Some((run.clone(), selection.clone()))
+        );
+        for suffix in [
+            vec!["--expect-retained-run", &run],
+            vec!["--expect-retained-selection", &selection],
+            vec![
+                "--expect-retained-run",
+                "bad",
+                "--expect-retained-selection",
+                &selection,
+            ],
+            vec![
+                "--expect-retained-run",
+                &run,
+                "--expect-retained-selection",
+                "bad",
+            ],
+            vec![
+                "--expect-retained-run",
+                &run,
+                "--expect-retained-run",
+                &run,
+                "--expect-retained-selection",
+                &selection,
+            ],
+        ] {
+            let mut bad = base.to_vec();
+            bad.extend(suffix);
+            assert!(parse(&bad).is_err());
+        }
+        assert!(
+            parse(&[
+                "--profile",
+                "development",
+                "--internet",
+                "--expect-retained-run",
+                &run,
+                "--expect-retained-selection",
+                &selection
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn internet_mode_is_explicit_and_conflicts_with_allowlisting() {

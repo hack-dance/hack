@@ -82,12 +82,10 @@ complete bundle to change the candidate.
    runtime. Keep existing bundles in place while any of their child processes live.
 3. Select the new bundle's `hack-v5` by its full path with the same canonical
    mode-`0700` `HACK_NATIVE_HOME`. Check its `info` identity and update any explicitly
-   selected guest-relay artifact paths to the verified complete bundle. Explicitly
-   resume the retained runtime with the new bundle's `hack-native --candidate-root
-   /absolute/private/candidate-home runtime up --profile development --json` (use
-   its original profile). Normal frontend `up` currently inspects a retained graph
-   before starting the VM, so it cannot resume that graph while its VM is stopped.
-   Then restore the application and read back a saved data marker before accepting
+   selected guest-relay artifact paths to the verified complete bundle. Normal
+   frontend `up` validates the retained selection offline, resumes its clean owned
+   VM once if stopped, and then repeats live retained-data and restore-generation
+   checks. Restore the application and read back a saved data marker before accepting
    the upgrade.
 4. For rollback, retain-stop the new candidate in the same way, select the previous
    verified bundle with the same home, and repeat application/data readback. A prior
@@ -349,7 +347,17 @@ If the foreground owner concurrently retires its tmux session, cleanup accepts a
 fresh explicit absence proof. Missing ownership metadata or an unsuccessful query
 alone does not prove absence, and retirement preserves any replacement owner's state.
 The next ordinary `up` verifies that
-stopped receipt and restores the same run and volumes. It refuses an active, changed
+stopped receipt and restores the same run and volumes, including when its clean owned
+VM has been stopped. Offline `graph retained-preflight` returns durable eligibility
+only; it never fabricates volume observations or a restore generation. Startup checks
+the saved environment, profiles and AWS selector before hooks and binds the exact
+owner and receipt selection to `runtime up` with paired `--expect-retained-run` and
+`--expect-retained-selection` flags. Native startup holds publication retirement and
+revalidates the selection under the provider lease and immediately before boot. After
+resume, live inspection must still prove absent compute and present owned volumes;
+the existing restore selection pins the current boot and volume identities. Cancellation
+or timeout has an uncertain outcome and never replays runtime up or graph restore.
+It refuses an active, changed
 or uncertain mapping rather than allocating a new data volume. Down hooks resolve
 fresh managed host values using the environment selection saved by `up`; hook output goes to stderr with `--json`. A before-hook failure
 prevents cleanup; an after-hook failure reports that graph cleanup already completed.

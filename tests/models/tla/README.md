@@ -99,6 +99,50 @@ behavior, repeated jobs, multiple slots and real one-off traffic remain separate
 implementation and runtime gates. The existing Rebind model covers original-target
 drain/revocation; this model checks the later commit-before-new-grant boundary.
 
+## Stopped retained-pool startup
+
+`stopped-pool-startup/Resume.tla` checks one explicit startup from shape-valid
+stopped owner/retained receipt evidence. The positive control explores 71 states.
+Offline preflight records owner and receipt generations without granting graph
+authority. Either generation, or the retired-publication evidence, can change
+before the provider mutation lease. The boot effect requires revalidated exact
+selection and retirement under that lease. Cancellation observed before a new
+effect refuses it; a successful reply still requires fresh live resource and
+restore-selection proof before graph authority. Timeout/lost reply consumes the
+one attempt and cannot cause automatic replay. `booted` means a confirmed reply;
+its false value after timeout does not mean the VM remained stopped.
+
+Removing the selection guard must fail `NoSubstitutedBoot` in one `Boot` state
+with `attempts = 1`, `bootSelectionMatched = FALSE`, both selected generations
+equal to 1, and `locked = TRUE`. Removing the no-replay guard must fail
+`NoUncertainReplay` in one `Retry` state with `attempts = 2`, `uncertain = TRUE`,
+`bootSelectionMatched = TRUE`, `authority = FALSE` and `locked = TRUE`. Both
+controls require TLC exit 12, the named action and same-state witness; parser
+errors or other nonzero exits do not qualify.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `Preflight` | `provider/graph/retained_startup.rs::preflight` / `Guard::acquire` and `src/backends/native-project-retained-startup.ts`; exact durable Owner/Receipt digest and retired publication, explicitly `live_resources_verified = false` |
+| `SubstituteOwner` / `SubstituteReceipt` / `LoseRetirement` | Changes between offline preflight and runtime-up; `Guard::verify` rechecks full evidence rather than trusting the response |
+| `AcquireLease` / `Boot` | `provider/lifecycle.rs::up_with_retained_project_share` / `up_selected`; paired expected run/selection flags, provider mutation lease and retained guard verification before writes and immediately before `begin_boot`/start |
+| `Cancel` / `RefuseCancelled` / `Timeout` | Startup's abort checks and single guarded runtime-up invocation in `src/backends/native-project-start.ts`; `native-runtime-client.ts` refuses an already-aborted spawn and reaps only its own child on active abort, returning an uncertain outcome without replay |
+| `InspectLive` / `GrantGraph` | Post-boot `confirmedNativeRetainedGraph`, then `provider/graph/foreground.rs::restore_selection` and `provider/graph/restore.rs` generation verification before a fresh graph owner restores data |
+
+Rust paths above are relative to `packages/runtime-core/src/`. Owner and receipt
+each have two abstract versions and may be substituted once; these are pre-boot
+inputs, not the owner bytes written by a successful boot. Relevant cooperating
+mutations are excluded while the lease and retired-publication guard are held.
+The model treats final revalidation plus boot effect as atomic: this requires the
+implementation's guards across that boundary and does not prove filesystem race
+resistance. Offline shape checks are assumed, and live proof is a trusted oracle
+that includes the later restore-selection guard. Source/env/profile/AWS and disk
+validation, actual lock/process identity, hashing, cancellation delivery, durable
+writes, partial boot cleanup, multiple clients, later explicit user recovery,
+volume integrity and live application behavior remain separate tests. `Cancel`
+represents an observed abort check, not arbitrary OS signal delivery; cancellation
+does not reverse an already-admitted boot. There is no fairness or eventual-start
+claim, and a model pass is not native startup qualification.
+
 ## Graph admission
 
 `graph-admission/Admission.tla` checks the smallest admission race: two clients

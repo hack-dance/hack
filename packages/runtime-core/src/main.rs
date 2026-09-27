@@ -336,14 +336,28 @@ fn run() -> Result<(), CandidateError> {
                     hack_runtime_core::provider::ProjectShareIntent::approve(project, true)
                 })
                 .transpose()?;
-            print_json(&hack_runtime_core::provider::up_with_project_share(
-                &discover_candidate(&requested)?,
-                options.profile,
-                options.bridges,
-                options.dependencies,
-                options.network,
-                share,
-            )?)?;
+            let candidate = discover_candidate(&requested)?;
+            let started = if let Some((run, selection)) = options.retained {
+                hack_runtime_core::provider::up_with_retained_project_share(
+                    &candidate,
+                    options.profile,
+                    options.bridges,
+                    options.dependencies,
+                    options.network,
+                    share,
+                    (&run, &selection),
+                )
+            } else {
+                hack_runtime_core::provider::up_with_project_share(
+                    &candidate,
+                    options.profile,
+                    options.bridges,
+                    options.dependencies,
+                    options.network,
+                    share,
+                )
+            };
+            print_json(&started?)?;
         }
         ["runtime", action @ ("probe" | "up"), "--profile", profile]
         | [

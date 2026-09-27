@@ -152,7 +152,7 @@ pub(super) fn recorded_process(
         executable: binary(candidate),
     })
 }
-fn verify_live(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
+pub(super) fn verify_live(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
     let recorded = owner.process.as_ref().ok_or_else(|| {
         CandidateError::new(
             "process_identity_unavailable",
@@ -707,7 +707,7 @@ pub fn up_with_capabilities(
     requested: Option<super::BridgeIntent>,
     network: Option<super::NetworkIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(candidate, profile, requested, network, None, None)
+    up_selected(candidate, profile, requested, network, None, None, None)
 }
 
 /// Stage fixed inbound and outbound UNIX socket capacity. Missing dependency
@@ -718,7 +718,7 @@ pub fn up_with_sockets(
     bridge: Option<super::BridgeIntent>,
     dependencies: Option<super::DependencySocketIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(candidate, profile, bridge, None, dependencies, None)
+    up_selected(candidate, profile, bridge, None, dependencies, None, None)
 }
 
 /// Explicit socket and egress selection; an existing pool is never widened.
@@ -729,7 +729,15 @@ pub fn up_with_network_sockets(
     dependencies: Option<super::DependencySocketIntent>,
     network: Option<super::NetworkIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(candidate, profile, bridge, network, dependencies, None)
+    up_selected(
+        candidate,
+        profile,
+        bridge,
+        network,
+        dependencies,
+        None,
+        None,
+    )
 }
 
 /// Explicit unfiltered writable project sharing; never modifies an existing pool.
@@ -748,6 +756,29 @@ pub fn up_with_project_share(
         network,
         dependencies,
         project_share,
+        None,
+    )
+}
+
+/// One explicit start bound to offline retained graph eligibility. The selection
+/// is revalidated under the provider lease and before boot; uncertainty is never replayed.
+pub fn up_with_retained_project_share(
+    candidate: &Candidate,
+    profile: super::Profile,
+    bridge: Option<super::BridgeIntent>,
+    dependencies: Option<super::DependencySocketIntent>,
+    network: Option<super::NetworkIntent>,
+    project_share: Option<super::ProjectShareIntent>,
+    retained: (&str, &str),
+) -> Result<RuntimeStatus, CandidateError> {
+    up_selected(
+        candidate,
+        profile,
+        bridge,
+        network,
+        dependencies,
+        project_share,
+        Some(retained),
     )
 }
 
@@ -758,7 +789,21 @@ fn up_selected(
     network: Option<super::NetworkIntent>,
     dependencies: Option<super::DependencySocketIntent>,
     project_share: Option<super::ProjectShareIntent>,
+    retained: Option<(&str, &str)>,
 ) -> Result<RuntimeStatus, CandidateError> {
+    #[cfg(target_os = "macos")]
+    let retained_guard = retained
+        .map(|(run, selection)| {
+            super::graph::retained_startup::Guard::acquire(candidate, run, Some(selection))
+        })
+        .transpose()?;
+    #[cfg(not(target_os = "macos"))]
+    if retained.is_some() {
+        return Err(CandidateError::new(
+            "unsupported_host",
+            "Retained foreground startup requires macOS.",
+        ));
+    }
     super::network_update::require_complete(candidate)?;
     if let Some(share) = &project_share {
         share.validate()?;
@@ -830,6 +875,10 @@ fn up_selected(
     artifact::verify_engine(candidate)?;
     super::network_tools::verify(candidate)?;
     let _lock = state::Lock::acquire(&root(candidate))?;
+    #[cfg(target_os = "macos")]
+    if let Some(guard) = &retained_guard {
+        guard.verify(candidate)?;
+    }
     super::network_update::require_complete(candidate)?;
     let fresh_owner = match fs::symlink_metadata(root(candidate).join("owner.json")) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
@@ -880,6 +929,10 @@ fn up_selected(
     super::dependency_socket::verify(candidate, &owner)?;
     state::write(&root(candidate).join("admission.json"), &samples)?;
     if owner.phase == "running" {
+        #[cfg(target_os = "macos")]
+        if let Some(guard) = &retained_guard {
+            guard.verify(candidate)?;
+        }
         verify_live(candidate, &owner)?;
         audit_boot(candidate, &owner)?;
         return status(candidate);
@@ -985,6 +1038,10 @@ fn up_selected(
     if let Err(error) = super::config_audit::verify(candidate, &owner) {
         phase(candidate, &mut owner, "stopped-before-engine")?;
         return Err(error);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(guard) = &retained_guard {
+        guard.verify(candidate)?;
     }
     let previous_boot = owner.begin_boot();
     owner.reclamation = Some(boot_reclamation_policy());
@@ -1295,6 +1352,51 @@ fn prepare_rootfs(candidate: &Candidate, owner: &mut Owner) -> Result<(), Candid
         return Err(CandidateError::new(
             "artifact_digest_mismatch",
             "Runtime guest base changed; refusing boot.",
+        ));
+    }
+    Ok(())
+}
+
+/// Retained startup may verify existing templates/rootfs but never reconstruct
+/// missing provider state before refusing a stale or interrupted selection.
+#[cfg(target_os = "macos")]
+pub(super) fn verify_retained_rootfs(
+    candidate: &Candidate,
+    owner: &Owner,
+) -> Result<(), CandidateError> {
+    let expected = owner.rootfs_digest.as_deref().ok_or_else(|| {
+        CandidateError::new(
+            "graph_retained_startup",
+            "Retained runtime rootfs pin is missing.",
+        )
+    })?;
+    let templates = root(candidate).join("home/.smolvm");
+    state::check_private_directory(&templates)?;
+    for name in ["storage-template.ext4.zst", "overlay-template.ext4.zst"] {
+        let path = templates.join(name);
+        let metadata = fs::symlink_metadata(&path).map_err(io)?;
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || artifact::digest(&path)? != artifact::digest(&artifact::root(candidate).join(name))?
+        {
+            return Err(CandidateError::new(
+                "artifact_digest_mismatch",
+                "Retained disk template changed or is missing.",
+            ));
+        }
+    }
+    let destination = root(candidate).join("rootfs");
+    reject_aliased_state(&destination)?;
+    let data = owner.data_dir();
+    let machine = data.file_name().and_then(|v| v.to_str()).ok_or_else(|| {
+        CandidateError::new("foreign_state", "Owned machine identity is missing.")
+    })?;
+    let marker = format!(".smolvm-ready.{machine}");
+    if artifact::rootfs_digest(&destination, Some(&marker))? != expected {
+        return Err(CandidateError::new(
+            "artifact_digest_mismatch",
+            "Retained guest rootfs changed.",
         ));
     }
     Ok(())

@@ -28,6 +28,11 @@ import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import { serveNativeProjectGraph } from "./native-project-process.ts";
 import { selectNativeProjectRestore } from "./native-project-restore.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
+import {
+  preflightNativeRetainedStartup,
+  verifyNativeResumedRetainedGraph,
+  verifyNativeRetainedMapping,
+} from "./native-project-retained-startup.ts";
 import { withNativeProjectReview } from "./native-project-review.ts";
 import {
   hasOnlyNativeSupportedLabels,
@@ -182,8 +187,8 @@ function refused(): Error {
   );
 }
 
-function requireActiveStartup(signal: AbortSignal): void {
-  if (signal.aborted) {
+function requireActiveStartup(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
     throw refused();
   }
 }
@@ -496,28 +501,9 @@ async function selectNativeStartup(opts: {
   readonly aws?: { readonly profile: string; readonly region?: string };
   readonly load: typeof loadNativeProjectRun;
   readonly invoke: typeof invokeNativeRuntime;
+  readonly signal?: AbortSignal;
 }) {
   const retained = await opts.load(opts.scope);
-  if (retained) {
-    if (
-      opts.restore &&
-      JSON.stringify(opts.restore) !== JSON.stringify(retained)
-    ) {
-      throw new Error("Native retained run mapping changed before restore.");
-    }
-    const observed = await inspectNativeProjectGraph({
-      runtime: opts.runtime,
-      projectRoot: opts.scope.projectRoot,
-      run: retained.run,
-      invoke: opts.invoke,
-    });
-    if (!confirmedNativeRetainedGraph(observed, retained)) {
-      throw new Error(
-        "Native project already has an owned run mapping that is not safely stopped; inspect it before starting another run."
-      );
-    }
-  }
-  const restore = opts.restore ?? retained ?? undefined;
   const selection =
     retained && !opts.restore
       ? retainedStartupSelection({
@@ -531,7 +517,42 @@ async function selectNativeStartup(opts: {
           profiles: opts.requestedProfiles,
           aws: opts.aws,
         };
-  return { retained, restore, selection };
+  let retainedFlags: string[] = [];
+  if (retained) {
+    if (
+      opts.restore &&
+      JSON.stringify(opts.restore) !== JSON.stringify(retained)
+    ) {
+      throw new Error("Native retained run mapping changed before restore.");
+    }
+    const preflight = await preflightNativeRetainedStartup({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      run: retained,
+      invoke: opts.invoke,
+      signal: opts.signal,
+    });
+    retainedFlags = preflight.flags;
+    const observed =
+      preflight.runtimePhase === "running"
+        ? await inspectNativeProjectGraph({
+            runtime: opts.runtime,
+            projectRoot: opts.scope.projectRoot,
+            run: retained.run,
+            invoke: opts.invoke,
+          })
+        : undefined;
+    if (
+      preflight.runtimePhase === "running" &&
+      !confirmedNativeRetainedGraph(observed, retained)
+    ) {
+      throw new Error(
+        "Native project already has an owned run mapping that is not safely stopped; inspect it before starting another run."
+      );
+    }
+  }
+  const restore = opts.restore ?? retained ?? undefined;
+  return { retained, restore, selection, retainedFlags };
 }
 function selectedMapping(opts: {
   readonly ready: NativeProjectRun;
@@ -603,6 +624,7 @@ export async function startNativeProject(opts: {
   readonly dependencies?: Partial<Dependencies>;
 }): Promise<number> {
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
+  requireActiveStartup(opts.signal);
   const allowedHosts = validateNativeAllowedHosts(opts.allowedHosts);
   validateHttpsSelection(opts.https);
   if (!opts.sharedSource) {
@@ -612,17 +634,20 @@ export async function startNativeProject(opts: {
   }
   const deps = { ...DEFAULTS, ...opts.dependencies };
   await refusePendingFreshStart(opts.restore, opts.scope, deps.loadRestart);
-  const { retained, restore, selection } = await selectNativeStartup({
-    runtime: opts.runtime,
-    scope: opts.scope,
-    restore: opts.restore,
-    envName: opts.envName,
-    profiles: opts.profiles,
-    requestedProfiles,
-    aws: opts.aws,
-    load: deps.load,
-    invoke: deps.invoke,
-  });
+  const { retained, restore, selection, retainedFlags } =
+    await selectNativeStartup({
+      runtime: opts.runtime,
+      scope: opts.scope,
+      restore: opts.restore,
+      envName: opts.envName,
+      profiles: opts.profiles,
+      requestedProfiles,
+      aws: opts.aws,
+      load: deps.load,
+      invoke: deps.invoke,
+      signal: opts.signal,
+    });
+  requireActiveStartup(opts.signal);
   const profiles = selection.profiles;
   await deps.prepareStorage(opts.scope);
   let input = await deps.prepare({
@@ -713,6 +738,12 @@ export async function startNativeProject(opts: {
       dependencies: hostDependencies,
       services: specs,
     });
+    await verifyNativeRetainedMapping({
+      run: retained,
+      scope: opts.scope,
+      load: deps.load,
+    });
+    requireActiveStartup(controller.signal);
     await deps.invoke({
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
@@ -724,6 +755,7 @@ export async function startNativeProject(opts: {
         "--project-share",
         opts.scope.projectRoot,
         "--unfiltered-source",
+        ...retainedFlags,
         ...(hostDependencies.length > 0
           ? [
               "--dependency-sockets",
@@ -740,6 +772,14 @@ export async function startNativeProject(opts: {
           : ["--internet"]),
         "--json",
       ],
+      signal: controller.signal,
+    });
+    requireActiveStartup(controller.signal);
+    await verifyNativeResumedRetainedGraph({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      run: retained,
+      invoke: deps.invoke,
     });
     for (const spec of Object.values(specs)) {
       if (controller.signal.aborted) {

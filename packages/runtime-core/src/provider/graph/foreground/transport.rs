@@ -441,7 +441,10 @@ pub(in crate::provider::graph) fn verify_recovered_publisher_retired(
     }
     Ok(())
 }
-fn root(candidate: &Candidate, run: &str) -> Result<PathBuf, CandidateError> {
+pub(in crate::provider::graph) fn root(
+    candidate: &Candidate,
+    run: &str,
+) -> Result<PathBuf, CandidateError> {
     if !super::super::hex(run, 32) {
         return Err(refused());
     }
@@ -919,7 +922,7 @@ mod tests;
 
 /// Exclusive retirement guard shares the publisher's lock. Absence alone never
 /// authorizes cleanup while a foreground owner can still publish or restore.
-pub(super) struct Retired {
+pub(in crate::provider::graph) struct Retired {
     root: PathBuf,
     identity: (u64, u64),
     lock_identity: (u64, u64),

@@ -27,6 +27,37 @@ type ModelContract = {
 // Bounds and witnesses are reviewed contracts, not learned from each run.
 const contracts: readonly ModelContract[] = [
   {
+    name: "stopped-pool-startup",
+    module: "Resume",
+    states: 71,
+    invariant: "NoSubstitutedBoot",
+    action: "Boot",
+    fields: [
+      'phase = "pending"',
+      "attempts = 1",
+      "bootSelectionMatched = FALSE",
+      "selectedOwner = 1",
+      "selectedReceipt = 1",
+      "locked = TRUE",
+    ],
+    additionalControls: [
+      {
+        name: "uncertain-replay",
+        negative: true,
+        invariant: "NoUncertainReplay",
+        action: "Retry",
+        fields: [
+          'phase = "pending"',
+          "attempts = 2",
+          "uncertain = TRUE",
+          "bootSelectionMatched = TRUE",
+          "authority = FALSE",
+          "locked = TRUE",
+        ],
+      },
+    ],
+  },
+  {
     name: "dependency-rebind",
     module: "Rebind",
     states: 21,

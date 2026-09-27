@@ -167,6 +167,18 @@ function stoppedGraph(run: NativeProjectRun) {
     observations: { "container:web": { state: "absent" } },
   };
 }
+function retainedPreflight(run: NativeProjectRun, phase = "running") {
+  return {
+    version: 1,
+    run: run.run,
+    owner: run.owner,
+    namespace: run.namespace,
+    plan: run.planId,
+    runtime_phase: phase,
+    selection: "7".repeat(64),
+    live_resources_verified: false,
+  };
+}
 test("foreground saves after readiness and retains mapping after confirmed stop", async () => {
   const { opts, events } = await fixture();
   expect(await startNativeProject(opts)).toBe(0);
@@ -219,8 +231,10 @@ test("source opt-in and occupied mapping refuse before lifecycle or runtime effe
     namespace: "c".repeat(64),
     planId: "d".repeat(64),
   });
-  await expect(startNativeProject(opts)).rejects.toThrow("already");
-  expect(events).toEqual(["graph inspect"]);
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "cannot change the retained run"
+  );
+  expect(events).toEqual([]);
 });
 test("caller cancellation is forwarded and lifecycle cleanup remains owned", async () => {
   const { opts, events } = await fixture();
@@ -1195,7 +1209,14 @@ test("ordinary up reuses a stopped owned run and publishes its mapping by compar
   opts.dependencies.load = async () => saved;
   const invoke = opts.dependencies.invoke!;
   opts.dependencies.invoke = async (request) => {
-    if (request.args[1] === "inspect" && events.length === 0) {
+    if (request.args[1] === "retained-preflight") {
+      events.push("graph retained-preflight");
+      return retainedPreflight(saved);
+    }
+    if (
+      request.args[1] === "inspect" &&
+      !events.includes("graph dependency-plan")
+    ) {
       events.push("graph inspect");
       return stoppedGraph(saved);
     }
@@ -1238,7 +1259,7 @@ test("retained startup selection mismatch refuses before lifecycle effects", asy
   await expect(startNativeProject({ ...opts, envName: "qa" })).rejects.toThrow(
     "cannot change the retained run"
   );
-  expect(events).toEqual(["graph inspect"]);
+  expect(events).toEqual([]);
 });
 test("restore startup passes the retained run and selected generation to its owner", async () => {
   const { opts } = await fixture();
@@ -1262,6 +1283,162 @@ test("restore startup passes the retained run and selected generation to its own
     return await serve(request);
   };
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
+});
+
+test("ordinary up resumes a stopped owned VM once and requires live proof before restore", async () => {
+  for (const failed of [
+    "none",
+    "resume-timeout",
+    "live-proof",
+    "changed-mapping",
+    "cancel-preflight",
+    "cancel-before-up",
+  ]) {
+    const { opts, events } = await fixture(false);
+    const saved: NativeProjectRun = {
+      run: "1".repeat(32),
+      owner: "c".repeat(32),
+      namespace: "b".repeat(64),
+      planId: "a".repeat(64),
+      effectiveEnvName: null,
+      profiles: [],
+      aws: null,
+    };
+    const controller = new AbortController();
+    let up = 0,
+      served = 0,
+      loaded = 0;
+    opts.dependencies.load = async () => {
+      loaded++;
+      return failed === "changed-mapping" && loaded > 1
+        ? { ...saved, owner: "9".repeat(32) }
+        : saved;
+    };
+    const invoke = opts.dependencies.invoke!;
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "retained-preflight") {
+        expect(request.signal).toBe(controller.signal);
+        events.push("offline-preflight");
+        if (failed === "cancel-preflight") {
+          controller.abort();
+        }
+        return retainedPreflight(saved, "stopped");
+      }
+      if (request.args[0] === "runtime" && request.args[1] === "up") {
+        up++;
+        events.push("resume");
+        expect(request.args).toContain("--expect-retained-run");
+        expect(request.args).toContain(saved.run);
+        expect(request.args).toContain("--expect-retained-selection");
+        expect(request.args).toContain("7".repeat(64));
+        expect(request.signal).toBeDefined();
+        if (failed === "resume-timeout") {
+          throw new Error(
+            "Native runtime request timed out; outcome uncertain"
+          );
+        }
+        return {};
+      }
+      if (request.args[1] === "inspect" && served === 0) {
+        // This is the bug control: live inspection is impossible before the VM resumes.
+        if (up === 0) {
+          throw new Error("runtime_not_running");
+        }
+        events.push("live-retained-proof");
+        return failed === "live-proof"
+          ? { ...stoppedGraph(saved), journal_incomplete: true }
+          : stoppedGraph(saved);
+      }
+      if (request.args[1] === "restore-selection") {
+        events.push("restore-selection");
+        return { ...saved, plan: saved.planId, generation: "2".repeat(64) };
+      }
+      return await invoke(request);
+    };
+    const before = opts.before;
+    opts.before = async () => {
+      if (failed === "cancel-before-up") {
+        controller.abort();
+      }
+      return await before();
+    };
+    const serve = opts.dependencies.serve!;
+    opts.dependencies.serve = async (request) => {
+      served++;
+      expect(events.indexOf("resume")).toBeLessThan(
+        events.indexOf("live-retained-proof")
+      );
+      expect(events.indexOf("live-retained-proof")).toBeLessThan(
+        events.indexOf("restore-selection")
+      );
+      expect(request.restore).toBe(true);
+      expect(request.run).toBe(saved.run);
+      return await serve(request);
+    };
+    const attempt = startNativeProject({ ...opts, signal: controller.signal });
+    if (failed === "none") {
+      expect(await attempt).toBe(0);
+      expect(served).toBe(1);
+    } else {
+      await expect(attempt).rejects.toThrow();
+      expect(served).toBe(0);
+    }
+    expect(up).toBe(
+      ["none", "resume-timeout", "live-proof"].includes(failed) ? 1 : 0
+    );
+    if (failed === "cancel-preflight") {
+      expect(events).toEqual(["offline-preflight"]);
+    }
+  }
+});
+
+test("retained selectors, foreign eligibility and pre-cancellation refuse before hooks or resume", async () => {
+  for (const failed of [
+    "env",
+    "profiles",
+    "aws",
+    "foreign",
+    "legacy",
+    "canceled",
+  ]) {
+    const { opts, events } = await fixture(false);
+    const saved: NativeProjectRun = {
+      run: "1".repeat(32),
+      owner: "c".repeat(32),
+      namespace: "b".repeat(64),
+      planId: "a".repeat(64),
+      effectiveEnvName: null,
+      profiles: [],
+      aws: null,
+    };
+    opts.dependencies.load = async () =>
+      failed === "legacy"
+        ? {
+            run: saved.run,
+            owner: saved.owner,
+            namespace: saved.namespace,
+            planId: saved.planId,
+          }
+        : saved;
+    opts.dependencies.invoke = async () => {
+      events.push("offline-preflight");
+      return { ...retainedPreflight(saved, "stopped"), owner: "9".repeat(32) };
+    };
+    const controller = new AbortController();
+    if (failed === "canceled") {
+      controller.abort();
+    }
+    await expect(
+      startNativeProject({
+        ...opts,
+        signal: controller.signal,
+        ...(failed === "env" ? { envName: "qa" } : {}),
+        ...(failed === "profiles" ? { profiles: ["qa"] } : {}),
+        ...(failed === "aws" ? { aws: { profile: "qa" } } : {}),
+      })
+    ).rejects.toThrow();
+    expect(events).toEqual(failed === "foreign" ? ["offline-preflight"] : []);
+  }
 });
 
 test("changed shared source restores with old owner and cache publication", async () => {

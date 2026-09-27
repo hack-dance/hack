@@ -56,10 +56,17 @@ export async function invokeNativeRuntime(opts: {
   readonly args: readonly string[];
   readonly cwd: string;
   readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
   readonly privateInput?: Uint8Array;
   /** Graph exec and run-service return command exit status alongside JSON. */
   readonly serviceExecResponse?: boolean;
 }): Promise<unknown> {
+  if (opts.signal?.aborted) {
+    throw new NativeRuntimeRequestError({
+      message:
+        "Native runtime request was canceled before admission; no request was started.",
+    });
+  }
   const timeoutMs = opts.timeoutMs ?? 180_000;
   if (
     !(
@@ -91,6 +98,15 @@ export async function invokeNativeRuntime(opts: {
   );
   const failureDetails = readNativeFailure(child.stderr);
   let timedOut = false;
+  let canceled = false;
+  const cancel = () => {
+    canceled = true;
+    child.kill("SIGKILL");
+  };
+  opts.signal?.addEventListener("abort", cancel, { once: true });
+  if (opts.signal?.aborted) {
+    cancel();
+  }
   const timer = setTimeout(() => {
     timedOut = true;
     child.kill("SIGKILL");
@@ -103,6 +119,12 @@ export async function invokeNativeRuntime(opts: {
     const bytes = await readBoundedOutput(child.stdout);
     const code = await child.exited;
     const failure = await failureDetails;
+    if (canceled) {
+      throw new NativeRuntimeRequestError({
+        message:
+          "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
+      });
+    }
     rethrowNativeInputFailure(inputFailure, {
       interrupted: timedOut,
       code,
@@ -116,6 +138,7 @@ export async function invokeNativeRuntime(opts: {
       opts.serviceExecResponse
     );
   } finally {
+    opts.signal?.removeEventListener("abort", cancel);
     clearTimeout(timer);
     if (child.exitCode === null) {
       child.kill("SIGKILL");

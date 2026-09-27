@@ -118,6 +118,55 @@ test("failures omit subprocess diagnostics and timeouts are bounded", async () =
   ).rejects.toThrow("Native runtime request timed out");
 });
 
+test("cancellation starts at most one native request and reaps only its owned child", async () => {
+  for (const mode of ["before", "running", "timeout"]) {
+    const runtime = await fixture();
+    const marker = join(runtime.home, "attempts");
+    const pidFile = join(runtime.home, "pid");
+    await Bun.write(
+      runtime.binary,
+      `#!${process.execPath}
+import { appendFileSync, writeFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(marker)}, "attempt\\n");
+writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+await Bun.sleep(60_000);
+`
+    );
+    const controller = new AbortController();
+    if (mode === "before") {
+      controller.abort();
+    }
+    const attempt = invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args: ["runtime", "up", "--json"],
+      signal: controller.signal,
+      timeoutMs: mode === "timeout" ? 250 : 2000,
+    });
+    if (mode === "running") {
+      const deadline = performance.now() + 1500;
+      while (
+        !(await Bun.file(pidFile).exists()) &&
+        performance.now() < deadline
+      ) {
+        await Bun.sleep(10);
+      }
+      expect(await Bun.file(pidFile).exists()).toBe(true);
+      controller.abort();
+    }
+    await expect(attempt).rejects.toThrow(
+      mode === "timeout" ? "timed out" : "canceled"
+    );
+    if (mode === "before") {
+      expect(await Bun.file(marker).exists()).toBe(false);
+    } else {
+      expect(await Bun.file(marker).text()).toBe("attempt\n");
+      const pid = Number(await Bun.file(pidFile).text());
+      expect(() => process.kill(pid, 0)).toThrow();
+    }
+  }
+});
+
 test("private-input and response bounds reject instead of truncating", async () => {
   const runtime = await fixture();
   await expect(

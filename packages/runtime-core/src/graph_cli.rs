@@ -154,6 +154,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "serve-restore",
         "source-compatibility",
         "restore-selection",
+        "retained-preflight",
         "owner-status",
         "restart",
         "restore",
@@ -354,6 +355,22 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph receipt."))
     };
     match *action {
+        "retained-preflight" => {
+            if singles.len() != 1 || remove_data || !readiness.is_empty() || !profiles.is_empty() {
+                return Err(invalid());
+            }
+            #[cfg(target_os = "macos")]
+            {
+                graph::retained_startup_preflight(candidate, run)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(CandidateError::new(
+                    "unsupported_host",
+                    "Retained foreground startup requires macOS.",
+                ))
+            }
+        }
         "restore-selection" => {
             #[cfg(target_os = "macos")]
             {

@@ -380,21 +380,14 @@ pub(super) fn require_dependency_rebind_complete(
 
 /// Explicit owned cleanup preserves dependency refresh evidence before a later
 /// restore may create new helper generations. This never replays the refresh.
+#[cfg(target_os = "macos")]
 pub(super) fn archive_dependency_rebind_after_cleanup(
     root: &Path,
     original: &Receipt,
     cleaned: &Receipt,
     boot: &str,
 ) -> Result<(), CandidateError> {
-    #[cfg(target_os = "macos")]
-    {
-        runtime::archive_dependency_rebind_after_cleanup(root, original, cleaned, boot)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (root, original, cleaned, boot);
-        Ok(())
-    }
+    runtime::archive_dependency_rebind_after_cleanup(root, original, cleaned, boot)
 }
 
 pub(super) fn guest_directory(run: &str, generation: &str) -> String {

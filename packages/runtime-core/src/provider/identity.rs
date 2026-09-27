@@ -136,14 +136,6 @@ pub fn parent(recorded: &ProcessIdentity) -> Result<ProcessIdentity, CandidateEr
     Ok(supervisor)
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn parent(_recorded: &ProcessIdentity) -> Result<ProcessIdentity, CandidateError> {
-    Err(CandidateError::new(
-        "unsupported_host",
-        "Native supervisor inspection requires macOS.",
-    ))
-}
-
 #[cfg(target_os = "macos")]
 fn parent_refused() -> CandidateError {
     CandidateError::new(

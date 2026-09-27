@@ -166,11 +166,21 @@ fn identity_notifications_require_authenticated_checks_and_ignore_revocation_or_
 #[cfg(target_os = "macos")]
 #[test]
 fn pending_accepted_identity_failure_emits_one_terminal_notification() {
+    isolated_endpoint_fixture(
+        "provider::host_endpoint::tests::pending_accepted_identity_notification_child",
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated accepted/close fixture launched by pending_accepted_identity_failure_emits_one_terminal_notification"]
+fn pending_accepted_identity_notification_child() {
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
     let (listener, endpoint) = fixture();
+    listener.set_nonblocking(true).unwrap();
     let failures = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&failures);
     let endpoint = endpoint.with_identity_notification(Arc::new(move || {
@@ -178,13 +188,34 @@ fn pending_accepted_identity_failure_emits_one_terminal_notification() {
     }));
     let (_authority, session) = authorized(&endpoint);
     let mut pending = endpoint
-        .begin_connect(Duration::from_secs(1), &session)
+        .begin_connect(Duration::from_secs(3), &session)
         .unwrap();
+    let mut peer = accept_pending(&listener);
+    let peer_port = pending
+        .stream
+        .as_ref()
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    assert!(endpoint.verify(peer_port).unwrap());
+    assert_eq!(failures.load(Ordering::Relaxed), 0);
     drop(listener);
-    assert!(pending.progress().is_err());
+    // Prove listener loss independently without emitting an authenticated notice.
+    // An unaccepted socket's transport error or an expired deadline is not drift proof.
+    assert!(endpoint.fingerprint().is_err());
+    assert_eq!(failures.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        pending.progress().unwrap_err().code,
+        "host_endpoint_identity"
+    );
+    assert!(pending.stream.is_none());
     assert_eq!(failures.load(Ordering::Relaxed), 1);
     assert!(pending.progress().is_err());
     assert_eq!(failures.load(Ordering::Relaxed), 1);
+    peer.set_nonblocking(false).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
 }
 
 #[cfg(target_os = "macos")]
@@ -264,7 +295,7 @@ fn pending_accept_times_out_without_releasing_payload() {
 #[cfg(target_os = "macos")]
 #[test]
 fn replacement_listener_is_refused_in_the_same_process() {
-    isolated_replacement("provider::host_endpoint::tests::replacement_listener_child");
+    isolated_endpoint_fixture("provider::host_endpoint::tests::replacement_listener_child");
 }
 #[cfg(target_os = "macos")]
 #[test]
@@ -501,11 +532,11 @@ fn pending_timeout_and_drop_release_the_socket_without_data() {
 #[cfg(target_os = "macos")]
 #[test]
 fn pending_replacement_cannot_release_stream() {
-    isolated_replacement("provider::host_endpoint::tests::pending_replacement_child");
+    isolated_endpoint_fixture("provider::host_endpoint::tests::pending_replacement_child");
 }
 #[cfg(target_os = "macos")]
-fn isolated_replacement(test: &str) {
-    // The close/rebind fixture must not be inherited by unrelated parallel forks.
+fn isolated_endpoint_fixture(test: &str) {
+    // Close/rebind fixtures must not be inherited by unrelated parallel forks.
     // Keep its sockets in an isolated child and require the complete assertion path.
     use std::process::{Child, Command, Stdio};
     struct OwnedChild(Child);
@@ -525,17 +556,16 @@ fn isolated_replacement(test: &str) {
             .unwrap(),
     );
     let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
+    let status = loop {
         if let Some(status) = child.0.try_wait().unwrap() {
-            assert!(status.success());
-            break;
+            break status;
         }
         assert!(
             Instant::now() < deadline,
-            "endpoint replacement child exceeded its watchdog"
+            "endpoint fixture child exceeded its watchdog"
         );
         std::thread::sleep(Duration::from_millis(1));
-    }
+    };
     let mut output = String::new();
     child
         .0
@@ -546,6 +576,10 @@ fn isolated_replacement(test: &str) {
         .read_to_string(&mut output)
         .unwrap();
     assert!(output.len() <= 4096);
+    assert!(
+        status.success(),
+        "owned endpoint fixture {test} failed: {output}"
+    );
     assert!(
         output.contains("test result: ok. 1 passed"),
         "isolated assertion did not run"

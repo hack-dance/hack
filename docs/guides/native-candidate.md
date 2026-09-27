@@ -82,8 +82,13 @@ complete bundle to change the candidate.
    runtime. Keep existing bundles in place while any of their child processes live.
 3. Select the new bundle's `hack-v5` by its full path with the same canonical
    mode-`0700` `HACK_NATIVE_HOME`. Check its `info` identity and update any explicitly
-   selected guest-relay artifact paths to the verified complete bundle. Restore the
-   application and read back a saved data marker before accepting the upgrade.
+   selected guest-relay artifact paths to the verified complete bundle. Explicitly
+   resume the retained runtime with the new bundle's `hack-native --candidate-root
+   /absolute/private/candidate-home runtime up --profile development --json` (use
+   its original profile). Normal frontend `up` currently inspects a retained graph
+   before starting the VM, so it cannot resume that graph while its VM is stopped.
+   Then restore the application and read back a saved data marker before accepting
+   the upgrade.
 4. For rollback, retain-stop the new candidate in the same way, select the previous
    verified bundle with the same home, and repeat application/data readback. A prior
    binary refusing newer state is an unsupported downgrade, not a successful rollback.

@@ -63,6 +63,11 @@ chmod 755 "$out/hack-native" "$out/hack-relay-guest"
 python3 scripts/verify-native-relay.py "$out/hack-relay-guest"
 cp packages/runtime-core/provider-pins.json "$out/provider-pins.json"
 bun build index.ts --compile --outfile "$out/hack-cli"
+# Bun appends the compiled program to its runtime. Re-sign those final bytes;
+# preserve runtime metadata rather than trusting the embedded runtime's signature.
+/usr/bin/codesign --force --sign - --preserve-metadata=entitlements,flags,runtime "$out/hack-cli"
+/usr/bin/codesign --verify --strict "$out/hack-cli"
+/usr/bin/codesign --verify --strict "$out/hack-native"
 cp scripts/hack-v5.sh "$out/hack-v5"
 chmod 755 "$out/hack-cli" "$out/hack-v5"
 cp docs/guides/native-candidate.md "$out/README.md"

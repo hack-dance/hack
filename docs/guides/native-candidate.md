@@ -22,6 +22,10 @@ interpreter or shared-library requirements before publishing the bundle. It cont
 state, project data, or credentials. It can be copied outside the source checkout;
 Rust, Zig, Bun and the checkout are not needed to run the resulting executable.
 Host system utilities and the pinned provider remain runtime prerequisites.
+The build re-signs the final compiled frontend with a local ad-hoc signature and
+strictly verifies both macOS executables before generating checksums. This checks
+code integrity; an ad-hoc signature does not establish a publisher identity or
+provide Apple notarization. Verify `SHA256SUMS` after copying the complete bundle.
 `hack-relay-guest` runs inside the Linux guest, not on macOS. For graph dependency
 selections, set `artifact` to this bundled file's absolute path and
 `artifact_sha256` to its entry in `SHA256SUMS`; the runtime verifies it again before

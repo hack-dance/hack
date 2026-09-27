@@ -49,6 +49,14 @@ enum Command {
         Arc<AtomicBool>,
         Reply<FenceIdentity>,
     ),
+    BeginTerminalRebind(
+        GraphScope,
+        u8,
+        [u8; 32],
+        HostEndpoint,
+        Arc<AtomicBool>,
+        Reply<FenceIdentity>,
+    ),
     Replace(
         SlotFence,
         [u8; 32],
@@ -95,6 +103,9 @@ struct Rebind {
     canceled: Arc<AtomicBool>,
     old_generation: [u8; 32],
     expected_count: usize,
+    /// An empty fence selects a future one-off endpoint; it grants no authority
+    /// to historical completed services and cannot provision replacements.
+    terminal_endpoint: Option<HostEndpoint>,
     phase: RebindPhase,
     completed_targets: Vec<Target>,
     completion_cancel: Option<Arc<AtomicBool>>,
@@ -249,9 +260,13 @@ impl Slot {
         Ok(())
     }
     fn accepts(&self) -> bool {
-        self.rebind
-            .as_ref()
-            .is_none_or(|state| state.phase == RebindPhase::Complete)
+        self.rebind.as_ref().is_none_or(|state| {
+            state.phase == RebindPhase::Complete
+                && !state
+                    .completion_cancel
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.load(Ordering::Acquire))
+        })
     }
 }
 impl Drop for Slot {
@@ -364,6 +379,7 @@ impl Reactor {
         let retry_count = match &slot.rebind {
             Some(previous)
                 if previous.phase == RebindPhase::Aborted
+                    && previous.terminal_endpoint.is_none()
                     && previous.identity.scope == scope
                     && previous.old_generation == expected =>
             {
@@ -412,6 +428,90 @@ impl Reactor {
             canceled,
             old_generation: expected,
             expected_count,
+            terminal_endpoint: None,
+            phase: RebindPhase::Pending,
+            completed_targets: Vec::new(),
+            completion_cancel: None,
+        });
+        self.preambles.retain(|pending| pending.slot != number);
+        self.notifications.select(number, None)?;
+        Ok(identity)
+    }
+
+    fn begin_terminal_rebind(
+        &mut self,
+        scope: GraphScope,
+        number: u8,
+        expected: [u8; 32],
+        endpoint: HostEndpoint,
+        canceled: Arc<AtomicBool>,
+    ) -> Result<FenceIdentity, CandidateError> {
+        let generation = endpoint.generation()?;
+        if canceled.load(Ordering::Acquire)
+            || expected == [0; 32]
+            || generation == expected
+            || !self.owner.matches_context(scope.context)
+        {
+            return Err(refused());
+        }
+        let slot = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.number == number)
+            .ok_or_else(refused)?;
+        slot.verify()?;
+        if slot.endpoint_generation != Some(expected) || !slot.accepts() {
+            return Err(refused());
+        }
+        // An empty slot is not an ownership proof. Only this graph's prior
+        // completed empty fence can preserve its authority across another rotation.
+        if slot.targets.is_empty()
+            && !slot.rebind.as_ref().is_some_and(|state| {
+                state.phase == RebindPhase::Complete
+                    && state.identity.scope == scope
+                    && state.terminal_endpoint.is_some()
+            })
+        {
+            return Err(refused());
+        }
+        let targets: Vec<_> = slot
+            .targets
+            .iter()
+            .map(|(target, _)| target.clone())
+            .collect();
+        for target in &targets {
+            let entry = self
+                .owner
+                .entries
+                .get(&target.service)
+                .ok_or_else(refused)?;
+            if entry.target != *target || entry.graph != Some(scope.id) || !entry.retired {
+                return Err(refused());
+            }
+        }
+        let mut operation = [0; 16];
+        fs::File::open("/dev/urandom")
+            .and_then(|mut file| file.read_exact(&mut operation))
+            .map_err(|_| refused())?;
+        // The lifecycle guard and complete scoped retirement validation precede
+        // compaction. Serial/incarnation never reset, so old credentials stay dead.
+        if self.owner.retire_replacement(scope, operation, &targets)? != 0 {
+            return Err(refused());
+        }
+        let identity = FenceIdentity {
+            owner: self.owner.incarnation(),
+            scope,
+            slot: number,
+            operation,
+        };
+        slot.targets.clear();
+        slot.endpoint_generation = Some(generation);
+        slot.rebind = Some(Rebind {
+            identity: identity.clone(),
+            canceled,
+            old_generation: expected,
+            expected_count: 0,
+            terminal_endpoint: Some(endpoint),
             phase: RebindPhase::Pending,
             completed_targets: Vec::new(),
             completion_cancel: None,
@@ -439,6 +539,7 @@ impl Reactor {
         if identity.owner != self.owner.incarnation()
             || state.identity != *identity
             || state.phase != RebindPhase::Pending
+            || state.terminal_endpoint.is_some()
             || state.canceled.load(Ordering::Acquire)
             || canceled.load(Ordering::Acquire)
             || slot.targets.len() >= state.expected_count
@@ -489,6 +590,16 @@ impl Reactor {
             return Err(refused());
         }
         let generation = slot.endpoint_generation.ok_or_else(refused)?;
+        if let Some(endpoint) = &state.terminal_endpoint {
+            if state.expected_count != 0
+                || generation == state.old_generation
+                || endpoint.generation()? != generation
+            {
+                return Err(refused());
+            }
+        } else if state.expected_count == 0 {
+            return Err(refused());
+        }
         for (target, canceled) in &slot.targets {
             let entry = self
                 .owner
@@ -622,6 +733,11 @@ impl Reactor {
                             if !slot.accepts() {
                                 return Err(refused());
                             }
+                            if slot.rebind.as_ref().is_some_and(|state| {
+                                state.terminal_endpoint.is_some() && state.identity.scope != scope
+                            }) {
+                                return Err(refused());
+                            }
                             let generation = endpoint.generation()?;
                             if slot
                                 .endpoint_generation
@@ -656,6 +772,24 @@ impl Reactor {
                     }
                     Command::BeginRebind(scope, slot, expected, canceled, reply) => {
                         let result = self.begin_rebind(scope, slot, expected, canceled);
+                        if let Err(
+                            mpsc::TrySendError::Disconnected(Ok(identity))
+                            | mpsc::TrySendError::Full(Ok(identity)),
+                        ) = reply.try_send(result)
+                        {
+                            let _ = self.abort_rebind(&identity);
+                        }
+                    }
+                    Command::BeginTerminalRebind(
+                        scope,
+                        slot,
+                        expected,
+                        endpoint,
+                        canceled,
+                        reply,
+                    ) => {
+                        let result =
+                            self.begin_terminal_rebind(scope, slot, expected, endpoint, canceled);
                         if let Err(
                             mpsc::TrySendError::Disconnected(Ok(identity))
                             | mpsc::TrySendError::Full(Ok(identity)),
@@ -1015,19 +1149,43 @@ impl ManagedOwner {
         slot: u8,
         expected_generation: [u8; 32],
     ) -> Result<SlotFence, CandidateError> {
+        self.begin_fence(|canceled, reply| {
+            Command::BeginRebind(scope, slot, expected_generation, canceled, reply)
+        })
+    }
+    /// Select a future one-off endpoint for an entirely retired same-graph slot.
+    /// No grant is issued, and replacement registration is forbidden. The caller
+    /// journals first, verifies the original selector, and commits metadata before
+    /// batch completion. Interrupted empty fences require cleanup; never replay.
+    pub(crate) fn begin_terminal_rebind(
+        &self,
+        scope: GraphScope,
+        slot: u8,
+        expected_generation: [u8; 32],
+        endpoint: HostEndpoint,
+    ) -> Result<SlotFence, CandidateError> {
+        self.begin_fence(|canceled, reply| {
+            Command::BeginTerminalRebind(
+                scope,
+                slot,
+                expected_generation,
+                endpoint,
+                canceled,
+                reply,
+            )
+        })
+    }
+    fn begin_fence(
+        &self,
+        command: impl FnOnce(Arc<AtomicBool>, Reply<FenceIdentity>) -> Command,
+    ) -> Result<SlotFence, CandidateError> {
         let (reply, receiver) = mpsc::sync_channel(1);
         let mut pending = Pending {
             canceled: Arc::new(AtomicBool::new(false)),
             wake: Arc::clone(&self.wake),
             armed: true,
         };
-        self.send(Command::BeginRebind(
-            scope,
-            slot,
-            expected_generation,
-            Arc::clone(&pending.canceled),
-            reply,
-        ))?;
+        self.send(command(Arc::clone(&pending.canceled), reply))?;
         let identity = receiver.recv_timeout(BUDGET).map_err(|_| refused())??;
         pending.armed = false;
         Ok(SlotFence(Arc::new(FenceToken {
@@ -1380,10 +1538,10 @@ mod tests {
         let mut stream = UnixStream::connect(path).map_err(|_| refused())?;
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+            .map_err(|_| refused())?;
         stream
             .set_write_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+            .map_err(|_| refused())?;
         let (client, hello) = credential.begin()?;
         stream.write_all(&hello).map_err(|_| refused())?;
         let mut challenge = [0; 64];
@@ -1495,6 +1653,368 @@ mod tests {
         assert!(authenticate(&fixture.sockets[0], &first.credential).is_err());
         assert!(authenticate(&fixture.sockets[0], &second.credential).is_err());
         assert!(fixture.owner.begin_rebind(scope, 0, generation).is_err());
+    }
+
+    #[test]
+    fn terminal_empty_fence_selects_only_future_same_graph_jobs_without_old_authority() {
+        let fixture = fixture(2);
+        let scope = GraphScope::new(context(), [3; 32]).unwrap();
+        let foreign = GraphScope::new(context(), [8; 32]).unwrap();
+        let old = TcpListener::bind("127.0.0.1:0").unwrap();
+        let new = TcpListener::bind("127.0.0.1:0").unwrap();
+        let old_endpoint = captured(&old);
+        let new_endpoint = captured(&new);
+        let expected = old_endpoint.generation().unwrap();
+        let historical = fixture
+            .owner
+            .register(scope, [4; 32], 0, old_endpoint.clone())
+            .unwrap();
+        // An active target, unowned empty slot, wrong scope, old generation and
+        // same endpoint are all refused before compaction or capability effects.
+        assert!(
+            fixture
+                .owner
+                .begin_terminal_rebind(scope, 0, expected, new_endpoint.clone())
+                .is_err()
+        );
+        assert!(authenticate(&fixture.sockets[0], &historical.credential).is_ok());
+        fixture.owner.retire_bindings(scope, &[[4; 32]]).unwrap();
+        for (selected_scope, slot, generation, endpoint) in [
+            (scope, 1, expected, new_endpoint.clone()),
+            (foreign, 0, expected, new_endpoint.clone()),
+            (scope, 0, [42; 32], new_endpoint.clone()),
+            (scope, 0, expected, old_endpoint),
+            (
+                GraphScope::new(
+                    Context {
+                        boot: [42; 16],
+                        ..context()
+                    },
+                    [3; 32],
+                )
+                .unwrap(),
+                0,
+                expected,
+                new_endpoint.clone(),
+            ),
+        ] {
+            assert!(
+                fixture
+                    .owner
+                    .begin_terminal_rebind(selected_scope, slot, generation, endpoint)
+                    .is_err()
+            );
+        }
+        let mut prehello = UnixStream::connect(&fixture.sockets[0]).unwrap();
+        prehello
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        prehello.write_all(&[7; 8]).unwrap();
+        let fence = fixture
+            .owner
+            .begin_terminal_rebind(scope, 0, expected, new_endpoint.clone())
+            .unwrap();
+        closed(&mut prehello);
+        assert!(
+            fixture
+                .owner
+                .register_replacement(&fence, [4; 32], new_endpoint.clone())
+                .is_err()
+        );
+        assert!(
+            fixture
+                .owner
+                .register(scope, [9; 32], 0, new_endpoint.clone())
+                .is_err()
+        );
+        fixture.owner.complete_rebind(&fence).unwrap();
+        assert!(authenticate(&fixture.sockets[0], &historical.credential).is_err());
+        assert!(
+            fixture
+                .owner
+                .register(foreign, [9; 32], 0, new_endpoint.clone())
+                .is_err()
+        );
+        let job = fixture
+            .owner
+            .register(scope, [9; 32], 0, new_endpoint.clone())
+            .unwrap();
+        assert_ne!(job.target, historical.target);
+        assert!(authenticate(&fixture.sockets[0], &job.credential).is_ok());
+        fixture.owner.retire(job.target.clone()).unwrap();
+        let third = TcpListener::bind("127.0.0.1:0").unwrap();
+        let third_endpoint = captured(&third);
+        let next = fixture
+            .owner
+            .begin_terminal_rebind(
+                scope,
+                0,
+                new_endpoint.generation().unwrap(),
+                third_endpoint.clone(),
+            )
+            .unwrap();
+        fixture.owner.complete_rebind(&next).unwrap();
+        assert!(authenticate(&fixture.sockets[0], &job.credential).is_err());
+        let last = fixture
+            .owner
+            .register(scope, [10; 32], 0, third_endpoint.clone())
+            .unwrap();
+        fixture.owner.retire(last.target.clone()).unwrap();
+        let empty = fixture
+            .owner
+            .begin_terminal_rebind(
+                scope,
+                0,
+                third_endpoint.generation().unwrap(),
+                new_endpoint.clone(),
+            )
+            .unwrap();
+        fixture.owner.complete_rebind(&empty).unwrap();
+        // A second rotation without an intervening job still carries the exact
+        // original scope; an arbitrary initially empty slot cannot do this.
+        let no_job = fixture
+            .owner
+            .begin_terminal_rebind(scope, 0, new_endpoint.generation().unwrap(), third_endpoint)
+            .unwrap();
+        fixture.owner.complete_rebind(&no_job).unwrap();
+        assert!(authenticate(&fixture.sockets[0], &historical.credential).is_err());
+        assert!(authenticate(&fixture.sockets[0], &last.credential).is_err());
+    }
+
+    #[test]
+    fn interrupted_terminal_fences_never_replay_or_reopen_for_new_jobs() {
+        for mode in 0..4 {
+            let fixture = fixture(1);
+            let scope = GraphScope::new(context(), [3; 32]).unwrap();
+            let old = TcpListener::bind("127.0.0.1:0").unwrap();
+            let new = TcpListener::bind("127.0.0.1:0").unwrap();
+            let expected = captured(&old).generation().unwrap();
+            let endpoint = captured(&new);
+            let historical = fixture
+                .owner
+                .register(scope, [4; 32], 0, captured(&old))
+                .unwrap();
+            fixture.owner.retire_bindings(scope, &[[4; 32]]).unwrap();
+            if mode == 0 {
+                let (reply, receiver) = mpsc::sync_channel(1);
+                drop(receiver);
+                fixture
+                    .owner
+                    .send(Command::BeginTerminalRebind(
+                        scope,
+                        0,
+                        expected,
+                        endpoint.clone(),
+                        Arc::new(AtomicBool::new(false)),
+                        reply,
+                    ))
+                    .unwrap();
+            } else {
+                let fence = fixture
+                    .owner
+                    .begin_terminal_rebind(scope, 0, expected, endpoint.clone())
+                    .unwrap();
+                if mode == 1 {
+                    drop(fence);
+                } else {
+                    let (reply, receiver) = mpsc::sync_channel(1);
+                    let receiver = if mode == 2 {
+                        drop(receiver);
+                        None
+                    } else {
+                        Some(receiver)
+                    };
+                    fixture
+                        .owner
+                        .send(Command::Complete(
+                            vec![fence.clone()],
+                            Arc::new(AtomicBool::new(mode == 3)),
+                            reply,
+                        ))
+                        .unwrap();
+                    if mode == 3 {
+                        assert!(receiver.unwrap().recv_timeout(BUDGET).unwrap().is_err());
+                    }
+                }
+            }
+            fixture.owner.verify_alive().unwrap();
+            assert!(authenticate(&fixture.sockets[0], &historical.credential).is_err());
+            assert!(
+                fixture
+                    .owner
+                    .register(scope, [9; 32], 0, endpoint.clone())
+                    .is_err()
+            );
+            assert!(
+                fixture
+                    .owner
+                    .begin_terminal_rebind(scope, 0, expected, endpoint)
+                    .is_err()
+            );
+            assert!(fixture.owner.begin_rebind(scope, 0, expected).is_err());
+        }
+    }
+
+    #[test]
+    fn terminal_endpoint_failure_keeps_entire_mixed_completion_batch_fenced() {
+        let fixture = fixture(2);
+        let scope = GraphScope::new(context(), [3; 32]).unwrap();
+        let old = TcpListener::bind("127.0.0.1:0").unwrap();
+        let new = TcpListener::bind("127.0.0.1:0").unwrap();
+        let terminal_new = TcpListener::bind("127.0.0.1:0").unwrap();
+        let expected = captured(&old).generation().unwrap();
+        fixture
+            .owner
+            .register(scope, [4; 32], 0, captured(&old))
+            .unwrap();
+        let historical = fixture
+            .owner
+            .register(scope, [5; 32], 1, captured(&old))
+            .unwrap();
+        fixture.owner.retire_bindings(scope, &[[5; 32]]).unwrap();
+        let active = fixture.owner.begin_rebind(scope, 0, expected).unwrap();
+        let terminal = fixture
+            .owner
+            .begin_terminal_rebind(scope, 1, expected, captured(&terminal_new))
+            .unwrap();
+        let fresh = fixture
+            .owner
+            .register_replacement(&active, [4; 32], captured(&new))
+            .unwrap();
+        drop(terminal_new);
+        assert!(
+            fixture
+                .owner
+                .complete_rebinds(&[active.clone(), terminal.clone()])
+                .is_err()
+        );
+        assert!(authenticate(&fixture.sockets[0], &fresh.credential).is_err());
+        assert!(authenticate(&fixture.sockets[1], &historical.credential).is_err());
+        assert!(
+            fixture
+                .owner
+                .register(scope, [9; 32], 1, captured(&new))
+                .is_err()
+        );
+        fixture.owner.abort_rebind(&active).unwrap();
+        fixture.owner.abort_rebind(&terminal).unwrap();
+    }
+
+    #[test]
+    fn terminal_empty_fence_refuses_unresolved_cleanup_intent_before_compaction() {
+        let fixture = fixture(1);
+        let scope = GraphScope::new(context(), [3; 32]).unwrap();
+        let old = TcpListener::bind("127.0.0.1:0").unwrap();
+        let new = TcpListener::bind("127.0.0.1:0").unwrap();
+        let expected = captured(&old).generation().unwrap();
+        let historical = fixture
+            .owner
+            .register(scope, [4; 32], 0, captured(&old))
+            .unwrap();
+        fixture.owner.retire_bindings(scope, &[[4; 32]]).unwrap();
+        let intent = super::super::lifecycle_intent::Coordinator::begin(
+            &fixture.owner.endpoint(),
+            super::super::lifecycle_intent::Mutation {
+                effect: [6; 32],
+                targets: vec![historical.target.clone()],
+            },
+        )
+        .unwrap();
+        drop(intent);
+        assert!(
+            fixture
+                .owner
+                .begin_terminal_rebind(scope, 0, expected, captured(&new))
+                .is_err()
+        );
+        // Exact historical target is retained for acknowledgement retry.
+        fixture.owner.retire(historical.target).unwrap();
+    }
+
+    #[test]
+    fn completed_slot_admission_observes_cancellation_before_any_reactor_scan() {
+        let root = Root::new();
+        let mut slot = Slot::bind(ManagedSlot {
+            slot: 0,
+            path: root.0.join("slot.sock"),
+            canonical_parent: root.0.clone(),
+        })
+        .unwrap();
+        let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+        let scope = GraphScope::new(context(), [3; 32]).unwrap();
+        for terminal_endpoint in [None, Some(captured(&backend))] {
+            let canceled = Arc::new(AtomicBool::new(false));
+            slot.rebind = Some(Rebind {
+                identity: FenceIdentity {
+                    owner: [1; 16],
+                    scope,
+                    slot: 0,
+                    operation: [2; 16],
+                },
+                canceled: Arc::new(AtomicBool::new(false)),
+                old_generation: [3; 32],
+                expected_count: usize::from(terminal_endpoint.is_none()),
+                terminal_endpoint,
+                phase: RebindPhase::Complete,
+                completed_targets: Vec::new(),
+                completion_cancel: Some(Arc::clone(&canceled)),
+            });
+            assert!(
+                slot.accepts(),
+                "confirmed completed fence admits future registration"
+            );
+            canceled.store(true, Ordering::Release);
+            // No reactor exists to run an abort scan. This fails if accepts()
+            // checks only the completed phase, for both active and empty fences.
+            assert!(
+                !slot.accepts(),
+                "uncertain completion must fence immediately"
+            );
+            canceled.store(false, Ordering::Release);
+            slot.rebind
+                .as_ref()
+                .unwrap()
+                .canceled
+                .store(true, Ordering::Release);
+            assert!(
+                slot.accepts(),
+                "dropping a completed fence token is not reply cancellation"
+            );
+        }
+    }
+
+    #[test]
+    fn late_completion_cancellation_refuses_job_before_reactor_abort_scan() {
+        let fixture = fixture(1);
+        let scope = GraphScope::new(context(), [3; 32]).unwrap();
+        let old = TcpListener::bind("127.0.0.1:0").unwrap();
+        let new = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = captured(&new);
+        fixture
+            .owner
+            .register(scope, [4; 32], 0, captured(&old))
+            .unwrap();
+        fixture.owner.retire_bindings(scope, &[[4; 32]]).unwrap();
+        let fence = fixture
+            .owner
+            .begin_terminal_rebind(
+                scope,
+                0,
+                captured(&old).generation().unwrap(),
+                endpoint.clone(),
+            )
+            .unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let (reply, receiver) = mpsc::sync_channel(1);
+        fixture
+            .owner
+            .send(Command::Complete(vec![fence], Arc::clone(&canceled), reply))
+            .unwrap();
+        receiver.recv_timeout(BUDGET).unwrap().unwrap();
+        // Register is a command handled before the reactor's abandoned-fence
+        // scan; the admission predicate must observe this cancellation itself.
+        canceled.store(true, Ordering::Release);
+        assert!(fixture.owner.register(scope, [9; 32], 0, endpoint).is_err());
     }
     #[test]
     fn shared_slot_rebind_drains_prehello_and_opens_only_complete_fresh_grants() {

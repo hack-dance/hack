@@ -3,6 +3,7 @@
 use super::*;
 use crate::provider::{graph::startup::native_test::RestartableBackend, identity};
 use base64::Engine as _;
+mod terminal_only;
 
 fn checked_cli(
     stage: &str,

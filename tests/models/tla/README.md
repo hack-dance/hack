@@ -25,8 +25,9 @@ target must have declared `Completed` readiness and an observed successful exit.
 Both targets' old grants and streams retire, but only the running target receives
 a replacement grant/helper. The completed service retains its generation/StartedAt;
 a shared slot's endpoint generation may change without readmitting that service.
-The wholly completed control explores 18 states and ends
-with target admission closed after retirement, without a replacement grant.
+The wholly completed control explores 18 states and ends with original target
+admission closed after retirement, without a replacement grant. A terminal-only
+slot may complete an empty fence for a later one-off; its old targets stay revoked.
 
 The barrier requires reviewed ownership, fenced target admission, retirement and
 stream drain for all historical bindings, replacement readiness for running targets,
@@ -49,7 +50,7 @@ unrevoked targets and no committed replacement. CI rejects other failures.
 | `Fence` / `Retire` | `provider/relay_owner/managed.rs` slot admission fence, batch revocation and stream drain |
 | `Register` | Fresh grants and exact owned guest helper replacement for running services only in `provider/graph/startup/runtime/rebind.rs` |
 | `Commit` / `Release` | Synced receipt and committed nonterminal journal before atomic `ManagedOwner::complete_rebinds`; completed terminal journal follows activation |
-| `CloseTerminal` | Scoped retirement of all terminal services' historical bindings, without replacement registration or activation; `Phase::Completed` retains service generation/StartedAt with `binding.process = None` |
+| `CloseTerminal` | Scoped retirement of all terminal services' historical bindings and empty-fence completion, without terminal replacement grants/helpers; `Phase::Completed` retains service generation/StartedAt with `binding.process = None` |
 | `Cancel` / `Crash` | Fenced incomplete journal and explicit owned cleanup; no replay |
 
 The model abstracts individual registration steps for two bindings and assumes
@@ -64,6 +65,39 @@ helper-identity checks, native process/supervisor identity, credential secrecy,
 filesystem durability, partial multi-slot activation, real guest readiness,
 application health, or performance. Rust tests and live replacement traffic remain
 required. There is no fairness or eventual recovery claim.
+
+`dependency-rebind/TerminalReuse.tla` separately checks a terminal-only slot's
+reuse for one new one-off target. It preserves the established Rebind controls:
+closed original-target authority does not imply that a later, distinct job can
+never register. Five fixed Boolean observations represent exact original scope,
+old generation, all historical targets retired, zero live authorities and no
+unresolved lifecycle intent. The 32 possible initial combinations explore 82
+states; unsafe combinations cannot initiate the prepared journal or new effects.
+For the eligible case, a prepared journal precedes the empty fence, durable commit
+precedes empty completion, and only then may one distinct target receive a grant.
+No original terminal target receives a grant or helper. Cancellation/owner death
+closes admission, retains prepared evidence and cannot replay this operation.
+
+The negative control registers the new target while still fenced, before commit.
+It must violate `NoPrematureNewGrant` in one `RegisterNew` state with `grants = {3}`,
+`committed = FALSE`, `slotReady = FALSE` and `fenced = TRUE`. An arbitrary checker
+failure or those fields spread across different states cannot satisfy the control.
+
+| Terminal reuse action | Implementation boundary under `packages/runtime-core/src/` |
+| --- | --- |
+| `Review` / inputs | `provider/graph/startup/runtime/rebind.rs` reuses the original selector/context and exact old endpoint generation; terminal service/container checks remain required |
+| `Prepare` / `BeginEmpty` | Prepared rebind journal precedes `ManagedOwner::begin_terminal_rebind`; it requires the same scope, retired targets, no live authority or unresolved lifecycle intent and pins the newly reviewed endpoint with expected count zero |
+| `Commit` / `CompleteEmpty` | Receipt and committed journal precede atomic `ManagedOwner::complete_rebinds`; `JournalSlot.terminal_only` distinguishes an empty terminal fence from active helper replacement |
+| `RegisterNew` | Original-scope ordinary registration for a unique one-off target; `register_replacement` remains forbidden on a terminal fence |
+| `Cancel` / `Crash` | Abort, dropped token and reply loss retain a fenced uncertain operation, requiring owned cleanup rather than replay |
+
+This is a second bounded safety abstraction, not a composition proof or a live
+one-off test. The eligibility observations are fixed during the operation, and
+target 3 assumes a uniquely derived fresh job identity. Native selector/process
+checks, endpoint reinspection, real target uniqueness, durable writes, guest helper
+behavior, repeated jobs, multiple slots and real one-off traffic remain separate
+implementation and runtime gates. The existing Rebind model covers original-target
+drain/revocation; this model checks the later commit-before-new-grant boundary.
 
 ## Graph admission
 

@@ -166,6 +166,7 @@ struct SlotSelection {
     endpoint: HostEndpoint,
     fingerprint: String,
     keys: Vec<(String, String)>,
+    terminal_only: bool,
 }
 fn fingerprint_bytes(value: &str) -> Result<[u8; 32], CandidateError> {
     if !hex(value, 64) {
@@ -219,12 +220,9 @@ fn selections(
         if keys.iter().any(|key| &dependencies[key].refresh != policy) {
             return Err(rejected());
         }
-        if keys
+        let terminal_only = keys
             .iter()
-            .all(|key| startup.services[&key.0].phase == Phase::Completed)
-        {
-            continue;
-        }
+            .all(|key| startup.services[&key.0].phase == Phase::Completed);
         let mut old = None;
         let mut healthy = 0;
         for key in &keys {
@@ -274,6 +272,7 @@ fn selections(
             endpoint,
             fingerprint,
             keys,
+            terminal_only,
         });
     }
     Ok(result)
@@ -303,6 +302,9 @@ struct JournalSlot {
     before: String,
     after: String,
     bindings: Vec<(String, String)>,
+    /// Empty host fence selects future job admission without historical grants.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    terminal_only: bool,
 }
 fn existing(root: &Path, receipt: &Receipt) -> Result<Option<RebindJournal>, CandidateError> {
     match fs::symlink_metadata(root.join(JOURNAL)) {
@@ -374,6 +376,15 @@ pub(super) fn require_complete(root: &Path, receipt: &Receipt) -> Result<(), Can
                 }
             }
             for slot in journal.slots.values() {
+                if slot.terminal_only
+                    && (slot.bindings.is_empty()
+                        || slot
+                            .bindings
+                            .iter()
+                            .any(|(service, _)| !completed.contains(service)))
+                {
+                    return Err(stage_refused("graph_dependency_rebind_incomplete"));
+                }
                 for (service, name) in &slot.bindings {
                     let binding = receipt
                         .relay_startup
@@ -649,6 +660,7 @@ impl HostRelayRuntime {
                                 .collect(),
                             after: slot.fingerprint.clone(),
                             bindings: slot.keys.clone(),
+                            terminal_only: slot.terminal_only,
                         },
                     )
                 })
@@ -678,7 +690,16 @@ impl HostRelayRuntime {
                 check_cancelled()?;
                 fences.push((
                     slot.slot,
-                    self.managed.begin_rebind(scope, slot.slot, slot.expected)?,
+                    if slot.terminal_only {
+                        self.managed.begin_terminal_rebind(
+                            scope,
+                            slot.slot,
+                            slot.expected,
+                            slot.endpoint.clone(),
+                        )?
+                    } else {
+                        self.managed.begin_rebind(scope, slot.slot, slot.expected)?
+                    },
                 ));
             }
             journal.phase = "fenced".into();

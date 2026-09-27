@@ -418,6 +418,7 @@ fn incomplete_journal_blocks_ready_operations_and_is_never_replayed() {
         slots: BTreeMap::from([(
             0,
             JournalSlot {
+                terminal_only: false,
                 before: "5".repeat(64),
                 after: "6".repeat(64),
                 bindings: vec![("web".into(), "content".into())],
@@ -532,6 +533,7 @@ fn exact_owned_cleanup_archives_partial_rebind_and_unblocks_fresh_restore() {
         slots: BTreeMap::from([(
             0,
             JournalSlot {
+                terminal_only: false,
                 before: "5".repeat(64),
                 after: "6".repeat(64),
                 bindings: vec![("web".into(), "content".into())],
@@ -637,6 +639,7 @@ fn terminal_refresh_proofs_do_not_pin_old_helpers_across_owned_restore() {
         slots: BTreeMap::from([(
             0,
             JournalSlot {
+                terminal_only: false,
                 before: "5".repeat(64),
                 after: "6".repeat(64),
                 bindings: vec![("web".into(), "content".into())],
@@ -703,6 +706,7 @@ fn completed_journal_requires_explicit_terminal_state_and_never_fabricates_helpe
         slots: BTreeMap::from([(
             0,
             JournalSlot {
+                terminal_only: false,
                 before: "5".repeat(64),
                 after: "6".repeat(64),
                 bindings: vec![
@@ -756,6 +760,10 @@ fn completed_journal_requires_explicit_terminal_state_and_never_fabricates_helpe
         .process = None;
     assert!(require_complete(&root, &changed).is_err());
     let mut encoded = serde_json::to_value(&journal).unwrap();
+    encoded["slots"]["0"]["terminal_only"] = json!(true);
+    state::write(&root.join(JOURNAL), &encoded).unwrap();
+    assert!(require_complete(&root, &receipt).is_err());
+    encoded["slots"]["0"]["terminal_only"] = json!(false);
     encoded["processes"]["init"] = encoded["processes"]["web"].clone();
     state::write(&root.join(JOURNAL), &encoded).unwrap();
     assert!(require_complete(&root, &receipt).is_err());
@@ -784,6 +792,16 @@ fn completed_journal_requires_explicit_terminal_state_and_never_fabricates_helpe
         state::write(&root.join(JOURNAL), &encoded).unwrap();
         assert!(require_complete(&root, &terminal_only).is_err());
     }
+    encoded["phase"] = json!("completed");
+    encoded["slots"] = json!({"0":{
+        "before":"5".repeat(64),"after":"6".repeat(64),
+        "bindings":[["init","content"]],"terminal_only":true
+    }});
+    state::write(&root.join(JOURNAL), &encoded).unwrap();
+    require_complete(&root, &terminal_only).unwrap();
+    encoded["slots"]["0"]["bindings"] = json!([]);
+    state::write(&root.join(JOURNAL), &encoded).unwrap();
+    assert!(require_complete(&root, &terminal_only).is_err());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -846,7 +864,15 @@ fn mixed_completed_binding_retains_metadata_across_noop_and_second_rotation() {
     );
     startup.services.remove("web");
     dependencies.remove(&("web".into(), "content".into()));
+    let terminal = selections(&dependencies, &startup).unwrap().remove(0);
+    assert!(terminal.terminal_only);
+    assert_eq!(terminal.keys.len(), 1);
+    assert!(
+        startup.services["init"].bindings["content"]
+            .process
+            .is_none()
+    );
     drop(replacement);
-    assert!(selections(&dependencies, &startup).unwrap().is_empty());
+    assert!(selections(&dependencies, &startup).is_err());
     verify_endpoint_generations(&dependencies, &startup).unwrap();
 }

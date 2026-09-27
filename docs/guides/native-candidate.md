@@ -582,15 +582,19 @@ exit, and failed completed jobs, refuse this path. One-off commands retain the
 admitted template and create fresh job intent; this state never permits exec in
 the stopped container.
 
-If a physical dependency slot is used only by completed jobs and its host listener
-rotates, later one-off commands using that slot currently refuse until an ordinary
-owned restart. One-off commands can still use an unchanged listener, or a slot
-whose running siblings have refreshed it. Terminal-only slot re-admission remains
-an open dependency-refresh limitation.
+When a physical dependency slot is used only by completed jobs, refresh can select
+a replacement for later one-off commands under the same executable and ancestry
+policy. A separate empty fence requires every old target to be retired, preserves
+the exact graph and old generation, and commits the new endpoint before future job
+admission. It issues no grant or helper for the completed containers. A later
+one-off uses fresh job intent and credentials; old credentials remain revoked.
+An interrupted empty fence refuses further admission until ordinary owned cleanup
+and restart, and is never retried or replayed automatically.
 
-The rebind journal's optional `completed_services` field records that terminal
-retirement explicitly. Older journals without the field remain readable, but a
-previous bundle cannot be assumed to understand the new completed startup phase.
+The rebind journal's optional `completed_services` and per-slot `terminal_only`
+fields record terminal retirement and empty fences explicitly. Older journals
+without these fields remain readable, but a previous bundle cannot be assumed to
+understand the new completed startup phase.
 Use the current owning bundle for retaining cleanup and journal archival before
 selecting an older bundle; do not substitute an older binary against active state.
 

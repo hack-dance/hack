@@ -63,9 +63,11 @@ try {
     for (const control of controls) {
       const { negative, name } = control;
       const module =
-        negative && "negativeModule" in model
-          ? (model.negativeModule ?? model.module)
-          : model.module;
+        "module" in control && typeof control.module === "string"
+          ? control.module
+          : negative && "negativeModule" in model
+            ? (model.negativeModule ?? model.module)
+            : model.module;
       const result = spawnSync(
         process.env.JAVA_BIN ?? "java",
         [

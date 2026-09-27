@@ -15,6 +15,7 @@ type ModelContract = {
   readonly fields: readonly string[];
   readonly additionalControls?: readonly {
     readonly name: string;
+    readonly module?: "TerminalReuse";
     readonly negative: boolean;
     readonly states?: number;
     readonly invariant?: string;
@@ -43,6 +44,26 @@ const contracts: readonly ModelContract[] = [
       { name: "all-completed", negative: false, states: 18 },
       { name: "refused-readiness", negative: false, states: 2 },
       { name: "refused-failed-completed", negative: false, states: 2 },
+      {
+        name: "terminal-reuse",
+        module: "TerminalReuse",
+        negative: false,
+        states: 82,
+      },
+      {
+        name: "premature-terminal-reuse",
+        module: "TerminalReuse",
+        negative: true,
+        invariant: "NoPrematureNewGrant",
+        action: "RegisterNew",
+        fields: [
+          'phase = "one-off"',
+          "grants = {3}",
+          "committed = FALSE",
+          "slotReady = FALSE",
+          "fenced = TRUE",
+        ],
+      },
       {
         name: "wrong-readiness",
         negative: true,

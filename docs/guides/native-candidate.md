@@ -63,6 +63,34 @@ currently reports the repository package version; `hack-v5` identifies the opt-i
 candidate channel, not a published v5 release. Unsupported native workflows still
 report their existing refusal rather than falling back to Docker.
 
+## Manual candidate upgrade and rollback
+
+Candidate bundles are selected by their full path. There is no automatic candidate
+updater or state migration manager. `hack-v5 update` refuses before discovering an
+installed binary or contacting a release server; install a separately reviewed,
+complete bundle to change the candidate.
+
+1. Keep the previous complete bundle and its `SHA256SUMS`. Copy the new bundle into
+   a separate directory and verify every checksum before using it. A checksum
+   failure or incomplete copy is a failed installation; preserve it for inspection.
+2. Retain application data with ordinary `down` for each owned graph, confirm its
+   foreground owner and host processes have retired, and stop the owned candidate
+   runtime. Keep existing bundles in place while any of their child processes live.
+3. Select the new bundle's `hack-v5` by its full path with the same canonical
+   mode-`0700` `HACK_NATIVE_HOME`. Check its `info` identity and update any explicitly
+   selected guest-relay artifact paths to the verified complete bundle. Restore the
+   application and read back a saved data marker before accepting the upgrade.
+4. For rollback, retain-stop the new candidate in the same way, select the previous
+   verified bundle with the same home, and repeat application/data readback. A prior
+   binary refusing newer state is an unsupported downgrade, not a successful rollback.
+   Preserve that state; do not rewrite receipts or adopt another home's data.
+
+Compatibility is qualified for specific bundle hashes and state formats. The
+displayed version alone does not establish frontend/executor or downgrade
+compatibility. V4 and candidate homes remain separate; this procedure does not
+migrate V4 data into the candidate or replace the installed `hack`. DNS, trust and
+client configuration are outside this bundle-selection procedure.
+
 Provider setup is separate and explicit. Obtain the exact archives identified in
 `provider-pins.json`, then run:
 

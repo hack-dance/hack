@@ -13,8 +13,10 @@ import {
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
 import { prepareNativeProjectInput } from "./native-project-input.ts";
+import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import { verifyNativeSourceCompatibility } from "./native-project-restore.ts";
+import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
 import { withNativeProjectReview } from "./native-project-review.ts";
 import {
   type NativeProjectRun,
@@ -215,6 +217,26 @@ export async function preflightNativeRestart(opts: {
 }) {
   const deps = { ...DEFAULTS, ...opts.dependencies };
   const selected = nativeRestartSelection({ run: opts.run });
+  if (opts.cleanedRetry) {
+    let observed: unknown;
+    try {
+      observed = await inspectNativeProjectGraph({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        run: opts.run.run,
+        invoke: deps.invoke,
+      });
+    } catch {
+      throw new Error(
+        "Native restart cannot confirm the stopped retained graph; no listener discovery or cleanup was requested."
+      );
+    }
+    if (!confirmedNativeRetainedGraph(observed, opts.run)) {
+      throw new Error(
+        "Native restart cannot confirm the stopped retained graph; no listener discovery or cleanup was requested."
+      );
+    }
+  }
   requireNativeRestartNetwork(
     await deps.invoke({
       runtime: opts.runtime,

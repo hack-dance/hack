@@ -27,6 +27,7 @@ import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import { serveNativeProjectGraph } from "./native-project-process.ts";
 import { selectNativeProjectRestore } from "./native-project-restore.ts";
+import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
 import { withNativeProjectReview } from "./native-project-review.ts";
 import {
   hasOnlyNativeSupportedLabels,
@@ -456,41 +457,6 @@ async function refusePendingFreshStart(
     );
   }
 }
-function confirmedRetainedGraph(
-  value: unknown,
-  run: NativeProjectRun
-): boolean {
-  if (
-    !isRecord(value) ||
-    value.journal_incomplete !== false ||
-    !isRecord(value.receipt) ||
-    !isRecord(value.observations)
-  ) {
-    return false;
-  }
-  const receipt = value.receipt;
-  const observations = value.observations;
-  if (
-    receipt.run !== run.run ||
-    receipt.owner !== run.owner ||
-    receipt.namespace !== run.namespace ||
-    receipt.plan_id !== run.planId ||
-    receipt.phase !== "stopped-data-retained" ||
-    !isRecord(receipt.resources)
-  ) {
-    return false;
-  }
-  return Object.values(receipt.resources).every((resource) => {
-    if (!isRecord(resource)) {
-      return false;
-    }
-    if (resource.kind !== "container") {
-      return true;
-    }
-    const observation = observations[`container:${resource.key}`];
-    return isRecord(observation) && observation.state === "absent";
-  });
-}
 function retainedStartupSelection(opts: {
   readonly run: NativeProjectRun;
   readonly envName?: string | null;
@@ -545,7 +511,7 @@ async function selectNativeStartup(opts: {
       run: retained.run,
       invoke: opts.invoke,
     });
-    if (!confirmedRetainedGraph(observed, retained)) {
+    if (!confirmedNativeRetainedGraph(observed, retained)) {
       throw new Error(
         "Native project already has an owned run mapping that is not safely stopped; inspect it before starting another run."
       );

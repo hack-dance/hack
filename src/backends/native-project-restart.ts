@@ -83,7 +83,7 @@ export async function restartNativeProject(opts: {
       );
     }
     await opts.preflight(run, {
-      cleanedRetry: !current && intent?.phase === "cleaned",
+      cleanedRetry: intent?.phase === "cleaned",
     });
     if (!intent) {
       intent = {

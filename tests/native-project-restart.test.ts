@@ -1,14 +1,31 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readNativeHostDependencies } from "../src/backends/native-project-dependencies.ts";
+import { nativeProjectDown } from "../src/backends/native-project-down.ts";
 import { restartNativeProject } from "../src/backends/native-project-restart.ts";
 import {
   nativeRestartSelection,
   preflightNativeRestart,
 } from "../src/backends/native-project-restart-preflight.ts";
-import type { NativeRestartIntent } from "../src/backends/native-project-run.ts";
+import {
+  completeNativeRestartCleanup,
+  loadNativeProjectRun,
+  loadNativeRestartIntent,
+  type NativeRestartIntent,
+  removeNativeRestartIntent,
+  saveNativeProjectRun,
+  saveNativeRestartIntent,
+  withNativeRestartLock,
+} from "../src/backends/native-project-run.ts";
 
 const run = {
   run: "a".repeat(32),
@@ -145,14 +162,14 @@ test("resume uses persisted intent without new capture or cleanup", async () => 
     "serving",
   ]);
 });
-test("only a cleaned intent without a current mapping selects cleaned retry preflight", async () => {
+test("a cleaned intent selects retained-state review with or without a matching mapping", async () => {
   for (const current of [null, run]) {
     const f = fixture({ run, finalization: token, phase: "cleaned" });
     await restartNativeProject({
       ...f.options,
       preflight: async (selected, { cleanedRetry }) => {
         expect(selected).toEqual(run);
-        expect(cleanedRetry).toBe(current === null);
+        expect(cleanedRetry).toBe(true);
       },
       dependencies: { ...f.options.dependencies, load: async () => current },
     });
@@ -441,6 +458,29 @@ test("restart preflight refuses failed or unknown admission before reading envir
   }
 });
 
+function stoppedRetainedGraph() {
+  return {
+    journal_incomplete: false,
+    receipt: {
+      run: run.run,
+      owner: run.owner,
+      namespace: run.namespace,
+      plan_id: run.planId,
+      phase: "stopped-data-retained",
+      resources: {
+        app: { kind: "container", key: "app" },
+        default: { kind: "network", key: "default" },
+        data: { kind: "volume", key: "data" },
+      },
+    },
+    observations: {
+      "container:app": { state: "absent" },
+      "network:default": { state: "absent" },
+      "volume:data": { state: "present" },
+    },
+  };
+}
+
 async function listenerIntentFixture() {
   const directory = await mkdtemp(join(tmpdir(), "hack-restart-intent-test-"));
   const path = join(directory, "dependencies.json");
@@ -485,6 +525,16 @@ async function listenerIntentFixture() {
       adapt: async ({ input: prepared }) => prepared,
       invoke: async ({ args }) => {
         calls.push(`${args[0]} ${args[1]}`);
+        if (args[1] === "inspect") {
+          expect(args).toEqual([
+            "graph",
+            "inspect",
+            "--run-id",
+            run.run,
+            "--json",
+          ]);
+          return stoppedRetainedGraph();
+        }
         if (args[1] === "status") {
           return { network: "internet" };
         }
@@ -553,6 +603,7 @@ test("cleaned retry with absent listeners reaches startup hooks before actual id
     ).toBe(0);
     expect(captured).toEqual([12_345]);
     expect(listener.calls).toEqual([
+      "graph inspect",
       "runtime status",
       "runtime probe",
       "review",
@@ -561,6 +612,218 @@ test("cleaned retry with absent listeners reaches startup hooks before actual id
     expect(JSON.parse(await readFile(listener.path, "utf8"))).toEqual(
       listener.selection
     );
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
+test("persisted retaining cleanup keeps its mapping and retry captures listeners after hooks", async () => {
+  const listener = await listenerIntentFixture();
+  try {
+    const projectRoot = await realpath(listener.directory);
+    const projectDir = join(projectRoot, ".hack");
+    const nativeHome = join(projectRoot, "candidate");
+    await mkdir(projectDir);
+    await mkdir(nativeHome);
+    const retainedScope = { projectRoot, projectDir, nativeHome, branch: null };
+    const intent: NativeRestartIntent = {
+      phase: "prepared",
+      run,
+      finalization: token,
+    };
+    await saveNativeProjectRun({ ...retainedScope, run });
+    await saveNativeRestartIntent({ ...retainedScope, intent });
+    const cleaned = await completeNativeRestartCleanup({
+      ...retainedScope,
+      expected: intent,
+    });
+    expect(cleaned.phase).toBe("cleaned");
+    expect(await loadNativeProjectRun(retainedScope)).toEqual(run);
+    expect(await loadNativeRestartIntent(retainedScope)).toEqual(cleaned);
+    const runtime = { ...listener.options.runtime, home: nativeHome };
+    const f = fixture(cleaned);
+    let hookStarted = false;
+    const captured: number[] = [];
+    expect(
+      await restartNativeProject({
+        ...f.options,
+        scope: retainedScope,
+        preflight: async (selected, { cleanedRetry }) => {
+          expect(cleanedRetry).toBe(true);
+          await preflightNativeRestart({
+            ...listener.options,
+            runtime,
+            scope: retainedScope,
+            run: selected,
+            cleanedRetry,
+          });
+        },
+        down: async () => {
+          await nativeProjectDown({
+            runtime,
+            scope: retainedScope,
+            invoke: listener.options.dependencies?.invoke,
+            before: async () => {
+              throw new Error("down hooks must not replay");
+            },
+            after: async () => {
+              throw new Error("down hooks must not replay");
+            },
+            retireHostProcesses: async () => {
+              f.events.push("retire");
+            },
+          });
+        },
+        start: async ({ onReady }) => {
+          f.events.push("up.before");
+          hookStarted = true;
+          const dependencies = await readNativeHostDependencies({
+            path: listener.path,
+            services: ["app"],
+            discover: async () => {
+              expect(hookStarted).toBe(true);
+              expect(await loadNativeProjectRun(retainedScope)).toEqual(run);
+              return { host_pid: 12_345, endpoint_fingerprint: "8".repeat(64) };
+            },
+          });
+          captured.push(
+            ...dependencies.map((dependency) => dependency.host_pid)
+          );
+          await onReady();
+          return 0;
+        },
+        dependencies: {
+          ...f.options.dependencies,
+          load: loadNativeProjectRun,
+          pending: loadNativeRestartIntent,
+          cleaned: completeNativeRestartCleanup,
+          remove: removeNativeRestartIntent,
+          lock: withNativeRestartLock,
+        },
+      })
+    ).toBe(0);
+    expect(captured).toEqual([12_345]);
+    expect(listener.calls).toEqual([
+      "graph inspect",
+      "runtime status",
+      "runtime probe",
+      "review",
+      "graph inspect",
+    ]);
+    expect(f.events).toEqual(["retire", "finalized", "up.before"]);
+    expect(await loadNativeProjectRun(retainedScope)).toEqual(run);
+    expect(await loadNativeRestartIntent(retainedScope)).toBeNull();
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
+test("cleaned intent cannot bypass live, uncertain, foreign or malformed retained graph observations", async () => {
+  const listener = await listenerIntentFixture();
+  try {
+    const stopped = stoppedRetainedGraph();
+    const invalid: unknown[] = [
+      null,
+      { ...stopped, journal_incomplete: true },
+      { ...stopped, receipt: { ...stopped.receipt, phase: "ready-observed" } },
+      ...["run", "owner", "namespace", "plan_id"].map((field) => ({
+        ...stopped,
+        receipt: { ...stopped.receipt, [field]: "foreign" },
+      })),
+      ...["container:app", "network:default"].map((key) => ({
+        ...stopped,
+        observations: { ...stopped.observations, [key]: { state: "present" } },
+      })),
+      ...["absent", "uncertain"].map((state) => ({
+        ...stopped,
+        observations: { ...stopped.observations, "volume:data": { state } },
+      })),
+      {
+        ...stopped,
+        observations: {
+          ...stopped.observations,
+          "container:other": { state: "absent" },
+        },
+      },
+      {
+        ...stopped,
+        observations: {
+          "container:app": stopped.observations["container:app"],
+          "network:default": stopped.observations["network:default"],
+        },
+      },
+      ...[["container"], { kind: "container" }, "unknown"].map((kind) => ({
+        ...stopped,
+        receipt: {
+          ...stopped.receipt,
+          resources: {
+            ...stopped.receipt.resources,
+            app: { key: "app", kind },
+          },
+        },
+      })),
+      {
+        ...stopped,
+        receipt: {
+          ...stopped.receipt,
+          resources: {
+            ...stopped.receipt.resources,
+            duplicate: stopped.receipt.resources.app,
+          },
+        },
+      },
+      {
+        ...stopped,
+        receipt: { ...stopped.receipt, resources: {} },
+        observations: {},
+      },
+    ];
+    for (const observed of invalid) {
+      listener.calls.length = 0;
+      const f = fixture({ run, finalization: token, phase: "cleaned" });
+      await expect(
+        restartNativeProject({
+          ...f.options,
+          preflight: async (selected, { cleanedRetry }) =>
+            await preflightNativeRestart({
+              ...listener.options,
+              run: selected,
+              cleanedRetry,
+              dependencies: {
+                ...listener.options.dependencies,
+                invoke: async ({ args }) => {
+                  listener.calls.push(`${args[0]} ${args[1]}`);
+                  return observed;
+                },
+              },
+            }),
+          dependencies: { ...f.options.dependencies, load: async () => run },
+        })
+      ).rejects.toThrow("cannot confirm the stopped retained graph");
+      expect(listener.calls).toEqual(["graph inspect"]);
+      expect(f.events).toEqual([]);
+      expect(f.state.pending?.phase).toBe("cleaned");
+    }
+    const f = fixture({ run, finalization: token, phase: "cleaned" });
+    await expect(
+      restartNativeProject({
+        ...f.options,
+        preflight: async (selected, { cleanedRetry }) =>
+          await preflightNativeRestart({
+            ...listener.options,
+            run: selected,
+            cleanedRetry,
+            dependencies: {
+              ...listener.options.dependencies,
+              invoke: async () => {
+                throw new Error("sensitive fixture failure");
+              },
+            },
+          }),
+        dependencies: { ...f.options.dependencies, load: async () => run },
+      })
+    ).rejects.toThrow("cannot confirm the stopped retained graph");
+    expect(f.events).toEqual([]);
   } finally {
     await rm(listener.directory, { recursive: true, force: true });
   }
@@ -624,7 +887,11 @@ test("malformed dependency intent refuses cleaned retry without capture or start
             }),
         })
       ).rejects.toThrow("dependency intent is invalid; values omitted");
-      expect(listener.calls).toEqual(["runtime status", "runtime probe"]);
+      expect(listener.calls).toEqual([
+        "graph inspect",
+        "runtime status",
+        "runtime probe",
+      ]);
       expect(f.events).toEqual([]);
       expect(f.state.pending?.phase).toBe("cleaned");
     }

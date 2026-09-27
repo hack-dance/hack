@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import { checkNativeHttpsPort } from "./native-https-port.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
+import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
 import type {
   NativeProjectRun,
   NativeProjectRunScope,
@@ -173,52 +174,7 @@ async function verifyStoppedGraph(opts: RecoveryOptions): Promise<void> {
     run: opts.run.run,
     invoke: opts.invoke,
   });
-  if (
-    !isRecord(result) ||
-    result.journal_incomplete !== false ||
-    !isRecord(result.receipt) ||
-    !isRecord(result.observations)
-  ) {
-    throw refused();
-  }
-  const { receipt, observations } = result;
-  if (
-    receipt.phase !== "stopped-data-retained" ||
-    receipt.run !== opts.run.run ||
-    receipt.owner !== opts.run.owner ||
-    receipt.namespace !== opts.run.namespace ||
-    receipt.plan_id !== opts.run.planId ||
-    !isRecord(receipt.resources)
-  ) {
-    throw refused();
-  }
-  const expectedObservations = new Set<string>();
-  for (const resource of Object.values(receipt.resources)) {
-    if (
-      !isRecord(resource) ||
-      typeof resource.key !== "string" ||
-      typeof resource.kind !== "string"
-    ) {
-      throw refused();
-    }
-    const key = `${resource.kind}:${resource.key}`;
-    if (expectedObservations.has(key)) {
-      throw refused();
-    }
-    expectedObservations.add(key);
-    const observed = observations[key];
-    if (
-      !isRecord(observed) ||
-      observed.state !== (resource.kind === "volume" ? "present" : "absent") ||
-      !["container", "network", "volume"].includes(resource.kind)
-    ) {
-      throw refused();
-    }
-  }
-  if (
-    Object.keys(observations).length !== expectedObservations.size ||
-    Object.keys(observations).some((key) => !expectedObservations.has(key))
-  ) {
+  if (!confirmedNativeRetainedGraph(result, opts.run)) {
     throw refused();
   }
 }

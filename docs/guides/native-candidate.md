@@ -373,8 +373,11 @@ to confirm graph, HTTPS and lifecycle cleanup before starting its replacement.
 Changed selections and unknown legacy startup/finalization records refuse before
 cleanup. A failed replacement retains its intent: retry `restart` after resolving
 the reported problem; a fresh `up` cannot bypass it. When the saved intent confirms
-cleanup and the old run mapping is absent, retry still reviews the public dependency
-intent and all source, plan, environment, network and admission checks. It captures
+cleanup, retry independently inspects the exact native run: its journal must be
+complete, containers and networks absent, and retained volumes present. A matching
+retained frontend mapping may remain; the mapping and intent alone do not prove
+cleanup. Retry still reviews the public dependency intent and all source, plan,
+environment, network and admission checks. It captures
 listener identities after the startup hooks recreate them, rather than requiring
 already stopped listeners before those hooks run. An interrupted operation lock
 requires ownership inspection rather than automatic removal. Restart does not

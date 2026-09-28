@@ -83,6 +83,150 @@ fn invoke(fixture: &Fixture, arguments: &[&str]) -> Output {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn runtime_inspect_host_listener_reports_exact_live_identity() {
+    use std::net::{TcpListener, TcpStream};
+    use std::os::fd::AsRawFd;
+
+    let fixture = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let enabled: libc::c_int = 1;
+    // SAFETY: the live listener owns fd; enabled points to a valid integer.
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                listener.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_REUSEPORT,
+                (&enabled as *const libc::c_int).cast(),
+                std::mem::size_of_val(&enabled) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    let pid = std::process::id().to_string();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let executable = executable.to_str().unwrap();
+    let args = [
+        "runtime",
+        "inspect-host-listener",
+        "--pid",
+        &pid,
+        "--port",
+        &port,
+        "--executable",
+        executable,
+        "--json",
+    ];
+    let first = invoke(&fixture, &args);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let observed: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(observed["pid"], std::process::id());
+    assert_eq!(observed["port"], listener.local_addr().unwrap().port());
+    assert_eq!(observed["executable"], executable);
+    assert_eq!(observed["uid"], unsafe { libc::geteuid() });
+    assert!(observed["start_micros"].as_u64().unwrap() > 0);
+    let fingerprint = observed["fingerprint"].as_str().unwrap();
+    assert_eq!(fingerprint.len(), 64);
+    assert!(
+        fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    );
+    let second = invoke(&fixture, &args);
+    assert!(second.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&second.stdout).unwrap(),
+        observed
+    );
+    let no_peer = invoke(
+        &fixture,
+        &[
+            "runtime",
+            "inspect-host-listener",
+            "--pid",
+            &pid,
+            "--port",
+            &port,
+            "--executable",
+            executable,
+            "--peer-port",
+            "1",
+            "--json",
+        ],
+    );
+    assert_eq!(no_peer.status.code(), Some(2));
+    let client = TcpStream::connect(("127.0.0.1", listener.local_addr().unwrap().port())).unwrap();
+    let (_server, _) = listener.accept().unwrap();
+    let peer_port = client.local_addr().unwrap().port().to_string();
+    let peer = invoke(
+        &fixture,
+        &[
+            "runtime",
+            "inspect-host-listener",
+            "--pid",
+            &pid,
+            "--port",
+            &port,
+            "--executable",
+            executable,
+            "--peer-port",
+            &peer_port,
+            "--json",
+        ],
+    );
+    assert!(
+        peer.status.success(),
+        "{}",
+        String::from_utf8_lossy(&peer.stderr)
+    );
+    let accepted: Value = serde_json::from_slice(&peer.stdout).unwrap();
+    assert_eq!(accepted["accepted"], true);
+    assert_eq!(accepted["fingerprint"], observed["fingerprint"]);
+    assert_eq!(
+        accepted.as_object().unwrap().len(),
+        observed.as_object().unwrap().len() + 1
+    );
+    drop(listener);
+    let absent = invoke(&fixture, &args);
+    assert!(!absent.status.success());
+}
+
+#[test]
+fn runtime_inspect_host_listener_rejects_malformed_pid_and_port() {
+    let fixture = Fixture::new();
+    for (pid, port, peer_port) in [
+        ("not-a-pid", "443", None),
+        ("2", "65536", None),
+        ("2", "443", Some("65536")),
+    ] {
+        let mut args = vec![
+            "runtime",
+            "inspect-host-listener",
+            "--pid",
+            pid,
+            "--port",
+            port,
+            "--executable",
+            "/bin/sh",
+        ];
+        if let Some(peer_port) = peer_port {
+            args.extend(["--peer-port", peer_port]);
+        }
+        args.push("--json");
+        let output = invoke(&fixture, &args);
+        assert_eq!(output.status.code(), Some(2));
+        let failure: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(failure["code"], "invalid_arguments");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn graph_serve_rejects_changed_plan_before_dependency_or_runtime_access() {
     use hack_runtime_core::project::{self, PlanOptions};
 

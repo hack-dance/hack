@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
   access,
@@ -17,14 +17,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   type HttpsChild,
+  inspectActiveNativeHttpsOwner,
   isNativeHttpsProbePath,
   nativeHttpsVerificationError,
   parseNativeHttpsHeaders,
   spawnNativeHttpsChild,
   startNativeProjectHttps,
+  verifyActiveNativeHttpsConnection,
   verifyNativeHttpsHostname,
 } from "../src/backends/native-project-https.ts";
-import { CURRENT_CA_PEM } from "./helpers/ca-certificates.ts";
+import { CURRENT_CA_PEM, OLD_CA_PEM } from "./helpers/ca-certificates.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -61,6 +63,10 @@ async function fixture() {
   let foreign = false;
   let failCaddy = false;
   let wrongIdentity = false;
+  let wrongListener = false;
+  let wrongPeer = false;
+  let peerAccepted = true;
+  const peerProofCalls: string[][] = [];
   const events: string[] = [];
   const deps: NonNullable<
     Parameters<typeof startNativeProjectHttps>[0]["dependencies"]
@@ -69,6 +75,24 @@ async function fixture() {
     permissionPort: async () => 18_443,
     adminReady: async () => true,
     invoke: async (request) => {
+      if (request.args[1] === "inspect-host-listener") {
+        const peer = request.args.includes("--peer-port");
+        if (peer) {
+          peerProofCalls.push([...request.args]);
+        }
+        return {
+          pid: 1001,
+          start_micros: 1_700_000_000_000_000,
+          uid: process.getuid?.(),
+          executable: binary,
+          port: 443,
+          fingerprint:
+            wrongListener || (peer && wrongPeer)
+              ? "f".repeat(64)
+              : "a".repeat(64),
+          ...(peer ? { accepted: peerAccepted } : {}),
+        };
+      }
       if (request.args[1] === "stop-hostname-authority") {
         expect(request.args).toEqual([
           "runtime",
@@ -189,6 +213,16 @@ async function fixture() {
     wrongIdentity: () => {
       wrongIdentity = true;
     },
+    wrongListener: () => {
+      wrongListener = true;
+    },
+    wrongPeer: () => {
+      wrongPeer = true;
+    },
+    rejectPeer: () => {
+      peerAccepted = false;
+    },
+    peerProofCalls,
     foreign: () => {
       foreign = true;
     },
@@ -210,12 +244,179 @@ test("owns authority and Caddy lifetimes, writes strict routing config and prese
   expect(f.config()).toContain("https://:443");
   expect(f.config()).toContain("bind 127.0.0.1");
   expect(f.config()).toContain("permission http http://127.0.0.1:18443/ask");
+  const owner = await inspectActiveNativeHttpsOwner({
+    runtime: f.opts.runtime,
+    invoke: f.opts.dependencies.invoke,
+  });
+  expect(owner).toMatchObject({
+    caPath: running.caPath,
+    httpsPort: 443,
+    listenerFingerprint: "a".repeat(64),
+    caddyPid: 1001,
+    caddyBinary: f.opts.caddyBinary,
+  });
   await running.close();
   await running.close();
   expect(f.events).toEqual(["1:SIGTERM", "0:cooperative-stop", "0:EOF"]);
   expect(await readFile(running.caPath, "utf8")).toBe(CURRENT_CA_PEM);
   await expect(
     access(join(f.root, "native-https/owner.lock"))
+  ).rejects.toThrow();
+  await expect(
+    access(join(f.root, "native-https/active-owner.json"))
+  ).rejects.toThrow();
+});
+test("owner receipt verifier refuses a replaced listener", async () => {
+  const f = await fixture();
+  const running = await startNativeProjectHttps(f.opts);
+  cleanups.push(() => running.close());
+  f.wrongListener();
+  await expect(
+    inspectActiveNativeHttpsOwner({
+      runtime: f.opts.runtime,
+      invoke: f.opts.dependencies.invoke,
+    })
+  ).rejects.toThrow("ownership verification failed");
+});
+test("peer proof requires the accepted socket and exact receipted listener", async () => {
+  const f = await fixture();
+  const running = await startNativeProjectHttps(f.opts);
+  cleanups.push(() => running.close());
+  const owner = await inspectActiveNativeHttpsOwner({
+    runtime: f.opts.runtime,
+    invoke: f.opts.dependencies.invoke,
+  });
+  await verifyActiveNativeHttpsConnection({
+    runtime: f.opts.runtime,
+    owner,
+    peerPort: 52_341,
+    invoke: f.opts.dependencies.invoke,
+  });
+  expect(f.peerProofCalls).toContainEqual([
+    "runtime",
+    "inspect-host-listener",
+    "--pid",
+    "1001",
+    "--port",
+    "443",
+    "--executable",
+    f.opts.caddyBinary,
+    "--peer-port",
+    "52341",
+    "--json",
+  ]);
+  f.wrongPeer();
+  await expect(
+    verifyActiveNativeHttpsConnection({
+      runtime: f.opts.runtime,
+      owner,
+      peerPort: 52_342,
+      invoke: f.opts.dependencies.invoke,
+    })
+  ).rejects.toThrow("ownership verification failed");
+  const other = await fixture();
+  const otherRunning = await startNativeProjectHttps(other.opts);
+  cleanups.push(() => otherRunning.close());
+  const otherOwner = await inspectActiveNativeHttpsOwner({
+    runtime: other.opts.runtime,
+    invoke: other.opts.dependencies.invoke,
+  });
+  other.rejectPeer();
+  await expect(
+    verifyActiveNativeHttpsConnection({
+      runtime: other.opts.runtime,
+      owner: otherOwner,
+      peerPort: 52_343,
+      invoke: other.opts.dependencies.invoke,
+    })
+  ).rejects.toThrow("ownership verification failed");
+});
+test("owner receipt verifier refuses CA rotation", async () => {
+  const f = await fixture();
+  const running = await startNativeProjectHttps(f.opts);
+  cleanups.push(() => running.close());
+  await writeFile(running.caPath, OLD_CA_PEM);
+  await expect(
+    inspectActiveNativeHttpsOwner({
+      runtime: f.opts.runtime,
+      invoke: f.opts.dependencies.invoke,
+    })
+  ).rejects.toThrow("ownership verification failed");
+});
+test("owner receipt verifier refuses a dead frontend challenge even while children remain", async () => {
+  const f = await fixture();
+  const running = await startNativeProjectHttps(f.opts);
+  cleanups.push(() => running.close());
+  await rm(join(f.root, "native-https/owner.sock"));
+  await expect(
+    inspectActiveNativeHttpsOwner({
+      runtime: f.opts.runtime,
+      invoke: f.opts.dependencies.invoke,
+    })
+  ).rejects.toThrow("ownership verification failed");
+});
+test("owner receipt verifier refuses malformed or publicly readable receipts", async () => {
+  const f = await fixture();
+  const running = await startNativeProjectHttps(f.opts);
+  cleanups.push(() => running.close());
+  const receipt = join(f.root, "native-https/active-owner.json");
+  const original = await readFile(receipt);
+  await writeFile(receipt, "{}");
+  await expect(
+    inspectActiveNativeHttpsOwner({
+      runtime: f.opts.runtime,
+      invoke: f.opts.dependencies.invoke,
+    })
+  ).rejects.toThrow("ownership verification failed");
+  await writeFile(receipt, original);
+  await chmod(receipt, 0o644);
+  await expect(
+    inspectActiveNativeHttpsOwner({
+      runtime: f.opts.runtime,
+      invoke: f.opts.dependencies.invoke,
+    })
+  ).rejects.toThrow("ownership verification failed");
+  await chmod(receipt, 0o600);
+});
+test("owner challenge refuses a valid receipt with a different signing key", async () => {
+  const f = await fixture();
+  const running = await startNativeProjectHttps(f.opts);
+  cleanups.push(() => running.close());
+  const receipt = join(f.root, "native-https/active-owner.json");
+  const original = await readFile(receipt);
+  const parsed = JSON.parse(original.toString("utf8"));
+  const foreign = generateKeyPairSync("ed25519");
+  parsed.owner.publicKey = foreign.publicKey
+    .export({ format: "der", type: "spki" })
+    .toString("base64");
+  await writeFile(receipt, JSON.stringify(parsed));
+  await expect(
+    inspectActiveNativeHttpsOwner({
+      runtime: f.opts.runtime,
+      invoke: f.opts.dependencies.invoke,
+    })
+  ).rejects.toThrow("ownership verification failed");
+  await writeFile(receipt, original);
+});
+test("owner socket preparation failure retires only its bound socket and lock", async () => {
+  const f = await fixture();
+  await expect(
+    startNativeProjectHttps({
+      ...f.opts,
+      dependencies: {
+        ...f.opts.dependencies,
+        chmodOwnerSocket: async () => {
+          throw new Error("simulated socket preparation failure");
+        },
+      },
+    })
+  ).rejects.toThrow("ownership verification failed");
+  expect(f.children).toHaveLength(0);
+  await expect(
+    access(join(f.root, "native-https/owner.lock"))
+  ).rejects.toThrow();
+  await expect(
+    access(join(f.root, "native-https/owner.sock"))
   ).rejects.toThrow();
 });
 test("refuses foreign authority without spawning or terminating any process", async () => {
@@ -503,9 +704,10 @@ while True:
     chunk=conn.recv(4096)
     if not chunk: break
     data+=chunk
-   seen.update(request=data.decode(),remote=remote[0])
-   (root/'seen').write_text(json.dumps(seen))
-   conn.sendall((root/'response').read_bytes())
+   if data:
+    seen.update(request=data.decode(),remote=remote[0],remote_port=remote[1])
+    (root/'seen').write_text(json.dumps(seen))
+    conn.sendall((root/'response').read_bytes())
  except (OSError,ssl.SSLError): client.close()
 `
   );
@@ -531,11 +733,42 @@ while True:
       "/health"
     )
   ).toEqual({ statusCode: 204 });
-  expect(JSON.parse(await readFile(seenPath, "utf8"))).toEqual({
+  expect(JSON.parse(await readFile(seenPath, "utf8"))).toMatchObject({
     sni: "fixture.invalid",
     request: `GET /health HTTP/1.1\r\nHost: fixture.invalid:${address.port}\r\nConnection: close\r\n\r\n`,
     remote: "127.0.0.1",
   });
+  await rm(seenPath);
+  let peerPort = 0;
+  const proof = verifyNativeHttpsHostname(
+    "fixture.invalid",
+    address.port,
+    cert,
+    "/health",
+    async (port) => {
+      peerPort = port;
+      await Bun.sleep(30);
+      expect(await Bun.file(seenPath).exists()).toBe(false);
+    }
+  );
+  expect(await proof).toEqual({ statusCode: 204 });
+  expect(peerPort).toBeGreaterThan(0);
+  expect(JSON.parse(await readFile(seenPath, "utf8")).remote_port).toBe(
+    peerPort
+  );
+  await rm(seenPath);
+  await expect(
+    verifyNativeHttpsHostname(
+      "fixture.invalid",
+      address.port,
+      cert,
+      "/health",
+      async () => {
+        throw new Error("untrusted peer detail");
+      }
+    )
+  ).rejects.toThrow("Native HTTPS verification failed");
+  expect(await Bun.file(seenPath).exists()).toBe(false);
   await expect(
     verifyNativeHttpsHostname("wrong.invalid", address.port, cert, "/health")
   ).rejects.toThrow("Native HTTPS verification failed");

@@ -38,6 +38,7 @@ Usage:
   hack-local runtime hostname-authority --socket <path> [--json]
   hack-local runtime recover-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
   hack-local runtime managed-hostname-authority [--json]
+  hack-local runtime inspect-host-listener --pid <pid> --port <loopback-port> --executable <absolute-path> [--peer-port <open-client-port>] [--json]
   hack-local runtime serve-managed-hostnames [--certificate-name-limit <1..4096>] (owner pipe on stdin)
   hack-local runtime certificate-admission [--json]
   hack-local runtime guest-disk-usage [--json]
@@ -435,6 +436,58 @@ fn run() -> Result<(), CandidateError> {
                     &discover_candidate(&requested)?,
                 )?,
             )?;
+        }
+        ["runtime", "inspect-host-listener", rest @ ..] => {
+            let _candidate = discover_candidate(&requested)?;
+            let (pid, port, executable, peer_port) = match rest {
+                ["--pid", pid, "--port", port, "--executable", executable]
+                | [
+                    "--pid",
+                    pid,
+                    "--port",
+                    port,
+                    "--executable",
+                    executable,
+                    "--json",
+                ] => (pid, port, executable, None),
+                [
+                    "--pid",
+                    pid,
+                    "--port",
+                    port,
+                    "--executable",
+                    executable,
+                    "--peer-port",
+                    peer_port,
+                    "--json",
+                ] => (pid, port, executable, Some(peer_port)),
+                _ => return Err(CandidateError::new("invalid_arguments", HELP)),
+            };
+            let pid = pid.parse::<i32>().map_err(|_| {
+                CandidateError::new("invalid_arguments", "Invalid host listener PID.")
+            })?;
+            let port = port.parse::<u16>().map_err(|_| {
+                CandidateError::new("invalid_arguments", "Invalid host listener port.")
+            })?;
+            let inspected = match peer_port {
+                Some(peer_port) => {
+                    let peer_port = peer_port.parse::<u16>().map_err(|_| {
+                        CandidateError::new("invalid_arguments", "Invalid host peer port.")
+                    })?;
+                    hack_runtime_core::provider::host_endpoint::inspect_listener_peer(
+                        pid,
+                        port,
+                        Path::new(executable),
+                        peer_port,
+                    )?
+                }
+                None => hack_runtime_core::provider::host_endpoint::inspect_listener(
+                    pid,
+                    port,
+                    Path::new(executable),
+                )?,
+            };
+            print_json(&inspected)?;
         }
         ["runtime", "guest-disk-usage"] | ["runtime", "guest-disk-usage", "--json"] => {
             print_json(&hack_runtime_core::provider::guest_storage::inspect(

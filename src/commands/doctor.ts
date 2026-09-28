@@ -8,6 +8,10 @@ import {
   checkLegacyProjectAgentArtifacts,
   checkLegacyUserAgentArtifacts,
 } from "../agents/legacy-artifacts.ts";
+import {
+  type NativeRuntimeSelection,
+  resolveNativeRuntimeSelection,
+} from "../backends/native-runtime-client.ts";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -87,6 +91,10 @@ import {
   getManagedMutagenInstallPath,
   getMutagenPath,
 } from "../lib/mutagen.ts";
+import {
+  inspectNativeCaTrust,
+  repairNativeCaTrust,
+} from "../lib/native-ca-doctor.ts";
 import { isMac } from "../lib/os.ts";
 import {
   defaultProjectSlugFromPath,
@@ -205,7 +213,7 @@ const doctorPositionals = [] as const;
 const doctorSpec = defineCommand({
   name: "doctor",
   summary:
-    "Validate local setup (docker, networks, DNS, global infra, project config)",
+    "Validate local setup for the selected runtime, routing, trust and project",
   group: "Diagnostics",
   options: doctorOptions,
   positionals: doctorPositionals,
@@ -247,6 +255,10 @@ const DOCTOR_SUMMARY_GROUPS = [
       "proxy ports",
       "caddy local ca",
       "host tls trust",
+      "native https owner",
+      "native root trust",
+      "native ca repair",
+      "native https route",
       "agent integrations",
     ]),
   },
@@ -335,6 +347,16 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     fix: args.options.fix === true,
     migrateEnvConfig: args.options.migrateEnvConfig === true,
   });
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    return await handleNativeDoctor({
+      runtime: native,
+      browser,
+      json,
+      fix: args.options.fix === true,
+      migrateEnvConfig: args.options.migrateEnvConfig === true,
+    });
+  }
   const results: TimedCheckResult[] = [];
   const s = createDoctorProgress({ json });
   s.start("Running doctor checks...");
@@ -750,6 +772,142 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 
   return 0;
 };
+
+async function handleNativeDoctor(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly browser: ReturnType<typeof parseBrowserNetworkOptions>;
+  readonly json: boolean;
+  readonly fix: boolean;
+  readonly migrateEnvConfig: boolean;
+}): Promise<number> {
+  if (opts.migrateEnvConfig) {
+    throw new CliUsageError(
+      "Native doctor does not run the Docker-era env migration; use an installed v4 invocation for that migration."
+    );
+  }
+  const results: TimedCheckResult[] = [];
+  const progress = createDoctorProgress({ json: opts.json });
+  progress.start("Checking the active native HTTPS root...");
+  const hostname = opts.browser.url
+    ? new URL(opts.browser.url).hostname
+    : undefined;
+  if (opts.fix) {
+    results.push(
+      await runCheck(progress, "native ca repair", async () => {
+        if (!isMac()) {
+          return {
+            name: "native ca repair",
+            status: "error",
+            message: "System-keychain repair requires macOS.",
+          };
+        }
+        const repaired = await repairNativeCaTrust({
+          runtime: opts.runtime,
+          hostname,
+        });
+        const messages = {
+          installed:
+            "Verified live native root installed in the System keychain.",
+          "already-trusted": "Verified live native root was already trusted.",
+          declined:
+            "Trust repair requires an interactive confirmation and native administrator prompt.",
+        } as const;
+        return {
+          name: "native ca repair",
+          status: repaired === "declined" ? "warn" : "ok",
+          message: messages[repaired],
+        };
+      })
+    );
+  }
+  let inspected: Awaited<ReturnType<typeof inspectNativeCaTrust>> | undefined;
+  try {
+    inspected = await inspectNativeCaTrust({ runtime: opts.runtime });
+    results.push({
+      name: "native https owner",
+      status: "ok",
+      message: "Active Caddy listener and exact current root verified.",
+      durationMs: 0,
+    });
+  } catch {
+    results.push({
+      name: "native https owner",
+      status: "warn",
+      message:
+        "No verified active native Caddy listener/root. Trust cannot be inferred from a retained certificate or similarly named keychain entry.",
+      durationMs: 0,
+    });
+  }
+  if (inspected) {
+    results.push({
+      name: "native root trust",
+      status: inspected.trust.trusted ? "ok" : "error",
+      message: inspected.trust.trusted
+        ? "Exact live root passes macOS System-keychain TLS trust."
+        : (inspected.trust.issue ??
+          "Exact live root is not trusted in the macOS System keychain."),
+      durationMs: 0,
+    });
+    if (hostname) {
+      results.push(
+        await runCheck(progress, "native https route", async () => {
+          const after = await inspectNativeCaTrust({
+            runtime: opts.runtime,
+            hostname,
+          });
+          if (
+            after.owner.listenerFingerprint !==
+              inspected.owner.listenerFingerprint ||
+            after.owner.caSha256 !== inspected.owner.caSha256
+          ) {
+            throw new Error(
+              "Native HTTPS owner changed during route verification."
+            );
+          }
+          return {
+            name: "native https route",
+            status: "ok",
+            message: `${hostname} completed a loopback TLS handshake against the exact live root.`,
+          };
+        })
+      );
+    }
+  } else {
+    results.push({
+      name: "native root trust",
+      status: "warn",
+      message: "Skipped until the active Caddy owner and root are verified.",
+      durationMs: 0,
+    });
+  }
+  if (opts.browser.url) {
+    results.push(
+      await runCheck(
+        progress,
+        "browser local network",
+        () =>
+          checkBrowserLocalNetwork({
+            platform: process.platform,
+            ...opts.browser,
+          }),
+        { timeoutMs: 7000 }
+      )
+    );
+  }
+  progress.stop(`Native doctor checks complete (${results.length} checks)`);
+  const hasError = results.some((result) => result.status === "error");
+  if (opts.json) {
+    return finishDoctorJson({ results, hasError });
+  }
+  await renderDoctorSummary(results);
+  if (!opts.browser.url) {
+    note(
+      "Pass --browser-url https://your-app.hack.local --browser-result works|fails|permission-denied to check an exact app route and record a separate browser observation.",
+      "Native HTTPS"
+    );
+  }
+  return hasError ? 1 : 0;
+}
 
 export type DoctorJsonCheck = {
   readonly id: string;

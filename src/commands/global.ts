@@ -1,5 +1,6 @@
 import { dirname, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
+import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 
@@ -2701,6 +2702,14 @@ function buildGatewayUrl(opts: {
 }
 
 async function globalTrust(): Promise<number> {
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    logger.warn({
+      message:
+        "Native trust needs an exact reviewed HTTPS origin. Run hack doctor --fix --browser-url https://your-app.hack.local while its native app is running. No Docker-era CA was installed.",
+    });
+    return 1;
+  }
   const slimExit = failIfSlimMode({
     feature: "hack global trust",
   });

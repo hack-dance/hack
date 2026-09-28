@@ -3,8 +3,8 @@ use super::*;
 #[cfg(target_os = "macos")]
 use std::{
     io::{Read, Write},
-    net::TcpListener,
-    os::fd::AsRawFd,
+    net::{TcpListener, TcpStream},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     thread,
     time::Instant,
 };
@@ -18,6 +18,56 @@ fn fixture() -> (TcpListener, HostEndpoint) {
     )
     .unwrap();
     (listener, endpoint)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn inspection_reports_a_stable_exact_listener_and_refuses_replacement() {
+    let (listener, endpoint) = fixture();
+    let port = listener.local_addr().unwrap().port();
+    let expected = endpoint.process_identity();
+    let observed = inspect_listener(expected.pid, port, &expected.executable).unwrap();
+    assert_eq!(observed.pid, expected.pid);
+    assert_eq!(observed.start_micros, expected.start_micros);
+    assert_eq!(observed.uid, expected.uid);
+    assert_eq!(observed.executable, expected.executable);
+    assert_eq!(observed.port, port);
+    assert_eq!(
+        observed.fingerprint,
+        inspect_listener(expected.pid, port, &expected.executable)
+            .unwrap()
+            .fingerprint
+    );
+    assert!(inspect_listener(expected.pid, port, Path::new("/bin/sh")).is_err());
+    drop(listener);
+    assert!(inspect_listener(expected.pid, port, &expected.executable).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn peer_inspection_requires_one_exact_open_accepted_socket() {
+    let (listener, endpoint) = fixture();
+    let process = endpoint.process_identity();
+    let port = listener.local_addr().unwrap().port();
+    assert!(inspect_listener_peer(process.pid, port, &process.executable, 1).is_err());
+    let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let (server, _) = listener.accept().unwrap();
+    let peer_port = client.local_addr().unwrap().port();
+    let observed =
+        inspect_listener_peer(process.pid, port, &process.executable, peer_port).unwrap();
+    assert_eq!(observed.accepted, Some(true));
+    assert_eq!(
+        observed.fingerprint,
+        inspect_listener(process.pid, port, &process.executable)
+            .unwrap()
+            .fingerprint
+    );
+    // SAFETY: dup returns a new owned descriptor for the live accepted socket.
+    let duplicate = unsafe { libc::dup(server.as_raw_fd()) };
+    assert!(duplicate >= 0);
+    // SAFETY: this newly duplicated descriptor has not been given to another owner.
+    let _duplicate = unsafe { OwnedFd::from_raw_fd(duplicate) };
+    assert!(inspect_listener_peer(process.pid, port, &process.executable, peer_port).is_err());
 }
 
 #[cfg(target_os = "macos")]
@@ -333,6 +383,7 @@ fn changed_generation_or_process_cannot_authorize_connection() {
 #[test]
 fn shared_or_wildcard_listener_is_not_captured() {
     let (listener, endpoint) = fixture();
+    let process = endpoint.process_identity();
     let enabled: libc::c_int = 1;
     // SAFETY: the live listener owns fd; enabled points to a correctly sized integer.
     assert_eq!(
@@ -348,6 +399,11 @@ fn shared_or_wildcard_listener_is_not_captured() {
         0
     );
     assert!(HostEndpoint::capture(std::process::id() as i32, endpoint.port).is_err());
+    let observed = inspect_listener(process.pid, endpoint.port, &process.executable).unwrap();
+    assert_eq!(observed.pid, process.pid);
+    assert_eq!(observed.start_micros, process.start_micros);
+    assert_eq!(observed.port, endpoint.port);
+    assert_eq!(observed.fingerprint.len(), 64);
     let wildcard = TcpListener::bind("0.0.0.0:0").unwrap();
     assert!(
         HostEndpoint::capture(

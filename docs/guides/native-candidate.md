@@ -2,7 +2,8 @@
 
 `hack-native` is an experimental Apple Silicon macOS executor installed alongside
 Hack's supported CLI. It does not replace `hack`, select a Docker context, migrate
-projects, or install DNS or trust. Its graph commands support a bounded subset;
+projects, or install DNS or trust automatically. Its graph commands support a
+bounded subset;
 this bundle is not application parity or release qualification.
 
 Build with the repository's pinned Bun 1.3.9, Rust 1.97.1 and Zig 0.15.2 toolchain, Python 3,
@@ -704,6 +705,31 @@ readiness policy. It does not render `/` merely to verify an alias. The guest
 readiness probes remain required; a health response does not establish a usable
 browser session. DNS and user-approved trust setup are separate prerequisites for
 normal browser access.
+
+With the native backend selected, `hack doctor --json` inspects the active
+frontend owner, the exact Caddy listener and root certificate, and macOS
+System-keychain trust. A retained root file or an older same-name certificate
+does not count as current trust. To check a real app route, pass an exact HTTPS
+origin with `--browser-url`; Doctor verifies that hostname over loopback with
+the live root and reports normal macOS TLS separately. `--browser-result` records
+your manual observation for that origin; CLI success alone does not prove a
+browser session works.
+
+`hack doctor --fix --browser-url https://your-app.hack.local` can install only
+the verified live root after interactive confirmation and the native macOS
+administrator prompt. It checks the owner, root and route again after that
+prompt and verifies trust after installation. A missing, stale or changed owner
+refuses repair. The native `hack global trust` path directs you to this scoped
+Doctor command instead of falling back to Docker's exported CA. The native
+repair does not set up DNS or a browser's Local Network permission.
+
+The runtime's read-only `runtime inspect-host-listener --pid PID --port PORT
+--executable /absolute/caddy --json` reports the selected same-user loopback
+listener identity. The optional `--peer-port PEER_PORT` proves Caddy accepted
+that exact still-open TLS socket, including when Caddy enables `SO_REUSEPORT`.
+Doctor and native startup use the peer proof before accepting a TLS route.
+A PID, file path or listener fingerprint alone is not proof of an owned
+frontend or CA.
 
 The probe pins its TCP connection to loopback independently of SNI and Host.
 Failed HTTPS verification reports a reviewed TLS/transport error code or

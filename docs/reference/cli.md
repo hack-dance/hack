@@ -1217,7 +1217,7 @@ hack log-pipe [options]
 
 ## `hack doctor`
 
-Validate local setup (docker, networks, DNS, global infra, project config)
+Validate local setup for the selected runtime, routing, trust and project
 
 ### Usage
 

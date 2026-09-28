@@ -5,7 +5,10 @@ import {
   DEFAULT_INGRESS_NETWORK,
   DEFAULT_LOGGING_NETWORK,
   DEFAULT_LOKI_HOST,
+  DEFAULT_NEW_PROJECT_TLD,
+  DEFAULT_OAUTH_ALIAS_ROOT,
   DEFAULT_OAUTH_ALIAS_TLD,
+  DEFAULT_PROJECT_TLD,
   DEFAULT_SCHEMAS_HOST,
   GLOBAL_ALLOY_FILENAME,
   GLOBAL_CADDY_COMPOSE_FILENAME,
@@ -20,6 +23,7 @@ import {
   LEGACY_LOKI_HOST,
   LEGACY_SCHEMAS_HOST,
 } from "./constants.ts";
+import { parseDefaultDomain } from "./lib/default-domain.ts";
 
 export function renderGlobalCaddyCompose(opts?: {
   readonly useStaticCoreDnsIp?: boolean;
@@ -84,19 +88,32 @@ export function renderGlobalCaddyCompose(opts?: {
 
 export function renderGlobalCoreDnsConfig(opts?: {
   readonly useStaticCaddyIp?: boolean;
+  readonly defaultDomain?: string;
 }): string {
   const useStaticCaddyIp = opts?.useStaticCaddyIp === true;
+  const defaultDomain = parseDefaultDomain(
+    opts?.defaultDomain ?? DEFAULT_NEW_PROJECT_TLD
+  );
+  const builtInDomains: ReadonlySet<string> = new Set([
+    DEFAULT_PROJECT_TLD,
+    DEFAULT_NEW_PROJECT_TLD,
+    DEFAULT_OAUTH_ALIAS_ROOT,
+  ]);
+  const builtInPattern = "(.*)\\.hack(\\..*)?\\.?";
+  const pattern = builtInDomains.has(defaultDomain)
+    ? `${builtInPattern}$`
+    : `(?:${builtInPattern}|(.*)\\.${defaultDomain.replaceAll(".", "\\.")}\\.?)$`;
   return [
     ".:53 {",
     ...(useStaticCaddyIp
       ? [
           "  template IN A {",
-          "    match (.*)\\.hack(\\..*)?\\.?$",
+          `    match ${pattern}`,
           `    answer "{{ .Name }} 30 IN A ${DEFAULT_CADDY_IP}"`,
           "    fallthrough",
           "  }",
         ]
-      : ["  rewrite name regex (.*)\\.hack(\\..*)?\\.?$ caddy"]),
+      : [`  rewrite name regex ${pattern} caddy`]),
     "  forward . 127.0.0.11",
     "  cache 30",
     "}",

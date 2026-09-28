@@ -75,7 +75,7 @@ hack init [options]
 | `--manual` | Skip discovery and define services manually (or generate a minimal compose in --auto) |
 | `--auto` | Run non-interactive init with sensible defaults |
 | `--name <slug>` | Project slug (default: repo name) |
-| `--dev-host <host>` | DEV_HOST override (new projects default to <project>.hack.local) |
+| `--dev-host <host>` | DEV_HOST override (new projects use global default_domain, or hack.local) |
 | `--oauth` | Enable OAuth-safe alias host |
 | `--oauth-tld <tld>` | OAuth alias TLD override (default: gy) |
 | `--no-discovery` | Skip discovery and generate a minimal compose |

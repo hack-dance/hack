@@ -56,6 +56,7 @@ import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
 } from "../lib/config-paths.ts";
+import { resolveDefaultDomain } from "../lib/default-domain.ts";
 import {
   checkBrowserLocalNetwork,
   parseBrowserNetworkOptions,
@@ -358,6 +359,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     });
   }
   const results: TimedCheckResult[] = [];
+  const defaultDomain = await resolveDefaultDomain();
   const s = createDoctorProgress({ json });
   s.start("Running doctor checks...");
 
@@ -567,6 +569,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     }
   );
   results.push(oauthDns);
+  await appendCustomDomainDnsChecks({ results, progress: s, defaultDomain });
 
   // Endpoint reachability (best-effort). Skip if DNS isn't set up.
   if (dns.status === "ok") {
@@ -1489,7 +1492,7 @@ async function checkMacDnsmasqConfigForDomain(
   }
 
   let ok = dnsmasqConfigHasDomain({ text, domain });
-  if (!ok && domain === DEFAULT_NEW_PROJECT_TLD) {
+  if (!ok) {
     const dynamicIp = await resolveGlobalCaddyIp();
     ok =
       dynamicIp !== null &&
@@ -1793,15 +1796,53 @@ function skipDnsName(buf: Buffer, startOffset: number): number {
   return offset;
 }
 
+async function appendCustomDomainDnsChecks(opts: {
+  readonly results: TimedCheckResult[];
+  readonly progress: DoctorProgress;
+  readonly defaultDomain: string;
+}): Promise<void> {
+  const { results, progress, defaultDomain } = opts;
+  const builtInDomains: ReadonlySet<string> = new Set([
+    DEFAULT_NEW_PROJECT_TLD,
+    DEFAULT_PROJECT_TLD,
+    DEFAULT_OAUTH_ALIAS_ROOT,
+  ]);
+  if (builtInDomains.has(defaultDomain)) {
+    return;
+  }
+  if (isMac()) {
+    results.push(
+      await runCheck(progress, `resolver:${defaultDomain}`, () =>
+        checkMacResolverForDomain(defaultDomain)
+      )
+    );
+    results.push(
+      await runCheck(progress, `dnsmasq.conf:${defaultDomain}`, () =>
+        checkMacDnsmasqConfigForDomain(defaultDomain)
+      )
+    );
+  }
+  results.push(
+    await runCheck(
+      progress,
+      `dns:${defaultDomain}`,
+      () => checkHackLocalDns({ domain: defaultDomain }),
+      { timeoutMs: 3000 }
+    )
+  );
+}
+
 /** DNS observation only; it does not assert an HTTP service exists at this probe name. */
 export async function checkHackLocalDns(
   opts: {
     readonly lookup?: (host: string) => Promise<{ address: string }>;
     readonly caddyIp?: () => Promise<string | null>;
+    readonly domain?: string;
   } = {}
 ): Promise<CheckResult> {
-  const host = `doctor.${DEFAULT_NEW_PROJECT_TLD}`;
-  const name = `dns:${DEFAULT_NEW_PROJECT_TLD}`;
+  const domain = opts.domain ?? DEFAULT_NEW_PROJECT_TLD;
+  const host = `doctor.${domain}`;
+  const name = `dns:${domain}`;
   try {
     const { address } = await (opts.lookup ?? lookup)(host);
     let ok = [DEFAULT_CADDY_IP, DEFAULT_HOST_DNS_IP, "::1"].includes(address);

@@ -11,8 +11,13 @@ hack open
 
 Notes:
 - `hack init` writes `.hack/` files (Compose + config).
-- New projects default to `<project>.hack.local`. Pass `--dev-host` to choose a custom
-  hostname. Existing project hosts are not migrated by this default change.
+- New projects default to `<project>.hack.local`. Set a different machine-wide
+  suffix with `hack config set --global default_domain hack.gy` (or a dedicated
+  domain suffix you control, such as `dev.example.com`), then run
+  `hack global install` to configure local DNS. This is wildcard DNS for the
+  entire suffix, so do not select a domain used by unrelated sites.
+  Pass `--dev-host` for a per-project hostname; it takes precedence over the
+  global default. Existing project hosts and Compose routes are not migrated.
 - `hack init` also scaffolds `.hack/hack.env.default.yaml`. See `docs/env.md`.
 - `hack up` starts the stack on an isolated network.
 - `hack open` resolves the routed URL via the global proxy and prefers the OAuth alias when
@@ -32,8 +37,10 @@ Note:
 
 ## Local domain compatibility
 
-For new projects, `--oauth` adds `<project>.hack.gy` alongside the primary
-`<project>.hack.local` route; it does not create `<project>.hack.local.gy`.
+For new projects using the default `hack.local`, `--oauth` adds
+`<project>.hack.gy` alongside the primary route; it does not create
+`<project>.hack.local.gy`. When `default_domain` is `hack.gy`, the primary
+host is already OAuth-compatible and no second alias is needed.
 An explicit OAuth TLD replaces `gy`. Custom development hosts keep their configured
 name; Hack does not invent an OAuth alias for a domain outside its managed namespaces.
 Service subdomains and branch names are inserted before the project name on both routes.
@@ -78,7 +85,10 @@ never takes a lock from a live or unknown owner. An interrupted lock publication
 or recovery guard requires manual review. Keep editors and other config writers
 idle during apply/rollback; they do not participate in the migration lock.
 
-The explicit global setup configures the new DNS suffix alongside the legacy ones.
+The explicit global setup configures the selected default DNS suffix alongside
+the built-in `.hack`, `.hack.local`, and `.hack.gy` roots. It refuses an
+existing conflicting dnsmasq or macOS resolver claim for a custom suffix;
+review and resolve that conflict explicitly before retrying.
 Use Doctor to check for missing resolver configuration before starting a new project;
 review the proposed global setup changes rather than removing existing resolver files.
 `.local` has special multicast DNS semantics ([RFC 6762, section 3](https://www.rfc-editor.org/rfc/rfc6762.html#section-3)),

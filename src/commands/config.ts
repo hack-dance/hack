@@ -14,6 +14,10 @@ import {
   PROJECT_CONFIG_LEGACY_FILENAME,
 } from "../constants.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import {
+  DEFAULT_DOMAIN_CONFIG_KEY,
+  parseDefaultDomain,
+} from "../lib/default-domain.ts";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import type { ProjectContext } from "../lib/project.ts";
@@ -144,7 +148,11 @@ const handleConfigSet: CommandHandlerFor<typeof configSetSpec> = async ({
   }
 
   const valueRaw = (args.positionals.value ?? "").trim();
-  const value = parseValue({ raw: valueRaw });
+  const value = parseConfigSetValue({
+    target: project,
+    path: parsedKey,
+    raw: valueRaw,
+  });
 
   const globalOnlyKey = resolveGlobalOnlyKey({ path: parsedKey });
   if (globalOnlyKey && project.scope === "project") {
@@ -200,6 +208,29 @@ export const configCommand = defineCommand({
 type ConfigTarget =
   | { readonly scope: "global"; readonly path: string }
   | { readonly scope: "project"; readonly project: ProjectContext };
+
+function parseConfigSetValue(opts: {
+  readonly target: ConfigTarget;
+  readonly path: readonly string[];
+  readonly raw: string;
+}): unknown {
+  const value = parseValue({ raw: opts.raw });
+  if (opts.path.join(".") !== DEFAULT_DOMAIN_CONFIG_KEY) {
+    return value;
+  }
+  if (opts.target.scope === "project") {
+    throw new CliUsageError(
+      "default_domain is global-only. Use --global for new projects, or --dev-host during this project's init."
+    );
+  }
+  try {
+    return parseDefaultDomain(value);
+  } catch (error) {
+    throw new CliUsageError(
+      error instanceof Error ? error.message : "Invalid default_domain"
+    );
+  }
+}
 
 async function resolveProjectForArgs(opts: {
   readonly ctx: CliContext;

@@ -54,6 +54,10 @@ import {
   resolveGlobalHackDir,
 } from "../lib/config-paths.ts";
 import {
+  managedLocalDomains,
+  resolveDefaultDomain,
+} from "../lib/default-domain.ts";
+import {
   isSlimExecutionMode,
   renderSlimModeUnavailableMessage,
 } from "../lib/execution-mode.ts";
@@ -505,6 +509,8 @@ async function globalInstall(): Promise<number> {
     return slimExit;
   }
 
+  await preflightCustomDomainDnsClaim();
+
   const s = spinner();
   await ensureOptionalInstallDependencies({ spinner: s });
   await warnIfSessionsMuxUnavailable();
@@ -653,6 +659,7 @@ async function writeGlobalInstallAssets(opts: {
   readonly paths: ReturnType<typeof getGlobalPaths>;
   readonly useStaticIps: boolean;
 }): Promise<void> {
+  const defaultDomain = await resolveDefaultDomain();
   await writeWithPromptIfDifferent(
     opts.paths.caddyCompose,
     renderGlobalCaddyCompose({
@@ -662,7 +669,10 @@ async function writeGlobalInstallAssets(opts: {
   );
   await writeWithPromptIfDifferent(
     opts.paths.coreDnsConfig,
-    renderGlobalCoreDnsConfig({ useStaticCaddyIp: opts.useStaticIps })
+    renderGlobalCoreDnsConfig({
+      useStaticCaddyIp: opts.useStaticIps,
+      defaultDomain,
+    })
   );
   await writeWithPromptIfDifferent(
     opts.paths.loggingCompose,
@@ -2971,6 +2981,11 @@ async function hasMkcertLocalCa({
 async function ensureMacHackDns(opts: {
   readonly targetIp: string;
 }): Promise<void> {
+  const domains = managedLocalDomains(await resolveDefaultDomain());
+  const customDomain = domains.at(-1);
+  if (domains.length > 3 && customDomain) {
+    await assertCustomResolverAvailable(customDomain);
+  }
   const brewOk = await ensureBrewForDnsmasq();
   if (!brewOk) {
     return;
@@ -2983,11 +2998,59 @@ async function ensureMacHackDns(opts: {
 
   const brewPrefix = await resolveBrewPrefix();
   const dnsmasqConf = resolve(brewPrefix, "etc", "dnsmasq.conf");
-  await ensureDnsmasqHackAliases({ dnsmasqConf, targetIp: opts.targetIp });
-  await ensureMacResolverFiles();
+  await ensureDnsmasqHackAliases({
+    dnsmasqConf,
+    targetIp: opts.targetIp,
+    domains,
+  });
+  await ensureMacResolverFiles(domains);
   await restartMacDnsmasq();
   await flushMacDnsCachePrivileged();
-  noteDnsConfigured({ dnsmasqConf, targetIp: opts.targetIp });
+  noteDnsConfigured({ dnsmasqConf, targetIp: opts.targetIp, domains });
+}
+
+async function preflightCustomDomainDnsClaim(): Promise<void> {
+  const domains = managedLocalDomains(await resolveDefaultDomain());
+  const customDomain = domains.length > 3 ? domains.at(-1) : undefined;
+  if (!(isMac() && customDomain)) {
+    return;
+  }
+  await assertCustomResolverAvailable(customDomain);
+  const brew = await findExecutableInPath("brew");
+  if (!brew) {
+    return;
+  }
+  const brewPrefix = await resolveBrewPrefix();
+  const conf = await readTextFile(resolve(brewPrefix, "etc", "dnsmasq.conf"));
+  assertCustomDnsmasqClaimAvailable({
+    domain: customDomain,
+    content: conf ?? "",
+  });
+}
+
+function assertCustomDnsmasqClaimAvailable(opts: {
+  readonly domain: string;
+  readonly content: string;
+}): void {
+  const prefix = `address=/.${opts.domain}/`;
+  const managedTargets: ReadonlySet<string> = new Set([
+    DEFAULT_CADDY_IP,
+    DEFAULT_HOST_DNS_IP,
+    "::1",
+  ]);
+  const claim = opts.content
+    .split("\n")
+    .map((line) => line.trim())
+    .find(
+      (line) =>
+        line.startsWith(prefix) &&
+        !managedTargets.has(line.slice(prefix.length))
+    );
+  if (claim) {
+    throw new Error(
+      `Existing dnsmasq claim for .${opts.domain}; resolve it before global install`
+    );
+  }
 }
 
 async function ensureBrewForDnsmasq(): Promise<boolean> {
@@ -3046,24 +3109,30 @@ async function resolveBrewPrefix(): Promise<string> {
 async function ensureDnsmasqHackAliases(opts: {
   readonly dnsmasqConf: string;
   readonly targetIp: string;
+  readonly domains: readonly string[];
 }): Promise<void> {
-  const desiredLines = [
-    `address=/.${DEFAULT_PROJECT_TLD}/${opts.targetIp}`,
-    `address=/.${DEFAULT_NEW_PROJECT_TLD}/${opts.targetIp}`,
-    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${opts.targetIp}`,
-  ] as const;
+  const desiredLines = opts.domains.map(
+    (domain) => `address=/.${domain}/${opts.targetIp}`
+  );
   const legacyHostTarget =
     opts.targetIp === DEFAULT_CADDY_IP ? DEFAULT_HOST_DNS_IP : DEFAULT_CADDY_IP;
-  const legacyLines = [
-    `address=/.${DEFAULT_PROJECT_TLD}/${legacyHostTarget}`,
-    `address=/.${DEFAULT_NEW_PROJECT_TLD}/${legacyHostTarget}`,
-    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${legacyHostTarget}`,
-    `address=/.${DEFAULT_PROJECT_TLD}/::1`,
-    `address=/.${DEFAULT_NEW_PROJECT_TLD}/::1`,
-    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/::1`,
-  ] as const;
+  const legacyLines = opts.domains.flatMap((domain) => [
+    `address=/.${domain}/${legacyHostTarget}`,
+    `address=/.${domain}/::1`,
+  ]);
 
   const existing = (await readTextFile(opts.dnsmasqConf)) ?? "";
+  const builtInDomains: ReadonlySet<string> = new Set([
+    DEFAULT_PROJECT_TLD,
+    DEFAULT_NEW_PROJECT_TLD,
+    DEFAULT_OAUTH_ALIAS_ROOT,
+  ]);
+  for (const domain of opts.domains) {
+    if (builtInDomains.has(domain)) {
+      continue;
+    }
+    assertCustomDnsmasqClaimAvailable({ domain, content: existing });
+  }
   const migrated = removeLegacyDnsmasqLines({
     content: existing,
     legacyLines,
@@ -3074,7 +3143,7 @@ async function ensureDnsmasqHackAliases(opts: {
   const shouldWrite = migrated.changed || missing.length > 0;
   if (!shouldWrite) {
     logger.info({
-      message: `dnsmasq already configured for .${DEFAULT_PROJECT_TLD}  .${DEFAULT_NEW_PROJECT_TLD} and .${DEFAULT_OAUTH_ALIAS_ROOT}`,
+      message: `dnsmasq already configured for ${opts.domains.map((domain) => `*.${domain}`).join(", ")}`,
     });
     return;
   }
@@ -3126,16 +3195,44 @@ function buildDnsmasqConf(opts: {
   return `${existing}\n${opts.lines.join("\n")}\n`;
 }
 
-async function ensureMacResolverFiles(): Promise<void> {
-  await maybeWriteResolver({ domain: DEFAULT_PROJECT_TLD });
-  await maybeWriteResolver({ domain: DEFAULT_NEW_PROJECT_TLD });
-  await maybeWriteResolver({ domain: DEFAULT_OAUTH_ALIAS_ROOT });
+async function ensureMacResolverFiles(
+  domains: readonly string[]
+): Promise<void> {
+  const builtInDomains: ReadonlySet<string> = new Set([
+    DEFAULT_PROJECT_TLD,
+    DEFAULT_NEW_PROJECT_TLD,
+    DEFAULT_OAUTH_ALIAS_ROOT,
+  ]);
+  for (const domain of domains) {
+    await maybeWriteResolver({
+      domain,
+      refuseForeign: !builtInDomains.has(domain),
+    });
+  }
+}
+
+async function assertCustomResolverAvailable(domain: string): Promise<void> {
+  const resolverPath = `/etc/resolver/${domain}`;
+  const existing = await readTextFile(resolverPath);
+  if (existing !== null && existing.trim() !== "nameserver 127.0.0.1") {
+    throw new Error(
+      `Existing resolver ${resolverPath} is not Hack-owned; refusing to overwrite it`
+    );
+  }
 }
 
 async function maybeWriteResolver(opts: {
   readonly domain: string;
+  readonly refuseForeign: boolean;
 }): Promise<void> {
   const resolverPath = `/etc/resolver/${opts.domain}`;
+  if (opts.refuseForeign) {
+    await assertCustomResolverAvailable(opts.domain);
+    const existing = await readTextFile(resolverPath);
+    if (existing !== null) {
+      return;
+    }
+  }
   const resolverOk = await confirmSafe({
     message: `Write ${resolverPath} (requires sudo)?`,
     initialValue: true,
@@ -3160,18 +3257,18 @@ async function maybeWriteResolver(opts: {
 function noteDnsConfigured(opts: {
   readonly dnsmasqConf: string;
   readonly targetIp: string;
+  readonly domains: readonly string[];
 }): void {
   const targetLabel =
     opts.targetIp === DEFAULT_CADDY_IP ? "container ingress" : "localhost";
   note(
     [
-      `DNS configured: *.${DEFAULT_PROJECT_TLD} → ${opts.targetIp} (${targetLabel})`,
-      `DNS configured: *.${DEFAULT_NEW_PROJECT_TLD} → ${opts.targetIp} (${targetLabel})`,
-      `DNS configured: *.${DEFAULT_OAUTH_ALIAS_ROOT} → ${opts.targetIp} (${targetLabel})`,
+      ...opts.domains.map(
+        (domain) =>
+          `DNS configured: *.${domain} → ${opts.targetIp} (${targetLabel})`
+      ),
       `- dnsmasq: ${opts.dnsmasqConf}`,
-      `- resolver: /etc/resolver/${DEFAULT_PROJECT_TLD}`,
-      `- resolver: /etc/resolver/${DEFAULT_NEW_PROJECT_TLD}`,
-      `- resolver: /etc/resolver/${DEFAULT_OAUTH_ALIAS_ROOT}`,
+      ...opts.domains.map((domain) => `- resolver: /etc/resolver/${domain}`),
     ].join("\n"),
     "DNS"
   );

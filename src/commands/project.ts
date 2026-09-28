@@ -143,6 +143,7 @@ import {
   classifyComposeStartupState,
 } from "../lib/compose-startup-state.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
+import { resolveDefaultDomain } from "../lib/default-domain.ts";
 import {
   resolveDependencyCacheBootstrapServices,
   resolveDependencyCacheOverride,
@@ -342,7 +343,7 @@ const optDevHost = defineOption({
   long: "--dev-host",
   valueHint: "<host>",
   description:
-    "DEV_HOST override (new projects default to <project>.hack.local)",
+    "DEV_HOST override (new projects use global default_domain, or hack.local)",
 } as const);
 
 const optOauth = defineOption({
@@ -3784,8 +3785,9 @@ function validateInitDevHost(value: string | undefined): string | undefined {
 async function promptInitDevHost(opts: {
   readonly slug: string;
   readonly devHostOption: string | undefined;
+  readonly defaultDomain: string;
 }): Promise<string | null> {
-  const defaultHost = `${opts.slug}.${DEFAULT_NEW_PROJECT_TLD}`;
+  const defaultHost = `${opts.slug}.${opts.defaultDomain}`;
   const initialHost = (opts.devHostOption ?? defaultHost).trim();
   const devHost = await text({
     message: "DEV_HOST:",
@@ -3940,6 +3942,9 @@ async function handleInit({
   const devHost = await promptInitDevHost({
     slug,
     devHostOption: args.options.devHost,
+    defaultDomain: args.options.devHost
+      ? DEFAULT_NEW_PROJECT_TLD
+      : await resolveDefaultDomain(),
   });
   if (!devHost) {
     return 1;
@@ -4070,7 +4075,7 @@ async function handleInit({
       "  hack up",
       "  hack open",
       "",
-      "First time on this machine? Run `hack global install` for *.hack DNS/TLS (needs sudo).",
+      `Check DNS/TLS for ${devHost}; hack global install configures managed global domains (needs sudo).`,
     ].join("\n"),
     "Initialized"
   );
@@ -4112,6 +4117,9 @@ async function handleInitAuto({
   const devHost = resolveInitDevHost({
     slug,
     devHostOpt: args.options.devHost,
+    defaultDomain: args.options.devHost
+      ? DEFAULT_NEW_PROJECT_TLD
+      : await resolveDefaultDomain(),
   });
 
   const oauthEnabled =
@@ -4219,8 +4227,7 @@ async function handleInitAuto({
     message: "Next: hack up --detach && hack open",
   });
   logger.info({
-    message:
-      "First time on this machine? Run `hack global install` for *.hack DNS/TLS (needs sudo).",
+    message: `Check DNS/TLS for ${devHost}; hack global install configures managed global domains (needs sudo).`,
   });
 
   if (withValue) {
@@ -4321,8 +4328,9 @@ async function ensureUniqueProjectSlug(opts: {
 function resolveInitDevHost(opts: {
   readonly slug: string;
   readonly devHostOpt?: string;
+  readonly defaultDomain: string;
 }): string {
-  const fallback = `${opts.slug}.${DEFAULT_NEW_PROJECT_TLD}`;
+  const fallback = `${opts.slug}.${opts.defaultDomain}`;
   const raw = (opts.devHostOpt ?? fallback).trim();
   const error = validateDevHost({ value: raw });
   if (error) {

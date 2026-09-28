@@ -45,3 +45,18 @@ test("missing local suffix has explicit global setup guidance and separate summa
   expect(report.checks[0]?.id).toBe("dns:hack.local");
   expect(report.summary.join(" ")).toContain("Resolver & DNS");
 });
+
+test("configured custom domain checks the exact DNS suffix", async () => {
+  const result = await checkHackLocalDns({
+    domain: "dev.example.test",
+    lookup: async (host) => {
+      expect(host).toBe("doctor.dev.example.test");
+      return { address: DEFAULT_HOST_DNS_IP };
+    },
+  });
+  expect(result).toEqual({
+    name: "dns:dev.example.test",
+    status: "ok",
+    message: `doctor.dev.example.test → ${DEFAULT_HOST_DNS_IP}`,
+  });
+});

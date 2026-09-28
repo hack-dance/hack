@@ -717,9 +717,27 @@ your manual observation for that origin; CLI success alone does not prove a
 browser session works.
 
 The native candidate refuses `hack global install`: that command owns the
-Docker global stack and could change installed v4 routing. For a newly chosen
-custom suffix, host wildcard DNS activation remains a separately reviewed
-step. A successful loopback TLS check alone does not establish browser DNS.
+Docker global stack and could change installed v4 routing. For a dedicated
+custom suffix alongside v4, run `hack global dns preview --domain v5.hack.gy`
+and then `hack global dns activate --domain v5.hack.gy`. Omit `--domain` to use
+the configured global `default_domain`; changing that shared setting also
+changes the installed v4 CLI's default. Preview is read-only;
+activation shows the exact scoped claim and requires interactive confirmation
+and a native administrator prompt. It adds one owned dnsmasq include file and
+one resolver file pointing the selected suffix to 127.0.0.1, while leaving
+the built-in v4 DNS rules intact. An existing or overlapping foreign claim,
+uninspected configuration source, or uncertain prior activation refuses.
+Activation verifies direct and system DNS and conditionally removes only its
+own files if verification fails. An interrupted activation may retain a
+private pending receipt for explicit recovery. The built-in `hack`,
+`hack.local`, and `hack.gy` roots cannot be claimed wholesale by this command;
+a dedicated `v5.hack.gy` subtree is supported when its v4 parent is verified.
+Existing project hosts and reviewed routes are not migrated.
+
+DNS activation alone does not prove that an app route, certificate, port 443,
+or OAuth redirect is ready. Use `hack doctor --browser-url` for the exact app
+origin and test the browser session. Google OAuth requires a separately
+registered compatible redirect origin; `.local` may be rejected by the provider.
 
 `hack doctor --fix --browser-url https://your-app.hack.local` can install only
 the verified live root after interactive confirmation and the native macOS

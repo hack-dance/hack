@@ -16,10 +16,12 @@ Notes:
   domain suffix you control, such as `dev.example.com`), then run
   `hack global install` to configure local DNS. This is wildcard DNS for the
   entire suffix, so do not select a domain used by unrelated sites.
-  The global installer currently configures the Docker-backed host stack. An
-  explicitly selected native candidate refuses that installer to preserve the
-  installed v4 stack; use an independently reviewed host DNS setup for a new
-  native suffix and verify its exact app origin with `hack doctor --browser-url`.
+  The global installer configures the Docker-backed host stack. An explicitly
+  selected native candidate refuses it to preserve the installed v4 stack.
+  On macOS, use `hack global dns preview` and then the separately confirmed
+  `hack global dns activate` for a dedicated custom native suffix. This leaves
+  the v4 wildcard rules untouched. Verify the exact app origin with
+  `hack doctor --browser-url`; DNS setup alone does not validate HTTPS or OAuth.
   Pass `--dev-host` for a per-project hostname; it takes precedence over the
   global default. Existing project hosts and Compose routes are not migrated.
 - `hack init` also scaffolds `.hack/hack.env.default.yaml`. See `docs/env.md`.

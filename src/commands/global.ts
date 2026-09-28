@@ -1,7 +1,15 @@
-import { dirname, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { dirname, join, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
-import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
-import type { CliContext, CommandArgs } from "../cli/command.ts";
+import {
+  type NativeRuntimeSelection,
+  resolveNativeRuntimeSelection,
+} from "../backends/native-runtime-client.ts";
+import type {
+  CliContext,
+  CommandArgs,
+  CommandHandlerFor,
+} from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 
 import {
@@ -55,6 +63,7 @@ import {
 } from "../lib/config-paths.ts";
 import {
   managedLocalDomains,
+  parseDefaultDomain,
   resolveDefaultDomain,
 } from "../lib/default-domain.ts";
 import {
@@ -90,6 +99,17 @@ import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
 } from "../lib/mutagen.ts";
+import type { NativeDnsActivationInspection } from "../lib/native-domain-dns-activate.ts";
+import { activateNativeDomainDns } from "../lib/native-domain-dns-activate.ts";
+import { createNativeDnsHostDependencies } from "../lib/native-domain-dns-host.ts";
+import {
+  type NativeDnsReceipt,
+  planNativeDomainDns,
+} from "../lib/native-domain-dns-plan.ts";
+import {
+  inspectNativeDnsHost,
+  readStableNativeDnsFile,
+} from "../lib/native-domain-dns-snapshot.ts";
 import { isLinux, isMac } from "../lib/os.ts";
 import {
   reconcileRemoteCaddyRoutesStack,
@@ -197,6 +217,54 @@ const globalInstallSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const globalDnsPreviewSpec = defineCommand({
+  name: "preview",
+  summary:
+    "Preview a scoped native custom-domain DNS claim without changing the host",
+  group: "Global",
+  options: [
+    optJson,
+    defineOption({
+      name: "domain",
+      type: "string",
+      long: "--domain",
+      valueHint: "v5.hack.gy",
+      description: "Custom suffix to inspect (default: global default_domain)",
+    } as const),
+  ] as const,
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const globalDnsActivateSpec = defineCommand({
+  name: "activate",
+  summary: "Activate only the selected native custom-domain DNS suffix",
+  group: "Global",
+  options: [
+    defineOption({
+      name: "domain",
+      type: "string",
+      long: "--domain",
+      valueHint: "v5.hack.gy",
+      description: "Custom suffix to activate (default: global default_domain)",
+    } as const),
+  ] as const,
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const globalDnsSpec = defineCommand({
+  name: "dns",
+  summary: "Manage scoped native custom-domain DNS",
+  group: "Global",
+  options: [],
+  positionals: [],
+  subcommands: [
+    withHandler(globalDnsPreviewSpec, handleGlobalDnsPreview),
+    withHandler(globalDnsActivateSpec, handleGlobalDnsActivate),
+  ],
+} as const);
+
 const globalUpSpec = defineCommand({
   name: "up",
   summary: "Start global infra containers",
@@ -289,6 +357,7 @@ export const globalCommand = defineCommand({
   ...globalSpec,
   subcommands: [
     withHandler(globalInstallSpec, async () => await globalInstall()),
+    globalDnsSpec,
     withHandler(globalUpSpec, async () => await globalUp()),
     withHandler(globalDownSpec, async () => await globalDown()),
     withHandler(globalStatusSpec, handleGlobalStatus),
@@ -300,6 +369,188 @@ export const globalCommand = defineCommand({
     withHandler(globalAuthorizeSpec, async () => await globalAuthorize()),
   ],
 } as const);
+
+async function handleGlobalDnsPreview({
+  args,
+}: Parameters<
+  CommandHandlerFor<typeof globalDnsPreviewSpec>
+>[0]): Promise<number> {
+  const runtime = resolveNativeRuntimeSelection();
+  if (!(runtime && isMac())) {
+    logger.error({
+      message:
+        "Native DNS preview requires an explicitly selected macOS native candidate.",
+    });
+    return 1;
+  }
+  const domain = parseDefaultDomain(
+    args.options.domain ?? (await resolveDefaultDomain())
+  );
+  const { inspection, receiptPath } = await inspectNativeDnsPlan({
+    runtime,
+    domain,
+  });
+  const { plan } = inspection;
+  const output = {
+    domain: plan.domain,
+    status: plan.status,
+    dnsmasqPath: plan.dnsmasqPath,
+    resolverPath: plan.resolverPath,
+    receiptPath,
+    address: DEFAULT_HOST_DNS_IP,
+    activation: plan.activation,
+  };
+  if (args.options.json) {
+    console.log(JSON.stringify({ ok: true, data: output }));
+  } else {
+    logger.info({
+      message: [
+        `Native DNS ${plan.status} for *.${domain}`,
+        `dnsmasq: ${plan.dnsmasqPath}`,
+        `resolver: ${plan.resolverPath}`,
+        `private receipt: ${receiptPath}`,
+        ...plan.activation,
+      ].join("\n"),
+    });
+  }
+  return 0;
+}
+
+async function handleGlobalDnsActivate({
+  args,
+}: Parameters<
+  CommandHandlerFor<typeof globalDnsActivateSpec>
+>[0]): Promise<number> {
+  const runtime = resolveNativeRuntimeSelection();
+  if (!(runtime && isMac())) {
+    logger.error({
+      message:
+        "Native DNS activation requires an explicitly selected macOS native candidate.",
+    });
+    return 1;
+  }
+  const domain = parseDefaultDomain(
+    args.options.domain ?? (await resolveDefaultDomain())
+  );
+  const initial = await inspectNativeDnsPlan({ runtime, domain });
+  if (
+    initial.inspection.plan.status === "available" &&
+    !isInteractiveTerminal()
+  ) {
+    logger.error({
+      message:
+        "Native DNS activation requires interactive confirmation and a macOS administrator prompt.",
+    });
+    return 1;
+  }
+  const inspectPlan = async () => {
+    const current = await inspectNativeDnsPlan({ runtime, domain });
+    if (
+      current.inspection.fingerprint !== initial.inspection.fingerprint ||
+      current.receiptPath !== initial.receiptPath ||
+      current.dnsmasqBinary !== initial.dnsmasqBinary ||
+      current.mainConfigPath !== initial.mainConfigPath ||
+      current.includeDir !== initial.includeDir
+    ) {
+      throw new Error("Native DNS inputs changed before activation");
+    }
+    return current.inspection;
+  };
+  const authorize = async () => {
+    if (!isInteractiveTerminal()) {
+      return false;
+    }
+    const accepted = await confirmSafe({
+      message: `Activate only *.${domain} at 127.0.0.1 via a new dnsmasq claim and /etc/resolver file? This restarts dnsmasq; existing v4 suffixes remain unchanged.`,
+      initialValue: false,
+      nonInteractive: "decline",
+    });
+    if (!accepted) {
+      return false;
+    }
+    return (
+      (await run(["sudo", "-v"], {
+        stdin: "inherit",
+        timeoutMs: 120_000,
+        forwardSignals: true,
+      })) === 0
+    );
+  };
+  const deps = createNativeDnsHostDependencies({
+    receiptPath: initial.receiptPath,
+    dnsmasqPath: initial.inspection.plan.dnsmasqPath,
+    resolverPath: initial.inspection.plan.resolverPath,
+    dnsmasqBinary: initial.dnsmasqBinary,
+    dnsmasqMainConfigPath: initial.mainConfigPath,
+    dnsmasqIncludeDir: initial.includeDir,
+    inspectPlan,
+    authorize,
+    restartDnsmasq: restartMacDnsmasq,
+    flushDnsCache: flushMacDnsCachePrivileged,
+  });
+  if (initial.inspection.plan.status === "active") {
+    await deps.verifyLiveDns(initial.inspection.plan);
+    logger.success({
+      message: `Native DNS for *.${domain} is active and verified.`,
+    });
+    return 0;
+  }
+  await activateNativeDomainDns({ dependencies: deps });
+  logger.success({
+    message: `Native DNS for *.${domain} is active. Check the exact app origin with hack doctor --browser-url.`,
+  });
+  return 0;
+}
+
+async function inspectNativeDnsPlan(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly domain: string;
+}): Promise<{
+  readonly inspection: NativeDnsActivationInspection;
+  readonly receiptPath: string;
+  readonly dnsmasqBinary: string;
+  readonly mainConfigPath: string;
+  readonly includeDir: string;
+}> {
+  const prefix = await resolveBrewPrefix();
+  const host = await inspectNativeDnsHost({ brewPrefix: prefix });
+  const receiptPath = join(
+    opts.runtime.home,
+    "native-dns",
+    `${opts.domain}.json`
+  );
+  const receiptText = await readStableNativeDnsFile(receiptPath);
+  let receipt: NativeDnsReceipt | null = null;
+  if (receiptText !== null) {
+    try {
+      receipt = JSON.parse(receiptText) as NativeDnsReceipt;
+    } catch {
+      throw new Error(
+        "Private native DNS receipt is invalid; refusing to infer ownership"
+      );
+    }
+  }
+  const plan = planNativeDomainDns({
+    domain: opts.domain,
+    ...host,
+    receipt,
+    ...(opts.domain.endsWith(".hack.gy")
+      ? { builtInParentClaim: "hack.gy" as const }
+      : {}),
+  });
+  return {
+    inspection: {
+      plan,
+      fingerprint: createHash("sha256")
+        .update(JSON.stringify({ host, receiptText }), "utf8")
+        .digest("hex"),
+    },
+    receiptPath,
+    dnsmasqBinary: host.dnsmasqArgs[0] ?? "",
+    mainConfigPath: host.mainConfig.path,
+    includeDir: host.includeDir,
+  };
+}
 
 function getGlobalPaths() {
   const root = resolveGlobalHackDir();

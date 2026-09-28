@@ -865,6 +865,7 @@ hack global <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack global install` | Bootstrap ~/.hack and start Caddy + Grafana/Loki/Alloy |
+| `hack global dns` | Manage scoped native custom-domain DNS |
 | `hack global up` | Start global infra containers |
 | `hack global down` | Stop global infra containers |
 | `hack global status` | Show status for global infra (containers + networks) |
@@ -892,6 +893,31 @@ Bootstrap ~/.hack and start Caddy + Grafana/Loki/Alloy
 ```bash
 hack global install [options]
 ```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack global dns`
+
+Manage scoped native custom-domain DNS
+
+### Usage
+
+```bash
+hack global dns <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack global dns preview` | Preview a scoped native custom-domain DNS claim without changing the host |
+| `hack global dns activate` | Activate only the selected native custom-domain DNS suffix |
 
 ### Options
 

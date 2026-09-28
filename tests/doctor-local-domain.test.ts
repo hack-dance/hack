@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   buildDoctorJsonData,
   checkHackLocalDns,
+  checkNativeHostDns,
 } from "../src/commands/doctor.ts";
 import { DEFAULT_CADDY_IP, DEFAULT_HOST_DNS_IP } from "../src/constants.ts";
 
@@ -59,4 +60,38 @@ test("configured custom domain checks the exact DNS suffix", async () => {
     status: "ok",
     message: `doctor.dev.example.test → ${DEFAULT_HOST_DNS_IP}`,
   });
+});
+
+test("native host DNS refuses foreign and IPv6 answers even with a loopback answer", async () => {
+  const hostname = "app.dev.example.test";
+  const ready = await checkNativeHostDns({
+    hostname,
+    lookupAll: async (observed) => {
+      expect(observed).toBe(hostname);
+      return [{ address: DEFAULT_HOST_DNS_IP }];
+    },
+  });
+  expect(ready.status).toBe("ok");
+  for (const addresses of [
+    [{ address: "192.0.2.42" }],
+    [{ address: DEFAULT_HOST_DNS_IP }, { address: "::1" }],
+    [],
+  ]) {
+    const result = await checkNativeHostDns({
+      hostname,
+      lookupAll: async () => addresses,
+    });
+    expect(result.status).toBe("warn");
+  }
+  const missing = await checkNativeHostDns({
+    hostname,
+    lookupAll: async () => {
+      throw new Error("DNS lookup failed");
+    },
+  });
+  expect(missing.status).toBe("warn");
+  const summary = buildDoctorJsonData({
+    results: [{ ...missing, durationMs: 0 }],
+  }).summary.join(" ");
+  expect(summary).toContain("Resolver & DNS");
 });

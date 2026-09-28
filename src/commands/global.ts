@@ -500,6 +500,13 @@ function networkHasSubnet(raw: string, subnet: string): boolean {
 }
 
 async function globalInstall(): Promise<number> {
+  if (resolveNativeRuntimeSelection()) {
+    logger.error({
+      message:
+        "Native global DNS/TLS installation needs a scoped host-domain plan; hack global install would start the Docker stack and may change v4 routing. Use hack doctor --browser-url https://your-app.hack.local to verify the current native route.",
+    });
+    return 1;
+  }
   const slimExit = failIfSlimMode({
     feature: "hack global install",
     alternative:

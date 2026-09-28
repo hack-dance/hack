@@ -1646,3 +1646,22 @@ test("global DNS setup refuses a foreign custom-domain claim before rewriting dn
   expect(await readDnsmasqConf(tempDir!)).toBe(original);
   expect(runCalls.some((cmd) => cmd[0] === "docker")).toBe(false);
 });
+
+test("native global install refuses before touching the Docker global stack", async () => {
+  const previousBackend = process.env.HACK_RUNTIME_BACKEND;
+  const previousBinary = process.env.HACK_NATIVE_BINARY;
+  const previousNativeHome = process.env.HACK_NATIVE_HOME;
+  process.env.HACK_RUNTIME_BACKEND = "native";
+  process.env.HACK_NATIVE_BINARY = "/nonexistent/hack-native";
+  process.env.HACK_NATIVE_HOME = "/nonexistent/native-home";
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "install"])).toBe(1);
+    expect(runCalls).toHaveLength(0);
+    expect(execCalls).toHaveLength(0);
+  } finally {
+    process.env.HACK_RUNTIME_BACKEND = previousBackend;
+    process.env.HACK_NATIVE_BINARY = previousBinary;
+    process.env.HACK_NATIVE_HOME = previousNativeHome;
+  }
+});

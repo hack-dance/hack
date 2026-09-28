@@ -711,9 +711,15 @@ frontend owner, the exact Caddy listener and root certificate, and macOS
 System-keychain trust. A retained root file or an older same-name certificate
 does not count as current trust. To check a real app route, pass an exact HTTPS
 origin with `--browser-url`; Doctor verifies that hostname over loopback with
-the live root and reports normal macOS TLS separately. `--browser-result` records
+the live root, checks that every host DNS answer points at its IPv4 loopback
+relay, and reports normal macOS TLS separately. `--browser-result` records
 your manual observation for that origin; CLI success alone does not prove a
 browser session works.
+
+The native candidate refuses `hack global install`: that command owns the
+Docker global stack and could change installed v4 routing. For a newly chosen
+custom suffix, host wildcard DNS activation remains a separately reviewed
+step. A successful loopback TLS check alone does not establish browser DNS.
 
 `hack doctor --fix --browser-url https://your-app.hack.local` can install only
 the verified live root after interactive confirmation and the native macOS

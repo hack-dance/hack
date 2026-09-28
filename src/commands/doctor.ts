@@ -277,6 +277,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       `dnsmasq.conf:${DEFAULT_NEW_PROJECT_TLD}`,
       `dnsmasq.conf:${DEFAULT_OAUTH_ALIAS_ROOT}`,
       "dnsmasq:53",
+      "native host dns",
       `dns:${DEFAULT_PROJECT_TLD}`,
       `dns:${DEFAULT_NEW_PROJECT_TLD}`,
       `dns:${DEFAULT_OAUTH_ALIAS_ROOT}`,
@@ -882,6 +883,16 @@ async function handleNativeDoctor(opts: {
       message: "Skipped until the active Caddy owner and root are verified.",
       durationMs: 0,
     });
+  }
+  if (hostname) {
+    results.push(
+      await runCheck(
+        progress,
+        "native host dns",
+        () => checkNativeHostDns({ hostname }),
+        { timeoutMs: 3000 }
+      )
+    );
   }
   if (opts.browser.url) {
     results.push(
@@ -1830,6 +1841,36 @@ async function appendCustomDomainDnsChecks(opts: {
       { timeoutMs: 3000 }
     )
   );
+}
+
+/** The native HTTPS relay is bound to IPv4 loopback; other DNS answers cannot reach it. */
+export async function checkNativeHostDns(opts: {
+  readonly hostname: string;
+  readonly lookupAll?: (
+    hostname: string
+  ) => Promise<readonly { address: string }[]>;
+}): Promise<CheckResult> {
+  try {
+    const addresses = await (
+      opts.lookupAll ?? ((hostname) => lookup(hostname, { all: true }))
+    )(opts.hostname);
+    const ready =
+      addresses.length > 0 &&
+      addresses.every((entry) => entry.address === DEFAULT_HOST_DNS_IP);
+    return {
+      name: "native host dns",
+      status: ready ? "ok" : "warn",
+      message: ready
+        ? `${opts.hostname} resolves to the native loopback HTTPS relay.`
+        : `${opts.hostname} has a non-loopback DNS answer; the native HTTPS relay is bound to ${DEFAULT_HOST_DNS_IP}.`,
+    };
+  } catch {
+    return {
+      name: "native host dns",
+      status: "warn",
+      message: `Unable to resolve ${opts.hostname} for the native HTTPS relay.`,
+    };
+  }
 }
 
 /** DNS observation only; it does not assert an HTTP service exists at this probe name. */

@@ -77,6 +77,14 @@ test("CLI success does not replace manual observation or prove permission state"
   });
   expect(works.status).toBe("ok");
   expect(works.message).toContain("manual observation");
+  const redirected = await checkBrowserLocalNetwork({
+    platform: "darwin",
+    url,
+    observation: "works",
+    probe: async () => ({ outcome: "response", status: 307 }),
+  });
+  expect(redirected.status).toBe("ok");
+  expect(redirected.message).toContain("redirect destinations are not checked");
   const failed = await checkBrowserLocalNetwork({
     platform: "darwin",
     url,
@@ -118,6 +126,9 @@ test("TLS failure and HTTP errors stay ambiguous even with reported denial", asy
 
 test("curl invocation validates TLS, disables config, and bounds transfer without following redirects", async () => {
   const result = await probeBrowserTarget(url, async (argv, options) => {
+    expect(argv[0]).toBe(
+      process.platform === "darwin" ? "/usr/bin/curl" : "curl"
+    );
     expect(argv[1]).toBe("--disable");
     expect(argv).toContain("--max-time");
     expect(argv).toContain("--max-filesize");

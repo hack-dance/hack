@@ -728,8 +728,15 @@ one resolver file pointing the selected suffix to 127.0.0.1, while leaving
 the built-in v4 DNS rules intact. An existing or overlapping foreign claim,
 uninspected configuration source, or uncertain prior activation refuses.
 Activation verifies direct and system DNS and conditionally removes only its
-own files if verification fails. An interrupted activation may retain a
-private pending receipt for explicit recovery. The built-in `hack`,
+own files if verification fails. To remove this scoped claim, use
+`hack global dns deactivate --domain v5.hack.gy`. It requires a matching active
+private receipt and unchanged file identities across confirmation, then removes
+only those two owned files, restarts dnsmasq and verifies the parent fallback.
+The private receipt becomes `inactive` after proof so a later activation can
+reuse the suffix. An interrupted activation retains a `pending` receipt; an
+interrupted deactivation retains a `removing` receipt. Both refuse automatic
+retry until the partial state has been reviewed and explicitly recovered; do
+not delete these files or receipts blindly. The built-in `hack`,
 `hack.local`, and `hack.gy` roots cannot be claimed wholesale by this command;
 a dedicated `v5.hack.gy` subtree is supported when its v4 parent is verified.
 Existing project hosts and reviewed routes are not migrated.

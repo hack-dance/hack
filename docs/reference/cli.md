@@ -918,6 +918,7 @@ hack global dns <subcommand> [options]
 | --- | --- |
 | `hack global dns preview` | Preview a scoped native custom-domain DNS claim without changing the host |
 | `hack global dns activate` | Activate only the selected native custom-domain DNS suffix |
+| `hack global dns deactivate` | Remove only an owned native custom-domain DNS suffix |
 
 ### Options
 

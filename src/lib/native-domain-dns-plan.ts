@@ -46,7 +46,7 @@ export interface NativeDnsFileSnapshot {
 /** Persist in a private location before/after activation; only active proves ownership. */
 export interface NativeDnsReceipt {
   readonly version: 1;
-  readonly state: "pending" | "active";
+  readonly state: "pending" | "active" | "removing" | "inactive";
   readonly domain: string;
   readonly dnsmasqPath: string;
   readonly resolverPath: string;
@@ -64,6 +64,10 @@ export interface NativeDnsPlan {
   readonly status: "available" | "active";
   readonly pendingReceipt: NativeDnsReceipt;
   readonly activeReceipt: NativeDnsReceipt;
+  readonly removingReceipt: NativeDnsReceipt;
+  readonly inactiveReceipt: NativeDnsReceipt;
+  /** Verified parent claim used to prove fallback after scoped deactivation. */
+  readonly parentAddress: string | null;
   readonly activation: readonly string[];
 }
 
@@ -232,7 +236,7 @@ function checkConfigSources(opts: NativeDnsPlanOptions): void {
   }
 }
 
-function checkParentClaim(opts: NativeDnsPlanOptions): void {
+function checkParentClaim(opts: NativeDnsPlanOptions): string {
   if (opts.builtInParentClaim !== "hack.gy") {
     refuse("a nested built-in suffix needs an explicit parent claim");
   }
@@ -257,6 +261,10 @@ function checkParentClaim(opts: NativeDnsPlanOptions): void {
       "the built-in hack.gy parent resolver claim is missing or unexpected"
     );
   }
+  return (
+    parentLines[0]?.slice("address=/.hack.gy/".length) ??
+    refuse("missing parent address")
+  );
 }
 
 function hash(content: string): string {
@@ -281,6 +289,7 @@ function matchesReceipt(
 function validateInputs(opts: NativeDnsPlanOptions): {
   domain: string;
   builtInParent: "hack.gy" | undefined;
+  parentAddress: string | null;
 } {
   const domain = parseDefaultDomain(opts.domain);
   if (
@@ -311,10 +320,9 @@ function validateInputs(opts: NativeDnsPlanOptions): {
   if (builtInParent && builtInParent !== DEFAULT_OAUTH_ALIAS_ROOT) {
     refuse("custom domains cannot nest beneath this built-in root");
   }
-  if (builtInParent === DEFAULT_OAUTH_ALIAS_ROOT) {
-    checkParentClaim(opts);
-  }
-  return { domain, builtInParent };
+  const parentAddress =
+    builtInParent === DEFAULT_OAUTH_ALIAS_ROOT ? checkParentClaim(opts) : null;
+  return { domain, builtInParent, parentAddress };
 }
 
 function managedFile(
@@ -413,11 +421,18 @@ function resolveStatus(opts: {
   readonly dnsmasqContent: string;
   readonly receipt: NativeDnsReceipt | null;
   readonly activeReceipt: NativeDnsReceipt;
+  readonly inactiveReceipt: NativeDnsReceipt;
 }): "available" | "active" {
   const hasDnsmasq = opts.managedDnsmasq !== undefined;
   const hasResolver = opts.managedResolver !== undefined;
   if (hasDnsmasq !== hasResolver || (hasDnsmasq && !opts.receipt)) {
     refuse("partial or unowned managed DNS files require explicit recovery");
+  }
+  if (
+    !hasDnsmasq &&
+    (!opts.receipt || matchesReceipt(opts.receipt, opts.inactiveReceipt))
+  ) {
+    return "available";
   }
   if (
     opts.receipt &&
@@ -433,7 +448,7 @@ function resolveStatus(opts: {
       "the private DNS receipt or managed files do not match an active claim"
     );
   }
-  return hasDnsmasq ? "active" : "available";
+  return "active";
 }
 
 /**
@@ -442,7 +457,7 @@ function resolveStatus(opts: {
  * persist pending/active receipts, and independently prove live DNS after restart.
  */
 export function planNativeDomainDns(opts: NativeDnsPlanOptions): NativeDnsPlan {
-  const { domain, builtInParent } = validateInputs(opts);
+  const { domain, builtInParent, parentAddress } = validateInputs(opts);
   const dnsmasqPath = join(opts.includeDir, `hack-native-${domain}.conf`);
   const resolverPath = join(opts.resolverDir, domain);
   if (Buffer.byteLength(basename(dnsmasqPath), "utf8") > 255) {
@@ -492,12 +507,21 @@ export function planNativeDomainDns(opts: NativeDnsPlanOptions): NativeDnsPlan {
     ...receiptBase,
     state: "active",
   });
+  const removingReceipt: NativeDnsReceipt = Object.freeze({
+    ...receiptBase,
+    state: "removing",
+  });
+  const inactiveReceipt: NativeDnsReceipt = Object.freeze({
+    ...receiptBase,
+    state: "inactive",
+  });
   const status = resolveStatus({
     managedDnsmasq,
     managedResolver,
     dnsmasqContent,
     receipt: opts.receipt,
     activeReceipt,
+    inactiveReceipt,
   });
   const activation =
     status === "active"
@@ -519,6 +543,9 @@ export function planNativeDomainDns(opts: NativeDnsPlanOptions): NativeDnsPlan {
     status,
     pendingReceipt,
     activeReceipt,
+    removingReceipt,
+    inactiveReceipt,
+    parentAddress,
     activation: Object.freeze(activation),
   });
 }

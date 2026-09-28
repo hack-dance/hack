@@ -89,6 +89,20 @@ export interface NativeDnsHostDependenciesOptions {
   readonly runPrivileged?: NativeDnsCommandRunner;
 }
 
+export interface NativeDnsHostDependencies
+  extends NativeDnsActivationDependencies {
+  readonly adoptReceipt: (
+    receipt: NativeDnsReceipt
+  ) => Promise<NativeDnsOwnedFile>;
+  readonly inspectOwnedFile: (
+    path: string
+  ) => Promise<NativeDnsOwnedFile | null>;
+  readonly verifyDeactivatedDns: (plan: {
+    readonly domain: string;
+    readonly parentAddress: string | null;
+  }) => Promise<void>;
+}
+
 async function defaultRunner(command: readonly string[]): Promise<ExecResult> {
   return await exec(command, { stdin: "ignore", timeoutMs: 15_000 });
 }
@@ -224,8 +238,15 @@ async function removeLocalIfOwned(file: NativeDnsOwnedFile): Promise<boolean> {
   if (fileIdentity(current) !== file.identity) {
     return false;
   }
-  await unlink(file.path);
-  await syncDirectory(dirname(file.path));
+  try {
+    await unlink(file.path);
+    await syncDirectory(dirname(file.path));
+  } catch (error) {
+    throw new NativeDnsUncertainEffectError(
+      `DNS removal completion is uncertain: ${file.path}`,
+      error
+    );
+  }
   return true;
 }
 
@@ -285,11 +306,25 @@ function receiptContent(receipt: NativeDnsReceipt): string {
   return `${JSON.stringify(receipt)}\n`;
 }
 
-function oppositeReceipt(receipt: NativeDnsReceipt): NativeDnsReceipt {
-  return {
-    ...receipt,
-    state: receipt.state === "active" ? "pending" : "active",
-  };
+function expectedPreviousReceipt(
+  receipt: NativeDnsReceipt
+): readonly NativeDnsReceipt[] {
+  if (receipt.state === "pending") {
+    return [
+      { ...receipt, state: "active" },
+      { ...receipt, state: "inactive" },
+    ];
+  }
+  if (receipt.state === "removing") {
+    return [{ ...receipt, state: "active" }];
+  }
+  if (receipt.state === "inactive") {
+    return [{ ...receipt, state: "removing" }];
+  }
+  return [
+    { ...receipt, state: "pending" },
+    { ...receipt, state: "removing" },
+  ];
 }
 
 function assertReceiptState(opts: {
@@ -307,11 +342,13 @@ function assertReceiptState(opts: {
   if (
     existing &&
     (existing.identity !== ownedIdentity ||
-      existing.content !== receiptContent(oppositeReceipt(receipt)))
+      !expectedPreviousReceipt(receipt).some(
+        (previous) => existing.content === receiptContent(previous)
+      ))
   ) {
     throw new Error("Private DNS receipt changed before publication");
   }
-  if (!existing && receipt.state === "active") {
+  if (!existing && receipt.state !== "pending") {
     throw new Error("Pending DNS receipt is missing");
   }
 }
@@ -322,7 +359,7 @@ function assertReceiptState(opts: {
  */
 export function createNativeDnsHostDependencies(
   opts: NativeDnsHostDependenciesOptions
-): NativeDnsActivationDependencies {
+): NativeDnsHostDependencies {
   const runCommand = opts.runCommand ?? defaultRunner;
   const runPrivileged = opts.runPrivileged ?? defaultRunner;
   let receiptIdentity: string | null = null;
@@ -354,6 +391,27 @@ export function createNativeDnsHostDependencies(
     authorize: opts.authorize,
     restartDnsmasq: opts.restartDnsmasq,
     flushDnsCache: opts.flushDnsCache,
+    async adoptReceipt(receipt) {
+      const existing = await readOwnedFile(opts.receiptPath);
+      if (!existing || existing.content !== receiptContent(receipt)) {
+        throw new Error(
+          "Private DNS receipt changed before ownership adoption"
+        );
+      }
+      receiptIdentity = existing.identity;
+      return { path: opts.receiptPath, ...existing };
+    },
+    async inspectOwnedFile(path) {
+      if (
+        path !== opts.receiptPath &&
+        path !== opts.dnsmasqPath &&
+        path !== opts.resolverPath
+      ) {
+        throw new Error("DNS file path is outside the validated plan");
+      }
+      const file = await readOwnedFile(path);
+      return file ? { path, ...file } : null;
+    },
     async writeReceipt(receipt) {
       await ensurePrivateReceiptDirectory(opts.receiptPath);
       const content = receiptContent(receipt);
@@ -455,9 +513,19 @@ export function createNativeDnsHostDependencies(
       if (file.path !== opts.resolverPath) {
         return false;
       }
-      const result = await privilegedResolver("remove", file);
+      let result: string;
+      try {
+        result = await privilegedResolver("remove", file);
+      } catch (error) {
+        throw new NativeDnsUncertainEffectError(
+          `Resolver remove completion is uncertain: ${file.path}`,
+          error
+        );
+      }
       if (result !== "0" && result !== "1") {
-        throw new Error("Resolver remove returned an invalid result");
+        throw new NativeDnsUncertainEffectError(
+          "Resolver remove returned an invalid result"
+        );
       }
       return result === "1";
     },
@@ -514,6 +582,52 @@ export function createNativeDnsHostDependencies(
         throw new Error(
           "System DNS did not resolve the custom domain to 127.0.0.1"
         );
+      }
+    },
+    async verifyDeactivatedDns(plan) {
+      const name = `hack-probe-${randomUUID().replaceAll("-", "")}.${plan.domain}`;
+      const direct = await runCommand([
+        "/usr/bin/dig",
+        "+short",
+        "+time=2",
+        "+tries=1",
+        "@127.0.0.1",
+        name,
+        plan.parentAddress?.includes(":") ? "AAAA" : "A",
+      ]);
+      const directAddresses = assertSuccess(
+        direct,
+        "Direct fallback DNS verification"
+      )
+        .split("\n")
+        .filter(Boolean);
+      const system = await runCommand([
+        "/usr/bin/dscacheutil",
+        "-q",
+        "host",
+        "-a",
+        "name",
+        name,
+      ]);
+      const systemAddresses = [
+        ...assertSuccess(system, "System fallback DNS verification").matchAll(
+          IP_ADDRESS_LINE
+        ),
+      ].map((match) => match[1]);
+      if (plan.parentAddress) {
+        if (
+          directAddresses.length !== 1 ||
+          directAddresses[0] !== plan.parentAddress ||
+          systemAddresses.length !== 1 ||
+          systemAddresses[0] !== plan.parentAddress
+        ) {
+          throw new Error("DNS did not return the verified parent fallback");
+        }
+      } else if (
+        directAddresses.includes("127.0.0.1") ||
+        systemAddresses.includes("127.0.0.1")
+      ) {
+        throw new Error("Native DNS claim still resolves after deactivation");
       }
     },
   };

@@ -5,6 +5,7 @@ import {
   readFile,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,11 +14,13 @@ import {
   activateNativeDomainDns,
   NativeDnsUncertainEffectError,
 } from "../src/lib/native-domain-dns-activate.ts";
+import { deactivateNativeDomainDns } from "../src/lib/native-domain-dns-deactivate.ts";
 import {
   createNativeDnsHostDependencies,
   type NativeDnsCommandRunner,
 } from "../src/lib/native-domain-dns-host.ts";
 import { planNativeDomainDns } from "../src/lib/native-domain-dns-plan.ts";
+import { exec } from "../src/lib/shell.ts";
 
 const roots: string[] = [];
 
@@ -130,6 +133,24 @@ test("private receipt is exclusive and transitions atomically with guarded clear
   });
 });
 
+test("deactivation receipt transitions cannot overwrite foreign or unexpected states", async () => {
+  const f = await fixture();
+  await f.dependencies.writeReceipt(f.plan.pendingReceipt);
+  await f.dependencies.writeReceipt(f.plan.activeReceipt);
+  await f.dependencies.writeReceipt(f.plan.removingReceipt);
+  await f.dependencies.writeReceipt(f.plan.inactiveReceipt);
+  expect(await readFile(f.receiptPath, "utf8")).toBe(
+    `${JSON.stringify(f.plan.inactiveReceipt)}\n`
+  );
+  await f.dependencies.writeReceipt(f.plan.pendingReceipt);
+  await f.dependencies.writeReceipt(f.plan.activeReceipt);
+  await writeFile(f.receiptPath, "foreign\n");
+  await expect(
+    f.dependencies.writeReceipt(f.plan.removingReceipt)
+  ).rejects.toThrow("changed");
+  expect(await readFile(f.receiptPath, "utf8")).toBe("foreign\n");
+});
+
 test("foreign receipt is never overwritten and changed pending receipt is retained", async () => {
   const f = await fixture();
   await writeFile(f.receiptPath, "foreign\n");
@@ -223,6 +244,52 @@ test("system DNS mismatch fails verification", async () => {
   );
 });
 
+test("deactivation requires exact direct and system parent fallback", async () => {
+  const correct = await fixture({
+    runCommand: async (command) => ({
+      exitCode: 0,
+      stdout:
+        command[0] === "/usr/bin/dig"
+          ? "172.30.0.2\n"
+          : "name: probe\nip_address: 172.30.0.2\n",
+      stderr: "",
+    }),
+  });
+  await correct.dependencies.verifyDeactivatedDns({
+    domain: "v5.hack.gy",
+    parentAddress: "172.30.0.2",
+  });
+
+  const wrong = await fixture({
+    runCommand: async (command) => ({
+      exitCode: 0,
+      stdout:
+        command[0] === "/usr/bin/dig"
+          ? "172.30.0.2\n"
+          : "ip_address: 127.0.0.1\n",
+      stderr: "",
+    }),
+  });
+  await expect(
+    wrong.dependencies.verifyDeactivatedDns({
+      domain: "v5.hack.gy",
+      parentAddress: "172.30.0.2",
+    })
+  ).rejects.toThrow("verified parent fallback");
+});
+
+test("deactivation without a parent refuses a remaining native loopback answer", async () => {
+  const absent = await fixture({
+    runCommand: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+  });
+  await absent.dependencies.verifyDeactivatedDns(absent.plan);
+
+  const lingering = await fixture();
+  await expect(
+    lingering.dependencies.verifyDeactivatedDns(lingering.plan)
+  ).rejects.toThrow("still resolves after deactivation");
+});
+
 test("activation commits the receipt after mocked resolver and DNS proof", async () => {
   const f = await fixture();
   const active = await activateNativeDomainDns({
@@ -298,4 +365,118 @@ test("unparseable resolver create reply is uncertain", async () => {
       content: f.plan.resolverContent,
     })
   ).rejects.toBeInstanceOf(NativeDnsUncertainEffectError);
+});
+
+test("fixed privileged resolver program guards inode, content, and symlinks in an isolated directory", async () => {
+  let root = "";
+  const f = await fixture({
+    runPrivileged: async (command) => {
+      const resolverDir = join(root, "resolver");
+      const script = command[6]?.replaceAll("/etc/resolver", resolverDir);
+      if (!script) {
+        throw new Error("Missing resolver program");
+      }
+      return await exec(
+        ["/usr/bin/python3", "-I", "-S", "-c", script, ...command.slice(7)],
+        { stdin: "ignore", timeoutMs: 3000 }
+      );
+    },
+  });
+  root = f.root;
+  const expected = {
+    path: f.plan.resolverPath,
+    content: f.plan.resolverContent,
+  };
+  const owned = await f.dependencies.createExclusive(expected);
+  expect(await readFile(expected.path, "utf8")).toBe(expected.content);
+  await writeFile(expected.path, "foreign\n");
+  expect(await f.dependencies.removeIfOwned(owned)).toBe(false);
+  expect(await readFile(expected.path, "utf8")).toBe("foreign\n");
+
+  await rm(expected.path);
+  await writeFile(expected.path, expected.content);
+  expect(await f.dependencies.removeIfOwned(owned)).toBe(false);
+  expect(await readFile(expected.path, "utf8")).toBe(expected.content);
+
+  await rm(expected.path);
+  const ownAgain = await f.dependencies.createExclusive(expected);
+  expect(await f.dependencies.removeIfOwned(ownAgain)).toBe(true);
+  await expect(readFile(expected.path)).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+
+  const target = join(f.root, "foreign-target");
+  await writeFile(target, "untouched\n");
+  await symlink(target, expected.path);
+  await expect(f.dependencies.createExclusive(expected)).rejects.toBeInstanceOf(
+    NativeDnsUncertainEffectError
+  );
+  expect(await readFile(target, "utf8")).toBe("untouched\n");
+  expect(await readFile(expected.path, "utf8")).toBe("untouched\n");
+});
+
+test("activated temporary claim deactivates through real file effects and commits inactive", async () => {
+  let root = "";
+  const runPrivileged: NativeDnsCommandRunner = async (command) => {
+    const script = command[6]?.replaceAll(
+      "/etc/resolver",
+      join(root, "resolver")
+    );
+    if (!script) {
+      throw new Error("Missing resolver program");
+    }
+    return await exec(
+      ["/usr/bin/python3", "-I", "-S", "-c", script, ...command.slice(7)],
+      { stdin: "ignore", timeoutMs: 3000 }
+    );
+  };
+  const f = await fixture({ runPrivileged });
+  root = f.root;
+  await activateNativeDomainDns({ dependencies: f.dependencies });
+  const active = planNativeDomainDns({
+    domain: f.plan.domain,
+    mainConfig: {
+      path: join(root, "dnsmasq.conf"),
+      content: `conf-dir=${join(root, "dnsmasq.d")},*.conf\n`,
+    },
+    includeDir: join(root, "dnsmasq.d"),
+    includeFiles: [
+      { path: f.plan.dnsmasqPath, content: f.plan.dnsmasqContent },
+    ],
+    resolverDir: join(root, "resolver"),
+    resolverFiles: [
+      { path: f.plan.resolverPath, content: f.plan.resolverContent },
+    ],
+    hosts: { path: join(root, "hosts"), content: "127.0.0.1 localhost\n" },
+    dnsmasqArgs: ["dnsmasq", "-7", `${join(root, "dnsmasq.d")},*.conf`],
+    receipt: f.plan.activeReceipt,
+  });
+  const deps = createNativeDnsHostDependencies({
+    receiptPath: f.receiptPath,
+    dnsmasqPath: active.dnsmasqPath,
+    resolverPath: active.resolverPath,
+    dnsmasqBinary: join(root, "dnsmasq"),
+    dnsmasqMainConfigPath: join(root, "dnsmasq.conf"),
+    dnsmasqIncludeDir: join(root, "dnsmasq.d"),
+    inspectPlan: async () => ({ plan: active, fingerprint: "active-snapshot" }),
+    authorize: async () => true,
+    restartDnsmasq: async () => {},
+    flushDnsCache: async () => {},
+    runCommand: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    runPrivileged,
+  });
+  const result = await deactivateNativeDomainDns({
+    dependencies: deps,
+    receiptPath: f.receiptPath,
+  });
+  expect(result).toEqual(active.inactiveReceipt);
+  expect(await readFile(f.receiptPath, "utf8")).toBe(
+    `${JSON.stringify(active.inactiveReceipt)}\n`
+  );
+  await expect(readFile(active.dnsmasqPath)).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+  await expect(readFile(active.resolverPath)).rejects.toMatchObject({
+    code: "ENOENT",
+  });
 });

@@ -101,6 +101,7 @@ import {
 } from "../lib/mutagen.ts";
 import type { NativeDnsActivationInspection } from "../lib/native-domain-dns-activate.ts";
 import { activateNativeDomainDns } from "../lib/native-domain-dns-activate.ts";
+import { deactivateNativeDomainDns } from "../lib/native-domain-dns-deactivate.ts";
 import { createNativeDnsHostDependencies } from "../lib/native-domain-dns-host.ts";
 import {
   type NativeDnsReceipt,
@@ -253,6 +254,24 @@ const globalDnsActivateSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const globalDnsDeactivateSpec = defineCommand({
+  name: "deactivate",
+  summary: "Remove only an owned native custom-domain DNS suffix",
+  group: "Global",
+  options: [
+    defineOption({
+      name: "domain",
+      type: "string",
+      long: "--domain",
+      valueHint: "v5.hack.gy",
+      description:
+        "Custom suffix to deactivate (default: global default_domain)",
+    } as const),
+  ] as const,
+  positionals: [],
+  subcommands: [],
+} as const);
+
 const globalDnsSpec = defineCommand({
   name: "dns",
   summary: "Manage scoped native custom-domain DNS",
@@ -262,6 +281,7 @@ const globalDnsSpec = defineCommand({
   subcommands: [
     withHandler(globalDnsPreviewSpec, handleGlobalDnsPreview),
     withHandler(globalDnsActivateSpec, handleGlobalDnsActivate),
+    withHandler(globalDnsDeactivateSpec, handleGlobalDnsDeactivate),
   ],
 } as const);
 
@@ -495,9 +515,110 @@ async function handleGlobalDnsActivate({
     });
     return 0;
   }
+  if (initial.receipt?.state === "inactive") {
+    await deps.adoptReceipt(initial.inspection.plan.inactiveReceipt);
+  }
   await activateNativeDomainDns({ dependencies: deps });
   logger.success({
     message: `Native DNS for *.${domain} is active. Check the exact app origin with hack doctor --browser-url.`,
+  });
+  return 0;
+}
+
+async function handleGlobalDnsDeactivate({
+  args,
+}: Parameters<
+  CommandHandlerFor<typeof globalDnsDeactivateSpec>
+>[0]): Promise<number> {
+  const runtime = resolveNativeRuntimeSelection();
+  if (!(runtime && isMac())) {
+    logger.error({
+      message:
+        "Native DNS deactivation requires an explicitly selected macOS native candidate.",
+    });
+    return 1;
+  }
+  const domain = parseDefaultDomain(
+    args.options.domain ?? (await resolveDefaultDomain())
+  );
+  const initial = await inspectNativeDnsPlan({ runtime, domain });
+  if (initial.inspection.plan.status === "available") {
+    if (initial.receipt?.state === "inactive") {
+      const deps = createNativeDnsHostDependencies({
+        receiptPath: initial.receiptPath,
+        dnsmasqPath: initial.inspection.plan.dnsmasqPath,
+        resolverPath: initial.inspection.plan.resolverPath,
+        dnsmasqBinary: initial.dnsmasqBinary,
+        dnsmasqMainConfigPath: initial.mainConfigPath,
+        dnsmasqIncludeDir: initial.includeDir,
+        inspectPlan: async () => initial.inspection,
+        authorize: async () => false,
+        restartDnsmasq: restartMacDnsmasq,
+        flushDnsCache: flushMacDnsCachePrivileged,
+      });
+      await deps.verifyDeactivatedDns(initial.inspection.plan);
+    }
+    logger.success({ message: `No active native DNS claim for *.${domain}.` });
+    return 0;
+  }
+  if (!isInteractiveTerminal()) {
+    logger.error({
+      message:
+        "Native DNS deactivation requires interactive confirmation and a macOS administrator prompt.",
+    });
+    return 1;
+  }
+  const inspectPlan = async () => {
+    const current = await inspectNativeDnsPlan({ runtime, domain });
+    if (
+      current.inspection.fingerprint !== initial.inspection.fingerprint ||
+      current.receiptPath !== initial.receiptPath ||
+      current.dnsmasqBinary !== initial.dnsmasqBinary ||
+      current.mainConfigPath !== initial.mainConfigPath ||
+      current.includeDir !== initial.includeDir
+    ) {
+      throw new Error("Native DNS inputs changed before deactivation");
+    }
+    return current.inspection;
+  };
+  const authorize = async () => {
+    if (!isInteractiveTerminal()) {
+      return false;
+    }
+    const accepted = await confirmSafe({
+      message: `Deactivate only the owned *.${domain} DNS claim? This restarts dnsmasq; the existing v4 parent remains unchanged.`,
+      initialValue: false,
+      nonInteractive: "decline",
+    });
+    if (!accepted) {
+      return false;
+    }
+    return (
+      (await run(["sudo", "-v"], {
+        stdin: "inherit",
+        timeoutMs: 120_000,
+        forwardSignals: true,
+      })) === 0
+    );
+  };
+  const deps = createNativeDnsHostDependencies({
+    receiptPath: initial.receiptPath,
+    dnsmasqPath: initial.inspection.plan.dnsmasqPath,
+    resolverPath: initial.inspection.plan.resolverPath,
+    dnsmasqBinary: initial.dnsmasqBinary,
+    dnsmasqMainConfigPath: initial.mainConfigPath,
+    dnsmasqIncludeDir: initial.includeDir,
+    inspectPlan,
+    authorize,
+    restartDnsmasq: restartMacDnsmasq,
+    flushDnsCache: flushMacDnsCachePrivileged,
+  });
+  await deactivateNativeDomainDns({
+    dependencies: deps,
+    receiptPath: initial.receiptPath,
+  });
+  logger.success({
+    message: `Owned native DNS claim for *.${domain} was removed; fallback resolution verified.`,
   });
   return 0;
 }
@@ -511,6 +632,7 @@ async function inspectNativeDnsPlan(opts: {
   readonly dnsmasqBinary: string;
   readonly mainConfigPath: string;
   readonly includeDir: string;
+  readonly receipt: NativeDnsReceipt | null;
 }> {
   const prefix = await resolveBrewPrefix();
   const host = await inspectNativeDnsHost({ brewPrefix: prefix });
@@ -549,6 +671,7 @@ async function inspectNativeDnsPlan(opts: {
     dnsmasqBinary: host.dnsmasqArgs[0] ?? "",
     mainConfigPath: host.mainConfig.path,
     includeDir: host.includeDir,
+    receipt,
   };
 }
 

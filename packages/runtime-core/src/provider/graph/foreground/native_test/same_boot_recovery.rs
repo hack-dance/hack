@@ -31,7 +31,17 @@ fn ready(owner: &mut Process, run: &str, deadline: Instant) {
 #[test]
 #[ignore = "Owned capacity-two development VM, matching all-feature CLI, pinned static image/relay and external 240s watchdog required"]
 fn same_boot_dead_owner_recovery_preserves_sibling_and_restores_data() {
-    let deadline = Instant::now() + Duration::from_secs(210);
+    exercise(false);
+}
+
+#[test]
+#[ignore = "Owned capacity-two development VM, matching all-feature CLI, pinned static image/relay and external 300s watchdog required"]
+fn previous_boot_recovery_then_same_boot_recovery_preserves_history_and_data() {
+    exercise(true);
+}
+
+fn exercise(previous_boot: bool) {
+    let deadline = Instant::now() + Duration::from_secs(if previous_boot { 270 } else { 210 });
     let candidate =
         Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap())).unwrap();
     let binary = PathBuf::from(std::env::var("HACK_LOCAL_TEST_BINARY").unwrap());
@@ -129,7 +139,96 @@ fn same_boot_dead_owner_recovery_preserves_sibling_and_restores_data() {
         }
         Process::start(&binary, &candidate, &args, None)
     };
-    let mut owners = [start(0, None), start(1, None)];
+    let mut first = start(0, None);
+    let mut seed_cleanup = Cleanup {
+        binary: &binary,
+        candidate: &candidate,
+        run: &runs[0],
+        done: false,
+    };
+    let old_proof = if previous_boot {
+        ready(&mut first, &runs[0], deadline);
+        backends[0].traffic(1);
+        assert_eq!(
+            exec(&binary, &candidate, &runs[0], "web", "write-data", deadline)["exit_code"],
+            0
+        );
+        let before = snapshot(&candidate, &runs[0], deadline).receipt;
+        let expected = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec_pretty(&before).unwrap())
+        );
+        first.child.kill().unwrap();
+        first.wait(deadline);
+        checked_cli(
+            "stop-prior-boot",
+            &binary,
+            &candidate,
+            &["runtime", "down", "--json"],
+            deadline,
+        );
+        checked_cli(
+            "start-successor-boot",
+            &binary,
+            &candidate,
+            &[
+                "runtime",
+                "up",
+                "--profile",
+                "development",
+                "--bridge-sockets",
+                "2",
+                "--dependency-sockets",
+                "2",
+                "--internet",
+                "--json",
+            ],
+            deadline,
+        );
+        checked_cli(
+            "recover-prior-boot",
+            &binary,
+            &candidate,
+            &[
+                "graph",
+                "recover-cleanup",
+                "--run-id",
+                &runs[0],
+                "--expect-receipt",
+                &expected,
+                "--json",
+            ],
+            deadline,
+        );
+        checked_cli(
+            "retire-prior-publisher",
+            &binary,
+            &candidate,
+            &[
+                "graph",
+                "retire-recovered-publisher",
+                "--run-id",
+                &runs[0],
+                "--expect-owner",
+                &before.owner,
+                "--json",
+            ],
+            deadline,
+        );
+        let selection = graph::foreground::restore_selection(&candidate, &runs[0]).unwrap();
+        first = start(0, Some(selection["generation"].as_str().unwrap()));
+        Some(
+            fs::read(
+                graph::directory(&candidate, &runs[0])
+                    .unwrap()
+                    .join("dead-owner-cleanup.json"),
+            )
+            .unwrap(),
+        )
+    } else {
+        None
+    };
+    let mut owners = [first, start(1, None)];
     let mut cleanup = [
         Cleanup {
             binary: &binary,
@@ -144,6 +243,7 @@ fn same_boot_dead_owner_recovery_preserves_sibling_and_restores_data() {
             done: false,
         },
     ];
+    seed_cleanup.done = true;
     ready(&mut owners[0], &runs[0], deadline);
     ready(&mut owners[1], &runs[1], deadline);
     for backend in &backends {
@@ -181,7 +281,18 @@ fn same_boot_dead_owner_recovery_preserves_sibling_and_restores_data() {
     backends[0].assert_no_traffic();
     let sibling = serde_json::to_vec(&snapshot(&candidate, &runs[1], deadline).receipt).unwrap();
     assert_eq!(
-        exec(&binary, &candidate, &runs[0], "web", "write-data", deadline)["exit_code"],
+        exec(
+            &binary,
+            &candidate,
+            &runs[0],
+            "web",
+            if previous_boot {
+                "read-data"
+            } else {
+                "write-data"
+            },
+            deadline
+        )["exit_code"],
         0
     );
     let boot = crate::provider::lifecycle::status(&candidate)
@@ -230,6 +341,17 @@ fn same_boot_dead_owner_recovery_preserves_sibling_and_restores_data() {
                 &candidate,
                 &recovery,
                 deadline,
+            );
+        }
+        if let Some(bytes) = &old_proof {
+            assert_eq!(
+                &fs::read(
+                    graph::directory(&candidate, &runs[0])
+                        .unwrap()
+                        .join("dead-owner-cleanup.json")
+                )
+                .unwrap(),
+                bytes
             );
         }
         let cleaned = snapshot(&candidate, &runs[0], deadline).receipt;

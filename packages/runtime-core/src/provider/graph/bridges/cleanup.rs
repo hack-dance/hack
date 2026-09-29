@@ -92,10 +92,7 @@ fn validate_bindings(
         !hex(hash, 64)
             || selection.previous_boot.is_none()
             || !selection.selected.is_empty()
-            || !receipt
-                .relay_startup
-                .as_ref()
-                .is_some_and(|startup| startup.control_only && startup.services.is_empty())
+            || !pinned_predecessor_eligible(receipt)
     }) {
         return Err(invalid());
     }
@@ -170,11 +167,27 @@ pub(crate) fn capture(
     Ok(selection)
 }
 
+// An empty ingress registry does not imply an empty host-dependency graph.
+// Completed dependency startup may use the same exact dead-publication proof;
+// pending startup never obtains cleanup authority from an empty registry.
+fn pinned_predecessor_eligible(receipt: &Receipt) -> bool {
+    receipt.relay_startup.as_ref().is_some_and(|startup| {
+        startup.valid(receipt)
+            && startup.services.values().all(|service| {
+                matches!(
+                    service.phase,
+                    super::super::startup::Phase::Released
+                        | super::super::startup::Phase::Completed
+                )
+            })
+    })
+}
+
 fn predecessor_owner(receipt: &Receipt, previous: &str) -> Result<String, CandidateError> {
     let startup = receipt
         .relay_startup
         .as_ref()
-        .filter(|s| s.control_only && s.services.is_empty())
+        .filter(|_| pinned_predecessor_eligible(receipt))
         .ok_or_else(invalid)?;
     let pin = crate::provider::relay_owner::publication::PinnedEndpoint::load(
         &startup.control_root,
@@ -780,6 +793,47 @@ mod tests {
         receipt.relay_startup = None;
         assert!(validate_bindings(&receipt, &selection, Some("prior")).is_err());
     }
+    #[test]
+    fn empty_prior_boot_accepts_completed_dependencies_but_not_unready_or_changed_proof() {
+        let mut selection = selection(0);
+        selection.boot = "current".into();
+        selection.previous_boot = Some("prior".into());
+        selection.predecessor_owner = Some("f".repeat(64));
+        let mut receipt: Receipt = serde_json::from_value(json!({
+            "version":1,"run":selection.run,"owner":selection.owner,"namespace":"d".repeat(64),"plan_id":selection.plan,
+            "phase":"ready-observed","readiness":{"web":"healthy"},
+            "resources":{"container:web":{"kind":"container","key":"web","name":"owned-web","id":"a".repeat(64),"image":"sha256:fixture","phase":"started"}},
+            "relay_startup":{"guest_root":[1,2],"control_root":"/private/owned","artifact":"e".repeat(64),"services":{
+                "web":{"generation":"a".repeat(32),"phase":"released","started_at":"2026-01-01T00:00:00Z",
+                    "bindings":{"default":{"slot":0,"port":25252,"process":{"pid":9,"start":1,"port":25252}}}}
+            }}
+        })).unwrap();
+        assert!(validate_bindings(&receipt, &selection, Some("prior")).is_ok());
+        assert!(validate_bindings(&receipt, &selection, Some("foreign")).is_err());
+        assert!(validate_bindings(&receipt, &selection, Some("current")).is_err());
+        let mut missing = selection.clone();
+        missing.predecessor_owner = None;
+        assert!(validate_bindings(&receipt, &missing, Some("prior")).is_err());
+        for phase in ["prepared", "provision_intent", "provisioned"] {
+            let mut changed = serde_json::to_value(&receipt).unwrap();
+            changed["relay_startup"]["services"]["web"]["phase"] = json!(phase);
+            let changed: Receipt = serde_json::from_value(changed).unwrap();
+            assert!(validate_bindings(&changed, &selection, Some("prior")).is_err());
+        }
+        receipt
+            .relay_startup
+            .as_mut()
+            .unwrap()
+            .services
+            .get_mut("web")
+            .unwrap()
+            .bindings
+            .get_mut("default")
+            .unwrap()
+            .port = 0;
+        assert!(validate_bindings(&receipt, &selection, Some("prior")).is_err());
+    }
+
     #[test]
     fn prior_generation_selection_is_retained_only_before_all_current_routes() {
         let fixture = Fixture::new();

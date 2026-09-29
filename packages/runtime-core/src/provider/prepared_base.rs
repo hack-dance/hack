@@ -7,10 +7,10 @@
 //! a pool's provider `$HOME/.smolvm`, the base-scoped network-tools owner, and recovery of an
 //! activation the pool owns.
 //!
-//! It is deliberately not wired into `lifecycle`. Adoption also needs a seed builder that
-//! produces the base in an owned machine, installs network tools under the base-scoped owner,
-//! sanitizes and stops it, and publishes it with readback. Until then the receipt's
-//! sanitization record is a publisher claim this module requires but cannot verify.
+//! `lifecycle` uses it only through `prepared_start`, for pools that request a base. Bases are
+//! built by `lifecycle::prepared_boot`, and a pool uses one only after an independent verifier
+//! boot recorded a passing inventory (`prepared_store`); the receipt's sanitization record alone
+//! is a publisher claim this module requires but cannot verify.
 //!
 //! Timing (pinned SmolVM 1.14.3): a machine's disks are formatted from the plain templates during
 //! its first start (`prepare_for_launch`); `machine create` makes none. Therefore:
@@ -213,7 +213,7 @@ fn base_network_tools_owner(base_id: &str) -> String {
     format!("prepared-base:{base_id}")
 }
 
-fn valid_base_id(id: &str) -> bool {
+pub(super) fn valid_base_id(id: &str) -> bool {
     (1..=64).contains(&id.len())
         && id
             .bytes()
@@ -564,13 +564,6 @@ pub struct PoolTarget<'a> {
 impl<'a> PoolTarget<'a> {
     /// A target for the pool at `root`, refused unless `lock` is that root's held operation lock.
     /// The borrow keeps the lock held for as long as the target exists.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "lifecycle constructs targets once prepared-base activation is wired"
-        )
-    )]
     pub(crate) fn new(
         root: &'a Path,
         lock: &'a state::Lock,
@@ -661,7 +654,7 @@ pub struct ActivationRecord {
 
 impl ActivationRecord {
     /// The committed record, if any. An uncommitted pending write is not consulted.
-    fn load(target: &PoolTarget<'_>) -> Result<Option<Self>, CandidateError> {
+    pub(super) fn load(target: &PoolTarget<'_>) -> Result<Option<Self>, CandidateError> {
         let path = target.record();
         if !exists(&path)? {
             return Ok(None);
@@ -1124,7 +1117,7 @@ fn open_regular(path: &Path) -> Result<File, CandidateError> {
 }
 
 /// Read a private, singly linked regular file owned by this user, up to `limit` bytes.
-fn read_private(path: &Path, limit: u64) -> Result<Vec<u8>, CandidateError> {
+pub(super) fn read_private(path: &Path, limit: u64) -> Result<Vec<u8>, CandidateError> {
     let mut file = open_regular(path)?;
     let metadata = file.metadata().map_err(state::io)?;
     // SAFETY: geteuid has no preconditions and cannot fail.
@@ -1173,7 +1166,7 @@ fn c_path(path: &Path) -> Result<std::ffi::CString, CandidateError> {
 /// APFS copy-on-write clone of a regular file, never following a symlink at `source` and never
 /// replacing `destination`.
 #[cfg(target_os = "macos")]
-fn clone_file(source: &Path, destination: &Path) -> Result<(), CandidateError> {
+pub(super) fn clone_file(source: &Path, destination: &Path) -> Result<(), CandidateError> {
     /// `CLONE_NOFOLLOW` from `<sys/clonefile.h>`.
     const CLONE_NOFOLLOW: u32 = 0x0001;
     let (source, destination) = (c_path(source)?, c_path(destination)?);
@@ -1193,7 +1186,7 @@ fn clone_file(source: &Path, destination: &Path) -> Result<(), CandidateError> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn clone_file(_source: &Path, _destination: &Path) -> Result<(), CandidateError> {
+pub(super) fn clone_file(_source: &Path, _destination: &Path) -> Result<(), CandidateError> {
     Err(error(
         "prepared_base_unsupported",
         "Prepared bases are implemented for macOS APFS only.",

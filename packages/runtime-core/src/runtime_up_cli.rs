@@ -1,7 +1,9 @@
 //! Explicit pool socket options. Parse completely before runtime discovery or mutation.
 use hack_runtime_core::{
     CandidateError,
-    provider::{BridgeIntent, DependencySocketIntent, NetworkIntent, Profile},
+    provider::{
+        BridgeIntent, DependencySocketIntent, NetworkIntent, Profile, prepared_start::Mode,
+    },
 };
 use std::path::PathBuf;
 
@@ -14,12 +16,14 @@ pub struct Options {
     pub minimum_dependencies: Option<DependencySocketIntent>,
     pub project_share: Option<PathBuf>,
     pub retained: Option<(String, String)>,
+    /// `--prepared-base MODE` and optional `--prepared-base-store ABS` for a fresh pool.
+    pub prepared: Option<(Mode, Option<PathBuf>)>,
 }
 
 fn invalid() -> CandidateError {
     CandidateError::new(
         "invalid_arguments",
-        "Use runtime up --profile research|development with --bridge-sockets or --minimum-bridge-sockets, and/or --dependency-sockets or --minimum-dependency-sockets, each once, repeatable --allow-host HOST, plus optional --json. Direct project sharing requires --profile development --project-share PATH --unfiltered-source together; it exposes the exact project tree without snapshot exclusions.",
+        "Use runtime up --profile research|development with --bridge-sockets or --minimum-bridge-sockets, and/or --dependency-sockets or --minimum-dependency-sockets, each once, repeatable --allow-host HOST, plus optional --json. Direct project sharing requires --profile development --project-share PATH --unfiltered-source together; it exposes the exact project tree without snapshot exclusions. A fresh pool may request a prepared base with --prepared-base prefer|require and optional absolute --prepared-base-store PATH.",
     )
 }
 
@@ -36,6 +40,8 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
     let mut unfiltered_source = false;
     let mut retained_run = None;
     let mut retained_selection = None;
+    let mut prepared = None;
+    let mut prepared_store = None;
     let mut args = args.iter();
     while let Some(key) = args.next() {
         match *key {
@@ -51,6 +57,20 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
                     return Err(invalid());
                 }
                 project_share = Some(path);
+            }
+            "--prepared-base" if prepared.is_none() => {
+                prepared = Some(
+                    args.next()
+                        .and_then(|mode| Mode::parse(mode))
+                        .ok_or_else(invalid)?,
+                );
+            }
+            "--prepared-base-store" if prepared_store.is_none() => {
+                let path = PathBuf::from(args.next().ok_or_else(invalid)?);
+                if !path.is_absolute() {
+                    return Err(invalid());
+                }
+                prepared_store = Some(path);
             }
             "--unfiltered-source" if !unfiltered_source => unfiltered_source = true,
             "--internet" if !internet => internet = true,
@@ -106,6 +126,7 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
         _ => return Err(invalid()),
     };
     if (internet && !hosts.is_empty())
+        || (prepared_store.is_some() && prepared.is_none())
         || unfiltered_source != project_share.is_some()
         || (project_share.is_some() && profile != Profile::Development)
         || (bridges.is_none()
@@ -114,7 +135,8 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
             && minimum_dependencies.is_none()
             && hosts.is_empty()
             && !internet
-            && project_share.is_none())
+            && project_share.is_none()
+            && prepared.is_none())
     {
         return Err(invalid());
     }
@@ -134,12 +156,77 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
         minimum_dependencies,
         project_share,
         retained,
+        prepared: prepared.map(|mode| (mode, prepared_store)),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_base_composes_with_minimum_dependency_capacity() {
+        let options = parse(&[
+            "--profile",
+            "development",
+            "--minimum-dependency-sockets",
+            "2",
+            "--prepared-base",
+            "require",
+        ])
+        .unwrap();
+        assert_eq!(options.minimum_dependencies.unwrap().slots, 2);
+        assert_eq!(options.dependencies, None);
+        assert_eq!(options.prepared, Some((Mode::Require, None)));
+    }
+
+    #[test]
+    fn prepared_base_is_an_explicit_mode_with_an_optional_absolute_store() {
+        let options = parse(&["--profile", "development", "--prepared-base", "prefer"]).unwrap();
+        assert_eq!(options.prepared, Some((Mode::Prefer, None)));
+        let options = parse(&[
+            "--profile",
+            "research",
+            "--minimum-bridge-sockets",
+            "1",
+            "--prepared-base",
+            "require",
+            "--prepared-base-store",
+            "/private/store",
+        ])
+        .unwrap();
+        assert_eq!(
+            options.prepared,
+            Some((Mode::Require, Some(PathBuf::from("/private/store"))))
+        );
+        for args in [
+            &["--profile", "development", "--prepared-base", "off"][..],
+            &[
+                "--profile",
+                "development",
+                "--prepared-base-store",
+                "/private/store",
+            ][..],
+            &[
+                "--profile",
+                "development",
+                "--prepared-base",
+                "prefer",
+                "--prepared-base-store",
+                "relative",
+            ][..],
+            &[
+                "--profile",
+                "development",
+                "--prepared-base",
+                "prefer",
+                "--prepared-base",
+                "require",
+            ][..],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+    }
 
     #[test]
     fn minimum_dependency_capacity_requires_one_unambiguous_bounded_selection() {

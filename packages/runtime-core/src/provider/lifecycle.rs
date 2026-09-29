@@ -712,7 +712,7 @@ pub fn up_with_capabilities(
         profile,
         requested.into(),
         network,
-        None,
+        None.into(),
         None,
         None,
     )
@@ -731,7 +731,7 @@ pub fn up_with_sockets(
         profile,
         bridge.into(),
         None,
-        dependencies,
+        dependencies.into(),
         None,
         None,
     )
@@ -750,7 +750,7 @@ pub fn up_with_network_sockets(
         profile,
         bridge.into(),
         network,
-        dependencies,
+        dependencies.into(),
         None,
         None,
     )
@@ -770,7 +770,7 @@ pub fn up_with_project_share(
         profile,
         bridge.into(),
         network,
-        dependencies,
+        dependencies.into(),
         project_share,
         None,
     )
@@ -792,7 +792,7 @@ pub fn up_with_retained_project_share(
         profile,
         bridge.into(),
         network,
-        dependencies,
+        dependencies.into(),
         project_share,
         Some(retained),
     )
@@ -815,6 +815,28 @@ pub fn up_with_minimum_bridges(
         profile,
         super::bridge::Request::Minimum(required),
         network,
+        dependencies.into(),
+        project_share,
+        retained,
+    )
+}
+
+/// Admit exact or minimum capacity independently for ingress and dependencies.
+/// Graph startup must separately allocate free slots under the provider lease.
+pub fn up_with_socket_requests(
+    candidate: &Candidate,
+    profile: super::Profile,
+    sockets: super::SocketRequests,
+    network: Option<super::NetworkIntent>,
+    project_share: Option<super::ProjectShareIntent>,
+    retained: Option<(&str, &str)>,
+) -> Result<RuntimeStatus, CandidateError> {
+    let (bridges, dependencies) = sockets.resolve()?;
+    up_selected(
+        candidate,
+        profile,
+        bridges,
+        network,
         dependencies,
         project_share,
         retained,
@@ -826,7 +848,7 @@ fn up_selected(
     profile: super::Profile,
     bridge_request: super::bridge::Request,
     network: Option<super::NetworkIntent>,
-    dependencies: Option<super::DependencySocketIntent>,
+    dependency_request: super::dependency_socket::Request,
     project_share: Option<super::ProjectShareIntent>,
     retained: Option<(&str, &str)>,
 ) -> Result<RuntimeStatus, CandidateError> {
@@ -844,6 +866,7 @@ fn up_selected(
         ));
     }
     let requested = bridge_request.initial();
+    let dependencies = dependency_request.initial();
     super::network_update::require_complete(candidate)?;
     if let Some(share) = &project_share {
         share.validate()?;
@@ -868,7 +891,7 @@ fn up_selected(
         super::project_share::check_request(owner.project_share.as_ref(), project_share.as_ref())?;
         bridge_request.check(owner.application_bridge)?;
         super::network_intent::check_request(&owner.network, network.as_ref())?;
-        super::dependency_socket::check_request(owner.dependency_sockets, dependencies)?;
+        dependency_request.check(owner.dependency_sockets)?;
         (
             owner.application_bridge,
             owner.network.clone(),
@@ -942,7 +965,7 @@ fn up_selected(
     }
     bridge_request.check(owner.application_bridge)?;
     super::network_intent::check_request(&owner.network, Some(&existing_network))?;
-    super::dependency_socket::check_request(owner.dependency_sockets, dependencies)?;
+    dependency_request.check(owner.dependency_sockets)?;
     if owner.dependency_sockets != existing_dependencies {
         return Err(CandidateError::new(
             "dependency_socket_conflict",

@@ -181,3 +181,40 @@ fn invalid_dependency_capacity_does_not_initialize_runtime_state() {
     assert_eq!(error.code, "dependency_socket");
     assert!(!candidate.state_root.exists());
 }
+
+#[test]
+fn invalid_minimum_dependency_requests_refuse_before_runtime_effects() {
+    let fixture = Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    for slots in [0, 33, u8::MAX] {
+        let failure = provider::up_with_socket_requests(
+            &candidate,
+            provider::Profile::Development,
+            provider::SocketRequests {
+                minimum_dependencies: Some(provider::DependencySocketIntent { slots }),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, "dependency_socket");
+        assert!(!candidate.state_root.exists());
+    }
+    let failure = provider::up_with_socket_requests(
+        &candidate,
+        provider::Profile::Development,
+        provider::SocketRequests {
+            minimum_bridges: Some(provider::BridgeIntent { slots: 32 }),
+            minimum_dependencies: Some(provider::DependencySocketIntent { slots: 1 }),
+            ..Default::default()
+        },
+        None,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(failure.code, "dependency_socket");
+    assert!(!candidate.state_root.exists());
+}

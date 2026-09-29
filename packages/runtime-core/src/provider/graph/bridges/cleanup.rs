@@ -280,6 +280,45 @@ pub(crate) fn verify_remaining(
     let store = strict_store(candidate, engine)?;
     remaining_matches(&store, receipt, selection)
 }
+
+/// Same-boot recovery must recheck the selected reservations before any release.
+/// Removed slots may stay absent, but a reused slot or additional graph assignment
+/// cannot inherit cleanup authority from the original selection.
+pub(crate) fn verify_live_remaining(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    selection: &Selection,
+) -> Result<(), CandidateError> {
+    validate_selection(engine, receipt, selection)?;
+    let store = strict_store(candidate, engine)?;
+    live_remaining_matches(&store, selection)
+}
+
+fn live_remaining_matches(store: &Store, selection: &Selection) -> Result<(), CandidateError> {
+    if selection.previous_boot.is_some()
+        || selection.predecessor_owner.is_some()
+        || store.owner != selection.owner
+        || store.next_launch_serial < selection.serial
+    {
+        return Err(invalid());
+    }
+    for (slot, assignment) in &store.slots {
+        if assignment.run != selection.run && !selection.selected.contains_key(slot) {
+            continue;
+        }
+        let expected = selection.selected.get(slot).ok_or_else(invalid)?;
+        if !["running", "stopping", "stopped"].contains(&assignment.phase.as_str()) {
+            return Err(invalid());
+        }
+        let mut observed = assignment.clone();
+        observed.phase = expected.assignment.phase.clone();
+        if observed != expected.assignment {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
 fn remaining_matches(
     store: &Store,
     receipt: &Receipt,
@@ -525,6 +564,122 @@ mod tests {
             selected: BTreeMap::new(),
         }
     }
+    fn live_selection() -> (Selection, Store) {
+        let mut selected = selection(1);
+        selected.boot = "11111111-1111-1111-1111-111111111111".into();
+        selected.capacity = 3;
+        let assignment = Assignment {
+            reservation: "d".repeat(32),
+            run: selected.run.clone(),
+            service: "web".into(),
+            generation: "e".repeat(64),
+            container_id: "f".repeat(64),
+            network_id: "1".repeat(64),
+            boot_id: selected.boot.clone(),
+            phase: "running".into(),
+            relay: Some(relay::Relay {
+                transport: relay::Transport::ReservationV1,
+                launch_serial: 1,
+                binary_sha256: "2".repeat(64),
+                target_pid: 10,
+                target_start: 10,
+                port: 8080,
+            }),
+        };
+        selected.selected.insert(
+            0,
+            Selected {
+                assignment: assignment.clone(),
+                helper: Some(
+                    serde_json::from_value(json!({
+                        "pid": 20, "start": 20, "executable_device": 1,
+                        "executable_inode": 2, "socket_device": 1,
+                        "socket_inode": 3, "kernel_socket_inode": 4
+                    }))
+                    .unwrap(),
+                ),
+            },
+        );
+        let store = Store {
+            version: 1,
+            owner: selected.owner.clone(),
+            next_launch_serial: 1,
+            slots: BTreeMap::from([(0, assignment)]),
+        };
+        (selected, store)
+    }
+
+    #[test]
+    fn same_boot_remaining_allows_cleanup_progress_without_selecting_siblings() {
+        let (selected, mut store) = live_selection();
+        let mut sibling = store.slots[&0].clone();
+        sibling.run = "9".repeat(32);
+        sibling.reservation = "8".repeat(32);
+        sibling.relay.as_mut().unwrap().launch_serial = 2;
+        store.next_launch_serial = 2;
+        store.slots.insert(1, sibling.clone());
+        for phase in ["running", "stopping", "stopped"] {
+            store.slots.get_mut(&0).unwrap().phase = phase.into();
+            assert!(live_remaining_matches(&store, &selected).is_ok());
+        }
+        store.slots.remove(&0);
+        assert!(live_remaining_matches(&store, &selected).is_ok());
+        assert_eq!(store.slots[&1], sibling);
+    }
+
+    #[test]
+    fn same_boot_remaining_rejects_replaced_added_and_foreign_assignments() {
+        for mutation in 0..12 {
+            let (selected, mut store) = live_selection();
+            match mutation {
+                0 => store.slots.get_mut(&0).unwrap().reservation = "8".repeat(32),
+                1 => store.slots.get_mut(&0).unwrap().generation = "8".repeat(64),
+                2 => store.slots.get_mut(&0).unwrap().container_id = "8".repeat(64),
+                3 => store.slots.get_mut(&0).unwrap().network_id = "8".repeat(64),
+                4 => store.slots.get_mut(&0).unwrap().run = "8".repeat(32),
+                5 => store.slots.get_mut(&0).unwrap().boot_id = "other-boot".into(),
+                6 => store.slots.get_mut(&0).unwrap().phase = "starting".into(),
+                7 => {
+                    let extra = store.slots[&0].clone();
+                    store.slots.insert(1, extra);
+                }
+                8 => store.owner = "8".repeat(32),
+                9 => store.next_launch_serial = 0,
+                10 => {
+                    store
+                        .slots
+                        .get_mut(&0)
+                        .unwrap()
+                        .relay
+                        .as_mut()
+                        .unwrap()
+                        .target_start += 1
+                }
+                11 => {
+                    store
+                        .slots
+                        .get_mut(&0)
+                        .unwrap()
+                        .relay
+                        .as_mut()
+                        .unwrap()
+                        .launch_serial += 1
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                live_remaining_matches(&store, &selected).is_err(),
+                "mutation {mutation}"
+            );
+        }
+        let (mut selected, store) = live_selection();
+        selected.previous_boot = Some("old-boot".into());
+        assert!(live_remaining_matches(&store, &selected).is_err());
+        selected.previous_boot = None;
+        selected.predecessor_owner = Some("8".repeat(64));
+        assert!(live_remaining_matches(&store, &selected).is_err());
+    }
+
     #[test]
     fn prior_boot_selection_refuses_mixed_current_foreign_and_replaced_reservations() {
         let mut selection = selection(1);

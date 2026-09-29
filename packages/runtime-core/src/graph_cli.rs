@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; planning actions accept optional --branch <canonical-lowercase-dns-label>. Source mounts may select --source-revision. Fresh run/serve may explicitly select --release-initializer-cache service for quiescent guest page/dentry cache release (package contents retained); explicit --live-source binds directory mounts to that initial acknowledged workspace revision; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Dead-owner recover-cleanup requires --expect-receipt; retire-recovered-publisher requires --expect-owner. Foreground serve additionally requires --dependencies and --expect-dependencies and accepts explicit --environment-stdin and --route-slot service=index|auto for reviewed local routes; dependency-plan requires --dependencies; dependency-discover requires --host-port and --executable; owner-status requires --run-id. Fresh foreground owner-restore requires exactly --run-id, --expect-plan, --expect-generation and --environment-stdin, plus optional --json. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); --unix accepts up to eight --hostname claims; unpublish-bridge requires --run-id and --expect-reservation.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; planning actions accept optional --branch <canonical-lowercase-dns-label>. Source mounts may select --source-revision. Fresh run/serve may explicitly select --release-initializer-cache service for quiescent guest page/dentry cache release (package contents retained); explicit --live-source binds directory mounts to that initial acknowledged workspace revision; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Dead-owner recover-cleanup and same-boot recover-live-owner require --expect-receipt; retire-recovered-publisher requires --expect-owner. Foreground serve may opt into --auto-dependency-slots for pool-wide transport allocation; dependency-reservations inspects claims and recover-dependency-reservation --run-id --expect-reservation releases a verified dead pre-admission claim. Foreground serve additionally requires --dependencies and --expect-dependencies and accepts explicit --environment-stdin and --route-slot service=index|auto for reviewed local routes; dependency-plan requires --dependencies; dependency-discover requires --host-port and --executable; owner-status requires --run-id. Fresh foreground owner-restore requires exactly --run-id, --expect-plan, --expect-generation and --environment-stdin, plus optional --json. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); --unix accepts up to eight --hostname claims; unpublish-bridge requires --run-id and --expect-reservation.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
@@ -64,6 +64,25 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         return Err(invalid());
     }
     let args = arguments.as_slice();
+    if *action == "recover-live-owner" {
+        let (run, expected) = match *args {
+            ["--run-id", run, "--expect-receipt", expected]
+            | ["--run-id", run, "--expect-receipt", expected, "--json"] => (run, expected),
+            _ => return Err(invalid()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            return graph::recover_live_owner(candidate, run, expected);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (run, expected);
+            return Err(CandidateError::new(
+                "unsupported_host",
+                "Same-boot foreground recovery requires macOS.",
+            ));
+        }
+    }
     if *action == "owner-restore" {
         let options = restore_options(args)?;
         #[cfg(target_os = "macos")]
@@ -100,6 +119,27 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 "Foreground graph restore requires macOS.",
             ));
         }
+    }
+    if ["dependency-reservations", "recover-dependency-reservation"].contains(action) {
+        #[cfg(target_os = "macos")]
+        {
+            return match (*action, args) {
+                ("dependency-reservations", [] | ["--json"]) => {
+                    graph::dependency_reservations(candidate)
+                }
+                (
+                    "recover-dependency-reservation",
+                    ["--run-id", run, "--expect-reservation", expected]
+                    | ["--run-id", run, "--expect-reservation", expected, "--json"],
+                ) => graph::recover_dependency_reservation(candidate, run, expected),
+                _ => Err(invalid()),
+            };
+        }
+        #[cfg(not(target_os = "macos"))]
+        return Err(CandidateError::new(
+            "unsupported_host",
+            "Dependency reservations require macOS.",
+        ));
     }
     if *action == "dependency-plan" {
         let path = match *args {
@@ -186,6 +226,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let mut profiles = Vec::new();
     let mut remove_data = false;
     let mut environment_stdin = false;
+    let mut automatic_dependency_slots = false;
     let mut live_source = false;
     let mut shared_source = false;
     let mut json = false;
@@ -213,6 +254,13 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 return Err(invalid());
             }
             live_source = true;
+            continue;
+        }
+        if key == "--auto-dependency-slots" {
+            if automatic_dependency_slots || !["serve", "serve-restore"].contains(action) {
+                return Err(invalid());
+            }
+            automatic_dependency_slots = true;
             continue;
         }
         if key == "--environment-stdin" {
@@ -568,6 +616,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                     &singles,
                     &route_slots,
                     environment_stdin,
+                    automatic_dependency_slots,
                 );
             }
             if ["serve-restore", "source-compatibility"].contains(action) {
@@ -633,6 +682,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                             .ok_or_else(invalid)?,
                         &inputs,
                         run,
+                        automatic_dependency_slots,
                     )?;
                     return encode(if let Some(managed) = &managed {
                         graph::foreground::serve_with_routes(

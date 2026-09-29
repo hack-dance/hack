@@ -5,7 +5,7 @@ use crate::provider::{graph::startup::native_test::RestartableBackend, identity}
 use base64::Engine as _;
 mod terminal_only;
 
-fn checked_cli(
+pub(super) fn checked_cli(
     stage: &str,
     binary: &Path,
     candidate: &Candidate,
@@ -22,7 +22,7 @@ fn checked_cli(
     serde_json::from_slice(&process.out).unwrap()
 }
 
-fn exec(
+pub(super) fn exec(
     binary: &Path,
     candidate: &Candidate,
     run: &str,
@@ -117,7 +117,7 @@ fn application_result_accepts_matching_nonzero_exit_and_rejects_native_refusal()
     }
 }
 
-fn snapshot(candidate: &Candidate, run: &str, deadline: Instant) -> graph::Snapshot {
+pub(super) fn snapshot(candidate: &Candidate, run: &str, deadline: Instant) -> graph::Snapshot {
     loop {
         match graph::inspect(candidate, run) {
             Ok(snapshot) => return snapshot,

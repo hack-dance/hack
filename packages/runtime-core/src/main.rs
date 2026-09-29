@@ -24,10 +24,13 @@ Usage:
   hack-local graph inspect|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
   hack-local graph recover-cleanup --run-id <32-hex> --expect-receipt <sha256> [--json]
+  hack-local graph recover-live-owner --run-id <32-hex> --expect-receipt <sha256> [--json]
   hack-local graph retire-recovered-publisher --run-id <32-hex> --expect-owner <32-hex> [--json]
   hack-local graph logs --run-id <32-hex> --service <name> [--tail <1..1000>] [--json]
   hack-local graph exec --run-id <32-hex> --service <name> [--workdir /path] [--timeout-seconds <1..120>] [--json] -- <program> [args...]
   hack-local graph dependency-plan --dependencies <reviewed.json> [--json]
+  hack-local graph dependency-reservations [--json]
+  hack-local graph recover-dependency-reservation --run-id <32-hex> --expect-reservation <sha256> [--json]
   hack-local graph dependency-discover --host-port <port> --executable <absolute-path> [--json]
   hack-local graph serve --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... --dependencies <reviewed.json> --expect-dependencies <sha256> [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
   hack-local graph owner-status --run-id <32-hex> [--json]
@@ -55,13 +58,14 @@ Usage:
   hack-local runtime engine-info [--json]
   hack-local graph reserve-bridge --run-id <32-hex> --service <name> --slot <index> --expect-generation <sha256> [--json]
   hack-local graph serve ... [--route-slot <service=index|auto>]...
+  hack-local graph serve|serve-restore ... [--auto-dependency-slots]
   hack-local graph start-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> [--json]
   hack-local graph publish-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> (--port <loopback-port> | --unix [--hostname <name>]...)
   hack-local graph unpublish-bridge --run-id <32-hex> --expect-reservation <32-hex> [--json]
   hack-local graph release-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> [--json]
   hack-local graph bridges|reconcile-bridges --run-id <32-hex> [--json]
   hack-local runtime probe|up --profile research|development [--json]
-  hack-local runtime up --profile research|development [--bridge-sockets <1..32> | --minimum-bridge-sockets <1..32>] [--dependency-sockets <1..32>] [--json]
+  hack-local runtime up --profile research|development [--bridge-sockets <1..32> | --minimum-bridge-sockets <1..32>] [--dependency-sockets <1..32> | --minimum-dependency-sockets <1..32>] [--json]
   hack-local runtime up --profile development --project-share <exact-project-root> --unfiltered-source [--json]
   hack-local graph serve|run ... --shared-source
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
@@ -326,6 +330,7 @@ fn run() -> Result<(), CandidateError> {
             if arguments.contains(&"--bridge-sockets")
                 || arguments.contains(&"--minimum-bridge-sockets")
                 || arguments.contains(&"--dependency-sockets")
+                || arguments.contains(&"--minimum-dependency-sockets")
                 || arguments.contains(&"--allow-host")
                 || arguments.contains(&"--internet")
                 || arguments.contains(&"--project-share")
@@ -340,39 +345,22 @@ fn run() -> Result<(), CandidateError> {
                 })
                 .transpose()?;
             let candidate = discover_candidate(&requested)?;
-            let started = if let Some(required) = options.minimum_bridges {
-                hack_runtime_core::provider::up_with_minimum_bridges(
-                    &candidate,
-                    options.profile,
-                    required,
-                    options.dependencies,
-                    options.network,
-                    share,
-                    options
-                        .retained
-                        .as_ref()
-                        .map(|(run, selection)| (run.as_str(), selection.as_str())),
-                )
-            } else if let Some((run, selection)) = options.retained {
-                hack_runtime_core::provider::up_with_retained_project_share(
-                    &candidate,
-                    options.profile,
-                    options.bridges,
-                    options.dependencies,
-                    options.network,
-                    share,
-                    (&run, &selection),
-                )
-            } else {
-                hack_runtime_core::provider::up_with_project_share(
-                    &candidate,
-                    options.profile,
-                    options.bridges,
-                    options.dependencies,
-                    options.network,
-                    share,
-                )
-            };
+            let started = hack_runtime_core::provider::up_with_socket_requests(
+                &candidate,
+                options.profile,
+                hack_runtime_core::provider::SocketRequests {
+                    bridges: options.bridges,
+                    minimum_bridges: options.minimum_bridges,
+                    dependencies: options.dependencies,
+                    minimum_dependencies: options.minimum_dependencies,
+                },
+                options.network,
+                share,
+                options
+                    .retained
+                    .as_ref()
+                    .map(|(run, selection)| (run.as_str(), selection.as_str())),
+            );
             print_json(&started?)?;
         }
         ["runtime", action @ ("probe" | "up"), "--profile", profile]

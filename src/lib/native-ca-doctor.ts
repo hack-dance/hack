@@ -222,7 +222,8 @@ export async function repairNativeCaTrust(opts: {
         "/Library/Keychains/System.keychain",
         staged,
       ],
-      { stdin: "ignore", timeoutMs: 15_000 }
+      // Reuse the prompt's controlling terminal for terminal-scoped sudo tickets.
+      { stdin: "ignore", timeoutMs: 15_000, forwardSignals: true }
     );
     if (installed !== 0) {
       throw new Error("macOS did not install the verified native Caddy root.");

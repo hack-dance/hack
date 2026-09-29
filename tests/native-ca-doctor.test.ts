@@ -8,6 +8,8 @@ import {
   type NativeCaDoctorDependencies,
   repairNativeCaTrust,
 } from "../src/lib/native-ca-doctor.ts";
+import { run } from "../src/lib/shell.ts";
+import { hasControllingTerminal } from "../src/lib/tty-process-group.ts";
 import { CURRENT_CA_PEM, OLD_CA_PEM } from "./helpers/ca-certificates.ts";
 
 const sha = (pem: string) =>
@@ -236,3 +238,42 @@ test("confirmed native repair stages the exact root and checks trust afterward",
     await f.cleanup();
   }
 });
+
+test.skipIf(!hasControllingTerminal())(
+  "native trust authorization and installation keep the same controlling terminal",
+  async () => {
+    const f = await fixture();
+    const identities: string[] = [];
+    try {
+      const result = await repairNativeCaTrust({
+        runtime: f.runtime,
+        hostname: "app.hack.gy",
+        dependencies: {
+          ...f.dependencies,
+          runCommand: async (command, options) => {
+            const path = join(f.home, `terminal-${identities.length}`);
+            const exitCode = await run(
+              [
+                "/usr/bin/python3",
+                "-I",
+                "-S",
+                "-c",
+                "import os,sys; fd=os.open('/dev/tty',os.O_RDONLY); identity=str(os.fstat(fd).st_rdev)+':'+str(os.getsid(0)); os.close(fd); open(sys.argv[1],'w').write(identity)",
+                path,
+              ],
+              options
+            );
+            expect(exitCode).toBe(0);
+            identities.push(await readFile(path, "utf8"));
+            return await f.dependencies.runCommand(command, options);
+          },
+        },
+      });
+      expect(result).toBe("installed");
+      expect(identities).toHaveLength(2);
+      expect(identities[0]).toBe(identities[1]);
+    } finally {
+      await f.cleanup();
+    }
+  }
+);

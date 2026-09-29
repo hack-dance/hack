@@ -777,6 +777,8 @@ prompt and verifies trust after installation. A missing, stale or changed owner
 refuses repair. The native `hack global trust` path directs you to this scoped
 Doctor command instead of falling back to Docker's exported CA. The native
 repair does not set up DNS or a browser's Local Network permission.
+Both authorization and installation retain the caller's controlling terminal,
+so terminal-scoped sudo authorization remains valid during the bounded repair.
 
 The runtime's read-only `runtime inspect-host-listener --pid PID --port PORT
 --executable /absolute/caddy --json` reports the selected same-user loopback

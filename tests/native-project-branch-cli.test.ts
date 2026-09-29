@@ -206,6 +206,7 @@ test("native branch restart checks source before cleanup and preserves its mappi
     planId: "d".repeat(64),
     profiles: [],
     effectiveEnvName: null,
+    aws: null,
   };
   await saveNativeProjectRun({ ...scope, run });
   const result = await invoke({

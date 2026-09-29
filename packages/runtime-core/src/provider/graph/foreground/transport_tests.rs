@@ -42,10 +42,111 @@ fn recovered_publisher_retirement_is_exact_and_idempotent() {
     assert!(retired_path(&root, &owner, false).exists());
     let retired = Retired::acquire(&candidate, &run).unwrap().unwrap();
     retired.verify().unwrap();
+    for _ in 0..2 {
+        retired
+            .verify_recovery(&candidate, &run, &owner, &receipt)
+            .unwrap();
+    }
+    for (selected_owner, selected_receipt) in [
+        ("0".repeat(64), receipt.clone()),
+        (owner.clone(), "e".repeat(64)),
+        ("invalid".into(), receipt.clone()),
+        (owner.clone(), "invalid".into()),
+    ] {
+        assert!(
+            retired
+                .verify_recovery(&candidate, &run, &selected_owner, &selected_receipt)
+                .is_err()
+        );
+    }
+    assert!(
+        retired
+            .verify_recovery(&candidate, &"b".repeat(32), &owner, &receipt)
+            .is_err()
+    );
     drop(retired);
     retire_recovered_publisher(&candidate, &run, &owner, &receipt).unwrap();
     assert!(retire_recovered_publisher(&candidate, &run, &owner, &"e".repeat(64)).is_err());
     fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn retired_recovery_refuses_pending_missing_and_partial_proof_without_mutation() {
+    let (_fixture, candidate, run, owner, root) = abandoned_publisher();
+    let receipt = "f".repeat(64);
+    retire_recovered_publisher(&candidate, &run, &owner, &receipt).unwrap();
+    let retired = Retired::acquire(&candidate, &run).unwrap().unwrap();
+    let verify = || retired.verify_recovery(&candidate, &run, &owner, &receipt);
+    let path = retirement_path(&root, &owner);
+    let bytes = fs::read(&path).unwrap();
+    let pending = path.with_extension("pending");
+    fs::write(&pending, b"interrupted retirement").unwrap();
+    assert!(verify().is_err());
+    assert_eq!(fs::read(&pending).unwrap(), b"interrupted retirement");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    fs::remove_file(pending).unwrap();
+
+    let retained = root.join("saved-retirement.json");
+    fs::rename(&path, &retained).unwrap();
+    assert!(verify().is_err(), "pathname absence cannot replace proof");
+    assert_eq!(fs::read(&retained).unwrap(), bytes);
+    fs::rename(&retained, &path).unwrap();
+
+    let record = retired_path(&root, &owner, false);
+    fs::rename(&record, root.join("owner.json")).unwrap();
+    assert!(
+        verify().is_err(),
+        "partial retirement must not be completed"
+    );
+    assert!(root.join("owner.json").is_file());
+    assert!(!record.exists());
+    fs::rename(root.join("owner.json"), &record).unwrap();
+    verify().unwrap();
+    drop(retired);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn retired_recovery_rechecks_archived_record_socket_and_lock_identity() {
+    for changed in ["record", "socket", "lock"] {
+        let (_fixture, candidate, run, owner, root) = abandoned_publisher();
+        let receipt = "f".repeat(64);
+        retire_recovered_publisher(&candidate, &run, &owner, &receipt).unwrap();
+        let retired = Retired::acquire(&candidate, &run).unwrap().unwrap();
+        retired
+            .verify_recovery(&candidate, &run, &owner, &receipt)
+            .unwrap();
+        let path = match changed {
+            "record" => retired_path(&root, &owner, false),
+            "socket" => retired_path(&root, &owner, true),
+            "lock" => root.join("operation.lock"),
+            _ => unreachable!(),
+        };
+        let saved = root.join("saved-evidence");
+        fs::rename(&path, &saved).unwrap();
+        let listener = if changed == "socket" {
+            Some(UnixListener::bind(&path).unwrap())
+        } else {
+            let bytes = fs::read(&saved).unwrap();
+            fs::write(&path, bytes).unwrap();
+            None
+        };
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let replacement = id(&fs::symlink_metadata(&path).unwrap());
+        assert!(
+            retired
+                .verify_recovery(&candidate, &run, &owner, &receipt)
+                .is_err(),
+            "{changed}"
+        );
+        assert_eq!(id(&fs::symlink_metadata(&path).unwrap()), replacement);
+        assert!(saved.exists());
+        drop(listener);
+        drop(retired);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(target_os = "macos")]

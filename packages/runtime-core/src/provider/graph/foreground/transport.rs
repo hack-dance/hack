@@ -971,6 +971,42 @@ impl Retired {
         }
         Ok(())
     }
+
+    /// Bind completed recovery to the exact retired publisher while retaining
+    /// this guard's lock. Current pathname absence alone is not recovery proof.
+    pub fn verify_recovery(
+        &self,
+        candidate: &Candidate,
+        run: &str,
+        owner_sha256: &str,
+        complete_sha256: &str,
+    ) -> Result<(), CandidateError> {
+        self.verify()?;
+        if !super::super::hex(owner_sha256, 64)
+            || !super::super::hex(complete_sha256, 64)
+            || root(candidate, run)? != self.root
+        {
+            return Err(retirement_refused());
+        }
+        let path = retirement_path(&self.root, owner_sha256);
+        if metadata(&path.with_extension("pending"))?.is_some() {
+            return Err(retirement_refused());
+        }
+        let intent: Retirement = state::read(&path).map_err(|_| retirement_refused())?;
+        let (socket_original, record_original) = verify_retirement(
+            candidate,
+            run,
+            owner_sha256,
+            complete_sha256,
+            &self.root,
+            &self._lock,
+            &intent,
+        )?;
+        if socket_original || record_original {
+            return Err(retirement_refused());
+        }
+        self.verify()
+    }
 }
 
 /// A held publication lock and unchanged record prove the old owner cannot return.

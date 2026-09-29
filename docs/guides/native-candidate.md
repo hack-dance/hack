@@ -921,8 +921,16 @@ After recovery completes, explicitly remove that graph's retained data with:
 ```
 
 This separate destructive request requires the retained dead-owner identity and
-completed recovery evidence on the same boot. It journals the selected volumes
-before removal and refuses changed ownership or replaced volumes. An interrupted
+completed recovery evidence on the same boot. It also works after explicit
+`retire-recovered-publisher`: the archived publisher must match the recovery's exact
+owner fingerprint and completed receipt, with unchanged archived record, socket and
+lock identities. No application restore is required first. Partial retirement,
+missing evidence or another boot still refuses removal. Ordinary acknowledged
+cleanup keeps its own authority even when an older recovery record exists.
+Before removal it verifies the receipt's ownership labels and journals the current
+volume inventory. Retries refuse changed ownership or replacements relative to
+that removal inventory. The older recovery receipt does not independently pin a
+volume's creation timestamp before the first removal request. An interrupted
 removal can resume against its recorded inventory; it does not authorize removal of
 another graph's volumes. Recovery alone continues to preserve data. Keep the
 recovery evidence until cleanup finishes; deleting it is not a repair.

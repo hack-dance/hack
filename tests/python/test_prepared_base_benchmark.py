@@ -83,23 +83,97 @@ class Harness(unittest.TestCase):
         self.assertFalse((self.root / "argv.log").exists())
 
     def test_flagged_pairs_are_excluded_from_the_admitted_ratio(self):
-        def pair(index, lane, wall, admitted):
-            return {
-                "mode": "pairs", "index": index, "lane": lane, "ok": True, "service_ready_s": wall,
-                "admission": {"admitted": admitted}, "disks_at_ready": {}, "cleanup": {"removed": True},
-                "samples": {"up": {"wall_s": wall, "cli_cpu_s": 1}, "restart_up": {"wall_s": 1}},
-            }
-
         records = [
-            pair(0, "stock", 10, True), pair(0, "prepared", 5, True),
-            pair(1, "stock", 10, False), pair(1, "prepared", 1, True),
+            pair(0, "stock", 10, CLEAN), pair(0, "prepared", 5, CLEAN),
+            pair(1, "stock", 10, LOADED), pair(1, "prepared", 1, CLEAN),
             {"mode": "cohort", "size": 8, "lane": "stock", "ok": False, "error": "x", "cleanup": {"error": "left"}},
         ]
-        summary = benchmark.summarize(records)
-        self.assertEqual(summary["admitted_pair_up_wall_ratio"], {"n": 1, "median": 0.5, "min": 0.5, "max": 0.5})
+        summary = benchmark.summarize(records, 16)
+        ratio = summary["admitted_pair_ratios"]["up_wall"]
+        self.assertEqual((ratio["n"], ratio["median"]), (1, 0.5))
         self.assertEqual(summary["pairs_flagged"]["stock"]["up_wall_s"]["n"], 1)
+        self.assertIsNone(summary["pairs_flagged"]["prepared"])
         self.assertEqual(summary["failures"][0]["error"], "x")
         self.assertEqual(len(summary["cleanup_failures"]), 1)
+        self.assertIn("start:load_high", summary["flag_reasons"])
+
+
+# Pure admission, summary and coverage controls; no processes.
+CLEAN = benchmark.admission_from(1.0, ["zsh"], "1", 16)
+LOADED = benchmark.admission_from(12.0, ["zsh"], "1", 16)
+
+
+def pair(index, lane, wall, admission, vm_cpu=1.0, private=1):
+    up = {"wall_s": wall, "cli_cpu_s": 1.0}
+    if vm_cpu is not None:
+        up["vm_cpu_s"] = vm_cpu
+    return {
+        "mode": "pairs", "index": index, "lane": lane, "ok": True, "service_ready_s": wall,
+        "admission": admission, "admission_end": CLEAN,
+        "disks_at_ready": {"storage.raw": {"allocated": 2, "private": private}},
+        "cleanup": {"removed": True, "allocated_after_down": 3},
+        "samples": {"up": up, "restart_up": {"wall_s": 1}},
+    }
+
+
+def cohort(size, repeat, lane, all_ready, admission):
+    return {
+        "mode": "cohort", "size": size, "repeat": repeat, "lane": lane, "ok": True, "all_ready_s": all_ready,
+        "admission": admission, "admission_end": CLEAN, "after_all_ready": {"vm_cpu_s": 2.0},
+        "disks_at_ready": {}, "cleanup": {"removed": True}, "samples": {"up": {"wall_s": 1, "cli_cpu_s": 1}},
+    }
+
+
+class Accounting(unittest.TestCase):
+    def test_unobserved_admission_inputs_fail_closed_with_reasons(self):
+        cases = {
+            "load_unobserved": (None, ["zsh"], "1"),
+            "load_high": (9.0, ["zsh"], "1"),
+            "processes_unobserved": (1.0, None, "1"),
+            "build_tools": (1.0, ["/usr/bin/cargo", "zsh"], "1"),
+            "pressure_unobserved": (1.0, ["zsh"], ""),
+            "memory_pressure": (1.0, ["zsh"], "4"),
+        }
+        for reason, (load, names, pressure) in cases.items():
+            observed = benchmark.admission_from(load, names, pressure, 16)
+            self.assertFalse(observed["admitted"], reason)
+            self.assertEqual(observed["reasons"], [reason])
+        self.assertIsNone(benchmark.admission_from(1.0, ["zsh"], None, 16)["memory_pressure"])
+        self.assertTrue(CLEAN["admitted"])
+
+    def test_legacy_start_only_records_are_reevaluated_not_trusted(self):
+        legacy = {"load1": 1.0, "build_tools": [], "memory_pressure": "", "admitted": True}
+        ok, reasons, boundary = benchmark.admitted({"admission": legacy}, 16)
+        self.assertFalse(ok)
+        self.assertEqual(reasons, ["start:pressure_unobserved"])
+        self.assertTrue(boundary.startswith("start-only (legacy"))
+        ok, _, boundary = benchmark.admitted({"admission": dict(legacy, memory_pressure="1")}, 16)
+        self.assertTrue(ok)
+        ok, reasons, _ = benchmark.admitted({"admission": CLEAN, "admission_end": LOADED}, 16)
+        self.assertEqual((ok, reasons), (False, ["end:load_high"]))
+
+    def test_cohorts_are_split_by_admission_and_paired_by_size_and_repeat(self):
+        records = [
+            cohort(8, 0, "stock", 20.0, CLEAN), cohort(8, 0, "prepared", 10.0, CLEAN),
+            cohort(8, 1, "stock", 30.0, LOADED), cohort(8, 1, "prepared", 10.0, CLEAN),
+            cohort(32, 0, "stock", 60.0, CLEAN),
+        ]
+        summary = benchmark.summarize(records, 16)
+        self.assertEqual(summary["cohorts_admitted"]["8"]["stock"]["all_ready_s"]["n"], 1)
+        self.assertEqual(summary["cohorts_admitted"]["8"]["prepared"]["all_ready_s"]["n"], 2)
+        self.assertEqual(summary["cohorts_flagged"]["8"]["stock"]["all_ready_s"]["median"], 30.0)
+        ratio = summary["admitted_cohort_all_ready_ratio_by_size"]
+        self.assertEqual((ratio["8"]["n"], ratio["8"]["median"]), (1, 0.5))
+        self.assertNotIn("32", ratio)
+
+    def test_unobserved_resources_stay_null_and_unqualified(self):
+        summary = benchmark.summarize([pair(0, "stock", 10, CLEAN, vm_cpu=None, private=None), pair(0, "prepared", 5, CLEAN)], 16)
+        stock, prepared = summary["pairs_admitted"]["stock"], summary["pairs_admitted"]["prepared"]
+        for metric in ("up_cpu_s", "disk_private_bytes"):
+            self.assertEqual({k: stock[metric][k] for k in ("n", "of", "qualified")}, {"n": 0, "of": 1, "qualified": False})
+            self.assertNotIn("median", stock[metric])
+            self.assertTrue(prepared[metric]["qualified"])
+        self.assertEqual(prepared["up_cpu_s"]["median"], 2.0)
 
 
 if __name__ == "__main__":

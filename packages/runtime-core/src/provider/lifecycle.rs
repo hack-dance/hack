@@ -962,6 +962,13 @@ fn up_selected(
     }
     prepare_rootfs(candidate, &mut owner)?;
     if !owner.created {
+        // SmolVM clones the expanded templates in this directory into the new disks.
+        // Refuse a template it would reuse before the phase records a create attempt.
+        let templates = root(candidate).join("home/.smolvm");
+        super::disk_template::verify_expanded(
+            &templates,
+            super::disk_template::Stage::BeforeCreate,
+        )?;
         phase(candidate, &mut owner, "creating")?;
         let mount = format!(
             "{}:/opt/hack-engine:ro",
@@ -1014,6 +1021,13 @@ fn up_selected(
             candidate,
             &owner,
             &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
+        )?;
+        // SmolVM expands missing templates during create. Verify what it cloned before the
+        // machine is recorded as created; a refusal leaves `creating`, like a failed create,
+        // and nothing is adopted or removed.
+        super::disk_template::verify_expanded(
+            &templates,
+            super::disk_template::Stage::AfterCreate,
         )?;
         super::config_audit::pin_created_network(candidate, &mut owner)?;
         owner.created = true;

@@ -12,6 +12,7 @@ pub use dependency_socket::{
     dependency_socket_paths,
 };
 mod disk_audit;
+mod disk_template;
 mod engine;
 pub mod environment;
 #[cfg(test)]

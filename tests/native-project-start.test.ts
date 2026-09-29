@@ -480,9 +480,9 @@ test("host listener selections replace stale pre-hook state and bind to the revi
   const invoke = opts.dependencies.invoke!;
   opts.dependencies.invoke = async (request) => {
     if (request.args[1] === "up") {
-      expect(request.args).toContain("--dependency-sockets");
+      expect(request.args).toContain("--minimum-dependency-sockets");
       expect(
-        request.args[request.args.indexOf("--dependency-sockets") + 1]
+        request.args[request.args.indexOf("--minimum-dependency-sockets") + 1]
       ).toBe("1");
     }
     if (request.args[1] === "dependency-plan") {
@@ -496,6 +496,11 @@ test("host listener selections replace stale pre-hook state and bind to the revi
       ]);
     }
     return await invoke(request);
+  };
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    expect(request.args).toContain("--auto-dependency-slots");
+    return await serve(request);
   };
   await expect(startNativeProject(opts)).rejects.toThrow("cannot admit");
   await writeFile(

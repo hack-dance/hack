@@ -823,7 +823,7 @@ export async function startNativeProject(opts: {
         ...retainedFlags,
         ...(hostDependencies.length > 0
           ? [
-              "--dependency-sockets",
+              "--minimum-dependency-sockets",
               String(
                 new Set(hostDependencies.map((binding) => binding.slot)).size
               ),
@@ -971,6 +971,7 @@ export async function startNativeProject(opts: {
                 dependencyFile,
                 "--expect-dependencies",
                 plan.dependency_plan_id,
+                "--auto-dependency-slots",
                 ...delivery.flags,
                 "--timeout-seconds",
                 "300",

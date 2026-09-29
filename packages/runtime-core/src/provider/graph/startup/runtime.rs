@@ -65,6 +65,8 @@ pub struct HostRelayRuntime {
     run: Option<String>,
     selected_run: Option<String>,
     startup_cancelled: Option<fn() -> bool>,
+    // Dropped after the managed listeners: only verified cleanup releases capacity.
+    dependency_reservation: Option<super::super::dependency_slots::Reservation>,
 }
 fn refused() -> CandidateError {
     error(
@@ -251,7 +253,14 @@ impl HostRelayRuntime {
         expected_sha256: &str,
         dependencies: Vec<Dependency>,
     ) -> Result<Self, CandidateError> {
-        Self::new_scoped(candidate, artifact, expected_sha256, dependencies, None)
+        Self::new_scoped(
+            candidate,
+            artifact,
+            expected_sha256,
+            dependencies,
+            None,
+            false,
+        )
     }
     /// Run-scoped foreground owner identity. The selected run is validated before
     /// any artifact/provider effects and must match eventual graph admission.
@@ -271,6 +280,28 @@ impl HostRelayRuntime {
             expected_sha256,
             dependencies,
             Some(run),
+            false,
+        )
+    }
+    /// Allocate physical dependency transports pool-wide. Selection slots remain
+    /// logical groups in the reviewed plan; admitted receipts record their mapping.
+    pub fn new_for_run_auto(
+        candidate: &Candidate,
+        artifact: &Path,
+        expected_sha256: &str,
+        dependencies: Vec<Dependency>,
+        run: &str,
+    ) -> Result<Self, CandidateError> {
+        if !hex(run, 32) {
+            return Err(refused());
+        }
+        Self::new_scoped(
+            candidate,
+            artifact,
+            expected_sha256,
+            dependencies,
+            Some(run),
+            true,
         )
     }
     fn new_scoped(
@@ -279,6 +310,7 @@ impl HostRelayRuntime {
         expected_sha256: &str,
         dependencies: Vec<Dependency>,
         selected_run: Option<&str>,
+        automatic_slots: bool,
     ) -> Result<Self, CandidateError> {
         if !hex(expected_sha256, 64)
             || dependencies.len() > crate::provider::relay_auth::MAX_LOGICAL_BINDINGS
@@ -311,7 +343,10 @@ impl HostRelayRuntime {
             }
             bytes
         };
-        let engine = Engine::connect(candidate)?;
+        let engine =
+            Engine::connect_until(candidate, Instant::now() + Duration::from_secs(30), || {
+                false
+            })?;
         let owner = state::Owner::load(candidate)?;
         engine.guest().verify()?;
         let context = host_relay::context(engine.guest().incarnation(), engine.guest().boot_id())?;
@@ -333,7 +368,7 @@ impl HostRelayRuntime {
             let address = dependency_address(dependency.slot, &dependency.aliases)?;
             let endpoint_generation = dependency.endpoint.generation()?;
             if dependency.service.is_empty()
-                || dependency.slot >= capacity
+                || (!automatic_slots && dependency.slot >= capacity)
                 || dependency.port == 0
                 || slots
                     .insert(dependency.slot, endpoint_generation)
@@ -364,7 +399,33 @@ impl HostRelayRuntime {
             selected_run,
         )?;
         state::private_directory(&control_root)?;
-        let managed = ManagedOwner::start(
+        let mut dependency_reservation = if let Some(run) = selected_run {
+            super::super::dependency_slots::Reservation::reserve(
+                candidate,
+                &engine,
+                run,
+                &slots.keys().copied().collect(),
+                automatic_slots,
+            )?
+        } else {
+            super::super::dependency_slots::check_exact_available(
+                candidate,
+                &engine,
+                &slots.keys().copied().collect(),
+            )?;
+            None
+        };
+        if let Some(reservation) = &dependency_reservation {
+            let mapping = reservation.mapping();
+            for dependency in selected.values_mut() {
+                dependency.slot = *mapping.get(&dependency.slot).ok_or_else(refused)?;
+            }
+            slots = slots
+                .into_iter()
+                .map(|(logical, generation)| (mapping[&logical], generation))
+                .collect();
+        }
+        let started = ManagedOwner::start(
             context,
             &control_root,
             slots
@@ -375,7 +436,23 @@ impl HostRelayRuntime {
                     canonical_parent: candidate.state_root.join("run/smolvm/home"),
                 })
                 .collect(),
-        )?;
+        );
+        let managed = match started {
+            Ok(managed) => managed,
+            Err(error) => {
+                if let Some(reservation) = &mut dependency_reservation {
+                    let _ = reservation.cancel_locked();
+                }
+                return Err(error);
+            }
+        };
+        if let Some(reservation) = &mut dependency_reservation {
+            if let Err(error) = reservation.bound() {
+                drop(managed);
+                let _ = reservation.cancel_locked();
+                return Err(error);
+            }
+        }
         Ok(Self {
             managed,
             context,
@@ -389,6 +466,7 @@ impl HostRelayRuntime {
             run: None,
             selected_run: selected_run.map(str::to_owned),
             startup_cancelled: None,
+            dependency_reservation,
         })
     }
     /// Armed only while the foreground initial startup runs, never during cleanup.
@@ -453,6 +531,8 @@ impl HostRelayRuntime {
             crate::provider::graph::one_off::runtime::finish(candidate, self, &run)?;
         }
         if let Some(receipt) = self.cleanup_incomplete_rebind(candidate, &run, remove_data)? {
+            let _engine = Engine::connect_cleanup_wait(candidate)?;
+            self.release_dependency_reservation()?;
             return Ok(receipt);
         }
         let engine = Engine::connect_cleanup_wait(candidate)?;
@@ -472,7 +552,17 @@ impl HostRelayRuntime {
         let cleanup_engine = Engine::connect_cleanup_wait(candidate)?;
         startup::verify_cleanup(&cleanup_engine, &receipt)?;
         rebind::archive_after_cleanup(&root, &before, &receipt, &boot)?;
+        self.release_dependency_reservation()?;
         Ok(receipt)
+    }
+    // Caller retains the provider lease after verified graph cleanup. Close the
+    // authenticated owner and its exact socket inodes before freeing capacity.
+    fn release_dependency_reservation(&mut self) -> Result<(), CandidateError> {
+        if let Some(reservation) = &mut self.dependency_reservation {
+            self.managed.shutdown()?;
+            reservation.cancel_locked()?;
+        }
+        Ok(())
     }
     fn check(&self, engine: &Engine<'_>, receipt: &Receipt) -> Result<(), CandidateError> {
         self.managed.verify_alive()?;
@@ -587,6 +677,9 @@ impl Driver for HostRelayRuntime {
             || !matches_selected_run(self.selected_run.as_deref(), &receipt.run)
         {
             return Err(stage_refused("graph_startup_prepare_state"));
+        }
+        if let Some(reservation) = &mut self.dependency_reservation {
+            reservation.admitted();
         }
         let mut services: BTreeMap<String, Service> = BTreeMap::new();
         for ((name, binding), dependency) in &self.dependencies {

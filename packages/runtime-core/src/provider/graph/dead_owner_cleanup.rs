@@ -230,6 +230,9 @@ pub fn retire_recovered_publisher(
     if !hex(expected_owner, 32) {
         return Err(refused());
     }
+    if let Some(result) = super::live_owner_cleanup::retire(candidate, run, expected_owner)? {
+        return Ok(result);
+    }
     let engine = Engine::connect_cleanup_wait(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
     no_pending(&root)?;
@@ -520,6 +523,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             &receipt,
             &intent.old_boot,
         )?;
+        super::dependency_slots::recover_cleaned(candidate, &receipt)?;
         if intent.one_off_sha256.is_some() {
             normalize_completed(candidate, &engine, &root, &intent)?;
         }
@@ -546,6 +550,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     intent.complete_sha256 = Some(selected(&cleaned)?);
     retain_interrupted_write(&root)?;
     state::write(&root.join(FILE), &intent)?;
+    super::dependency_slots::recover_cleaned(candidate, &cleaned)?;
     if intent.one_off_sha256.is_some() {
         normalize_completed(candidate, &engine, &root, &intent)?;
     }

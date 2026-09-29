@@ -24,7 +24,6 @@ use super::disk_template::{self, Stage};
 use super::prepared_base::{self, ActivationRecord, ActivationState, Pins, PoolTarget, TEMPLATES};
 use super::prepared_store::{self, StoreLock};
 use super::state::{self, Owner};
-use super::{BridgeIntent, bridge};
 use crate::{Candidate, CandidateError};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -68,22 +67,6 @@ pub struct Request {
     pub mode: Mode,
     /// Explicit, absolute, private store on the same APFS volume as the pool.
     pub store: PathBuf,
-}
-
-/// Pool bridge selection for `up_with_prepared_base`; mirrors the private bridge request.
-#[derive(Debug, Clone, Copy)]
-pub enum Bridges {
-    Exact(Option<BridgeIntent>),
-    Minimum(BridgeIntent),
-}
-
-impl From<Bridges> for bridge::Request {
-    fn from(bridges: Bridges) -> Self {
-        match bridges {
-            Bridges::Exact(intent) => Self::Exact(intent),
-            Bridges::Minimum(intent) => Self::Minimum(intent),
-        }
-    }
 }
 
 /// Per-invocation startup selections that do not change pool capacity.

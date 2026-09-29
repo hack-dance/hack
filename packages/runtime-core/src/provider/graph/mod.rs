@@ -15,6 +15,12 @@ pub use normalized::{
 mod admission;
 mod cache_provenance;
 mod dependency_hosts;
+#[cfg(target_os = "macos")]
+mod dependency_slots;
+#[cfg(target_os = "macos")]
+pub use dependency_slots::{
+    inspect as dependency_reservations, recover_orphan as recover_dependency_reservation,
+};
 mod initializer_cache;
 mod volume_subpaths;
 pub use dependency_hosts::dependency_address;
@@ -34,9 +40,13 @@ mod cleanup_enrollment;
 #[cfg(target_os = "macos")]
 mod dead_owner_cleanup;
 #[cfg(target_os = "macos")]
+mod live_owner_cleanup;
+#[cfg(target_os = "macos")]
 pub use dead_owner_cleanup::recover_cleanup;
 #[cfg(target_os = "macos")]
 pub use dead_owner_cleanup::retire_recovered_publisher;
+#[cfg(target_os = "macos")]
+pub use live_owner_cleanup::recover_live_owner;
 
 mod config;
 mod dependency_cache;
@@ -1192,6 +1202,14 @@ fn run_inputs(
     )?;
     // The Engine retains OwnedGuest's mutation lease through immutable/live source
     // verification and durable consumer publication, serializing sync and admission.
+    let admission_deadline = std::time::Instant::now() + options.timeout;
+    #[cfg(target_os = "macos")]
+    let engine = Engine::connect_until(candidate, admission_deadline, || {
+        startup
+            .as_ref()
+            .is_some_and(|driver| driver.check_cancelled().is_err())
+    })?;
+    #[cfg(not(target_os = "macos"))]
     let engine = Engine::connect(candidate)?;
     if engine.guest().profile() != super::Profile::Development {
         return Err(error(
@@ -1320,7 +1338,11 @@ fn run_inputs(
             )?;
         }
         session.create_resources(false)?;
-        execution::run(&prepared.graph, &mut session, options.timeout)
+        execution::run(
+            &prepared.graph,
+            &mut session,
+            admission_deadline.saturating_duration_since(std::time::Instant::now()),
+        )
     })();
     if let Err(failure) = result {
         session.receipt.phase = "failed-retained".into();

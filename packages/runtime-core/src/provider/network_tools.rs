@@ -151,6 +151,14 @@ pub(super) fn verify(candidate: &Candidate) -> Result<(), CandidateError> {
     Ok(())
 }
 
+/// Identity of the pinned package set, as recorded in the guest receipt.
+pub(super) fn identity() -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(PACKAGES.iter().map(|(_, hash)| *hash).collect::<String>())
+    )
+}
+
 pub(super) fn provision(
     candidate: &Candidate,
     owner: &str,
@@ -169,10 +177,7 @@ pub(super) fn provision(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let identity = format!(
-        "{:x}",
-        Sha256::digest(PACKAGES.iter().map(|(_, hash)| *hash).collect::<String>())
-    );
+    let identity = identity();
     let result = execute(
         include_str!("guest-network-tools.sh"),
         &[owner, &identity, "check"],

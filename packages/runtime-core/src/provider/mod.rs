@@ -51,6 +51,7 @@ pub use network_update::{enable_internet, extend_network};
 mod project_share;
 pub use project_share::ProjectShareIntent;
 mod network_tools;
+pub mod prepared_base;
 
 /// Prepare the pinned guest networking inputs without starting a runtime.
 pub fn prepare_network_tools(

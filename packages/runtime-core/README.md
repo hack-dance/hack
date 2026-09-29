@@ -117,6 +117,26 @@ digest is. A mismatch refuses with `disk_template_untrusted` and changes no file
 removing the refused file lets SmolVM re-expand it from the verified compressed template. After a
 start, the boot is stopped as a failed boot without adopting its disks and needs manual recovery.
 
+`provider::prepared_base` is a prepared-base component that runtime startup does not use yet;
+fresh pools still start from the stock templates. A base is a pair of templates cloned from a
+sanitized seed machine's disks, published into an explicit, private store with a strict
+`hack.prepared-base/v1` receipt. The receipt pins the SmolVM archive, agent rootfs, engine,
+network-tools identity and disk capacity, and records content digests and a sanitization record.
+Publication stages under a random name and renames the complete base into place without replacing
+anything. Activation binds a fresh pool only (no machine disks, no plain templates, no prior
+activation) to exactly matching pins. It records its intent first, then clones each template into
+the pool's provider home and verifies the clone's content before placing it. Because SmolVM formats
+disks during the first start, the activated templates are verified in place of the stock pins
+before and after that start, and removed only after disk adoption. Recovery rolls back only files
+this activation provably created, and only before the first start. Every pool operation requires
+the pool's held provider operation lock, which the caller keeps from activation through the first
+start, disk adoption and consumption. The activation record is bound to its pool. An interrupted
+record write is removed only when it validates as this pool's next write; a torn or unassociated
+pending file is kept and blocks the pool's prepared-base operations until someone inspects it.
+Receipts and records are read without following links or blocking, and only as regular files. The
+base-scoped network-tools owner is `prepared-base:<id>`. Runtime adoption still needs a seed builder that proves the
+sanitization claims and the lifecycle wiring above; neither is included.
+
 Protocol version 1 describes this development client. It is not a promised release API. This is
 a bounded experimental application graph executor, not a qualified native Linux container adapter. The checkout-owned `node serve`
 service and independent supervisors implement the WU04 contract (local `_docs/docs/plans/v5/wu04-contract.md`).

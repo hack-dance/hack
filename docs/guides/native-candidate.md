@@ -742,6 +742,43 @@ The layout participates in native dependency-cache identity. This shares compati
 workspace installations; it does not implement a cross-project package store or
 claim deduplication across different lockfiles.
 
+### Optional prepared base for a fresh pool
+
+A prepared base formats a **new** pool's disks from an independently verified snapshot of a
+sanitized seed pool instead of the stock templates. It changes only pool creation: the first pool
+in a candidate home, or one recreated during recovery. Existing pools and graph starts inside a
+running pool are unchanged. It is off unless selected and is macOS APFS only.
+
+Build and verify a base in a private store on the same volume as the candidate home. The installed
+candidate defaults to `<HACK_NATIVE_HOME>/prepared-bases`; pass `--store /absolute/private/store` to
+use another:
+
+```sh
+./bundle/hack-native --candidate-root /absolute/private/candidate-home runtime prepared-base build --profile development --json
+./bundle/hack-native --candidate-root /absolute/private/candidate-home runtime prepared-base verify --base-id BASE_ID --json
+./bundle/hack-native --candidate-root /absolute/private/candidate-home runtime prepared-base status --profile development --json
+```
+
+`build` boots a disposable seed pool from cloned providers, with no project, sockets, graphs or
+credentials. It installs network tools under the base owner, removes per-pool identity and
+runtime residue, and publishes the stopped disks. `verify` boots a separate disposable verifier
+from the published base and reads both disks before any setup; a base becomes usable only after it
+passes. Both need the same host admission as a development pool while they run, and both delete
+their disposable machine afterwards.
+
+Then select it for normal foreground startup:
+
+```sh
+export HACK_NATIVE_PREPARED_BASE=prefer   # or require; unset or off disables
+export HACK_NATIVE_PREPARED_BASE_STORE=/absolute/private/store   # optional
+```
+
+`prefer` uses the newest verified base bound to the pool's provider, engine, network-tools and
+capacity pins, and otherwise keeps the stock templates; `runtime status` records the reason.
+`require` refuses before creating the pool. An existing pool ignores the selection. Remove a base
+with `runtime prepared-base remove --base-id BASE_ID`; a pool never depends on its base after the
+first start.
+
 ### Optional native HTTPS frontend
 
 For routed foreground startup, explicitly set all three public selections:

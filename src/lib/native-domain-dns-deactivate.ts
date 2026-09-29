@@ -2,7 +2,10 @@ import type {
   NativeDnsActivationInspection,
   NativeDnsOwnedFile,
 } from "./native-domain-dns-activate.ts";
-import { NativeDnsUncertainEffectError } from "./native-domain-dns-activate.ts";
+import {
+  NativeDnsUncertainEffectError,
+  nativeDnsFailureMessage,
+} from "./native-domain-dns-activate.ts";
 import type { NativeDnsHostDependencies } from "./native-domain-dns-host.ts";
 import type {
   NativeDnsPlan,
@@ -38,10 +41,11 @@ export class NativeDnsDeactivationError extends Error {
     const uncertain =
       failures.length > 0 ||
       opts.cause instanceof NativeDnsUncertainEffectError;
+    const detail = nativeDnsFailureMessage(opts.cause);
     super(
       `Native DNS deactivation failed during ${opts.phase}${
         uncertain ? "; removing receipt requires explicit recovery" : ""
-      }`,
+      }${detail ? `: ${detail}` : ""}`,
       { cause: opts.cause }
     );
     this.name = "NativeDnsDeactivationError";

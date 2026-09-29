@@ -5,6 +5,7 @@ import {
   NativeDnsActivationError,
   type NativeDnsOwnedFile,
   NativeDnsUncertainEffectError,
+  nativeDnsFailureMessage,
 } from "../src/lib/native-domain-dns-activate.ts";
 import {
   type NativeDnsPlan,
@@ -242,6 +243,7 @@ test("lost resolver create reply retains pending receipt for recovery", async ()
   expect(error.originalCause).toBeInstanceOf(NativeDnsUncertainEffectError);
   expect(error.cause).toBe(error.originalCause);
   expect(error.cause).toHaveProperty("cause", commandFailure);
+  expect(error.message).toContain("resolver command failed");
   expect(error.rollbackUncertain).toBe(true);
   expect(error.rollbackFailures).toHaveLength(0);
   expect(state.files.has(state.plan.dnsmasqPath)).toBe(false);
@@ -322,4 +324,37 @@ test("ambiguous active receipt write restores pending before rollback", async ()
     "flush",
     "receipt:clear",
   ]);
+});
+
+test("DNS failure detail bounds nested messages and handles cyclic causes", () => {
+  const error = new Error("restart\nfailed", {
+    cause: new Error("x".repeat(1000)),
+  });
+  expect(nativeDnsFailureMessage(error)).toStartWith("restart failed: ");
+  expect(nativeDnsFailureMessage(error)).toHaveLength(512);
+  error.cause = error;
+  expect(nativeDnsFailureMessage(error)).toBe("restart failed");
+  expect(nativeDnsFailureMessage({ message: "untrusted" })).toBe("");
+});
+
+test("restart and rollback restart failures retain a receipt after removing owned files", async () => {
+  const state = fixture();
+  let attempts = 0;
+  const failure = new Error("service manager refused restart");
+  const error = await activationError({
+    ...state.dependencies,
+    restartDnsmasq: async () => {
+      attempts += 1;
+      throw failure;
+    },
+  });
+  expect(attempts).toBe(2);
+  expect(error.phase).toBe("restart");
+  expect(error.message).toContain(failure.message);
+  expect(error.rollbackFailures).toEqual([failure]);
+  expect(error.rollbackUncertain).toBe(true);
+  expect(state.files.size).toBe(0);
+  expect(state.receipt()).toEqual(state.plan.pendingReceipt);
+  expect(state.events).not.toContain("verify");
+  expect(state.events).not.toContain("receipt:clear");
 });

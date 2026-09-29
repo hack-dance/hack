@@ -103,6 +103,7 @@ import type { NativeDnsActivationInspection } from "../lib/native-domain-dns-act
 import { activateNativeDomainDns } from "../lib/native-domain-dns-activate.ts";
 import { deactivateNativeDomainDns } from "../lib/native-domain-dns-deactivate.ts";
 import { createNativeDnsHostDependencies } from "../lib/native-domain-dns-host.ts";
+import { prepareNativeDnsLaunchdRestart } from "../lib/native-domain-dns-launchd.ts";
 import {
   type NativeDnsReceipt,
   planNativeDomainDns,
@@ -463,6 +464,12 @@ async function handleGlobalDnsActivate({
     });
     return 1;
   }
+  const restartDnsmasq = await prepareNativeDnsLaunchdRestart({
+    dnsmasqBinary: initial.dnsmasqBinary,
+    mainConfigPath: initial.mainConfigPath,
+    includeDir: initial.includeDir,
+    inspectedArgs: initial.dnsmasqArgs,
+  });
   const inspectPlan = async () => {
     const current = await inspectNativeDnsPlan({ runtime, domain });
     if (
@@ -505,7 +512,7 @@ async function handleGlobalDnsActivate({
     dnsmasqIncludeDir: initial.includeDir,
     inspectPlan,
     authorize,
-    restartDnsmasq: restartMacDnsmasq,
+    restartDnsmasq,
     flushDnsCache: flushMacDnsCachePrivileged,
   });
   if (initial.inspection.plan.status === "active") {
@@ -568,6 +575,12 @@ async function handleGlobalDnsDeactivate({
     });
     return 1;
   }
+  const restartDnsmasq = await prepareNativeDnsLaunchdRestart({
+    dnsmasqBinary: initial.dnsmasqBinary,
+    mainConfigPath: initial.mainConfigPath,
+    includeDir: initial.includeDir,
+    inspectedArgs: initial.dnsmasqArgs,
+  });
   const inspectPlan = async () => {
     const current = await inspectNativeDnsPlan({ runtime, domain });
     if (
@@ -610,7 +623,7 @@ async function handleGlobalDnsDeactivate({
     dnsmasqIncludeDir: initial.includeDir,
     inspectPlan,
     authorize,
-    restartDnsmasq: restartMacDnsmasq,
+    restartDnsmasq,
     flushDnsCache: flushMacDnsCachePrivileged,
   });
   await deactivateNativeDomainDns({
@@ -630,6 +643,7 @@ async function inspectNativeDnsPlan(opts: {
   readonly inspection: NativeDnsActivationInspection;
   readonly receiptPath: string;
   readonly dnsmasqBinary: string;
+  readonly dnsmasqArgs: readonly string[];
   readonly mainConfigPath: string;
   readonly includeDir: string;
   readonly receipt: NativeDnsReceipt | null;
@@ -669,6 +683,7 @@ async function inspectNativeDnsPlan(opts: {
     },
     receiptPath,
     dnsmasqBinary: host.dnsmasqArgs[0] ?? "",
+    dnsmasqArgs: host.dnsmasqArgs,
     mainConfigPath: host.mainConfig.path,
     includeDir: host.includeDir,
     receipt,

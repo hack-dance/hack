@@ -725,7 +725,11 @@ changes the installed v4 CLI's default. Preview is read-only;
 activation shows the exact scoped claim and requires interactive confirmation
 and a native administrator prompt. Run it from a terminal; the bounded privileged
 steps preserve that terminal's sudo authorization and report the underlying
-command failure if a step fails. It adds one owned dnsmasq include file and
+command failure if a step fails. Before changing files, the candidate checks that
+the root-owned Homebrew system launchd job matches the inspected dnsmasq command
+and configuration. It restarts that verified job directly through launchctl, so
+activation does not need Homebrew metadata downloads as root. Missing, changed or
+ambiguous service ownership refuses. It adds one owned dnsmasq include file and
 one resolver file pointing the selected suffix to 127.0.0.1, while leaving
 the built-in v4 DNS rules intact. An existing or overlapping foreign claim,
 uninspected configuration source, or uncertain prior activation refuses.

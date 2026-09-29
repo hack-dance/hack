@@ -64,6 +64,19 @@ export class NativeDnsUncertainEffectError extends Error {
   }
 }
 
+/** Keep bounded DNS command causes visible even when the CLI renders only Error.message. */
+export function nativeDnsFailureMessage(cause: unknown): string {
+  const messages: string[] = [];
+  const seen = new Set<Error>();
+  let current = cause;
+  while (current instanceof Error && seen.size < 3 && !seen.has(current)) {
+    seen.add(current);
+    messages.push(current.message.replaceAll("\n", " ").replaceAll("\r", " "));
+    current = current.cause;
+  }
+  return messages.join(": ").slice(0, 512);
+}
+
 /** An uncertain rollback leaves the pending receipt for explicit recovery. */
 export class NativeDnsActivationError extends Error {
   readonly phase: NativeDnsActivationPhase;
@@ -80,10 +93,11 @@ export class NativeDnsActivationError extends Error {
     const uncertain =
       failures.length > 0 ||
       opts.cause instanceof NativeDnsUncertainEffectError;
+    const detail = nativeDnsFailureMessage(opts.cause);
     super(
       `Native DNS activation failed during ${opts.phase}${
         uncertain ? "; rollback requires explicit recovery" : ""
-      }`,
+      }${detail ? `: ${detail}` : ""}`,
       { cause: opts.cause }
     );
     this.name = "NativeDnsActivationError";

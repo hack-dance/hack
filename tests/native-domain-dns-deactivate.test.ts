@@ -295,6 +295,7 @@ test("lost resolver removal reply retains removing receipt", async () => {
   expect(error.phase).toBe("resolver-remove");
   expect(error.cause).toBe(error.originalCause);
   expect(error.cause).toHaveProperty("cause", commandFailure);
+  expect(error.message).toContain("resolver command failed");
   expect(error.rollbackUncertain).toBe(true);
   expect(state.receipt()).toEqual(state.plan.removingReceipt);
   expect(state.events).not.toContain("receipt:active");

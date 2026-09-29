@@ -58,7 +58,7 @@ export class NativeDnsUncertainEffectError extends Error {
   readonly originalCause: unknown;
 
   constructor(message: string, cause?: unknown) {
-    super(message);
+    super(message, { cause });
     this.name = "NativeDnsUncertainEffectError";
     this.originalCause = cause;
   }
@@ -83,7 +83,8 @@ export class NativeDnsActivationError extends Error {
     super(
       `Native DNS activation failed during ${opts.phase}${
         uncertain ? "; rollback requires explicit recovery" : ""
-      }`
+      }`,
+      { cause: opts.cause }
     );
     this.name = "NativeDnsActivationError";
     this.phase = opts.phase;

@@ -222,6 +222,7 @@ test("resolver create failure removes only the confirmed dnsmasq file", async ()
 });
 
 test("lost resolver create reply retains pending receipt for recovery", async () => {
+  const commandFailure = new Error("resolver command failed");
   const state = fixture({
     createExclusive: async ({ path, content }) => {
       state.events.push(`create:${path}`);
@@ -229,7 +230,8 @@ test("lost resolver create reply retains pending receipt for recovery", async ()
       state.files.set(path, owned);
       if (path === state.plan.resolverPath) {
         throw new NativeDnsUncertainEffectError(
-          "resolver create reply was lost"
+          "resolver create reply was lost",
+          commandFailure
         );
       }
       return owned;
@@ -238,6 +240,8 @@ test("lost resolver create reply retains pending receipt for recovery", async ()
   const error = await activationError(state.dependencies);
   expect(error.phase).toBe("resolver-create");
   expect(error.originalCause).toBeInstanceOf(NativeDnsUncertainEffectError);
+  expect(error.cause).toBe(error.originalCause);
+  expect(error.cause).toHaveProperty("cause", commandFailure);
   expect(error.rollbackUncertain).toBe(true);
   expect(error.rollbackFailures).toHaveLength(0);
   expect(state.files.has(state.plan.dnsmasqPath)).toBe(false);

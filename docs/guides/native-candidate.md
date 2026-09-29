@@ -723,7 +723,9 @@ and then `hack global dns activate --domain v5.hack.gy`. Omit `--domain` to use
 the configured global `default_domain`; changing that shared setting also
 changes the installed v4 CLI's default. Preview is read-only;
 activation shows the exact scoped claim and requires interactive confirmation
-and a native administrator prompt. It adds one owned dnsmasq include file and
+and a native administrator prompt. Run it from a terminal; the bounded privileged
+steps preserve that terminal's sudo authorization and report the underlying
+command failure if a step fails. It adds one owned dnsmasq include file and
 one resolver file pointing the selected suffix to 127.0.0.1, while leaving
 the built-in v4 DNS rules intact. An existing or overlapping foreign claim,
 uninspected configuration source, or uncertain prior activation refuses.

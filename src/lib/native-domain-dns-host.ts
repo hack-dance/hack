@@ -1,18 +1,37 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { link, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
-import { dirname } from "node:path";
+import {
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  rename,
+  rm,
+  unlink,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type {
   NativeDnsActivationDependencies,
   NativeDnsOwnedFile,
 } from "./native-domain-dns-activate.ts";
 import { NativeDnsUncertainEffectError } from "./native-domain-dns-activate.ts";
 import type { NativeDnsReceipt } from "./native-domain-dns-plan.ts";
-import { type ExecResult, exec } from "./shell.ts";
+import { type ExecResult, exec, run } from "./shell.ts";
 
 const MAX_FILE_BYTES = 1024 * 1024;
 const IDENTITY = /^\d+:\d+$/;
 const IP_ADDRESS_LINE = /^ip_address:\s*(\S+)\s*$/gm;
+const PRIVILEGED_TIMEOUT_MS = 15_000;
+const CAPTURED_COMMAND_SCRIPT = `import os, resource, sys
+resource.setrlimit(resource.RLIMIT_FSIZE, (1048576, 1048576))
+for descriptor, path in ((1, sys.argv[1]), (2, sys.argv[2])):
+    output = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    os.dup2(output, descriptor)
+    os.close(output)
+os.execvp(sys.argv[3], sys.argv[3:])
+`;
 const PRIVILEGED_RESOLVER_SCRIPT = `import os, stat, sys
 action, path, content, expected = sys.argv[1:5]
 if os.path.dirname(path) != '/etc/resolver' or os.path.basename(path) in ('', '.', '..'):
@@ -107,9 +126,78 @@ async function defaultRunner(command: readonly string[]): Promise<ExecResult> {
   return await exec(command, { stdin: "ignore", timeoutMs: 15_000 });
 }
 
+/** Use the existing terminal-group runner so sudo keeps the caller's TTY and cancellation owns descendants. */
+export async function runNativeDnsAttachedCommand(opts: {
+  readonly command: readonly string[];
+  readonly timeoutMs?: number;
+}): Promise<ExecResult> {
+  const directory = await mkdtemp(join(tmpdir(), "hack-native-dns-command-"));
+  const stdoutPath = join(directory, "stdout");
+  const stderrPath = join(directory, "stderr");
+  try {
+    const exitCode = await run(
+      [
+        "/usr/bin/python3",
+        "-I",
+        "-S",
+        "-c",
+        CAPTURED_COMMAND_SCRIPT,
+        stdoutPath,
+        stderrPath,
+        ...opts.command,
+      ],
+      {
+        stdin: "ignore",
+        stdout: "stderr",
+        timeoutMs: opts.timeoutMs ?? PRIVILEGED_TIMEOUT_MS,
+        forwardSignals: true,
+      }
+    );
+    const [stdout, stderr] = await Promise.all([
+      readPrivateCapture(stdoutPath),
+      readPrivateCapture(stderrPath),
+    ]);
+    return { exitCode, stdout, stderr };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function readPrivateCapture(path: string): Promise<string> {
+  const captured = await readOwnedFile(path);
+  if (!captured) {
+    return "";
+  }
+  const details = await lstat(path);
+  const getuid = process.getuid;
+  if (
+    !details.isFile() ||
+    fileIdentity(details) !== captured.identity ||
+    typeof getuid !== "function" ||
+    details.uid !== getuid() ||
+    (details.mode & 0o077) !== 0
+  ) {
+    throw new Error("Native DNS command output is not an owned private file");
+  }
+  return captured.content;
+}
+
+async function defaultPrivilegedRunner(
+  command: readonly string[]
+): Promise<ExecResult> {
+  return await runNativeDnsAttachedCommand({ command });
+}
+
 function assertSuccess(result: ExecResult, action: string): string {
   if (result.exitCode !== 0) {
-    throw new Error(`${action} failed (exit ${result.exitCode})`);
+    const detail = result.stderr
+      .trim()
+      .replaceAll("\n", " ")
+      .replaceAll("\r", " ")
+      .slice(0, 512);
+    throw new Error(
+      `${action} failed (exit ${result.exitCode})${detail ? `: ${detail}` : ""}`
+    );
   }
   if (result.stdout.length > MAX_FILE_BYTES) {
     throw new Error(`${action} returned oversized output`);
@@ -361,7 +449,7 @@ export function createNativeDnsHostDependencies(
   opts: NativeDnsHostDependenciesOptions
 ): NativeDnsHostDependencies {
   const runCommand = opts.runCommand ?? defaultRunner;
-  const runPrivileged = opts.runPrivileged ?? defaultRunner;
+  const runPrivileged = opts.runPrivileged ?? defaultPrivilegedRunner;
   let receiptIdentity: string | null = null;
 
   async function privilegedResolver(

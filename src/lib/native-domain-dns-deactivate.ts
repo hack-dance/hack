@@ -41,7 +41,8 @@ export class NativeDnsDeactivationError extends Error {
     super(
       `Native DNS deactivation failed during ${opts.phase}${
         uncertain ? "; removing receipt requires explicit recovery" : ""
-      }`
+      }`,
+      { cause: opts.cause }
     );
     this.name = "NativeDnsDeactivationError";
     this.phase = opts.phase;

@@ -281,14 +281,20 @@ test("failure after one removal restores it and revalidates active DNS", async (
 });
 
 test("lost resolver removal reply retains removing receipt", async () => {
+  const commandFailure = new Error("resolver command failed");
   const state = fixture({
     removeIfOwned: async (file) => {
       state.files.delete(file.path);
-      throw new NativeDnsUncertainEffectError("remove reply lost");
+      throw new NativeDnsUncertainEffectError(
+        "remove reply lost",
+        commandFailure
+      );
     },
   });
   const error = await failure(state.dependencies);
   expect(error.phase).toBe("resolver-remove");
+  expect(error.cause).toBe(error.originalCause);
+  expect(error.cause).toHaveProperty("cause", commandFailure);
   expect(error.rollbackUncertain).toBe(true);
   expect(state.receipt()).toEqual(state.plan.removingReceipt);
   expect(state.events).not.toContain("receipt:active");

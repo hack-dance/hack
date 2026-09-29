@@ -18,9 +18,11 @@ import { deactivateNativeDomainDns } from "../src/lib/native-domain-dns-deactiva
 import {
   createNativeDnsHostDependencies,
   type NativeDnsCommandRunner,
+  runNativeDnsAttachedCommand,
 } from "../src/lib/native-domain-dns-host.ts";
 import { planNativeDomainDns } from "../src/lib/native-domain-dns-plan.ts";
 import { exec } from "../src/lib/shell.ts";
+import { hasControllingTerminal } from "../src/lib/tty-process-group.ts";
 
 const roots: string[] = [];
 
@@ -480,3 +482,51 @@ test("activated temporary claim deactivates through real file effects and commit
     code: "ENOENT",
   });
 });
+
+test.skipIf(!hasControllingTerminal())(
+  "privileged runner preserves the caller's real controlling terminal",
+  async () => {
+    const result = await runNativeDnsAttachedCommand({
+      command: [
+        "/usr/bin/python3",
+        "-c",
+        "import os; fd = os.open('/dev/tty', os.O_RDONLY); os.close(fd); print('TTY_OK')",
+      ],
+      timeoutMs: 3000,
+    });
+    expect(result).toEqual({ exitCode: 0, stdout: "TTY_OK\n", stderr: "" });
+  }
+);
+
+test("privileged runner bounds timeout and stops a stubborn helper child", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-dns-timeout-"));
+  roots.push(root);
+  const parentPidPath = join(root, "parent.pid");
+  const childPidPath = join(root, "child.pid");
+  const script = `import os, signal, subprocess, sys, time
+child = "import os, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(60)"
+subprocess.Popen([sys.executable, '-c', child, sys.argv[2]])
+open(sys.argv[1], 'w').write(str(os.getpid()))
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+time.sleep(60)
+`;
+  const started = performance.now();
+  const result = await runNativeDnsAttachedCommand({
+    command: ["/usr/bin/python3", "-c", script, parentPidPath, childPidPath],
+    timeoutMs: 1000,
+  });
+  expect(result.exitCode).toBe(124);
+  expect(performance.now() - started).toBeLessThan(5000);
+  const parentPid = Number(await readFile(parentPidPath, "utf8"));
+  const childPid = Number(await readFile(childPidPath, "utf8"));
+  expect(await fixtureProcessAlive(parentPid)).toBe(false);
+  expect(await fixtureProcessAlive(childPid)).toBe(false);
+});
+
+async function fixtureProcessAlive(pid: number): Promise<boolean> {
+  const result = await exec(["/bin/ps", "-p", String(pid), "-o", "stat="], {
+    stdin: "ignore",
+    timeoutMs: 2000,
+  });
+  return result.exitCode === 0 && !result.stdout.trim().startsWith("Z");
+}

@@ -291,6 +291,17 @@ enum Executes {
     Unknown,
 }
 
+/// What the kernel reports about a process whose executable path is unreadable.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Record {
+    zombie: bool,
+    /// Exec-time name, truncated by the kernel to MAXCOMLEN bytes.
+    name: Vec<u8>,
+    /// `(effective, real)` user.
+    users: (u32, u32),
+}
+
 /// One raw observation of a process, gathered only as far as needed.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Default)]
@@ -301,37 +312,36 @@ struct Observation {
     path_error: i32,
     /// The errno of `kill(pid, 0)`; `None` when the signal check succeeded.
     signal_error: Option<i32>,
-    /// `(zombie, exec-time name)` from BSD process info, when readable.
-    info: Option<(bool, Vec<u8>)>,
-    /// The errno of the failed BSD process info read.
-    info_error: i32,
-    /// `(effective, real)` user of a process the signal check was not permitted to reach.
-    users: Option<(u32, u32)>,
+    /// The process's record, from short BSD process info or else the process table.
+    record: Option<Record>,
+    /// The errno of the failed short BSD process info read.
+    record_error: i32,
 }
 
 #[cfg(target_os = "macos")]
 impl Observation {
     fn describe(&self) -> String {
-        let mut stages = vec![match &self.path {
-            Some(_) => "path read".to_owned(),
-            None => format!("path unreadable (errno {})", self.path_error),
-        }];
-        if self.path.is_none() {
-            stages.push(match self.signal_error {
-                None => "signal check succeeded".to_owned(),
-                Some(errno) => format!("signal check failed (errno {errno})"),
-            });
-            if self.signal_error == Some(libc::EPERM) {
-                stages.push(match self.users {
-                    Some((effective, real)) => format!("users {effective}/{real}"),
-                    None => format!("users unreadable (errno {})", self.info_error),
-                });
-            }
+        if self.path.is_some() {
+            return "path read".to_owned();
         }
-        if self.path.is_none() && self.signal_error.is_none() {
-            stages.push(match &self.info {
-                Some((zombie, _)) => format!("process info read (zombie: {zombie})"),
-                None => format!("process info unreadable (errno {})", self.info_error),
+        let mut stages = vec![format!("path unreadable (errno {})", self.path_error)];
+        stages.push(match self.signal_error {
+            None => "signal check succeeded".to_owned(),
+            Some(errno) => format!("signal check failed (errno {errno})"),
+        });
+        if self.signal_error != Some(libc::ESRCH) {
+            stages.push(match &self.record {
+                Some(record) => format!(
+                    "zombie {}, users {}/{}, exec name {:?}",
+                    record.zombie,
+                    record.users.0,
+                    record.users.1,
+                    String::from_utf8_lossy(&record.name)
+                ),
+                None => format!(
+                    "process record unreadable (errno {}; process table too)",
+                    self.record_error
+                ),
             });
         }
         stages.join(", ")
@@ -352,66 +362,115 @@ fn observe_process(pid: i32) -> Observation {
     }
     let errno = || std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
     let path_error = errno();
-    let bsd_info = || {
-        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
-        // SAFETY: libproc receives a correctly sized writable proc_bsdinfo buffer. A nonzero
-        // `arg` also finds a zombie; with zero, an unreaped process fails with ESRCH like a
-        // missing one while the signal check still succeeds.
-        let read = unsafe {
-            libc::proc_pidinfo(
-                pid,
-                libc::PROC_PIDTBSDINFO,
-                1,
-                info.as_mut_ptr().cast(),
-                std::mem::size_of::<libc::proc_bsdinfo>() as i32,
-            )
-        };
-        // SAFETY: the buffer was zero-initialized, and a full-size read filled it.
-        (read as usize == std::mem::size_of::<libc::proc_bsdinfo>())
-            .then(|| unsafe { info.assume_init() })
-            .ok_or_else(errno)
-    };
     // SAFETY: signal zero only observes existence and permission.
-    if unsafe { libc::kill(pid, 0) } != 0 {
-        let signal_error = errno();
-        // Permission is also refused by sandboxing, so the owner decides, not the errno.
-        let (users, info_error) = if signal_error == libc::EPERM {
-            match bsd_info() {
-                Ok(info) => (Some((info.pbi_uid, info.pbi_ruid)), 0),
-                Err(error) => (None, error),
-            }
-        } else {
-            (None, 0)
-        };
+    let signal_error = (unsafe { libc::kill(pid, 0) } != 0).then(errno);
+    if signal_error == Some(libc::ESRCH) {
         return Observation {
             path_error,
-            signal_error: Some(signal_error),
-            info_error,
-            users,
+            signal_error,
             ..Observation::default()
         };
     }
-    let info = match bsd_info() {
-        Ok(info) => info,
-        Err(info_error) => {
-            return Observation {
-                path_error,
-                info_error,
-                ..Observation::default()
-            };
-        }
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
+    // SAFETY: libproc receives a correctly sized writable proc_bsdshortinfo buffer. A nonzero
+    // `arg` also finds zombies, which otherwise fail with ESRCH while still answering the signal
+    // check. Short info remains readable for other users' processes where full info is refused.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            1,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<libc::proc_bsdshortinfo>() as i32,
+        )
     };
-    let comm = info
-        .pbi_comm
-        .iter()
+    let (record, record_error) = if read as usize == std::mem::size_of::<libc::proc_bsdshortinfo>()
+    {
+        // SAFETY: the buffer was zero-initialized, and a full-size read filled it.
+        let info = unsafe { info.assume_init() };
+        let record = Record {
+            zombie: info.pbsi_status == libc::SZOMB,
+            name: comm_bytes(&info.pbsi_comm),
+            users: (info.pbsi_uid, info.pbsi_ruid),
+        };
+        (Some(record), 0)
+    } else {
+        // The process table (`ps`, via sysctl) reports every process.
+        (process_table(pid), errno())
+    };
+    Observation {
+        path: None,
+        path_error,
+        signal_error,
+        record,
+        record_error,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn comm_bytes(comm: &[libc::c_char]) -> Vec<u8> {
+    comm.iter()
         .take_while(|byte| **byte != 0)
         .map(|byte| *byte as u8)
-        .collect();
-    Observation {
-        path_error,
-        info: Some((info.pbi_status == libc::SZOMB, comm)),
-        ..Observation::default()
+        .collect()
+}
+
+/// `pid`'s record from the process table (`ps`, via sysctl), which reports every process,
+/// including ones this user may not signal or inspect. `None` unless the table reports exactly
+/// one parsable row.
+#[cfg(target_os = "macos")]
+fn process_table(pid: i32) -> Option<Record> {
+    let output = super::process::capture(
+        super::process::clean_command(Path::new("/bin/ps"))
+            .args(["-o", "uid=,ruid=,stat=,ucomm=", "-p"])
+            .arg(pid.to_string()),
+        std::time::Duration::from_secs(5),
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
     }
+    parse_process_row(&output.stdout)
+}
+
+/// Parse `<uid> <ruid> <stat> <ucomm>`; the name may contain spaces and is padded by `ps`.
+#[cfg(target_os = "macos")]
+fn parse_process_row(output: &[u8]) -> Option<Record> {
+    let text = std::str::from_utf8(output).ok()?.strip_suffix('\n')?;
+    if text.contains('\n') {
+        return None;
+    }
+    let mut rest = text;
+    let mut field = || -> Option<&str> {
+        let (value, tail) = rest
+            .trim_start()
+            .split_once(|c: char| c.is_ascii_whitespace())?;
+        rest = tail;
+        Some(value)
+    };
+    let effective = field()?.parse().ok()?;
+    let real = field()?.parse().ok()?;
+    let state = field()?;
+    let name = rest.trim();
+    if name.is_empty() || !state.chars().next()?.is_ascii_uppercase() {
+        return None;
+    }
+    Some(Record {
+        zombie: state.starts_with('Z'),
+        name: name.as_bytes().to_vec(),
+        users: (effective, real),
+    })
+}
+
+/// Whether an exec-time name (truncated by the kernel to MAXCOMLEN bytes) could be `binary`'s.
+#[cfg(target_os = "macos")]
+fn exec_name_matches(name: &[u8], binary: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let expected = binary
+        .file_name()
+        .map(OsStrExt::as_bytes)
+        .unwrap_or_default();
+    name == &expected[..expected.len().min(libc::MAXCOMLEN)]
 }
 
 #[cfg(target_os = "macos")]
@@ -421,7 +480,6 @@ fn classify(
     canonical: Option<&Path>,
     user: u32,
 ) -> Executes {
-    use std::os::unix::ffi::OsStrExt;
     if let Some(path) = &observation.path {
         return if path == binary || canonical == Some(path.as_path()) {
             Executes::Yes
@@ -429,31 +487,25 @@ fn classify(
             Executes::No
         };
     }
-    match (observation.signal_error, observation.users) {
-        (Some(libc::ESRCH), _) => return Executes::No,
-        // Another user's process cannot open this user's private provider state.
-        (Some(libc::EPERM), Some((effective, real))) if effective != user && real != user => {
-            return Executes::No;
-        }
-        (Some(_), _) => return Executes::Unknown,
-        (None, _) => {}
+    match observation.signal_error {
+        Some(libc::ESRCH) => return Executes::No,
+        // Permission is also refused by sandboxing, so the record decides, not the errno.
+        None | Some(libc::EPERM) => {}
+        Some(_) => return Executes::Unknown,
     }
-    match &observation.info {
-        None => Executes::Unknown,
-        Some((true, _)) => Executes::No,
-        // The path is unreadable when the executable was since removed or replaced. Its name at
-        // exec time (truncated by the kernel) still identifies a process that may be the provider.
-        Some((false, comm)) => {
-            let name = binary
-                .file_name()
-                .map(OsStrExt::as_bytes)
-                .unwrap_or_default();
-            if comm.as_slice() == &name[..name.len().min(libc::MAXCOMLEN)] {
-                Executes::Unknown
-            } else {
-                Executes::No
-            }
-        }
+    let Some(record) = &observation.record else {
+        return Executes::Unknown;
+    };
+    if record.zombie
+        // Another user's process cannot open this user's private provider state.
+        || (record.users.0 != user && record.users.1 != user)
+        // The path is unreadable when the executable was removed or replaced, or while the
+        // process exits; the provider always runs under its own exec-time name.
+        || !exec_name_matches(&record.name, binary)
+    {
+        Executes::No
+    } else {
+        Executes::Unknown
     }
 }
 
@@ -686,47 +738,70 @@ mod tests {
             signal_error: Some(errno),
             ..Observation::default()
         };
-        let refused = |users| Observation {
-            signal_error: Some(libc::EPERM),
-            users,
+        let record = |signal_error, zombie, users, name: &[u8]| Observation {
+            signal_error,
+            record: Some(Record {
+                zombie,
+                name: name.to_vec(),
+                users,
+            }),
             ..Observation::default()
         };
-        let info = |zombie, comm: &[u8]| Observation {
-            info: Some((zombie, comm.to_vec())),
-            ..Observation::default()
-        };
+        let ok = None;
+        let refused = Some(libc::EPERM);
         let cases = [
             (path("/private/pool/providers/smolvm-bin"), Executes::Yes),
             (path("/private/real/smolvm-bin"), Executes::Yes),
             (path("/usr/bin/true"), Executes::No),
             // Confirmed gone.
             (signal(libc::ESRCH), Executes::No),
-            // A refused signal proves another user only with both of the process's users read.
-            (refused(Some((0, 0))), Executes::No),
-            (refused(Some((501, 0))), Executes::No),
-            (refused(Some((USER, 0))), Executes::Unknown),
-            (refused(Some((0, USER))), Executes::Unknown),
-            (refused(None), Executes::Unknown),
             (signal(libc::EINVAL), Executes::Unknown),
-            // Live but unreadable, as when caught mid-exit.
+            // No record from either source: never assumed absent.
             (Observation::default(), Executes::Unknown),
-            (info(true, b"smolvm-bin"), Executes::No),
-            // A live process whose replaced executable had the provider's name.
-            (info(false, b"smolvm-bin"), Executes::Unknown),
-            (info(false, b"true"), Executes::No),
+            (signal(libc::EPERM), Executes::Unknown),
+            // Zombies execute nothing, whoever owns them (e.g. another user's defunct process).
+            (record(ok, true, (0, 0), b"sshd"), Executes::No),
+            (record(ok, true, (USER, USER), b"smolvm-bin"), Executes::No),
+            // Another user's process, however the signal check went.
+            (record(refused, false, (0, 0), b"smolvm-bin"), Executes::No),
+            (
+                record(refused, false, (501, 0), b"smolvm-bin"),
+                Executes::No,
+            ),
+            (record(ok, false, (0, 0), b"smolvm-bin"), Executes::No),
+            // This user's process under another exec-time name (removed, replaced or exiting).
+            (record(ok, false, (USER, USER), b"true"), Executes::No),
+            (
+                record(refused, false, (USER, USER), b"sandboxd"),
+                Executes::No,
+            ),
+            // Only one of the users is this user, under the provider's name: not provable.
+            (
+                record(refused, false, (USER, 0), b"smolvm-bin"),
+                Executes::Unknown,
+            ),
+            (
+                record(refused, false, (0, USER), b"smolvm-bin"),
+                Executes::Unknown,
+            ),
+            (
+                record(ok, false, (USER, USER), b"smolvm-bin"),
+                Executes::Unknown,
+            ),
         ];
         for (index, (observation, expected)) in cases.iter().enumerate() {
             assert_eq!(
                 classify(observation, binary, canonical, USER),
                 *expected,
-                "case {index}"
+                "case {index}: {}",
+                observation.describe()
             );
         }
         // The kernel truncates exec-time names to MAXCOMLEN bytes.
         let long = b"provider-binary-with-a-long-name";
         assert_eq!(
             classify(
-                &info(false, &long[..libc::MAXCOMLEN]),
+                &record(ok, false, (USER, USER), &long[..libc::MAXCOMLEN]),
                 Path::new("/p/provider-binary-with-a-long-name"),
                 None,
                 USER
@@ -762,31 +837,89 @@ mod tests {
     }
     #[cfg(target_os = "macos")]
     #[test]
+    fn the_process_table_reports_users_and_names_and_malformed_output_is_unknown() {
+        // SAFETY: getuid and geteuid have no preconditions and cannot fail.
+        let (effective, real) = unsafe { (libc::geteuid(), libc::getuid()) };
+        let own = process_table(std::process::id() as i32).unwrap();
+        assert_eq!((own.users, own.zombie), ((effective, real), false));
+        assert_eq!(
+            process_table(1),
+            Some(Record {
+                zombie: false,
+                name: b"launchd".to_vec(),
+                users: (0, 0),
+            })
+        );
+        assert_eq!(process_table(99_999), None);
+        assert_eq!(
+            parse_process_row(b"  502   501 S+   Google Chrome He \n"),
+            Some(Record {
+                zombie: false,
+                name: b"Google Chrome He".to_vec(),
+                users: (502, 501),
+            })
+        );
+        assert_eq!(
+            parse_process_row(b"    0     0 Z    sshd             \n").map(|row| row.zombie),
+            Some(true)
+        );
+        for malformed in [
+            &b""[..],
+            b"502 501 S\n",
+            b"502 501 S   \n",
+            b"502 501 name\n",
+            b"x 501 S name\n",
+            b"-1 501 S name\n",
+            b"502 501 S a\n502 501 S b\n",
+            b"502 501 S name",
+        ] {
+            assert_eq!(parse_process_row(malformed), None, "{malformed:?}");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
     fn an_unreaped_child_is_observed_as_a_zombie_not_an_unknown_process() {
         let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
         let pid = child.id() as i32;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let user = unsafe { libc::geteuid() };
+        let provider = Path::new("/usr/bin/true");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        // Until reaped, the exited child keeps its PID and answers the signal check.
+        // While exiting, a process has no readable path but is still running (status 2), which
+        // classifies as unknown under its own name; only then does it become an unreaped zombie
+        // that keeps its PID and answers the signal check.
         let observation = loop {
             let observation = observe_process(pid);
-            if observation.path.is_none() || std::time::Instant::now() > deadline {
+            let zombie = observation
+                .record
+                .as_ref()
+                .is_some_and(|record| record.zombie);
+            if zombie || std::time::Instant::now() > deadline {
                 break observation;
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            if observation.path.is_none() {
+                assert_eq!(
+                    classify(&observation, provider, None, user),
+                    Executes::Unknown,
+                    "{}",
+                    observation.describe()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
         };
         assert_eq!(observation.signal_error, None, "{}", observation.describe());
         assert_eq!(
-            observation.info,
-            Some((true, b"true".to_vec())),
+            observation.record,
+            Some(Record {
+                zombie: true,
+                name: b"true".to_vec(),
+                // SAFETY: getuid has no preconditions and cannot fail.
+                users: (user, unsafe { libc::getuid() }),
+            }),
             "{}",
             observation.describe()
         );
-        assert_eq!(
-            classify(&observation, Path::new("/usr/bin/true"), None, unsafe {
-                libc::geteuid()
-            }),
-            Executes::No
-        );
+        assert_eq!(classify(&observation, provider, None, user), Executes::No);
         assert!(child.wait().unwrap().success());
     }
     #[cfg(target_os = "macos")]

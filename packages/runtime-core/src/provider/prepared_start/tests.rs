@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(target_os = "macos")]
 use crate::provider::Profile;
 #[cfg(target_os = "macos")]
 use crate::provider::prepared_base::{PublishRequest, PublishedBase, Sanitization};

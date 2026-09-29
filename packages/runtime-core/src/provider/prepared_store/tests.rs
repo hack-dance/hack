@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(target_os = "macos")]
 use crate::provider::Profile;
 #[cfg(target_os = "macos")]
 use crate::provider::prepared_base::{PublishRequest, Sanitization};
@@ -6,8 +7,10 @@ use std::io::Read;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::FileExt;
 
+#[cfg(target_os = "macos")]
 const ROOTFS: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[cfg(target_os = "macos")]
 fn pins() -> Pins {
     Pins::current(Profile::Research, ROOTFS)
 }

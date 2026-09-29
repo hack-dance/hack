@@ -14,8 +14,11 @@ Modes:
               startup is out of scope.
   concurrent  K pools created at once from one base; distinct identities and data.
 
-Timing admission: a sample is flagged when build tools run or the 1-minute load exceeds half
-the CPU count at its start. Flagged samples are kept and summarized separately.
+Timing admission is observed at the start and end of each trial's timed work, not continuously.
+A sample is flagged when build tools run, the 1-minute load exceeds half the CPU count, memory
+pressure is raised, or any of those could not be observed. Flagged samples are kept and
+summarized separately. Resource metrics keep unobserved values as null, report coverage and
+are labeled unqualified when incomplete.
 """
 import argparse
 import base64
@@ -132,13 +135,60 @@ def allocated(root):
     return total
 
 
+def admission_from(load, names, pressure, cpus):
+    """Admission from one host observation. `None` marks an input that could not be observed;
+    any unobserved input or failed condition flags the sample with its reason (fail closed)."""
+    reasons = []
+    if load is None:
+        reasons.append("load_unobserved")
+    elif load > cpus / 2:
+        reasons.append("load_high")
+    tools = []
+    if names is None:
+        reasons.append("processes_unobserved")
+    else:
+        tools = sorted({Path(n.strip()).name for n in names if BUILD_TOOLS.match(Path(n.strip()).name or "")})
+        if tools:
+            reasons.append("build_tools")
+    if not pressure:
+        reasons.append("pressure_unobserved")
+    elif pressure != "1":
+        reasons.append("memory_pressure")
+    return {"load1": None if load is None else round(load, 2), "build_tools": tools,
+            "memory_pressure": pressure, "reasons": reasons, "admitted": not reasons}
+
+
 def admission():
-    load = os.getloadavg()[0]
-    names = subprocess.run(["ps", "-axo", "comm="], capture_output=True, text=True).stdout.split("\n")
-    tools = sorted({Path(n.strip()).name for n in names if BUILD_TOOLS.match(Path(n.strip()).name or "")})
-    pressure = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True).stdout.strip()
-    admitted = not tools and load <= (os.cpu_count() or 1) / 2 and pressure in ("", "1")
-    return {"load1": round(load, 2), "build_tools": tools, "memory_pressure": pressure, "admitted": admitted}
+    try:
+        load = os.getloadavg()[0]
+    except OSError:
+        load = None
+    listing = subprocess.run(["ps", "-axo", "comm="], capture_output=True, text=True)
+    names = listing.stdout.split("\n") if listing.returncode == 0 and listing.stdout.strip() else None
+    level = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True)
+    pressure = level.stdout.strip() if level.returncode == 0 else None
+    return admission_from(load, names, pressure, os.cpu_count() or 1)
+
+
+def admitted(record, cpus):
+    """(admitted, reasons, boundary) for a record. Records written before admission carried
+    reasons are re-evaluated from their recorded fields; their process listing's exit status was
+    not recorded, so that limitation is named rather than assumed."""
+    reasons, legacy = [], False
+    for key, label in (("admission", "start"), ("admission_end", "end")):
+        observed = record.get(key)
+        if observed is None:
+            if key == "admission":
+                reasons.append("start:unobserved")
+            continue
+        if "reasons" not in observed:
+            legacy = True
+            observed = admission_from(observed.get("load1"), observed.get("build_tools"), observed.get("memory_pressure"), cpus)
+        reasons += [f"{label}:{reason}" for reason in observed["reasons"]]
+    boundary = "start-and-end" if record.get("admission_end") is not None else "start-only"
+    if legacy:
+        boundary += " (legacy: process listing status unrecorded)"
+    return not reasons, reasons, boundary
 
 
 class Trial:
@@ -303,6 +353,7 @@ def pair_trial(args, index, lane):
         if trial.token(graph["run"], "restore_token") != graph["token"]:
             raise Failure("persistent token changed across restart")
         record["token_sha256"] = hashlib.sha256(graph["token"].encode()).hexdigest()[:16]
+        record["admission_end"] = admission()
         record["ok"] = True
     except Failure as error:
         record["ok"] = False
@@ -338,6 +389,7 @@ def cohort_trial(args, size, repeat, lane):
         record["after_all_ready"] = trial.provider(trial.status())
         record["disks_at_ready"] = trial.disks()
         record["busy_retries"] = sum(v.get("busy_retries", 0) for v in trial.samples.values())
+        record["admission_end"] = admission()
         record["ok"] = True
     except Failure as error:
         record["ok"] = False
@@ -369,6 +421,7 @@ def concurrent_trial(args, count):
             raise Failure(f"identities collided: machines={len(machines)} boots={len(boots)} tokens={len(tokens)}")
         record["distinct"] = {"machines": len(machines), "guest_boots": len(boots), "tokens": len(tokens)}
         record["disk_private_bytes"] = [{k: v["private"] for k, v in d.items()} for d in disks]
+        record["admission_end"] = admission()
         record["ok"] = True
     except Failure as error:
         record["ok"] = False
@@ -379,57 +432,127 @@ def concurrent_trial(args, count):
     return record
 
 
-def summarize(records):
-    def stats(values):
-        values = [v for v in values if v is not None]
-        if not values:
-            return None
-        return {"n": len(values), "median": round(statistics.median(values), 3), "min": round(min(values), 3), "max": round(max(values), 3)}
+def stats(values):
+    """Median/min/max over observed values. `of` counts every sample; a metric with any
+    unobserved sample is labeled unqualified instead of treating the gap as zero."""
+    observed = [v for v in values if v is not None]
+    result = {"n": len(observed), "of": len(values), "qualified": bool(values) and len(observed) == len(values)}
+    if observed:
+        result.update(median=round(statistics.median(observed), 3), min=round(min(observed), 3), max=round(max(observed), 3))
+    return result
 
-    summary = {}
-    pairs = [r for r in records if r["mode"] == "pairs" and r.get("ok")]
-    for admitted in (True, False):
-        chosen = [r for r in pairs if r["admission"]["admitted"] == admitted]
-        key = "pairs_admitted" if admitted else "pairs_flagged"
-        summary[key] = {
-            lane: {
-                "up_wall_s": stats([r["samples"]["up"]["wall_s"] for r in chosen if r["lane"] == lane]),
-                "up_cpu_s": stats([r["samples"]["up"]["cli_cpu_s"] + r["samples"]["up"].get("vm_cpu_s", 0) for r in chosen if r["lane"] == lane]),
-                "service_ready_s": stats([r["service_ready_s"] for r in chosen if r["lane"] == lane]),
-                "restart_up_wall_s": stats([r["samples"]["restart_up"]["wall_s"] for r in chosen if r["lane"] == lane]),
-                "vm_peak_footprint_bytes": stats([r["samples"]["up"].get("vm_peak_footprint_bytes") for r in chosen if r["lane"] == lane]),
-                "disk_private_bytes": stats([sum(d["private"] or 0 for d in r["disks_at_ready"].values()) for r in chosen if r["lane"] == lane]),
-            }
-            for lane in ("stock", "prepared")
-        }
-    ratios = []
-    by_index = {}
-    for r in pairs:
-        by_index.setdefault(r["index"], {})[r["lane"]] = r
-    for pair in by_index.values():
-        if len(pair) == 2 and all(p["admission"]["admitted"] for p in pair.values()):
-            ratios.append(pair["prepared"]["samples"]["up"]["wall_s"] / pair["stock"]["samples"]["up"]["wall_s"])
-    summary["admitted_pair_up_wall_ratio"] = stats(ratios)
-    cohorts = [r for r in records if r["mode"] == "cohort" and r.get("ok")]
-    summary["cohorts"] = {
-        f"{size}-{lane}": stats([r["all_ready_s"] for r in cohorts if r["size"] == size and r["lane"] == lane])
-        for size in sorted({r["size"] for r in cohorts})
-        for lane in ("stock", "prepared")
+
+def total(parts):
+    """Sum of parts, or None when there are none or any part is unobserved."""
+    parts = list(parts)
+    return None if not parts or any(p is None for p in parts) else sum(parts)
+
+
+def pair_metrics(r):
+    up = r["samples"]["up"]
+    after = r.get("after_service") or {}
+    disks = (r.get("disks_at_ready") or {}).values()
+    return {
+        "up_wall_s": up["wall_s"],
+        "up_cpu_s": total([up["cli_cpu_s"], up.get("vm_cpu_s")]),
+        "service_ready_s": r["service_ready_s"],
+        "restart_up_wall_s": r["samples"]["restart_up"]["wall_s"],
+        "vm_footprint_after_service_bytes": after.get("vm_footprint_bytes"),
+        "vm_peak_footprint_bytes": after.get("vm_peak_footprint_bytes", up.get("vm_peak_footprint_bytes")),
+        "disk_allocated_bytes": total(d.get("allocated") for d in disks),
+        "disk_private_bytes": total(d.get("private") for d in disks),
+        "home_allocated_after_down_bytes": (r.get("cleanup") or {}).get("allocated_after_down"),
     }
+
+
+def cohort_metrics(r):
+    after = r.get("after_all_ready") or {}
+    disks = (r.get("disks_at_ready") or {}).values()
+    return {
+        "all_ready_s": r["all_ready_s"],
+        "up_wall_s": r["samples"]["up"]["wall_s"],
+        "cli_cpu_s": total(v.get("cli_cpu_s") for k, v in r["samples"].items() if not k.startswith("setup_")),
+        "vm_cpu_s": after.get("vm_cpu_s"),
+        "vm_footprint_bytes": after.get("vm_footprint_bytes"),
+        "vm_peak_footprint_bytes": after.get("vm_peak_footprint_bytes"),
+        "disk_private_bytes": total(d.get("private") for d in disks),
+    }
+
+
+def summarize(records, cpus=None):
+    cpus = cpus or os.cpu_count() or 1
+    summary = {"admission_boundaries": {}}
+    classified = []
+    for r in records:
+        ok, reasons, boundary = admitted(r, cpus)
+        summary["admission_boundaries"][boundary] = summary["admission_boundaries"].get(boundary, 0) + 1
+        classified.append((r, ok, reasons))
+
+    def lanes(chosen, metrics):
+        return {
+            lane: {name: stats([metrics(r)[name] for r in chosen if r["lane"] == lane])
+                   for name in metrics(chosen[0]) } if any(r["lane"] == lane for r in chosen) else None
+            for lane in ("stock", "prepared")
+        } if chosen else None
+
+    def paired(rs, key, metric):
+        groups = {}
+        for r, ok, _ in rs:
+            groups.setdefault(key(r), {})[r["lane"]] = (r, ok)
+        ratios = {}
+        for group, pair in groups.items():
+            if len(pair) == 2 and all(ok for _, ok in pair.values()):
+                ratios.setdefault(group[0] if isinstance(group, tuple) else "all", []).append(
+                    metric(pair["prepared"][0]) / metric(pair["stock"][0]))
+        return {str(k): stats(v) for k, v in ratios.items()}
+
+    pairs = [(r, ok, why) for r, ok, why in classified if r["mode"] == "pairs" and r.get("ok")]
+    summary["pairs_admitted"] = lanes([r for r, ok, _ in pairs if ok], pair_metrics)
+    summary["pairs_flagged"] = lanes([r for r, ok, _ in pairs if not ok], pair_metrics)
+    summary["admitted_pair_ratios"] = {
+        "up_wall": paired(pairs, lambda r: r["index"], lambda r: r["samples"]["up"]["wall_s"]).get("all"),
+        "service_ready": paired(pairs, lambda r: r["index"], lambda r: r["service_ready_s"]).get("all"),
+    }
+    cohorts = [(r, ok, why) for r, ok, why in classified if r["mode"] == "cohort" and r.get("ok")]
+    for admitted_flag, key in ((True, "cohorts_admitted"), (False, "cohorts_flagged")):
+        chosen = [r for r, ok, _ in cohorts if ok == admitted_flag]
+        summary[key] = {str(size): lanes([r for r in chosen if r["size"] == size], cohort_metrics)
+                        for size in sorted({r["size"] for r in chosen})}
+    summary["admitted_cohort_all_ready_ratio_by_size"] = paired(
+        cohorts, lambda r: (r["size"], r["repeat"]), lambda r: r["all_ready_s"])
+    summary["concurrent"] = [
+        {"count": r["count"], "ok": r.get("ok"), "admitted": ok, "reasons": why, "distinct": r.get("distinct"),
+         "up_wall_s": r.get("up_wall_s"), "disk_private_bytes": r.get("disk_private_bytes")}
+        for r, ok, why in classified if r["mode"] == "concurrent"
+    ]
+    summary["flag_reasons"] = sorted({reason for _, ok, why in classified for reason in why})
     summary["failures"] = [{k: r.get(k) for k in ("mode", "index", "size", "lane", "error")} for r in records if not r.get("ok")]
     summary["cleanup_failures"] = [r.get("home") or r.get("homes") for r in records if any("error" in c or not c.get("removed") for c in (r["cleanup"] if isinstance(r["cleanup"], list) else [r["cleanup"]]))]
     return summary
 
 
+def load_samples(path):
+    """(context, records) from a raw samples file; a trailing summary line is ignored."""
+    context, records = {}, []
+    for line in Path(path).read_text().splitlines():
+        entry = json.loads(line)
+        if "context" in entry:
+            context = entry["context"]
+        elif "summary" not in entry:
+            records.append(entry)
+    return context, records
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--bundle", required=True, help="absolute hack-native executable")
-    parser.add_argument("--root", required=True, help="absolute private (0700) directory for trial homes")
-    parser.add_argument("--store", required=True, help="absolute store holding a verified base for these pins")
-    parser.add_argument("--provider-archive", required=True)
-    parser.add_argument("--engine-archive", required=True)
-    parser.add_argument("--network-tools", required=True, help="directory of pinned network-tool packages")
-    parser.add_argument("--image", required=True, help="pinned image reference (repository@sha256:...)")
+    parser.add_argument("--summarize", metavar="SAMPLES", help="only summarize a raw samples file; runs nothing")
+    parser.add_argument("--bundle", help="absolute hack-native executable")
+    parser.add_argument("--root", help="absolute private (0700) directory for trial homes")
+    parser.add_argument("--store", help="absolute store holding a verified base for these pins")
+    parser.add_argument("--provider-archive")
+    parser.add_argument("--engine-archive")
+    parser.add_argument("--network-tools", help="directory of pinned network-tool packages")
+    parser.add_argument("--image", help="pinned image reference (repository@sha256:...)")
     parser.add_argument("--profile", default="development", choices=("development", "research"))
     parser.add_argument("--mode", action="append", choices=("pairs", "cohort", "concurrent"))
     parser.add_argument("--pairs", type=int, default=5)
@@ -440,9 +563,15 @@ def main():
     parser.add_argument("--output", help="JSON lines of raw samples (default <root>/samples-<time>.jsonl)")
     parser.add_argument("--run", action="store_true", help="execute; without it only the plan is printed")
     args = parser.parse_args()
+    if args.summarize:
+        context, records = load_samples(args.summarize)
+        print(json.dumps({"context": context, "summary": summarize(records, (context.get("host") or {}).get("cpus"))}, indent=2))
+        return
     modes = args.mode or ["pairs", "cohort", "concurrent"]
+    if not args.image:
+        parser.error("--image is required")
     for name in ("bundle", "root", "store", "provider_archive", "engine_archive", "network_tools"):
-        if not os.path.isabs(getattr(args, name)):
+        if not getattr(args, name) or not os.path.isabs(getattr(args, name)):
             parser.error(f"--{name.replace('_', '-')} must be absolute")
     sizes = [int(s) for s in args.cohorts.split(",") if s]
     plan = {"modes": modes, "pairs": args.pairs, "cohorts": sizes, "cohort_repeats": args.cohort_repeats,
@@ -490,7 +619,7 @@ def main():
                         keep(cohort_trial(args, size, repeat, lane))
         if "concurrent" in modes:
             keep(concurrent_trial(args, args.concurrent))
-        summary = summarize(records)
+        summary = summarize(records, context["host"]["cpus"])
         sink.write(json.dumps({"summary": summary}) + "\n")
     print(json.dumps({"output": str(output), "summary": summary}, indent=2))
 

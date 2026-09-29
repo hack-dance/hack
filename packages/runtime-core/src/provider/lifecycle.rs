@@ -1179,6 +1179,10 @@ fn start_pool(
     }
     let previous_boot = owner.begin_boot();
     owner.reclamation = Some(boot_reclamation_policy());
+    // The previous provider was proven dead above. Until this start records its own provider,
+    // the receipt names none, so recovery identifies it (`interrupted`) instead of trusting the
+    // old identity.
+    owner.process = None;
     phase(candidate, &mut owner, "booting")?;
     invoke(
         candidate,
@@ -1613,8 +1617,10 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         "recovered-unclean",
     ]
     .contains(&owner.phase.as_str())
-        && initial.process_alive == Some(false)
+        && initial.process_alive != Some(true)
     {
+        // These phases are written only before a start or after proven absence; no recorded
+        // provider (`None`) is as stopped as a dead one.
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
@@ -1742,16 +1748,19 @@ fn finish_stopped(
             "Provider process absence is not established.",
         ));
     }
-    finish_absent(candidate, owner, value)
+    finish_absent(candidate, owner, value, true)
 }
 
 /// Record `value` once the provider's VM lock is free, no handle remains on the owned disks and
 /// no owned socket accepts connections. The caller has established that no provider process
 /// remains; this proves the machine it launched released everything before the receipt changes.
+/// With `record_disks`, unadopted disks are identified now; without it they stay unadopted, so
+/// the next boot's size, format-marker and template checks decide whether to adopt them.
 fn finish_absent(
     candidate: &Candidate,
     owner: &mut Owner,
     value: &str,
+    record_disks: bool,
 ) -> Result<(), CandidateError> {
     let directory = owner.real_data_dir(candidate)?;
     let vm_lock = OpenOptions::new()
@@ -1788,12 +1797,12 @@ fn finish_absent(
         ));
     }
     verify_disks(candidate, owner)?;
-    if owner.storage.is_none() {
+    if record_disks && owner.storage.is_none() {
         owner.storage = Some(identity::disk(
             &owner.real_data_dir(candidate)?.join("storage.raw"),
         )?);
     }
-    if owner.overlay.is_none() {
+    if record_disks && owner.overlay.is_none() {
         owner.overlay = Some(identity::disk(
             &owner.real_data_dir(candidate)?.join("overlay.raw"),
         )?);

@@ -222,8 +222,8 @@ pub fn alive(pid: i32) -> Result<bool, CandidateError> {
 /// Whether any live process other than this one executes exactly `binary`.
 ///
 /// Used where no PID record names the provider, so absence must hold for every process that
-/// could act on this pool. Processes of other users are skipped (they cannot open this user's
-/// private provider state), as are zombies. A same-user process whose executable path cannot be
+/// could act on this pool. Processes proven to belong to other users are skipped (they cannot
+/// open this user's private provider state), as are zombies. A same-user process whose executable path cannot be
 /// read, and whose exec-time name (truncated by the kernel) could be `binary`'s, makes absence
 /// uncertain rather than assumed.
 ///
@@ -260,9 +260,11 @@ pub fn executable_running(binary: &Path) -> Result<bool, CandidateError> {
             continue;
         }
         let mut last = Observation::default();
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let user = unsafe { libc::geteuid() };
         let observe = || {
             last = observe_process(pid);
-            classify(&last, binary, canonical.as_deref())
+            classify(&last, binary, canonical.as_deref(), user)
         };
         match settle(observe, ATTEMPTS, |_| std::time::Duration::from_millis(5)) {
             Ok(true) => return Ok(true),
@@ -303,6 +305,8 @@ struct Observation {
     info: Option<(bool, Vec<u8>)>,
     /// The errno of the failed BSD process info read.
     info_error: i32,
+    /// `(effective, real)` user of a process the signal check was not permitted to reach.
+    users: Option<(u32, u32)>,
 }
 
 #[cfg(target_os = "macos")]
@@ -317,6 +321,12 @@ impl Observation {
                 None => "signal check succeeded".to_owned(),
                 Some(errno) => format!("signal check failed (errno {errno})"),
             });
+            if self.signal_error == Some(libc::EPERM) {
+                stages.push(match self.users {
+                    Some((effective, real)) => format!("users {effective}/{real}"),
+                    None => format!("users unreadable (errno {})", self.info_error),
+                });
+            }
         }
         if self.path.is_none() && self.signal_error.is_none() {
             stages.push(match &self.info {
@@ -342,36 +352,55 @@ fn observe_process(pid: i32) -> Observation {
     }
     let errno = || std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
     let path_error = errno();
+    let bsd_info = || {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        // SAFETY: libproc receives a correctly sized writable proc_bsdinfo buffer. A nonzero
+        // `arg` also finds a zombie; with zero, an unreaped process fails with ESRCH like a
+        // missing one while the signal check still succeeds.
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                1,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+            )
+        };
+        // SAFETY: the buffer was zero-initialized, and a full-size read filled it.
+        (read as usize == std::mem::size_of::<libc::proc_bsdinfo>())
+            .then(|| unsafe { info.assume_init() })
+            .ok_or_else(errno)
+    };
     // SAFETY: signal zero only observes existence and permission.
     if unsafe { libc::kill(pid, 0) } != 0 {
+        let signal_error = errno();
+        // Permission is also refused by sandboxing, so the owner decides, not the errno.
+        let (users, info_error) = if signal_error == libc::EPERM {
+            match bsd_info() {
+                Ok(info) => (Some((info.pbi_uid, info.pbi_ruid)), 0),
+                Err(error) => (None, error),
+            }
+        } else {
+            (None, 0)
+        };
         return Observation {
             path_error,
-            signal_error: Some(errno()),
+            signal_error: Some(signal_error),
+            info_error,
+            users,
             ..Observation::default()
         };
     }
-    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
-    // SAFETY: libproc receives a correctly sized writable proc_bsdinfo buffer. A nonzero `arg`
-    // also finds a zombie; with zero, an unreaped process fails with ESRCH like a missing one
-    // while the signal check above still succeeds.
-    let read = unsafe {
-        libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTBSDINFO,
-            1,
-            info.as_mut_ptr().cast(),
-            std::mem::size_of::<libc::proc_bsdinfo>() as i32,
-        )
+    let info = match bsd_info() {
+        Ok(info) => info,
+        Err(info_error) => {
+            return Observation {
+                path_error,
+                info_error,
+                ..Observation::default()
+            };
+        }
     };
-    if read as usize != std::mem::size_of::<libc::proc_bsdinfo>() {
-        return Observation {
-            path_error,
-            info_error: errno(),
-            ..Observation::default()
-        };
-    }
-    // SAFETY: the buffer was zero-initialized, and a full-size read filled it.
-    let info = unsafe { info.assume_init() };
     let comm = info
         .pbi_comm
         .iter()
@@ -386,7 +415,12 @@ fn observe_process(pid: i32) -> Observation {
 }
 
 #[cfg(target_os = "macos")]
-fn classify(observation: &Observation, binary: &Path, canonical: Option<&Path>) -> Executes {
+fn classify(
+    observation: &Observation,
+    binary: &Path,
+    canonical: Option<&Path>,
+    user: u32,
+) -> Executes {
     use std::os::unix::ffi::OsStrExt;
     if let Some(path) = &observation.path {
         return if path == binary || canonical == Some(path.as_path()) {
@@ -395,10 +429,14 @@ fn classify(observation: &Observation, binary: &Path, canonical: Option<&Path>) 
             Executes::No
         };
     }
-    match observation.signal_error {
-        Some(libc::ESRCH | libc::EPERM) => return Executes::No,
-        Some(_) => return Executes::Unknown,
-        None => {}
+    match (observation.signal_error, observation.users) {
+        (Some(libc::ESRCH), _) => return Executes::No,
+        // Another user's process cannot open this user's private provider state.
+        (Some(libc::EPERM), Some((effective, real))) if effective != user && real != user => {
+            return Executes::No;
+        }
+        (Some(_), _) => return Executes::Unknown,
+        (None, _) => {}
     }
     match &observation.info {
         None => Executes::Unknown,
@@ -637,6 +675,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn classification_proves_absence_only_for_gone_zombie_foreign_or_other_processes() {
+        const USER: u32 = 502;
         let binary = Path::new("/private/pool/providers/smolvm-bin");
         let canonical = Some(Path::new("/private/real/smolvm-bin"));
         let path = |p: &str| Observation {
@@ -647,6 +686,11 @@ mod tests {
             signal_error: Some(errno),
             ..Observation::default()
         };
+        let refused = |users| Observation {
+            signal_error: Some(libc::EPERM),
+            users,
+            ..Observation::default()
+        };
         let info = |zombie, comm: &[u8]| Observation {
             info: Some((zombie, comm.to_vec())),
             ..Observation::default()
@@ -655,9 +699,14 @@ mod tests {
             (path("/private/pool/providers/smolvm-bin"), Executes::Yes),
             (path("/private/real/smolvm-bin"), Executes::Yes),
             (path("/usr/bin/true"), Executes::No),
-            // Confirmed gone, or another user's process.
+            // Confirmed gone.
             (signal(libc::ESRCH), Executes::No),
-            (signal(libc::EPERM), Executes::No),
+            // A refused signal proves another user only with both of the process's users read.
+            (refused(Some((0, 0))), Executes::No),
+            (refused(Some((501, 0))), Executes::No),
+            (refused(Some((USER, 0))), Executes::Unknown),
+            (refused(Some((0, USER))), Executes::Unknown),
+            (refused(None), Executes::Unknown),
             (signal(libc::EINVAL), Executes::Unknown),
             // Live but unreadable, as when caught mid-exit.
             (Observation::default(), Executes::Unknown),
@@ -668,7 +717,7 @@ mod tests {
         ];
         for (index, (observation, expected)) in cases.iter().enumerate() {
             assert_eq!(
-                classify(observation, binary, canonical),
+                classify(observation, binary, canonical, USER),
                 *expected,
                 "case {index}"
             );
@@ -679,7 +728,8 @@ mod tests {
             classify(
                 &info(false, &long[..libc::MAXCOMLEN]),
                 Path::new("/p/provider-binary-with-a-long-name"),
-                None
+                None,
+                USER
             ),
             Executes::Unknown
         );
@@ -732,7 +782,9 @@ mod tests {
             observation.describe()
         );
         assert_eq!(
-            classify(&observation, Path::new("/usr/bin/true"), None),
+            classify(&observation, Path::new("/usr/bin/true"), None, unsafe {
+                libc::geteuid()
+            }),
             Executes::No
         );
         assert!(child.wait().unwrap().success());

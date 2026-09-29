@@ -156,7 +156,8 @@ class Accounting(unittest.TestCase):
     def test_continuous_admission_flags_any_failed_sample_during_timed_work(self):
         observations = iter([CLEAN, LOADED] + [CLEAN] * 1000)
         sampler = benchmark.Sampler(0.001, observe=lambda: next(observations)).start()
-        while len(sampler.samples) < 3:
+        deadline = time.monotonic() + 5
+        while len(sampler.samples) < 3 and time.monotonic() < deadline:
             time.sleep(0.001)
         during = sampler.stop()
         self.assertGreaterEqual(during["samples"], 3)
@@ -167,6 +168,35 @@ class Accounting(unittest.TestCase):
     def test_a_sampler_without_samples_is_unobserved_not_admitted(self):
         result = benchmark.Sampler(1.0).result()
         self.assertEqual((result["reasons"], result["admitted"]), (["unobserved"], False))
+
+    def test_a_failing_observer_flags_the_trial_and_sampling_continues(self):
+        calls = []
+
+        def observe():
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError("ps unavailable")
+            return CLEAN
+
+        sampler = benchmark.Sampler(0.001, observe=observe).start()
+        deadline = time.monotonic() + 5
+        while len(sampler.samples) < 3 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        during = sampler.stop()
+        self.assertEqual((during["reasons"], during["admitted"]), (["observer_failed"], False))
+        self.assertGreaterEqual(during["samples"], 3)
+
+    def test_unobserved_gaps_flag_the_trial(self):
+        def sampler(times, stopped):
+            observed = benchmark.Sampler(1.0)
+            observed.started, observed.times, observed.stopped = 0.0, times, stopped
+            observed.samples = [CLEAN] * len(times)
+            return observed.result()
+
+        steady = sampler([0.1, 1.1, 2.1, 3.1], 3.5)
+        self.assertEqual((steady["reasons"], steady["max_gap_s"]), ([], 1.0))
+        for times, stopped in (([0.1, 7.0], 7.5), ([0.1, 1.1], 9.0), ([6.0], 6.5)):
+            self.assertEqual(sampler(times, stopped)["reasons"], ["sampling_gap"], (times, stopped))
 
     def test_cohorts_are_split_by_admission_and_paired_by_size_and_repeat(self):
         records = [

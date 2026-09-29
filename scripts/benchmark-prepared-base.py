@@ -17,7 +17,7 @@ Modes:
 Timing admission is observed at the start and end of each trial's timed work and every
 --admission-interval seconds in between. A sample is flagged when build tools run, the 1-minute
 load exceeds half the CPU count, memory pressure is raised, or any of those could not be observed
-at any of those points. Flagged samples are kept and
+at any of those points; a failed observation or an unobserved gap also flags it. Flagged samples are kept and
 summarized separately. Resource metrics keep unobserved values as null, report coverage and
 are labeled unqualified when incomplete.
 """
@@ -197,35 +197,54 @@ def admitted(record, cpus):
 
 class Sampler:
     """Admission observed every `interval` seconds while a trial's timed work runs. Its own cost
-    is one process listing and one sysctl per sample."""
+    is one process listing and one sysctl per sample.
 
-    def __init__(self, interval, observe=None):
-        self.interval, self.observe = interval, observe or admission
-        self.samples = []
+    It fails closed: an observation that raises becomes an `observer_failed` sample, and a gap
+    longer than `GAP_INTERVALS` intervals between samples (or before the first, or after the last
+    until stop) is reported as `sampling_gap`, since load during that gap was not observed."""
+
+    GAP_INTERVALS = 5
+
+    def __init__(self, interval, observe=None, clock=time.monotonic):
+        self.interval, self.observe, self.clock = interval, observe or admission, clock
+        self.samples, self.times = [], []
+        self.started = self.stopped = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self):
+        self.started = self.clock()
         self._thread.start()
         return self
 
     def _run(self):
         while True:
-            self.samples.append(self.observe())
+            try:
+                sample = self.observe()
+            except Exception:  # noqa: BLE001 - any observer failure must flag, not end sampling.
+                sample = {"reasons": ["observer_failed"], "load1": None}
+            self.samples.append(sample)
+            self.times.append(self.clock())
             if self._stop.wait(self.interval):
                 return
 
     def stop(self):
         self._stop.set()
         self._thread.join()
+        self.stopped = self.clock()
         return self.result()
 
     def result(self):
-        reasons = sorted({reason for sample in self.samples for reason in sample["reasons"]})
+        reasons = {reason for sample in self.samples for reason in sample["reasons"]}
         if not self.samples:
-            reasons = ["unobserved"]
+            reasons.add("unobserved")
+        edges = [t for t in (self.started, *self.times, self.stopped) if t is not None]
+        gaps = [later - earlier for earlier, later in zip(edges, edges[1:])]
+        if gaps and max(gaps) > self.GAP_INTERVALS * self.interval:
+            reasons.add("sampling_gap")
         loads = [sample["load1"] for sample in self.samples if sample["load1"] is not None]
-        return {"samples": len(self.samples), "interval_s": self.interval, "reasons": reasons,
+        return {"samples": len(self.samples), "interval_s": self.interval, "reasons": sorted(reasons),
+                "max_gap_s": round(max(gaps), 3) if gaps else None,
                 "max_load1": max(loads) if loads else None, "admitted": not reasons}
 
 

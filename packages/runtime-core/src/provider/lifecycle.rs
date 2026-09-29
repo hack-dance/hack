@@ -588,6 +588,29 @@ fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError
 
 /// Read-only source compatibility check before application lifecycle hooks.
 /// This is advisory: `up_selected` repeats the check before VM effects.
+fn require_fresh_source_pool(candidate: &Candidate) -> Result<(), CandidateError> {
+    if !root(candidate).try_exists().map_err(io)? {
+        return Ok(());
+    }
+    state::check_private_directory(&root(candidate))?;
+    for entry in fs::read_dir(root(candidate)).map_err(io)? {
+        let entry = entry.map_err(io)?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(io)?;
+        if entry.file_name() != "operation.lock"
+            || !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+        {
+            return Err(CandidateError::new(
+                "foreign_state",
+                "Source admission requires a fresh or owned source pool; unowned provider state was preserved.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn check_project_share(
     candidate: &Candidate,
     requested: &super::ProjectShareIntent,
@@ -602,13 +625,8 @@ pub fn check_project_share(
     if initialized {
         let owner = Owner::load(candidate)?;
         super::project_share::check_request(owner.project_share.as_ref(), Some(requested))?;
-    } else if root(candidate).try_exists().map_err(io)?
-        && fs::read_dir(root(candidate)).map_err(io)?.next().is_some()
-    {
-        return Err(CandidateError::new(
-            "foreign_state",
-            "Source admission requires a fresh or owned source pool; unowned provider state was preserved.",
-        ));
+    } else {
+        require_fresh_source_pool(candidate)?;
     }
     Ok(json!({ "source_admitted": true, "pool_initialized": initialized }))
 }
@@ -975,6 +993,11 @@ fn up_selected(
         Ok(_) => false,
         Err(error) => return Err(io(error)),
     };
+    // Hooks and admission can outlive the read-only frontend check. Never adopt
+    // unrelated state that appeared before this operation acquired its lock.
+    if fresh_owner && project_share.is_some() {
+        require_fresh_source_pool(candidate)?;
+    }
     let mut owner = Owner::create_with_project_share(
         candidate,
         profile,
@@ -1874,6 +1897,8 @@ mod tests {
             json!({"source_admitted":true,"pool_initialized":false})
         );
         assert!(!candidate.state_root.exists());
+        let lock = state::Lock::acquire(&root(&candidate)).unwrap();
+        assert!(require_fresh_source_pool(&candidate).is_ok());
         state::private_directory(&root(&candidate)).unwrap();
         let canary = root(&candidate).join("unowned");
         fs::write(&canary, "preserved").unwrap();
@@ -1882,6 +1907,11 @@ mod tests {
             "foreign_state"
         );
         assert_eq!(fs::read_to_string(canary).unwrap(), "preserved");
+        assert_eq!(
+            require_fresh_source_pool(&candidate).unwrap_err().code,
+            "foreign_state"
+        );
+        drop(lock);
         assert!(!root(&candidate).join("owner.json").exists());
         #[cfg(target_os = "macos")]
         {

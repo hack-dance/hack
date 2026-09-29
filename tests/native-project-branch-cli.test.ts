@@ -9,6 +9,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+  loadNativeProjectRun,
+  saveNativeProjectRun,
+} from "../src/backends/native-project-run.ts";
 
 const roots: string[] = [];
 const entrypoint = resolve("index.ts");
@@ -185,4 +189,34 @@ test("admitted native branch startup runs hooks before runtime up", async () => 
   expect(await Bun.file(join(f.home, "preflight-ran")).exists()).toBe(true);
   expect(await Bun.file(join(f.project, "hook-ran")).exists()).toBe(true);
   expect(await Bun.file(join(f.home, "native-ran")).exists()).toBe(true);
+});
+
+test("native branch restart checks source before cleanup and preserves its mapping", async () => {
+  const f = await fixture();
+  const scope = {
+    projectRoot: f.project,
+    projectDir: join(f.project, ".hack"),
+    nativeHome: f.nativeHome,
+    branch: "feature-new",
+  };
+  const run = {
+    run: "a".repeat(32),
+    owner: "b".repeat(32),
+    namespace: "c".repeat(64),
+    planId: "d".repeat(64),
+    profiles: [],
+    effectiveEnvName: null,
+  };
+  await saveNativeProjectRun({ ...scope, run });
+  const result = await invoke({
+    fixture: f,
+    command: "restart",
+    branch: "feature/new",
+  });
+  expect(result.code).toBe(1);
+  expect(result.output).toContain(refusal);
+  expect(await Bun.file(join(f.home, "preflight-ran")).exists()).toBe(true);
+  expect(await Bun.file(join(f.project, "hook-ran")).exists()).toBe(false);
+  expect(await Bun.file(join(f.home, "native-ran")).exists()).toBe(false);
+  expect(await loadNativeProjectRun(scope)).toEqual(run);
 });

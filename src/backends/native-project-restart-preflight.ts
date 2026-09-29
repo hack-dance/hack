@@ -15,7 +15,10 @@ import {
 import { prepareNativeProjectInput } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
-import { verifyNativeSourceCompatibility } from "./native-project-restore.ts";
+import {
+  nativeReviewNeedsCompatibility,
+  verifyNativeSourceCompatibility,
+} from "./native-project-restore.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
 import { withNativeProjectReview } from "./native-project-review.ts";
 import {
@@ -323,7 +326,7 @@ export async function preflightNativeRestart(opts: {
           "Native restart configuration changed; the current graph was not stopped."
         );
       }
-      if (review.planId !== opts.run.planId) {
+      if (nativeReviewNeedsCompatibility({ saved: opts.run, review })) {
         await verifyNativeSourceCompatibility({
           runtime: opts.runtime,
           projectRoot: opts.scope.projectRoot,

@@ -406,6 +406,26 @@ pub(super) fn prepare_shared_changed(
     receipt: &Receipt,
     revision: Option<&str>,
 ) -> Result<Inputs, CandidateError> {
+    prepare_shared_review(engine, plan, receipt, revision, false)
+}
+
+/// Used only by the normalized hostname transition verifier under the provider lease.
+pub(super) fn prepare_shared_hostnames(
+    engine: &Engine<'_>,
+    plan: &PlanData,
+    receipt: &Receipt,
+    revision: Option<&str>,
+) -> Result<Inputs, CandidateError> {
+    prepare_shared_review(engine, plan, receipt, revision, true)
+}
+
+fn prepare_shared_review(
+    engine: &Engine<'_>,
+    plan: &PlanData,
+    receipt: &Receipt,
+    revision: Option<&str>,
+    hostnames: bool,
+) -> Result<Inputs, CandidateError> {
     let binding = receipt
         .source
         .as_ref()
@@ -431,7 +451,11 @@ pub(super) fn prepare_shared_changed(
         ));
     }
     let current = project::snapshot::capture_plan(plan)?;
-    contract.verify(plan, current.receipt())?;
+    if hostnames {
+        contract.verify_hostnames(plan, current.receipt())?;
+    } else {
+        contract.verify(plan, current.receipt())?;
+    }
     let share = binding
         .shared
         .as_ref()
@@ -465,10 +489,17 @@ pub(super) fn prepare_shared_changed(
     } else {
         current.receipt().clone()
     };
+    let mut next_binding = binding.clone();
+    if hostnames {
+        next_binding.shared_contract = Some(project::live_source::Contract::from_plan(
+            plan,
+            current.receipt(),
+        )?);
+    }
     Ok(Inputs {
         current_manifest: Some(current.receipt().clone()),
         manifest,
-        binding: binding.clone(),
+        binding: next_binding,
         paths,
     })
 }

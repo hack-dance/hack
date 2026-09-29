@@ -5,6 +5,7 @@ mod compose;
 mod enrollment;
 pub mod execution;
 mod generated;
+mod hostname_change;
 pub mod inputs;
 pub mod live_source;
 pub mod registry;
@@ -297,6 +298,9 @@ pub struct PlanData {
     pub compose_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_compose_sha256: Option<String>,
+    /// Hash of both reviewed raw documents with only literal route hostnames masked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname_change_sha256: Option<String>,
     pub active_profiles: Vec<String>,
     pub services: BTreeMap<String, ServicePlan>,
     pub networks: BTreeMap<String, NetworkPlan>,
@@ -332,7 +336,11 @@ pub struct PlanReport {
 }
 
 pub(crate) fn identity(plan: &PlanData) -> Result<String, CandidateError> {
-    let bytes = serde_json::to_vec(plan)
+    // This additive proof is derived afresh from the exact original/normalized
+    // bytes already bound below. It must not reidentify unchanged legacy graphs.
+    let mut identity_plan = plan.clone();
+    identity_plan.hostname_change_sha256 = None;
+    let bytes = serde_json::to_vec(&identity_plan)
         .map_err(|_| problem("serialization_failed", "Cannot encode review plan."))?;
     if bytes.len() > 3 * 1024 * 1024 {
         return Err(problem("plan_budget", "Review plan exceeds 3 MiB."));
@@ -363,7 +371,7 @@ fn plan_input(
         .ok_or_else(|| problem("invalid_compose_path", "Compose path must be valid UTF-8."))?;
     let path = source::resolve(source, source, file_text, false)?;
     let original = source::read_compose(&path)?;
-    let bytes = if let Some(input) = normalized {
+    let bytes = if let Some(ref input) = normalized {
         input.verify(&preview.namespace, &original)?;
         input.bytes
     } else {
@@ -391,6 +399,7 @@ fn plan_input(
         value,
     )?;
     data.namespace = preview.namespace;
+    data.hostname_change_sha256 = hostname_change::fingerprint(&original, bytes);
     let mut environment_files = data
         .services
         .values()

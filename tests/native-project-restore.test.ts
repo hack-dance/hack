@@ -126,3 +126,50 @@ test("changed source review retains the old cache publication after native compa
     sourceRevision: "1".repeat(64),
   });
 });
+
+test("eligible hostname rollback checks current native provenance even at the ownership plan", async () => {
+  const review = {
+    ...options.review,
+    report: {
+      plan: { hostname_change_sha256: "f".repeat(64), services: {} },
+    },
+  };
+  const calls: string[] = [];
+  const result = await selectNativeProjectRestore({
+    ...options,
+    review,
+    restore: saved,
+    invoke: async ({ args }) => {
+      calls.push(args[1] ?? "");
+      return args[1] === "restore-selection"
+        ? selected
+        : {
+            run: saved.run,
+            owner: saved.owner,
+            namespace: saved.namespace,
+            plan: saved.planId,
+            reviewed_plan: review.planId,
+            source_revision: null,
+          };
+    },
+  });
+  expect(calls).toEqual(["restore-selection", "source-compatibility"]);
+  expect(result).toEqual({
+    run: saved.run,
+    restoring: true,
+    flags: ["--expect-generation", selected.generation],
+  });
+  await expect(
+    selectNativeProjectRestore({
+      ...options,
+      review,
+      restore: saved,
+      invoke: async ({ args }) => {
+        if (args[1] === "restore-selection") {
+          return selected;
+        }
+        throw new Error("route change refused");
+      },
+    })
+  ).rejects.toThrow("route change refused");
+});

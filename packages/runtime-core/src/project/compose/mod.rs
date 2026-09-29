@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 mod dependency_cache;
 mod fields;
 mod graph;
-mod routing;
+pub(super) mod routing;
 mod service;
 use fields::*;
 
@@ -168,7 +168,7 @@ pub(super) fn compile(
         &mut diagnostics,
     )?;
     graph::validate(&services, &networks, profiles, &mut diagnostics);
-    Ok(PlanData {schema_version:1,kind:"compose-enrollment-review-only".into(),candidate_root:candidate.checkout.clone(),source:project.into(),namespace:String::new(),compose_file:file.into(),compose_sha256:format!("{:x}",Sha256::digest(input)),original_compose_sha256:None,active_profiles:profiles.to_vec(),services,networks,volumes,registry:None,generated_files:super::generated::parse(m.get("x-hack-generated-files"))?,
+    Ok(PlanData {schema_version:1,kind:"compose-enrollment-review-only".into(),candidate_root:candidate.checkout.clone(),source:project.into(),namespace:String::new(),compose_file:file.into(),compose_sha256:format!("{:x}",Sha256::digest(input)),original_compose_sha256:None,hostname_change_sha256:None,active_profiles:profiles.to_vec(),services,networks,volumes,registry:None,generated_files:super::generated::parse(m.get("x-hack-generated-files"))?,
         original_environment_files:std::collections::BTreeSet::new(),source_selection:SourceSelection {policy:String::new(),identity_kind:String::new(),metadata_sha256:String::new(),ignore_files:BTreeMap::new(),entries:vec![],excluded_paths:vec![],exclusion_rules:vec![]},diagnostics,enrollment_compatible:false,runtime_execution_supported:false,
         planned_effects:vec!["Create one private candidate enrollment receipt only; no project writes, source copy, VM boot, image pull, container, volume, network or port creation".into()],
         execution_gates:vec!["WU04 execution/receipt contract".into(),"WU05 source conformance and sync".into(),"WU07 network/graph/data qualification".into(),"explicit scoped environment delivery and image/build resolution".into()],

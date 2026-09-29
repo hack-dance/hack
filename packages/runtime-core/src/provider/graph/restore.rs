@@ -117,9 +117,20 @@ fn verify_fresh(
     fresh: &FreshOwnerRestore<'_>,
     generation: &str,
 ) -> Result<(), CandidateError> {
+    verify_fresh_change(receipt, plan, fresh, generation, None)
+}
+
+fn verify_fresh_change(
+    receipt: &Receipt,
+    plan: &str,
+    fresh: &FreshOwnerRestore<'_>,
+    generation: &str,
+    change: Option<&hostname_change::Verified>,
+) -> Result<(), CandidateError> {
     if !hex(fresh.generation, 64)
         || generation != fresh.generation
-        || receipt.normalized_input.as_ref() != Some(&fresh.identity)
+        || (receipt.normalized_input.as_ref() != Some(&fresh.identity)
+            && !change.is_some_and(|change| change.matches_fresh(receipt, &fresh.identity)))
         || (plan != receipt.plan_id
             && receipt
                 .source
@@ -186,13 +197,36 @@ fn restore_inputs(
         ));
     }
     let (mut receipt, root) = load(candidate, &engine, options.run_id)?;
+    let hostname_change = if let Some(fresh) = &fresh {
+        let change =
+            hostname_change::prepare(&engine, &inputs.review.plan, &receipt, &fresh.identity)?;
+        if change.is_some()
+            && (!options.shared_source
+                || options.live_source
+                || !options.non_secret_values.is_empty())
+        {
+            return Err(error(
+                "graph_hostname_change",
+                "Hostname changes require the same normalized shared-source mode without external execution substitutions.",
+            ));
+        }
+        change
+    } else {
+        None
+    };
     if let Some(fresh) = &fresh {
-        verify_fresh(
-            &receipt,
-            &inputs.review.plan_id,
-            fresh,
-            &restore_generation(&engine, &receipt)?,
-        )?;
+        let generation = restore_generation(&engine, &receipt)?;
+        if let Some(change) = &hostname_change {
+            verify_fresh_change(
+                &receipt,
+                &inputs.review.plan_id,
+                fresh,
+                &generation,
+                Some(change),
+            )?;
+        } else {
+            verify_fresh(&receipt, &inputs.review.plan_id, fresh, &generation)?;
+        }
     } else {
         normalized::require_file_replay(&receipt)?;
     }
@@ -221,30 +255,66 @@ fn restore_inputs(
         ));
     }
     super::super::source_job::check_reservations(&engine)?;
-    let source = source::prepare_replay(
-        &engine,
-        &inputs,
-        &receipt,
-        options.source_revision,
-        options.live_source,
-        options.shared_source,
-        options.non_secret_values,
-    )?;
+    let ordinary_source = if hostname_change.is_none() {
+        source::prepare_replay(
+            &engine,
+            &inputs,
+            &receipt,
+            options.source_revision,
+            options.live_source,
+            options.shared_source,
+            options.non_secret_values,
+        )?
+    } else {
+        let cached = inputs
+            .review
+            .plan
+            .services
+            .values()
+            .any(|service| service.active && service.dependency_cache.is_some());
+        if options.source_revision
+            != cached
+                .then(|| {
+                    receipt
+                        .source
+                        .as_ref()
+                        .map(|binding| binding.revision.as_str())
+                })
+                .flatten()
+        {
+            return Err(error(
+                "graph_hostname_change",
+                "Hostname change must retain the original cache source revision.",
+            ));
+        }
+        None
+    };
+    let source = hostname_change
+        .as_ref()
+        .map(|change| &change.source)
+        .or(ordinary_source.as_ref());
     let mut prepared = config::prepare_delivery(
         inputs,
         options.readiness,
         options.run_id,
         engine.guest().incarnation(),
-        source.as_ref(),
+        source,
         config::DeliveryOptions {
             environment: !environments.is_empty(),
             dependency_hosts: fresh.is_some(),
             routing_enrolled: options.routing_enrolled,
         },
     )?;
-    config::retain_replay_ownership(&mut prepared, &receipt)?;
+    if let Some(change) = &hostname_change {
+        config::retain_hostname_change_ownership(&mut prepared, &receipt, change)?;
+    } else {
+        config::retain_replay_ownership(&mut prepared, &receipt)?;
+    }
     if prepared.namespace != receipt.namespace
-        || !same_resource_bindings(&prepared.resources, &receipt.resources)
+        || !hostname_change.as_ref().map_or_else(
+            || same_resource_bindings(&prepared.resources, &receipt.resources),
+            |change| change.matches_resources(&prepared.resources, &receipt),
+        )
     {
         return Err(error(
             "graph_receipt",
@@ -328,6 +398,9 @@ fn restore_inputs(
     }
     // The complete previous attempt is retained above; current failure evidence
     // belongs only to this newly admitted generation.
+    if let Some(change) = &hostname_change {
+        change.apply(&mut receipt)?;
+    }
     receipt.startup_failure = None;
     receipt.probes = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
     receipt.phase = "restoring".into();
@@ -407,6 +480,45 @@ mod tests {
     use super::*;
     use sha2::Digest;
     use std::{path::Path, time::Instant};
+
+    #[test]
+    fn hostname_restore_requires_fresh_proof_and_exact_retained_generation() {
+        let (_fixture, receipt, proof) = hostname_change::tests::transition();
+        let mut next = receipt.clone();
+        proof.apply(&mut next).unwrap();
+        let generation = "1".repeat(64);
+        let fresh = FreshOwnerRestore {
+            identity: next.normalized_input.unwrap(),
+            generation: &generation,
+            deadline: Instant::now() + Duration::from_secs(30),
+        };
+        let reviewed = "8".repeat(64);
+        assert!(verify_fresh(&receipt, &reviewed, &fresh, &generation).is_err());
+        verify_fresh_change(&receipt, &reviewed, &fresh, &generation, Some(&proof)).unwrap();
+        // Rollback may review the original ownership plan; provenance still needs proof.
+        verify_fresh_change(
+            &receipt,
+            &receipt.plan_id,
+            &fresh,
+            &generation,
+            Some(&proof),
+        )
+        .unwrap();
+        assert!(
+            verify_fresh_change(&receipt, &reviewed, &fresh, &"2".repeat(64), Some(&proof))
+                .is_err()
+        );
+        let mut replaced = receipt.clone();
+        replaced.owner = "c".repeat(32);
+        assert!(
+            verify_fresh_change(&replaced, &reviewed, &fresh, &generation, Some(&proof)).is_err()
+        );
+        let mut altered = fresh;
+        altered.identity.normalized_compose_sha256 = "7".repeat(64);
+        assert!(
+            verify_fresh_change(&receipt, &reviewed, &altered, &generation, Some(&proof)).is_err()
+        );
+    }
 
     #[test]
     fn fresh_normalized_restore_requires_exact_plan_provenance_and_selection() {

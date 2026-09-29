@@ -80,14 +80,15 @@ pub(super) fn command(
             let selected = graph::foreground::restore_selection(candidate, options.run.run_id)?;
             if selected["generation"] != expected
                 || selected["normalized_input"]["namespace"] != report.plan.namespace
+            {
+                return Err(invalid());
+            }
+            if selected["plan"] != options.run.expected_plan
                 || selected["normalized_input"]["original_compose_sha256"]
                     != options.compose.expected_compose_sha256
                 || selected["normalized_input"]["normalized_compose_sha256"]
                     != report.plan.compose_sha256
             {
-                return Err(invalid());
-            }
-            if selected["plan"] != options.run.expected_plan {
                 graph::source_compatibility(
                     candidate,
                     options.run.run_id,

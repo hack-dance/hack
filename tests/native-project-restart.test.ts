@@ -322,6 +322,22 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
     "compatibility changed"
   );
   expect(calls).toEqual(["review"]);
+  // The native receipt, not the immutable ownership plan, records current routes.
+  await expect(
+    preflightNativeRestart({
+      ...options,
+      dependencies: {
+        ...options.dependencies,
+        review: async (reviewOptions) =>
+          await reviewOptions.run({
+            planId: run.planId,
+            namespace: run.namespace,
+            report: { plan: { hostname_change_sha256: "f".repeat(64) } },
+            projectArgs: [],
+          }),
+      },
+    })
+  ).rejects.toThrow("compatibility changed");
 });
 
 test("preflight refuses a stale host listener before restart cleanup", async () => {

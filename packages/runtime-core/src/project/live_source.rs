@@ -30,6 +30,8 @@ pub struct Contract {
     reviewed_revision: Option<String>,
     version: u32,
     execution_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hostname_execution_sha256: Option<String>,
     policy_sha256: String,
     cache_inputs_sha256: String,
     mount_roots_sha256: String,
@@ -88,6 +90,38 @@ fn selected<'a>(
         })),
         _ => Err(refused()),
     }
+}
+
+/// Pair a literal-preserving raw-input fingerprint with the complete public plan
+/// projection. Dropping Compose hashes from the ordinary redacted plan is unsafe.
+fn hostname_execution(plan: &PlanData) -> Result<Option<String>, CandidateError> {
+    let Some(raw) = &plan.hostname_change_sha256 else {
+        return Ok(None);
+    };
+    let mut services = plan.services.clone();
+    for service in services.values_mut() {
+        if let Some(route) = service.routing.as_mut() {
+            route.hostnames.clear();
+        }
+    }
+    hash(&(
+        "hack-hostname-execution-v1",
+        raw,
+        plan.schema_version,
+        &plan.kind,
+        &plan.candidate_root,
+        &plan.source,
+        &plan.namespace,
+        &plan.compose_file,
+        &plan.active_profiles,
+        services,
+        &plan.networks,
+        &plan.volumes,
+        &plan.registry,
+        &plan.generated_files,
+        &plan.original_environment_files,
+    ))
+    .map(Some)
 }
 
 impl Contract {
@@ -210,10 +244,31 @@ impl Contract {
             reviewed_revision: Some(manifest.revision.clone()),
             version: 1,
             execution_sha256,
+            hostname_execution_sha256: hostname_execution(plan)?,
             policy_sha256,
             cache_inputs_sha256: hash(&("hack-live-source-cache-inputs-v1", caches))?,
             mount_roots_sha256: hash(&("hack-live-source-mount-roots-v1", roots))?,
         })
+    }
+
+    /// Separate opt-in proof for a newly enrolled normalized hostname-only change.
+    /// The ordinary execution fingerprint remains strict, including Compose bytes.
+    pub(crate) fn verify_hostnames(
+        &self,
+        plan: &PlanData,
+        manifest: &ContentRevision,
+    ) -> Result<(), CandidateError> {
+        let fresh = Self::from_plan(plan, manifest)?;
+        if self.version != fresh.version
+            || self.hostname_execution_sha256.is_none()
+            || self.hostname_execution_sha256 != fresh.hostname_execution_sha256
+            || self.policy_sha256 != fresh.policy_sha256
+            || self.cache_inputs_sha256 != fresh.cache_inputs_sha256
+            || self.mount_roots_sha256 != fresh.mount_roots_sha256
+        {
+            return Err(refused());
+        }
+        Ok(())
     }
 
     /// Allow ordinary accepted file edits/additions/removals, never execution,
@@ -294,6 +349,115 @@ mod tests {
         .unwrap();
         (report, snapshot)
     }
+    fn normalized_capture(
+        candidate: &Candidate,
+        source: &Path,
+        value: &serde_json::Value,
+    ) -> (project::PlanReport, snapshot::Snapshot) {
+        let bytes = serde_json::to_vec(value).unwrap();
+        fs::write(source.join("compose.yaml"), &bytes).unwrap();
+        let original = format!("{:x}", Sha256::digest(&bytes));
+        let namespace = candidate.plan(source).unwrap().namespace;
+        let report = project::plan_normalized(
+            candidate,
+            project::NormalizedComposeOptions {
+                project: source,
+                compose_file: Path::new("compose.yaml"),
+                profiles: &[],
+                expected_namespace: &namespace,
+                expected_compose_sha256: &original,
+                compose_bytes: &bytes,
+            },
+        )
+        .unwrap();
+        let snapshot = snapshot::capture_plan(&report.plan).unwrap();
+        (report, snapshot)
+    }
+
+    #[test]
+    fn hostname_contract_preserves_literals_policy_cache_and_roundtrip() {
+        let (_fixture, candidate, source) = fixture();
+        let mut base =
+            super::super::yaml::parse(&fs::read(source.join("compose.yaml")).unwrap()).unwrap();
+        base["services"]["web"] = serde_json::json!({
+            "image": format!("sha256:{}", "a".repeat(64)),
+            "command": ["serve", "original-private-literal"], "environment": {"TOKEN": "private-env-literal"},
+            "volumes": [".:/app:ro"], "read_only": true,
+            "healthcheck": {"x-hack-http": {"port":3000,"path":"/health","interval_ms":100,"timeout_ms":500,"retries":3,"start_period_ms":0}},
+            "labels": {"caddy":"web.hack", "caddy.reverse_proxy":"{{upstreams 3000}}", "caddy.tls":"internal"}
+        });
+        let (initial, before) = normalized_capture(&candidate, &source, &base);
+        let contract = Contract::from_plan(&initial.plan, before.receipt()).unwrap();
+        assert!(contract.hostname_execution_sha256.is_some());
+        let mut changed = base.clone();
+        changed["services"]["web"]["labels"]["caddy"] = "web.hack, web.v5.hack.gy".into();
+        let (next, after) = normalized_capture(&candidate, &source, &changed);
+        assert!(contract.verify(&next.plan, after.receipt()).is_err());
+        contract
+            .verify_hostnames(&next.plan, after.receipt())
+            .unwrap();
+        let current = Contract::from_plan(&next.plan, after.receipt()).unwrap();
+        let (rollback, snapshot) = normalized_capture(&candidate, &source, &base);
+        current
+            .verify_hostnames(&rollback.plan, snapshot.receipt())
+            .unwrap();
+        let encoded = serde_json::to_string(&current).unwrap();
+        assert!(!encoded.contains("private") && !encoded.contains("web.hack"));
+        let mut old = serde_json::to_value(&contract).unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("hostname_execution_sha256");
+        let legacy: Contract = serde_json::from_value(old).unwrap();
+        legacy.verify(&initial.plan, before.receipt()).unwrap();
+        assert!(
+            legacy
+                .verify_hostnames(&next.plan, after.receipt())
+                .is_err()
+        );
+        for (key, value) in [
+            (
+                "command",
+                serde_json::json!(["serve", "different-private-literal"]),
+            ),
+            ("entrypoint", serde_json::json!(["/bin/other"])),
+            (
+                "environment",
+                serde_json::json!({"TOKEN":"other-private-literal"}),
+            ),
+            (
+                "image",
+                serde_json::json!(format!("sha256:{}", "b".repeat(64))),
+            ),
+            ("working_dir", serde_json::json!("/other")),
+            ("volumes", serde_json::json!([".:/different:ro"])),
+        ] {
+            let mut rejected = changed.clone();
+            rejected["services"]["web"][key] = value;
+            let (plan, snapshot) = normalized_capture(&candidate, &source, &rejected);
+            assert!(
+                contract
+                    .verify_hostnames(&plan.plan, snapshot.receipt())
+                    .is_err(),
+                "accepted {key}"
+            );
+        }
+        for (path, content) in [
+            ("bun.lock", "different lock"),
+            (".gitignore", "node_modules/\n.npmrc\nextra/\n"),
+        ] {
+            let saved = fs::read(source.join(path)).unwrap();
+            fs::write(source.join(path), content).unwrap();
+            let (plan, snapshot) = normalized_capture(&candidate, &source, &changed);
+            assert!(
+                contract
+                    .verify_hostnames(&plan.plan, snapshot.receipt())
+                    .is_err(),
+                "accepted {path}"
+            );
+            fs::write(source.join(path), saved).unwrap();
+        }
+    }
+
     #[test]
     fn content_add_remove_and_excluded_secrets_do_not_freeze_plan_identity() {
         let (_fixture, candidate, source) = fixture();

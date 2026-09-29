@@ -149,6 +149,38 @@ mod tests {
         assert!(!fixture.candidate.state_root.exists());
     }
     #[test]
+    fn identical_routed_normalized_input_preserves_file_plan_identity() {
+        let mut fixture = Fixture::new();
+        let bytes = b"services:\n  web:\n    image: alpine:3.21\n    labels: {caddy: web.hack, caddy.reverse_proxy: '{{upstreams 3000}}', caddy.tls: internal}\n";
+        fs::write(fixture.project.join(".hack/compose.yml"), bytes).unwrap();
+        fixture.hash = format!("{:x}", Sha256::digest(bytes));
+        let normal = super::super::plan(
+            &fixture.candidate,
+            PlanOptions {
+                project: &fixture.project,
+                compose_file: Path::new(".hack/compose.yml"),
+                profiles: &[],
+            },
+        )
+        .unwrap();
+        let adapted = plan_normalized(&fixture.candidate, fixture.options(bytes)).unwrap();
+        assert!(normal.plan.hostname_change_sha256.is_some());
+        assert!(normal.plan.services["web"].mounts.is_empty());
+        // Old routed image-only receipts have no shared-source compatibility
+        // binding. The new derived proof cannot change their ordinary plan ID.
+        for report in [&normal, &adapted] {
+            let mut legacy = report.plan.clone();
+            legacy.hostname_change_sha256 = None;
+            assert_eq!(super::super::identity(&legacy).unwrap(), report.plan_id);
+        }
+        assert_eq!(normal.plan_id, adapted.plan_id);
+        assert_eq!(
+            serde_json::to_value(normal.plan).unwrap(),
+            serde_json::to_value(adapted.plan).unwrap()
+        );
+    }
+
+    #[test]
     fn changed_input_changes_fingerprint_without_modifying_original() {
         let fixture = Fixture::new();
         let a = plan_normalized(&fixture.candidate, fixture.options(ORIGINAL.as_bytes())).unwrap();

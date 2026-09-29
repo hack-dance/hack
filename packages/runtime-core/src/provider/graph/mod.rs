@@ -5,6 +5,7 @@ pub use service_exec::{
     ServiceExecOptions, ServiceExecResult, service_exec, service_exec_generation,
     service_exec_with_environment,
 };
+mod hostname_change;
 mod normalized;
 #[cfg(target_os = "macos")]
 pub use normalized::run_normalized_with_host_dependencies_until;
@@ -1377,7 +1378,16 @@ pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateEr
     inspect_using(candidate, &engine, run)
 }
 
-/// Read-only proof for a reviewed normalized shared-source plan before restart cleanup.
+fn unchanged_normalized_review(
+    receipt: &Receipt,
+    plan_id: &str,
+    normalized: &NormalizedInputIdentity,
+) -> bool {
+    receipt.plan_id == plan_id && receipt.normalized_input.as_ref() == Some(normalized)
+}
+
+/// Read-only proof for an exact normalized review or a compatible shared-source
+/// transition before restart cleanup. Image-only unchanged graphs need no source.
 /// Admission repeats the compatibility check while holding the provider lease.
 pub fn source_compatibility(
     candidate: &Candidate,
@@ -1396,9 +1406,8 @@ pub fn source_compatibility(
     let (receipt, root) = load(candidate, &engine, run)?;
     if !hex(plan_id, 64)
         || project::identity(plan)? != plan_id
-        || receipt.plan_id == plan_id
+        || !normalized.matches_plan(plan)
         || receipt.namespace != plan.namespace
-        || receipt.normalized_input.as_ref() != Some(normalized)
         || !matches!(
             receipt.phase.as_str(),
             "ready-observed" | "stopped-data-retained"
@@ -1408,23 +1417,34 @@ pub fn source_compatibility(
     {
         return Err(refused());
     }
-    let revision = receipt
-        .source
-        .as_ref()
-        .map(|binding| binding.revision.as_str())
-        .ok_or_else(refused)?;
     let cached = plan
         .services
         .values()
         .any(|service| service.active && service.dependency_cache.is_some());
-    source::prepare_shared_changed(&engine, plan, &receipt, cached.then_some(revision))?;
+    let revision = receipt
+        .source
+        .as_ref()
+        .map(|binding| binding.revision.as_str());
+    let needs_source = cached
+        || plan.services.values().any(|service| {
+            service.active && service.mounts.iter().any(|mount| mount.kind == "bind")
+        });
+    if needs_source && revision.is_none() {
+        return Err(refused());
+    }
+    if !unchanged_normalized_review(&receipt, plan_id, normalized) {
+        let revision = revision.ok_or_else(refused)?;
+        if hostname_change::prepare(&engine, plan, &receipt, normalized)?.is_none() {
+            source::prepare_shared_changed(&engine, plan, &receipt, cached.then_some(revision))?;
+        }
+    }
     Ok(json!({
         "run": receipt.run,
         "owner": receipt.owner,
         "namespace": receipt.namespace,
         "plan": receipt.plan_id,
         "reviewed_plan": plan_id,
-        "source_revision": cached.then_some(revision),
+        "source_revision": if cached { revision } else { None },
     }))
 }
 fn inspect_using(

@@ -17,9 +17,27 @@ pub(super) fn retain_replay_ownership(
     prepared: &mut Prepared,
     receipt: &Receipt,
 ) -> Result<(), CandidateError> {
-    if prepared.namespace != receipt.namespace
-        || !same_resource_bindings(&prepared.resources, &receipt.resources)
-    {
+    retain_ownership(prepared, receipt, None)
+}
+
+pub(super) fn retain_hostname_change_ownership(
+    prepared: &mut Prepared,
+    receipt: &Receipt,
+    change: &hostname_change::Verified,
+) -> Result<(), CandidateError> {
+    retain_ownership(prepared, receipt, Some(change))
+}
+
+fn retain_ownership(
+    prepared: &mut Prepared,
+    receipt: &Receipt,
+    change: Option<&hostname_change::Verified>,
+) -> Result<(), CandidateError> {
+    let same = change.map_or_else(
+        || same_resource_bindings(&prepared.resources, &receipt.resources),
+        |change| change.matches_resources(&prepared.resources, receipt),
+    );
+    if prepared.namespace != receipt.namespace || !same {
         return Err(error(
             "graph_receipt",
             "Replay resources differ from their retained ownership.",

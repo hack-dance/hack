@@ -214,6 +214,24 @@ older receipts without that contract continue to refuse source-edited restart.
 Source exclusions and runtime ownership checks remain in force. Existing commands
 without normalization flags keep their file-based behavior.
 
+New normalized shared-source graphs also capture a separate hostname-change
+contract. A retaining restart can change only the literal hostnames of already
+routed services: the service set, upstream ports, TLS settings, probes, commands,
+environment declarations, images, mounts, networks and volumes must stay the same.
+Both original and normalized Compose declarations are checked; only fingerprints
+are retained. Changed dependency-cache inputs still refuse. The old ownership
+plan and named data identities remain fixed, while normalized input provenance and
+route intent advance together. Returning to the old names requires the same
+checks. Existing hostname claims are checked before cleanup and again at publication.
+Older receipts without this contract cannot be retrofitted from their redacted
+plans and continue to refuse hostname changes.
+
+`doctor --domain-migration apply` remains a file-only operation. It retains old
+aliases and does not restart the graph or activate DNS/trust. Run an explicit
+retaining restart after reviewing its changes, and separately verify the exact
+browser origin. A successful file rollback likewise requires a retaining restart
+to change running routes; it does not imply a live migration succeeded.
+
 Graph execution respects the declared container root mode: `read_only: true`
 keeps the root read-only, while false or omitted permits a writable container
 layer. Removing the owned container discards that layer; use named volumes for

@@ -9,6 +9,17 @@ import {
 } from "./native-runtime-client.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
+/** Eligible routes consult current native provenance even when reverting to the ownership plan. */
+export function nativeReviewNeedsCompatibility(opts: {
+  readonly saved: NativeProjectRun;
+  readonly review: NativeProjectReview;
+}): boolean {
+  return (
+    opts.saved.planId !== opts.review.planId ||
+    (isRecord(opts.review.report.plan) &&
+      typeof opts.review.report.plan.hostname_change_sha256 === "string")
+  );
+}
 /** Native code verifies the current review against the retained shared-source contract. */
 export async function verifyNativeSourceCompatibility(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -97,16 +108,18 @@ export async function selectNativeProjectRestore(opts: {
       "Native restore selection changed; retained data was not adopted."
     );
   }
-  const sourceRevision =
-    selected.plan !== opts.review.planId
-      ? await verifyNativeSourceCompatibility({
-          runtime: opts.runtime,
-          projectRoot: opts.projectRoot,
-          saved,
-          review: opts.review,
-          invoke: opts.invoke,
-        })
-      : null;
+  const sourceRevision = nativeReviewNeedsCompatibility({
+    saved,
+    review: opts.review,
+  })
+    ? await verifyNativeSourceCompatibility({
+        runtime: opts.runtime,
+        projectRoot: opts.projectRoot,
+        saved,
+        review: opts.review,
+        invoke: opts.invoke,
+      })
+    : null;
   return {
     run: saved.run,
     flags: ["--expect-generation", selected.generation],

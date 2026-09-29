@@ -20,6 +20,16 @@ pub struct NormalizedInputIdentity {
     pub normalized_compose_sha256: String,
 }
 impl NormalizedInputIdentity {
+    pub(super) fn matches_plan(&self, plan: &project::PlanData) -> bool {
+        self.valid(&plan.namespace)
+            && self.normalized_compose_sha256 == plan.compose_sha256
+            && &self.original_compose_sha256
+                == plan
+                    .original_compose_sha256
+                    .as_ref()
+                    .unwrap_or(&plan.compose_sha256)
+    }
+
     pub(super) fn valid(&self, namespace: &str) -> bool {
         self.namespace == namespace
             && [
@@ -149,6 +159,60 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::path::Path;
+
+    #[test]
+    fn unchanged_routed_image_only_review_needs_no_shared_source_contract() {
+        let fixture = super::super::tests::Fixture::new();
+        let project = fixture.0.join("project");
+        fs::create_dir(&project).unwrap();
+        let bytes = b"services: {web: {image: alpine, labels: {caddy: web.hack, caddy.reverse_proxy: '{{upstreams 3000}}', caddy.tls: internal}}}";
+        fs::write(project.join("compose.yaml"), bytes).unwrap();
+        let candidate = Candidate::discover(&fixture.0).unwrap();
+        let namespace = candidate.plan(&project).unwrap().namespace;
+        let original = format!("{:x}", Sha256::digest(bytes));
+        let report = project::plan_normalized(
+            &candidate,
+            project::NormalizedComposeOptions {
+                project: &project,
+                compose_file: Path::new("compose.yaml"),
+                profiles: &[],
+                expected_namespace: &namespace,
+                expected_compose_sha256: &original,
+                compose_bytes: bytes,
+            },
+        )
+        .unwrap();
+        let identity = NormalizedInputIdentity {
+            namespace: namespace.clone(),
+            original_compose_sha256: original.clone(),
+            normalized_compose_sha256: original,
+        };
+        let receipt:Receipt = serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":namespace,"plan_id":report.plan_id,"phase":"stopped-data-retained","readiness":{},"resources":{},"normalized_input":identity})).unwrap();
+        assert!(receipt.source.is_none());
+        assert!(identity.matches_plan(&report.plan));
+        assert!(super::super::unchanged_normalized_review(
+            &receipt,
+            &report.plan_id,
+            &identity
+        ));
+        let mut legacy = report.plan.clone();
+        legacy.hostname_change_sha256 = None;
+        assert_eq!(project::identity(&legacy).unwrap(), report.plan_id);
+        let mut changed = identity.clone();
+        changed.normalized_compose_sha256 = "9".repeat(64);
+        assert!(!changed.matches_plan(&report.plan));
+        // Ownership plan equality cannot excuse a changed current provenance.
+        assert!(!super::super::unchanged_normalized_review(
+            &receipt,
+            &report.plan_id,
+            &changed
+        ));
+        assert!(!super::super::unchanged_normalized_review(
+            &receipt,
+            &"8".repeat(64),
+            &identity
+        ));
+    }
 
     #[test]
     fn normalized_receipt_cannot_be_replayed_as_original() {

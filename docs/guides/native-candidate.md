@@ -917,11 +917,21 @@ After completion, retained restore can create a fresh owner;
 idempotent compatibility operation. Interrupted cleanup retains its journal for an
 explicit retry with the original receipt hash. A pool boot
 change, replaced process or socket evidence, or ambiguous ownership refuses recovery.
-The separate previous-boot operation below preserves its existing requirements.
-This retaining path does not yet accept a graph with historical previous-boot
-recovery evidence. Its completion proof also does not authorize direct data removal:
-restore the graph and use ordinary cleanup for that operation. Routed-publication
-crash recovery requires separate native qualification.
+The separate previous-boot operation below preserves its existing ownership
+requirements.
+A graph with completed host-dependency startup and no inbound routes can also use
+its exact dead relay publication as the previous-boot proof; an empty bridge
+registry alone never grants cleanup authority.
+A completed previous-boot recovery may remain as historical evidence after restore.
+Its exact stopped receipt must still be in the bounded restore history, and the
+current graph must have a different recorded container generation. Incomplete,
+foreign, one-off, altered or no-longer-verifiable records refuse without modifying
+them. The historical proof never authorizes cleanup of current resources; current
+owner, boot, process and resource checks remain required, including on retries.
+The same-boot completion proof does not authorize direct data removal: restore the
+graph and use ordinary cleanup for that operation. Native routed recovery has been
+qualified with repeated owner crashes, retained data and an unaffected sibling's
+HTTPS route; this does not establish normal source-mounted worktree parity.
 
 `graph recover-cleanup --run-id <run> --expect-receipt <sha256>` is a retaining,
 explicit two-step recovery for a failed enrolled graph. Select the SHA256 of its
@@ -943,9 +953,9 @@ previous-boot evidence. Old guest helper absence follows the verified boot trans
 it is not recorded as a live helper acknowledgement.
 
 Recovery retains its own durable intent and completion evidence. It does not forge
-a relay acknowledgement or permit ordinary restore of the old enrolled graph;
-start a fresh graph in the same pool after cleanup. Missing or replaced foreground
-evidence, pending graph journals, unfinished explicit page-cache release, changed
+a relay acknowledgement. A normalized graph can explicitly retire its recovered
+publisher and select a fresh foreground restore using the retained data. Missing
+or replaced foreground evidence, pending graph journals, unfinished explicit page-cache release, changed
 inventories, another boot rollover, and unsupported prior cleanup enrollment
 refuse. Preserve these files and use the reported reconciliation path rather than
 editing receipts. Receipt-only export/prune still requires its existing relay
@@ -957,8 +967,10 @@ After recovery completes, explicitly remove that graph's retained data with:
 ./hack-native --candidate-root /absolute/private/candidate-home graph cleanup --run-id RUN_ID --remove-data --json
 ```
 
-This separate destructive request requires the retained dead-owner identity and
-completed recovery evidence on the same boot. It journals the selected volumes
+Run this direct removal before `graph retire-recovered-publisher`: it requires the
+retained dead-owner identity and completed recovery evidence on the same boot.
+If the publisher is already retired, restore a fresh foreground owner first, then
+use ordinary cleanup with `--remove-data`. It journals the selected volumes
 before removal and refuses changed ownership or replaced volumes. An interrupted
 removal can resume against its recorded inventory; it does not authorize removal of
 another graph's volumes. Recovery alone continues to preserve data. Keep the

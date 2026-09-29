@@ -60,9 +60,10 @@ pub(super) const PINNED: [PinnedTemplate; 2] = [
 
 const DOMAIN: &[u8] = b"hack.disk-template.content.v1\0";
 const BLOCK: u64 = 4096;
-/// Bound on bytes read while hashing. A SmolVM expansion of the pinned templates allocates
-/// roughly 20 MiB per file; a file whose allocated extents exceed this is refused rather
-/// than read, so a dense or foreign file cannot make verification unbounded.
+/// Read budget for hashing. A SmolVM expansion of the pinned templates allocates roughly
+/// 20 MiB per file. Hashing reads at most this many bytes; a file with more allocated data is
+/// refused once verification stops at its read budget, so a dense or foreign file cannot
+/// make verification unbounded.
 const MAX_ALLOCATED_READ: u64 = 256 * 1024 * 1024;
 /// Remedy once SmolVM has already created a machine from the refused template. The caller
 /// leaves the create phase unfinished, as for a failed create, so nothing is adopted.
@@ -155,7 +156,7 @@ fn verify_with(
             Some(_) => return Err(refuse("content differs from the pinned SmolVM template")),
             None => {
                 return Err(refuse(
-                    "has more allocated data than a SmolVM expansion; it was not read",
+                    "has more allocated data than a SmolVM expansion; verification stopped at its read budget",
                 ));
             }
         }
@@ -167,8 +168,9 @@ fn verify_with(
 /// `SHA-256(DOMAIN || u64le(BLOCK) || u64le(len) || for each BLOCK-sized block containing a
 /// non-zero byte: u64le(index) || block bytes)`; the final block may be shorter than BLOCK.
 ///
-/// Only data extents are read (`SEEK_DATA`/`SEEK_HOLE`), because holes read as zero. Returns
-/// `None` once more than `max_read` bytes would be read.
+/// Only data extents are read (`SEEK_DATA`/`SEEK_HOLE`), because holes read as zero. At most
+/// `max_read` bytes are read: returns `None` when the next block would exceed that budget,
+/// that is, when verification stopped at its read budget.
 fn content_digest(file: &File, len: u64, max_read: u64) -> Result<Option<String>, CandidateError> {
     let mut hasher = Sha256::new();
     hasher.update(DOMAIN);
@@ -415,8 +417,8 @@ mod tests {
     fn shape_and_ownership_refusals_happen_before_hashing() {
         let content = content_with(&[(0, b"ext4")]);
         let pinned = [pinned_for("storage-template.ext4", &content)];
-        // A zero read bound would refuse any hashed file with the allocation message, so
-        // each expected message proves the refusal came before hashing.
+        // A zero read budget stops hashing before its first block with the read-budget
+        // message, so each expected message proves the refusal came before hashing.
         let cases: [(&str, Setup); 4] = [
             ("is not a regular file", |f| {
                 let target = f.sparse("elsewhere", LEN, &[(0, b"ext4")]);
@@ -469,14 +471,14 @@ mod tests {
     }
 
     #[test]
-    fn allocated_data_beyond_the_bound_is_refused_without_reading_it() {
+    fn verification_stops_at_its_read_budget() {
         let fixture = Fixture::new("bound");
         let content = content_with(&[(0, &[1u8; 64 * 1024])]);
         let pinned = [pinned_for("storage-template.ext4", &content)];
         fixture.sparse("storage-template.ext4", LEN, &[(0, &[1u8; 64 * 1024])]);
         let error = verify_with(&fixture.0, Stage::BeforeCreate, &pinned, 32 * 1024).unwrap_err();
         assert!(
-            error.message.contains("more allocated data"),
+            error.message.contains("stopped at its read budget"),
             "{}",
             error.message
         );

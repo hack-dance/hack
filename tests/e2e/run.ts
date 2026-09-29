@@ -8,6 +8,7 @@ import { dependencyCachePackageScenario } from "./scenarios/dependency-cache-pac
 import { dependencyCacheProtocolScenario } from "./scenarios/dependency-cache-protocol.ts";
 import { doctorScenario } from "./scenarios/doctor.ts";
 import { domainMigrationScenario } from "./scenarios/domain-migration.ts";
+import { domainMigrationFilesScenario } from "./scenarios/domain-migration-files.ts";
 import { envSecretsScenario } from "./scenarios/env-secrets.ts";
 import { initScenario } from "./scenarios/init.ts";
 import { lifecycleHostProcessScenario } from "./scenarios/lifecycle-host-process.ts";
@@ -45,6 +46,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   worktreeBranchDefaultScenario,
   agentDocsSyncScenario,
   doctorScenario,
+  domainMigrationFilesScenario,
   lifecycleSessionRecoveryScenario,
   cachePruneScenario,
   dependencyCacheScenario,

@@ -49,6 +49,12 @@ platform identity, not cross-architecture package compatibility.
 
 ## Domain migration routing qualification
 
+The local `domain-migration-files` scenario checks the real CLI with both default
+and native backend selections. It verifies preview, old/new alias coexistence,
+refusal to overwrite a later edit, and exact-byte rollback. Runtime tripwires
+fail the scenario if Docker or the selected native binary is invoked. This
+offline check does not prove running routes, retained volumes, DNS or TLS.
+
 The `domain-migration` scenario belongs to the separate `host-ingress` tier and is
 excluded from the default local/Docker suite. Select it explicitly with
 `--only=domain-migration`; missing prerequisites then fail the run rather than skip.

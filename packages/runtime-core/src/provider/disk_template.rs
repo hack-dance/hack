@@ -36,11 +36,13 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
-/// An expanded template as SmolVM produces it from the pinned archive's `<name>.zst`.
-pub(super) struct PinnedTemplate {
-    pub name: &'static str,
+/// Expected content of one expanded template: the SmolVM pins below, or a verified
+/// prepared-base receipt (`prepared_base`).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Template<'a> {
+    pub name: &'a str,
     pub logical_len: u64,
-    pub content_sha256: &'static str,
+    pub content_sha256: &'a str,
 }
 
 /// Expanded templates of SmolVM 1.14.3 (`ARCHIVE_SHA256` d0c962a0…).
@@ -51,13 +53,13 @@ pub(super) struct PinnedTemplate {
 /// same inputs produces the same values (`pinned_expansion_matches`, run manually).
 /// Re-derive these values whenever the SmolVM archive pin changes;
 /// `pinned_templates_track_the_smolvm_archive_pin` fails until then.
-pub(super) const PINNED: [PinnedTemplate; 2] = [
-    PinnedTemplate {
+pub(super) const PINNED: [Template<'static>; 2] = [
+    Template {
         name: "storage-template.ext4",
         logical_len: 21_474_836_480,
         content_sha256: "9be5724c9955fda1fbb79518e53de4841ace72424f57f5fc02be1375ab03ca6e",
     },
-    PinnedTemplate {
+    Template {
         name: "overlay-template.ext4",
         logical_len: 10_737_418_240,
         content_sha256: "4ba471578185f5ccb967647416b613dcee6fc409fdef2f8b1bea8fbb18e3b37e",
@@ -95,27 +97,10 @@ pub(super) fn verify_expanded(dir: &Path, stage: Stage) -> Result<(), CandidateE
 fn verify_with(
     dir: &Path,
     stage: Stage,
-    pinned: &[PinnedTemplate],
+    expected: &[Template<'_>],
     max_read: u64,
 ) -> Result<(), CandidateError> {
-    for template in pinned {
-        let path = dir.join(template.name);
-        let before = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if stage == Stage::AfterFirstStart {
-                    return Err(CandidateError::new(
-                        "disk_template_untrusted",
-                        format!(
-                            "Expanded disk template {} is missing after the first start; SmolVM did not clone a verifiable template. {AFTER_FIRST_START}",
-                            template.name
-                        ),
-                    ));
-                }
-                continue;
-            }
-            Err(error) => return Err(io(error)),
-        };
+    for template in expected {
         let refuse = |reason: &str| {
             let remedy = match stage {
                 Stage::BeforeUse => {
@@ -131,43 +116,87 @@ fn verify_with(
                 ),
             )
         };
-        // SAFETY: geteuid has no preconditions and cannot fail.
-        let euid = unsafe { libc::geteuid() };
-        if !before.file_type().is_file() {
-            return Err(refuse("is not a regular file"));
-        }
-        if before.nlink() != 1 {
-            return Err(refuse("is hard-linked"));
-        }
-        if before.uid() != euid {
-            return Err(refuse("is not owned by the candidate user"));
-        }
-        if before.mode() & 0o022 != 0 {
-            return Err(refuse("is group- or world-writable"));
-        }
-        if before.len() != template.logical_len {
-            return Err(refuse("has an unexpected size"));
-        }
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)
-            .map_err(io)?;
-        let opened = file.metadata().map_err(io)?;
-        if opened.dev() != before.dev() || opened.ino() != before.ino() {
-            return Err(refuse("changed while it was being verified"));
-        }
-        match content_digest(&file, template.logical_len, max_read)? {
-            Some(digest) if digest == template.content_sha256 => {}
-            Some(_) => return Err(refuse("content differs from the pinned SmolVM template")),
-            None => {
+        match check_file(&dir.join(template.name), template, max_read)? {
+            Check::Verified => {}
+            Check::Missing if stage == Stage::BeforeUse => {}
+            Check::Missing => {
                 return Err(refuse(
-                    "has more allocated data than a SmolVM expansion; verification stopped at its read budget",
+                    "is missing after the first start; SmolVM did not clone a verifiable template",
                 ));
             }
+            Check::Refused(reason) => return Err(refuse(reason)),
         }
     }
     Ok(())
+}
+
+/// Outcome of [`check_file`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Check {
+    Missing,
+    Verified,
+    /// The file exists but is not the expected template; the reason completes a sentence.
+    Refused(&'static str),
+}
+
+/// Check one file against `expected`: ownership and shape first (not integrity), then the
+/// content digest, reading at most `max_read` bytes. Never changes the file.
+pub(super) fn check_file(
+    path: &Path,
+    expected: &Template<'_>,
+    max_read: u64,
+) -> Result<Check, CandidateError> {
+    let before = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Check::Missing),
+        Err(error) => return Err(io(error)),
+    };
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    let refused = if !before.file_type().is_file() {
+        Some("is not a regular file")
+    } else if before.nlink() != 1 {
+        Some("is hard-linked")
+    } else if before.uid() != euid {
+        Some("is not owned by the candidate user")
+    } else if before.mode() & 0o022 != 0 {
+        Some("is group- or world-writable")
+    } else if before.len() != expected.logical_len {
+        Some("has an unexpected size")
+    } else {
+        None
+    };
+    if let Some(reason) = refused {
+        return Ok(Check::Refused(reason));
+    }
+    // Nonblocking, so a FIFO swapped in after the lstat cannot stall the open; the identity
+    // comparison below then refuses it.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(io)?;
+    let opened = file.metadata().map_err(io)?;
+    if opened.dev() != before.dev() || opened.ino() != before.ino() {
+        return Ok(Check::Refused("changed while it was being verified"));
+    }
+    Ok(
+        match content_digest(&file, expected.logical_len, max_read)? {
+            Some(digest) if digest.sha256 == expected.content_sha256 => Check::Verified,
+            Some(_) => Check::Refused("content differs from its pinned digest"),
+            None => Check::Refused(
+                "has more allocated data than expected; verification stopped at its read budget",
+            ),
+        },
+    )
+}
+
+/// A content digest and the bytes read to compute it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ContentDigest {
+    pub sha256: String,
+    /// Data-extent bytes read; a later check of a clone reads the same amount.
+    pub read: u64,
 }
 
 /// Content digest of the first `len` bytes of `file`:
@@ -177,7 +206,11 @@ fn verify_with(
 /// Only data extents are read (`SEEK_DATA`/`SEEK_HOLE`), because holes read as zero. At most
 /// `max_read` bytes are read: returns `None` when the next block would exceed that budget,
 /// that is, when verification stopped at its read budget.
-fn content_digest(file: &File, len: u64, max_read: u64) -> Result<Option<String>, CandidateError> {
+pub(super) fn content_digest(
+    file: &File,
+    len: u64,
+    max_read: u64,
+) -> Result<Option<ContentDigest>, CandidateError> {
     let mut hasher = Sha256::new();
     hasher.update(DOMAIN);
     hasher.update(BLOCK.to_le_bytes());
@@ -209,7 +242,10 @@ fn content_digest(file: &File, len: u64, max_read: u64) -> Result<Option<String>
         next_block = last + 1;
         offset = next_block.saturating_mul(BLOCK);
     }
-    Ok(Some(format!("{:x}", hasher.finalize())))
+    Ok(Some(ContentDigest {
+        sha256: format!("{:x}", hasher.finalize()),
+        read,
+    }))
 }
 
 /// The next data extent at or after `offset`, clamped to `len`, or `None` when only holes
@@ -307,11 +343,14 @@ mod tests {
     fn digest_of(path: &Path) -> String {
         let file = File::open(path).unwrap();
         let len = file.metadata().unwrap().len();
-        content_digest(&file, len, u64::MAX).unwrap().unwrap()
+        content_digest(&file, len, u64::MAX)
+            .unwrap()
+            .unwrap()
+            .sha256
     }
 
-    fn pinned_for(name: &'static str, content: &[u8]) -> PinnedTemplate {
-        PinnedTemplate {
+    fn pinned_for(name: &'static str, content: &[u8]) -> Template<'static> {
+        Template {
             name,
             logical_len: content.len() as u64,
             content_sha256: Box::leak(reference(content).into_boxed_str()),

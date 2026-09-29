@@ -37,7 +37,6 @@ pub fn check_private_directory(path: &Path) -> Result<(), CandidateError> {
 pub struct Lock(File);
 impl Lock {
     /// Identity of the retained descriptor, for callers fencing pathname replacement.
-    #[cfg(target_os = "macos")]
     pub(crate) fn identity(&self) -> Result<(u64, u64), CandidateError> {
         let metadata = self.0.metadata().map_err(io)?;
         Ok((metadata.dev(), metadata.ino()))

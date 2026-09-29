@@ -70,9 +70,11 @@ report their existing refusal rather than falling back to Docker.
 
 Native `up` and `restart` currently refuse branch instances, including an explicit
 `--branch` and the automatic branch selected in a linked Git worktree. They refuse
-before lifecycle hooks, registry writes or native runtime changes. Concurrent
-ownership of the shared HTTPS listener and pool-wide dependency slot
-allocation are not implemented; pool capacity also remains fixed at creation.
+before lifecycle hooks, registry writes or native runtime changes. A detached helper
+now owns shared HTTPS through graph-specific leases, retaining each lease until
+independent graph and publication cleanup is verified. This does not lift the branch
+startup restriction: pool-wide dependency slot allocation, source-mount compatibility
+and live coexistence qualification remain open; pool capacity is fixed at creation.
 A separate run mapping alone does not provide
 branch routing. Use the Compose
 backend for branch instances. Setting `worktree.auto_branch=false` selects a base

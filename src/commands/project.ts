@@ -24,6 +24,7 @@ import {
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
+import { parseNativePreparedBase } from "../backends/native-prepared-base.ts";
 import {
   nativeDownEnvironment,
   nativeProjectDown,
@@ -5948,6 +5949,7 @@ async function handleNativeUp({
     dependencyFile: process.env.HACK_NATIVE_DEPENDENCIES,
     adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
     allowedHosts: parseNativeAllowedHosts(process.env.HACK_NATIVE_ALLOW_HOSTS),
+    preparedBase: parseNativePreparedBase(process.env),
     https: parseNativeHttpsSelection(process.env),
     aws: process.env.HACK_NATIVE_AWS_PROFILE
       ? {

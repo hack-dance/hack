@@ -1,3 +1,5 @@
+mod interrupted;
+mod prepared_boot;
 #[cfg(any(target_os = "macos", test))]
 mod private_child;
 mod relay_process;
@@ -6,6 +8,10 @@ use super::{
     state::{self, Owner, io},
 };
 use crate::{Candidate, CandidateError, reject_aliased_state};
+pub use prepared_boot::{
+    Built as PreparedBaseBuilt, build_prepared_base, prepared_base_status, remove_prepared_base,
+    verify_prepared_base,
+};
 #[cfg(target_os = "macos")]
 pub(super) use private_child::{RelayChild, RelayLaunch};
 pub(super) use relay_process::RelayProcess;
@@ -39,6 +45,9 @@ pub struct RuntimeStatus {
     pub engine_socket: Option<String>,
     pub persistent_disks_identified: bool,
     pub guest_boot_id: Option<String>,
+    /// Prepared-base selection and activation, for pools that requested one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepared_base: Option<super::prepared_start::Status>,
 }
 fn root(candidate: &Candidate) -> std::path::PathBuf {
     candidate.state_root.join("run/smolvm")
@@ -656,6 +665,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             engine_socket: None,
             persistent_disks_identified: false,
             guest_boot_id: None,
+            prepared_base: None,
         });
     }
     let owner = Owner::load(candidate)?;
@@ -711,6 +721,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         )),
         persistent_disks_identified: owner.storage.is_some(),
         guest_boot_id: owner.guest_boot_id,
+        prepared_base: super::prepared_start::status(candidate),
     })
 }
 
@@ -897,6 +908,52 @@ fn up_selected(
     project_share: Option<super::ProjectShareIntent>,
     retained: Option<(&str, &str)>,
 ) -> Result<RuntimeStatus, CandidateError> {
+    start_pool(
+        candidate,
+        profile,
+        bridge_request,
+        network,
+        dependency_request,
+        project_share,
+        super::prepared_start::Start {
+            retained,
+            prepared: None,
+        },
+    )
+}
+
+/// Start with a prepared-base request for a fresh pool. Existing wrappers pass none and keep
+/// the stock templates; `prepared_start` documents fallback and refusal.
+pub fn up_with_prepared_base(
+    candidate: &Candidate,
+    profile: super::Profile,
+    sockets: super::SocketRequests,
+    network: Option<super::NetworkIntent>,
+    project_share: Option<super::ProjectShareIntent>,
+    start: super::prepared_start::Start<'_>,
+) -> Result<RuntimeStatus, CandidateError> {
+    let (bridges, dependencies) = sockets.resolve()?;
+    start_pool(
+        candidate,
+        profile,
+        bridges,
+        network,
+        dependencies,
+        project_share,
+        start,
+    )
+}
+
+fn start_pool(
+    candidate: &Candidate,
+    profile: super::Profile,
+    bridge_request: super::bridge::Request,
+    network: Option<super::NetworkIntent>,
+    dependency_request: super::dependency_socket::Request,
+    project_share: Option<super::ProjectShareIntent>,
+    start: super::prepared_start::Start<'_>,
+) -> Result<RuntimeStatus, CandidateError> {
+    let retained = start.retained;
     #[cfg(target_os = "macos")]
     let retained_guard = retained
         .map(|(run, selection)| {
@@ -982,7 +1039,7 @@ fn up_selected(
     artifact::verify(candidate)?;
     artifact::verify_engine(candidate)?;
     super::network_tools::verify(candidate)?;
-    let _lock = state::Lock::acquire(&root(candidate))?;
+    let lock = state::Lock::acquire(&root(candidate))?;
     #[cfg(target_os = "macos")]
     if let Some(guard) = &retained_guard {
         guard.verify(candidate)?;
@@ -1075,11 +1132,11 @@ fn up_selected(
     }
     prepare_rootfs(candidate, &mut owner)?;
     if !owner.created {
-        // SmolVM clones the expanded templates in this directory into the new disks at the
-        // machine's first start. Refuse a template it would reuse before the phase records a
-        // create attempt; `verify_templates` checks again around that start.
-        let templates = root(candidate).join("home/.smolvm");
-        super::disk_template::verify_expanded(&templates, super::disk_template::Stage::BeforeUse)?;
+        // SmolVM clones the expanded templates in `home/.smolvm` into the new disks at the
+        // machine's first start. Choose them (stock, or an activated prepared base) and verify
+        // them before the phase records a create attempt; `verify_templates` checks again
+        // around that start.
+        super::prepared_start::before_create(candidate, &owner, &lock, start.prepared)?;
         phase(candidate, &mut owner, "creating")?;
         let mount = format!(
             "{}:/opt/hack-engine:ro",
@@ -1157,8 +1214,12 @@ fn up_selected(
         phase(candidate, &mut owner, "stopped-before-engine")?;
         return Err(error);
     }
-    if let Err(error) = verify_templates(candidate, &owner, super::disk_template::Stage::BeforeUse)
-    {
+    if let Err(error) = verify_templates(
+        candidate,
+        &owner,
+        &lock,
+        super::disk_template::Stage::BeforeUse,
+    ) {
         phase(candidate, &mut owner, "stopped-before-engine")?;
         return Err(error);
     }
@@ -1168,6 +1229,10 @@ fn up_selected(
     }
     let previous_boot = owner.begin_boot();
     owner.reclamation = Some(boot_reclamation_policy());
+    // The previous provider was proven dead above. Until this start records its own provider,
+    // the receipt names none, so recovery identifies it (`interrupted`) instead of trusting the
+    // old identity.
+    owner.process = None;
     phase(candidate, &mut owner, "booting")?;
     invoke(
         candidate,
@@ -1183,7 +1248,7 @@ fn up_selected(
     )?;
     owner.process = Some(observed);
     owner.save(candidate)?;
-    let result = finish_boot(candidate, &mut owner, previous_boot.as_deref());
+    let result = finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock);
     if let Err(error) = &result {
         // Disk rejection must not keep an allocation alive. Process authority is
         // independent of disk adoption; this is an unclean stop, never reconciliation.
@@ -1231,16 +1296,16 @@ fn stop_failed_boot(
 /// (`prepare_for_launch`); `machine create` makes no disks, so nothing is expanded until then.
 /// Until the pool adopts its disk identities, a start may clone templates: verify the ones it
 /// would reuse before the start, and the ones it cloned after it, before adoption. Adopted disks
-/// are not formatted again, and a replaced disk is refused by its pinned identity.
+/// are not formatted again, and a replaced disk is refused by its pinned identity. A pool bound
+/// to a prepared base verifies its activated templates against the base receipt instead of
+/// the stock pins (`prepared_start::verify`).
 fn verify_templates(
     candidate: &Candidate,
     owner: &Owner,
+    lock: &state::Lock,
     stage: super::disk_template::Stage,
 ) -> Result<(), CandidateError> {
-    if owner.storage.is_some() && owner.overlay.is_some() {
-        return Ok(());
-    }
-    super::disk_template::verify_expanded(&root(candidate).join("home/.smolvm"), stage)
+    super::prepared_start::verify(candidate, owner, lock, stage)
 }
 
 fn verify_disk_allocation(
@@ -1263,11 +1328,13 @@ fn finish_boot(
     candidate: &Candidate,
     owner: &mut Owner,
     previous_boot: Option<&str>,
+    lock: &state::Lock,
 ) -> Result<RuntimeStatus, CandidateError> {
     // Before any disk is adopted: a refusal here takes the caller's failed-boot path.
     verify_templates(
         candidate,
         owner,
+        lock,
         super::disk_template::Stage::AfterFirstStart,
     )?;
     audit_boot(candidate, owner)?;
@@ -1295,6 +1362,7 @@ fn finish_boot(
     owner.storage = Some(storage);
     owner.overlay = Some(overlay);
     owner.save(candidate)?;
+    super::prepared_start::after_adoption(candidate, owner, lock);
     agent::ping(&socket(candidate, owner, "agent.sock")?)?;
     phase(candidate, owner, "provisioning")?;
     let boot = guest(
@@ -1339,7 +1407,8 @@ fn finish_boot(
             ));
         }
     }
-    super::network_tools::provision(candidate, &owner.token, &mut |script, args, input| {
+    let tools_owner = super::prepared_start::network_tools_owner(candidate, owner, lock)?;
+    super::network_tools::provision(candidate, &tools_owner, &mut |script, args, input| {
         verify_live(candidate, owner)?;
         let guarded = format!(
             "set -eu\ntest \"$(cat /proc/sys/kernel/random/boot_id)\" = \"$1\"\ntest \"$(cat /storage/.hack-local-owner)\" = \"$2\"\nshift 2\n{script}"
@@ -1598,8 +1667,10 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         "recovered-unclean",
     ]
     .contains(&owner.phase.as_str())
-        && initial.process_alive == Some(false)
+        && initial.process_alive != Some(true)
     {
+        // These phases are written only before a start or after proven absence; no recorded
+        // provider (`None`) is as stopped as a dead one.
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
@@ -1727,6 +1798,20 @@ fn finish_stopped(
             "Provider process absence is not established.",
         ));
     }
+    finish_absent(candidate, owner, value, true)
+}
+
+/// Record `value` once the provider's VM lock is free, no handle remains on the owned disks and
+/// no owned socket accepts connections. The caller has established that no provider process
+/// remains; this proves the machine it launched released everything before the receipt changes.
+/// With `record_disks`, unadopted disks are identified now; without it they stay unadopted, so
+/// the next boot's size, format-marker and template checks decide whether to adopt them.
+fn finish_absent(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    value: &str,
+    record_disks: bool,
+) -> Result<(), CandidateError> {
     let directory = owner.real_data_dir(candidate)?;
     let vm_lock = OpenOptions::new()
         .read(true)
@@ -1762,12 +1847,12 @@ fn finish_stopped(
         ));
     }
     verify_disks(candidate, owner)?;
-    if owner.storage.is_none() {
+    if record_disks && owner.storage.is_none() {
         owner.storage = Some(identity::disk(
             &owner.real_data_dir(candidate)?.join("storage.raw"),
         )?);
     }
-    if owner.overlay.is_none() {
+    if record_disks && owner.overlay.is_none() {
         owner.overlay = Some(identity::disk(
             &owner.real_data_dir(candidate)?.join("overlay.raw"),
         )?);
@@ -1815,9 +1900,13 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     if initial.phase == "uninitialized" {
         return Ok(initial);
     }
-    let _lock = state::Lock::acquire(&root(candidate))?;
+    let lock = state::Lock::acquire(&root(candidate))?;
     let mut owner = Owner::load(candidate)?;
-    let process = owner.process.as_ref().ok_or_else(|| CandidateError::new("recovery_required","No retained process identity; manual inspection required. No state adopted or removed."))?;
+    let Some(process) = owner.process.as_ref() else {
+        // A start interrupted before the provider identity was recorded; see `interrupted`.
+        interrupted::recover(candidate, &mut owner, &lock)?;
+        return status(candidate);
+    };
     if identity::alive(process.pid)? {
         return Err(CandidateError::new(
             "recovery_required",
@@ -2366,6 +2455,44 @@ printf 'verified-cache\n'
     }
 
     #[test]
+    fn a_prepared_start_refuses_ambiguous_capacity_before_any_pool_state() {
+        let checkout = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-prepared-sockets-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&checkout).unwrap();
+        let candidate = Candidate::discover(&checkout).unwrap();
+        let one = super::super::BridgeIntent::new(1).unwrap();
+        let request = super::super::prepared_start::Request {
+            mode: super::super::prepared_start::Mode::Require,
+            store: checkout.join("store"),
+        };
+        let error = up_with_prepared_base(
+            &candidate,
+            super::super::Profile::Development,
+            super::super::SocketRequests {
+                bridges: Some(one),
+                minimum_bridges: Some(one),
+                ..Default::default()
+            },
+            None,
+            None,
+            super::super::prepared_start::Start {
+                retained: None,
+                prepared: Some(&request),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_arguments");
+        assert!(!root(&candidate).exists());
+        fs::remove_dir_all(&checkout).unwrap();
+    }
+
+    #[test]
     fn templates_are_verified_around_the_first_start_not_after_create() {
         // The state a live fresh pool reached after `machine create`: pinned SmolVM makes no
         // disks and expands nothing until the first start, so only the compressed templates
@@ -2401,10 +2528,12 @@ printf 'verified-cache\n'
             .unwrap()
         };
         let fresh = owner(false);
+        let lock = state::Lock::acquire(&root(&candidate)).unwrap();
         // Before the first start: nothing to reuse yet, so the start may proceed.
         verify_templates(
             &candidate,
             &fresh,
+            &lock,
             super::super::disk_template::Stage::BeforeUse,
         )
         .unwrap();
@@ -2413,6 +2542,7 @@ printf 'verified-cache\n'
         let error = verify_templates(
             &candidate,
             &fresh,
+            &lock,
             super::super::disk_template::Stage::AfterFirstStart,
         )
         .unwrap_err();
@@ -2428,7 +2558,7 @@ printf 'verified-cache\n'
             super::super::disk_template::Stage::BeforeUse,
             super::super::disk_template::Stage::AfterFirstStart,
         ] {
-            verify_templates(&candidate, &adopted, stage).unwrap();
+            verify_templates(&candidate, &adopted, &lock, stage).unwrap();
         }
         fs::remove_dir_all(&checkout).unwrap();
     }

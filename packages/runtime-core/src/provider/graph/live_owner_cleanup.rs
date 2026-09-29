@@ -39,7 +39,7 @@ fn exists(path: &Path) -> Result<bool, CandidateError> {
         Err(e) => Err(state::io(e)),
     }
 }
-fn no_pending(root: &Path) -> Result<(), CandidateError> {
+fn no_pending(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
     for name in [
         "state.pending",
         "one-off.json",
@@ -47,7 +47,6 @@ fn no_pending(root: &Path) -> Result<(), CandidateError> {
         "one-off-normalization.json",
         "dependency-rebind.json",
         "dependency-rebind.pending",
-        "dead-owner-cleanup.json",
         "dead-owner-cleanup.pending",
         "relay-cleanup-bridges.pending",
     ] {
@@ -55,7 +54,7 @@ fn no_pending(root: &Path) -> Result<(), CandidateError> {
             return Err(refused());
         }
     }
-    Ok(())
+    dead_owner_cleanup::require_historical_recovery(root, receipt)
 }
 fn ready(receipt: &Receipt) -> Result<(), CandidateError> {
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
@@ -246,7 +245,7 @@ pub fn recover_live_owner(
     }
     let engine = Engine::connect_cleanup_wait(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
-    no_pending(&root)?;
+    no_pending(&root, &receipt)?;
     if exists(&root.join(FILE))? {
         let intent: Intent = state::read(&root.join(FILE))?;
         if intent.original_sha256 == expected && intent.complete_sha256.is_some() {
@@ -438,7 +437,7 @@ pub(super) fn retire(
     if !exists(&root.join(FILE))? {
         return Ok(None);
     }
-    no_pending(&root)?;
+    no_pending(&root, &receipt)?;
     if receipt.owner != expected_owner || !retained(&root, &receipt)? {
         return Err(refused());
     }
@@ -481,7 +480,7 @@ mod tests {
     #[test]
     fn ambiguous_mutations_are_preserved_without_effect() {
         let fixture = super::super::tests::Fixture::new();
-        no_pending(&fixture.0).unwrap();
+        no_pending(&fixture.0, &receipt()).unwrap();
         for name in [
             "state.pending",
             "one-off.json",
@@ -489,11 +488,10 @@ mod tests {
             "dependency-rebind.json",
             "dependency-rebind.pending",
             "relay-cleanup-bridges.pending",
-            "dead-owner-cleanup.json",
         ] {
             let path = fixture.0.join(name);
             fs::write(&path, b"retained").unwrap();
-            assert!(no_pending(&fixture.0).is_err());
+            assert!(no_pending(&fixture.0, &receipt()).is_err());
             assert_eq!(fs::read(&path).unwrap(), b"retained");
             fs::remove_file(path).unwrap();
         }

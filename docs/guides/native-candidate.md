@@ -764,6 +764,43 @@ The layout participates in native dependency-cache identity. This shares compati
 workspace installations; it does not implement a cross-project package store or
 claim deduplication across different lockfiles.
 
+### Optional prepared base for a fresh pool
+
+A prepared base formats a **new** pool's disks from an independently verified snapshot of a
+sanitized seed pool instead of the stock templates. It changes only pool creation: the first pool
+in a candidate home, or one recreated during recovery. Existing pools and graph starts inside a
+running pool are unchanged. It is off unless selected and is macOS APFS only.
+
+Build and verify a base in a private store on the same volume as the candidate home. The installed
+candidate defaults to `<HACK_NATIVE_HOME>/prepared-bases`; pass `--store /absolute/private/store` to
+use another:
+
+```sh
+./bundle/hack-native --candidate-root /absolute/private/candidate-home runtime prepared-base build --profile development --json
+./bundle/hack-native --candidate-root /absolute/private/candidate-home runtime prepared-base verify --base-id BASE_ID --json
+./bundle/hack-native --candidate-root /absolute/private/candidate-home runtime prepared-base status --profile development --json
+```
+
+`build` boots a disposable seed pool from cloned providers, with no project, sockets, graphs or
+credentials. It installs network tools under the base owner, removes per-pool identity and
+runtime residue, and publishes the stopped disks. `verify` boots a separate disposable verifier
+from the published base and reads both disks before any setup; a base becomes usable only after it
+passes. Both need the same host admission as a development pool while they run, and both delete
+their disposable machine afterwards.
+
+Then select it for normal foreground startup:
+
+```sh
+export HACK_NATIVE_PREPARED_BASE=prefer   # or require; unset or off disables
+export HACK_NATIVE_PREPARED_BASE_STORE=/absolute/private/store   # optional
+```
+
+`prefer` uses the newest verified base bound to the pool's provider, engine, network-tools and
+capacity pins, and otherwise keeps the stock templates; `runtime status` records the reason.
+`require` refuses before creating the pool. An existing pool ignores the selection. Remove a base
+with `runtime prepared-base remove --base-id BASE_ID`; a pool never depends on its base after the
+first start.
+
 ### Optional native HTTPS frontend
 
 For routed foreground startup, explicitly set all three public selections:
@@ -880,11 +917,21 @@ After completion, retained restore can create a fresh owner;
 idempotent compatibility operation. Interrupted cleanup retains its journal for an
 explicit retry with the original receipt hash. A pool boot
 change, replaced process or socket evidence, or ambiguous ownership refuses recovery.
-The separate previous-boot operation below preserves its existing requirements.
-This retaining path does not yet accept a graph with historical previous-boot
-recovery evidence. Its completion proof also does not authorize direct data removal:
-restore the graph and use ordinary cleanup for that operation. Routed-publication
-crash recovery requires separate native qualification.
+The separate previous-boot operation below preserves its existing ownership
+requirements.
+A graph with completed host-dependency startup and no inbound routes can also use
+its exact dead relay publication as the previous-boot proof; an empty bridge
+registry alone never grants cleanup authority.
+A completed previous-boot recovery may remain as historical evidence after restore.
+Its exact stopped receipt must still be in the bounded restore history, and the
+current graph must have a different recorded container generation. Incomplete,
+foreign, one-off, altered or no-longer-verifiable records refuse without modifying
+them. The historical proof never authorizes cleanup of current resources; current
+owner, boot, process and resource checks remain required, including on retries.
+The same-boot completion proof does not authorize direct data removal: restore the
+graph and use ordinary cleanup for that operation. Native routed recovery has been
+qualified with repeated owner crashes, retained data and an unaffected sibling's
+HTTPS route; this does not establish normal source-mounted worktree parity.
 
 `graph recover-cleanup --run-id <run> --expect-receipt <sha256>` is a retaining,
 explicit two-step recovery for a failed enrolled graph. Select the SHA256 of its
@@ -906,9 +953,9 @@ previous-boot evidence. Old guest helper absence follows the verified boot trans
 it is not recorded as a live helper acknowledgement.
 
 Recovery retains its own durable intent and completion evidence. It does not forge
-a relay acknowledgement or permit ordinary restore of the old enrolled graph;
-start a fresh graph in the same pool after cleanup. Missing or replaced foreground
-evidence, pending graph journals, unfinished explicit page-cache release, changed
+a relay acknowledgement. A normalized graph can explicitly retire its recovered
+publisher and select a fresh foreground restore using the retained data. Missing
+or replaced foreground evidence, pending graph journals, unfinished explicit page-cache release, changed
 inventories, another boot rollover, and unsupported prior cleanup enrollment
 refuse. Preserve these files and use the reported reconciliation path rather than
 editing receipts. Receipt-only export/prune still requires its existing relay
@@ -920,8 +967,10 @@ After recovery completes, explicitly remove that graph's retained data with:
 ./hack-native --candidate-root /absolute/private/candidate-home graph cleanup --run-id RUN_ID --remove-data --json
 ```
 
-This separate destructive request requires the retained dead-owner identity and
-completed recovery evidence on the same boot. It journals the selected volumes
+Run this direct removal before `graph retire-recovered-publisher`: it requires the
+retained dead-owner identity and completed recovery evidence on the same boot.
+If the publisher is already retired, restore a fresh foreground owner first, then
+use ordinary cleanup with `--remove-data`. It journals the selected volumes
 before removal and refuses changed ownership or replaced volumes. An interrupted
 removal can resume against its recorded inventory; it does not authorize removal of
 another graph's volumes. Recovery alone continues to preserve data. Keep the

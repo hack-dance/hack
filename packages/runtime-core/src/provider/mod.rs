@@ -52,6 +52,9 @@ mod project_share;
 pub use project_share::ProjectShareIntent;
 mod network_tools;
 pub mod prepared_base;
+mod prepared_inventory;
+pub mod prepared_start;
+pub mod prepared_store;
 
 /// Prepare the pinned guest networking inputs without starting a runtime.
 pub fn prepare_network_tools(
@@ -88,9 +91,11 @@ pub use source_sync::{SyncReceipt, SyncSession, sync_status};
 mod socket_requests;
 mod state;
 pub use lifecycle::{
-    check_project_share, down, recover, status, up, up_with_bridge, up_with_capabilities,
-    up_with_minimum_bridges, up_with_network_sockets, up_with_profile, up_with_project_share,
-    up_with_retained_project_share, up_with_socket_requests, up_with_sockets,
+    PreparedBaseBuilt, build_prepared_base, check_project_share, down, prepared_base_status, recover,
+    remove_prepared_base, status, up, up_with_bridge, up_with_capabilities,
+    up_with_minimum_bridges, up_with_network_sockets, up_with_prepared_base, up_with_profile,
+    up_with_project_share, up_with_retained_project_share, up_with_socket_requests,
+    up_with_sockets, verify_prepared_base,
 };
 pub use socket_requests::SocketRequests;
 pub use source_transfer::{

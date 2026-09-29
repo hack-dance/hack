@@ -407,6 +407,41 @@ test("approved outbound hosts are forwarded exactly and sorted before runtime ad
     "--json",
   ]);
 });
+test("a prepared-base selection is forwarded to runtime up after network intent", async () => {
+  const { opts } = await fixture(false);
+  const invoke = opts.dependencies.invoke!;
+  let up: readonly string[] = [];
+  opts.dependencies.invoke = async (call) => {
+    if (call.args[0] === "runtime" && call.args[1] === "up") {
+      up = call.args;
+    }
+    return await invoke(call);
+  };
+  expect(
+    await startNativeProject({
+      ...opts,
+      preparedBase: { mode: "require", store: "/private/prepared-bases" },
+    })
+  ).toBe(0);
+  expect(up).toEqual([
+    "runtime",
+    "up",
+    "--profile",
+    "development",
+    "--project-share",
+    opts.scope.projectRoot,
+    "--unfiltered-source",
+    "--internet",
+    "--prepared-base",
+    "require",
+    "--prepared-base-store",
+    "/private/prepared-bases",
+    "--json",
+  ]);
+  up = [];
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(up).not.toContain("--prepared-base");
+});
 test("invalid outbound selection refuses before lifecycle or preparation effects", async () => {
   const { opts, events } = await fixture();
   opts.dependencies.load = async () => {

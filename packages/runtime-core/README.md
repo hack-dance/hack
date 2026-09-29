@@ -117,8 +117,22 @@ digest is. A mismatch refuses with `disk_template_untrusted` and changes no file
 removing the refused file lets SmolVM re-expand it from the verified compressed template. After a
 start, the boot is stopped as a failed boot without adopting its disks and needs manual recovery.
 
-`provider::prepared_base` is a prepared-base component that runtime startup does not use yet;
-fresh pools still start from the stock templates. A base is a pair of templates cloned from a
+A start interrupted before the pool records its provider process (for example, `up` is killed)
+leaves the pool `creating` or `booting`, and `up` refuses. Each start clears the previous
+provider's already-dead identity before `booting`, so this covers every start, not only the
+first. `runtime recover` resolves those states only after proving that no process executes the
+candidate's provider binary. An interrupted create that never recorded its machine deletes only
+this pool's own machine record and returns to `initializing`. A start that created no disks
+returns to `stopped-before-engine`. A launched start becomes an unclean stop after the
+provider's own PID record is verified (and the provider stopped if alive), or after it has
+exited, and after its VM lock, disk handles and sockets are proven released. Recovery never
+adopts disks: a first start's disks stay unadopted until the next boot's template, size and
+format checks accept them. Missing adopted disks, a partial launch and other phases still
+refuse for manual inspection. `down` treats a stopped pool with no recorded provider as already
+stopped.
+
+Prepared bases are an opt-in way to format a **fresh** pool's disks. Without a request, startup is
+unchanged and fresh pools use the stock templates. A base is a pair of templates cloned from a
 sanitized seed machine's disks, published into an explicit, private store with a strict
 `hack.prepared-base/v1` receipt. The receipt pins the SmolVM archive, agent rootfs, engine,
 network-tools identity and disk capacity, and records content digests and a sanitization record.
@@ -134,8 +148,30 @@ start, disk adoption and consumption. The activation record is bound to its pool
 record write is removed only when it validates as this pool's next write; a torn or unassociated
 pending file is kept and blocks the pool's prepared-base operations until someone inspects it.
 Receipts and records are read without following links or blocking, and only as regular files. The
-base-scoped network-tools owner is `prepared-base:<id>`. Runtime adoption still needs a seed builder that proves the
-sanitization claims and the lifecycle wiring above; neither is included.
+base-scoped network-tools owner is `prepared-base:<id>`.
+
+`runtime prepared-base build` makes a base from a disposable seed pool in `<store>/.work/<nonce>`
+(cloned providers; no project share, sockets, graphs or credentials): it installs network tools
+under the base owner, then a reviewed guest script proves there are no containers or volumes, stops
+the engine, and removes the owner marker, engine id, logs and runtime residue before publication.
+`runtime prepared-base verify` then boots a separate disposable verifier from the *published* base,
+re-proves its content digests on its own clone, and reads both disks read-only before any guest
+setup. A host-side allow-list must account for every entry; only a passing inventory is recorded
+(`<store>/.verified`). The publisher's sanitization claims are never treated as proof.
+
+`runtime up ... --prepared-base prefer|require [--prepared-base-store PATH]` asks for the newest
+verified base bound to the pool's pins and capacity when the pool is created. The installed
+candidate defaults to `<home>/prepared-bases`; a development checkout needs an explicit store.
+`prefer` keeps the stock templates and records a typed reason when no usable base exists or a base
+fails activation; `require` refuses before anything is created. Ambiguous pool state (an unowned
+template or an unprovable interrupted record) refuses in both modes. `runtime status` reports the
+selection, activation and any deferred consumption. Stores are locked shared while a pool clones
+and exclusively to publish, record a verification or remove a base
+(`runtime prepared-base status|remove`), so no base disappears mid-clone. A pool never depends on
+its base after the first start. Prepared bases change only how a pool's disks are first formatted,
+so they speed up creating a pool (the first one, or one recreated during recovery), not starting
+graphs inside a running pool. macOS APFS only: elsewhere `prefer` keeps the stock templates and
+`require` refuses.
 
 Protocol version 1 describes this development client. It is not a promised release API. This is
 a bounded experimental application graph executor, not a qualified native Linux container adapter. The checkout-owned `node serve`

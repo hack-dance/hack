@@ -117,6 +117,16 @@ digest is. A mismatch refuses with `disk_template_untrusted` and changes no file
 removing the refused file lets SmolVM re-expand it from the verified compressed template. After a
 start, the boot is stopped as a failed boot without adopting its disks and needs manual recovery.
 
+A start interrupted before the pool records its provider process (for example, `up` is killed)
+leaves the pool `creating` or `booting`, and `up` refuses. `runtime recover` resolves those
+states only after proving that no process executes the candidate's provider binary. An
+interrupted create deletes only this pool's own machine record and returns to `initializing`. A
+start that created no disks returns to `stopped-before-engine`. A launched start becomes an
+unclean stop, after the provider's own PID record is verified (and the provider stopped if alive)
+or, once it has exited, after its VM lock, disk handles and sockets are proven released. Disks
+launched from a prepared base are recorded only after the activated templates verify. Missing
+adopted disks, a partial launch and other phases still refuse for manual inspection.
+
 Prepared bases are an opt-in way to format a **fresh** pool's disks. Without a request, startup is
 unchanged and fresh pools use the stock templates. A base is a pair of templates cloned from a
 sanitized seed machine's disks, published into an explicit, private store with a strict

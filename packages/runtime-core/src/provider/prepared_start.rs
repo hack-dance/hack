@@ -183,7 +183,7 @@ pub(super) fn before_create(
             Err(Choice::Refuse(failure)) => Err(failure),
             Err(Choice::Fallback(reason)) if request.mode == Mode::Require => Err(error(
                 "prepared_base_unavailable",
-                format!("No usable prepared base ({reason}); nothing was created."),
+                format!("No usable prepared base ({reason}); no machine was created."),
             )),
             Err(Choice::Fallback(reason)) => {
                 selection.reason = Some(reason);

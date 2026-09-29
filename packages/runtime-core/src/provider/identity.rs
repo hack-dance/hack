@@ -219,6 +219,101 @@ pub fn alive(pid: i32) -> Result<bool, CandidateError> {
     }
 }
 
+/// Whether any live process other than this one executes exactly `binary`.
+///
+/// Used where no PID record names the provider, so absence must hold for every process that
+/// could act on this pool. Processes of other users are skipped (they cannot open this user's
+/// private provider state), as are zombies. A same-user process whose executable path cannot be
+/// read, and whose exec-time name (truncated by the kernel) could be `binary`'s, makes absence
+/// uncertain rather than assumed.
+#[cfg(target_os = "macos")]
+pub fn executable_running(binary: &Path) -> Result<bool, CandidateError> {
+    use std::os::unix::ffi::OsStrExt;
+    let uncertain = || {
+        CandidateError::new(
+            "stop_uncertain",
+            "Cannot establish provider process absence.",
+        )
+    };
+    let canonical = std::fs::canonicalize(binary).ok();
+    // SAFETY: a null buffer asks libproc only for the current process count.
+    let estimate = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let capacity = usize::try_from(estimate).map_err(|_| uncertain())? + 64;
+    let mut pids = vec![0_i32; capacity];
+    let bytes = i32::try_from(capacity * std::mem::size_of::<i32>()).map_err(|_| uncertain())?;
+    // SAFETY: the buffer is writable for `bytes` bytes of pid_t values.
+    let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    let count = usize::try_from(count).map_err(|_| uncertain())?;
+    // A full buffer may have truncated the list.
+    if count == 0 || count >= capacity {
+        return Err(uncertain());
+    }
+    let this = i32::try_from(std::process::id()).map_err(|_| uncertain())?;
+    for &pid in &pids[..count] {
+        if pid <= 0 || pid == this {
+            continue;
+        }
+        let mut path = [0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: buffer is writable for its full declared size.
+        let length =
+            unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+        if let Ok(length @ 1..) = usize::try_from(length) {
+            let path = Path::new(std::ffi::OsStr::from_bytes(&path[..length]));
+            if path == binary || canonical.as_deref() == Some(path) {
+                return Ok(true);
+            }
+            continue;
+        }
+        // SAFETY: signal zero only observes existence and permission.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::ESRCH | libc::EPERM) => continue,
+                _ => return Err(uncertain()),
+            }
+        }
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        // SAFETY: libproc receives a correctly sized writable proc_bsdinfo buffer.
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+            )
+        };
+        if read as usize != std::mem::size_of::<libc::proc_bsdinfo>() {
+            return Err(uncertain());
+        }
+        // SAFETY: the buffer was zero-initialized, and a full-size read filled it.
+        let info = unsafe { info.assume_init() };
+        // The path is unreadable when the executable was since removed or replaced. Its name
+        // at exec time still identifies a process that may be the provider.
+        let comm: Vec<u8> = info
+            .pbi_comm
+            .iter()
+            .take_while(|byte| **byte != 0)
+            .map(|byte| *byte as u8)
+            .collect();
+        let name = binary
+            .file_name()
+            .map(OsStrExt::as_bytes)
+            .unwrap_or_default();
+        let name = &name[..name.len().min(info.pbi_comm.len())];
+        if info.pbi_status != libc::SZOMB && comm == name {
+            return Err(uncertain());
+        }
+    }
+    Ok(false)
+}
+#[cfg(not(target_os = "macos"))]
+pub fn executable_running(_binary: &Path) -> Result<bool, CandidateError> {
+    Err(CandidateError::new(
+        "unsupported_host",
+        "SmolVM process inspection requires macOS.",
+    ))
+}
+
 #[derive(Debug, Serialize)]
 pub struct MemoryUsage {
     pub resident_bytes: u64,
@@ -378,6 +473,32 @@ mod tests {
             std::env::current_exe().unwrap().canonicalize().unwrap()
         );
         assert!(observed.start_micros > 0);
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_running_executable_is_found_by_exact_path_until_it_exits() {
+        let mut random = [0_u8; 8];
+        std::fs::File::open("/dev/urandom")
+            .unwrap()
+            .read_exact(&mut random)
+            .unwrap();
+        let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        // Uncanonicalized temp root: the kernel reports the resolved path.
+        let root = std::env::temp_dir().join(format!("hack-identity-running-{suffix}"));
+        std::fs::create_dir(&root).unwrap();
+        let binary = root.join("sleep");
+        std::fs::copy("/bin/sleep", &binary).unwrap();
+        assert!(!executable_running(&binary).unwrap());
+        let mut child = std::process::Command::new(&binary)
+            .arg("30")
+            .spawn()
+            .unwrap();
+        assert!(executable_running(&binary).unwrap());
+        assert!(!executable_running(&root.join("other")).unwrap());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!executable_running(&binary).unwrap());
+        std::fs::remove_dir_all(&root).unwrap();
     }
     #[cfg(target_os = "macos")]
     #[test]

@@ -1,3 +1,4 @@
+mod interrupted;
 mod prepared_boot;
 #[cfg(any(target_os = "macos", test))]
 mod private_child;
@@ -1718,6 +1719,17 @@ fn finish_stopped(
             "Provider process absence is not established.",
         ));
     }
+    finish_absent(candidate, owner, value)
+}
+
+/// Record `value` once the provider's VM lock is free, no handle remains on the owned disks and
+/// no owned socket accepts connections. The caller has established that no provider process
+/// remains; this proves the machine it launched released everything before the receipt changes.
+fn finish_absent(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    value: &str,
+) -> Result<(), CandidateError> {
     let directory = owner.real_data_dir(candidate)?;
     let vm_lock = OpenOptions::new()
         .read(true)
@@ -1806,9 +1818,13 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     if initial.phase == "uninitialized" {
         return Ok(initial);
     }
-    let _lock = state::Lock::acquire(&root(candidate))?;
+    let lock = state::Lock::acquire(&root(candidate))?;
     let mut owner = Owner::load(candidate)?;
-    let process = owner.process.as_ref().ok_or_else(|| CandidateError::new("recovery_required","No retained process identity; manual inspection required. No state adopted or removed."))?;
+    let Some(process) = owner.process.as_ref() else {
+        // A start interrupted before the provider identity was recorded; see `interrupted`.
+        interrupted::recover(candidate, &mut owner, &lock)?;
+        return status(candidate);
+    };
     if identity::alive(process.pid)? {
         return Err(CandidateError::new(
             "recovery_required",

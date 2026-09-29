@@ -2315,6 +2315,44 @@ printf 'verified-cache\n'
     }
 
     #[test]
+    fn a_prepared_start_refuses_ambiguous_capacity_before_any_pool_state() {
+        let checkout = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-prepared-sockets-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&checkout).unwrap();
+        let candidate = Candidate::discover(&checkout).unwrap();
+        let one = super::super::BridgeIntent::new(1).unwrap();
+        let request = super::super::prepared_start::Request {
+            mode: super::super::prepared_start::Mode::Require,
+            store: checkout.join("store"),
+        };
+        let error = up_with_prepared_base(
+            &candidate,
+            super::super::Profile::Development,
+            super::super::SocketRequests {
+                bridges: Some(one),
+                minimum_bridges: Some(one),
+                ..Default::default()
+            },
+            None,
+            None,
+            super::super::prepared_start::Start {
+                retained: None,
+                prepared: Some(&request),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_arguments");
+        assert!(!root(&candidate).exists());
+        fs::remove_dir_all(&checkout).unwrap();
+    }
+
+    #[test]
     fn templates_are_verified_around_the_first_start_not_after_create() {
         // The state a live fresh pool reached after `machine create`: pinned SmolVM makes no
         // disks and expands nothing until the first start, so only the compressed templates

@@ -165,6 +165,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn prepared_base_composes_with_minimum_dependency_capacity() {
+        let options = parse(&[
+            "--profile",
+            "development",
+            "--minimum-dependency-sockets",
+            "2",
+            "--prepared-base",
+            "require",
+        ])
+        .unwrap();
+        assert_eq!(options.minimum_dependencies.unwrap().slots, 2);
+        assert_eq!(options.dependencies, None);
+        assert_eq!(options.prepared, Some((Mode::Require, None)));
+    }
+
+    #[test]
     fn prepared_base_is_an_explicit_mode_with_an_optional_absolute_store() {
         let options = parse(&["--profile", "development", "--prepared-base", "prefer"]).unwrap();
         assert_eq!(options.prepared, Some((Mode::Prefer, None)));

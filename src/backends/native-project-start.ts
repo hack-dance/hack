@@ -9,6 +9,10 @@ import {
   type NativeHttpsLeaseIdentity,
   recoverNativeHttpsLease,
 } from "./native-https-owner.ts";
+import {
+  type NativePreparedBase,
+  preparedBaseArguments,
+} from "./native-prepared-base.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import { prepareNativeProjectBranch } from "./native-project-branch.ts";
 import {
@@ -672,6 +676,7 @@ export async function startNativeProject(opts: {
   readonly dependencyFile?: string;
   readonly adaptationFile?: string;
   readonly allowedHosts?: readonly string[];
+  readonly preparedBase?: NativePreparedBase;
   readonly https?: NativeHttpsSelection;
   readonly aws?: { readonly profile: string; readonly region?: string };
   readonly before: (input: NativeProjectInput) => Promise<Hooks>;
@@ -830,6 +835,7 @@ export async function startNativeProject(opts: {
         ...(allowedHosts.length > 0
           ? allowedHosts.flatMap((host) => ["--allow-host", host])
           : ["--internet"]),
+        ...preparedBaseArguments(opts.preparedBase),
         "--json",
       ],
       signal: controller.signal,

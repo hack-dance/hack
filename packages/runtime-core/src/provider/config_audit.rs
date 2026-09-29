@@ -40,6 +40,48 @@ pub(super) fn verify_value(
     )
 }
 
+/// Whether this pool's private provider database records `owner.machine`, for recovering a create
+/// that was interrupted before the candidate recorded its outcome. The pool's provider home holds
+/// at most this pool's machine, so any other record, or more than one, is refused.
+pub(super) fn machine_recorded(
+    candidate: &Candidate,
+    owner: &Owner,
+) -> Result<bool, CandidateError> {
+    let home = candidate.state_root.join("run/smolvm/home");
+    #[cfg(target_os = "macos")]
+    let database = home.join("Library/Application Support/smolvm/server/smolvm.db");
+    #[cfg(not(target_os = "macos"))]
+    let database = home.join(".local/share/smolvm/server/smolvm.db");
+    match fs::symlink_metadata(&database) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(invalid()),
+        Ok(_) => {}
+    }
+    reject_aliased_state(database.parent().ok_or_else(invalid)?).map_err(|_| invalid())?;
+    metadata(&database)?;
+    let connection = Connection::open_with_flags(
+        &database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| invalid())?;
+    connection
+        .busy_timeout(Duration::from_millis(200))
+        .map_err(|_| invalid())?;
+    let mut statement = connection
+        .prepare("SELECT substr(name, 1, 129) FROM vms LIMIT 2")
+        .map_err(|_| invalid())?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| invalid())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| invalid())?;
+    match names.as_slice() {
+        [] => Ok(false),
+        [name] if *name == owner.machine => Ok(true),
+        _ => Err(invalid()),
+    }
+}
+
 /// Called only after this process successfully created a machine, before any boot.
 pub(super) fn pin_created_network(
     candidate: &Candidate,
@@ -225,6 +267,58 @@ fn verify_record(
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn an_interrupted_create_is_recognized_only_by_this_pools_own_record() {
+        let checkout = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-config-audit-recorded-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&checkout).unwrap();
+        let candidate = Candidate::discover(&checkout).unwrap();
+        let owner: Owner = serde_json::from_value(json!({
+            "version": 1, "checkout": "/fixture", "token": "fixture", "machine": "owned",
+            "short_home": "/fixture", "created": false, "phase": "creating", "process": null,
+            "storage": null, "overlay": null, "guest_boot_id": null, "daemon_pid": null,
+            "daemon_start": null, "rootfs_digest": null
+        }))
+        .unwrap();
+        let home = candidate.state_root.join("run/smolvm/home");
+        #[cfg(target_os = "macos")]
+        let server = home.join("Library/Application Support/smolvm/server");
+        #[cfg(not(target_os = "macos"))]
+        let server = home.join(".local/share/smolvm/server");
+        // No provider database: `machine create` never ran.
+        assert!(!machine_recorded(&candidate, &owner).unwrap());
+        fs::create_dir_all(&server).unwrap();
+        let connection = Connection::open(server.join("smolvm.db")).unwrap();
+        connection
+            .execute_batch("CREATE TABLE vms(name TEXT PRIMARY KEY, data BLOB NOT NULL)")
+            .unwrap();
+        assert!(!machine_recorded(&candidate, &owner).unwrap());
+        let insert = |name: &str| {
+            connection
+                .execute(
+                    "INSERT INTO vms VALUES (?1, ?2)",
+                    rusqlite::params![name, b"{}".to_vec()],
+                )
+                .unwrap();
+        };
+        insert("owned");
+        assert!(machine_recorded(&candidate, &owner).unwrap());
+        insert("foreign");
+        assert!(machine_recorded(&candidate, &owner).is_err());
+        connection
+            .execute("DELETE FROM vms WHERE name='owned'", [])
+            .unwrap();
+        assert!(machine_recorded(&candidate, &owner).is_err());
+        drop(connection);
+        fs::remove_dir_all(&checkout).unwrap();
+    }
     fn verify_isolated_record(
         record: &Value,
         machine: &str,

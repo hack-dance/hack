@@ -786,7 +786,9 @@ credentials. It installs network tools under the base owner, removes per-pool id
 runtime residue, and publishes the stopped disks. `verify` boots a separate disposable verifier
 from the published base and reads both disks before any setup; a base becomes usable only after it
 passes. Both need the same host admission as a development pool while they run, and both delete
-their disposable machine afterwards.
+their disposable machine afterwards. If one is interrupted, `status` lists its work root under
+`abandoned_work`, and the next `build` or `verify` removes it before starting, except while a
+provider still runs there. `status` also reports each base under `bases`.
 
 Then select it for normal foreground startup:
 

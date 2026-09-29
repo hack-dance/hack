@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::{FileExt, FileTypeExt};
 
 const ROOTFS: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -14,8 +15,11 @@ struct Fixture {
 /// Paths of the fixture pool, laid out as under the lifecycle's `run/smolvm`.
 struct PoolPaths {
     root: PathBuf,
+    #[cfg(target_os = "macos")]
     templates: PathBuf,
+    #[cfg(target_os = "macos")]
     record: PathBuf,
+    #[cfg(target_os = "macos")]
     pending: PathBuf,
     disks: [PathBuf; 2],
 }
@@ -34,6 +38,7 @@ impl Fixture {
         Self { root }
     }
 
+    #[cfg(target_os = "macos")]
     fn store(&self) -> PathBuf {
         self.root.join("store")
     }
@@ -41,8 +46,11 @@ impl Fixture {
     fn pool(&self) -> PoolPaths {
         let root = self.root.join("pool");
         PoolPaths {
+            #[cfg(target_os = "macos")]
             templates: root.join(TEMPLATE_DIR),
+            #[cfg(target_os = "macos")]
             record: root.join(RECORD),
+            #[cfg(target_os = "macos")]
             pending: root.join(PENDING),
             disks: [root.join("vm/storage.raw"), root.join("vm/overlay.raw")],
             root,
@@ -50,6 +58,7 @@ impl Fixture {
     }
 
     /// A sparse seed disk with a little data.
+    #[cfg(target_os = "macos")]
     fn seed(&self, name: &str, len: u64, marker: &[u8]) -> PathBuf {
         let path = self.root.join("seed").join(name);
         let file = OpenOptions::new()
@@ -65,6 +74,7 @@ impl Fixture {
     }
 
     /// Publish `base_id` from its seed disks, creating them on first use.
+    #[cfg(target_os = "macos")]
     fn publish(&self, base_id: &str) -> Result<Receipt, CandidateError> {
         let capacity = pins().capacity_bytes();
         let seed = |kind: &str, len: u64| {
@@ -89,11 +99,13 @@ impl Fixture {
         )
     }
 
+    #[cfg(target_os = "macos")]
     fn base(&self) -> PublishedBase {
         self.publish("base-1").unwrap();
         open_published(&self.store(), "base-1").unwrap()
     }
 
+    #[cfg(target_os = "macos")]
     fn entries(&self, dir: &Path) -> Vec<String> {
         let mut names: Vec<_> = fs::read_dir(dir)
             .unwrap()
@@ -111,6 +123,7 @@ impl Drop for Fixture {
 }
 
 /// Run `check` against the fixture pool while holding its provider operation lock.
+#[cfg(target_os = "macos")]
 fn with_pool<T>(fixture: &Fixture, check: impl FnOnce(&PoolTarget<'_>) -> T) -> T {
     let pool = fixture.pool();
     let lock = state::Lock::acquire(&pool.root).unwrap();
@@ -118,6 +131,7 @@ fn with_pool<T>(fixture: &Fixture, check: impl FnOnce(&PoolTarget<'_>) -> T) -> 
     check(&target)
 }
 
+#[cfg(target_os = "macos")]
 fn overwrite(path: &Path, at: u64, bytes: &[u8]) {
     let mode = fs::metadata(path).unwrap().mode() & 0o777;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -168,6 +182,7 @@ fn intent(base: &PublishedBase, pool: (u64, u64), nonce: &str) -> ActivationReco
 }
 
 /// Clone template `index` of `base` to `nonce`'s temporary path, as `place` does.
+#[cfg(target_os = "macos")]
 fn clone_temporary(
     base: &PublishedBase,
     pool: &PoolPaths,
@@ -182,6 +197,7 @@ fn clone_temporary(
     (path, (metadata.dev(), metadata.ino()))
 }
 
+#[cfg(target_os = "macos")]
 fn fifo(path: &Path) {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
@@ -190,6 +206,7 @@ fn fifo(path: &Path) {
 }
 
 /// Run `operation` on another thread and fail if it does not return promptly.
+#[cfg(target_os = "macos")]
 fn without_blocking<T: Send + 'static>(operation: impl FnOnce() -> T + Send + 'static) -> T {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -842,6 +859,7 @@ fn consumption_follows_the_first_start_and_removes_only_the_recorded_clones() {
     assert_eq!(with_pool(&fixture, recover).unwrap(), Recovery::Nothing);
 }
 
+#[cfg(target_os = "macos")]
 impl ActivationRecord {
     /// The committed record at `path`, for assertions outside a pool operation.
     fn load_path(path: &Path) -> Self {

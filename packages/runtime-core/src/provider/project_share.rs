@@ -1,4 +1,6 @@
 //! Explicit unfiltered writable development tree. Snapshot exclusions do not apply.
+mod worktree;
+
 use crate::{CandidateError, reject_aliased_state};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -28,19 +30,36 @@ impl ProjectShareIntent {
     /// Approves the whole project tree, including local configuration files, for
     /// guest reads and writes. Never called implicitly by filtered source capture.
     pub fn approve(project: &Path, unfiltered_source: bool) -> Result<Self, CandidateError> {
-        reject_aliased_state(project)?;
-        let canonical = fs::canonicalize(project).map_err(|_| refused())?;
-        let text = project.to_str().ok_or_else(refused)?;
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(refused)?;
+        Self::approve_with_home(project, unfiltered_source, &home)
+    }
+    fn approve_with_home(
+        project: &Path,
+        unfiltered_source: bool,
+        home: &Path,
+    ) -> Result<Self, CandidateError> {
+        reject_aliased_state(project)?;
+        let canonical = fs::canonicalize(project).map_err(|_| refused())?;
+        let text = project.to_str().ok_or_else(refused)?;
         if !unfiltered_source || canonical != project || !project.is_absolute()
             || text.contains(':') || text.chars().any(char::is_control)
             || home.starts_with(project)
-            || project.components().any(|c| matches!(c, Component::Normal(n) if [".aws", ".ssh", ".gnupg", ".codex", ".config"].iter().any(|v| n == *v)))
+            || project.components().any(|c| matches!(c, Component::Normal(n) if [".aws", ".ssh", ".gnupg", ".config"].iter().any(|v| n == *v)))
             || project.file_name().is_none_or(|n| ["dev","projects","workspaces","src"].iter().any(|v| n == *v))
             || !["package.json","Cargo.toml","pyproject.toml","go.mod",".hack/docker-compose.yml","compose.yaml","docker-compose.yml"].iter().any(|name| project.join(name).is_file())
         { return Err(refused()); }
+        let codex_components = project
+            .components()
+            .filter(|c| matches!(c, Component::Normal(n) if *n == ".codex"))
+            .count();
+        if codex_components > 0 {
+            if codex_components != 1 {
+                return Err(refused());
+            }
+            worktree::verify(project, home)?;
+        }
         let meta = fs::symlink_metadata(project).map_err(|_| refused())?;
         if !meta.is_dir() || meta.uid() != current_uid() || meta.mode() & 0o022 != 0 {
             return Err(refused());
@@ -160,6 +179,246 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct RegisteredWorktree {
+        _fixture: Fixture,
+        home: PathBuf,
+        project: PathBuf,
+        common: PathBuf,
+        gitdir: PathBuf,
+    }
+    impl RegisteredWorktree {
+        fn new() -> Self {
+            Self::at(".codex/worktrees/example/app")
+        }
+        fn at(relative: &str) -> Self {
+            let fixture = Fixture::new();
+            let home = fixture.0.join("home");
+            let main = fixture.0.join("main");
+            let project = home.join(relative);
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(project.parent().unwrap())
+                .unwrap();
+            let git = |args: &[&std::ffi::OsStr]| {
+                let output = std::process::Command::new("git")
+                    .env_clear()
+                    .env("PATH", std::env::var_os("PATH").unwrap())
+                    .env("HOME", &home)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "fixture git failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            };
+            git(&[
+                "-c".as_ref(),
+                "init.templateDir=".as_ref(),
+                "init".as_ref(),
+                "--quiet".as_ref(),
+                main.as_os_str(),
+            ]);
+            git(&[
+                "-C".as_ref(),
+                main.as_os_str(),
+                "-c".as_ref(),
+                "user.name=Fixture".as_ref(),
+                "-c".as_ref(),
+                "user.email=fixture@example.invalid".as_ref(),
+                "-c".as_ref(),
+                "commit.gpgsign=false".as_ref(),
+                "commit".as_ref(),
+                "--quiet".as_ref(),
+                "--allow-empty".as_ref(),
+                "-m".as_ref(),
+                "fixture".as_ref(),
+            ]);
+            git(&[
+                "-C".as_ref(),
+                main.as_os_str(),
+                "worktree".as_ref(),
+                "add".as_ref(),
+                "--quiet".as_ref(),
+                "--detach".as_ref(),
+                project.as_os_str(),
+                "HEAD".as_ref(),
+            ]);
+            fs::write(project.join("package.json"), "{}").unwrap();
+            let pointer = fs::read_to_string(project.join(".git")).unwrap();
+            let gitdir = PathBuf::from(pointer.trim().strip_prefix("gitdir: ").unwrap());
+            Self {
+                _fixture: fixture,
+                home,
+                project,
+                common: main.join(".git"),
+                gitdir,
+            }
+        }
+        fn approve(&self) -> Result<ProjectShareIntent, CandidateError> {
+            ProjectShareIntent::approve_with_home(&self.project, true, &self.home)
+        }
+    }
+
+    #[test]
+    fn project_share_codex_exception_does_not_admit_sensitive_or_neighbor_layouts() {
+        for relative in [
+            ".codex/worktrees/.aws/app",
+            ".codex/worktrees/.ssh/app",
+            ".codex/worktrees/.gnupg/app",
+            ".codex/worktrees/example/.config",
+            ".codex/worktrees/.codex/app",
+            ".codex/neighbor/example/app",
+            "other/.codex/worktrees/example/app",
+            ".codex/worktrees/outer/example/app",
+            ".codex/worktrees/app",
+        ] {
+            let fixture = RegisteredWorktree::at(relative);
+            assert!(fixture.approve().is_err(), "accepted {relative}");
+        }
+    }
+
+    #[test]
+    fn project_share_allows_only_exact_registered_codex_worktree_with_consent() {
+        let fixture = RegisteredWorktree::new();
+        let intent = fixture.approve().unwrap();
+        assert_eq!(intent.project, fixture.project);
+        assert_eq!(
+            intent.argument(),
+            format!("{}:{}:rw", fixture.project.display(), intent.guest_path)
+        );
+        assert!(!intent.argument().contains(fixture.common.to_str().unwrap()));
+        assert!(
+            ProjectShareIntent::approve_with_home(&fixture.project, false, &fixture.home).is_err()
+        );
+        for path in [
+            fixture.home.clone(),
+            fixture.home.join(".codex"),
+            fixture.home.join(".codex/worktrees"),
+            fixture.project.parent().unwrap().to_path_buf(),
+            fixture.home.join(".codex/worktrees/example/neighbor"),
+            fixture.project.join("nested"),
+        ] {
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("package.json"), "{}").unwrap();
+            assert!(
+                ProjectShareIntent::approve_with_home(&path, true, &fixture.home).is_err(),
+                "accepted {}",
+                path.display()
+            );
+        }
+        assert!(fixture.approve().is_ok());
+    }
+
+    #[test]
+    fn project_share_codex_worktree_requires_exact_backlink_and_common_registration() {
+        let fixture = RegisteredWorktree::new();
+        let backlink = fixture.gitdir.join("gitdir");
+        let original = fs::read(&backlink).unwrap();
+        fs::write(
+            &backlink,
+            format!(
+                "{}\n",
+                fixture
+                    .project
+                    .with_file_name("neighbor")
+                    .join(".git")
+                    .display()
+            ),
+        )
+        .unwrap();
+        assert!(fixture.approve().is_err());
+        fs::write(&backlink, &original).unwrap();
+        assert!(fixture.approve().is_ok());
+
+        let commondir = fixture.gitdir.join("commondir");
+        let original = fs::read(&commondir).unwrap();
+        fs::write(&commondir, "../../../\n").unwrap();
+        assert!(fixture.approve().is_err());
+        fs::write(&commondir, &original).unwrap();
+        assert!(fixture.approve().is_ok());
+
+        // Even internally consistent pointers must be one immediate registration.
+        let nested = fixture.gitdir.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("commondir"), "../../..\n").unwrap();
+        fs::write(nested.join("gitdir"), fs::read(&backlink).unwrap()).unwrap();
+        fs::write(
+            fixture.project.join(".git"),
+            format!("gitdir: {}\n", nested.display()),
+        )
+        .unwrap();
+        assert!(fixture.approve().is_err());
+    }
+
+    #[test]
+    fn project_share_codex_worktree_refuses_pointer_aliases_and_unbounded_metadata() {
+        let fixture = RegisteredWorktree::new();
+        for path in [
+            fixture.project.join(".git"),
+            fixture.gitdir.join("commondir"),
+            fixture.gitdir.join("gitdir"),
+        ] {
+            let saved = path.with_extension("saved");
+            fs::rename(&path, &saved).unwrap();
+            symlink(&saved, &path).unwrap();
+            assert!(fixture.approve().is_err());
+            fs::remove_file(&path).unwrap();
+            fs::hard_link(&saved, &path).unwrap();
+            assert!(fixture.approve().is_err());
+            fs::remove_file(&path).unwrap();
+            fs::write(&path, "x".repeat(4097)).unwrap();
+            assert!(fixture.approve().is_err());
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(&path).unwrap();
+            assert!(fixture.approve().is_err());
+            fs::remove_dir(&path).unwrap();
+            fs::rename(&saved, &path).unwrap();
+            assert!(fixture.approve().is_ok());
+        }
+        let alias = fixture.home.join("git-alias");
+        symlink(&fixture.common, &alias).unwrap();
+        fs::write(
+            fixture.project.join(".git"),
+            format!(
+                "gitdir: {}/worktrees/{}\n",
+                alias.display(),
+                fixture.gitdir.file_name().unwrap().to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        assert!(fixture.approve().is_err());
+    }
+
+    #[test]
+    fn project_share_codex_worktree_refuses_unsafe_directories_and_metadata() {
+        let fixture = RegisteredWorktree::new();
+        for path in [
+            fixture.home.clone(),
+            fixture.home.join(".codex"),
+            fixture.home.join(".codex/worktrees"),
+            fixture.project.parent().unwrap().to_path_buf(),
+            fixture.project.clone(),
+            fixture.common.parent().unwrap().to_path_buf(),
+            fixture.common.clone(),
+            fixture.common.join("worktrees"),
+            fixture.gitdir.clone(),
+            fixture.project.join(".git"),
+            fixture.gitdir.join("commondir"),
+            fixture.gitdir.join("gitdir"),
+        ] {
+            let permissions = fs::metadata(&path).unwrap().permissions();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
+            assert!(fixture.approve().is_err(), "accepted {}", path.display());
+            fs::set_permissions(&path, permissions).unwrap();
+            assert!(fixture.approve().is_ok());
         }
     }
 

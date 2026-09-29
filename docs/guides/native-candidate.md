@@ -68,18 +68,18 @@ currently reports the repository package version; `hack-v5` identifies the opt-i
 candidate channel, not a published v5 release. Unsupported native workflows still
 report their existing refusal rather than falling back to Docker.
 
-Native `up` and `restart` currently refuse branch instances, including an explicit
-`--branch` and the automatic branch selected in a linked Git worktree. They refuse
-before lifecycle hooks, registry writes or native runtime changes. A detached helper
-now owns shared HTTPS through graph-specific leases, retaining each lease until
-independent graph and publication cleanup is verified. This does not lift the branch
-startup restriction: source-mount compatibility and normal worktree coexistence
-qualification remain open; pool capacity is fixed at creation.
-A separate run mapping alone does not provide
-branch routing. Use the Compose
-backend for branch instances. Setting `worktree.auto_branch=false` selects a base
-instance; it does not enable isolated native branch support. Existing native branch
-mappings remain accessible through `ps`, `logs`, `exec` and retaining `down`.
+Native `up` accepts an explicit branch or the branch inferred from a linked Git
+worktree when its exact source root can be shared with a fresh or matching pool.
+The runtime checks source compatibility before startup hooks; `restart` repeats
+this check before stopping the existing graph. A different root in an occupied
+pool is refused. This does not dynamically add mounts to a running VM: simultaneous
+worktrees with different source roots still require separate pools.
+
+Unfiltered writable source sharing still requires `HACK_NATIVE_SHARED_SOURCE=1`.
+An exact repository at `$HOME/.codex/worktrees/<id>/<repo>` is allowed only when
+bounded Git registration metadata verifies its worktree root, common directory and
+backlink. The enclosing Codex directories are never exported. Sensitive ancestors,
+aliases and unsafe ownership or permissions remain refused.
 
 The internal planning path accepts a canonical lowercase DNS-label `--branch`.
 It gives each checkout/branch pair a separate enrollment and source namespace;
@@ -90,8 +90,8 @@ normalized review, source capture and execution review. Original Compose files
 and private environment values are unchanged. Hostnames outside the configured
 project bases remain explicit, unchanged claims; normal route collision checks
 still apply. A same-checkout branch namespace does not create an isolated source
-tree. These planning contracts do not lift the startup restriction or qualify
-multi-worktree source sharing.
+tree. These planning contracts do not qualify multiple independent source roots
+inside one VM pool.
 
 ## Manual candidate upgrade and rollback
 

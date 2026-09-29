@@ -52,6 +52,7 @@ import {
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "./native-project-run.ts";
+import { preflightNativeProjectSource } from "./native-project-source-preflight.ts";
 import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
@@ -704,6 +705,12 @@ export async function startNativeProject(opts: {
     });
   requireActiveStartup(opts.signal);
   const profiles = selection.profiles;
+  await preflightNativeProjectSource({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    signal: opts.signal,
+    invoke: deps.invoke,
+  });
   await deps.prepareStorage(opts.scope);
   let input = await deps.prepare({
     ...opts.scope,

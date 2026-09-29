@@ -67,6 +67,7 @@ Usage:
   hack-local runtime probe|up --profile research|development [--json]
   hack-local runtime up --profile research|development [--bridge-sockets <1..32> | --minimum-bridge-sockets <1..32>] [--dependency-sockets <1..32> | --minimum-dependency-sockets <1..32>] [--json]
   hack-local runtime up --profile development --project-share <exact-project-root> --unfiltered-source [--json]
+  hack-local runtime check-project-share --project-share <exact-project-root> --unfiltered-source --json
   hack-local graph serve|run ... --shared-source
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
   hack-local runtime prepare-engine --archive <pinned-docker.tgz>
@@ -324,6 +325,21 @@ fn run() -> Result<(), CandidateError> {
             print_json(&hack_runtime_core::provider::extend_network(
                 &discover_candidate(&requested)?,
                 hosts,
+            )?)?;
+        }
+        [
+            "runtime",
+            "check-project-share",
+            "--project-share",
+            project,
+            "--unfiltered-source",
+            "--json",
+        ] => {
+            let share =
+                hack_runtime_core::provider::ProjectShareIntent::approve(Path::new(project), true)?;
+            print_json(&hack_runtime_core::provider::check_project_share(
+                &discover_candidate(&requested)?,
+                &share,
             )?)?;
         }
         ["runtime", "up", arguments @ ..]

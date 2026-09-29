@@ -46,6 +46,7 @@ import {
   nativeRestartSelection,
   preflightNativeRestart,
 } from "../backends/native-project-restart-preflight.ts";
+import { preflightNativeProjectSource } from "../backends/native-project-source-preflight.ts";
 import {
   parseNativeHttpsSelection,
   startNativeProject,
@@ -5921,11 +5922,6 @@ async function handleNativeUp({
     project,
     branchOption: args.options.branch,
   });
-  if (branch !== null) {
-    throw new CliUsageError(
-      "Native branch startup is unavailable: pool-wide dependency allocation and multi-worktree source sharing are not supported yet, and pool capacity remains fixed. Use the Compose backend for branch instances; existing native instances remain accessible through ps, logs, exec and down."
-    );
-  }
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
     throw new CliUsageError(
@@ -6040,8 +6036,12 @@ async function handleNativeUp({
             }),
         }
       : undefined,
-    preflight: (run, { cleanedRetry }) =>
-      preflightNativeRestart({
+    preflight: async (run, { cleanedRetry }) => {
+      await preflightNativeProjectSource({
+        runtime: native,
+        projectRoot: startup.scope.projectRoot,
+      });
+      await preflightNativeRestart({
         runtime: native,
         scope: startup.scope,
         composeFile: startup.composeFile,
@@ -6050,7 +6050,8 @@ async function handleNativeUp({
         allowedHosts: startup.allowedHosts,
         run,
         cleanedRetry,
-      }),
+      });
+    },
     down: async () => {
       const code = await handleDown({
         ctx,

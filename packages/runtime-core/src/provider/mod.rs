@@ -88,8 +88,8 @@ pub use source_sync::{SyncReceipt, SyncSession, sync_status};
 mod socket_requests;
 mod state;
 pub use lifecycle::{
-    down, recover, status, up, up_with_bridge, up_with_capabilities, up_with_minimum_bridges,
-    up_with_network_sockets, up_with_profile, up_with_project_share,
+    check_project_share, down, recover, status, up, up_with_bridge, up_with_capabilities,
+    up_with_minimum_bridges, up_with_network_sockets, up_with_profile, up_with_project_share,
     up_with_retained_project_share, up_with_socket_requests, up_with_sockets,
 };
 pub use socket_requests::SocketRequests;

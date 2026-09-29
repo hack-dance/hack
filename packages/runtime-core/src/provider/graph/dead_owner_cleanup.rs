@@ -171,6 +171,53 @@ fn archive_completed_prior(
         .map_err(state::io)
 }
 
+/// A completed recovery from an older container generation is diagnostic history,
+/// not a pending operation. Require its exact stopped receipt in restore history;
+/// this never supplies authority to retire current resources or mutates old proof.
+pub(super) fn require_historical_recovery(
+    root: &std::path::Path,
+    current: &Receipt,
+) -> Result<(), CandidateError> {
+    if exists(&root.join("dead-owner-cleanup.pending"))? {
+        return Err(refused());
+    }
+    if !exists(&root.join(FILE))? {
+        return Ok(());
+    }
+    let prior: Intent = state::read(&root.join(FILE))?;
+    let complete = prior.complete_sha256.as_deref().ok_or_else(refused)?;
+    if !hex(complete, 64)
+        || prior.one_off_sha256.is_some()
+        || prior
+            .new_boot
+            .as_deref()
+            .is_none_or(|boot| boot.is_empty() || boot == prior.old_boot)
+    {
+        return Err(refused());
+    }
+    let stopped =
+        restore_history::completed_for_recovery(root, current, complete)?.ok_or_else(refused)?;
+    validate(
+        &prior,
+        &stopped,
+        &prior.original_sha256,
+        &prior.owner_sha256,
+    )?;
+    if !stopped.resources.iter().any(|(key, old)| {
+        old.kind == Kind::Container
+            && old.id.as_ref().is_some_and(|id| {
+                current
+                    .resources
+                    .get(key)
+                    .and_then(|now| now.id.as_ref())
+                    .is_some_and(|current_id| current_id != id)
+            })
+    }) {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 /// A bridge sidecar from a restored generation can be superseded only when
 /// its exact stopped receipt and selected bridge assignments have a completed,
 /// archived dead-owner recovery proof.
@@ -1248,5 +1295,83 @@ mod tests {
                 .count(),
             0
         );
+    }
+    fn historical_fixture() -> (super::super::tests::Fixture, Receipt, Receipt, Intent) {
+        let fixture = super::super::tests::Fixture::new();
+        let original = partial();
+        let mut stopped = original.clone();
+        stopped.phase = "stopped-data-retained".into();
+        for resource in stopped.resources.values_mut() {
+            if resource.kind != Kind::Volume {
+                resource.phase = "absent".into();
+            }
+        }
+        let mut proof = intent(&original);
+        proof.new_boot = Some("successor-boot".into());
+        proof.complete_sha256 = Some(selected(&stopped).unwrap());
+        restore_history::retain(&fixture.0, &stopped).unwrap();
+        state::write(&fixture.0.join(FILE), &proof).unwrap();
+        let mut current = stopped.clone();
+        current.phase = "ready-observed".into();
+        current.resources.get_mut("container:init").unwrap().id = Some("9".repeat(64));
+        (fixture, current, stopped, proof)
+    }
+
+    #[test]
+    fn completed_previous_boot_proof_is_read_only_history_for_later_live_recovery() {
+        let (fixture, mut current, _, _) = historical_fixture();
+        let before = fs::read(fixture.0.join(FILE)).unwrap();
+        for phase in ["ready-observed", "cleanup-intent", "stopped-data-retained"] {
+            current.phase = phase.into();
+            require_historical_recovery(&fixture.0, &current).unwrap();
+            assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), before);
+        }
+        fs::remove_file(fixture.0.join(FILE)).unwrap();
+        require_historical_recovery(&fixture.0, &current).unwrap();
+    }
+
+    #[test]
+    fn historical_recovery_refuses_unproven_records_without_mutating_them() {
+        for (field, value) in [
+            ("version", json!(9)),
+            ("complete_sha256", Value::Null),
+            ("complete_sha256", json!("8".repeat(64))),
+            ("original_sha256", json!("8".repeat(64))),
+            ("owner_sha256", json!("invalid")),
+            ("new_boot", Value::Null),
+            ("new_boot", json!("")),
+            ("old_boot", json!("")),
+            ("old_boot", json!("successor-boot")),
+            ("one_off_sha256", json!("8".repeat(64))),
+        ] {
+            let (fixture, current, _, proof) = historical_fixture();
+            let mut changed = serde_json::to_value(proof).unwrap();
+            changed[field] = value;
+            state::write(&fixture.0.join(FILE), &changed).unwrap();
+            let bytes = fs::read(fixture.0.join(FILE)).unwrap();
+            assert!(
+                require_historical_recovery(&fixture.0, &current).is_err(),
+                "{field}"
+            );
+            assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), bytes);
+        }
+        let (fixture, current, stopped, _) = historical_fixture();
+        assert!(require_historical_recovery(&fixture.0, &stopped).is_err());
+        for field in ["owner", "run", "namespace", "plan_id"] {
+            let mut changed = serde_json::to_value(&current).unwrap();
+            changed[field] = json!("f".repeat(64));
+            let changed: Receipt = serde_json::from_value(changed).unwrap();
+            assert!(
+                require_historical_recovery(&fixture.0, &changed).is_err(),
+                "{field}"
+            );
+        }
+        let pending = fixture.0.join("dead-owner-cleanup.pending");
+        fs::write(&pending, b"partial evidence").unwrap();
+        assert!(require_historical_recovery(&fixture.0, &current).is_err());
+        assert_eq!(fs::read(&pending).unwrap(), b"partial evidence");
+        fs::remove_file(pending).unwrap();
+        fs::remove_file(fixture.0.join("restore-history.json")).unwrap();
+        assert!(require_historical_recovery(&fixture.0, &current).is_err());
     }
 }

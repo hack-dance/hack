@@ -529,3 +529,34 @@ codec and host identity guard, including VM restart and oversized-frame refusal
 without an upstream connection. This avoids raw write-half shutdown in the tested
 exchange. It does not yet qualify production relay ownership/authentication,
 bidirectional load behavior or application/performance parity.
+
+## Prepared-base startup benchmark
+
+`scripts/benchmark-prepared-base.py` compares fresh native pools started from the stock disk
+templates with pools started from an independently verified prepared base (`runtime up
+--prepared-base require`). It prints its plan unless `--run` is given. Pass the installed
+`hack-native` bundle, a private 0700 `--root`, a store holding a verified base for the bundle's
+pins, the pinned provider, engine and network-tool inputs, and a pinned image reference. Each
+trial creates a fresh candidate home, so the image cache is cold in both lanes; the host page
+cache is not flushed.
+
+- `pairs` alternates stock and prepared lanes. It times create-to-ready (`runtime up`) and
+  service readiness: image ensure, then a graph service reaching `healthy`, and its volume
+  token read back. It then restarts the pool, restores the graph and requires the same token.
+- `cohort` starts 1/8/32 (by default) graphs in one shared pool per lane. Graph operations
+  in one pool serialize on the provider lock and refuse with `provider_busy`, so concurrent
+  requests are retried and counted. A base changes only pool creation, so its saving is a
+  fixed offset that later graph starts amortize.
+- `concurrent` creates several pools at once from one base and requires distinct machines,
+  guest boots and data.
+
+Every sample records the complete CLI process tree's CPU (via `wait4`), the VM process's CPU,
+current and lifetime-peak physical footprint, and each disk's logical, allocated and
+clone-private bytes. A sample is flagged, not dropped, when build tools run, the 1-minute load
+exceeds half the CPU count, or memory pressure is raised. Only admitted pairs enter the
+headline ratio. Cleanup stops each pool and removes only the trial's home and provider alias,
+with a readback. Store raw output outside the repository. Its negative controls run with
+`python3 -m unittest discover -s tests/python -p test_prepared_base_benchmark.py`.
+
+This measures pool creation and a synthetic single-service graph. It does not qualify normal
+source-mounted worktree startup, application-specific images or cold host caches.

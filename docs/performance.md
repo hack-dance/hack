@@ -556,9 +556,11 @@ clone-private bytes. Unobserved values stay null. Each summarized metric reports
 (`n` of `of`) and is labeled unqualified when any sample lacks it, instead of counting the gap
 as zero.
 
-Admission is sampled at the start and end of each trial's timed work, not continuously. A
-sample is flagged, not dropped, when build tools run, the 1-minute load exceeds half the CPU
-count, memory pressure is raised, or any of these could not be observed. Only admitted samples
+Admission is sampled at the start and end of each trial's timed work and every
+`--admission-interval` seconds (default 1) in between. Each sample costs one process listing
+and one sysctl. A trial is flagged, not dropped, when build tools run, the 1-minute load
+exceeds half the CPU count, memory pressure is raised, or any of these could not be observed at
+any sample. Only admitted samples
 enter the admitted summaries and the paired pair and cohort ratios. `--summarize SAMPLES`
 recomputes the summary from a retained raw file without running anything. Cleanup stops each
 pool and removes only the trial's home and provider alias, with a readback. Store raw output

@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 source = Path(__file__).resolve().parents[2] / "scripts/benchmark-prepared-base.py"
@@ -151,6 +152,21 @@ class Accounting(unittest.TestCase):
         self.assertTrue(ok)
         ok, reasons, _ = benchmark.admitted({"admission": CLEAN, "admission_end": LOADED}, 16)
         self.assertEqual((ok, reasons), (False, ["end:load_high"]))
+
+    def test_continuous_admission_flags_any_failed_sample_during_timed_work(self):
+        observations = iter([CLEAN, LOADED] + [CLEAN] * 1000)
+        sampler = benchmark.Sampler(0.001, observe=lambda: next(observations)).start()
+        while len(sampler.samples) < 3:
+            time.sleep(0.001)
+        during = sampler.stop()
+        self.assertGreaterEqual(during["samples"], 3)
+        self.assertEqual((during["reasons"], during["admitted"]), (["load_high"], False))
+        ok, reasons, boundary = benchmark.admitted({"admission": CLEAN, "admission_during": during, "admission_end": CLEAN}, 16)
+        self.assertEqual((ok, reasons, boundary), (False, ["during:load_high"], "continuous"))
+
+    def test_a_sampler_without_samples_is_unobserved_not_admitted(self):
+        result = benchmark.Sampler(1.0).result()
+        self.assertEqual((result["reasons"], result["admitted"]), (["unobserved"], False))
 
     def test_cohorts_are_split_by_admission_and_paired_by_size_and_repeat(self):
         records = [

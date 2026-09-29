@@ -68,6 +68,15 @@ currently reports the repository package version; `hack-v5` identifies the opt-i
 candidate channel, not a published v5 release. Unsupported native workflows still
 report their existing refusal rather than falling back to Docker.
 
+Native `up` and `restart` currently refuse branch instances, including an explicit
+`--branch` and the automatic branch selected in a linked Git worktree. They refuse
+before lifecycle hooks, registry writes or native runtime changes. Branch hostname
+rewriting and concurrent ownership of the shared HTTPS listener are not implemented;
+a separate run mapping alone does not provide branch routing. Use the Compose
+backend for branch instances. Setting `worktree.auto_branch=false` selects a base
+instance; it does not enable isolated native branch support. Existing native branch
+mappings remain accessible through `ps`, `logs`, `exec` and retaining `down`.
+
 ## Manual candidate upgrade and rollback
 
 Candidate bundles are selected by their full path. There is no automatic candidate

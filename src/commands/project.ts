@@ -5921,6 +5921,11 @@ async function handleNativeUp({
     project,
     branchOption: args.options.branch,
   });
+  if (branch !== null) {
+    throw new CliUsageError(
+      "Native branch startup is unavailable: branch hostnames and concurrent HTTPS ownership are not supported yet. Use the Compose backend for branch instances; existing native instances remain accessible through ps, logs, exec and down."
+    );
+  }
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
     throw new CliUsageError(

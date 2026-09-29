@@ -569,3 +569,14 @@ outside the repository. The negative controls run with
 
 This measures pool creation and a synthetic single-service graph. It does not qualify normal
 source-mounted worktree startup, application-specific images or cold host caches.
+
+Prepared bases carry no application images. On an M3 (September 2026, one prepared pool, three
+repeats), `ensure-image` for `postgres:16-alpine` (114 MB archive) took 10.6 s cold. The engine
+load itself took 3.1 s and host digest and layer validation about 1.8 s; the rest was registry
+acquisition into the home's image cache. `node:22-alpine` (61 MB) took 6.3 s cold, with a 1.7 s
+engine load.
+
+Preloading an image into a base could skip only the engine load. A fresh pool's load receipt is
+bound to its incarnation, so it still acquires and validates every image. Preloading would also
+make bases project-specific and require the verifier to check layer contents, so bases stay
+image-free. The larger remaining costs are image acquisition and per-incarnation revalidation.

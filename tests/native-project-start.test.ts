@@ -725,7 +725,7 @@ test("routed startup reserves bridges and enrolls reviewed healthy services with
     return await invoke(call);
   };
   opts.dependencies.serve = async (call) => {
-    expect(call.args).toContain("web=0");
+    expect(call.args).toContain("web=auto");
     expect(call.args).toContain("web=healthy");
     return await serve(call);
   };

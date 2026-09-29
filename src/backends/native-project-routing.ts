@@ -102,10 +102,9 @@ export function reviewedNativeRoutes(opts: {
   }
   routed.sort();
   return {
-    flags: routed.flatMap((name, index) => [
-      "--route-slot",
-      `${name}=${index}`,
-    ]),
+    // The provider reserves all slots under its pool mutation lock. A local
+    // index would collide with other graphs already using the same pool.
+    flags: routed.flatMap((name) => ["--route-slot", `${name}=auto`]),
     services: new Set(routed),
   };
 }

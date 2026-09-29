@@ -52,8 +52,8 @@ pub use host_relay::{
 };
 mod relay;
 pub use bridges::{
-    ReserveBridgeOptions, inspect_bridges, publish_bridge, reconcile_bridges, release_bridge,
-    reserve_bridge, start_bridge,
+    ReserveBridgeOptions, RouteSlot, inspect_bridges, publish_bridge, reconcile_bridges,
+    release_bridge, reserve_bridge, start_bridge,
 };
 mod environment;
 pub use endpoints::GuestEndpoint;

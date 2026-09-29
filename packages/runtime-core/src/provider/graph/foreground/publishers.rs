@@ -54,9 +54,8 @@ fn command(
 }
 
 impl Publishers {
-    /// The caller must hold no Engine/provider lease. Slots are explicitly reviewed;
-    /// the run-filtered bridge inspection API cannot safely discover global vacancies.
-    /// Existing bridge reservation validates capacity and conflicts atomically.
+    /// The caller must hold no Engine/provider lease. The provider reserves the
+    /// complete reviewed route set atomically against pool-wide bridge capacity.
     /// On error, call enrolled graph cleanup and then reap this same set.
     pub(super) fn start(
         &mut self,
@@ -64,7 +63,7 @@ impl Publishers {
         receipt: &Receipt,
         signals: &signals::Events,
         deadline: Instant,
-        slots: &BTreeMap<String, u8>,
+        slots: &BTreeMap<String, graph::RouteSlot>,
     ) -> Result<(), CandidateError> {
         if !self.children.is_empty() || receipt.phase != "ready-observed" {
             return Err(refused());
@@ -79,14 +78,21 @@ impl Publishers {
                     .map(|route| (&resource.key, route))
             })
             .collect::<BTreeMap<_, _>>();
+        let explicit = slots
+            .values()
+            .filter_map(|choice| match choice {
+                graph::RouteSlot::Explicit(slot) => Some(*slot),
+                graph::RouteSlot::Auto => None,
+            })
+            .collect::<Vec<_>>();
         if routes.len() > 32
             || routes
                 .keys()
                 .map(|name| name.as_str())
                 .collect::<BTreeSet<_>>()
                 != slots.keys().map(String::as_str).collect::<BTreeSet<_>>()
-            || slots.values().any(|slot| *slot >= 32)
-            || slots.values().collect::<BTreeSet<_>>().len() != slots.len()
+            || explicit.iter().any(|slot| *slot >= 32)
+            || explicit.iter().collect::<BTreeSet<_>>().len() != explicit.len()
             || routes
                 .values()
                 .any(|route| !graph::routes::valid_intent(route))
@@ -96,27 +102,14 @@ impl Publishers {
         if routes.is_empty() {
             return Ok(());
         }
+        check_deadline(signals, deadline)?;
+        let reserved = super::super::bridges::reserve_routes(candidate, receipt, slots)?;
         let executable = std::env::current_exe().map_err(|_| refused())?;
         for (service, route) in routes {
             check_deadline(signals, deadline)?;
-            // Each helper acquires/releases its own Engine lease before returning.
-            let snapshot = graph::inspect(candidate, &receipt.run)?;
-            if snapshot.receipt.owner != receipt.owner
-                || snapshot.receipt.plan_id != receipt.plan_id
-            {
-                return Err(refused());
-            }
-            let endpoint = snapshot.guest_endpoints.get(service).ok_or_else(refused)?;
-            let slot = slots[service];
-            let assignment = graph::reserve_bridge(
-                candidate,
-                graph::ReserveBridgeOptions {
-                    run: &receipt.run,
-                    service,
-                    slot,
-                    expected_generation: &endpoint.generation,
-                },
-            )?;
+            let selected = reserved.get(service).ok_or_else(refused)?;
+            let slot = selected.slot;
+            let assignment = &selected.assignment;
             check_deadline(signals, deadline)?;
             graph::start_bridge(candidate, &receipt.run, slot, &assignment.reservation)?;
             check_deadline(signals, deadline)?;
@@ -133,7 +126,7 @@ impl Publishers {
             self.children.push(Owned {
                 child,
                 run: receipt.run.clone(),
-                reservation: assignment.reservation,
+                reservation: assignment.reservation.clone(),
                 hostnames: route.hostnames.clone(),
             });
             let owned = self.children.last().ok_or_else(refused)?;

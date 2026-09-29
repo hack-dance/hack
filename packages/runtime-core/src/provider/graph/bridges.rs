@@ -209,6 +209,160 @@ pub struct ReserveBridgeOptions<'a> {
     pub slot: u8,
     pub expected_generation: &'a str,
 }
+
+/// Foreground route admission may select a fixed slot or ask the provider to
+/// choose one while holding its pool-wide mutation lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteSlot {
+    Auto,
+    Explicit(u8),
+}
+
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug)]
+pub(in crate::provider::graph) struct ReservedRoute {
+    pub slot: u8,
+    pub assignment: Assignment,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn select_route_slots(
+    store: &Store,
+    requested: &BTreeMap<String, RouteSlot>,
+    capacity: u8,
+    run: &str,
+) -> Result<BTreeMap<String, u8>, CandidateError> {
+    let mut used = store
+        .slots
+        .keys()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut selected = BTreeMap::new();
+    for (service, choice) in requested {
+        if store
+            .slots
+            .values()
+            .any(|assignment| assignment.run == run && assignment.service == *service)
+        {
+            return Err(error(
+                "bridge_slot_busy",
+                "The service is already reserved; no reassignment was attempted.",
+            ));
+        }
+        if let RouteSlot::Explicit(slot) = choice {
+            if *slot >= capacity {
+                return Err(error(
+                    "bridge_capacity",
+                    "Requested socket slot is outside this pool's capacity.",
+                ));
+            }
+            if !used.insert(*slot) {
+                return Err(error(
+                    "bridge_slot_busy",
+                    "The slot is already reserved; no reassignment was attempted.",
+                ));
+            }
+            selected.insert(service.clone(), *slot);
+        }
+    }
+    for (service, choice) in requested {
+        if *choice == RouteSlot::Auto {
+            let slot = (0..capacity).find(|slot| !used.contains(slot)).ok_or_else(|| {
+                error(
+                    "bridge_capacity_exhausted",
+                    "No free application bridge socket remains in this pool; no routes were reserved.",
+                )
+            })?;
+            used.insert(slot);
+            selected.insert(service.clone(), slot);
+        }
+    }
+    Ok(selected)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn reserve_selected(
+    candidate: &Candidate,
+    mut store: Store,
+    requested: &BTreeMap<String, RouteSlot>,
+    capacity: u8,
+    run: &str,
+    boot_id: &str,
+    endpoints: &BTreeMap<String, GuestEndpoint>,
+) -> Result<BTreeMap<String, ReservedRoute>, CandidateError> {
+    let selected = select_route_slots(&store, requested, capacity, run)?;
+    let mut reserved = BTreeMap::new();
+    for (service, slot) in selected {
+        let endpoint = endpoints.get(&service).ok_or_else(|| {
+            error(
+                "bridge_endpoint_unavailable",
+                "A committed healthy guest endpoint is required.",
+            )
+        })?;
+        let assignment = Assignment {
+            reservation: probes::token()?,
+            run: run.into(),
+            service: service.clone(),
+            generation: endpoint.generation.clone(),
+            container_id: endpoint.container_id.clone(),
+            network_id: endpoint.network_id.clone(),
+            boot_id: boot_id.into(),
+            phase: "reserved".into(),
+            relay: None,
+        };
+        store.slots.insert(slot, assignment.clone());
+        reserved.insert(service, ReservedRoute { slot, assignment });
+    }
+    validate(&store, &store.owner, capacity)?;
+    save(candidate, &store)?;
+    Ok(reserved)
+}
+
+/// Reserve the complete route set against one validated graph snapshot. Capacity
+/// refusal writes no assignments and starts no relays; the provider lease covers
+/// the pool-wide selection and single durable registry update.
+#[cfg(target_os = "macos")]
+pub(in crate::provider::graph) fn reserve_routes(
+    candidate: &Candidate,
+    receipt: &Receipt,
+    requested: &BTreeMap<String, RouteSlot>,
+) -> Result<BTreeMap<String, ReservedRoute>, CandidateError> {
+    if requested.is_empty() || requested.len() > 32 {
+        return Err(invalid());
+    }
+    let engine = Engine::connect_cleanup(candidate)?;
+    let capacity = engine
+        .guest()
+        .bridge_intent()
+        .ok_or_else(|| {
+            error(
+                "bridge_unavailable",
+                "The pool has no application bridge capacity.",
+            )
+        })?
+        .slots;
+    let snapshot = inspect_using(candidate, &engine, &receipt.run)?;
+    if snapshot.receipt.owner != receipt.owner
+        || snapshot.receipt.plan_id != receipt.plan_id
+        || snapshot.receipt.namespace != receipt.namespace
+        || snapshot.receipt.phase != "ready-observed"
+    {
+        return Err(error(
+            "bridge_generation_stale",
+            "The reviewed graph changed before bridge reservation.",
+        ));
+    }
+    let store = load_store(candidate, &engine, false)?;
+    reserve_selected(
+        candidate,
+        store,
+        requested,
+        capacity,
+        &receipt.run,
+        engine.guest().boot_id(),
+        &snapshot.guest_endpoints,
+    )
+}
 pub fn reserve_bridge(
     candidate: &Candidate,
     options: ReserveBridgeOptions<'_>,
@@ -559,18 +713,22 @@ pub(super) fn release_run(
     receipt: &Receipt,
 ) -> Result<(), CandidateError> {
     let mut store = load_store(candidate, engine, false)?;
-    let selected = store
-        .slots
-        .iter()
-        .filter(|(_, a)| a.run == receipt.run)
-        .map(|(slot, _)| *slot)
-        .collect::<Vec<_>>();
+    let selected = owned_slots(&store, &receipt.run);
     for slot in selected {
         stop_slot(candidate, engine, &mut store, slot)?;
         store.slots.remove(&slot);
         save(candidate, &store)?;
     }
     Ok(())
+}
+
+fn owned_slots(store: &Store, run: &str) -> Vec<u8> {
+    store
+        .slots
+        .iter()
+        .filter(|(_, assignment)| assignment.run == run)
+        .map(|(slot, _)| *slot)
+        .collect()
 }
 pub fn reconcile_bridges(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
@@ -648,6 +806,205 @@ mod tests {
                 },
             )]),
         }
+    }
+    #[test]
+    fn automatic_routes_allocate_distinct_free_slots_without_stealing_foreign_owners() {
+        let store = fixture();
+        let requests = BTreeMap::from([
+            ("api".into(), RouteSlot::Auto),
+            ("worker".into(), RouteSlot::Auto),
+            ("web".into(), RouteSlot::Explicit(3)),
+        ]);
+        let selected = select_route_slots(&store, &requests, 4, &"f".repeat(32)).unwrap();
+        assert_eq!(selected["api"], 1);
+        assert_eq!(selected["worker"], 2);
+        assert_eq!(selected["web"], 3);
+        assert_eq!(store.slots[&0].run, "b".repeat(32));
+        assert_eq!(store.slots.len(), 1);
+    }
+    #[test]
+    fn exhausted_batch_refuses_without_changing_registry_or_partial_selection() {
+        let fixture_root = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&fixture_root.0).unwrap();
+        let owner = "a".repeat(32);
+        initialize_registry(&candidate, &owner, 2).unwrap();
+        let mut store = fixture();
+        store.owner = owner.clone();
+        save(&candidate, &store).unwrap();
+        let before = fs::read(root(&candidate).join("state.json")).unwrap();
+        let requests = BTreeMap::from([
+            ("api".into(), RouteSlot::Auto),
+            ("worker".into(), RouteSlot::Auto),
+        ]);
+        assert_eq!(
+            reserve_selected(
+                &candidate,
+                read_owner_registry(&candidate, &owner, 2, false).unwrap(),
+                &requests,
+                2,
+                &"f".repeat(32),
+                "12345678-1234-1234-1234-123456789abc",
+                &BTreeMap::new(),
+            )
+            .unwrap_err()
+            .code,
+            "bridge_capacity_exhausted"
+        );
+        assert_eq!(
+            fs::read(root(&candidate).join("state.json")).unwrap(),
+            before
+        );
+    }
+    #[test]
+    fn batch_commit_is_atomic_across_late_endpoint_failure_and_success() {
+        let fixture_root = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&fixture_root.0).unwrap();
+        let owner = "a".repeat(32);
+        let run = "f".repeat(32);
+        let boot = "12345678-1234-1234-1234-123456789abc";
+        initialize_registry(&candidate, &owner, 3).unwrap();
+        let mut store = fixture();
+        store.owner = owner.clone();
+        save(&candidate, &store).unwrap();
+        let before = fs::read(root(&candidate).join("state.json")).unwrap();
+        let requested = BTreeMap::from([
+            ("api".into(), RouteSlot::Auto),
+            ("web".into(), RouteSlot::Auto),
+        ]);
+        let endpoint = GuestEndpoint {
+            generation: "c".repeat(64),
+            container_id: "d".repeat(64),
+            network_id: "e".repeat(64),
+            address: "172.17.0.2".parse().unwrap(),
+            port: 3000,
+            scope: "guest-only",
+            reachability: "not-probed",
+        };
+        let mut endpoints = BTreeMap::from([("api".into(), endpoint.clone())]);
+        assert_eq!(
+            reserve_selected(
+                &candidate,
+                read_owner_registry(&candidate, &owner, 3, false).unwrap(),
+                &requested,
+                3,
+                &run,
+                boot,
+                &endpoints,
+            )
+            .unwrap_err()
+            .code,
+            "bridge_endpoint_unavailable"
+        );
+        assert_eq!(
+            fs::read(root(&candidate).join("state.json")).unwrap(),
+            before
+        );
+        let mut invalid = endpoint.clone();
+        invalid.generation = "invalid".into();
+        endpoints.insert("web".into(), invalid);
+        assert_eq!(
+            reserve_selected(
+                &candidate,
+                read_owner_registry(&candidate, &owner, 3, false).unwrap(),
+                &requested,
+                3,
+                &run,
+                boot,
+                &endpoints,
+            )
+            .unwrap_err()
+            .code,
+            "bridge_assignment"
+        );
+        assert_eq!(
+            fs::read(root(&candidate).join("state.json")).unwrap(),
+            before
+        );
+        endpoints.insert("web".into(), endpoint);
+        let reserved = reserve_selected(
+            &candidate,
+            read_owner_registry(&candidate, &owner, 3, false).unwrap(),
+            &requested,
+            3,
+            &run,
+            boot,
+            &endpoints,
+        )
+        .unwrap();
+        assert_eq!(reserved["api"].slot, 1);
+        assert_eq!(reserved["web"].slot, 2);
+        let persisted = read_owner_registry(&candidate, &owner, 3, false).unwrap();
+        assert_eq!(persisted.slots.len(), 3);
+        for (service, route) in reserved {
+            assert_eq!(persisted.slots[&route.slot].run, run);
+            assert_eq!(persisted.slots[&route.slot].service, service);
+            assert_eq!(
+                persisted.slots[&route.slot].reservation,
+                route.assignment.reservation
+            );
+        }
+        assert_eq!(persisted.slots[&0].run, "b".repeat(32));
+    }
+    #[test]
+    fn explicit_slot_and_existing_service_conflicts_still_refuse() {
+        let store = fixture();
+        for (run, choice, code) in [
+            ("f".repeat(32), RouteSlot::Explicit(0), "bridge_slot_busy"),
+            ("f".repeat(32), RouteSlot::Explicit(2), "bridge_capacity"),
+            ("b".repeat(32), RouteSlot::Auto, "bridge_slot_busy"),
+        ] {
+            let requests = BTreeMap::from([("web".into(), choice)]);
+            assert_eq!(
+                select_route_slots(&store, &requests, 2, &run)
+                    .unwrap_err()
+                    .code,
+                code
+            );
+        }
+    }
+    #[test]
+    fn retained_restore_selection_respects_current_pool_ownership() {
+        let mut store = fixture();
+        let requests = BTreeMap::from([("web".into(), RouteSlot::Auto)]);
+        let old_slot = select_route_slots(&store, &requests, 2, &"f".repeat(32)).unwrap()["web"];
+        assert_eq!(old_slot, 1);
+        store.slots.remove(&0);
+        store.slots.insert(1, fixture().slots[&0].clone());
+        let restored = select_route_slots(&store, &requests, 2, &"f".repeat(32)).unwrap();
+        assert_eq!(restored["web"], 0);
+        assert_eq!(store.slots[&1].run, "b".repeat(32));
+    }
+    #[test]
+    fn stopping_slots_stay_occupied_and_cleanup_selects_only_owned_run() {
+        let mut store = fixture();
+        let entry = store.slots.get_mut(&0).unwrap();
+        entry.phase = "stopping".into();
+        entry.relay = Some(relay::Relay {
+            transport: relay::Transport::Raw,
+            launch_serial: 0,
+            binary_sha256: "f".repeat(64),
+            target_pid: 42,
+            target_start: 123,
+            port: 3000,
+        });
+        validate(&store, "owner", 2).unwrap();
+        let requests = BTreeMap::from([("web".into(), RouteSlot::Auto)]);
+        assert_eq!(
+            select_route_slots(&store, &requests, 2, &"f".repeat(32)).unwrap()["web"],
+            1
+        );
+        let mut other = fixture().slots.remove(&0).unwrap();
+        other.run = "f".repeat(32);
+        other.reservation = "9".repeat(32);
+        store.slots.insert(1, other);
+        assert_eq!(owned_slots(&store, &"b".repeat(32)), vec![0]);
+        assert_eq!(owned_slots(&store, &"f".repeat(32)), vec![1]);
+        assert!(
+            select_route_slots(&store, &requests, 2, &"e".repeat(32))
+                .unwrap_err()
+                .code
+                == "bridge_capacity_exhausted"
+        );
     }
     #[test]
     fn matching_generation_cannot_authorize_a_different_container_or_network() {

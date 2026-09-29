@@ -8,7 +8,7 @@ pub(super) fn command(
     action: &str,
     options: graph::NormalizedRunOptions<'_>,
     singles: &BTreeMap<&str, &str>,
-    route_slots: &BTreeMap<String, u8>,
+    route_slots: &BTreeMap<String, graph::RouteSlot>,
     environment_stdin: bool,
 ) -> Result<Value, CandidateError> {
     let report = hack_runtime_core::project::plan_normalized(candidate, options.compose)?;

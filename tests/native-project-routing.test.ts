@@ -57,7 +57,7 @@ test("supported routing and cache label keys remain bounded without rewriting va
     )
   ).toThrow();
 });
-test("only active reviewed routes receive stable unique slots and matching existing probes", () => {
+test("active reviewed routes request pool allocation with matching existing probes", () => {
   const opts = {
     plan: {
       services: { z: service, a: service, off: { ...service, active: false } },
@@ -67,9 +67,9 @@ test("only active reviewed routes receive stable unique slots and matching exist
   };
   expect(reviewedNativeRoutes(opts).flags).toEqual([
     "--route-slot",
-    "a=0",
+    "a=auto",
     "--route-slot",
-    "z=1",
+    "z=auto",
   ]);
   expect([...reviewedNativeRoutes(opts).services]).toEqual(["a", "z"]);
   for (const changed of [

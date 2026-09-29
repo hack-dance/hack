@@ -71,8 +71,9 @@ report their existing refusal rather than falling back to Docker.
 Native `up` and `restart` currently refuse branch instances, including an explicit
 `--branch` and the automatic branch selected in a linked Git worktree. They refuse
 before lifecycle hooks, registry writes or native runtime changes. Concurrent
-ownership of the shared HTTPS listener and pool-wide ingress/dependency slot
-allocation are not implemented; a separate run mapping alone does not provide
+ownership of the shared HTTPS listener and pool-wide dependency slot
+allocation are not implemented; pool capacity also remains fixed at creation.
+A separate run mapping alone does not provide
 branch routing. Use the Compose
 backend for branch instances. Setting `worktree.auto_branch=false` selects a base
 instance; it does not enable isolated native branch support. Existing native branch
@@ -550,6 +551,17 @@ and missing probes are not replaced or inferred. Native review still validates
 hostnames, ports, networks and labels. Foreground graph ownership supervises and
 retires Unix route publishers. Without explicit HTTPS selection, this enrollment does not start a hostname authority
 or Caddy HTTPS server. It never installs trust, configures DNS, or widens an existing pool.
+
+The frontend requests `--route-slot SERVICE=auto` for each active route. The
+native graph owner selects distinct free ingress slots across the whole pool
+under its mutation lock and reserves the complete route set before starting its
+route relays or publishers. Slots held by another graph, including slots awaiting
+cleanup, remain unavailable. Insufficient capacity refuses the reservation without
+publishing a partial route set. Internal callers can still select an exact slot
+with `--route-slot SERVICE=N`; a busy slot is refused rather than reassigned.
+Retained starts resolve automatic selections again against current ownership.
+This allocation does not resize a pool or enable shared HTTPS lifetime, dependency
+transport allocation, or multi-worktree source sharing.
 
 `HACK_NATIVE_DEPENDENCIES` selects an absolute path to a regular JSON file with
 explicit host listeners. The CLI reads it after lifecycle hooks, so a hook can

@@ -54,7 +54,7 @@ Usage:
   hack-local runtime export-bridge-recovery --slot <1..8> --expect-sha256 <sha256> [--json]
   hack-local runtime engine-info [--json]
   hack-local graph reserve-bridge --run-id <32-hex> --service <name> --slot <index> --expect-generation <sha256> [--json]
-  hack-local graph serve ... [--route-slot <service=index>]...
+  hack-local graph serve ... [--route-slot <service=index|auto>]...
   hack-local graph start-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> [--json]
   hack-local graph publish-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> (--port <loopback-port> | --unix [--hostname <name>]...)
   hack-local graph unpublish-bridge --run-id <32-hex> --expect-reservation <32-hex> [--json]

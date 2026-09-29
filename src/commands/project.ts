@@ -5923,7 +5923,7 @@ async function handleNativeUp({
   });
   if (branch !== null) {
     throw new CliUsageError(
-      "Native branch startup is unavailable: shared HTTPS ownership and pool-wide routing/dependency allocation are not supported yet. Use the Compose backend for branch instances; existing native instances remain accessible through ps, logs, exec and down."
+      "Native branch startup is unavailable: shared HTTPS ownership and pool-wide dependency allocation are not supported yet, and pool capacity remains fixed. Use the Compose backend for branch instances; existing native instances remain accessible through ps, logs, exec and down."
     );
   }
   const cfg = await readProjectConfig(project);

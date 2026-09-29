@@ -82,7 +82,7 @@ pub fn serve_with_environment(
         &BTreeMap::new(),
     )
 }
-/// Explicit route slots belong to this foreground owner; publication readiness is
+/// Reviewed route selectors belong to this foreground owner; publication readiness is
 /// additional to application readiness. TLS is provided by a separate authority.
 pub fn serve_with_routes(
     candidate: &Candidate,
@@ -90,7 +90,7 @@ pub fn serve_with_routes(
     runtime: HostRelayRuntime,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
     deadline: Instant,
-    route_slots: &BTreeMap<String, u8>,
+    route_slots: &BTreeMap<String, super::RouteSlot>,
 ) -> Result<Receipt, CandidateError> {
     serve_input(
         candidate,
@@ -112,7 +112,7 @@ pub fn serve_normalized_with_routes(
     runtime: HostRelayRuntime,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
     deadline: Instant,
-    route_slots: &BTreeMap<String, u8>,
+    route_slots: &BTreeMap<String, super::RouteSlot>,
 ) -> Result<Receipt, CandidateError> {
     serve_input(
         candidate,
@@ -132,7 +132,7 @@ pub fn serve_restore_normalized_with_routes(
     runtime: HostRelayRuntime,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
     deadline: Instant,
-    route_slots: &BTreeMap<String, u8>,
+    route_slots: &BTreeMap<String, super::RouteSlot>,
     generation: &str,
 ) -> Result<Receipt, CandidateError> {
     serve_input(
@@ -177,7 +177,7 @@ fn serve_input<'a>(
     mut runtime: HostRelayRuntime,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
     deadline: Instant,
-    route_slots: &BTreeMap<String, u8>,
+    route_slots: &BTreeMap<String, super::RouteSlot>,
     normalized: Option<(crate::project::NormalizedComposeOptions<'a>, Option<&str>)>,
 ) -> Result<Receipt, CandidateError> {
     if options.routing_enrolled != !route_slots.is_empty() {

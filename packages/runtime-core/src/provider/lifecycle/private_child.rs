@@ -410,6 +410,44 @@ impl OwnedGuest<'_> {
         Ok(())
     }
 
+    /// Stop an orphan selected by a durable ready graph under its provider and
+    /// dead-owner publication locks. A recorded PID alone is never sufficient:
+    /// STOP rechecks container ID, executable, full argv and process start time.
+    pub(in crate::provider) fn stop_orphan_relay_listener(
+        &self,
+        options: RelayLaunch<'_>,
+        process: RelayProcess,
+        budget: Duration,
+    ) -> Result<(), CandidateError> {
+        if !options.valid()
+            || process.pid <= 1
+            || process.start == 0
+            || process.address != options.address
+            || process.port != options.port
+        {
+            return Err(refused());
+        }
+        let mut child = RelayChild {
+            child: None,
+            status: None,
+            stdout: None,
+            stderr: None,
+            socket: None,
+            out: Vec::new(),
+            err: Vec::new(),
+            container: options.container.into(),
+            runtime: self.incarnation().into(),
+            boot: self.boot_id().into(),
+            port: options.port,
+            address: options.address,
+            slot: options.slot,
+            uid: options.uid,
+            gid: options.gid,
+            process: Some(process),
+        };
+        self.stop_relay_listener(&mut child, budget)
+    }
+
     /// A removed container cannot be inspected by STOP. Prove that both its
     /// recorded ID and graph name are absent before reaping the host transport;
     /// Docker removal itself has already killed processes in that container.

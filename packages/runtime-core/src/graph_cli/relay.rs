@@ -235,6 +235,7 @@ pub(super) fn runtime(
     expected: &str,
     inputs: &hack_runtime_core::project::inputs::ExecutionInputs,
     run: &str,
+    automatic_slots: bool,
 ) -> Result<graph::HostRelayRuntime, CandidateError> {
     let selection = Selection::read(path)?;
     if selection.plan != plan || !hex(expected) {
@@ -245,7 +246,12 @@ pub(super) fn runtime(
         return Err(refused());
     }
     graph::HostRelayRuntime::validate_inputs(&dependencies, inputs)?;
-    graph::HostRelayRuntime::new_for_run(
+    let create = if automatic_slots {
+        graph::HostRelayRuntime::new_for_run_auto
+    } else {
+        graph::HostRelayRuntime::new_for_run
+    };
+    create(
         candidate,
         &selection.artifact,
         &selection.artifact_sha256,

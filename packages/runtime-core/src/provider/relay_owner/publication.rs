@@ -27,6 +27,8 @@ use std::{
     time::{Duration, Instant},
 };
 mod connect;
+#[cfg(target_os = "macos")]
+pub(crate) mod dead;
 const LIMIT: u64 = 4096;
 type FileId = (u64, u64);
 fn id(m: &fs::Metadata) -> FileId {

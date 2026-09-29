@@ -11,6 +11,7 @@ pub struct Options {
     pub bridges: Option<BridgeIntent>,
     pub minimum_bridges: Option<BridgeIntent>,
     pub dependencies: Option<DependencySocketIntent>,
+    pub minimum_dependencies: Option<DependencySocketIntent>,
     pub project_share: Option<PathBuf>,
     pub retained: Option<(String, String)>,
 }
@@ -18,7 +19,7 @@ pub struct Options {
 fn invalid() -> CandidateError {
     CandidateError::new(
         "invalid_arguments",
-        "Use runtime up --profile research|development with --bridge-sockets or --minimum-bridge-sockets, and/or --dependency-sockets, each once, repeatable --allow-host HOST, plus optional --json. Direct project sharing requires --profile development --project-share PATH --unfiltered-source together; it exposes the exact project tree without snapshot exclusions.",
+        "Use runtime up --profile research|development with --bridge-sockets or --minimum-bridge-sockets, and/or --dependency-sockets or --minimum-dependency-sockets, each once, repeatable --allow-host HOST, plus optional --json. Direct project sharing requires --profile development --project-share PATH --unfiltered-source together; it exposes the exact project tree without snapshot exclusions.",
     )
 }
 
@@ -27,6 +28,7 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
     let mut bridges = None;
     let mut minimum_bridges = None;
     let mut dependencies = None;
+    let mut minimum_dependencies = None;
     let mut json = false;
     let mut hosts = Vec::new();
     let mut internet = false;
@@ -69,9 +71,17 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
                 let count = args.next().ok_or_else(invalid)?;
                 minimum_bridges = Some(BridgeIntent::new(count.parse().map_err(|_| invalid())?)?);
             }
-            "--dependency-sockets" if dependencies.is_none() => {
+            "--dependency-sockets" if dependencies.is_none() && minimum_dependencies.is_none() => {
                 let count = args.next().ok_or_else(invalid)?;
                 dependencies = Some(DependencySocketIntent::new(
+                    count.parse().map_err(|_| invalid())?,
+                )?);
+            }
+            "--minimum-dependency-sockets"
+                if minimum_dependencies.is_none() && dependencies.is_none() =>
+            {
+                let count = args.next().ok_or_else(invalid)?;
+                minimum_dependencies = Some(DependencySocketIntent::new(
                     count.parse().map_err(|_| invalid())?,
                 )?);
             }
@@ -101,6 +111,7 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
         || (bridges.is_none()
             && minimum_bridges.is_none()
             && dependencies.is_none()
+            && minimum_dependencies.is_none()
             && hosts.is_empty()
             && !internet
             && project_share.is_none())
@@ -120,6 +131,7 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
         bridges,
         minimum_bridges,
         dependencies,
+        minimum_dependencies,
         project_share,
         retained,
     })
@@ -128,6 +140,58 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimum_dependency_capacity_requires_one_unambiguous_bounded_selection() {
+        let base = [
+            "--profile",
+            "development",
+            "--minimum-dependency-sockets",
+            "4",
+        ];
+        let options = parse(&base).unwrap();
+        assert_eq!(
+            options.minimum_dependencies,
+            Some(DependencySocketIntent::new(4).unwrap())
+        );
+        assert_eq!(options.dependencies, None);
+        for suffix in [
+            vec!["--dependency-sockets", "4"],
+            vec!["--minimum-dependency-sockets", "4"],
+        ] {
+            let mut args = base.to_vec();
+            args.extend(suffix);
+            assert!(parse(&args).is_err());
+        }
+        assert!(
+            parse(&[
+                "--profile",
+                "development",
+                "--dependency-sockets",
+                "4",
+                "--minimum-dependency-sockets",
+                "1"
+            ])
+            .is_err()
+        );
+        for count in ["0", "33", "-1", "invalid"] {
+            assert!(
+                parse(&[
+                    "--profile",
+                    "development",
+                    "--minimum-dependency-sockets",
+                    count
+                ])
+                .is_err()
+            );
+        }
+        assert!(parse(&["--profile", "development", "--minimum-dependency-sockets"]).is_err());
+        let mut both = base.to_vec();
+        both.extend(["--minimum-bridge-sockets", "8"]);
+        let options = parse(&both).unwrap();
+        assert_eq!(options.minimum_bridges.unwrap().slots, 8);
+        assert_eq!(options.minimum_dependencies.unwrap().slots, 4);
+    }
 
     #[test]
     fn minimum_bridge_capacity_is_bounded_and_exclusive_with_exact_selection() {

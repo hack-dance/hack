@@ -342,3 +342,67 @@ fn named_selection_verifies_an_explicit_empty_graph_without_retirement() {
     }
     assert_eq!(owner.connections(), 0);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn dead_witness_requires_lock_dead_exact_process_and_preserves_partial_retirement() {
+    let root = Root::new();
+    let mut child = spawn_child(&root, false);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let pin = loop {
+        if let Ok(pin) = PinnedEndpoint::load(&root.0, context()) {
+            break pin;
+        }
+        assert!(Instant::now() < deadline);
+        assert!(child.0.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(dead::Witness::acquire(&root.0, context(), &pin.receipt.process).is_err());
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let mut foreign = pin.receipt.process.clone();
+    foreign.start_micros += 1;
+    assert!(dead::Witness::acquire(&root.0, context(), &foreign).is_err());
+    let witness = dead::Witness::acquire(&root.0, context(), &pin.receipt.process).unwrap();
+    let selection = witness.selection();
+    assert!(dead::Witness::acquire(&root.0, context(), &pin.receipt.process).is_err());
+    assert!(dead::retire(&root.0, context(), &selection).is_err());
+    drop(witness);
+    // Simulate interruption after the first authorized unlink. Retrying retains
+    // the immutable original owner selection and finishes only that receipt.
+    fs::remove_file(&pin.paths.socket).unwrap();
+    assert!(dead::Witness::acquire(&root.0, context(), &pin.receipt.process).is_err());
+    dead::retire(&root.0, context(), &selection).unwrap();
+    dead::retire(&root.0, context(), &selection).unwrap();
+    assert!(!pin.paths.receipt.exists());
+    assert!(!pin.paths.socket.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn dead_witness_rejects_replacement_listener_and_changed_lock() {
+    let root = Root::new();
+    let mut child = spawn_child(&root, false);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let pin = loop {
+        if let Ok(pin) = PinnedEndpoint::load(&root.0, context()) {
+            break pin;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let witness = dead::Witness::acquire(&root.0, context(), &pin.receipt.process).unwrap();
+    let lock = pin.paths.directory.join("operation.lock");
+    fs::rename(&lock, pin.paths.directory.join("old.lock")).unwrap();
+    let replacement = state::Lock::acquire(&pin.paths.directory).unwrap();
+    assert!(witness.verify().is_err());
+    drop(replacement);
+    drop(witness);
+    fs::remove_file(&pin.paths.socket).unwrap();
+    let replacement = UnixListener::bind(&pin.paths.socket).unwrap();
+    fs::set_permissions(&pin.paths.socket, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(dead::Witness::acquire(&root.0, context(), &pin.receipt.process).is_err());
+    drop(replacement);
+}

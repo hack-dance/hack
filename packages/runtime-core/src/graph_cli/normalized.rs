@@ -10,6 +10,7 @@ pub(super) fn command(
     singles: &BTreeMap<&str, &str>,
     route_slots: &BTreeMap<String, graph::RouteSlot>,
     environment_stdin: bool,
+    automatic_dependency_slots: bool,
 ) -> Result<Value, CandidateError> {
     let report = hack_runtime_core::project::plan_normalized(candidate, options.compose)?;
     if report.plan_id != options.run.expected_plan {
@@ -135,6 +136,7 @@ pub(super) fn command(
                 .ok_or_else(invalid)?,
             &inputs.executable,
             options.run.run_id,
+            automatic_dependency_slots,
         )?;
         let deadline = managed.as_ref().map_or_else(
             || Instant::now() + Duration::from_secs(120),
@@ -163,7 +165,12 @@ pub(super) fn command(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (singles, route_slots, environment_stdin);
+        let _ = (
+            singles,
+            route_slots,
+            environment_stdin,
+            automatic_dependency_slots,
+        );
         Err(CandidateError::new(
             "unsupported_host",
             "Normalized foreground graph requires macOS.",

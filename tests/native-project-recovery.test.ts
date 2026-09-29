@@ -81,6 +81,97 @@ async function fixture() {
   };
   return { root, projectDir, lifecycle, opts, receipt, events };
 }
+function httpsLease(run: Awaited<ReturnType<typeof fixture>>["opts"]["run"]) {
+  return {
+    version: 1 as const,
+    ownerGeneration: "1".repeat(32),
+    leaseId: "2".repeat(32),
+    run: run.run,
+    attempt: "3".repeat(32),
+    owner: run.owner,
+    namespace: run.namespace,
+    planId: run.planId,
+  };
+}
+
+test("shared lease recovery keeps another live HTTPS owner and skips global probes", async () => {
+  const f = await fixture();
+  const lock = join(f.root, "native-https/owner.lock");
+  await mkdir(lock, { recursive: true, mode: 0o700 });
+  await writeFile(join(lock, "other-owner"), "keep");
+  await writeFile(join(f.lifecycle, "state.json"), '{"entries":[{}]}');
+  const lease = httpsLease(f.opts.run);
+  await verifyNativeFrontendRecovery({
+    ...f.opts,
+    legacy: false,
+    httpsLease: lease,
+    inspectLegacyProcesses: async () => {
+      throw new Error("legacy process inventory must not run");
+    },
+    invoke: async () => {
+      throw new Error("global authority probe must not run");
+    },
+    checkPort: async () => {
+      throw new Error("global HTTPS port probe must not run");
+    },
+    recoverLease: async ({ runtime, identity }) => {
+      expect(runtime).toEqual(f.opts.runtime);
+      expect(identity).toEqual(lease);
+      f.events.push("lease");
+    },
+    cleanupLifecycle: async () => {
+      f.events.push("lifecycle");
+      await writeFile(join(f.lifecycle, "state.json"), '{"entries":[]}');
+    },
+  });
+  expect(f.events).toEqual(["graph", "lease", "lifecycle"]);
+  expect((await lstat(join(lock, "other-owner"))).isFile()).toBe(true);
+});
+
+test("shared recovery refuses foreign leases and retains uncertainty on failed retirement", async () => {
+  const f = await fixture();
+  const lease = httpsLease(f.opts.run);
+  let recoveries = 0;
+  const options = {
+    ...f.opts,
+    legacy: false,
+    httpsLease: lease,
+    recoverLease: async () => {
+      recoveries++;
+      throw new Error("exact lease retirement uncertain");
+    },
+    cleanupLifecycle: async () => {
+      f.events.push("lifecycle");
+    },
+  };
+  for (const foreign of [
+    { ...lease, run: "f".repeat(32) },
+    { ...lease, owner: "f".repeat(32) },
+    { ...lease, namespace: "f".repeat(64) },
+    { ...lease, planId: "f".repeat(64) },
+  ]) {
+    await expect(
+      verifyNativeFrontendRecovery({ ...options, httpsLease: foreign })
+    ).rejects.toThrow("cannot prove");
+  }
+  expect(recoveries).toBe(0);
+  await expect(
+    verifyNativeFrontendRecovery({ ...options, httpsPort: null })
+  ).rejects.toThrow("cannot prove");
+  await expect(verifyNativeFrontendRecovery(options)).rejects.toThrow(
+    "exact lease retirement uncertain"
+  );
+  expect(recoveries).toBe(1);
+  expect(f.events).toEqual(["graph"]);
+  const changed = structuredClone(f.receipt);
+  changed.observations["container:app"].state = "present";
+  f.events.length = 0;
+  await expect(
+    verifyNativeFrontendRecovery({ ...options, inspect: async () => changed })
+  ).rejects.toThrow("cannot prove");
+  expect(recoveries).toBe(1);
+  expect(f.events).toEqual([]);
+});
 
 test("recovery requires stopped owned graph, vacant HTTPS, and empty lifecycle", async () => {
   const f = await fixture();

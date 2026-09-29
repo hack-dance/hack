@@ -6018,10 +6018,11 @@ async function handleNativeUp({
               scope: startup.scope,
               run,
               httpsPort:
-                token.version === 2
+                token.version !== 1
                   ? token.httpsPort
                   : (startup.https?.httpsPort ?? null),
               legacy: token.version === 1,
+              httpsLease: token.version === 3 ? token.httpsLease : undefined,
               cleanupLifecycle: async () =>
                 await stopLifecycleProcesses({
                   project,

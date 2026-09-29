@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { acquireNativeHttpsLease } from "../src/backends/native-https-owner.ts";
 import { beginNativeProjectFinalization } from "../src/backends/native-project-finalization.ts";
 import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
 import { preflightNativeRestart } from "../src/backends/native-project-restart-preflight.ts";
@@ -75,6 +76,13 @@ async function fixture(withEnvironment = true) {
       }),
     invoke: async (opts) => {
       events.push(opts.args.slice(0, 2).join(" "));
+      if (opts.args[0] === "runtime" && opts.args[1] === "status") {
+        return {
+          phase: "running",
+          process_alive: true,
+          guest_boot_id: "12345678-1234-1234-1234-123456789abc",
+        };
+      }
       if (opts.args[1] === "dependency-plan") {
         return { dependency_plan_id: "f".repeat(64) };
       }
@@ -732,6 +740,17 @@ test("routed startup reserves bridges and enrolls reviewed healthy services with
   expect(await startNativeProject(opts)).toBe(0);
 });
 
+function leaseIdentity(
+  selection: Parameters<typeof acquireNativeHttpsLease>[0]
+) {
+  return {
+    version: 1 as const,
+    ownerGeneration: "1".repeat(32),
+    leaseId: "2".repeat(32),
+    owner: selection.pool.owner,
+    ...selection.lease,
+  };
+}
 const httpsSelection = {
   caddyBinary: "/synthetic/caddy",
   caddySha256: "a".repeat(64),
@@ -826,9 +845,20 @@ test("unrouted graphs do not start the selected HTTPS frontend", async () => {
 test("routed HTTPS verification precedes readiness and closes after graph cleanup", async () => {
   const { opts, events } = await httpsFixture();
   opts.dependencies.https = async (selection) => {
-    expect(selection).toEqual({ runtime: opts.runtime, ...httpsSelection });
+    expect(selection).toMatchObject({
+      runtime: opts.runtime,
+      ...httpsSelection,
+      pool: {
+        owner: "c".repeat(32),
+        bootId: "12345678-1234-1234-1234-123456789abc",
+      },
+      lease: { namespace: "b".repeat(64), planId: "a".repeat(64) },
+    });
+    expect(selection.lease.run).toMatch(/^[a-f0-9]{32}$/);
+    expect(selection.lease.attempt).toMatch(/^[a-f0-9]{32}$/);
     events.push("https-start");
     return {
+      identity: leaseIdentity(selection),
       caPath: "/synthetic/root.crt",
       httpsPort: 8443,
       exited: new Promise(() => {}),
@@ -838,12 +868,15 @@ test("routed HTTPS verification precedes readiness and closes after graph cleanu
         events.push("https-verify");
         return { statusCode: 200 };
       },
-      close: async () => {
+      releaseAfterCleanup: async () => {
         events.push("https-close");
       },
     };
   };
   expect(await startNativeProject({ ...opts, https: httpsSelection })).toBe(0);
+  expect(events.indexOf("graph inspect")).toBeLessThan(
+    events.indexOf("https-start")
+  );
   expect(events.indexOf("https-start")).toBeLessThan(
     events.indexOf("https-verify")
   );
@@ -852,18 +885,99 @@ test("routed HTTPS verification precedes readiness and closes after graph cleanu
   expect(events.indexOf("save")).toBeLessThan(events.indexOf("https-close"));
   expect(events.indexOf("https-close")).toBeLessThan(events.indexOf("cleanup"));
 });
+test("shared HTTPS lease is never acquired before graph readiness or without a live pool", async () => {
+  const beforeReady = await httpsFixture();
+  beforeReady.opts.dependencies.https = async () => {
+    throw new Error("unexpected lease acquisition");
+  };
+  beforeReady.opts.dependencies.serve = async () => {
+    beforeReady.events.push("serve-failed-before-ready");
+    throw new Error("graph never admitted");
+  };
+  await expect(
+    startNativeProject({ ...beforeReady.opts, https: httpsSelection })
+  ).rejects.toThrow();
+  expect(beforeReady.events).not.toContain("runtime status");
+  expect(beforeReady.events).not.toContain("save");
+  for (const status of [
+    {
+      phase: "running",
+      process_alive: false,
+      guest_boot_id: "12345678-1234-1234-1234-123456789abc",
+    },
+    {
+      phase: "stopped",
+      process_alive: true,
+      guest_boot_id: "12345678-1234-1234-1234-123456789abc",
+    },
+    { phase: "running", process_alive: true, guest_boot_id: "invalid" },
+  ]) {
+    const { opts, events } = await httpsFixture();
+    const invoke = opts.dependencies.invoke!;
+    let acquired = false;
+    opts.dependencies.invoke = async (request) =>
+      request.args[1] === "status" ? status : invoke(request);
+    opts.dependencies.https = async () => {
+      acquired = true;
+      throw new Error("unexpected lease acquisition");
+    };
+    await expect(
+      startNativeProject({ ...opts, https: httpsSelection })
+    ).rejects.toThrow("verified running pool");
+    expect(acquired).toBe(false);
+    expect(events).not.toContain("save");
+    expect(events.at(-1)).toBe("cleanup");
+  }
+});
+
+test("cancellation after lease acquisition releases only the acquired lease and never publishes readiness", async () => {
+  const { opts, events } = await httpsFixture();
+  const controller = new AbortController();
+  let released = 0;
+  let verified = false;
+  opts.dependencies.https = async (selection) => {
+    controller.abort();
+    return {
+      identity: leaseIdentity(selection),
+      caPath: "/synthetic/root.crt",
+      httpsPort: 8443,
+      exited: new Promise(() => {}),
+      verifyHostname: async () => {
+        verified = true;
+        return { statusCode: 200 };
+      },
+      releaseAfterCleanup: async () => {
+        released++;
+      },
+    };
+  };
+  expect(
+    await startNativeProject({
+      ...opts,
+      https: httpsSelection,
+      signal: controller.signal,
+    })
+  ).toBe(130);
+  expect(released).toBe(1);
+  expect(verified).toBe(false);
+  expect(events).not.toContain("save");
+  expect(events).not.toContain("ready");
+  expect(events.at(-1)).toBe("cleanup");
+});
+
 test("unexpected HTTPS owner exit aborts the graph and fails instead of returning interrupt status", async () => {
   const { opts, events } = await httpsFixture();
   let exit!: (value: { component: string; code: number }) => void;
   const exited = new Promise<{ component: string; code: number }>((resolve) => {
     exit = resolve;
   });
-  opts.dependencies.https = async () => ({
+  opts.dependencies.https = async (selection) => ({
+    identity: leaseIdentity(selection),
     caPath: "/synthetic/root.crt",
     httpsPort: 8443,
     exited,
     verifyHostname: async () => ({ statusCode: 200 }),
-    close: async () => {
+    releaseAfterCleanup: async () => {
       events.push("https-close");
     },
   });
@@ -885,14 +999,15 @@ test("unexpected HTTPS owner exit aborts the graph and fails instead of returnin
 test("HTTPS readiness failure preserves its cause without removing an unpublished mapping", async () => {
   const { opts, events } = await httpsFixture();
   const failure = new Error("synthetic HTTPS verification failure");
-  opts.dependencies.https = async () => ({
+  opts.dependencies.https = async (selection) => ({
+    identity: leaseIdentity(selection),
     caPath: "/synthetic/root.crt",
     httpsPort: 8443,
     exited: new Promise(() => {}),
     verifyHostname: async () => {
       throw failure;
     },
-    close: async () => {
+    releaseAfterCleanup: async () => {
       events.push("https-close");
     },
   });
@@ -932,14 +1047,15 @@ test("failed cleanup reports sanitized TLS failure and retained state without re
   const failure = new Error(
     "Native HTTPS verification failed (VERIFICATION_TIMEOUT_RESPONSE); peer values omitted."
   );
-  opts.dependencies.https = async () => ({
+  opts.dependencies.https = async (selection) => ({
+    identity: leaseIdentity(selection),
     caPath: "/synthetic/root.crt",
     httpsPort: 8443,
     exited: new Promise(() => {}),
     verifyHostname: async () => {
       throw failure;
     },
-    close: async () => {},
+    releaseAfterCleanup: async () => {},
   });
   const serve = opts.dependencies.serve!;
   opts.dependencies.serve = async (request) => {
@@ -1034,12 +1150,13 @@ test("HTTPS route paths come only from reviewed native probes and conflicts refu
 
 test("HTTPS startup refuses a non-2xx reviewed health response", async () => {
   const { opts, events } = await httpsFixture();
-  opts.dependencies.https = async () => ({
+  opts.dependencies.https = async (selection) => ({
+    identity: leaseIdentity(selection),
     caPath: "/synthetic/root.crt",
     httpsPort: 8443,
     exited: new Promise(() => {}),
     verifyHostname: async () => ({ statusCode: 403 }),
-    close: async () => {
+    releaseAfterCleanup: async () => {
       events.push("https-close");
     },
   });
@@ -1082,7 +1199,7 @@ test("HTTPS redirects terminate only at verified same-service reviewed aliases",
     caPath: "/public",
     httpsPort: 18_443,
     exited: new Promise<{ component: string; code: number }>(() => {}),
-    close: async () => {},
+    releaseAfterCleanup: async () => {},
     verifyHostname: async (hostname: string, path: string) => {
       expect(path).toBe("/health");
       calls.push(hostname);
@@ -1522,10 +1639,65 @@ test("restore selection mismatch never starts a replacement graph", async () => 
   expect(events.at(-1)).toBe("cleanup");
 });
 
+test("lost shared HTTPS acquire reply retains intent and recovers only after graph cleanup", async () => {
+  for (const uncertainRecovery of [false, true]) {
+    const { opts, events } = await httpsFixture();
+    let intent: ReturnType<typeof leaseIdentity> | undefined;
+    opts.dependencies.finalization = async (request) => {
+      const lifetime = await beginNativeProjectFinalization(request);
+      events.push("intent");
+      return {
+        ...lifetime,
+        complete: async () => {
+          await lifetime.complete();
+          events.push("finalized");
+        },
+      };
+    };
+    opts.dependencies.https = async (selection) => {
+      intent = leaseIdentity(selection);
+      await selection.onIntent?.(intent);
+      expect(events.slice(-2)).toEqual(["intent", "save"]);
+      events.push("acquire-sent");
+      throw new Error("acquire reply lost");
+    };
+    opts.dependencies.recoverHttps = async ({ identity }) => {
+      if (!intent) {
+        throw new Error("missing acquire intent");
+      }
+      expect(identity).toEqual(intent);
+      expect(events.at(-1)).toBe("graph inspect");
+      events.push("recover-lease");
+      if (uncertainRecovery) {
+        throw new Error("lease recovery uncertain");
+      }
+    };
+    await expect(
+      startNativeProject({ ...opts, https: httpsSelection })
+    ).rejects.toThrow(
+      uncertainRecovery ? "lease recovery uncertain" : "acquire reply lost"
+    );
+    expect(events.filter((event) => event === "save")).toHaveLength(1);
+    expect(events).not.toContain("ready");
+    expect(events.includes("finalized")).toBe(!uncertainRecovery);
+    expect(events.indexOf("intent")).toBeLessThan(
+      events.indexOf("acquire-sent")
+    );
+  }
+});
+
 test("restart callback follows ready and acknowledgement follows all finalizers", async () => {
   const { opts, events } = await httpsFixture();
   opts.dependencies.finalization = async (request) => {
     const lifetime = await beginNativeProjectFinalization(request);
+    if (!request.httpsLease) {
+      throw new Error("missing HTTPS lease");
+    }
+    expect(lifetime.token).toMatchObject({
+      version: 3,
+      httpsLease: request.httpsLease,
+    });
+    expect(lifetime.token.attempt).toBe(request.httpsLease.attempt);
     return {
       ...lifetime,
       complete: async () => {
@@ -1534,12 +1706,13 @@ test("restart callback follows ready and acknowledgement follows all finalizers"
       },
     };
   };
-  opts.dependencies.https = async () => ({
+  opts.dependencies.https = async (selection) => ({
+    identity: leaseIdentity(selection),
     caPath: "/synthetic/root.crt",
     httpsPort: 8443,
     exited: new Promise(() => {}),
     verifyHostname: async () => ({ statusCode: 200 }),
-    close: async () => {
+    releaseAfterCleanup: async () => {
       events.push("https-close");
     },
   });
@@ -1571,12 +1744,13 @@ test("failed HTTPS or lifecycle finalization never acknowledges cleanup", async 
         },
       };
     };
-    opts.dependencies.https = async () => ({
+    opts.dependencies.https = async (selection) => ({
+      identity: leaseIdentity(selection),
       caPath: "/synthetic/root.crt",
       httpsPort: 8443,
       exited: new Promise(() => {}),
       verifyHostname: async () => ({ statusCode: 200 }),
-      close: async () => {
+      releaseAfterCleanup: async () => {
         if (failed === "https") {
           throw new Error("close failed");
         }

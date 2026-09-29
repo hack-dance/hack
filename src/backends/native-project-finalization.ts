@@ -11,6 +11,10 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
+import {
+  isNativeHttpsLeaseIdentity,
+  type NativeHttpsLeaseIdentity,
+} from "./native-https-owner.ts";
 import type {
   NativeProjectRun,
   NativeProjectRunScope,
@@ -37,26 +41,87 @@ export type NativeProjectFinalizationToken = FinalizationIdentity &
         readonly pid: number;
         readonly httpsPort: number | null;
       }
+    | {
+        readonly version: 3;
+        /** This frontend and its exact shared HTTPS lease must both be retired. */
+        readonly pid: number;
+        readonly httpsPort: number;
+        readonly httpsLease: NativeHttpsLeaseIdentity;
+      }
   );
+function validPid(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 1;
+}
+function validPort(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= 65_535
+  );
+}
+function leaseMatchesRun(
+  lease: NativeHttpsLeaseIdentity,
+  run: NativeProjectRun
+): boolean {
+  return (
+    lease.run === run.run &&
+    lease.owner === run.owner &&
+    lease.namespace === run.namespace &&
+    lease.planId === run.planId
+  );
+}
+function sameLease(
+  a: NativeHttpsLeaseIdentity,
+  b: NativeHttpsLeaseIdentity
+): boolean {
+  return (
+    a.version === b.version &&
+    a.ownerGeneration === b.ownerGeneration &&
+    a.leaseId === b.leaseId &&
+    a.run === b.run &&
+    a.attempt === b.attempt &&
+    a.owner === b.owner &&
+    a.namespace === b.namespace &&
+    a.planId === b.planId
+  );
+}
+function validVersionFields(value: Record<string, unknown>): boolean {
+  const keys = Object.keys(value).sort().join();
+  if (value.version === 1) {
+    return keys === "attempt,namespace,owner,planId,run,scope,version";
+  }
+  if (value.version === 2) {
+    return (
+      keys ===
+        "attempt,httpsPort,namespace,owner,pid,planId,run,scope,version" &&
+      validPid(value.pid) &&
+      (value.httpsPort === null || validPort(value.httpsPort))
+    );
+  }
+  if (value.version !== 3) {
+    return false;
+  }
+  const lease = value.httpsLease;
+  return (
+    keys ===
+      "attempt,httpsLease,httpsPort,namespace,owner,pid,planId,run,scope,version" &&
+    validPid(value.pid) &&
+    validPort(value.httpsPort) &&
+    isNativeHttpsLeaseIdentity(lease) &&
+    lease.attempt === value.attempt &&
+    lease.run === value.run &&
+    lease.owner === value.owner &&
+    lease.namespace === value.namespace &&
+    lease.planId === value.planId
+  );
+}
 export function isNativeProjectFinalizationToken(
   value: unknown
 ): value is NativeProjectFinalizationToken {
   return (
     isRecord(value) &&
-    (value.version === 1
-      ? Object.keys(value).sort().join() ===
-        "attempt,namespace,owner,planId,run,scope,version"
-      : value.version === 2 &&
-        Object.keys(value).sort().join() ===
-          "attempt,httpsPort,namespace,owner,pid,planId,run,scope,version" &&
-        typeof value.pid === "number" &&
-        Number.isSafeInteger(value.pid) &&
-        value.pid > 1 &&
-        (value.httpsPort === null ||
-          (typeof value.httpsPort === "number" &&
-            Number.isSafeInteger(value.httpsPort) &&
-            value.httpsPort > 0 &&
-            value.httpsPort <= 65_535))) &&
+    validVersionFields(value) &&
     [value.attempt, value.run, value.owner].every(
       (v) => typeof v === "string" && HEX32.test(v)
     ) &&
@@ -77,7 +142,15 @@ function same(
   return (
     a.version === b.version &&
     (a.version === 1 ||
-      (b.version === 2 && a.pid === b.pid && a.httpsPort === b.httpsPort)) &&
+      (a.version === 2 &&
+        b.version === 2 &&
+        a.pid === b.pid &&
+        a.httpsPort === b.httpsPort) ||
+      (a.version === 3 &&
+        b.version === 3 &&
+        a.pid === b.pid &&
+        a.httpsPort === b.httpsPort &&
+        sameLease(a.httpsLease, b.httpsLease))) &&
     a.attempt === b.attempt &&
     a.scope === b.scope &&
     a.run === b.run &&
@@ -257,22 +330,48 @@ export async function beginNativeProjectFinalization(opts: {
   readonly scope: NativeProjectRunScope;
   readonly run: NativeProjectRun;
   readonly httpsPort?: number | null;
+  readonly httpsLease?: NativeHttpsLeaseIdentity;
 }): Promise<{
   readonly token: NativeProjectFinalizationToken;
   readonly complete: () => Promise<void>;
 }> {
+  let sharedPort: number | null = null;
+  if (opts.httpsLease !== undefined) {
+    if (
+      !(
+        isNativeHttpsLeaseIdentity(opts.httpsLease) &&
+        leaseMatchesRun(opts.httpsLease, opts.run) &&
+        validPort(opts.httpsPort)
+      )
+    ) {
+      throw refused();
+    }
+    sharedPort = opts.httpsPort;
+  }
   const { root, hash } = await selected(opts.scope, opts.run, true);
-  const token: NativeProjectFinalizationToken = {
-    version: 2,
-    attempt: randomBytes(16).toString("hex"),
+  const identity = {
     scope: hash,
     run: opts.run.run,
     owner: opts.run.owner,
     namespace: opts.run.namespace,
     planId: opts.run.planId,
     pid: process.pid,
-    httpsPort: opts.httpsPort ?? null,
   };
+  const token: NativeProjectFinalizationToken =
+    opts.httpsLease !== undefined && sharedPort !== null
+      ? {
+          ...identity,
+          version: 3,
+          attempt: opts.httpsLease.attempt,
+          httpsPort: sharedPort,
+          httpsLease: opts.httpsLease,
+        }
+      : {
+          ...identity,
+          version: 2,
+          attempt: randomBytes(16).toString("hex"),
+          httpsPort: opts.httpsPort ?? null,
+        };
   if (!isNativeProjectFinalizationToken(token)) {
     throw refused();
   }
@@ -328,11 +427,11 @@ export async function recoverNativeProjectFinalization(opts: {
     !isNativeProjectFinalizationToken(opts.token) ||
     opts.token.attempt !== opts.expectAttempt ||
     (opts.token.version === 1 && opts.legacyPid === undefined) ||
-    (opts.token.version === 2 && opts.legacyPid !== undefined)
+    (opts.token.version !== 1 && opts.legacyPid !== undefined)
   ) {
     throw refused();
   }
-  const pid = opts.token.version === 2 ? opts.token.pid : opts.legacyPid;
+  const pid = opts.token.version === 1 ? opts.legacyPid : opts.token.pid;
   if (pid === undefined || !Number.isSafeInteger(pid) || pid <= 1) {
     throw refused();
   }

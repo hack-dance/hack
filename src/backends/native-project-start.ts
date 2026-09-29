@@ -1,9 +1,14 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
+import {
+  acquireNativeHttpsLease,
+  type NativeHttpsLeaseIdentity,
+  recoverNativeHttpsLease,
+} from "./native-https-owner.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import { prepareNativeProjectBranch } from "./native-project-branch.ts";
 import {
@@ -16,10 +21,7 @@ import {
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
 import { beginNativeProjectFinalization } from "./native-project-finalization.ts";
-import {
-  isNativeHttpsProbePath,
-  startNativeProjectHttps,
-} from "./native-project-https.ts";
+import { isNativeHttpsProbePath } from "./native-project-https.ts";
 import {
   type NativeProjectInput,
   prepareNativeProjectInput,
@@ -58,6 +60,7 @@ import {
 const SHA = /^[a-f0-9]{64}$/;
 const OWNER = /^[a-f0-9]{32}$/;
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
+const BOOT_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 export type NativeHttpsSelection = {
   readonly caddyBinary: string;
   readonly caddySha256: string;
@@ -107,6 +110,50 @@ export function parseNativeHttpsSelection(
   };
   validateHttpsSelection(selection);
   return selection;
+}
+/** Bind shared ingress only after the native graph has an authoritative owner. */
+async function acquireReadyHttps(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly selection: NativeHttpsSelection;
+  readonly run: NativeProjectRun;
+  readonly signal: AbortSignal;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly acquire: typeof acquireNativeHttpsLease;
+  readonly onIntent: (identity: NativeHttpsLeaseIdentity) => Promise<void>;
+}): Promise<Awaited<ReturnType<typeof acquireNativeHttpsLease>>> {
+  const pool = await opts.invoke({
+    runtime: opts.runtime,
+    cwd: opts.runtime.home,
+    args: ["runtime", "status", "--json"],
+    timeoutMs: 5000,
+    signal: opts.signal,
+  });
+  if (
+    !(
+      isRecord(pool) &&
+      pool.phase === "running" &&
+      pool.process_alive === true &&
+      typeof pool.guest_boot_id === "string" &&
+      BOOT_ID.test(pool.guest_boot_id)
+    )
+  ) {
+    throw new Error(
+      "Native HTTPS requires a verified running pool incarnation."
+    );
+  }
+  requireActiveStartup(opts.signal);
+  return await opts.acquire({
+    runtime: opts.runtime,
+    ...opts.selection,
+    pool: { owner: opts.run.owner, bootId: pool.guest_boot_id },
+    lease: {
+      run: opts.run.run,
+      attempt: randomBytes(16).toString("hex"),
+      namespace: opts.run.namespace,
+      planId: opts.run.planId,
+    },
+    onIntent: opts.onIntent,
+  });
 }
 export function reviewedNativeHttpsRoutes(
   plan: unknown,
@@ -160,7 +207,8 @@ type Dependencies = {
   adaptAws: typeof adaptNativeAwsEnvironment;
   review: typeof withNativeProjectReview;
   serve: typeof serveNativeProjectGraph;
-  https: typeof startNativeProjectHttps;
+  https: typeof acquireNativeHttpsLease;
+  recoverHttps: typeof recoverNativeHttpsLease;
   invoke: typeof invokeNativeRuntime;
   load: typeof loadNativeProjectRun;
   loadRestart: typeof loadNativeRestartIntent;
@@ -174,7 +222,8 @@ const DEFAULTS: Dependencies = {
   adaptAws: adaptNativeAwsEnvironment,
   review: withNativeProjectReview,
   serve: serveNativeProjectGraph,
-  https: startNativeProjectHttps,
+  https: acquireNativeHttpsLease,
+  recoverHttps: recoverNativeHttpsLease,
   invoke: invokeNativeRuntime,
   load: loadNativeProjectRun,
   loadRestart: loadNativeRestartIntent,
@@ -322,7 +371,12 @@ function redirectHostname(
   return target.hostname;
 }
 export async function verifyHttpsRoutes(
-  frontend: Awaited<ReturnType<typeof startNativeProjectHttps>> | undefined,
+  frontend:
+    | Pick<
+        Awaited<ReturnType<typeof acquireNativeHttpsLease>>,
+        "httpsPort" | "verifyHostname"
+      >
+    | undefined,
   plan: unknown,
   services: ReadonlySet<string>
 ): Promise<void> {
@@ -812,6 +866,7 @@ export async function startNativeProject(opts: {
     const compose = JSON.parse(input.normalizedComposeJson);
     compose.services = specs;
     const pinned = { ...input, normalizedComposeJson: JSON.stringify(compose) };
+    const expectedMapping = retained ?? undefined;
     return await deps.review({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
@@ -844,9 +899,10 @@ export async function startNativeProject(opts: {
         const run = runSelection.run;
         let mapping: NativeProjectRun | undefined;
         let https:
-          | Awaited<ReturnType<typeof startNativeProjectHttps>>
+          | Awaited<ReturnType<typeof acquireNativeHttpsLease>>
           | undefined;
         let httpsClosing = false;
+        let httpsIntent: NativeHttpsLeaseIdentity | undefined;
         let httpsFailure: Error | undefined;
         try {
           const dependencyFile = join(directory, "dependencies.json");
@@ -886,17 +942,6 @@ export async function startNativeProject(opts: {
               run,
               invoke: deps.invoke,
             });
-          if (opts.https && routes.services.size > 0) {
-            https = await deps.https({ runtime: opts.runtime, ...opts.https });
-            void https.exited.then(() => {
-              if (!httpsClosing) {
-                httpsFailure = new Error(
-                  "Native HTTPS owner exited unexpectedly; graph shutdown requested."
-                );
-                controller.abort();
-              }
-            });
-          }
           const delivery = environmentDelivery(input, review.planId, run);
           let code = 1;
           let serveFailure: unknown;
@@ -942,6 +987,58 @@ export async function startNativeProject(opts: {
                     "Native startup canceled before mapping publication."
                   );
                 }
+                const persistedMapping = selectedMapping({
+                  ready: readyMapping,
+                  effectiveEnvName: input.effectiveEnvName,
+                  profiles,
+                  aws: selection.aws,
+                });
+                // Enrollment must exist before taking a shared lease: release
+                // requires independent proof of this exact graph's cleanup.
+                if (opts.https && routes.services.size > 0) {
+                  https = await acquireReadyHttps({
+                    runtime: opts.runtime,
+                    selection: opts.https,
+                    run: readyMapping,
+                    signal: controller.signal,
+                    invoke: deps.invoke,
+                    acquire: deps.https,
+                    onIntent: async (identity) => {
+                      finalization = await deps.finalization({
+                        scope: opts.scope,
+                        run: persistedMapping,
+                        httpsPort: opts.https?.httpsPort ?? null,
+                        httpsLease: identity,
+                      });
+                      httpsIntent = identity;
+                      // This is an ownership mapping, not a readiness signal.
+                      // Recovery must be able to select the run after a lost reply.
+                      await deps.save({
+                        ...opts.scope,
+                        run: persistedMapping,
+                        expected: expectedMapping,
+                      });
+                      mapping = persistedMapping;
+                    },
+                  });
+                  void https.exited.then(() => {
+                    if (!httpsClosing) {
+                      httpsFailure = new Error(
+                        "Native HTTPS owner exited unexpectedly; graph shutdown requested."
+                      );
+                      controller.abort();
+                    }
+                  });
+                }
+                // Injectable frontends may return a lease without publishing intent;
+                // production publishes this marker before sending its acquire frame.
+                finalization ??= await deps.finalization({
+                  scope: opts.scope,
+                  run: persistedMapping,
+                  httpsPort: https ? opts.https?.httpsPort : null,
+                  httpsLease: https?.identity,
+                });
+                requireActiveStartup(controller.signal);
                 await verifyHttpsRoutes(
                   https,
                   review.report.plan,
@@ -950,23 +1047,14 @@ export async function startNativeProject(opts: {
                 if (httpsFailure) {
                   throw httpsFailure;
                 }
-                const persistedMapping = selectedMapping({
-                  ready: readyMapping,
-                  effectiveEnvName: input.effectiveEnvName,
-                  profiles,
-                  aws: selection.aws,
-                });
-                finalization = await deps.finalization({
-                  scope: opts.scope,
-                  run: persistedMapping,
-                  httpsPort: https ? opts.https?.httpsPort : null,
-                });
-                await deps.save({
-                  ...opts.scope,
-                  run: persistedMapping,
-                  ...(retained ? { expected: retained } : {}),
-                });
-                mapping = persistedMapping;
+                if (!mapping) {
+                  await deps.save({
+                    ...opts.scope,
+                    run: persistedMapping,
+                    expected: expectedMapping,
+                  });
+                  mapping = persistedMapping;
+                }
                 await hooks?.ready?.();
                 await opts.onReady?.();
               },
@@ -1010,7 +1098,14 @@ export async function startNativeProject(opts: {
         } finally {
           httpsClosing = true;
           try {
-            await https?.close();
+            if (https) {
+              await https.releaseAfterCleanup();
+            } else if (httpsIntent) {
+              await deps.recoverHttps({
+                runtime: opts.runtime,
+                identity: httpsIntent,
+              });
+            }
             httpsCleanupConfirmed = true;
           } finally {
             await rm(directory, { recursive: true, force: true });

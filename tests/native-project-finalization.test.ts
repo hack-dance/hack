@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
+  isNativeProjectFinalizationToken,
   recoverNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
@@ -44,6 +45,153 @@ async function fixture() {
     },
   };
 }
+function httpsLease(run: Awaited<ReturnType<typeof fixture>>["run"]) {
+  return {
+    version: 1 as const,
+    ownerGeneration: "1".repeat(32),
+    leaseId: "2".repeat(32),
+    run: run.run,
+    attempt: "3".repeat(32),
+    owner: run.owner,
+    namespace: run.namespace,
+    planId: run.planId,
+  };
+}
+test("shared HTTPS finalization v3 binds the exact lease and never inherits a stale completion", async () => {
+  const opts = await fixture();
+  const lease = httpsLease(opts.run);
+  for (const invalid of [
+    { ...lease, ownerGeneration: "not-a-generation" },
+    { ...lease, leaseId: "not-a-lease" },
+    { ...lease, owner: "f".repeat(32) },
+    { ...lease, run: "f".repeat(32) },
+    { ...lease, namespace: "f".repeat(64) },
+    { ...lease, planId: "f".repeat(64) },
+  ]) {
+    await expect(
+      beginNativeProjectFinalization({
+        ...opts,
+        httpsPort: 18_443,
+        httpsLease: invalid,
+      })
+    ).rejects.toThrow("unconfirmed");
+  }
+  await expect(
+    beginNativeProjectFinalization({
+      ...opts,
+      httpsPort: null,
+      httpsLease: lease,
+    })
+  ).rejects.toThrow("unconfirmed");
+  expect(await readdir(opts.scope.nativeHome)).toEqual([".hack"]);
+  const first = await beginNativeProjectFinalization({
+    ...opts,
+    httpsPort: 18_443,
+    httpsLease: lease,
+  });
+  expect(first.token).toMatchObject({
+    version: 3,
+    attempt: lease.attempt,
+    pid: process.pid,
+    httpsPort: 18_443,
+    httpsLease: lease,
+  });
+  expect(isNativeProjectFinalizationToken(first.token)).toBe(true);
+  expect(await captureNativeProjectFinalization(opts)).toEqual(first.token);
+  await first.complete();
+  const secondLease = {
+    ...lease,
+    ownerGeneration: "4".repeat(32),
+    leaseId: "5".repeat(32),
+  };
+  const second = await beginNativeProjectFinalization({
+    ...opts,
+    httpsPort: 18_443,
+    httpsLease: secondLease,
+  });
+  expect(second.token.attempt).toBe(first.token.attempt);
+  await expect(
+    waitNativeProjectFinalization({
+      ...opts,
+      token: second.token,
+      timeoutMs: 1,
+    })
+  ).rejects.toThrow("unconfirmed");
+  await expect(first.complete()).rejects.toThrow("unconfirmed");
+  if (second.token.version !== 3) {
+    throw new Error("expected v3 finalizer");
+  }
+  const forged = {
+    ...second.token,
+    httpsLease: { ...second.token.httpsLease, leaseId: "6".repeat(32) },
+  };
+  expect(isNativeProjectFinalizationToken(forged)).toBe(true);
+  await expect(
+    waitNativeProjectFinalization({ ...opts, token: forged, timeoutMs: 1 })
+  ).rejects.toThrow("unconfirmed");
+  await second.complete();
+  await waitNativeProjectFinalization({
+    ...opts,
+    token: second.token,
+    timeoutMs: 1,
+  });
+});
+test("dead v3 frontend recovery requires its exact persisted HTTPS lease", async () => {
+  const opts = await fixture();
+  const lifetime = await beginNativeProjectFinalization({
+    ...opts,
+    httpsPort: 18_443,
+    httpsLease: httpsLease(opts.run),
+  });
+  if (lifetime.token.version !== 3) {
+    throw new Error("expected v3 finalizer");
+  }
+  let observations = 0;
+  const recovery = {
+    ...opts,
+    token: lifetime.token,
+    expectAttempt: lifetime.token.attempt,
+    isDead: () => true,
+    verifyEffects: async () => {
+      observations++;
+    },
+  };
+  await expect(
+    recoverNativeProjectFinalization({
+      ...recovery,
+      token: {
+        ...lifetime.token,
+        httpsLease: {
+          ...lifetime.token.httpsLease,
+          ownerGeneration: "f".repeat(32),
+        },
+      },
+    })
+  ).rejects.toThrow("unconfirmed");
+  expect(observations).toBe(0);
+  await expect(
+    recoverNativeProjectFinalization({
+      ...recovery,
+      verifyEffects: async () => {
+        throw new Error("lease recovery uncertain");
+      },
+    })
+  ).rejects.toThrow("lease recovery uncertain");
+  await expect(
+    waitNativeProjectFinalization({
+      ...opts,
+      token: lifetime.token,
+      timeoutMs: 1,
+    })
+  ).rejects.toThrow("unconfirmed");
+  await recoverNativeProjectFinalization(recovery);
+  expect(observations).toBe(1);
+  await waitNativeProjectFinalization({
+    ...opts,
+    token: lifetime.token,
+    timeoutMs: 1,
+  });
+});
 test("capture binds exact attempt and waits for explicit finalizer completion", async () => {
   const opts = await fixture();
   const lifetime = await beginNativeProjectFinalization(opts);

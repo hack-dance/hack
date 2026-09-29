@@ -27,6 +27,14 @@ type ModelContract = {
 // Bounds and witnesses are reviewed contracts, not learned from each run.
 const contracts: readonly ModelContract[] = [
   {
+    name: "shared-https-lifetime",
+    module: "SharedHttps",
+    states: 64,
+    invariant: "NoPrematureShutdown",
+    action: "FinishClose",
+    fields: ['mode = "closed"', "leases = {2}", "unsafeShutdown = TRUE"],
+  },
+  {
     name: "stopped-pool-startup",
     module: "Resume",
     states: 71,

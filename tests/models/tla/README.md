@@ -16,6 +16,37 @@ pinned artifact. Each check has a 120-second timeout, 512 MiB Java heap, two wor
 and bounded output; temporary TLC metadata is removed after success or failure.
 No credentials or running VM are needed.
 
+## Shared HTTPS lifetime
+
+`shared-https-lifetime/SharedHttps.tla` checks the last-lease release racing
+with a second application's acquisition. A socket disconnect preserves the lease;
+release requires a separate graph-cleanup observation. Closing admission and
+finishing shutdown are separate actions so the model exposes that interleaving.
+An owner crash retains ownership and permits no automatic adoption.
+
+| Model action | TypeScript boundary under `src/backends/` |
+| --- | --- |
+| `Acquire` | `native-https-owner-server.ts`: serialized acquisition after exact pool/graph checks and durable lease publication |
+| `Disconnect` | Socket closure retains the lease; connection lifetime alone cannot justify retirement |
+| `CleanupProof` / `Release` | Independent stopped/removed graph, resource, bridge and hostname checks precede lease retirement; `native-project-recovery.ts` selects the complete recorded lease identity |
+| `BeginClose` / `FinishClose` | Last release closes admission before awaiting frontend shutdown; queued acquisitions cannot reopen the closing owner |
+| `OwnerCrash` | Retained owner state refuses automatic reuse; absence of a process or socket is not child-cleanup proof |
+
+The positive control explores 64 states, checking lease preservation and no shutdown with a live lease.
+The negative control admits the second application during closing and must violate
+`NoPrematureShutdown` in a `FinishClose` state with `mode = "closed"`,
+`leases = {2}` and `unsafeShutdown = TRUE`. Parser errors or an arbitrary nonzero
+exit are not that witness.
+
+This finite safety model has two applications and one helper generation. Cleanup
+observations and lease publication are abstract atomic steps; the model does not
+prove filesystem durability, authentication, lost-response recovery, executable
+identity, descriptor inheritance, child containment or real Caddy behavior. It
+does not establish eventual recovery or resource/performance improvements. The
+shared-owner process tests and startup/finalization/recovery regressions provide
+separate implementation evidence; native multi-application acceptance remains
+required before claiming complete concurrent application support.
+
 ## Active dependency rebinding
 
 `dependency-rebind/Rebind.tla` checks one physical slot shared by two logical

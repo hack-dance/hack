@@ -2,6 +2,11 @@ import { constants } from "node:fs";
 import { lstat, open, realpath, rmdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
+import {
+  isNativeHttpsLeaseIdentity,
+  type NativeHttpsLeaseIdentity,
+  recoverNativeHttpsLease,
+} from "./native-https-owner.ts";
 import { checkNativeHttpsPort } from "./native-https-port.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
@@ -158,10 +163,12 @@ type RecoveryOptions = {
   readonly scope: NativeProjectRunScope;
   readonly run: NativeProjectRun;
   readonly httpsPort: number | null;
+  readonly httpsLease?: NativeHttpsLeaseIdentity;
   readonly legacy: boolean;
   readonly invoke?: typeof invokeNativeRuntime;
   readonly inspect?: typeof inspectNativeProjectGraph;
   readonly checkPort?: typeof checkNativeHttpsPort;
+  readonly recoverLease?: typeof recoverNativeHttpsLease;
   readonly inspectLegacyProcesses?: typeof noOtherHackFrontends;
   readonly cleanupLifecycle?: () => Promise<void>;
 };
@@ -186,10 +193,34 @@ async function verifyStoppedGraph(opts: RecoveryOptions): Promise<void> {
 export async function verifyNativeFrontendRecovery(
   opts: RecoveryOptions
 ): Promise<void> {
+  if (
+    opts.httpsLease !== undefined &&
+    (opts.legacy ||
+      !isNativeHttpsLeaseIdentity(opts.httpsLease) ||
+      opts.httpsLease.run !== opts.run.run ||
+      opts.httpsLease.owner !== opts.run.owner ||
+      opts.httpsLease.namespace !== opts.run.namespace ||
+      opts.httpsLease.planId !== opts.run.planId ||
+      opts.httpsPort === null ||
+      !Number.isSafeInteger(opts.httpsPort) ||
+      opts.httpsPort < 1 ||
+      opts.httpsPort > 65_535)
+  ) {
+    throw refused();
+  }
   if (opts.legacy) {
     await (opts.inspectLegacyProcesses ?? noOtherHackFrontends)();
   }
   await verifyStoppedGraph(opts);
+  if (opts.httpsLease !== undefined) {
+    await (opts.recoverLease ?? recoverNativeHttpsLease)({
+      runtime: opts.runtime,
+      identity: opts.httpsLease,
+    });
+    await opts.cleanupLifecycle?.();
+    await noLifecycleEntries(opts.scope.projectDir);
+    return;
+  }
   const invoke = opts.invoke ?? invokeNativeRuntime;
   const authority = await invoke({
     runtime: opts.runtime,

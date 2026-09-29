@@ -223,7 +223,9 @@ the exact run/reservation and live child, observes exit through kqueue, reaps ol
 publishers during restore, and completes cleanup before acknowledging retirement.
 This is a source-qualified supervision API, not native forwarding or TLS proof.
 `graph serve --route-slot service=index` explicitly selects publication slots for
-reviewed routes; other graph actions do not accept this flag. Relay control-owner
+reviewed routes. `service=auto`, used by the candidate frontend, reserves the entire
+requested set under the provider mutation lock and persists it together; exhaustion
+does not leave a partially allocated set. Other graph actions do not accept this flag. Relay control-owner
 identity is now run-scoped so distinct foreground graphs no longer select the same
 control root by construction. These CLI/identity changes are source-qualified;
 two concurrent routed graphs still require native acceptance. A bounded native
@@ -233,6 +235,21 @@ foreground exit and independently verified resource absence. This does not quali
 actual Event Agent routing, TLS, two routed graphs, restore, publisher-exit/partial
 startup failure, owner-crash recovery, scale or performance. No global Caddy
 configuration or trust installation is performed by this contract.
+
+The bundled candidate frontend uses a detached, pool-bound HTTPS helper with one
+durable lease per ready graph. The helper is launched from the exact candidate
+executable and pins the runtime and Caddy artifacts. Disconnecting an application
+does not release its lease. Release independently checks that application's graph,
+bridges and hostname claims; the last release closes admission before retiring
+the HTTPS processes. Finalization receipts bind the complete helper generation and
+lease identity so recovery for one application cannot retire another's listener.
+Missing or inconsistent owner evidence refuses automatic adoption. A killed helper
+can leave children and receipts requiring explicit recovery; this is not automatic
+crash reclamation. Compiled candidate and native multi-application checks remain
+separate from the finite lifetime model and injected process tests.
+An interrupted initial helper creation before intent publication also requires
+explicit recovery. Small release and retired-generation receipts are retained for
+retry; automatic receipt collection is not part of this implementation.
 
 The graph compiler accepts up to 32 owned networks and records each
 service's ordered attachment selection. Endpoint inspection uses the declared

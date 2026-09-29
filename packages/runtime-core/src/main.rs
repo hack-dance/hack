@@ -1,5 +1,6 @@
 mod graph_cli;
 mod normalized_cli;
+mod prepared_base_cli;
 mod runtime_up_cli;
 mod source_watch_retry;
 use hack_runtime_core::{CANDIDATE_VERSION, Candidate, CandidateError};
@@ -67,6 +68,11 @@ Usage:
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
   hack-local runtime prepare-engine --archive <pinned-docker.tgz>
   hack-local runtime prepare-network-tools --directory <private-pinned-apk-directory>
+  hack-local runtime up --profile research|development --prepared-base prefer|require [--prepared-base-store <absolute-private-store>] [--json]
+  hack-local runtime prepared-base build --profile research|development [--base-id <id>] [--store <absolute-private-store>] [--json]
+  hack-local runtime prepared-base verify --base-id <id> [--store <absolute-private-store>] [--json]
+  hack-local runtime prepared-base status --profile research|development [--store <absolute-private-store>] [--json]
+  hack-local runtime prepared-base remove --base-id <id> [--store <absolute-private-store>] [--json]
   hack-local runtime ensure-image --reference <namespace/repository[:tag]|namespace/repository@sha256:digest> --json
   hack-local runtime resolve-image --reference <namespace/repository[:tag]> --json
   hack-local runtime fetch-image --reference <namespace/repository@sha256:digest> --archive <new-flat-image.tar> [--json]
@@ -99,6 +105,36 @@ fn main() {
 
 fn installed_entrypoint() -> bool {
     cfg!(feature = "installed-candidate") && env!("CARGO_BIN_NAME") == "hack-native"
+}
+
+/// The prepared-base request for `runtime up`: an explicit store, or the installed home's
+/// `prepared-bases` directory (outside its `.hack-local`, so pool resets never touch it).
+/// Development checkouts require an explicit store rather than writing into the source tree.
+fn prepared_base_request(
+    candidate: &Candidate,
+    mode: hack_runtime_core::provider::prepared_start::Mode,
+    store: Option<&Path>,
+) -> Result<hack_runtime_core::provider::prepared_start::Request, CandidateError> {
+    Ok(hack_runtime_core::provider::prepared_start::Request {
+        mode,
+        store: prepared_base_store(candidate, store)?,
+    })
+}
+
+fn prepared_base_store(
+    candidate: &Candidate,
+    store: Option<&Path>,
+) -> Result<std::path::PathBuf, CandidateError> {
+    match store {
+        Some(store) => Ok(store.to_path_buf()),
+        None if candidate.channel == "installed-candidate" => {
+            Ok(candidate.checkout.join("prepared-bases"))
+        }
+        None => Err(CandidateError::new(
+            "invalid_arguments",
+            "A development checkout needs an explicit absolute prepared-base store.",
+        )),
+    }
 }
 
 fn discover_candidate(root: &Path) -> Result<Candidate, CandidateError> {
@@ -329,7 +365,8 @@ fn run() -> Result<(), CandidateError> {
                 || arguments.contains(&"--allow-host")
                 || arguments.contains(&"--internet")
                 || arguments.contains(&"--project-share")
-                || arguments.contains(&"--unfiltered-source") =>
+                || arguments.contains(&"--unfiltered-source")
+                || arguments.contains(&"--prepared-base") =>
         {
             let options = runtime_up_cli::parse(arguments)?;
             let share = options
@@ -340,7 +377,32 @@ fn run() -> Result<(), CandidateError> {
                 })
                 .transpose()?;
             let candidate = discover_candidate(&requested)?;
-            let started = if let Some(required) = options.minimum_bridges {
+            let retained = options
+                .retained
+                .as_ref()
+                .map(|(run, selection)| (run.as_str(), selection.as_str()));
+            let started = if let Some((mode, store)) = &options.prepared {
+                let request = prepared_base_request(&candidate, *mode, store.as_deref())?;
+                hack_runtime_core::provider::up_with_prepared_base(
+                    &candidate,
+                    options.profile,
+                    match options.minimum_bridges {
+                        Some(required) => {
+                            hack_runtime_core::provider::prepared_start::Bridges::Minimum(required)
+                        }
+                        None => hack_runtime_core::provider::prepared_start::Bridges::Exact(
+                            options.bridges,
+                        ),
+                    },
+                    options.dependencies,
+                    options.network,
+                    share,
+                    hack_runtime_core::provider::prepared_start::Start {
+                        retained,
+                        prepared: Some(&request),
+                    },
+                )
+            } else if let Some(required) = options.minimum_bridges {
                 hack_runtime_core::provider::up_with_minimum_bridges(
                     &candidate,
                     options.profile,
@@ -676,6 +738,48 @@ fn run() -> Result<(), CandidateError> {
             print_json(&hack_runtime_core::provider::probe(&discover_candidate(
                 &requested,
             )?)?)?;
+        }
+        [
+            "runtime",
+            "prepared-base",
+            action @ ("build" | "verify" | "status" | "remove"),
+            arguments @ ..,
+        ] => {
+            let command = prepared_base_cli::parse(action, arguments)?;
+            let candidate = discover_candidate(&requested)?;
+            match command {
+                prepared_base_cli::Command::Build {
+                    store,
+                    profile,
+                    base_id,
+                } => print_json(&hack_runtime_core::provider::build_prepared_base(
+                    &candidate,
+                    &prepared_base_store(&candidate, store.as_deref())?,
+                    profile,
+                    base_id.as_deref(),
+                )?)?,
+                prepared_base_cli::Command::Verify { store, base_id } => {
+                    print_json(&hack_runtime_core::provider::verify_prepared_base(
+                        &candidate,
+                        &prepared_base_store(&candidate, store.as_deref())?,
+                        &base_id,
+                    )?)?
+                }
+                prepared_base_cli::Command::Status { store, profile } => {
+                    print_json(&hack_runtime_core::provider::prepared_base_status(
+                        &candidate,
+                        &prepared_base_store(&candidate, store.as_deref())?,
+                        profile,
+                    )?)?
+                }
+                prepared_base_cli::Command::Remove { store, base_id } => {
+                    hack_runtime_core::provider::remove_prepared_base(
+                        &prepared_base_store(&candidate, store.as_deref())?,
+                        &base_id,
+                    )?;
+                    print_json(&serde_json::json!({ "removed": base_id }))?
+                }
+            }
         }
         ["runtime", "prepare", "--archive", archive] => {
             print_json(&hack_runtime_core::provider::prepare(

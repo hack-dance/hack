@@ -480,13 +480,16 @@ mod tests {
         }
     }
     fn fixture() -> Fixture {
+        // Parallel tests share this process, and macOS clocks are microsecond-grained.
+        static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
-            "network-update-{}-{}",
+            "network-update-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         fs::create_dir(&directory).unwrap();
         let directory = fs::canonicalize(directory).unwrap();

@@ -9,10 +9,14 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+  loadNativeProjectRun,
+  saveNativeProjectRun,
+} from "../src/backends/native-project-run.ts";
 
 const roots: string[] = [];
 const entrypoint = resolve("index.ts");
-const refusal = "Native branch startup is unavailable";
+const refusal = "Native runtime request failed";
 
 afterEach(async () => {
   for (const root of roots.splice(0)) {
@@ -20,7 +24,7 @@ afterEach(async () => {
   }
 });
 
-async function fixture() {
+async function fixture(approveSource = false) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-branch-cli-"))
   );
@@ -42,14 +46,26 @@ async function fixture() {
     join(projectDir, "hack.config.json"),
     JSON.stringify({
       name: "branch-fixture",
+      dev_host: "branch-fixture.hack.local",
       lifecycle: { up: { before: ["touch hook-ran"] } },
     })
   );
   const binary = join(root, "native-tripwire");
   await writeFile(join(root, "hack-relay-guest"), "synthetic fixture artifact");
-  await writeFile(binary, '#!/bin/sh\ntouch "$HOME/native-ran"\nexit 71\n', {
-    mode: 0o700,
-  });
+  await writeFile(
+    binary,
+    `#!/bin/sh
+if [ "$4" = "check-project-share" ]; then
+  touch "$HOME/preflight-ran"
+  ${approveSource ? `printf '%s\\n' '{"source_admitted":true,"pool_initialized":false}'\n  exit 0` : "exit 71"}
+fi
+touch "$HOME/native-ran"
+exit 71
+`,
+    {
+      mode: 0o700,
+    }
+  );
   const env = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
     HOME: home,
@@ -104,13 +120,14 @@ async function assertNoEffects(
 ) {
   expect(await Bun.file(join(project, "hook-ran")).exists()).toBe(false);
   expect(await Bun.file(join(f.home, "native-ran")).exists()).toBe(false);
+  expect(await Bun.file(join(f.home, "preflight-ran")).exists()).toBe(true);
   expect(await Bun.file(join(f.home, ".hack/projects.json")).exists()).toBe(
     false
   );
   expect(await readdir(f.nativeHome)).toEqual([]);
 }
 
-for (const command of ["up", "restart"] as const) {
+for (const command of ["up"] as const) {
   test(`native ${command} refuses an explicit branch before hooks or runtime effects`, async () => {
     const f = await fixture();
     const result = await invoke({ fixture: f, command, branch: "feature/new" });
@@ -155,6 +172,52 @@ test("native base startup still reaches the selected executor (tripwire control)
   const f = await fixture();
   const result = await invoke({ fixture: f, command: "up" });
   expect(result.code).toBe(1);
-  expect(result.output).not.toContain(refusal);
+  expect(result.output).toContain(refusal);
+  expect(await Bun.file(join(f.home, "preflight-ran")).exists()).toBe(true);
+  expect(await Bun.file(join(f.home, "native-ran")).exists()).toBe(false);
+});
+
+test("admitted native branch startup runs hooks before runtime up", async () => {
+  const f = await fixture(true);
+  const result = await invoke({
+    fixture: f,
+    command: "up",
+    branch: "feature/new",
+  });
+  expect(result.code).toBe(1);
+  expect(result.output).toContain(refusal);
+  expect(await Bun.file(join(f.home, "preflight-ran")).exists()).toBe(true);
+  expect(await Bun.file(join(f.project, "hook-ran")).exists()).toBe(true);
   expect(await Bun.file(join(f.home, "native-ran")).exists()).toBe(true);
+});
+
+test("native branch restart checks source before cleanup and preserves its mapping", async () => {
+  const f = await fixture();
+  const scope = {
+    projectRoot: f.project,
+    projectDir: join(f.project, ".hack"),
+    nativeHome: f.nativeHome,
+    branch: "feature-new",
+  };
+  const run = {
+    run: "a".repeat(32),
+    owner: "b".repeat(32),
+    namespace: "c".repeat(64),
+    planId: "d".repeat(64),
+    profiles: [],
+    effectiveEnvName: null,
+    aws: null,
+  };
+  await saveNativeProjectRun({ ...scope, run });
+  const result = await invoke({
+    fixture: f,
+    command: "restart",
+    branch: "feature/new",
+  });
+  expect(result.code).toBe(1);
+  expect(result.output).toContain(refusal);
+  expect(await Bun.file(join(f.home, "preflight-ran")).exists()).toBe(true);
+  expect(await Bun.file(join(f.project, "hook-ran")).exists()).toBe(false);
+  expect(await Bun.file(join(f.home, "native-ran")).exists()).toBe(false);
+  expect(await loadNativeProjectRun(scope)).toEqual(run);
 });

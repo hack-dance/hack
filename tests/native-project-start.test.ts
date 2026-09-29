@@ -75,6 +75,9 @@ async function fixture(withEnvironment = true) {
         },
       }),
     invoke: async (opts) => {
+      if (opts.args[1] === "check-project-share") {
+        return { source_admitted: true, pool_initialized: false };
+      }
       events.push(opts.args.slice(0, 2).join(" "));
       if (opts.args[0] === "runtime" && opts.args[1] === "status") {
         return {
@@ -189,6 +192,24 @@ function retainedPreflight(run: NativeProjectRun, phase = "running") {
     live_resources_verified: false,
   };
 }
+test("source pool mismatch refuses before hooks and storage preparation", async () => {
+  const { opts, events } = await fixture();
+  opts.dependencies.prepareStorage = async () => {
+    events.push("storage");
+  };
+  const invoke = opts.dependencies.invoke;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "check-project-share") {
+      throw new Error("source pool mismatch");
+    }
+    return await invoke?.(request);
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "source pool mismatch"
+  );
+  expect(events).toEqual([]);
+});
+
 test("foreground saves after readiness and retains mapping after confirmed stop", async () => {
   const { opts, events } = await fixture();
   expect(await startNativeProject(opts)).toBe(0);

@@ -595,6 +595,51 @@ fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError
     Ok(())
 }
 
+/// Read-only source compatibility check before application lifecycle hooks.
+/// This is advisory: `up_selected` repeats the check before VM effects.
+fn require_fresh_source_pool(candidate: &Candidate) -> Result<(), CandidateError> {
+    if !root(candidate).try_exists().map_err(io)? {
+        return Ok(());
+    }
+    state::check_private_directory(&root(candidate))?;
+    for entry in fs::read_dir(root(candidate)).map_err(io)? {
+        let entry = entry.map_err(io)?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(io)?;
+        if entry.file_name() != "operation.lock"
+            || !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+        {
+            return Err(CandidateError::new(
+                "foreign_state",
+                "Source admission requires a fresh or owned source pool; unowned provider state was preserved.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn check_project_share(
+    candidate: &Candidate,
+    requested: &super::ProjectShareIntent,
+) -> Result<serde_json::Value, CandidateError> {
+    requested.validate()?;
+    reject_aliased_state(&root(candidate))?;
+    super::network_update::require_complete(candidate)?;
+    let initialized = root(candidate)
+        .join("owner.json")
+        .try_exists()
+        .map_err(io)?;
+    if initialized {
+        let owner = Owner::load(candidate)?;
+        super::project_share::check_request(owner.project_share.as_ref(), Some(requested))?;
+    } else {
+        require_fresh_source_pool(candidate)?;
+    }
+    Ok(json!({ "source_admitted": true, "pool_initialized": initialized }))
+}
+
 pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     reject_aliased_state(&root(candidate))?;
     if !root(candidate)
@@ -1005,6 +1050,11 @@ fn start_pool(
         Ok(_) => false,
         Err(error) => return Err(io(error)),
     };
+    // Hooks and admission can outlive the read-only frontend check. Never adopt
+    // unrelated state that appeared before this operation acquired its lock.
+    if fresh_owner && project_share.is_some() {
+        require_fresh_source_pool(candidate)?;
+    }
     let mut owner = Owner::create_with_project_share(
         candidate,
         profile,
@@ -1907,6 +1957,87 @@ pub(super) fn kill_owned_vm_for_test(candidate: &Candidate) -> Result<(), Candid
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_preflight_is_read_only_and_preserves_unowned_state() {
+        let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-source-preflight-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        state::private_directory(&directory).unwrap();
+        struct Remove(std::path::PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _remove = Remove(directory.clone());
+        let project = directory.join("app");
+        state::private_directory(&project).unwrap();
+        fs::write(project.join("package.json"), "{}").unwrap();
+        let candidate = Candidate::discover(&directory).unwrap();
+        let share = super::super::ProjectShareIntent::approve(&project, true).unwrap();
+        assert_eq!(
+            check_project_share(&candidate, &share).unwrap(),
+            json!({"source_admitted":true,"pool_initialized":false})
+        );
+        assert!(!candidate.state_root.exists());
+        let lock = state::Lock::acquire(&root(&candidate)).unwrap();
+        assert!(require_fresh_source_pool(&candidate).is_ok());
+        state::private_directory(&root(&candidate)).unwrap();
+        let canary = root(&candidate).join("unowned");
+        fs::write(&canary, "preserved").unwrap();
+        assert_eq!(
+            check_project_share(&candidate, &share).unwrap_err().code,
+            "foreign_state"
+        );
+        assert_eq!(fs::read_to_string(canary).unwrap(), "preserved");
+        assert_eq!(
+            require_fresh_source_pool(&candidate).unwrap_err().code,
+            "foreign_state"
+        );
+        drop(lock);
+        assert!(!root(&candidate).join("owner.json").exists());
+        #[cfg(target_os = "macos")]
+        {
+            fs::remove_file(root(&candidate).join("unowned")).unwrap();
+            let owner = Owner::create_with_project_share(
+                &candidate,
+                super::super::Profile::Development,
+                None,
+                super::super::NetworkIntent::Internet,
+                None,
+                Some(share.clone()),
+            )
+            .unwrap();
+            let before = fs::read(root(&candidate).join("owner.json")).unwrap();
+            assert_eq!(
+                check_project_share(&candidate, &share).unwrap(),
+                json!({"source_admitted":true,"pool_initialized":true})
+            );
+            let second = directory.join("other-app");
+            state::private_directory(&second).unwrap();
+            fs::write(second.join("package.json"), "{}").unwrap();
+            let other = super::super::ProjectShareIntent::approve(&second, true).unwrap();
+            assert_eq!(
+                check_project_share(&candidate, &other).unwrap_err().code,
+                "project_share"
+            );
+            assert_eq!(
+                fs::read(root(&candidate).join("owner.json")).unwrap(),
+                before
+            );
+            assert_eq!(
+                fs::read_link(&owner.short_home).unwrap(),
+                root(&candidate).join("home")
+            );
+            fs::remove_file(&owner.short_home).unwrap();
+        }
+    }
 
     #[test]
     fn cleanup_operation_lease_waits_then_revalidates_without_replaying_effects() {

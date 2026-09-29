@@ -179,6 +179,7 @@ fn owned_graph_registration_live() -> Result<(), CandidateError> {
     let project = std::env::var("HACK_RELAY_GRAPH_PROJECT").expect("dedicated project");
     assert!(hex(&run_id, 32));
     let options = || PlanOptions {
+        branch: None,
         project: Path::new(&project),
         compose_file: Path::new("compose.json"),
         profiles: &[],

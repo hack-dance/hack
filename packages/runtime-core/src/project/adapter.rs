@@ -8,7 +8,7 @@ use std::path::Path;
 /// the original Compose-relative path base. Values requiring private delivery
 /// should remain references and be supplied separately through managed stdin.
 ///
-/// First select `expected_namespace` using `Candidate::plan(project)` and hash the
+/// First select `expected_namespace` using `Candidate::plan_with_branch(project, branch)` and hash the
 /// original selected Compose bytes. Then submit the bounded normalized bytes here.
 /// The original file must still exist inside the selected project, outside all
 /// excluded/credential paths. Neither it nor generated state is written by this API.
@@ -20,6 +20,7 @@ use std::path::Path;
 #[derive(Clone, Copy)]
 pub struct NormalizedComposeOptions<'a> {
     pub project: &'a Path,
+    pub branch: Option<&'a str>,
     pub expected_namespace: &'a str,
     pub compose_file: &'a Path,
     pub expected_compose_sha256: &'a str,
@@ -55,6 +56,7 @@ pub fn plan_normalized(
     plan_input(
         candidate,
         PlanOptions {
+            branch: options.branch,
             project: options.project,
             compose_file: options.compose_file,
             profiles: options.profiles,
@@ -113,6 +115,7 @@ mod tests {
         }
         fn options<'a>(&'a self, bytes: &'a [u8]) -> NormalizedComposeOptions<'a> {
             NormalizedComposeOptions {
+                branch: None,
                 project: &self.project,
                 expected_namespace: &self.namespace,
                 compose_file: Path::new(".hack/compose.yml"),
@@ -133,6 +136,7 @@ mod tests {
         let normal = project::plan(
             &fixture.candidate,
             PlanOptions {
+                branch: None,
                 project: &fixture.project,
                 compose_file: Path::new(".hack/compose.yml"),
                 profiles: &[],
@@ -149,6 +153,169 @@ mod tests {
         assert!(!fixture.candidate.state_root.exists());
     }
     #[test]
+    fn branch_namespace_isolates_normalized_review_and_enrollment() {
+        let fixture = Fixture::new();
+        let base = project::plan(
+            &fixture.candidate,
+            PlanOptions {
+                branch: None,
+                project: &fixture.project,
+                compose_file: Path::new(".hack/compose.yml"),
+                profiles: &[],
+            },
+        )
+        .unwrap();
+        let branch_review = |branch| {
+            let namespace = fixture
+                .candidate
+                .plan_with_branch(&fixture.project, Some(branch))
+                .unwrap()
+                .namespace;
+            let mut options = fixture.options(ORIGINAL.as_bytes());
+            options.branch = Some(branch);
+            options.expected_namespace = &namespace;
+            plan_normalized(&fixture.candidate, options).unwrap()
+        };
+        let alpha = branch_review("alpha");
+        let beta = branch_review("beta");
+        assert_eq!(base.plan.namespace, fixture.namespace);
+        assert_eq!(
+            base.plan.namespace,
+            fixture.candidate.plan(&fixture.project).unwrap().namespace
+        );
+        assert_ne!(base.plan.namespace, alpha.plan.namespace);
+        assert_ne!(alpha.plan.namespace, beta.plan.namespace);
+        assert_ne!(base.plan_id, alpha.plan_id);
+        assert_ne!(alpha.plan_id, beta.plan_id);
+        assert_eq!(alpha.plan.branch.as_deref(), Some("alpha"));
+        assert_eq!(beta.plan.branch.as_deref(), Some("beta"));
+        assert_eq!(base.plan.branch, None);
+        assert!(
+            !serde_json::to_string(&base.plan)
+                .unwrap()
+                .contains("\"branch\"")
+        );
+        for review in [&alpha, &beta] {
+            assert_eq!(review.plan.compose_sha256, base.plan.compose_sha256);
+            assert_eq!(
+                review.plan.source_selection.metadata_sha256,
+                base.plan.source_selection.metadata_sha256
+            );
+            assert_eq!(review.plan.source, base.plan.source);
+        }
+        assert!(!fixture.candidate.state_root.exists());
+
+        let alpha_file = project::plan(
+            &fixture.candidate,
+            PlanOptions {
+                branch: Some("alpha"),
+                project: &fixture.project,
+                compose_file: Path::new(".hack/compose.yml"),
+                profiles: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(alpha.plan_id, alpha_file.plan_id);
+        let receipt = project::enroll(
+            &fixture.candidate,
+            PlanOptions {
+                branch: Some("alpha"),
+                project: &fixture.project,
+                compose_file: Path::new(".hack/compose.yml"),
+                profiles: &[],
+            },
+            &alpha_file.plan_id,
+        )
+        .unwrap();
+        assert_eq!(receipt.plan.branch.as_deref(), Some("alpha"));
+        assert_eq!(
+            project::status(&fixture.candidate, &fixture.project)
+                .unwrap()
+                .state,
+            "not-enrolled"
+        );
+        assert_eq!(
+            project::status_with_branch(&fixture.candidate, &fixture.project, Some("alpha"))
+                .unwrap()
+                .plan_id
+                .as_deref(),
+            Some(alpha.plan_id.as_str())
+        );
+        assert_eq!(
+            project::status_with_branch(&fixture.candidate, &fixture.project, Some("beta"))
+                .unwrap()
+                .state,
+            "not-enrolled"
+        );
+        assert_eq!(branch_review("alpha").enrollment_diff.state, "unchanged");
+        assert_eq!(branch_review("beta").enrollment_diff.state, "new");
+        let beta_options = || PlanOptions {
+            branch: Some("beta"),
+            project: &fixture.project,
+            compose_file: Path::new(".hack/compose.yml"),
+            profiles: &[],
+        };
+        assert_eq!(
+            project::enroll(&fixture.candidate, beta_options(), &alpha.plan_id)
+                .unwrap_err()
+                .code,
+            "stale_plan"
+        );
+        assert_eq!(
+            project::status_with_branch(&fixture.candidate, &fixture.project, Some("beta"))
+                .unwrap()
+                .state,
+            "not-enrolled"
+        );
+        let beta_receipt =
+            project::enroll(&fixture.candidate, beta_options(), &beta.plan_id).unwrap();
+        assert_eq!(beta_receipt.plan.namespace, beta.plan.namespace);
+        assert_eq!(
+            project::status_with_branch(&fixture.candidate, &fixture.project, Some("alpha"))
+                .unwrap()
+                .plan_id
+                .as_deref(),
+            Some(alpha.plan_id.as_str())
+        );
+        assert_eq!(
+            project::status(&fixture.candidate, &fixture.project)
+                .unwrap()
+                .state,
+            "not-enrolled"
+        );
+    }
+    #[test]
+    fn branch_selector_mismatch_and_noncanonical_values_are_refused() {
+        let fixture = Fixture::new();
+        let mut normalized = fixture.options(ORIGINAL.as_bytes());
+        normalized.branch = Some("alpha");
+        assert_eq!(
+            plan_normalized(&fixture.candidate, normalized)
+                .unwrap_err()
+                .code,
+            "normalized_compose_input"
+        );
+        for branch in [
+            "",
+            "Alpha",
+            "-alpha",
+            "alpha-",
+            "alpha.beta",
+            "a/b",
+            "a".repeat(64).as_str(),
+        ] {
+            assert_eq!(
+                fixture
+                    .candidate
+                    .plan_with_branch(&fixture.project, Some(branch))
+                    .unwrap_err()
+                    .code,
+                "invalid_branch"
+            );
+        }
+        assert!(!fixture.candidate.state_root.exists());
+    }
+    #[test]
     fn identical_routed_normalized_input_preserves_file_plan_identity() {
         let mut fixture = Fixture::new();
         let bytes = b"services:\n  web:\n    image: alpine:3.21\n    labels: {caddy: web.hack, caddy.reverse_proxy: '{{upstreams 3000}}', caddy.tls: internal}\n";
@@ -157,6 +324,7 @@ mod tests {
         let normal = super::super::plan(
             &fixture.candidate,
             PlanOptions {
+                branch: None,
                 project: &fixture.project,
                 compose_file: Path::new(".hack/compose.yml"),
                 profiles: &[],
@@ -311,6 +479,7 @@ mod tests {
             project::inputs::compile_scoped(
                 &fixture.candidate,
                 PlanOptions {
+                    branch: None,
                     project: &fixture.project,
                     compose_file: Path::new(".hack/compose.yml"),
                     profiles: &[]

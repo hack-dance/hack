@@ -118,6 +118,7 @@ impl Selection<'_> {
 impl Input {
     pub fn options<'a>(&'a self, options: PlanOptions<'a>) -> NormalizedComposeOptions<'a> {
         NormalizedComposeOptions {
+            branch: options.branch,
             project: options.project,
             compose_file: options.compose_file,
             profiles: options.profiles,

@@ -612,6 +612,7 @@ mod tests {
         fs::write(fixture.0.join("bun.lock"), "pinned lock").unwrap();
         fs::write(fixture.0.join("app.js"), "initial").unwrap();
         let options = || PlanOptions {
+            branch: None,
             project: &fixture.0,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
@@ -735,6 +736,7 @@ mod tests {
         let review = project::plan(
             &candidate,
             PlanOptions {
+                branch: None,
                 project: &fixture.0,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],
@@ -863,6 +865,7 @@ mod tests {
         )
         .unwrap();
         let options = || PlanOptions {
+            branch: None,
             project: &fixture.0,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
@@ -1008,6 +1011,7 @@ mod tests {
         let review = project::plan(
             &candidate,
             PlanOptions {
+                branch: None,
                 project: &fixture.0,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],

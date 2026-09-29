@@ -331,6 +331,7 @@ mod tests {
         let report = project::plan(
             candidate,
             PlanOptions {
+                branch: None,
                 project: source,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],
@@ -361,6 +362,7 @@ mod tests {
         let report = project::plan_normalized(
             candidate,
             project::NormalizedComposeOptions {
+                branch: None,
                 project: source,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],

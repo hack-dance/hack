@@ -997,6 +997,7 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
     let inputs = project::inputs::compile(
         candidate,
         PlanOptions {
+            branch: options.project.branch,
             project: options.project.project,
             compose_file: options.project.compose_file,
             profiles: options.project.profiles,
@@ -1040,6 +1041,7 @@ pub fn run_with_host_dependencies_until(
             project::inputs::compile(
                 candidate,
                 PlanOptions {
+                    branch: options.project.branch,
                     project: options.project.project,
                     compose_file: options.project.compose_file,
                     profiles: options.project.profiles,
@@ -1131,6 +1133,7 @@ pub(super) fn compile_environment_inputs_until(
     let scoped = project::inputs::compile_scoped(
         candidate,
         PlanOptions {
+            branch: options.project.branch,
             project: options.project.project,
             compose_file: options.project.compose_file,
             profiles: options.project.profiles,
@@ -1402,6 +1405,13 @@ pub fn source_compatibility(
             "Retained graph or reviewed shared source changed; the current graph was not stopped.",
         )
     };
+    if candidate
+        .plan_with_branch(&plan.source, plan.branch.as_deref())?
+        .namespace
+        != plan.namespace
+    {
+        return Err(refused());
+    }
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
     if !hex(plan_id, 64)

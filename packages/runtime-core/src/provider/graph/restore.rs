@@ -6,6 +6,7 @@ pub fn restore(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
     let inputs = project::inputs::compile(
         candidate,
         PlanOptions {
+            branch: options.project.branch,
             project: options.project.project,
             compose_file: options.project.compose_file,
             profiles: options.project.profiles,
@@ -631,6 +632,7 @@ mod tests {
             release_initializer_cache: std::collections::BTreeSet::new(),
             routing_enrolled: false,
             project: PlanOptions {
+                branch: None,
                 project: &fixture.0,
                 compose_file: Path::new("absent.yaml"),
                 profiles: &[],
@@ -681,6 +683,7 @@ mod tests {
         let document = |command: &str| json!({"services":{"app":{"image":format!("example.invalid/app@sha256:{}", "a".repeat(64)),"network_mode":"none","entrypoint":["/bin/true"],"command":[command],"environment":{"TOKEN":null}}}});
         fs::write(&path, serde_json::to_vec(&document("before")).unwrap()).unwrap();
         let project_options = || PlanOptions {
+            branch: None,
             project: &project.0,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],

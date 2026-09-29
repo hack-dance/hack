@@ -276,6 +276,7 @@ fn private_owner_restore_preserves_data_and_retires_values() {
     let review = project::plan(
         &candidate,
         project::PlanOptions {
+            branch: None,
             project: &project,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],

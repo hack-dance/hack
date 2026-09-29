@@ -13,6 +13,7 @@ fn execute(
     restore: bool,
 ) -> Result<Receipt, CandidateError> {
     let project = || PlanOptions {
+        branch: None,
         project: path,
         compose_file: Path::new("compose.yaml"),
         profiles: &[],

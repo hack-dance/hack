@@ -1006,6 +1006,7 @@ mod tests {
         let plan = crate::project::plan(
             &candidate,
             crate::project::PlanOptions {
+                branch: None,
                 project: &source,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],

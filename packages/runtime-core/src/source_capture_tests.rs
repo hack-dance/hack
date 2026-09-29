@@ -41,6 +41,7 @@ fn plan_capture_preserves_mountpoints_registry_and_content_edits_without_secrets
         project::plan(
             &candidate,
             PlanOptions {
+                branch: None,
                 project: &source,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],
@@ -139,6 +140,7 @@ fn plan_capture_materializes_reviewed_next_declarations_without_reading_ignored_
         project::plan(
             &candidate,
             PlanOptions {
+                branch: None,
                 project: &source,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],

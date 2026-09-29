@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
+import { prepareNativeProjectBranch } from "./native-project-branch.ts";
 import {
   discoverNativeHostDependency,
   type NativeHostDependency,
@@ -267,6 +268,11 @@ export async function preflightNativeRestart(opts: {
     input,
     path: opts.adaptationFile,
   });
+  input = await prepareNativeProjectBranch({
+    input,
+    scope: opts.scope,
+    composeFile: opts.composeFile,
+  });
   if (selected.aws) {
     input = (await deps.aws({ input, ...selected.aws })).input;
   }
@@ -319,6 +325,7 @@ export async function preflightNativeRestart(opts: {
     projectRoot: opts.scope.projectRoot,
     composeFile: opts.composeFile,
     profiles: selected.profiles,
+    branch: opts.scope.branch,
     input: { ...input, normalizedComposeJson: JSON.stringify(compose) },
     run: async (review) => {
       if (review.namespace !== opts.run.namespace) {

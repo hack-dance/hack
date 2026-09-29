@@ -186,6 +186,7 @@ fn owned_immutable_source_job_live() -> Result<(), CandidateError> {
         project::plan(
             &candidate,
             project::PlanOptions {
+                branch: None,
                 project: &source,
                 compose_file: Path::new(&compose),
                 profiles: &[],

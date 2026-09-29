@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beginNativeProjectFinalization } from "../src/backends/native-project-finalization.ts";
+import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
+import { preflightNativeRestart } from "../src/backends/native-project-restart-preflight.ts";
 import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
 import {
   parseNativeHttpsSelection,
@@ -1634,4 +1636,78 @@ test("startup prepares mapping storage before input and plan review", async () =
     return await review(request);
   };
   expect(await startNativeProject(opts)).toBe(0);
+});
+
+test("startup and restart review use identical branch routes after adaptation", async () => {
+  const { opts } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  const review = opts.dependencies.review!;
+  const scope = { ...opts.scope, branch: "feature-a" };
+  const adaptationFile = join(scope.projectRoot, "adaptation.json");
+  await writeFile(opts.composeFile, "services: {}\n");
+  await writeFile(
+    join(scope.projectDir, "hack.config.json"),
+    JSON.stringify({ dev_host: "app.hack.local" })
+  );
+  await writeFile(
+    adaptationFile,
+    JSON.stringify({
+      version: 1,
+      additionalHostnames: { web: ["app.hack.gy"] },
+    })
+  );
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.web.labels = {
+      caddy: "app.hack.local",
+      "caddy.tls": "internal",
+      "caddy.reverse_proxy": "{{upstreams 3000}}",
+    };
+    return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+  };
+  const observed: NativeProjectInput[] = [];
+  opts.dependencies.review = async (request) => {
+    expect(request.branch).toBe("feature-a");
+    observed.push(request.input);
+    return await review(request);
+  };
+  expect(await startNativeProject({ ...opts, scope, adaptationFile })).toBe(0);
+  await preflightNativeRestart({
+    runtime: opts.runtime,
+    scope,
+    composeFile: opts.composeFile,
+    adaptationFile,
+    run: {
+      run: "1".repeat(32),
+      owner: "c".repeat(32),
+      namespace: "b".repeat(64),
+      planId: "a".repeat(64),
+      effectiveEnvName: null,
+      profiles: [],
+      aws: null,
+    },
+    dependencies: {
+      prepare: opts.dependencies.prepare,
+      review: opts.dependencies.review,
+      dependencies: async () => [],
+      invoke: async ({ args }) => {
+        if (args[1] === "status") {
+          return { network: "internet" };
+        }
+        if (args[1] === "probe") {
+          return { admitted: true };
+        }
+        throw new Error("unexpected preflight effect");
+      },
+    },
+  });
+  expect(observed).toHaveLength(2);
+  expect(observed[0]?.normalizedComposeJson).toBe(
+    observed[1]?.normalizedComposeJson
+  );
+  expect(
+    JSON.parse(observed[0]?.normalizedComposeJson ?? "{}").services.web.labels
+      .caddy
+  ).toBe("feature-a.app.hack.local, feature-a.app.hack.gy");
 });

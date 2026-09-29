@@ -178,6 +178,7 @@ mod tests {
         let plan = project::plan(
             &candidate,
             PlanOptions {
+                branch: None,
                 project: &project,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],
@@ -204,6 +205,7 @@ mod tests {
         let next = project::plan(
             &candidate,
             PlanOptions {
+                branch: None,
                 project: &plan.source,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],

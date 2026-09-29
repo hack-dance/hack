@@ -2,6 +2,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { isRecord } from "../lib/guards.ts";
+import { nativeProjectBranchArgs } from "./native-project-branch.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
 import {
   invokeNativeRuntime,
@@ -29,6 +30,7 @@ export async function withNativeProjectReview<T>(opts: {
   readonly projectRoot: string;
   readonly composeFile: string;
   readonly profiles?: readonly string[];
+  readonly branch?: string | null;
   readonly input: NativeProjectInput;
   readonly run: (review: NativeProjectReview) => Promise<T>;
 }): Promise<T> {
@@ -47,6 +49,7 @@ export async function withNativeProjectReview<T>(opts: {
     opts.projectRoot,
     "--file",
     file,
+    ...nativeProjectBranchArgs(opts.branch),
     ...(opts.profiles ?? []).flatMap((profile) => ["--profile", profile]),
   ];
   const original = await invokeNativeRuntime({

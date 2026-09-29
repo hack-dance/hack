@@ -348,6 +348,7 @@ fn foreground_traffic_wake_and_explicit_refresh_preserve_graph() {
     let review = project::plan(
         &candidate,
         project::PlanOptions {
+            branch: None,
             project: &fixture.0,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],

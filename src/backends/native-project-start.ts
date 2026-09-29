@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
+import { prepareNativeProjectBranch } from "./native-project-branch.ts";
 import {
   nativeSharedSourceFlags,
   nativeStartCacheSource,
@@ -668,6 +669,11 @@ export async function startNativeProject(opts: {
     input,
     path: opts.adaptationFile,
   });
+  input = await prepareNativeProjectBranch({
+    input,
+    scope: opts.scope,
+    composeFile: opts.composeFile,
+  });
   let specs = prepareNativeProjectServices(
     input,
     opts.dependencyFile !== undefined
@@ -811,6 +817,7 @@ export async function startNativeProject(opts: {
       projectRoot: opts.scope.projectRoot,
       composeFile: opts.composeFile,
       profiles,
+      branch: opts.scope.branch,
       input: pinned,
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);

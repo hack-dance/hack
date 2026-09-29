@@ -25,6 +25,7 @@ pub(super) fn options<'a>(original: &RunOptions<'a>) -> RunOptions<'a> {
         release_initializer_cache: original.release_initializer_cache.clone(),
         routing_enrolled: original.routing_enrolled,
         project: crate::project::PlanOptions {
+            branch: original.project.branch,
             project: original.project.project,
             compose_file: original.project.compose_file,
             profiles: original.project.profiles,
@@ -58,6 +59,7 @@ pub(super) fn restore(
         Some(crate::project::plan(
             candidate,
             crate::project::PlanOptions {
+                branch: original.project.branch,
                 project: original.project.project,
                 compose_file: original.project.compose_file,
                 profiles: original.project.profiles,

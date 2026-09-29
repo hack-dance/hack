@@ -44,6 +44,9 @@ impl Fixture {
         }
     }
     fn invoke(&self, prefix: &[&str], suffix: &[&str]) -> Output {
+        self.invoke_with_namespace(prefix, suffix, &self.namespace)
+    }
+    fn invoke_with_namespace(&self, prefix: &[&str], suffix: &[&str], namespace: &str) -> Output {
         Command::new(env!("CARGO_BIN_EXE_hack-runtime-candidate"))
             .arg("--candidate-root")
             .arg(checkout())
@@ -57,7 +60,7 @@ impl Fixture {
                 "--expect-original",
                 &self.hash,
                 "--expect-namespace",
-                &self.namespace,
+                namespace,
             ])
             .args(suffix)
             .current_dir(&self.root)
@@ -68,6 +71,83 @@ impl Fixture {
             .output()
             .unwrap()
     }
+}
+#[test]
+fn branch_selector_is_required_at_each_normalized_review_and_capture() {
+    let fixture = Fixture::new();
+    let candidate = Candidate::discover(&checkout()).unwrap();
+    let alpha = candidate
+        .plan_with_branch(&fixture.project, Some("alpha"))
+        .unwrap()
+        .namespace;
+    let base = fixture.invoke(&["project", "plan"], &["--json"]);
+    assert!(base.status.success(), "{base:?}");
+    let base: Value = serde_json::from_slice(&base.stdout).unwrap();
+    let branch = fixture.invoke_with_namespace(
+        &["project", "plan"],
+        &["--branch", "alpha", "--json"],
+        &alpha,
+    );
+    assert!(branch.status.success(), "{branch:?}");
+    let branch: Value = serde_json::from_slice(&branch.stdout).unwrap();
+    assert_eq!(branch["plan"]["namespace"], alpha);
+    assert_eq!(branch["plan"]["branch"], "alpha");
+    assert_ne!(branch["plan_id"], base["plan_id"]);
+    let branch_id = branch["plan_id"].as_str().unwrap();
+    let capture = fixture.invoke_with_namespace(
+        &["project", "capture"],
+        &["--branch", "alpha", "--expect-plan", branch_id, "--json"],
+        &alpha,
+    );
+    assert!(capture.status.success(), "{capture:?}");
+    assert_eq!(
+        error(fixture.invoke_with_namespace(&["project", "plan"], &["--json"], &alpha)),
+        "normalized_compose_input"
+    );
+    assert_eq!(
+        error(fixture.invoke_with_namespace(
+            &["project", "plan"],
+            &["--branch", "beta", "--json"],
+            &alpha
+        )),
+        "normalized_compose_input"
+    );
+    assert_eq!(
+        error(fixture.invoke_with_namespace(
+            &["graph", "run"],
+            &[
+                "--branch",
+                "alpha",
+                "--run-id",
+                &"a".repeat(32),
+                "--expect-plan",
+                base["plan_id"].as_str().unwrap(),
+                "--ready",
+                "web=started"
+            ],
+            &alpha
+        )),
+        "stale_plan"
+    );
+    assert_eq!(
+        error(fixture.invoke_with_namespace(
+            &["graph", "source-compatibility"],
+            &[
+                "--branch",
+                "alpha",
+                "--run-id",
+                &"a".repeat(32),
+                "--expect-plan",
+                base["plan_id"].as_str().unwrap(),
+            ],
+            &alpha
+        )),
+        "stale_plan"
+    );
+    assert_eq!(
+        error(fixture.invoke_with_namespace(&["project", "plan"], &["--branch", "Alpha"], &alpha)),
+        "invalid_branch"
+    );
 }
 impl Drop for Fixture {
     fn drop(&mut self) {

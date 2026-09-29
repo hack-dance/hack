@@ -185,6 +185,7 @@ fn compile_configs(
         &json!({"services":services}),
     )?;
     let options = || PlanOptions {
+        branch: None,
         project: &fixture.0,
         compose_file: Path::new("compose.yaml"),
         profiles: &[],

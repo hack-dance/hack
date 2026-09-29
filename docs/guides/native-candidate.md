@@ -70,12 +70,25 @@ report their existing refusal rather than falling back to Docker.
 
 Native `up` and `restart` currently refuse branch instances, including an explicit
 `--branch` and the automatic branch selected in a linked Git worktree. They refuse
-before lifecycle hooks, registry writes or native runtime changes. Branch hostname
-rewriting and concurrent ownership of the shared HTTPS listener are not implemented;
-a separate run mapping alone does not provide branch routing. Use the Compose
+before lifecycle hooks, registry writes or native runtime changes. Concurrent
+ownership of the shared HTTPS listener and pool-wide ingress/dependency slot
+allocation are not implemented; a separate run mapping alone does not provide
+branch routing. Use the Compose
 backend for branch instances. Setting `worktree.auto_branch=false` selects a base
 instance; it does not enable isolated native branch support. Existing native branch
 mappings remain accessible through `ps`, `logs`, `exec` and retaining `down`.
+
+The internal planning path accepts a canonical lowercase DNS-label `--branch`.
+It gives each checkout/branch pair a separate enrollment and source namespace;
+omitting the selector preserves existing base-instance identities. The frontend
+rewrites declared project, service, legacy and OAuth route names after applying
+native aliases, then carries the same branch selector through original review,
+normalized review, source capture and execution review. Original Compose files
+and private environment values are unchanged. Hostnames outside the configured
+project bases remain explicit, unchanged claims; normal route collision checks
+still apply. A same-checkout branch namespace does not create an isolated source
+tree. These planning contracts do not lift the startup restriction or qualify
+multi-worktree source sharing.
 
 ## Manual candidate upgrade and rollback
 

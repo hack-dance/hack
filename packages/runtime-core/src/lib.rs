@@ -88,6 +88,18 @@ impl Candidate {
 
     /// Preview a workspace attachment; it neither reads project configuration nor registers it.
     pub fn plan(&self, project: &Path) -> Result<WorkspacePlan, CandidateError> {
+        self.plan_with_branch(project, None)
+    }
+
+    /// Select a branch-specific namespace without changing legacy unscoped identities.
+    pub fn plan_with_branch(
+        &self,
+        project: &Path,
+        branch: Option<&str>,
+    ) -> Result<WorkspacePlan, CandidateError> {
+        if let Some(branch) = branch {
+            validate_branch(branch)?;
+        }
         let project = canonical_directory(project)?;
         if project.starts_with(&self.state_root) || self.state_root.starts_with(&project) {
             return Err(CandidateError::new(
@@ -98,7 +110,16 @@ impl Candidate {
         let project_text = project.to_str().ok_or_else(|| {
             CandidateError::new("unsupported_path", "Project path must be valid UTF-8.")
         })?;
-        let namespace = format!("{:x}", Sha256::digest(project_text.as_bytes()));
+        let namespace = if let Some(branch) = branch {
+            let mut digest = Sha256::new();
+            digest.update(b"hack-native-branch-namespace-v1\0");
+            digest.update(project_text.as_bytes());
+            digest.update(b"\0");
+            digest.update(branch.as_bytes());
+            format!("{:x}", digest.finalize())
+        } else {
+            format!("{:x}", Sha256::digest(project_text.as_bytes()))
+        };
         let planned_paths = PlannedPaths {
             provider_home: self.state_root.join("run/provider"),
             docker_config: self.state_root.join("run/docker-config"),
@@ -133,6 +154,25 @@ impl Candidate {
             next_checkpoint: "WU03-project-plan; WU01 preview is not an enrollment plan",
         })
     }
+}
+
+/// Branch selectors are canonical DNS labels, not filesystem paths or display names.
+pub fn validate_branch(branch: &str) -> Result<(), CandidateError> {
+    let bytes = branch.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 63
+        || !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit()
+        || !bytes[bytes.len() - 1].is_ascii_lowercase() && !bytes[bytes.len() - 1].is_ascii_digit()
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+    {
+        return Err(CandidateError::new(
+            "invalid_branch",
+            "Branch selector must be a canonical lowercase DNS label of at most 63 bytes.",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]

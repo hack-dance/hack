@@ -242,6 +242,7 @@ fn graph_serve_rejects_changed_plan_before_dependency_or_runtime_access() {
     )
     .unwrap();
     let options = || PlanOptions {
+        branch: None,
         project: &project,
         compose_file: Path::new("compose.yaml"),
         profiles: &[],

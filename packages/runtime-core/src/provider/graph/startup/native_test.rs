@@ -306,6 +306,7 @@ fn options<'a>(
         release_initializer_cache: std::collections::BTreeSet::new(),
         routing_enrolled: false,
         project: PlanOptions {
+            branch: None,
             project: fixture,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
@@ -347,6 +348,7 @@ fn qualify_startup(stale_dependency: bool) {
     let plan = project::plan(
         &candidate,
         PlanOptions {
+            branch: None,
             project: &fixture.0,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
@@ -544,6 +546,7 @@ fn qualify_active_rebind(refreshable: bool, cancel_after_fence: bool) {
     let plan = project::plan(
         &candidate,
         PlanOptions {
+            branch: None,
             project: &fixture.0,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
@@ -554,6 +557,7 @@ fn qualify_active_rebind(refreshable: bool, cancel_after_fence: bool) {
     let compose_bytes = fs::read(fixture.0.join("compose.yaml")).unwrap();
     let compose_sha256 = format!("{:x}", Sha256::digest(&compose_bytes));
     let compose = project::NormalizedComposeOptions {
+        branch: None,
         project: &fixture.0,
         expected_namespace: &plan.plan.namespace,
         compose_file: Path::new("compose.yaml"),

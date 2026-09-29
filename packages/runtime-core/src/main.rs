@@ -80,6 +80,7 @@ Usage:
   hack-local --version
   hack-local --help
 
+Project commands and graph run/serve/serve-restore/source-compatibility/restart/restore accept --branch <canonical-lowercase-dns-label> to select an isolated namespace; omit it for the legacy project namespace. Carry the same selector through review, source publication, and graph admission.
 Normalized public input for project plan/capture/publish-source/verify-source and graph run/serve/serve-restore: --normalized-file <path> --expect-original <sha256> --expect-namespace <sha256>. Sync/enroll/restart/restore do not accept it. Stopped normalized graphs use graph restore-selection --run-id RUN --json, then graph serve-restore with the same run/plan, --expect-generation, and fresh serve dependency/environment/route selections.
 Build with: ./scripts/build-hack-local.sh
 Runtime commands affect only the candidate pool. Graph commands support a bounded pinned-image subset; full project up/exec/down remains unimplemented.
@@ -782,6 +783,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         ["plan", "capture", "publish-source", "verify-source"].contains(action),
     )?;
     let mut source = None;
+    let mut branch = None;
     let mut file = None;
     let mut expected = None;
     let mut profiles = Vec::new();
@@ -828,6 +830,10 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
                 );
             }
             "--project" if source.is_none() => source = Some(*value),
+            "--branch" if branch.is_none() => {
+                hack_runtime_core::validate_branch(value)?;
+                branch = Some(*value);
+            }
             "--file" if file.is_none() => file = Some(*value),
             "--expect-plan" if expected.is_none() => expected = Some(*value),
             "--profile" if profiles.len() < 64 => profiles.push((*value).to_owned()),
@@ -841,7 +847,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         if file.is_some() || expected.is_some() || !profiles.is_empty() {
             return Err(CandidateError::new("invalid_arguments", HELP));
         }
-        let status = project::status(candidate, source)?;
+        let status = project::status_with_branch(candidate, source, branch)?;
         if json {
             print_json(&status)?;
         } else {
@@ -856,6 +862,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         )
     })?);
     let options = PlanOptions {
+        branch,
         project: source,
         compose_file: file,
         profiles: &profiles,
@@ -1101,6 +1108,7 @@ fn sync_source_command(
         project::plan(
             candidate,
             project::PlanOptions {
+                branch: options.branch,
                 project: options.project,
                 compose_file: options.compose_file,
                 profiles: options.profiles,

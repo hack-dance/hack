@@ -28,7 +28,7 @@ import {createHash} from "node:crypto";
 const args=process.argv.slice(2), value=(key)=>args[args.indexOf(key)+1];
 const original=await Bun.file(value("--project")+"/"+value("--file")).text();
 const hash=createHash("sha256").update(original).digest("hex");
-const namespace="a".repeat(64);
+const namespace=(args.includes("--branch") ? "c" : "a").repeat(64);
 if(args.includes("--normalized-file") && (value("--expect-original")!==hash || value("--expect-namespace")!==namespace)) process.exit(4);
 console.log(JSON.stringify({plan_id:"b".repeat(64),plan:{namespace,compose_sha256:hash}}));
 `
@@ -99,4 +99,35 @@ test("failed admission removes the temporary public input", async () => {
     })
   ).rejects.toThrow("synthetic refusal");
   expect(await Bun.file(file).exists()).toBe(false);
+});
+
+test("branch selection reaches both reviews and the exact execution arguments", async () => {
+  const options = await fixture();
+  await withNativeProjectReview({
+    ...options,
+    branch: "feature-a",
+    run: async (review) => {
+      expect(review.namespace).toBe("c".repeat(64));
+      const index = review.projectArgs.indexOf("--branch");
+      expect(index).toBeGreaterThan(-1);
+      expect(review.projectArgs[index + 1]).toBe("feature-a");
+      expect(
+        review.projectArgs.filter((arg) => arg === "--branch")
+      ).toHaveLength(1);
+    },
+  });
+});
+
+test("noncanonical branch review refuses before invoking the executor", async () => {
+  const options = await fixture();
+  await rm(options.runtime.binary);
+  await expect(
+    withNativeProjectReview({
+      ...options,
+      branch: "feature/raw",
+      run: async () => {
+        throw new Error("unreachable callback");
+      },
+    })
+  ).rejects.toThrow("canonical branch");
 });

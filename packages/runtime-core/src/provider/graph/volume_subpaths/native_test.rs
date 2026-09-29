@@ -18,6 +18,7 @@ fn token() -> String {
 }
 fn project_options(project: &Path) -> PlanOptions<'_> {
     PlanOptions {
+        branch: None,
         project,
         compose_file: Path::new("compose.yaml"),
         profiles: &[],

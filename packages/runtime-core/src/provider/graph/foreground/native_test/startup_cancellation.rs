@@ -52,6 +52,7 @@ fn exercise(
     let review = project::plan(
         candidate,
         project::PlanOptions {
+            branch: None,
             project: &project,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],

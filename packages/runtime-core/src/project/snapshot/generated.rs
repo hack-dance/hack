@@ -109,6 +109,7 @@ mod tests {
         let plan = project::plan(
             &candidate,
             PlanOptions {
+                branch: None,
                 project: &source,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],

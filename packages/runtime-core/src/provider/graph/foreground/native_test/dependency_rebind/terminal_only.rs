@@ -176,6 +176,7 @@ fn rotated_completed_only_slot_admits_fresh_jobs_and_preserves_stopped_original(
     let review = project::plan(
         &candidate,
         project::PlanOptions {
+            branch: None,
             project: &fixture.0,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],

@@ -434,6 +434,7 @@ pub fn compile_scoped_normalized(
     compile_inner(
         candidate,
         PlanOptions {
+            branch: options.branch,
             project: options.project,
             compose_file: options.compose_file,
             profiles: options.profiles,

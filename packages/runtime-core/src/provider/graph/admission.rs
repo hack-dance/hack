@@ -202,6 +202,7 @@ mod tests {
         )
         .unwrap();
         let options = || project::PlanOptions {
+            branch: None,
             project: &fixture.0,
             compose_file: std::path::Path::new("compose.yaml"),
             profiles: &[],

@@ -41,6 +41,7 @@ impl Fixture {
     }
     fn options(&self) -> PlanOptions<'_> {
         PlanOptions {
+            branch: None,
             project: &self.project,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
@@ -585,6 +586,7 @@ fn useful_graph_models_build_mounts_health_limits_and_loopback_proposal() {
     let plan = project::plan(
         &fixture.candidate,
         PlanOptions {
+            branch: None,
             project: &fixture.project,
             compose_file: Path::new("compose.yaml"),
             profiles: &profiles,
@@ -863,6 +865,7 @@ fn compose_relative_paths_and_normalized_reserved_targets_are_checked() {
     let plan = project::plan(
         &fixture.candidate,
         PlanOptions {
+            branch: None,
             project: &fixture.project,
             compose_file: Path::new("config/compose.yaml"),
             profiles: &[],
@@ -962,6 +965,7 @@ fn a_fifo_compose_input_is_rejected_without_waiting_for_a_writer() {
     let error = project::plan(
         &fixture.candidate,
         PlanOptions {
+            branch: None,
             project: &fixture.project,
             compose_file: Path::new("fifo.yaml"),
             profiles: &[],

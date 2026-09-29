@@ -20,11 +20,12 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub use enrollment::{EnrollmentReceipt, enroll, status};
+pub use enrollment::{EnrollmentReceipt, enroll, status, status_with_branch};
 pub use source::{SourceEntry, SourceSelection};
 
 pub struct PlanOptions<'a> {
     pub project: &'a Path,
+    pub branch: Option<&'a str>,
     pub compose_file: &'a Path,
     pub profiles: &'a [String],
 }
@@ -294,6 +295,8 @@ pub struct PlanData {
     pub candidate_root: PathBuf,
     pub source: PathBuf,
     pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub compose_file: String,
     pub compose_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -363,7 +366,7 @@ fn plan_input(
             "At most 64 profiles can be selected.",
         ));
     }
-    let preview = candidate.plan(options.project)?;
+    let preview = candidate.plan_with_branch(options.project, options.branch)?;
     let source = &preview.source;
     let file_text = options
         .compose_file
@@ -399,6 +402,7 @@ fn plan_input(
         value,
     )?;
     data.namespace = preview.namespace;
+    data.branch = options.branch.map(str::to_owned);
     data.hostname_change_sha256 = hostname_change::fingerprint(&original, bytes);
     let mut environment_files = data
         .services

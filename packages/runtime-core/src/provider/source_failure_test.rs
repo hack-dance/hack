@@ -48,6 +48,7 @@ fn owned_source_failures_live() -> Result<(), CandidateError> {
         let report = project::plan(
             &candidate,
             project::PlanOptions {
+                branch: None,
                 project: &source,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],

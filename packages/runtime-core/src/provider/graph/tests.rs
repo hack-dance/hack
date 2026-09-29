@@ -12,6 +12,7 @@ impl Fixture {
     }
     fn options(&self) -> PlanOptions<'_> {
         PlanOptions {
+            branch: None,
             project: &self.0,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
@@ -992,6 +993,7 @@ fn fault_child() -> Result<(), CandidateError> {
     let project = PathBuf::from(std::env::var("HACK_LOCAL_GRAPH_PROJECT").expect("fixture"));
     let run_id = std::env::var("HACK_LOCAL_GRAPH_RUN").expect("run");
     let options = || PlanOptions {
+        branch: None,
         project: &project,
         compose_file: Path::new("compose.yaml"),
         profiles: &[],

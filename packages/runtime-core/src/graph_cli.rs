@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed, plus --source-revision for source mounts; fresh run/serve may explicitly select --release-initializer-cache service for quiescent guest page/dentry cache release (package contents retained); explicit --live-source binds directory mounts to that initial acknowledged workspace revision; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Dead-owner recover-cleanup requires --expect-receipt; retire-recovered-publisher requires --expect-owner. Foreground serve additionally requires --dependencies and --expect-dependencies and accepts explicit --environment-stdin and --route-slot service=index for reviewed local routes; dependency-plan requires --dependencies; dependency-discover requires --host-port and --executable; owner-status requires --run-id. Fresh foreground owner-restore requires exactly --run-id, --expect-plan, --expect-generation and --environment-stdin, plus optional --json. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); --unix accepts up to eight --hostname claims; unpublish-bridge requires --run-id and --expect-reservation.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; planning actions accept optional --branch <canonical-lowercase-dns-label>. Source mounts may select --source-revision. Fresh run/serve may explicitly select --release-initializer-cache service for quiescent guest page/dentry cache release (package contents retained); explicit --live-source binds directory mounts to that initial acknowledged workspace revision; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Dead-owner recover-cleanup requires --expect-receipt; retire-recovered-publisher requires --expect-owner. Foreground serve additionally requires --dependencies and --expect-dependencies and accepts explicit --environment-stdin and --route-slot service=index for reviewed local routes; dependency-plan requires --dependencies; dependency-discover requires --host-port and --executable; owner-status requires --run-id. Fresh foreground owner-restore requires exactly --run-id, --expect-plan, --expect-generation and --environment-stdin, plus optional --json. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); --unix accepts up to eight --hostname claims; unpublish-bridge requires --run-id and --expect-reservation.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
@@ -326,6 +326,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             .contains(action)
                 && [
                     "--project",
+                    "--branch",
                     "--file",
                     "--expect-plan",
                     "--source-revision",
@@ -345,6 +346,9 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             "normalized_live_source_unsupported",
             "Normalized graphs currently require immutable source; live source is not supported.",
         ));
+    }
+    if let Some(branch) = singles.get("--branch") {
+        hack_runtime_core::validate_branch(branch)?;
     }
     if live_source && !singles.contains_key("--source-revision") {
         return Err(invalid());
@@ -531,6 +535,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             let options = graph::RunOptions {
                 routing_enrolled: !route_slots.is_empty(),
                 project: PlanOptions {
+                    branch: singles.get("--branch").copied(),
                     project: Path::new(project),
                     compose_file: Path::new(file),
                     profiles: &profiles,
@@ -548,6 +553,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             if let Some(selection) = &normalized_selection {
                 let input = selection.load()?;
                 let compose = input.options(PlanOptions {
+                    branch: options.project.branch,
                     project: options.project.project,
                     compose_file: options.project.compose_file,
                     profiles: options.project.profiles,
@@ -592,6 +598,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                         None
                     };
                     let plan_options = PlanOptions {
+                        branch: options.project.branch,
                         project: options.project.project,
                         compose_file: options.project.compose_file,
                         profiles: options.project.profiles,

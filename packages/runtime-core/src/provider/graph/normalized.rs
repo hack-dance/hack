@@ -4,7 +4,7 @@ use crate::project::{NormalizedComposeOptions, inputs::ScopedExecutionInputs};
 use std::time::Instant;
 
 /// Carries the frontend's reviewed input alongside ordinary graph ownership/readiness.
-/// The project/file/profiles must agree across both options. Plan, source publication,
+/// The project/branch/file/profiles must agree across both options. Plan, source publication,
 /// and admission must all use this same input; file-based replay is not a substitute.
 pub struct NormalizedRunOptions<'a> {
     pub run: RunOptions<'a>,
@@ -72,6 +72,7 @@ pub fn compile_normalized_inputs(
     let run = &options.run;
     let compose = &options.compose;
     if run.project.project != compose.project
+        || run.project.branch != compose.branch
         || run.project.compose_file != compose.compose_file
         || run.project.profiles != compose.profiles
     {
@@ -173,6 +174,7 @@ mod tests {
         let report = project::plan_normalized(
             &candidate,
             project::NormalizedComposeOptions {
+                branch: None,
                 project: &project,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],
@@ -185,7 +187,7 @@ mod tests {
         let identity = NormalizedInputIdentity {
             namespace: namespace.clone(),
             original_compose_sha256: original.clone(),
-            normalized_compose_sha256: original,
+            normalized_compose_sha256: original.clone(),
         };
         let receipt:Receipt = serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":namespace,"plan_id":report.plan_id,"phase":"stopped-data-retained","readiness":{},"resources":{},"normalized_input":identity})).unwrap();
         assert!(receipt.source.is_none());
@@ -212,6 +214,51 @@ mod tests {
             &"8".repeat(64),
             &identity
         ));
+        let branch_namespace = candidate
+            .plan_with_branch(&project, Some("alpha"))
+            .unwrap()
+            .namespace;
+        let branch_report = project::plan_normalized(
+            &candidate,
+            project::NormalizedComposeOptions {
+                branch: Some("alpha"),
+                expected_namespace: &branch_namespace,
+                project: &project,
+                compose_file: Path::new("compose.yaml"),
+                profiles: &[],
+                expected_compose_sha256: &original,
+                compose_bytes: bytes,
+            },
+        )
+        .unwrap();
+        let branch_identity = NormalizedInputIdentity {
+            namespace: branch_namespace,
+            original_compose_sha256: original.clone(),
+            normalized_compose_sha256: original,
+        };
+        assert_ne!(receipt.namespace, branch_report.plan.namespace);
+        assert!(!branch_identity.matches_plan(&report.plan));
+        assert!(!identity.matches_plan(&branch_report.plan));
+        assert!(!super::super::unchanged_normalized_review(
+            &receipt,
+            &branch_report.plan_id,
+            &branch_identity
+        ));
+        let mut dropped_selector = branch_report.plan.clone();
+        dropped_selector.branch = None;
+        let dropped_id = project::identity(&dropped_selector).unwrap();
+        assert_eq!(
+            super::super::source_compatibility(
+                &candidate,
+                &"a".repeat(32),
+                &dropped_id,
+                &dropped_selector,
+                &branch_identity,
+            )
+            .unwrap_err()
+            .code,
+            "graph_source_compatibility"
+        );
     }
 
     #[test]
@@ -263,6 +310,7 @@ mod tests {
             let normalized =
                 b"services:\n  web:\n    image: alpine:3.21\n    command: [echo, normalized]\n";
             let compose = NormalizedComposeOptions {
+                branch: None,
                 project: &project,
                 expected_namespace: &namespace,
                 compose_file: Path::new("compose.yml"),
@@ -281,6 +329,7 @@ mod tests {
                     release_initializer_cache: BTreeSet::new(),
                     routing_enrolled: false,
                     project: PlanOptions {
+                        branch: None,
                         project: &project,
                         compose_file: Path::new("compose.yml"),
                         profiles: &[],
@@ -296,13 +345,15 @@ mod tests {
             let compiled =
                 compile_normalized_inputs(&candidate, &make(), &BTreeMap::new()).unwrap();
             assert_eq!(compiled.executable.review.plan_id, review.plan_id);
-            for kind in 0..4 {
+            for kind in 0..6 {
                 let mut options = make();
                 match kind {
                     0 => options.run.expected_plan = "wrong",
                     1 => options.compose.expected_compose_sha256 = "wrong",
                     2 => options.run.project.compose_file = Path::new("other.yml"),
-                    _ => options.compose.expected_namespace = "wrong",
+                    3 => options.compose.expected_namespace = "wrong",
+                    4 => options.run.project.branch = Some("alpha"),
+                    _ => options.compose.branch = Some("alpha"),
                 }
                 assert!(
                     run_normalized(

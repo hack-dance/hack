@@ -186,6 +186,7 @@ pub(super) mod tests {
         let plan = project::plan(
             &candidate,
             project::PlanOptions {
+                branch: None,
                 project: &project,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],

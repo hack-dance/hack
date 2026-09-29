@@ -1064,6 +1064,7 @@ mod route_tests {
         )
         .unwrap();
         let options = || project::PlanOptions {
+            branch: None,
             project: &project,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],

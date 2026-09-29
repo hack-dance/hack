@@ -106,14 +106,16 @@ native process/disk identity, guest protocol, and lifecycle decisions. Guest req
 connection to the existing socket; they cannot silently start or recover a VM. Failed operations
 retain their phase and receipts. Recovery preserves disks and labels an unclean exit explicitly.
 
-SmolVM seeds new machine disks from expanded `*-template.ext4` files that it creates from the
-verified compressed templates and then reuses. Machine creation verifies those expanded files
-against content digests derived from the pinned SmolVM archive: before create for any file SmolVM
-would reuse, and after create for the files it actually cloned. Size, owner and mode checks are
-not integrity; the content digest is. A mismatch refuses with `disk_template_untrusted` and changes
-no files. Before create, removing the refused file lets SmolVM re-expand it from the verified
-compressed template. After create, the runtime stays in `creating` without adopting the machine,
-as for a failed create, and needs manual recovery.
+SmolVM seeds a machine's disks during its first start (`machine create` makes none) from expanded
+`*-template.ext4` files that it creates from the verified compressed templates and then reuses.
+Until a pool adopts its disk identities, those expanded files are verified against content
+digests derived from the pinned SmolVM archive: before create and before each start for any file
+SmolVM would reuse, and after the first start, before disk adoption, for the files it expanded and
+cloned. SmolVM expands and clones within one start, so a first-start expansion is verified only
+after the guest has booted from it. Size, owner and mode checks are not integrity; the content
+digest is. A mismatch refuses with `disk_template_untrusted` and changes no files. Before a start,
+removing the refused file lets SmolVM re-expand it from the verified compressed template. After a
+start, the boot is stopped as a failed boot without adopting its disks and needs manual recovery.
 
 Protocol version 1 describes this development client. It is not a promised release API. This is
 a bounded experimental application graph executor, not a qualified native Linux container adapter. The checkout-owned `node serve`

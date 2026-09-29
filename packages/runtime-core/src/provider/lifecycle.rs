@@ -962,13 +962,11 @@ fn up_selected(
     }
     prepare_rootfs(candidate, &mut owner)?;
     if !owner.created {
-        // SmolVM clones the expanded templates in this directory into the new disks.
-        // Refuse a template it would reuse before the phase records a create attempt.
+        // SmolVM clones the expanded templates in this directory into the new disks at the
+        // machine's first start. Refuse a template it would reuse before the phase records a
+        // create attempt; `verify_templates` checks again around that start.
         let templates = root(candidate).join("home/.smolvm");
-        super::disk_template::verify_expanded(
-            &templates,
-            super::disk_template::Stage::BeforeCreate,
-        )?;
+        super::disk_template::verify_expanded(&templates, super::disk_template::Stage::BeforeUse)?;
         phase(candidate, &mut owner, "creating")?;
         let mount = format!(
             "{}:/opt/hack-engine:ro",
@@ -1022,13 +1020,6 @@ fn up_selected(
             &owner,
             &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
         )?;
-        // SmolVM expands missing templates during create. Verify what it cloned before the
-        // machine is recorded as created; a refusal leaves `creating`, like a failed create,
-        // and nothing is adopted or removed.
-        super::disk_template::verify_expanded(
-            &templates,
-            super::disk_template::Stage::AfterCreate,
-        )?;
         super::config_audit::pin_created_network(candidate, &mut owner)?;
         owner.created = true;
         owner.save(candidate)?;
@@ -1050,6 +1041,11 @@ fn up_selected(
         ));
     }
     if let Err(error) = super::config_audit::verify(candidate, &owner) {
+        phase(candidate, &mut owner, "stopped-before-engine")?;
+        return Err(error);
+    }
+    if let Err(error) = verify_templates(candidate, &owner, super::disk_template::Stage::BeforeUse)
+    {
         phase(candidate, &mut owner, "stopped-before-engine")?;
         return Err(error);
     }
@@ -1116,6 +1112,24 @@ fn stop_failed_boot(
     Ok(())
 }
 
+/// Verify the expanded disk templates around a start that can format this pool's disks.
+///
+/// Pinned SmolVM 1.14.3 formats a machine's disks from the templates during its first start
+/// (`prepare_for_launch`); `machine create` makes no disks, so nothing is expanded until then.
+/// Until the pool adopts its disk identities, a start may clone templates: verify the ones it
+/// would reuse before the start, and the ones it cloned after it, before adoption. Adopted disks
+/// are not formatted again, and a replaced disk is refused by its pinned identity.
+fn verify_templates(
+    candidate: &Candidate,
+    owner: &Owner,
+    stage: super::disk_template::Stage,
+) -> Result<(), CandidateError> {
+    if owner.storage.is_some() && owner.overlay.is_some() {
+        return Ok(());
+    }
+    super::disk_template::verify_expanded(&root(candidate).join("home/.smolvm"), stage)
+}
+
 fn verify_disk_allocation(
     storage: &identity::DiskIdentity,
     overlay: &identity::DiskIdentity,
@@ -1137,6 +1151,12 @@ fn finish_boot(
     owner: &mut Owner,
     previous_boot: Option<&str>,
 ) -> Result<RuntimeStatus, CandidateError> {
+    // Before any disk is adopted: a refusal here takes the caller's failed-boot path.
+    verify_templates(
+        candidate,
+        owner,
+        super::disk_template::Stage::AfterFirstStart,
+    )?;
     audit_boot(candidate, owner)?;
     let dir = owner.real_data_dir(candidate)?;
     let storage = identity::disk(&dir.join("storage.raw"))?;
@@ -2149,6 +2169,74 @@ printf 'verified-cache\n'
         assert!(sentinel.try_wait().unwrap().is_none());
         sentinel.kill().unwrap();
         sentinel.wait().unwrap();
+    }
+
+    #[test]
+    fn templates_are_verified_around_the_first_start_not_after_create() {
+        // The state a live fresh pool reached after `machine create`: pinned SmolVM makes no
+        // disks and expands nothing until the first start, so only the compressed templates
+        // exist. The removed after-create check refused exactly this state.
+        let checkout = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-template-sequence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&checkout).unwrap();
+        let candidate = Candidate::discover(&checkout).unwrap();
+        let templates = root(&candidate).join("home/.smolvm");
+        state::private_directory(&templates).unwrap();
+        for name in ["storage-template.ext4.zst", "overlay-template.ext4.zst"] {
+            fs::write(templates.join(name), b"compressed").unwrap();
+        }
+        let owner = |adopted: bool| -> Owner {
+            let disk = serde_json::json!({"device": 1, "inode": 2, "bytes": 3, "uuid": "fixture"});
+            let disk = if adopted {
+                disk
+            } else {
+                serde_json::Value::Null
+            };
+            serde_json::from_value(serde_json::json!({
+                "version": 1, "checkout": "/fixture", "token": "fixture", "machine": "fixture",
+                "short_home": "/fixture", "created": adopted, "phase": "creating",
+                "process": null, "storage": disk, "overlay": disk, "guest_boot_id": null,
+                "daemon_pid": null, "daemon_start": null, "rootfs_digest": null
+            }))
+            .unwrap()
+        };
+        let fresh = owner(false);
+        // Before the first start: nothing to reuse yet, so the start may proceed.
+        verify_templates(
+            &candidate,
+            &fresh,
+            super::super::disk_template::Stage::BeforeUse,
+        )
+        .unwrap();
+        // After a first start that left no verifiable expansion beside the compressed input,
+        // its disks are refused rather than adopted.
+        let error = verify_templates(
+            &candidate,
+            &fresh,
+            super::super::disk_template::Stage::AfterFirstStart,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "disk_template_untrusted");
+        assert!(
+            error.message.contains("missing after the first start"),
+            "{}",
+            error.message
+        );
+        // Adopted disks are never formatted again, so their starts do not depend on templates.
+        let adopted = owner(true);
+        for stage in [
+            super::super::disk_template::Stage::BeforeUse,
+            super::super::disk_template::Stage::AfterFirstStart,
+        ] {
+            verify_templates(&candidate, &adopted, stage).unwrap();
+        }
+        fs::remove_dir_all(&checkout).unwrap();
     }
 
     #[test]

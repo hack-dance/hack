@@ -1,9 +1,10 @@
 //! Integrity of the expanded disk templates SmolVM clones into new machines.
 //!
 //! SmolVM seeds each new machine's `storage.raw` and `overlay.raw` from the plain
-//! `$HOME/.smolvm/{storage,overlay}-template.ext4` files. When they are absent it expands
-//! them itself from the adjacent `*.ext4.zst` (copied and digest-checked by
-//! `lifecycle::prepare_rootfs`) and reuses the expanded files for every later create. The
+//! `$HOME/.smolvm/{storage,overlay}-template.ext4` files during the machine's first start;
+//! `machine create` makes no disks (pinned `agent/manager.rs`, `prepare_for_launch`). When the
+//! plain files are absent, that start expands them from the adjacent `*.ext4.zst` (copied and
+//! digest-checked by `lifecycle::prepare_rootfs`), and later first starts reuse them. The
 //! compressed inputs were verified, but the expanded files that SmolVM actually clones were
 //! not, so a corrupt, stale or replaced template would have been copied silently into new
 //! disks. This module verifies the expanded content against digests derived from the pinned
@@ -15,13 +16,18 @@
 //!   any changed byte, logical length or block size changes it.
 //! - File type, link count, owner, mode and size are ownership and sanity checks that run
 //!   first; they are not integrity checks.
-//! - Verification never repairs, adopts, moves or deletes anything. A mismatch refuses the
-//!   create with `disk_template_untrusted`; SmolVM re-expands a template from the verified
-//!   compressed input once the refused file is removed.
-//! - Templates matter only when a machine is created, so only the create path verifies them.
+//! - Verification never repairs, adopts, moves or deletes anything. A mismatch refuses with
+//!   `disk_template_untrusted`; SmolVM re-expands a template from the verified compressed
+//!   input once the refused file is removed.
+//! - Templates matter only while a pool's disks are unadopted, so only starts before disk
+//!   adoption verify them: templates SmolVM would reuse are verified before use, and the
+//!   templates the first start expanded are verified after it, before adoption.
 //! - Threat model: accidental corruption, interrupted or partial writers and foreign
 //!   replacement. A same-user process that swaps content between this check and SmolVM's
 //!   clone is out of scope; such a process could equally rewrite the machine disks.
+//! - Limit: SmolVM expands and clones in one start, so a first-start expansion is verified
+//!   only after the guest has booted from disks cloned from it. It came from the verified
+//!   compressed input and the pinned SmolVM binary; a refusal stops that boot unadopted.
 use super::state::io;
 use crate::CandidateError;
 use sha2::{Digest, Sha256};
@@ -65,20 +71,20 @@ const BLOCK: u64 = 4096;
 /// refused once verification stops at its read budget, so a dense or foreign file cannot
 /// make verification unbounded.
 const MAX_ALLOCATED_READ: u64 = 256 * 1024 * 1024;
-/// Remedy once SmolVM has already created a machine from the refused template. The caller
-/// leaves the create phase unfinished, as for a failed create, so nothing is adopted.
-const AFTER_CREATE: &str =
-    "No file was changed. The machine SmolVM created was not adopted and needs manual recovery.";
+/// Remedy once SmolVM has already formatted disks from the refused template. The caller
+/// stops that boot through its failed-boot path, so no disk is adopted.
+const AFTER_FIRST_START: &str = "No file was changed. The disks SmolVM formatted from it were not adopted; the failed boot needs manual recovery.";
 
-/// When the create path verifies.
+/// When a start that can format unadopted disks verifies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Stage {
-    /// Before `machine create`: verify templates SmolVM would reuse. Missing ones are
-    /// allowed because SmolVM expands them from the verified compressed input during create.
-    BeforeCreate,
-    /// After `machine create`: every template must exist in the verified directory, which
-    /// also shows that SmolVM did not clone from a fallback expansion location.
-    AfterCreate,
+    /// Before a start: verify templates SmolVM would reuse. Missing ones are allowed because
+    /// that start expands them from the verified compressed input.
+    BeforeUse,
+    /// After the first start, before disk adoption: every template must exist in the verified
+    /// directory and match, which also shows that SmolVM did not clone from a fallback
+    /// expansion location such as its cache directory.
+    AfterFirstStart,
 }
 
 /// Verify the expanded templates in `dir` (the provider `$HOME/.smolvm`) for `stage`.
@@ -97,11 +103,11 @@ fn verify_with(
         let before = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if stage == Stage::AfterCreate {
+                if stage == Stage::AfterFirstStart {
                     return Err(CandidateError::new(
                         "disk_template_untrusted",
                         format!(
-                            "Expanded disk template {} is missing after create; SmolVM did not clone a verifiable template. {AFTER_CREATE}",
+                            "Expanded disk template {} is missing after the first start; SmolVM did not clone a verifiable template. {AFTER_FIRST_START}",
                             template.name
                         ),
                     ));
@@ -112,10 +118,10 @@ fn verify_with(
         };
         let refuse = |reason: &str| {
             let remedy = match stage {
-                Stage::BeforeCreate => {
+                Stage::BeforeUse => {
                     "No file was changed; remove it so SmolVM re-expands it from the verified compressed template."
                 }
-                Stage::AfterCreate => AFTER_CREATE,
+                Stage::AfterFirstStart => AFTER_FIRST_START,
             };
             CandidateError::new(
                 "disk_template_untrusted",
@@ -362,7 +368,7 @@ mod tests {
         let extents: &[(u64, &[u8])] = &[(0, b"ext4"), (8192, b"journal")];
         let path = fixture.sparse("storage-template.ext4", LEN, extents);
         let pinned = [pinned_for("storage-template.ext4", &content_with(extents))];
-        verify_with(&fixture.0, Stage::BeforeCreate, &pinned, MAX_ALLOCATED_READ).unwrap();
+        verify_with(&fixture.0, Stage::BeforeUse, &pinned, MAX_ALLOCATED_READ).unwrap();
         // A later create reuses the same file; touching it changes metadata, not content.
         File::options()
             .append(true)
@@ -370,7 +376,13 @@ mod tests {
             .unwrap()
             .set_modified(std::time::UNIX_EPOCH)
             .unwrap();
-        verify_with(&fixture.0, Stage::AfterCreate, &pinned, MAX_ALLOCATED_READ).unwrap();
+        verify_with(
+            &fixture.0,
+            Stage::AfterFirstStart,
+            &pinned,
+            MAX_ALLOCATED_READ,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -388,8 +400,11 @@ mod tests {
             fs::metadata(&path).unwrap().modified().unwrap(),
         );
         for (stage, remedy) in [
-            (Stage::BeforeCreate, "re-expands it"),
-            (Stage::AfterCreate, "not adopted and needs manual recovery"),
+            (Stage::BeforeUse, "re-expands it"),
+            (
+                Stage::AfterFirstStart,
+                "were not adopted; the failed boot needs manual recovery",
+            ),
         ] {
             let error = verify_with(&fixture.0, stage, &pinned, MAX_ALLOCATED_READ).unwrap_err();
             assert_eq!(error.code, "disk_template_untrusted");
@@ -439,7 +454,7 @@ mod tests {
         for (expected, setup) in cases {
             let fixture = Fixture::new("shape");
             setup(&fixture);
-            let error = verify_with(&fixture.0, Stage::BeforeCreate, &pinned, 0).unwrap_err();
+            let error = verify_with(&fixture.0, Stage::BeforeUse, &pinned, 0).unwrap_err();
             assert_eq!(error.code, "disk_template_untrusted");
             assert!(
                 error.message.contains(expected),
@@ -447,6 +462,27 @@ mod tests {
                 error.message
             );
         }
+    }
+
+    #[test]
+    fn first_start_expansion_is_verified_after_it_and_reused_after_verification() {
+        let fixture = Fixture::new("sequence");
+        let extents: &[(u64, &[u8])] = &[(0, b"ext4"), (8192, b"journal")];
+        let pinned = [pinned_for("storage-template.ext4", &content_with(extents))];
+        fixture.sparse("storage-template.ext4.zst", 16, &[(0, b"compressed")]);
+        // After `machine create`: pinned SmolVM has expanded nothing yet.
+        verify_with(&fixture.0, Stage::BeforeUse, &pinned, MAX_ALLOCATED_READ).unwrap();
+        // The first start expands beside the compressed input and clones that expansion.
+        fixture.sparse("storage-template.ext4", LEN, extents);
+        verify_with(
+            &fixture.0,
+            Stage::AfterFirstStart,
+            &pinned,
+            MAX_ALLOCATED_READ,
+        )
+        .unwrap();
+        // A later first start reuses it; it is verified before that use.
+        verify_with(&fixture.0, Stage::BeforeUse, &pinned, MAX_ALLOCATED_READ).unwrap();
     }
 
     #[test]
@@ -458,12 +494,18 @@ mod tests {
         // interruption only the compressed input and the scratch file can remain.
         let partial = fixture.sparse("storage-template.partial", LEN / 2, &[(0, b"ext4")]);
         fixture.sparse("storage-template.ext4.zst", 16, &[(0, b"compressed")]);
-        verify_with(&fixture.0, Stage::BeforeCreate, &pinned, MAX_ALLOCATED_READ).unwrap();
-        let error =
-            verify_with(&fixture.0, Stage::AfterCreate, &pinned, MAX_ALLOCATED_READ).unwrap_err();
+        verify_with(&fixture.0, Stage::BeforeUse, &pinned, MAX_ALLOCATED_READ).unwrap();
+        let error = verify_with(
+            &fixture.0,
+            Stage::AfterFirstStart,
+            &pinned,
+            MAX_ALLOCATED_READ,
+        )
+        .unwrap_err();
         assert_eq!(error.code, "disk_template_untrusted");
         assert!(
-            error.message.contains("missing after create") && error.message.contains("not adopted"),
+            error.message.contains("missing after the first start")
+                && error.message.contains("not adopted"),
             "{}",
             error.message
         );
@@ -476,13 +518,13 @@ mod tests {
         let content = content_with(&[(0, &[1u8; 64 * 1024])]);
         let pinned = [pinned_for("storage-template.ext4", &content)];
         fixture.sparse("storage-template.ext4", LEN, &[(0, &[1u8; 64 * 1024])]);
-        let error = verify_with(&fixture.0, Stage::BeforeCreate, &pinned, 32 * 1024).unwrap_err();
+        let error = verify_with(&fixture.0, Stage::BeforeUse, &pinned, 32 * 1024).unwrap_err();
         assert!(
             error.message.contains("stopped at its read budget"),
             "{}",
             error.message
         );
-        verify_with(&fixture.0, Stage::BeforeCreate, &pinned, MAX_ALLOCATED_READ).unwrap();
+        verify_with(&fixture.0, Stage::BeforeUse, &pinned, MAX_ALLOCATED_READ).unwrap();
     }
 
     #[test]
@@ -503,6 +545,6 @@ mod tests {
     fn pinned_expansion_matches() {
         let dir =
             std::env::var("HACK_LOCAL_EXPANDED_TEMPLATE_DIR").expect("expanded template directory");
-        verify_expanded(Path::new(&dir), Stage::AfterCreate).unwrap();
+        verify_expanded(Path::new(&dir), Stage::AfterFirstStart).unwrap();
     }
 }

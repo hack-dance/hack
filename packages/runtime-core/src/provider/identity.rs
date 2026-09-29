@@ -226,9 +226,15 @@ pub fn alive(pid: i32) -> Result<bool, CandidateError> {
 /// private provider state), as are zombies. A same-user process whose executable path cannot be
 /// read, and whose exec-time name (truncated by the kernel) could be `binary`'s, makes absence
 /// uncertain rather than assumed.
+///
+/// An exited process no longer reports its path but still answers the signal check until its
+/// parent reaps it, so zombies are identified through BSD process info. A process observed in any
+/// other unprovable state is observed again for a short bounded interval; it is skipped only once
+/// proven gone, a zombie, another user's or running something else, and absence is refused
+/// otherwise, naming the process and each failed observation.
 #[cfg(target_os = "macos")]
 pub fn executable_running(binary: &Path) -> Result<bool, CandidateError> {
-    use std::os::unix::ffi::OsStrExt;
+    const ATTEMPTS: u32 = 40;
     let uncertain = || {
         CandidateError::new(
             "stop_uncertain",
@@ -253,58 +259,186 @@ pub fn executable_running(binary: &Path) -> Result<bool, CandidateError> {
         if pid <= 0 || pid == this {
             continue;
         }
-        let mut path = [0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-        // SAFETY: buffer is writable for its full declared size.
-        let length =
-            unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
-        if let Ok(length @ 1..) = usize::try_from(length) {
-            let path = Path::new(std::ffi::OsStr::from_bytes(&path[..length]));
-            if path == binary || canonical.as_deref() == Some(path) {
-                return Ok(true);
-            }
-            continue;
-        }
-        // SAFETY: signal zero only observes existence and permission.
-        if unsafe { libc::kill(pid, 0) } != 0 {
-            match std::io::Error::last_os_error().raw_os_error() {
-                Some(libc::ESRCH | libc::EPERM) => continue,
-                _ => return Err(uncertain()),
-            }
-        }
-        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
-        // SAFETY: libproc receives a correctly sized writable proc_bsdinfo buffer.
-        let read = unsafe {
-            libc::proc_pidinfo(
-                pid,
-                libc::PROC_PIDTBSDINFO,
-                0,
-                info.as_mut_ptr().cast(),
-                std::mem::size_of::<libc::proc_bsdinfo>() as i32,
-            )
+        let mut last = Observation::default();
+        let observe = || {
+            last = observe_process(pid);
+            classify(&last, binary, canonical.as_deref())
         };
-        if read as usize != std::mem::size_of::<libc::proc_bsdinfo>() {
-            return Err(uncertain());
-        }
-        // SAFETY: the buffer was zero-initialized, and a full-size read filled it.
-        let info = unsafe { info.assume_init() };
-        // The path is unreadable when the executable was since removed or replaced. Its name
-        // at exec time still identifies a process that may be the provider.
-        let comm: Vec<u8> = info
-            .pbi_comm
-            .iter()
-            .take_while(|byte| **byte != 0)
-            .map(|byte| *byte as u8)
-            .collect();
-        let name = binary
-            .file_name()
-            .map(OsStrExt::as_bytes)
-            .unwrap_or_default();
-        let name = &name[..name.len().min(info.pbi_comm.len())];
-        if info.pbi_status != libc::SZOMB && comm == name {
-            return Err(uncertain());
+        match settle(observe, ATTEMPTS, |_| std::time::Duration::from_millis(5)) {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(CandidateError::new(
+                    error.code,
+                    format!("{} Process {pid}: {}.", error.message, last.describe()),
+                ));
+            }
         }
     }
     Ok(false)
+}
+
+/// Whether one process executes the provider binary, from a single observation.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Executes {
+    Yes,
+    /// Proven: gone, a zombie, another user's, or running a different executable.
+    No,
+    /// Not provable from this observation.
+    Unknown,
+}
+
+/// One raw observation of a process, gathered only as far as needed.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Default)]
+struct Observation {
+    /// The executable path, when the kernel reports one.
+    path: Option<PathBuf>,
+    /// The errno of the failed path lookup.
+    path_error: i32,
+    /// The errno of `kill(pid, 0)`; `None` when the signal check succeeded.
+    signal_error: Option<i32>,
+    /// `(zombie, exec-time name)` from BSD process info, when readable.
+    info: Option<(bool, Vec<u8>)>,
+    /// The errno of the failed BSD process info read.
+    info_error: i32,
+}
+
+#[cfg(target_os = "macos")]
+impl Observation {
+    fn describe(&self) -> String {
+        let mut stages = vec![match &self.path {
+            Some(_) => "path read".to_owned(),
+            None => format!("path unreadable (errno {})", self.path_error),
+        }];
+        if self.path.is_none() {
+            stages.push(match self.signal_error {
+                None => "signal check succeeded".to_owned(),
+                Some(errno) => format!("signal check failed (errno {errno})"),
+            });
+        }
+        if self.path.is_none() && self.signal_error.is_none() {
+            stages.push(match &self.info {
+                Some((zombie, _)) => format!("process info read (zombie: {zombie})"),
+                None => format!("process info unreadable (errno {})", self.info_error),
+            });
+        }
+        stages.join(", ")
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn observe_process(pid: i32) -> Observation {
+    use std::os::unix::ffi::OsStrExt;
+    let mut path = [0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: buffer is writable for its full declared size.
+    let length = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+    if let Ok(length @ 1..) = usize::try_from(length) {
+        return Observation {
+            path: Some(PathBuf::from(std::ffi::OsStr::from_bytes(&path[..length]))),
+            ..Observation::default()
+        };
+    }
+    let errno = || std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    let path_error = errno();
+    // SAFETY: signal zero only observes existence and permission.
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return Observation {
+            path_error,
+            signal_error: Some(errno()),
+            ..Observation::default()
+        };
+    }
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    // SAFETY: libproc receives a correctly sized writable proc_bsdinfo buffer. A nonzero `arg`
+    // also finds a zombie; with zero, an unreaped process fails with ESRCH like a missing one
+    // while the signal check above still succeeds.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            1,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+        )
+    };
+    if read as usize != std::mem::size_of::<libc::proc_bsdinfo>() {
+        return Observation {
+            path_error,
+            info_error: errno(),
+            ..Observation::default()
+        };
+    }
+    // SAFETY: the buffer was zero-initialized, and a full-size read filled it.
+    let info = unsafe { info.assume_init() };
+    let comm = info
+        .pbi_comm
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect();
+    Observation {
+        path_error,
+        info: Some((info.pbi_status == libc::SZOMB, comm)),
+        ..Observation::default()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn classify(observation: &Observation, binary: &Path, canonical: Option<&Path>) -> Executes {
+    use std::os::unix::ffi::OsStrExt;
+    if let Some(path) = &observation.path {
+        return if path == binary || canonical == Some(path.as_path()) {
+            Executes::Yes
+        } else {
+            Executes::No
+        };
+    }
+    match observation.signal_error {
+        Some(libc::ESRCH | libc::EPERM) => return Executes::No,
+        Some(_) => return Executes::Unknown,
+        None => {}
+    }
+    match &observation.info {
+        None => Executes::Unknown,
+        Some((true, _)) => Executes::No,
+        // The path is unreadable when the executable was since removed or replaced. Its name at
+        // exec time (truncated by the kernel) still identifies a process that may be the provider.
+        Some((false, comm)) => {
+            let name = binary
+                .file_name()
+                .map(OsStrExt::as_bytes)
+                .unwrap_or_default();
+            if comm.as_slice() == &name[..name.len().min(libc::MAXCOMLEN)] {
+                Executes::Unknown
+            } else {
+                Executes::No
+            }
+        }
+    }
+}
+
+/// Observe until the answer is proven, up to `attempts` further observations, pausing
+/// `pause(attempt)` before each. Persistent uncertainty refuses rather than assuming absence.
+#[cfg(target_os = "macos")]
+fn settle(
+    mut observe: impl FnMut() -> Executes,
+    attempts: u32,
+    pause: impl Fn(u32) -> std::time::Duration,
+) -> Result<bool, CandidateError> {
+    for attempt in 0..=attempts {
+        match observe() {
+            Executes::Yes => return Ok(true),
+            Executes::No => return Ok(false),
+            Executes::Unknown if attempt < attempts => std::thread::sleep(pause(attempt)),
+            Executes::Unknown => {}
+        }
+    }
+    Err(CandidateError::new(
+        "stop_uncertain",
+        "Cannot establish provider process absence.",
+    ))
 }
 #[cfg(not(target_os = "macos"))]
 pub fn executable_running(_binary: &Path) -> Result<bool, CandidateError> {
@@ -499,6 +633,135 @@ mod tests {
         child.wait().unwrap();
         assert!(!executable_running(&binary).unwrap());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn classification_proves_absence_only_for_gone_zombie_foreign_or_other_processes() {
+        let binary = Path::new("/private/pool/providers/smolvm-bin");
+        let canonical = Some(Path::new("/private/real/smolvm-bin"));
+        let path = |p: &str| Observation {
+            path: Some(PathBuf::from(p)),
+            ..Observation::default()
+        };
+        let signal = |errno| Observation {
+            signal_error: Some(errno),
+            ..Observation::default()
+        };
+        let info = |zombie, comm: &[u8]| Observation {
+            info: Some((zombie, comm.to_vec())),
+            ..Observation::default()
+        };
+        let cases = [
+            (path("/private/pool/providers/smolvm-bin"), Executes::Yes),
+            (path("/private/real/smolvm-bin"), Executes::Yes),
+            (path("/usr/bin/true"), Executes::No),
+            // Confirmed gone, or another user's process.
+            (signal(libc::ESRCH), Executes::No),
+            (signal(libc::EPERM), Executes::No),
+            (signal(libc::EINVAL), Executes::Unknown),
+            // Live but unreadable, as when caught mid-exit.
+            (Observation::default(), Executes::Unknown),
+            (info(true, b"smolvm-bin"), Executes::No),
+            // A live process whose replaced executable had the provider's name.
+            (info(false, b"smolvm-bin"), Executes::Unknown),
+            (info(false, b"true"), Executes::No),
+        ];
+        for (index, (observation, expected)) in cases.iter().enumerate() {
+            assert_eq!(
+                classify(observation, binary, canonical),
+                *expected,
+                "case {index}"
+            );
+        }
+        // The kernel truncates exec-time names to MAXCOMLEN bytes.
+        let long = b"provider-binary-with-a-long-name";
+        assert_eq!(
+            classify(
+                &info(false, &long[..libc::MAXCOMLEN]),
+                Path::new("/p/provider-binary-with-a-long-name"),
+                None
+            ),
+            Executes::Unknown
+        );
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn re_observation_skips_only_proven_answers_and_refuses_persistent_uncertainty() {
+        use Executes::{No, Unknown, Yes};
+        let run = |sequence: &[Executes], attempts| {
+            let mut calls = 0;
+            let result = settle(
+                || {
+                    calls += 1;
+                    sequence[(calls - 1).min(sequence.len() - 1)]
+                },
+                attempts,
+                |_| std::time::Duration::ZERO,
+            );
+            (result.map_err(|error| error.code.to_string()), calls)
+        };
+        let refused = Err("stop_uncertain".to_string());
+        // An exiting process is skipped once proven gone or a zombie.
+        assert_eq!(run(&[Unknown, Unknown, No], 5), (Ok(false), 3));
+        // One that turns out to run the provider is found.
+        assert_eq!(run(&[Unknown, Yes], 5), (Ok(true), 2));
+        // Still unprovable after every re-observation: refuse, never assume absence.
+        assert_eq!(run(&[Unknown], 5), (refused.clone(), 6));
+        assert_eq!(run(&[Unknown], 0), (refused, 1));
+        assert_eq!(run(&[No], 0), (Ok(false), 1));
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unreaped_child_is_observed_as_a_zombie_not_an_unknown_process() {
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id() as i32;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Until reaped, the exited child keeps its PID and answers the signal check.
+        let observation = loop {
+            let observation = observe_process(pid);
+            if observation.path.is_none() || std::time::Instant::now() > deadline {
+                break observation;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(observation.signal_error, None, "{}", observation.describe());
+        assert_eq!(
+            observation.info,
+            Some((true, b"true".to_vec())),
+            "{}",
+            observation.describe()
+        );
+        assert_eq!(
+            classify(&observation, Path::new("/usr/bin/true"), None),
+            Executes::No
+        );
+        assert!(child.wait().unwrap().success());
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn processes_exiting_during_a_scan_do_not_make_absence_uncertain() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Children spawned and reaped concurrently are caught mid-exit by some scans.
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let churn: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = std::process::Command::new("/usr/bin/true").status();
+                    }
+                })
+            })
+            .collect();
+        let absent = Path::new("/nonexistent/hack-provider-absence");
+        let scans: Vec<_> = (0..200).map(|_| executable_running(absent)).collect();
+        stop.store(true, Ordering::Relaxed);
+        for thread in churn {
+            thread.join().unwrap();
+        }
+        for scan in scans {
+            assert!(!scan.unwrap());
+        }
     }
     #[cfg(target_os = "macos")]
     #[test]

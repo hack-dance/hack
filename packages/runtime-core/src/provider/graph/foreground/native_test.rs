@@ -539,4 +539,7 @@ fn private_owner_restore_preserves_data_and_retires_values() {
 }
 
 mod dependency_rebind;
+mod dependency_slots;
 mod startup_cancellation;
+
+mod same_boot_recovery;

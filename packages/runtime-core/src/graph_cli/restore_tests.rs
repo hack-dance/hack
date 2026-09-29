@@ -6,6 +6,38 @@ const PLAN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const GENERATION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 #[test]
+fn same_boot_recovery_requires_explicit_receipt_and_forbids_data_removal() {
+    let fixture = Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    for args in [
+        vec!["recover-live-owner", "--run-id", RUN],
+        vec!["recover-live-owner", "--expect-receipt", PLAN],
+        vec![
+            "recover-live-owner",
+            "--run-id",
+            RUN,
+            "--expect-receipt",
+            PLAN,
+            "--remove-data",
+        ],
+        vec![
+            "recover-live-owner",
+            "--run-id",
+            RUN,
+            "--expect-receipt",
+            PLAN,
+            "--environment-stdin",
+        ],
+    ] {
+        assert_eq!(
+            command(&candidate, &args).unwrap_err().code,
+            "graph_arguments"
+        );
+    }
+    assert!(!candidate.state_root.exists());
+}
+
+#[test]
 fn shared_and_filtered_source_modes_cannot_be_combined_or_used_for_inspection() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -347,4 +379,32 @@ fn dependency_refresh_refuses_new_authority_or_private_input_flags() {
         );
         assert!(!candidate.state_root.exists());
     }
+}
+
+#[test]
+fn automatic_dependency_slots_are_explicit_and_foreground_only() {
+    let fixture = Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    for args in [
+        vec![
+            "serve",
+            "--auto-dependency-slots",
+            "--auto-dependency-slots",
+        ],
+        vec![
+            "serve-restore",
+            "--auto-dependency-slots",
+            "--auto-dependency-slots",
+        ],
+        vec!["run", "--auto-dependency-slots"],
+        vec!["inspect", "--auto-dependency-slots"],
+        vec!["cleanup", "--auto-dependency-slots"],
+        vec!["dependency-plan", "--auto-dependency-slots"],
+    ] {
+        assert_eq!(
+            command(&candidate, &args).unwrap_err().code,
+            "graph_arguments"
+        );
+    }
+    assert!(!candidate.state_root.exists());
 }

@@ -1266,6 +1266,17 @@ impl ManagedOwner {
         self.send(Command::Abort(fence.clone(), reply))?;
         receiver.recv_timeout(BUDGET).map_err(|_| refused())?
     }
+    /// Close owned transport listeners before releasing their durable reservation.
+    /// The caller must already have verified graph/grant cleanup; this is not a
+    /// substitute for retiring live guest applications.
+    pub(crate) fn shutdown(&mut self) -> Result<(), CandidateError> {
+        self.stop.store(true, Ordering::Release);
+        wake(&self.wake);
+        if let Some(worker) = self.worker.take() {
+            worker.join().map_err(|_| refused())??;
+        }
+        Ok(())
+    }
     pub(crate) fn verify_alive(&self) -> Result<(), CandidateError> {
         let (reply, receiver) = mpsc::sync_channel(1);
         self.send(Command::Check(reply))?;
@@ -1319,6 +1330,30 @@ mod tests {
         assert!(ManagedOwner::start(context(), &root.0, Vec::new()).is_err());
         managed.verify_alive().unwrap();
         drop(managed);
+    }
+    #[test]
+    fn explicit_shutdown_closes_only_owned_slots_before_returning() {
+        let root = Root::new();
+        let socket = root.0.join("slot.sock");
+        let sibling = root.0.join("sibling.sock");
+        let sibling_listener = UnixListener::bind(&sibling).unwrap();
+        let mut managed = ManagedOwner::start(
+            context(),
+            &root.0,
+            vec![ManagedSlot {
+                slot: 0,
+                path: socket.clone(),
+                canonical_parent: root.0.clone(),
+            }],
+        )
+        .unwrap();
+        managed.verify_alive().unwrap();
+        managed.shutdown().unwrap();
+        assert!(!socket.exists());
+        assert!(UnixStream::connect(&sibling).is_ok());
+        assert!(managed.verify_alive().is_err());
+        managed.shutdown().unwrap();
+        drop(sibling_listener);
     }
     #[test]
     fn managed_registration_retirement_and_idle_shutdown() {

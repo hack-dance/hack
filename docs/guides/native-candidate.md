@@ -73,8 +73,8 @@ Native `up` and `restart` currently refuse branch instances, including an explic
 before lifecycle hooks, registry writes or native runtime changes. A detached helper
 now owns shared HTTPS through graph-specific leases, retaining each lease until
 independent graph and publication cleanup is verified. This does not lift the branch
-startup restriction: pool-wide dependency slot allocation, source-mount compatibility
-and live coexistence qualification remain open; pool capacity is fixed at creation.
+startup restriction: source-mount compatibility and normal worktree coexistence
+qualification remain open; pool capacity is fixed at creation.
 A separate run mapping alone does not provide
 branch routing. Use the Compose
 backend for branch instances. Setting `worktree.auto_branch=false` selects a base
@@ -553,6 +553,11 @@ Insufficient capacity refuses startup without resizing or replacing the pool.
 The internal `runtime up --minimum-bridge-sockets N` command expresses this
 requirement; `--bridge-sockets N` retains its exact-capacity contract. Neither
 option promises free slots: graph admission still reserves those separately.
+Host dependencies use the equivalent `--minimum-dependency-sockets N` selection;
+`--dependency-sockets N` remains exact. Each direction can independently request
+an exact capacity or a minimum. The combined physical transport limit still applies
+to the pool's actual capacities, including any spare slots. A minimum does not resize
+an existing pool or guarantee that enough slots are currently free.
 Each routed service
 must already declare a matching `healthcheck.x-hack-http`; command healthchecks
 and missing probes are not replaced or inferred. Native review still validates
@@ -568,8 +573,25 @@ cleanup, remain unavailable. Insufficient capacity refuses the reservation witho
 publishing a partial route set. Internal callers can still select an exact slot
 with `--route-slot SERVICE=N`; a busy slot is refused rather than reassigned.
 Retained starts resolve automatic selections again against current ownership.
-This allocation does not resize a pool or enable dependency transport allocation
-or multi-worktree source sharing. Shared HTTPS lifetime uses separate graph leases.
+This allocation does not resize a pool or enable multi-worktree source sharing.
+Shared HTTPS lifetime uses separate graph leases.
+
+Normal foreground startup also selects `--auto-dependency-slots`. Each graph's
+logical dependency groups receive distinct physical pool slots under the provider
+lock. The complete assignment is recorded before listeners bind, so concurrent
+starts and a crash before binding cannot claim the same capacity. Cleanup verifies
+owned graph resources, closes its dependency listeners, and releases its reservation
+before reporting success. A sibling graph's reservations and listeners remain owned
+by that sibling. Low-level callers without this flag keep exact slot semantics and
+must also respect existing reservations.
+
+`graph dependency-reservations --json` inspects the durable claims. A dead owner
+that never enrolled a graph can release a coherent claim with
+`graph recover-dependency-reservation --run-id RUN --expect-reservation SHA256`.
+Recovery verifies the owner is dead and any recorded socket still has its original
+identity and no listener. Torn records and sockets without complete ownership
+evidence remain unavailable; do not delete them to force allocation. Recovery of an
+already enrolled graph requires verified graph cleanup instead.
 
 `HACK_NATIVE_DEPENDENCIES` selects an absolute path to a regular JSON file with
 explicit host listeners. The CLI reads it after lifecycle hooks, so a hook can
@@ -878,6 +900,28 @@ intact; inspect owned runtime and bridge state before retrying. A native cleanup
 error code is included when available, without its raw output or message.
 
 ### Explicit cleanup after a dead foreground owner
+
+For a fully ready graph whose foreground owner died while its pool remains on the
+same boot, `graph recover-live-owner --run-id RUN --expect-receipt SHA256` selects
+only that graph. It requires matching dead foreground and relay-owner identities,
+unchanged receipt and resource inventories, and exclusive publication locks. The
+operation stops verified guest dependency listeners, removes owned containers and
+network resources, retains persistent data, retires stale foreground and relay
+publications, and releases the graph's dependency reservation before unlocking the
+pool. It does not restart the pool. Pending startup, one-off or dependency
+rebind state is refused. Completion records owner-death evidence independently of
+the live relay acknowledgement protocol.
+
+After completion, retained restore can create a fresh owner;
+`graph retire-recovered-publisher --run-id RUN --expect-owner OWNER` remains an
+idempotent compatibility operation. Interrupted cleanup retains its journal for an
+explicit retry with the original receipt hash. A pool boot
+change, replaced process or socket evidence, or ambiguous ownership refuses recovery.
+The separate previous-boot operation below preserves its existing requirements.
+This retaining path does not yet accept a graph with historical previous-boot
+recovery evidence. Its completion proof also does not authorize direct data removal:
+restore the graph and use ordinary cleanup for that operation. Routed-publication
+crash recovery requires separate native qualification.
 
 `graph recover-cleanup --run-id <run> --expect-receipt <sha256>` is a retaining,
 explicit two-step recovery for a failed enrolled graph. Select the SHA256 of its

@@ -89,6 +89,44 @@ pub(super) fn check_capacity(
     Ok(())
 }
 
+/// Minimum selection admits existing capacity; it never resizes a pool or
+/// reserves free graph slots. Exact selection preserves the low-level contract.
+#[derive(Clone, Copy)]
+pub(super) enum Request {
+    Exact(Option<DependencySocketIntent>),
+    Minimum(DependencySocketIntent),
+}
+impl From<Option<DependencySocketIntent>> for Request {
+    fn from(intent: Option<DependencySocketIntent>) -> Self {
+        Self::Exact(intent)
+    }
+}
+impl Request {
+    pub(super) fn initial(self) -> Option<DependencySocketIntent> {
+        match self {
+            Self::Exact(intent) => intent,
+            Self::Minimum(intent) => Some(intent),
+        }
+    }
+    pub(super) fn check(
+        self,
+        existing: Option<DependencySocketIntent>,
+    ) -> Result<(), CandidateError> {
+        match self {
+            Self::Exact(intent) => check_request(existing, intent),
+            Self::Minimum(required)
+                if existing.is_some_and(|intent| intent.slots >= required.slots) =>
+            {
+                Ok(())
+            }
+            Self::Minimum(_) => Err(CandidateError::new(
+                "dependency_socket_conflict",
+                "Existing pool has insufficient dependency capacity. No resize or replacement was attempted.",
+            )),
+        }
+    }
+}
+
 pub(super) fn check_request(
     existing: Option<DependencySocketIntent>,
     requested: Option<DependencySocketIntent>,

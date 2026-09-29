@@ -998,6 +998,18 @@ impl DeadOwner {
         }
         Ok(())
     }
+    pub(in crate::provider::graph) fn process(&self) -> &identity::ProcessIdentity {
+        &self.pin.record.process
+    }
+    pub(in crate::provider::graph) fn verify_retirement_ready(&self) -> Result<(), CandidateError> {
+        self.verify()?;
+        let root = &self.pin.root;
+        let metadata = fs::symlink_metadata(root.join("operation.lock")).map_err(|_| refused())?;
+        if id(&metadata) != self._lock.identity()? {
+            return Err(refused());
+        }
+        no_listener(&root.join("control.sock"))
+    }
     pub(in crate::provider::graph) fn fingerprint(&self) -> String {
         format!("{:x}", Sha256::digest(&self.pin.bytes))
     }

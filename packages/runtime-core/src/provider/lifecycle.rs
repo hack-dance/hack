@@ -723,7 +723,7 @@ pub fn up_with_capabilities(
         profile,
         requested.into(),
         network,
-        None,
+        None.into(),
         None,
         None,
     )
@@ -742,7 +742,7 @@ pub fn up_with_sockets(
         profile,
         bridge.into(),
         None,
-        dependencies,
+        dependencies.into(),
         None,
         None,
     )
@@ -761,7 +761,7 @@ pub fn up_with_network_sockets(
         profile,
         bridge.into(),
         network,
-        dependencies,
+        dependencies.into(),
         None,
         None,
     )
@@ -781,7 +781,7 @@ pub fn up_with_project_share(
         profile,
         bridge.into(),
         network,
-        dependencies,
+        dependencies.into(),
         project_share,
         None,
     )
@@ -803,7 +803,7 @@ pub fn up_with_retained_project_share(
         profile,
         bridge.into(),
         network,
-        dependencies,
+        dependencies.into(),
         project_share,
         Some(retained),
     )
@@ -826,6 +826,28 @@ pub fn up_with_minimum_bridges(
         profile,
         super::bridge::Request::Minimum(required),
         network,
+        dependencies.into(),
+        project_share,
+        retained,
+    )
+}
+
+/// Admit exact or minimum capacity independently for ingress and dependencies.
+/// Graph startup must separately allocate free slots under the provider lease.
+pub fn up_with_socket_requests(
+    candidate: &Candidate,
+    profile: super::Profile,
+    sockets: super::SocketRequests,
+    network: Option<super::NetworkIntent>,
+    project_share: Option<super::ProjectShareIntent>,
+    retained: Option<(&str, &str)>,
+) -> Result<RuntimeStatus, CandidateError> {
+    let (bridges, dependencies) = sockets.resolve()?;
+    up_selected(
+        candidate,
+        profile,
+        bridges,
+        network,
         dependencies,
         project_share,
         retained,
@@ -837,7 +859,7 @@ fn up_selected(
     profile: super::Profile,
     bridge_request: super::bridge::Request,
     network: Option<super::NetworkIntent>,
-    dependencies: Option<super::DependencySocketIntent>,
+    dependency_request: super::dependency_socket::Request,
     project_share: Option<super::ProjectShareIntent>,
     retained: Option<(&str, &str)>,
 ) -> Result<RuntimeStatus, CandidateError> {
@@ -846,7 +868,7 @@ fn up_selected(
         profile,
         bridge_request,
         network,
-        dependencies,
+        dependency_request,
         project_share,
         super::prepared_start::Start {
             retained,
@@ -860,16 +882,16 @@ fn up_selected(
 pub fn up_with_prepared_base(
     candidate: &Candidate,
     profile: super::Profile,
-    bridges: super::prepared_start::Bridges,
-    dependencies: Option<super::DependencySocketIntent>,
+    sockets: super::SocketRequests,
     network: Option<super::NetworkIntent>,
     project_share: Option<super::ProjectShareIntent>,
     start: super::prepared_start::Start<'_>,
 ) -> Result<RuntimeStatus, CandidateError> {
+    let (bridges, dependencies) = sockets.resolve()?;
     start_pool(
         candidate,
         profile,
-        bridges.into(),
+        bridges,
         network,
         dependencies,
         project_share,
@@ -882,7 +904,7 @@ fn start_pool(
     profile: super::Profile,
     bridge_request: super::bridge::Request,
     network: Option<super::NetworkIntent>,
-    dependencies: Option<super::DependencySocketIntent>,
+    dependency_request: super::dependency_socket::Request,
     project_share: Option<super::ProjectShareIntent>,
     start: super::prepared_start::Start<'_>,
 ) -> Result<RuntimeStatus, CandidateError> {
@@ -901,6 +923,7 @@ fn start_pool(
         ));
     }
     let requested = bridge_request.initial();
+    let dependencies = dependency_request.initial();
     super::network_update::require_complete(candidate)?;
     if let Some(share) = &project_share {
         share.validate()?;
@@ -925,7 +948,7 @@ fn start_pool(
         super::project_share::check_request(owner.project_share.as_ref(), project_share.as_ref())?;
         bridge_request.check(owner.application_bridge)?;
         super::network_intent::check_request(&owner.network, network.as_ref())?;
-        super::dependency_socket::check_request(owner.dependency_sockets, dependencies)?;
+        dependency_request.check(owner.dependency_sockets)?;
         (
             owner.application_bridge,
             owner.network.clone(),
@@ -999,7 +1022,7 @@ fn start_pool(
     }
     bridge_request.check(owner.application_bridge)?;
     super::network_intent::check_request(&owner.network, Some(&existing_network))?;
-    super::dependency_socket::check_request(owner.dependency_sockets, dependencies)?;
+    dependency_request.check(owner.dependency_sockets)?;
     if owner.dependency_sockets != existing_dependencies {
         return Err(CandidateError::new(
             "dependency_socket_conflict",
@@ -2289,6 +2312,44 @@ printf 'verified-cache\n'
         assert!(sentinel.try_wait().unwrap().is_none());
         sentinel.kill().unwrap();
         sentinel.wait().unwrap();
+    }
+
+    #[test]
+    fn a_prepared_start_refuses_ambiguous_capacity_before_any_pool_state() {
+        let checkout = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-prepared-sockets-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&checkout).unwrap();
+        let candidate = Candidate::discover(&checkout).unwrap();
+        let one = super::super::BridgeIntent::new(1).unwrap();
+        let request = super::super::prepared_start::Request {
+            mode: super::super::prepared_start::Mode::Require,
+            store: checkout.join("store"),
+        };
+        let error = up_with_prepared_base(
+            &candidate,
+            super::super::Profile::Development,
+            super::super::SocketRequests {
+                bridges: Some(one),
+                minimum_bridges: Some(one),
+                ..Default::default()
+            },
+            None,
+            None,
+            super::super::prepared_start::Start {
+                retained: None,
+                prepared: Some(&request),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_arguments");
+        assert!(!root(&candidate).exists());
+        fs::remove_dir_all(&checkout).unwrap();
     }
 
     #[test]

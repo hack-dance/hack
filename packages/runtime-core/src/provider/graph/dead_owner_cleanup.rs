@@ -740,12 +740,37 @@ pub(super) fn removal_proof(
     boot: &str,
     expected: Option<&str>,
 ) -> Result<String, CandidateError> {
+    let proof = removal_selection(root, receipt, boot, expected)?;
+    if proof.owner != owner {
+        return Err(refused());
+    }
+    Ok(proof.digest)
+}
+
+/// Immutable recovery pins must also match the archived publisher before a
+/// retired-owner guard can authorize removal. Receipt phases may advance on retry.
+pub(super) struct RemovalProof {
+    pub owner: String,
+    pub complete: String,
+    pub digest: String,
+}
+pub(super) fn removal_selection(
+    root: &std::path::Path,
+    receipt: &Receipt,
+    boot: &str,
+    expected: Option<&str>,
+) -> Result<RemovalProof, CandidateError> {
     if exists(&root.join("dead-owner-cleanup.pending"))? {
         return Err(refused());
     }
     let intent: Intent = state::read(&root.join(FILE))?;
     let original_receipt = normalized_proof_receipt(root, receipt, &intent)?;
-    validate(&intent, &original_receipt, &intent.original_sha256, owner)?;
+    validate(
+        &intent,
+        &original_receipt,
+        &intent.original_sha256,
+        &intent.owner_sha256,
+    )?;
     let complete = intent
         .complete_sha256
         .as_deref()
@@ -764,7 +789,11 @@ pub(super) fn removal_proof(
                     .contains(&receipt.phase.as_str()) => {}
         _ => return Err(refused()),
     }
-    Ok(proof)
+    Ok(RemovalProof {
+        owner: intent.owner_sha256.clone(),
+        complete: complete.into(),
+        digest: proof,
+    })
 }
 
 /// Only local retained receipts are covered. Exported receipt-only retention still
@@ -977,6 +1006,10 @@ mod tests {
         state::write(&fixture.0.join(FILE), &intent).unwrap();
         let proof =
             removal_proof(&fixture.0, &receipt, &intent.owner_sha256, "new-boot", None).unwrap();
+        let selected = removal_selection(&fixture.0, &receipt, "new-boot", None).unwrap();
+        assert_eq!(selected.owner, intent.owner_sha256);
+        assert_eq!(Some(&selected.complete), intent.complete_sha256.as_ref());
+        assert_eq!(selected.digest, proof);
         assert!(removal_proof(&fixture.0, &receipt, &"9".repeat(64), "new-boot", None).is_err());
         assert!(
             removal_proof(
@@ -991,6 +1024,10 @@ mod tests {
         for phase in ["cleanup-intent", "removed"] {
             receipt.phase = phase.into();
             receipt.resources.get_mut("volume:data").unwrap().phase = "absent".into();
+            let retry = removal_selection(&fixture.0, &receipt, "new-boot", Some(&proof)).unwrap();
+            assert_eq!(retry.complete, selected.complete);
+            assert_eq!(retry.owner, selected.owner);
+            assert_eq!(retry.digest, selected.digest);
             assert_eq!(
                 removal_proof(
                     &fixture.0,

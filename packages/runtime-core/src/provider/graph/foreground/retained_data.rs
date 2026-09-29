@@ -112,6 +112,19 @@ impl Guard {
         }
     }
 }
+// Ordinary acknowledged cleanup remains authoritative even when an older
+// recovery sidecar exists. Never fall back to recovery after ACK validation fails.
+fn needs_recovery(receipt: &Receipt, intent: Option<&Intent>) -> bool {
+    intent.map_or_else(
+        || {
+            receipt
+                .relay_cleanup
+                .as_ref()
+                .is_none_or(|m| m.phase() != cleanup_enrollment::Phase::Confirmed)
+        },
+        |i| i.recovery.is_some(),
+    )
+}
 fn remove_guarded(candidate: &Candidate, run: &str, guard: Guard) -> Result<Value, CandidateError> {
     guard.verify()?;
     let engine = Engine::connect_cleanup(candidate)?;
@@ -124,8 +137,28 @@ fn remove_guarded(candidate: &Candidate, run: &str, guard: Guard) -> Result<Valu
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => return Err(refused()),
     };
+    let retired_proof = match &guard {
+        Guard::Retired(retired) if needs_recovery(&receipt, intent.as_ref()) => {
+            let proof = graph::dead_owner_cleanup::removal_selection(
+                &root,
+                &receipt,
+                engine.guest().boot_id(),
+                intent.as_ref().and_then(|i| i.recovery.as_deref()),
+            )?;
+            retired.verify_recovery(candidate, run, &proof.owner, &proof.complete)?;
+            Some(proof)
+        }
+        _ => None,
+    };
+    let verify_guard = || {
+        guard.verify()?;
+        if let (Guard::Retired(retired), Some(proof)) = (&guard, &retired_proof) {
+            retired.verify_recovery(candidate, run, &proof.owner, &proof.complete)?;
+        }
+        Ok::<(), CandidateError>(())
+    };
     let recovery = match &guard {
-        Guard::Retired(_) => None,
+        Guard::Retired(_) => retired_proof.as_ref().map(|p| p.digest.clone()),
         Guard::Recovered(dead) => Some(graph::dead_owner_cleanup::removal_proof(
             &root,
             &receipt,
@@ -199,9 +232,9 @@ fn remove_guarded(candidate: &Candidate, run: &str, guard: Guard) -> Result<Valu
             },
         )?;
     }
-    guard.verify()?;
+    verify_guard()?;
     let cleaned = graph::cleanup_owned(candidate, &engine, receipt, &root, true)?;
-    guard.verify()?;
+    verify_guard()?;
     Ok(json!({"ok":true,"run":run,"phase":cleaned.phase,"receipt":cleaned}))
 }
 
@@ -210,6 +243,28 @@ mod tests {
     use super::*;
     fn receipt() -> Receipt {
         serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"stopped-data-retained","readiness":{},"resources":{},"relay_startup":{"control_only":true,"guest_root":null,"control_root":"/private/owned","artifact":"e".repeat(64),"services":{}},"relay_cleanup":{"version":1,"runtime":vec![1;16],"boot":vec![2;16],"operation":vec![3;16],"effect":vec![4;32],"control_root":"/private/owned","phase":"confirmed"}})).unwrap()
+    }
+    #[test]
+    fn recovery_selection_preserves_ordinary_ack_and_pins_retry_authority() {
+        let mut receipt = receipt();
+        // Even with historical recovery evidence, current ACK cleanup must use
+        // its own marker. A bad marker is rejected, never retried as recovery.
+        assert!(!needs_recovery(&receipt, None));
+        let mut intent = Intent {
+            version: 1,
+            binding: binding(&receipt).unwrap(),
+            boot: "boot".into(),
+            volumes: BTreeMap::new(),
+            recovery: None,
+        };
+        receipt.relay_cleanup = None;
+        assert!(needs_recovery(&receipt, None));
+        assert!(!needs_recovery(&receipt, Some(&intent)));
+        assert!(allowed(&receipt, Some(&intent), "boot", None).is_err());
+        intent.recovery = Some("a".repeat(64));
+        assert!(needs_recovery(&receipt, Some(&intent)));
+        receipt = self::receipt();
+        assert!(needs_recovery(&receipt, Some(&intent)));
     }
     #[test]
     fn recovered_removal_intent_does_not_fabricate_relay_acknowledgement() {

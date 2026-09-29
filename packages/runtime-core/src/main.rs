@@ -61,7 +61,7 @@ Usage:
   hack-local graph release-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> [--json]
   hack-local graph bridges|reconcile-bridges --run-id <32-hex> [--json]
   hack-local runtime probe|up --profile research|development [--json]
-  hack-local runtime up --profile research|development [--bridge-sockets <1..32>] [--dependency-sockets <1..32>] [--json]
+  hack-local runtime up --profile research|development [--bridge-sockets <1..32> | --minimum-bridge-sockets <1..32>] [--dependency-sockets <1..32>] [--json]
   hack-local runtime up --profile development --project-share <exact-project-root> --unfiltered-source [--json]
   hack-local graph serve|run ... --shared-source
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
@@ -324,6 +324,7 @@ fn run() -> Result<(), CandidateError> {
         }
         ["runtime", "up", arguments @ ..]
             if arguments.contains(&"--bridge-sockets")
+                || arguments.contains(&"--minimum-bridge-sockets")
                 || arguments.contains(&"--dependency-sockets")
                 || arguments.contains(&"--allow-host")
                 || arguments.contains(&"--internet")
@@ -339,7 +340,20 @@ fn run() -> Result<(), CandidateError> {
                 })
                 .transpose()?;
             let candidate = discover_candidate(&requested)?;
-            let started = if let Some((run, selection)) = options.retained {
+            let started = if let Some(required) = options.minimum_bridges {
+                hack_runtime_core::provider::up_with_minimum_bridges(
+                    &candidate,
+                    options.profile,
+                    required,
+                    options.dependencies,
+                    options.network,
+                    share,
+                    options
+                        .retained
+                        .as_ref()
+                        .map(|(run, selection)| (run.as_str(), selection.as_str())),
+                )
+            } else if let Some((run, selection)) = options.retained {
                 hack_runtime_core::provider::up_with_retained_project_share(
                     &candidate,
                     options.profile,

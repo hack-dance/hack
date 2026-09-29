@@ -9,6 +9,7 @@ pub struct Options {
     pub profile: Profile,
     pub network: Option<NetworkIntent>,
     pub bridges: Option<BridgeIntent>,
+    pub minimum_bridges: Option<BridgeIntent>,
     pub dependencies: Option<DependencySocketIntent>,
     pub project_share: Option<PathBuf>,
     pub retained: Option<(String, String)>,
@@ -17,13 +18,14 @@ pub struct Options {
 fn invalid() -> CandidateError {
     CandidateError::new(
         "invalid_arguments",
-        "Use runtime up --profile research|development with --bridge-sockets and/or --dependency-sockets, each once, repeatable --allow-host HOST, plus optional --json. Direct project sharing requires --profile development --project-share PATH --unfiltered-source together; it exposes the exact project tree without snapshot exclusions.",
+        "Use runtime up --profile research|development with --bridge-sockets or --minimum-bridge-sockets, and/or --dependency-sockets, each once, repeatable --allow-host HOST, plus optional --json. Direct project sharing requires --profile development --project-share PATH --unfiltered-source together; it exposes the exact project tree without snapshot exclusions.",
     )
 }
 
 pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
     let mut profile = None;
     let mut bridges = None;
+    let mut minimum_bridges = None;
     let mut dependencies = None;
     let mut json = false;
     let mut hosts = Vec::new();
@@ -59,9 +61,13 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
                     _ => return Err(invalid()),
                 });
             }
-            "--bridge-sockets" if bridges.is_none() => {
+            "--bridge-sockets" if bridges.is_none() && minimum_bridges.is_none() => {
                 let count = args.next().ok_or_else(invalid)?;
                 bridges = Some(BridgeIntent::new(count.parse().map_err(|_| invalid())?)?);
+            }
+            "--minimum-bridge-sockets" if minimum_bridges.is_none() && bridges.is_none() => {
+                let count = args.next().ok_or_else(invalid)?;
+                minimum_bridges = Some(BridgeIntent::new(count.parse().map_err(|_| invalid())?)?);
             }
             "--dependency-sockets" if dependencies.is_none() => {
                 let count = args.next().ok_or_else(invalid)?;
@@ -93,6 +99,7 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
         || unfiltered_source != project_share.is_some()
         || (project_share.is_some() && profile != Profile::Development)
         || (bridges.is_none()
+            && minimum_bridges.is_none()
             && dependencies.is_none()
             && hosts.is_empty()
             && !internet
@@ -111,6 +118,7 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
         network,
         profile,
         bridges,
+        minimum_bridges,
         dependencies,
         project_share,
         retained,
@@ -120,6 +128,45 @@ pub fn parse(args: &[&str]) -> Result<Options, CandidateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimum_bridge_capacity_is_bounded_and_exclusive_with_exact_selection() {
+        let base = ["--profile", "development", "--minimum-bridge-sockets", "4"];
+        let options = parse(&base).unwrap();
+        assert_eq!(options.minimum_bridges, Some(BridgeIntent::new(4).unwrap()));
+        assert_eq!(options.bridges, None);
+        for suffix in [
+            vec!["--bridge-sockets", "4"],
+            vec!["--minimum-bridge-sockets", "4"],
+        ] {
+            let mut args = base.to_vec();
+            args.extend(suffix);
+            assert!(parse(&args).is_err());
+        }
+        assert!(
+            parse(&[
+                "--profile",
+                "development",
+                "--bridge-sockets",
+                "4",
+                "--minimum-bridge-sockets",
+                "1",
+            ])
+            .is_err()
+        );
+        for count in ["0", "33", "-1", "invalid"] {
+            assert!(
+                parse(&[
+                    "--profile",
+                    "development",
+                    "--minimum-bridge-sockets",
+                    count
+                ])
+                .is_err()
+            );
+        }
+        assert!(parse(&["--profile", "development", "--minimum-bridge-sockets"]).is_err());
+    }
 
     #[test]
     fn retained_selection_requires_one_exact_paired_development_share() {

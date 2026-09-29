@@ -707,7 +707,15 @@ pub fn up_with_capabilities(
     requested: Option<super::BridgeIntent>,
     network: Option<super::NetworkIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(candidate, profile, requested, network, None, None, None)
+    up_selected(
+        candidate,
+        profile,
+        requested.into(),
+        network,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Stage fixed inbound and outbound UNIX socket capacity. Missing dependency
@@ -718,7 +726,15 @@ pub fn up_with_sockets(
     bridge: Option<super::BridgeIntent>,
     dependencies: Option<super::DependencySocketIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(candidate, profile, bridge, None, dependencies, None, None)
+    up_selected(
+        candidate,
+        profile,
+        bridge.into(),
+        None,
+        dependencies,
+        None,
+        None,
+    )
 }
 
 /// Explicit socket and egress selection; an existing pool is never widened.
@@ -732,7 +748,7 @@ pub fn up_with_network_sockets(
     up_selected(
         candidate,
         profile,
-        bridge,
+        bridge.into(),
         network,
         dependencies,
         None,
@@ -752,7 +768,7 @@ pub fn up_with_project_share(
     up_selected(
         candidate,
         profile,
-        bridge,
+        bridge.into(),
         network,
         dependencies,
         project_share,
@@ -774,7 +790,7 @@ pub fn up_with_retained_project_share(
     up_selected(
         candidate,
         profile,
-        bridge,
+        bridge.into(),
         network,
         dependencies,
         project_share,
@@ -782,10 +798,33 @@ pub fn up_with_retained_project_share(
     )
 }
 
+/// Start for a graph requiring at least this many ingress sockets. New pools use
+/// the minimum; existing pools keep their exact durable capacity. This does not
+/// reserve free slots, which remain the graph owner's responsibility.
+pub fn up_with_minimum_bridges(
+    candidate: &Candidate,
+    profile: super::Profile,
+    required: super::BridgeIntent,
+    dependencies: Option<super::DependencySocketIntent>,
+    network: Option<super::NetworkIntent>,
+    project_share: Option<super::ProjectShareIntent>,
+    retained: Option<(&str, &str)>,
+) -> Result<RuntimeStatus, CandidateError> {
+    up_selected(
+        candidate,
+        profile,
+        super::bridge::Request::Minimum(required),
+        network,
+        dependencies,
+        project_share,
+        retained,
+    )
+}
+
 fn up_selected(
     candidate: &Candidate,
     profile: super::Profile,
-    requested: Option<super::BridgeIntent>,
+    bridge_request: super::bridge::Request,
     network: Option<super::NetworkIntent>,
     dependencies: Option<super::DependencySocketIntent>,
     project_share: Option<super::ProjectShareIntent>,
@@ -804,6 +843,7 @@ fn up_selected(
             "Retained foreground startup requires macOS.",
         ));
     }
+    let requested = bridge_request.initial();
     super::network_update::require_complete(candidate)?;
     if let Some(share) = &project_share {
         share.validate()?;
@@ -826,7 +866,7 @@ fn up_selected(
     {
         let owner = Owner::load(candidate)?;
         super::project_share::check_request(owner.project_share.as_ref(), project_share.as_ref())?;
-        super::bridge::check_request(owner.application_bridge, requested)?;
+        bridge_request.check(owner.application_bridge)?;
         super::network_intent::check_request(&owner.network, network.as_ref())?;
         super::dependency_socket::check_request(owner.dependency_sockets, dependencies)?;
         (
@@ -900,7 +940,7 @@ fn up_selected(
             "Project share changed before the operation lock.",
         ));
     }
-    super::bridge::check_request(owner.application_bridge, requested)?;
+    bridge_request.check(owner.application_bridge)?;
     super::network_intent::check_request(&owner.network, Some(&existing_network))?;
     super::dependency_socket::check_request(owner.dependency_sockets, dependencies)?;
     if owner.dependency_sockets != existing_dependencies {

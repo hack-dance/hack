@@ -108,6 +108,38 @@ fn invalid_or_unavailable_bridges_have_no_runtime_effects() {
         "bridge_capacity"
     );
     assert!(!candidate.state_root.exists());
+    for slots in [0, 33, u8::MAX] {
+        assert_eq!(
+            provider::up_with_minimum_bridges(
+                &candidate,
+                provider::Profile::Development,
+                provider::BridgeIntent { slots },
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_err()
+            .code,
+            "bridge_capacity"
+        );
+        assert!(!candidate.state_root.exists());
+    }
+    assert_eq!(
+        provider::up_with_minimum_bridges(
+            &candidate,
+            provider::Profile::Development,
+            provider::BridgeIntent::new(32).unwrap(),
+            Some(provider::DependencySocketIntent::new(1).unwrap()),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err()
+        .code,
+        "dependency_socket"
+    );
+    assert!(!candidate.state_root.exists());
     #[cfg(not(feature = "native-stream-relay"))]
     {
         assert_eq!(

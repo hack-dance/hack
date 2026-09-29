@@ -546,8 +546,14 @@ ordinary startup still refuses a different policy.
 
 Normal native foreground startup recognizes the bounded `caddy`,
 `caddy.reverse_proxy`, and `caddy.tls` label contract alongside dependency-cache
-labels. It reserves bridge capacity for declared routed services before pool
-startup and enrolls only active routes from native review. Each routed service
+labels. It requests minimum bridge capacity for declared routed services before pool
+startup and enrolls only active routes from native review. A fresh pool creates that
+capacity; an existing pool with equal or greater capacity is reused unchanged.
+Insufficient capacity refuses startup without resizing or replacing the pool.
+The internal `runtime up --minimum-bridge-sockets N` command expresses this
+requirement; `--bridge-sockets N` retains its exact-capacity contract. Neither
+option promises free slots: graph admission still reserves those separately.
+Each routed service
 must already declare a matching `healthcheck.x-hack-http`; command healthchecks
 and missing probes are not replaced or inferred. Native review still validates
 hostnames, ports, networks and labels. Foreground graph ownership supervises and
@@ -562,8 +568,8 @@ cleanup, remain unavailable. Insufficient capacity refuses the reservation witho
 publishing a partial route set. Internal callers can still select an exact slot
 with `--route-slot SERVICE=N`; a busy slot is refused rather than reassigned.
 Retained starts resolve automatic selections again against current ownership.
-This allocation does not resize a pool or enable shared HTTPS lifetime, dependency
-transport allocation, or multi-worktree source sharing.
+This allocation does not resize a pool or enable dependency transport allocation
+or multi-worktree source sharing. Shared HTTPS lifetime uses separate graph leases.
 
 `HACK_NATIVE_DEPENDENCIES` selects an absolute path to a regular JSON file with
 explicit host listeners. The CLI reads it after lifecycle hooks, so a hook can

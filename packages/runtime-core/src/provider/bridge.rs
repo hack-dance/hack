@@ -48,6 +48,45 @@ pub(super) fn check_request(
     Ok(())
 }
 
+/// Startup requirements never resize an existing pool. Exact selection remains
+/// the configuration contract; minimum selection admits existing spare capacity.
+#[derive(Clone, Copy)]
+pub(super) enum Request {
+    Exact(Option<BridgeIntent>),
+    Minimum(BridgeIntent),
+}
+
+impl From<Option<BridgeIntent>> for Request {
+    fn from(intent: Option<BridgeIntent>) -> Self {
+        Self::Exact(intent)
+    }
+}
+
+impl Request {
+    pub(super) fn initial(self) -> Option<BridgeIntent> {
+        match self {
+            Self::Exact(intent) => intent,
+            Self::Minimum(intent) => Some(intent),
+        }
+    }
+
+    pub(super) fn check(self, existing: Option<BridgeIntent>) -> Result<(), CandidateError> {
+        match self {
+            Self::Exact(intent) => check_request(existing, intent),
+            Self::Minimum(required) => {
+                if existing.is_some_and(|intent| intent.slots >= required.slots) {
+                    Ok(())
+                } else {
+                    Err(CandidateError::new(
+                        "bridge_conflict",
+                        "Existing pool has insufficient bridge capacity. No resize or replacement was attempted.",
+                    ))
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn verify_sockets(
     directory: &std::path::Path,
     intent: BridgeIntent,
@@ -82,6 +121,30 @@ pub(super) fn verify_sockets(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn minimum_admission_reuses_capacity_without_changing_exact_selection() {
+        let one = BridgeIntent::new(1).unwrap();
+        let four = BridgeIntent::new(4).unwrap();
+        let minimum = Request::Minimum(one);
+        assert_eq!(minimum.initial(), Some(one));
+        minimum.check(Some(one)).unwrap();
+        minimum.check(Some(four)).unwrap();
+        assert_eq!(minimum.check(None).unwrap_err().code, "bridge_conflict");
+        assert_eq!(
+            Request::Minimum(four).check(Some(one)).unwrap_err().code,
+            "bridge_conflict"
+        );
+        assert_eq!(
+            Request::Exact(Some(one))
+                .check(Some(four))
+                .unwrap_err()
+                .code,
+            "bridge_conflict"
+        );
+        Request::Exact(None).check(Some(four)).unwrap();
+        Request::Exact(None).check(None).unwrap();
+    }
+
     #[test]
     fn published_sockets_require_private_socket_files() {
         use std::{

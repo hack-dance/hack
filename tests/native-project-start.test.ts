@@ -727,8 +727,11 @@ test("routed startup reserves bridges and enrolls reviewed healthy services with
   };
   opts.dependencies.invoke = async (call) => {
     if (call.args[0] === "runtime" && call.args[1] === "up") {
-      expect(call.args).toContain("--bridge-sockets");
-      expect(call.args[call.args.indexOf("--bridge-sockets") + 1]).toBe("1");
+      expect(call.args).toContain("--minimum-bridge-sockets");
+      expect(call.args[call.args.indexOf("--minimum-bridge-sockets") + 1]).toBe(
+        "1"
+      );
+      expect(call.args).not.toContain("--bridge-sockets");
     }
     return await invoke(call);
   };

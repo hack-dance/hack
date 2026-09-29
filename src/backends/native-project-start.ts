@@ -825,7 +825,7 @@ export async function startNativeProject(opts: {
             ]
           : []),
         ...(bridgeCapacity > 0
-          ? ["--bridge-sockets", String(bridgeCapacity)]
+          ? ["--minimum-bridge-sockets", String(bridgeCapacity)]
           : []),
         ...(allowedHosts.length > 0
           ? allowedHosts.flatMap((host) => ["--allow-host", host])

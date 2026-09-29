@@ -1,0 +1,266 @@
+import { verifyFiniteModelResult } from "./tla-result.ts";
+
+type ModelResult = {
+  readonly negative: boolean;
+  readonly exitCode: number | null;
+  readonly output: string;
+};
+type ModelContract = {
+  readonly name: string;
+  readonly module: string;
+  readonly negativeModule?: string;
+  readonly states: number;
+  readonly invariant: string;
+  readonly action: string;
+  readonly fields: readonly string[];
+  readonly additionalControls?: readonly {
+    readonly name: string;
+    readonly module?: "TerminalReuse";
+    readonly negative: boolean;
+    readonly states?: number;
+    readonly invariant?: string;
+    readonly action?: string;
+    readonly fields?: readonly string[];
+  }[];
+};
+
+// Bounds and witnesses are reviewed contracts, not learned from each run.
+const contracts: readonly ModelContract[] = [
+  {
+    name: "shared-https-lifetime",
+    module: "SharedHttps",
+    states: 64,
+    invariant: "NoPrematureShutdown",
+    action: "FinishClose",
+    fields: ['mode = "closed"', "leases = {2}", "unsafeShutdown = TRUE"],
+  },
+  {
+    name: "stopped-pool-startup",
+    module: "Resume",
+    states: 71,
+    invariant: "NoSubstitutedBoot",
+    action: "Boot",
+    fields: [
+      'phase = "pending"',
+      "attempts = 1",
+      "bootSelectionMatched = FALSE",
+      "selectedOwner = 1",
+      "selectedReceipt = 1",
+      "locked = TRUE",
+    ],
+    additionalControls: [
+      {
+        name: "uncertain-replay",
+        negative: true,
+        invariant: "NoUncertainReplay",
+        action: "Retry",
+        fields: [
+          'phase = "pending"',
+          "attempts = 2",
+          "uncertain = TRUE",
+          "bootSelectionMatched = TRUE",
+          "authority = FALSE",
+          "locked = TRUE",
+        ],
+      },
+    ],
+  },
+  {
+    name: "dependency-rebind",
+    module: "Rebind",
+    states: 21,
+    invariant: "NoEarlyAdmission",
+    action: "Release",
+    fields: [
+      'phase = "active"',
+      "admitted = TRUE",
+      "revoked = {}",
+      "streams = {1, 2}",
+      "committed = FALSE",
+    ],
+    additionalControls: [
+      { name: "mixed-completed", negative: false, states: 19 },
+      { name: "all-completed", negative: false, states: 18 },
+      { name: "refused-readiness", negative: false, states: 2 },
+      { name: "refused-failed-completed", negative: false, states: 2 },
+      {
+        name: "terminal-reuse",
+        module: "TerminalReuse",
+        negative: false,
+        states: 82,
+      },
+      {
+        name: "premature-terminal-reuse",
+        module: "TerminalReuse",
+        negative: true,
+        invariant: "NoPrematureNewGrant",
+        action: "RegisterNew",
+        fields: [
+          'phase = "one-off"',
+          "grants = {3}",
+          "committed = FALSE",
+          "slotReady = FALSE",
+          "fenced = TRUE",
+        ],
+      },
+      {
+        name: "wrong-readiness",
+        negative: true,
+        invariant: "NoWrongTerminalReadiness",
+        action: "Review",
+        fields: [
+          'phase = "reviewed"',
+          "completed = {2}",
+          "reviewed = TRUE",
+          "admitted = FALSE",
+        ],
+      },
+      {
+        name: "failed-completed",
+        negative: true,
+        invariant: "NoWrongTerminalReadiness",
+        action: "Review",
+        fields: [
+          'phase = "reviewed"',
+          "completed = {2}",
+          "reviewed = TRUE",
+          "admitted = FALSE",
+        ],
+      },
+    ],
+  },
+  {
+    name: "relay-lifecycle-barrier",
+    module: "Barrier",
+    states: 1590,
+    invariant: "NoUnretiredTarget",
+    action: "BeginEffect",
+    fields: [
+      "unsafeCommit = TRUE",
+      'phase = "effect-started"',
+      "journal = TRUE",
+      "ownerAlive = TRUE",
+      "connections = {1, 2}",
+    ],
+  },
+  {
+    name: "relay-authorization",
+    module: "Authorization",
+    states: 7,
+    invariant: "NoLateWrite",
+    action: "Write",
+    fields: ["active = FALSE", "lateWrite = TRUE", 'phase = "done"'],
+  },
+  {
+    name: "mcp-startup-cancellation",
+    module: "Cancellation",
+    states: 10,
+    invariant: "NoLatePublication",
+    action: "Publish",
+    fields: ["cancelled = TRUE", "latePublication = TRUE"],
+  },
+  {
+    name: "mcp-startup",
+    module: "Startup",
+    states: 27,
+    invariant: "NoRevokedGrant",
+    action: "Timeout",
+    fields: ["granted = TRUE", "killed = TRUE"],
+  },
+  {
+    name: "authority-snapshot",
+    module: "Routing",
+    states: 11,
+    invariant: "NoWrongReservation",
+    action: "Connect",
+    fields: ["observed = 1", "delivered = 2"],
+  },
+  {
+    name: "authority-lifetime",
+    module: "Lifetime",
+    states: 9,
+    invariant: "NoAuthorityAfterDown",
+    action: "StartBind",
+    fields: ["running = FALSE", "authority = TRUE"],
+  },
+  {
+    name: "publication-journal",
+    module: "Journal",
+    states: 50,
+    invariant: "Safe",
+    action: "Recover",
+    fields: ["alive = TRUE", "recoveredLive = TRUE"],
+  },
+  {
+    name: "publication",
+    module: "Publication",
+    states: 16,
+    invariant: "Safe",
+    action: "Retire",
+    fields: ['process = "native"', "intent = FALSE"],
+  },
+  {
+    name: "fence-first",
+    module: "First",
+    negativeModule: "FirstBroken",
+    states: 24,
+    invariant: "Safe",
+    action: "Recover",
+    fields: ["occupied = TRUE", "recovered = TRUE"],
+  },
+  {
+    name: "fence-pending",
+    module: "Fence",
+    negativeModule: "FenceBroken",
+    states: 7,
+    invariant: "Safe",
+    action: "Recover",
+    fields: ['phase = "stopped"', "alive = TRUE"],
+  },
+  {
+    name: "relay-staging",
+    module: "Stage",
+    negativeModule: "StageBroken",
+    states: 9,
+    invariant: "Safe",
+    action: "Discard",
+    fields: ['phase = "discarded"', "alive = TRUE"],
+  },
+  {
+    name: "relay-fence",
+    module: "RelayFence",
+    negativeModule: "RelayFenceBroken",
+    states: 16,
+    invariant: "Safe",
+    action: "Launch",
+    fields: ["retired = <<1>>", "alive = 1"],
+  },
+];
+
+export const runtimeModels = contracts.map((contract) => ({
+  ...contract,
+  verify: (result: ModelResult) =>
+    verifyFiniteModelResult({ ...result, ...contract }),
+  additionalControls: (contract.additionalControls ?? []).map((control) => {
+    const selected = {
+      ...control,
+      states: control.states ?? contract.states,
+      invariant: control.invariant ?? contract.invariant,
+      action: control.action ?? contract.action,
+      fields: control.fields ?? contract.fields,
+    };
+    return {
+      ...selected,
+      verify: (result: ModelResult) =>
+        verifyFiniteModelResult({ ...selected, ...result }),
+    };
+  }),
+}));
+
+/** Config names are fixed case metadata, never filesystem paths. */
+export function runtimeModelControlConfig(name: string): string {
+  if (!/^[a-z][a-z0-9-]{0,63}$/.test(name)) {
+    throw new Error("Invalid runtime model control name.");
+  }
+  return `${name}.cfg`;
+}

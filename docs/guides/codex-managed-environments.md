@@ -225,6 +225,6 @@ The machine-wide `hack global` surface (install, up, down, status, trust, ca, ce
 logs-reset) is slim-gated, along with explicit Loki-backed log paths such as `hack logs --loki`.
 
 When you need full remote runtime orchestration instead of repo-local agent workflows, the
-[remote node container image](remote-node-container.md) exists — but note that the entire
+retained remote node container image exists — but note that the entire
 remote/node/gateway/dispatch surface is unsupported experimental in v3 (hidden behind
 `hack help --all`), not a supported product path.

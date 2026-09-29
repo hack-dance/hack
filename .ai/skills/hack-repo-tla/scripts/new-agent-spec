@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+from tla_agent_checks import main_new_agent_spec
+
+
+if __name__ == "__main__":
+    raise SystemExit(main_new_agent_spec())

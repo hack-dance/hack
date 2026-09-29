@@ -68,6 +68,18 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  // The native launcher runs hack-cli; PATH fallback can select the stable install.
+  if (process.env.HACK_RUNTIME_BACKEND === "native") {
+    return writeResult({
+      json: args.options.json === true,
+      result: {
+        ok: false,
+        error:
+          "Refusing to self-update the opt-in native candidate. Install a separately reviewed candidate bundle to update it.",
+      },
+    });
+  }
+
   const target = resolveUpdateTarget();
   if (!target) {
     return writeResult({

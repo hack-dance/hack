@@ -189,3 +189,71 @@ test("killLifecycleSessionWithOwnership cleans up only an exact token match", as
   ).toBe(false);
   expect(killed).toEqual([session.name]);
 });
+
+test("lifecycle retirement requires explicit absence when a concurrent finalizer removed ownership", async () => {
+  const killed: string[] = [];
+  let presence: "present" | "absent" | "unknown" = "absent";
+  let observedToken: string | null = null;
+  const backend: MuxBackend = {
+    name: "tmux",
+    available: true,
+    listSessions: async () => [],
+    createSession: async () => ({ ok: true, session }),
+    killSession: async ({ name }) => {
+      killed.push(name);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    readLifecycleOwnerToken: async () => observedToken,
+    readSessionPresence: async () => presence,
+    execInSession: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    sendInput: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+  };
+  const retire = () =>
+    killLifecycleSessionWithOwnership({
+      backend,
+      sessionName: session.name,
+      ownershipToken,
+    });
+
+  expect(await retire()).toBe(true);
+  presence = "present";
+  expect(await retire()).toBe(false);
+  presence = "unknown";
+  expect(await retire()).toBe(false);
+  presence = "absent";
+  observedToken = "foreign-token";
+  expect(await retire()).toBe(false);
+  expect(killed).toEqual([]);
+});
+
+test("lifecycle retirement rechecks absence after a failed kill", async () => {
+  let presence: "present" | "absent" | "unknown" = "absent";
+  let kills = 0;
+  const backend: MuxBackend = {
+    name: "tmux",
+    available: true,
+    listSessions: async () => [session],
+    createSession: async () => ({ ok: true, session }),
+    killSession: async () => {
+      kills += 1;
+      return { exitCode: 1, stdout: "", stderr: "session disappeared" };
+    },
+    readLifecycleOwnerToken: async () => ownershipToken,
+    readSessionPresence: async () => presence,
+    execInSession: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    sendInput: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+  };
+  const retire = () =>
+    killLifecycleSessionWithOwnership({
+      backend,
+      sessionName: session.name,
+      ownershipToken,
+    });
+
+  expect(await retire()).toBe(true);
+  presence = "present";
+  expect(await retire()).toBe(false);
+  presence = "unknown";
+  expect(await retire()).toBe(false);
+  expect(kills).toBe(3);
+});

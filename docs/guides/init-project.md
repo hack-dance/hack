@@ -11,6 +11,19 @@ hack open
 
 Notes:
 - `hack init` writes `.hack/` files (Compose + config).
+- New projects default to `<project>.hack.local`. Set a different machine-wide
+  suffix with `hack config set --global default_domain hack.gy` (or a dedicated
+  domain suffix you control, such as `dev.example.com`), then run
+  `hack global install` to configure local DNS. This is wildcard DNS for the
+  entire suffix, so do not select a domain used by unrelated sites.
+  The global installer configures the Docker-backed host stack. An explicitly
+  selected native candidate refuses it to preserve the installed v4 stack.
+  On macOS, use `hack global dns preview` and then the separately confirmed
+  `hack global dns activate` for a dedicated custom native suffix. This leaves
+  the v4 wildcard rules untouched. Verify the exact app origin with
+  `hack doctor --browser-url`; DNS setup alone does not validate HTTPS or OAuth.
+  Pass `--dev-host` for a per-project hostname; it takes precedence over the
+  global default. Existing project hosts and Compose routes are not migrated.
 - `hack init` also scaffolds `.hack/hack.env.default.yaml`. See `docs/env.md`.
 - `hack up` starts the stack on an isolated network.
 - `hack open` resolves the routed URL via the global proxy and prefers the OAuth alias when
@@ -25,8 +38,68 @@ Optional:
 
 Note:
 - Inside containers, `localhost` points at the container itself. Update any `localhost:PORT` references to:
-  - HTTP services via `https://*.hack` hostnames (matching your Caddy labels)
+  - HTTP services via `https://*.hack.local` hostnames (matching your Caddy labels)
   - non-HTTP services via Compose service hostnames (e.g. `db`, `redis`)
+
+## Local domain compatibility
+
+For new projects using the default `hack.local`, `--oauth` adds
+`<project>.hack.gy` alongside the primary route; it does not create
+`<project>.hack.local.gy`. When `default_domain` is `hack.gy`, the primary
+host is already OAuth-compatible and no second alias is needed.
+An explicit OAuth TLD replaces `gy`. Custom development hosts keep their configured
+name; Hack does not invent an OAuth alias for a domain outside its managed namespaces.
+Service subdomains and branch names are inserted before the project name on both routes.
+
+Existing `.hack` and `.hack.gy` configurations retain their names. Re-running init
+with an agent handoff also preserves and describes the existing host. Do not rename
+an existing project's config without updating its Compose routes and consumers.
+For a project with literal Compose routes, preview a scoped migration first:
+
+```bash
+hack doctor --path /absolute/path/to/repo --domain-migration preview --json
+hack doctor --path /absolute/path/to/repo --domain-migration apply --json
+hack doctor --path /absolute/path/to/repo --domain-migration rollback --json
+```
+
+`apply` is explicit authorization to update only `hack.config.json` and
+`docker-compose.yml`. It changes the primary host and adds matching `.hack.local`
+routes while retaining the old routes, including service and branch prefixes.
+It does not run the other Doctor repairs, restart services, change host DNS/trust,
+or rewrite OAuth callback registrations, environment variables or application config.
+Verify those consumers and DNS before separately restarting the intended instance.
+
+Migration refuses custom primary domains, dynamic routes, ambiguous Compose
+indirection and conflicting literal routes in this project or other registered
+projects/worktrees. The registered-configuration check is a preflight, not an
+exclusive claim on live Caddy routes or discovery of unregistered projects.
+Those cases require manual route review; do not work around a refusal by deleting
+registry entries. Preview prints host changes only, not configuration contents.
+
+The private `.hack/.internal/domain-migration` journal stores the exact original
+file bytes and permissions. Keep it local: Compose/config files may contain secrets.
+Its own ignore rule excludes backups and staged copies even in older projects
+without a parent `.internal` ignore rule. Do not force-add this journal to Git.
+Rollback restores both originals only when their current contents still match the
+recorded pre- or post-migration state; independent edits cause refusal before restore.
+Keep the journal until rollback is no longer needed. A second migration cannot
+overwrite an existing journal. Linked/symlinked target paths and non-regular files
+are rejected; use a canonical project path.
+The two file replacements are journaled, not a single atomic operation. Rollback
+can recover a recorded partial update after proving the lock owner is dead; it
+never takes a lock from a live or unknown owner. An interrupted lock publication
+or recovery guard requires manual review. Keep editors and other config writers
+idle during apply/rollback; they do not participate in the migration lock.
+
+The explicit global setup configures the selected default DNS suffix alongside
+the built-in `.hack`, `.hack.local`, and `.hack.gy` roots. It refuses an
+existing conflicting dnsmasq or macOS resolver claim for a custom suffix;
+review and resolve that conflict explicitly before retrying.
+Use Doctor to check for missing resolver configuration before starting a new project;
+review the proposed global setup changes rather than removing existing resolver files.
+`.local` has special multicast DNS semantics ([RFC 6762, section 3](https://www.rfc-editor.org/rfc/rfc6762.html#section-3)),
+so generated configuration alone does not establish host or browser reachability.
+Live DNS, route and TLS qualification remains a prerelease acceptance gate.
 
 ## What discovery checks (and what it can't)
 
@@ -71,6 +144,4 @@ pass, not ground truth — always inventory the generated `.hack/docker-compose.
 against the real repo before running `hack up` (agents included; see the
 onboarding prompt for the inventory-first review step).
 
-When the local path is working and you intentionally want remote execution or gateway exposure, move
-to [Beta workflows](../beta.md). For full command lookup and extension docs, use
-[Extensions & reference](../reference.md).
+For command lookup and extension docs, use [Reference](../reference.md).

@@ -18,6 +18,7 @@ const runCalls: Array<{
 const psJsonByComposeProject = new Map<string, string>();
 const warnCalls: string[] = [];
 const tempDirs = new Set<string>();
+const originalHackHome = process.env.HACK_HOME;
 
 const runtimeBackendMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -81,6 +82,11 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
+  if (originalHackHome === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_HOME");
+  } else {
+    process.env.HACK_HOME = originalHackHome;
+  }
 });
 
 afterAll(() => {
@@ -93,6 +99,23 @@ function expectNoEnvScopeWarnings(): void {
     warnCalls.filter((message) => message.startsWith('Env config scope "'))
   ).toEqual([]);
 }
+
+test("run reaches the runtime without writing a contended registry", async () => {
+  const projectRoot = await createProject();
+  const registryRoot = process.env.HACK_HOME;
+  if (!registryRoot) {
+    throw new Error("Missing fixture HACK_HOME");
+  }
+  await mkdir(registryRoot, { recursive: true });
+  const lockPath = resolve(registryRoot, "projects.json.lock");
+  await writeFile(lockPath, `${process.pid}\n`, { flag: "wx" });
+  expect(await runPrintenv({ projectRoot })).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(await readFile(lockPath, "utf8")).toBe(`${process.pid}\n`);
+  expect(await Bun.file(resolve(registryRoot, "projects.json")).exists()).toBe(
+    false
+  );
+});
 
 async function runPrintenv({
   projectRoot,
@@ -298,6 +321,7 @@ async function createProject(input?: {
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hack-project-run-env-"));
   tempDirs.add(root);
+  process.env.HACK_HOME = resolve(root, "global-hack");
 
   const projectRoot = resolve(root, "repo");
   const projectDir = resolve(projectRoot, ".hack");

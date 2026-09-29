@@ -211,29 +211,33 @@ test("degraded git falls back to a checkout-local key with a divergence warning"
   expect(ensured.warnings[0]).toContain("diverge");
 });
 
-test("failed shared-location write falls back to a local key with a divergence warning", async () => {
-  const fixture = await createWorktreeFixture();
+// Root bypasses mode bits; this permission control requires an unprivileged host.
+test.skipIf(process.getuid?.() === 0)(
+  "failed shared-location write falls back to a local key with a divergence warning",
+  async () => {
+    const fixture = await createWorktreeFixture();
 
-  const location = await resolveProjectEnvSharedKeyLocation({
-    projectRoot: fixture.linkedRoot,
-  });
-  if (!location) {
-    throw new Error("expected shared key location");
+    const location = await resolveProjectEnvSharedKeyLocation({
+      projectRoot: fixture.linkedRoot,
+    });
+    if (!location) {
+      throw new Error("expected shared key location");
+    }
+    const commonDir = resolve(location.path, "..");
+    await chmod(commonDir, 0o555);
+    restorePermissions.push(async () => {
+      await chmod(commonDir, 0o755);
+    });
+
+    const ensured = await ensureProjectEnvSecretKey({
+      projectRoot: fixture.linkedRoot,
+    });
+
+    expect(ensured.created).toBe(true);
+    expect(ensured.keyPath).toBe(
+      resolve(fixture.linkedRoot, PROJECT_ENV_KEY_FILENAME)
+    );
+    expect(ensured.warnings.length).toBeGreaterThan(0);
+    expect(ensured.warnings[0]).toContain(location.path);
   }
-  const commonDir = resolve(location.path, "..");
-  await chmod(commonDir, 0o555);
-  restorePermissions.push(async () => {
-    await chmod(commonDir, 0o755);
-  });
-
-  const ensured = await ensureProjectEnvSecretKey({
-    projectRoot: fixture.linkedRoot,
-  });
-
-  expect(ensured.created).toBe(true);
-  expect(ensured.keyPath).toBe(
-    resolve(fixture.linkedRoot, PROJECT_ENV_KEY_FILENAME)
-  );
-  expect(ensured.warnings.length).toBeGreaterThan(0);
-  expect(ensured.warnings[0]).toContain(location.path);
-});
+);

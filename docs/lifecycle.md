@@ -6,6 +6,19 @@ Lifecycle is configured in `.hack/hack.config.json` under `lifecycle`.
 
 You can also use a shorthand `startup` array for common `hack up` startup flows.
 
+For project-wide `up` and `restart`, Hack resolves hook environment and checks registry
+credentials before running `lifecycle.up.before`. After successful preparation, it
+renders internal host, branch, dependency-cache and runtime-metadata overrides for
+Compose. Extra-host registrations made by a before hook therefore apply on that same
+start; replacements and removals are reflected too. Explicit extra hosts also work
+when internal DNS and TLS are disabled. This does not reload arbitrary project config
+or replace the hook environment after a hook runs.
+
+A failed before hook prevents the Compose up phase. Service-scoped operations retain
+their existing behavior and do not run project-wide hooks. Hook code should use the
+supported integration that owns its host registrations rather than hand-editing Hack's
+generated internal files.
+
 ## Why `singleton` exists
 
 Some lifecycle-managed helpers bind fixed local ports and are easy to start outside Hack:

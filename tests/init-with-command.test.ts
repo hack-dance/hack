@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -76,6 +76,10 @@ test("hack init --auto --with claude initializes and prints the prompt when no b
   ]);
 
   expect(result.exitCode).toBe(0);
+  const generated = await Bun.file(
+    join(repoRoot, ".hack", "hack.config.json")
+  ).json();
+  expect(generated.dev_host).toBe("repo.hack.local");
   expect(
     await Bun.file(join(repoRoot, ".hack", "hack.config.json")).exists()
   ).toBe(true);
@@ -92,6 +96,8 @@ test("hack init --auto --with proceeds to handoff when .hack already exists", as
   const first = await runCliWithCapturedOutput([
     "init",
     "--auto",
+    "--dev-host",
+    "existing.hack",
     "--path",
     repoRoot,
   ]);
@@ -109,6 +115,133 @@ test("hack init --auto --with proceeds to handoff when .hack already exists", as
   expect(second.exitCode).toBe(0);
   expect(`${second.stdout}${second.stderr}`).toContain("already exists");
   expect(second.stdout).toContain("adopt the existing hack setup in this repo");
+  expect(second.stdout).toContain("existing.hack");
+  expect(
+    (await Bun.file(join(repoRoot, ".hack", "hack.config.json")).json())
+      .dev_host
+  ).toBe("existing.hack");
+});
+
+test("new default routes and README retain the canonical OAuth alias", async () => {
+  const repoRoot = await setupTempRepo();
+  const result = await runCliWithCapturedOutput([
+    "init",
+    "--auto",
+    "--oauth",
+    "--path",
+    repoRoot,
+  ]);
+  expect(result.exitCode).toBe(0);
+  const compose = await Bun.file(
+    join(repoRoot, ".hack", "docker-compose.yml")
+  ).text();
+  const readme = await Bun.file(join(repoRoot, ".hack", "README.md")).text();
+  expect(compose).toContain("repo.hack.local, repo.hack.gy");
+  expect(compose).not.toContain("hack.local.gy");
+  expect(readme).toContain("https://repo.hack.gy");
+  expect(readme).not.toContain("hack.local.gy");
+});
+
+test("global default_domain drives new project config, routes and open without changing explicit hosts", async () => {
+  const hackHome = process.env.HACK_HOME ?? "";
+  await mkdir(hackHome, { recursive: true });
+  await Bun.write(
+    join(hackHome, "hack.config.json"),
+    JSON.stringify({ default_domain: "hack.gy" })
+  );
+  const repoRoot = await setupTempRepo();
+  const result = await runCliWithCapturedOutput([
+    "init",
+    "--auto",
+    "--oauth",
+    "--path",
+    repoRoot,
+  ]);
+  expect(result.exitCode).toBe(0);
+  const config = await Bun.file(
+    join(repoRoot, ".hack", "hack.config.json")
+  ).json();
+  const compose = await Bun.file(
+    join(repoRoot, ".hack", "docker-compose.yml")
+  ).text();
+  expect(config.dev_host).toBe("repo.hack.gy");
+  expect(compose).toContain("caddy: repo.hack.gy");
+  expect(compose).not.toContain("repo.hack.gy.gy");
+
+  const opened = await runCliWithCapturedOutput([
+    "open",
+    "--json",
+    "--path",
+    repoRoot,
+  ]);
+  expect(opened.exitCode).toBe(0);
+  expect(JSON.parse(opened.stdout)).toEqual({ url: "https://repo.hack.gy" });
+});
+
+test("explicit --dev-host wins over global default_domain", async () => {
+  const hackHome = process.env.HACK_HOME ?? "";
+  await mkdir(hackHome, { recursive: true });
+  await Bun.write(
+    join(hackHome, "hack.config.json"),
+    JSON.stringify({ default_domain: "hack.gy" })
+  );
+  const repoRoot = await setupTempRepo();
+  const result = await runCliWithCapturedOutput([
+    "init",
+    "--auto",
+    "--dev-host",
+    "app.example.test",
+    "--path",
+    repoRoot,
+  ]);
+  expect(result.exitCode).toBe(0);
+  const config = await Bun.file(
+    join(repoRoot, ".hack", "hack.config.json")
+  ).json();
+  expect(config.dev_host).toBe("app.example.test");
+});
+
+test("invalid configured default_domain refuses init before scaffold writes", async () => {
+  const hackHome = process.env.HACK_HOME ?? "";
+  await mkdir(hackHome, { recursive: true });
+  await Bun.write(
+    join(hackHome, "hack.config.json"),
+    JSON.stringify({ default_domain: "https://bad.example.test/" })
+  );
+  const repoRoot = await setupTempRepo();
+  const result = await runCliWithCapturedOutput([
+    "init",
+    "--auto",
+    "--path",
+    repoRoot,
+  ]);
+  expect(result.exitCode).not.toBe(0);
+  expect(
+    await Bun.file(join(repoRoot, ".hack", "hack.config.json")).exists()
+  ).toBe(false);
+});
+
+test("explicit custom hosts are preserved without inventing OAuth aliases", async () => {
+  const repoRoot = await setupTempRepo();
+  const result = await runCliWithCapturedOutput([
+    "init",
+    "--auto",
+    "--oauth",
+    "--dev-host",
+    "demo.example.test",
+    "--path",
+    repoRoot,
+  ]);
+  expect(result.exitCode).toBe(0);
+  const config = await Bun.file(
+    join(repoRoot, ".hack", "hack.config.json")
+  ).json();
+  const compose = await Bun.file(
+    join(repoRoot, ".hack", "docker-compose.yml")
+  ).text();
+  expect(config.dev_host).toBe("demo.example.test");
+  expect(compose).toContain("demo.example.test");
+  expect(compose).not.toContain("demo.example.test.gy");
 });
 
 test("hack init --with rejects unknown agents with a usage error", async () => {
@@ -119,6 +252,26 @@ test("hack init --with rejects unknown agents with a usage error", async () => {
     "--auto",
     "--with",
     "cursor",
+    "--path",
+    repoRoot,
+  ]);
+
+  // The usage error message is emitted via the logger (bypasses the stubbed
+  // streams), so assert on behavior: failed exit and no scaffold written.
+  expect(result.exitCode).not.toBe(0);
+  expect(
+    await Bun.file(join(repoRoot, ".hack", "hack.config.json")).exists()
+  ).toBe(false);
+});
+
+test("hack init --with rejects removed both option before scaffolding with a usage error", async () => {
+  const repoRoot = await setupTempRepo();
+
+  const result = await runCliWithCapturedOutput([
+    "init",
+    "--auto",
+    "--with",
+    "both",
     "--path",
     repoRoot,
   ]);

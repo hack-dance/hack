@@ -109,7 +109,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
  * included — they emit E_USAGE and skip the printed help); the human-readable
  * message still reaches stderr.
  */
-async function handleRunCliError(opts: {
+export async function handleRunCliError(opts: {
   readonly error: unknown;
   readonly jsonRequested: boolean;
 }): Promise<number> {

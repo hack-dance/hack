@@ -1,0 +1,8 @@
+# fclt machine-local and generated state
+/.facult/
+/config.local.toml
+
+# Skill tool downloads and Python runtime caches
+**/.local/
+**/__pycache__/
+**/*.pyc

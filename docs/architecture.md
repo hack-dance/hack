@@ -7,7 +7,7 @@ which redirects all global state — registry, daemon, secrets — to another ro
 - **Caddy** (docker-proxy) routes `*.hack` based on container labels.
 - **CoreDNS** resolves `*.hack` inside containers to the Caddy IP, with `extra_hosts` mappings for resolver compatibility.
 - **Alloy + Loki + Grafana** capture logs and provide history.
-- **Schemas** are served by Caddy at `https://schemas.hack`.
+- **Schemas** are served by Caddy at `https://schemas.hack.local`.
 - **hackd (optional daemon)** caches Docker state for fast `hack projects --json` / `hack ps --json`.
 
 ```mermaid
@@ -44,8 +44,8 @@ graph LR
 
   CoreDNS -->|"*.hack → Caddy IP"| Services
   Caddy -->|"https://*.hack"| Browser
-  Grafana -->|"https://logs.hack"| Browser
-  Caddy -->|"https://schemas.hack"| Browser
+  Grafana -->|"https://logs.hack.local"| Browser
+  Caddy -->|"https://schemas.hack.local"| Browser
 ```
 
 ## Global vs project scope
@@ -57,7 +57,7 @@ graph LR
   - Logging stack (Alloy → Loki → Grafana)
   - Global config: `hack.config.json` (control plane defaults + extension settings)
     - Gateway bind/port/allowWrites
-  - Schemas hosted under `https://schemas.hack`
+  - Schemas hosted under `https://schemas.hack.local`
   - Networks: `hack-dev` (ingress) and `hack-logging`
 
 - Project scope (`.hack`)
@@ -245,39 +245,10 @@ graph LR
   Hackd -->|"cached state"| Cache["In-memory cache"]
 ```
 
-## Control plane + extensions
+## Unsupported retained surfaces
 
-The control plane keeps the core CLI minimal while adding features as extensions. `hackd` loads
-extension manifests and exposes their APIs; the CLI dispatches extension commands via `hack x`.
-
-Builtin extensions: **Supervisor** (job execution + streaming for agents), **Gateway** (optional HTTP/WS
-access to `hackd`), **Cloudflare**, and **Tailscale** (exposure/tunnel helpers).
-
-> Gateway, remote, node, and dispatch surfaces are experimental and unsupported. They are hidden
-> from default `hack help` (use `hack help --all` to see them) and print a warning when invoked.
-> See [Beta workflows](beta.md) and [Gateway API](gateway-api.md) for details — this doc only
-> summarizes where they fit in the system.
-
-```mermaid
-graph LR
-  CLI["hack CLI"] --> Hackd["hackd"]
-  Hackd --> ExtMgr["ExtensionManager"]
-  ExtMgr --> Gateway["Gateway"]
-  ExtMgr --> Supervisor["Supervisor"]
-  ExtMgr --> Cloudflare["Cloudflare"]
-  ExtMgr --> Tailscale["Tailscale"]
-  Remote["Remote client"] -->|HTTP/WS| Gateway
-  Gateway --> Hackd
-```
-
-### Gateway API + remote workflows (unsupported experimental)
-
-Summary only — see `gateway-api.md` for full usage, security posture, and end-to-end examples:
-- `GET /v1/projects` with `project_id` for remote workflow routing
-- job execution + streaming (`/control-plane/projects/:id/jobs`)
-- PTY-backed shells (`/control-plane/projects/:id/shells`, WS stream)
-- One gateway instance is active per machine (global config); projects opt in with
-  `controlPlane.gateway.enabled`; remote clients route by `project_id` in the API paths.
+Remote, gateway, node and dispatch code remains in the repository for explicit
+maintenance. It is outside the supported local CLI contract and default onboarding.
 
 ## Branch builds
 
@@ -349,3 +320,22 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
 - The optional daemon keeps CLI JSON queries fast without making it a hard dependency.
 - Config lives alongside each repo in `.hack/` to keep repos isolated and portable.
 - Schemas are generated from templates and served locally for editor validation.
+
+### Global service hostname compatibility
+
+New global templates prefer `logs.hack.local`, `loki.hack.local`, and
+`schemas.hack.local`. The same services retain `logs.hack`, `loki.hack`, and
+`schemas.hack` routes, so existing schema references and explicit legacy URLs
+continue to work. Existing custom project hosts and OAuth `.hack.gy` aliases are
+unchanged.
+
+A CLI upgrade does not rewrite or restart running global services. Use
+`hack global install` to review template changes and DNS setup, preserving any
+custom routes when reviewing an existing Compose file. Installation can start
+global services; do not use it as a read-only check. Until updated, an older global installation
+may serve only the legacy URLs. `hack open logs` reads the installed logging Compose labels: it prefers the
+configured `.hack.local` route and uses `.hack` when only the legacy route exists.
+Missing, malformed, or custom-only route declarations produce an explicit error
+instead of guessing; pass an explicit URL for custom routes. Doctor retains the
+legacy DNS check, checks `.hack.local` separately, and selects the configured
+Grafana route for reachability. These reads do not prove the service is running.

@@ -233,6 +233,24 @@ test("resolveProjectOauthTld falls back to default when enabled", () => {
 });
 
 test("resolveProjectOauthAliasHost only returns aliases Hack routes", () => {
+  for (const [devHost, tld, expected] of [
+    ["demo.hack.local", "gy", "demo.hack.gy"],
+    ["api.feature.demo.hack.local", "gy", "api.feature.demo.hack.gy"],
+    ["demo.hack.local", "test", "demo.hack.test"],
+    ["demo.hack", "test", "demo.hack.test"],
+    ["demo.hack.local.example", "gy", null],
+    ["demo.not-hack.local", "gy", null],
+  ] as const) {
+    expect(
+      resolveProjectOauthAliasHost({ devHost, oauth: { enabled: true, tld } })
+    ).toBe(expected);
+  }
+  expect(
+    resolveProjectOauthAliasHost({
+      devHost: "demo.hack.local",
+      oauth: { enabled: false },
+    })
+  ).toBeNull();
   expect(
     resolveProjectOauthAliasHost({
       devHost: "demo.hack",

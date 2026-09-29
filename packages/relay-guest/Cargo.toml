@@ -1,0 +1,24 @@
+[package]
+name = "hack-relay-guest"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Single-connection Linux guest adapter for Hack authenticated relays"
+
+[[bin]]
+name = "hack-relay-guest"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+hmac = "=0.12.1"
+sha2 = "=0.10.9"
+zeroize = "=1.9.0"
+libc = "=0.2.189"
+serde = { version = "=1.0.229", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+strip = true

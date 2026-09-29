@@ -8,5 +8,14 @@ import {
 if (Bun.argv[2] === TTY_SUPERVISOR_ARGUMENT && process.send) {
   process.exit(await runTtySupervisor());
 }
+if (Bun.argv[2] === "--internal-native-https-owner") {
+  if (Bun.argv.length !== 4 || !Bun.argv[3]) {
+    process.exit(2);
+  }
+  const { runNativeHttpsOwner } = await import(
+    "./src/backends/native-https-owner.ts"
+  );
+  process.exit(await runNativeHttpsOwner({ configurationPath: Bun.argv[3] }));
+}
 const { runCli } = await import("./packages/cli/index.ts");
 process.exitCode = await runCli(Bun.argv.slice(2));

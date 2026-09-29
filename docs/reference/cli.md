@@ -75,11 +75,11 @@ hack init [options]
 | `--manual` | Skip discovery and define services manually (or generate a minimal compose in --auto) |
 | `--auto` | Run non-interactive init with sensible defaults |
 | `--name <slug>` | Project slug (default: repo name) |
-| `--dev-host <host>` | DEV_HOST override |
+| `--dev-host <host>` | DEV_HOST override (new projects use global default_domain, or hack.local) |
 | `--oauth` | Enable OAuth-safe alias host |
 | `--oauth-tld <tld>` | OAuth alias TLD override (default: gy) |
 | `--no-discovery` | Skip discovery and generate a minimal compose |
-| `--with <claude|codex|both>` | After init, hand the onboarding prompt to an agent CLI (prints the prompt when the CLI is missing or the run is non-interactive) |
+| `--with <claude|codex>` | After init, hand the onboarding prompt to an agent CLI (prints the prompt when the CLI is missing or the run is non-interactive) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -173,6 +173,9 @@ hack restart [services...] [options]
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--json` | Output JSON (machine-readable) |
+| `--recover-frontend` | Recover an interrupted native frontend after proving its owner and effects are gone |
+| `--expect-finalization-attempt <32-hex>` | Require this exact interrupted native frontend attempt |
+| `--expect-frontend-pid <pid>` | Previously observed frontend PID (required only for legacy v1 state) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -862,6 +865,7 @@ hack global <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack global install` | Bootstrap ~/.hack and start Caddy + Grafana/Loki/Alloy |
+| `hack global dns` | Manage scoped native custom-domain DNS |
 | `hack global up` | Start global infra containers |
 | `hack global down` | Stop global infra containers |
 | `hack global status` | Show status for global infra (containers + networks) |
@@ -889,6 +893,32 @@ Bootstrap ~/.hack and start Caddy + Grafana/Loki/Alloy
 ```bash
 hack global install [options]
 ```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack global dns`
+
+Manage scoped native custom-domain DNS
+
+### Usage
+
+```bash
+hack global dns <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack global dns preview` | Preview a scoped native custom-domain DNS claim without changing the host |
+| `hack global dns activate` | Activate only the selected native custom-domain DNS suffix |
+| `hack global dns deactivate` | Remove only an owned native custom-domain DNS suffix |
 
 ### Options
 
@@ -1214,7 +1244,7 @@ hack log-pipe [options]
 
 ## `hack doctor`
 
-Validate local setup (docker, networks, DNS, global infra, project config)
+Validate local setup for the selected runtime, routing, trust and project
 
 ### Usage
 
@@ -1229,7 +1259,10 @@ hack doctor [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--fix` | Attempt safe auto-remediations (network + CoreDNS + CA) |
 | `--migrate-env-config` | Migrate legacy hack.env.json/.env state to the new env config files |
+| `--domain-migration preview|apply|rollback` | Preview, apply, or roll back only this project's hack.local migration |
 | `--json` | Output JSON (machine-readable) |
+| `--browser-url https://app.hack` | HTTPS origin manually tested in the browser (no path or credentials) |
+| `--browser-result unknown|works|fails|permission-denied` | Your manual browser observation for --browser-url (default: unknown) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1594,6 +1627,9 @@ hack mcp install [options]
 
 | Option | Description |
 | --- | --- |
+| `--bundle <directory>` | Select a verified candidate MCP bundle (requires --cli) |
+| `--cli <executable>` | Pin the Hack executable used by candidate MCP tools |
+| `--runtime-directory <directory>` | Select a private candidate MCP socket directory |
 | `--scope <user|project>` | Write MCP config to user or project scope (default: user) |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--all` | Target all supported clients |
@@ -1621,6 +1657,9 @@ hack mcp print [options]
 
 | Option | Description |
 | --- | --- |
+| `--bundle <directory>` | Select a verified candidate MCP bundle (requires --cli) |
+| `--cli <executable>` | Pin the Hack executable used by candidate MCP tools |
+| `--runtime-directory <directory>` | Select a private candidate MCP socket directory |
 | `--scope <user|project>` | Write MCP config to user or project scope (default: user) |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--all` | Target all supported clients |

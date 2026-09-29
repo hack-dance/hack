@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -18,6 +18,7 @@ const execCalls: Array<{
 }> = [];
 const psJsonByComposeProject = new Map<string, string>();
 const tempDirs = new Set<string>();
+const originalHackHome = process.env.HACK_HOME;
 
 const runtimeBackendMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -65,17 +66,30 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
+  if (originalHackHome === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_HOME");
+  } else {
+    process.env.HACK_HOME = originalHackHome;
+  }
 });
 
 afterAll(() => {
   runtimeBackendMock.deactivate();
 });
 
-test("exec runs inside an already-running service container", async () => {
+test("exec reaches the running service while registry registration is locked", async () => {
   const projectRoot = await createProject({
     runningServices: ["api"],
     runtimeEnvName: "qa",
   });
+
+  const registryRoot = process.env.HACK_HOME;
+  if (!registryRoot) {
+    throw new Error("Missing fixture HACK_HOME");
+  }
+  await mkdir(registryRoot, { recursive: true });
+  const lockPath = resolve(registryRoot, "projects.json.lock");
+  await writeFile(lockPath, `${process.pid}\n`, { flag: "wx" });
 
   const input = {
     ctx: {
@@ -116,6 +130,10 @@ test("exec runs inside an already-running service container", async () => {
 
   expect(exitCode).toBe(0);
   expect(execCalls).toHaveLength(1);
+  expect(await readFile(lockPath, "utf8")).toBe(`${process.pid}\n`);
+  expect(await Bun.file(resolve(registryRoot, "projects.json")).exists()).toBe(
+    false
+  );
   expect(execCalls[0]?.env).toEqual({
     GLOBAL_FLAG: "qa",
     SHARED_KEY: "base",
@@ -246,6 +264,7 @@ async function createProject(input?: {
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hack-project-exec-"));
   tempDirs.add(root);
+  process.env.HACK_HOME = resolve(root, "global-hack");
 
   const projectRoot = resolve(root, "repo");
   const projectDir = resolve(projectRoot, ".hack");

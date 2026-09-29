@@ -1,0 +1,21 @@
+#!/bin/sh
+# Workspace-only candidate entry point. Never delegates to the installed hack.
+set -eu
+
+if [ -L "$0" ]; then
+  echo "hack-local: invoke the checkout launcher directly, or use a shell alias to its absolute path." >&2
+  exit 2
+fi
+repo=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+if [ -L "$repo/.hack-local" ] || [ -L "$repo/.hack-local/target" ] || \
+   [ -L "$repo/.hack-local/target/release" ] || \
+   [ -L "$repo/.hack-local/target/release/hack-runtime-candidate" ]; then
+  echo "hack-local: refusing aliased candidate build/state directories." >&2
+  exit 2
+fi
+binary="$repo/.hack-local/target/release/hack-runtime-candidate"
+if [ ! -x "$binary" ]; then
+  echo "hack-local: candidate not built. Run $repo/scripts/build-hack-local.sh" >&2
+  exit 69
+fi
+exec "$binary" --candidate-root "$repo" "$@"

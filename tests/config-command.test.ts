@@ -54,6 +54,49 @@ test("config set --global updates extension enabled using bracket path", async (
   expect(parsed.controlPlane["dance.hack.cloudflare"]).toBeUndefined();
 });
 
+test("global default_domain is validated before writing", async () => {
+  const { runCli } = await import("../src/cli/run.ts");
+  const path = process.env.HACK_GLOBAL_CONFIG_PATH ?? "";
+  expect(
+    await runCli(["config", "set", "--global", "default_domain", "hack.gy"])
+  ).toBe(0);
+  expect(JSON.parse(await readFile(path, "utf8")).default_domain).toBe(
+    "hack.gy"
+  );
+  expect(
+    await runCli([
+      "config",
+      "set",
+      "--global",
+      "default_domain",
+      "https://bad.example/",
+    ])
+  ).not.toBe(0);
+  expect(JSON.parse(await readFile(path, "utf8")).default_domain).toBe(
+    "hack.gy"
+  );
+});
+
+test("project config rejects the global-only default_domain key", async () => {
+  const repoRoot = join(tempDir ?? "", "repo");
+  const projectDir = join(repoRoot, ".hack");
+  await mkdir(projectDir, { recursive: true });
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli([
+      "config",
+      "set",
+      "--path",
+      repoRoot,
+      "default_domain",
+      "hack.gy",
+    ])
+  ).not.toBe(0);
+  expect(await Bun.file(join(projectDir, "hack.config.json")).exists()).toBe(
+    false
+  );
+});
+
 test("config set --global updates extension config hostname using bracket path", async () => {
   const configPath = await writeBaseGlobalConfig();
   const { runCli } = await import("../src/cli/run.ts");

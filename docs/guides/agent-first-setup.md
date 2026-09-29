@@ -48,6 +48,28 @@ The skill tells the agent to run `hack agent onboard` (or fetch the `hack-init`
 MCP prompt) and follow it — the content stays in the CLI, so installed skills
 fetch guidance matching the installed CLI.
 
+## MCP request lifetime
+
+`hack mcp serve` ties command execution to the requesting client. Cancelling a tool
+request stops its command; the session remains available for later requests. Closing
+client stdin or gracefully stopping the server cancels in-flight commands. Command
+and log-tail timeouts also terminate the owned command group, escalating after two
+seconds when graceful termination does not finish. Cancellation does not roll back
+completed operations or delete persistent project data. These controls do not reduce
+the number of servers for clients that remain connected.
+
+MCP command results capture at most 8 MiB of combined stdout/stderr bytes before
+text decoding. This also bounds log tails with oversized or newline-free messages.
+Exceeding the budget stops the command and returns an error with
+`outputTruncated: true`; parsed `data` is omitted so a prefix cannot masquerade as
+a complete result. Run the equivalent CLI command when full output is needed.
+The budget bounds captured bytes, not total process memory or JSON response size.
+
+Each MCP session captures its launch working directory and environment. Project
+registry selection, command execution and audit-file locations use that snapshot;
+later sessions do not replace the state of an existing session. The standard stdio
+entry still starts one process per connected client.
+
 ## What the prompt covers
 
 1. Inventory — package manager, services, ports, backing services, and required

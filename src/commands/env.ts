@@ -1171,25 +1171,12 @@ async function resolveModernEnvExplain(opts: {
   readonly scope: string;
   readonly target: "host" | "compose";
 }): Promise<EnvExplainPayload> {
-  const hostValue = opts.modern.merged.values.host?.[opts.key];
-  const scopedValue =
-    opts.scope === "global"
-      ? undefined
-      : opts.modern.merged.values[opts.scope]?.[opts.key];
-  const globalValue = opts.modern.merged.values.global?.[opts.key];
-  const usesHost = opts.target === "host" && hostValue !== undefined;
-  let effectiveScope: string | null = null;
-  let storedValue: unknown;
-  if (usesHost) {
-    effectiveScope = "host";
-    storedValue = hostValue;
-  } else if (scopedValue !== undefined) {
-    effectiveScope = opts.scope;
-    storedValue = scopedValue;
-  } else if (globalValue !== undefined) {
-    effectiveScope = "global";
-    storedValue = globalValue;
-  }
+  const metadata = (
+    opts.target === "host"
+      ? opts.modern.hostEffectiveMetadata
+      : opts.modern.effectiveMetadata
+  )[opts.scope]?.[opts.key];
+  const effectiveScope = metadata?.scope ?? null;
   const sourceFile =
     effectiveScope === null
       ? null
@@ -1200,15 +1187,15 @@ async function resolveModernEnvExplain(opts: {
         });
   return {
     key: opts.key,
-    available: storedValue !== undefined,
-    secret: storedValue !== undefined && isModernSecretStoredValue(storedValue),
+    available: metadata !== undefined,
+    secret: metadata?.secret ?? false,
     format: "project_env_config_v1",
     environment: opts.modern.selection.effectiveEnv,
     requested_scope: opts.scope,
     effective_scope: effectiveScope,
     target: opts.target,
     delivered_to: resolveEnvExplainDelivery({
-      available: storedValue !== undefined,
+      available: metadata !== undefined,
       target: opts.target,
     }),
     source:
@@ -1350,19 +1337,9 @@ function isModernSecretAtScope(input: {
   readonly scope: string;
   readonly key: string;
 }): boolean {
-  const scopedValue =
-    input.scope === "global"
-      ? undefined
-      : input.modern.merged.values[input.scope]?.[input.key];
-  if (scopedValue !== undefined) {
-    return isModernSecretStoredValue(scopedValue);
-  }
-  const globalValue = input.modern.merged.values.global?.[input.key];
-  return globalValue !== undefined && isModernSecretStoredValue(globalValue);
-}
-
-function isModernSecretStoredValue(value: unknown): boolean {
-  return isRecord(value) && typeof value.secure === "string";
+  return (
+    input.modern.effectiveMetadata[input.scope]?.[input.key]?.secret ?? false
+  );
 }
 
 function buildModernEnvJsonPayload(input: {
@@ -1440,9 +1417,7 @@ function buildModernEnvJsonPayload(input: {
         scope: input.selectedScope,
         key,
       });
-      const secret = resolvedValue
-        ? isModernSecretStoredValue(resolvedValue.value)
-        : false;
+      const secret = resolvedValue?.secret ?? false;
       const services =
         resolvedValue?.scope && resolvedValue.scope !== "global"
           ? [resolvedValue.scope]
@@ -1487,20 +1462,8 @@ function resolveModernStoredValue(input: {
   >;
   readonly scope: string;
   readonly key: string;
-}): { readonly scope: string; readonly value: unknown } | null {
-  if (input.scope !== "global") {
-    const scopedValue = input.modern.merged.values[input.scope]?.[input.key];
-    if (scopedValue !== undefined) {
-      return { scope: input.scope, value: scopedValue };
-    }
-  }
-
-  const globalValue = input.modern.merged.values.global?.[input.key];
-  if (globalValue !== undefined) {
-    return { scope: "global", value: globalValue };
-  }
-
-  return null;
+}): { readonly scope: string; readonly secret: boolean } | null {
+  return input.modern.effectiveMetadata[input.scope]?.[input.key] ?? null;
 }
 
 function serializeEnvStorageForJson(input: {

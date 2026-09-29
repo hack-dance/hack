@@ -1,4 +1,4 @@
-# Extensions & SDK Reference
+# Extension reference
 
 This page documents the lower-level extension and control-plane surfaces that still ship in the
 repo.
@@ -6,7 +6,7 @@ repo.
 If you want the supported product overview first, read [integrations.md](integrations.md) and
 [core.md](core.md).
 
-Hack v3 is local-first. The supported product does not include hosted auth, a web dashboard,
+Hack is local-first. The supported product does not include hosted auth, a web dashboard,
 built-in GitHub integration, or built-in Linear integration.
 
 ## Scope
@@ -14,7 +14,7 @@ built-in GitHub integration, or built-in Linear integration.
 - Unsupported experimental workflows:
   - Gateway: `hack x gateway ...`
   - Supervisor: `hack x supervisor ...`
-  - Remote node / dispatch flows documented under [beta.md](beta.md)
+  - Remote node / dispatch flows (unsupported)
 - Hosted auth, GitHub, Linear, and Tickets integrations are not registered.
 
 ## Behavior
@@ -59,21 +59,3 @@ the default local-first product contract.
 - Treat bugs here as experimental unless they break the core local runtime.
 - These commands are hidden from default `hack --help` output; list them with `hack help --all`.
   Invoking one prints a one-line experimental/unsupported warning.
-
-## Gateway API Surface
-
-When the unsupported experimental gateway is enabled, the current HTTP/WS surface includes:
-
-- `GET /v1/status`
-- `GET /v1/metrics`
-- `GET /v1/projects`
-- `GET /v1/ps`
-- `GET/POST /control-plane/projects/:id/jobs`
-- `GET /control-plane/projects/:id/jobs/:jobId`
-- `POST /control-plane/projects/:id/jobs/:jobId/cancel`
-- `WS /control-plane/projects/:id/jobs/:jobId/stream`
-- `POST /control-plane/projects/:id/shells`
-- `GET /control-plane/projects/:id/shells/:shellId`
-- `WS /control-plane/projects/:id/shells/:shellId/stream`
-
-For usage patterns, see [gateway-api.md](gateway-api.md) and [beta.md](beta.md).

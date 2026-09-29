@@ -6,7 +6,7 @@ What remains:
 
 - local env management and host/container injection
 - local sessions and runtime orchestration
-- optional coding-agent setup helpers: `hack init --with claude|codex|both`, `hack agent onboard` /
+- optional coding-agent setup helpers: `hack init --with claude|codex`, `hack agent onboard` /
   `hack agent init` / `hack agent prime`, and scoped `hack setup` commands
 
 `hack setup sync` keeps interactive output compact: it summarizes each scope and only expands the
@@ -40,6 +40,23 @@ report freshness findings. Repair only the affected integration and scope covere
 `hack setup sync --all-scopes` remains available for an explicitly requested full refresh.
 Existing authorization for that action and scope is sufficient. After repair, read the updated
 guidance; restart only if the client cannot reload changed hooks or skills.
+
+## Standalone MCP configuration
+
+`hack mcp print --claude --scope project` previews a project entry;
+`hack mcp install --claude --scope project` installs it. Claude Code reads project
+MCP servers from `.mcp.json` and user-scoped servers from `~/.claude.json`, as described
+in [Claude's MCP scope documentation](https://code.claude.com/docs/en/mcp#mcp-installation-scopes).
+The setup check and removal commands use those same locations. Primer hooks continue
+to use `.claude/settings.json`; that file serves a different purpose.
+
+Older Hack versions wrote standalone Claude MCP entries into `settings.json`.
+Reinstall in the intended scope to create the entry where Claude loads it. Hack
+preserves the old settings file, unrelated fields and other servers. Malformed or
+unreadable configuration is refused without replacing it, and parse errors do not
+include configuration contents. This is not an automatic migration or a change to
+already-running clients. Project-scoped servers remain subject to Claude's workspace
+trust and approval rules.
 
 ## Optional native plugins
 

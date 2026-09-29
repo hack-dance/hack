@@ -12,7 +12,7 @@ import { logger } from "../ui/logger.ts";
 
 export type OnboardingAgent = "claude" | "codex";
 
-export type OnboardingWith = OnboardingAgent | "both";
+export type OnboardingWith = OnboardingAgent;
 
 export type OnboardingHandoffOutcome = {
   /** Agent CLIs that were launched interactively. */
@@ -25,19 +25,18 @@ export type OnboardingHandoffOutcome = {
   readonly exitCode: number;
 };
 
-const WITH_VALUES: ReadonlySet<string> = new Set(["claude", "codex", "both"]);
+const WITH_VALUES: ReadonlySet<string> = new Set(["claude", "codex"]);
 
 const WITH_AGENTS: Readonly<
   Record<OnboardingWith, readonly OnboardingAgent[]>
 > = {
   claude: ["claude"],
   codex: ["codex"],
-  both: ["claude", "codex"],
 };
 
 /**
  * Parse a raw `--with` value. Returns null when the value is not one of
- * `claude`, `codex`, or `both` (callers surface the usage error).
+ * `claude` or `codex` (callers surface the usage error).
  */
 export function parseOnboardingWith(opts: {
   readonly value: string;
@@ -47,7 +46,7 @@ export function parseOnboardingWith(opts: {
 }
 
 /**
- * Expand a `--with` selection into the ordered agent CLI list to hand off to.
+ * Expand a `--with` selection into the single-agent CLI list to hand off to.
  */
 export function resolveOnboardingAgents(opts: {
   readonly withValue: OnboardingWith;
@@ -62,7 +61,7 @@ export function resolveOnboardingAgents(opts: {
  * - `interactive: false` (non-TTY, `--no-interactive`, `HACK_NO_INTERACTIVE`):
  *   never spawns; prints the prompt once with copy-paste instructions.
  * - Otherwise each requested CLI found on PATH is launched interactively with
- *   the prompt as its positional argument (sequentially for `both`).
+ *   the prompt as its positional argument (one selected agent).
  * - Any requested CLI missing from PATH triggers the printed fallback once.
  *
  * @param opts.launch - Test seam; defaults to spawning via `run` with

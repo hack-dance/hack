@@ -1,8 +1,14 @@
 import { resolve } from "node:path";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
-import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
+import { ensureDir, writeTextFileIfChanged } from "../lib/fs.ts";
+import {
+  readLocalExtraHosts,
+  resolveExtraHostsPath,
+  resolveInternalExtraHosts,
+} from "../lib/internal-extra-hosts.ts";
 import { findProjectContext } from "../lib/project.ts";
+import { resolvePrimaryLocalProjectDir } from "../lib/worktree-local-config.ts";
 import { logger } from "../ui/logger.ts";
 
 const optPath = defineOption({
@@ -38,11 +44,21 @@ const extraHostsUnsetSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const listOptions = [
+  ...internalOptions,
+  defineOption({
+    name: "origins",
+    type: "boolean",
+    long: "--origins",
+    description: "Include the source file for each effective alias",
+  } as const),
+] as const;
+
 const extraHostsListSpec = defineCommand({
   name: "list",
   summary: "List internal extra_hosts entries",
   group: "Internal",
-  options: internalOptions,
+  options: listOptions,
   positionals: [],
   subcommands: [],
 } as const);
@@ -84,55 +100,9 @@ async function requireProject(startDir: string) {
   return project;
 }
 
-const INTERNAL_EXTRA_HOSTS_FILENAME = "extra-hosts.json" as const;
-
-function resolveExtraHostsPath(projectDir: string): string {
-  return resolve(projectDir, ".internal", INTERNAL_EXTRA_HOSTS_FILENAME);
-}
-
-async function readInternalExtraHosts(
-  path: string
-): Promise<Record<string, string>> {
-  const text = await readTextFile(path);
-  if (!text) {
-    return {};
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return {};
-  }
-
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return {};
-  }
-
-  const out: Record<string, string> = {};
-  for (const [keyRaw, valueRaw] of Object.entries(
-    parsed as Record<string, unknown>
-  )) {
-    const key = keyRaw.trim();
-    if (key.length === 0) {
-      continue;
-    }
-    if (typeof valueRaw !== "string") {
-      continue;
-    }
-    const value = valueRaw.trim();
-    if (value.length === 0) {
-      continue;
-    }
-    out[key] = value;
-  }
-
-  return out;
-}
-
 async function writeInternalExtraHosts(
   path: string,
-  map: Record<string, string>
+  map: Record<string, string | null>
 ): Promise<void> {
   const text = `${JSON.stringify(map, null, 2)}\n`;
   await writeTextFileIfChanged(path, text);
@@ -164,7 +134,7 @@ async function handleExtraHostsSet({
   await ensureDir(dir);
   const path = resolveExtraHostsPath(project.projectDir);
 
-  const existing = await readInternalExtraHosts(path);
+  const existing = await readLocalExtraHosts(path);
   existing[hostname] = target;
   await writeInternalExtraHosts(path, existing);
 
@@ -194,13 +164,18 @@ async function handleExtraHostsUnset({
   }
 
   const path = resolveExtraHostsPath(project.projectDir);
-  const existing = await readInternalExtraHosts(path);
-  if (!(hostname in existing)) {
+  const existing = await readLocalExtraHosts(path);
+  const effective = await resolveInternalExtraHosts(project);
+  if (!Object.hasOwn(effective.hosts, hostname)) {
     logger.warn({ message: `No internal extra_hosts entry for ${hostname}` });
     return 1;
   }
 
-  delete existing[hostname];
+  if (await resolvePrimaryLocalProjectDir(project)) {
+    existing[hostname] = null;
+  } else {
+    delete existing[hostname];
+  }
   await ensureDir(resolve(project.projectDir, ".internal"));
   await writeInternalExtraHosts(path, existing);
 
@@ -214,13 +189,13 @@ async function handleExtraHostsList({
   args,
 }: {
   readonly ctx: CliContext;
-  readonly args: InternalArgs;
+  readonly args: CommandArgs<typeof listOptions, readonly []>;
 }): Promise<number> {
   const startDir = resolveStartDir(ctx, args);
   const project = await requireProject(startDir);
 
-  const path = resolveExtraHostsPath(project.projectDir);
-  const map = await readInternalExtraHosts(path);
+  const effective = await resolveInternalExtraHosts(project);
+  const map = args.options.origins ? effective : effective.hosts;
 
   process.stdout.write(`${JSON.stringify(map, null, 2)}\n`);
   return 0;

@@ -596,9 +596,11 @@ enter the admitted summaries and the paired pair and cohort ratios.
 
 The load rule counts the run's own VMs, and half the CPU count is not a measurement of this
 host, so a measured baseline can replace it. `--idle-baseline SECONDS` first samples the host
-while nothing of the run exists. It refuses to start anything if build tools appear, memory
-pressure rises, a new crash or watchdog report appears, an idle VM changes, or fewer than three
-intervals are observed.
+for SECONDS of elapsed monotonic time while nothing of the run exists. It refuses to start
+anything if build tools appear, memory pressure rises, a new crash or watchdog report appears, an
+idle VM changes, or fewer than three intervals are observed. The first failed or timed-out
+observation ends it at once and refuses, so it takes at most SECONDS plus one interval and the
+observations in progress.
 - **Background.** It measures background CPU as per-process CPU-time deltas of processes whose
   command line does not name `--root`. Trial VMs, CLI calls, fixtures and the harness are
   therefore excluded. A process that starts and exits between two samples is not seen.
@@ -609,7 +611,7 @@ intervals are observed.
   it.
 - **Bounded observation.** Every host observation (`ps`, `sysctl`) is limited to 30 s. One
   that fails or times out is unobserved and fails closed: admission flags the sample, the idle
-  baseline refuses to start, and trial or fixture cleanup keeps its state. Trial runtime
+  baseline stops at once and refuses to start, and trial or fixture cleanup keeps its state. Trial runtime
   commands keep their own step timeouts, shortened by a worktree cohort's deadlines.
 - **Attribution.** Each sample records its three largest background commands. The sampler
   summary reports those behind its peak sample, and the idle baseline reports those behind its

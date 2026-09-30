@@ -631,6 +631,19 @@ class WorktreeTrials(unittest.TestCase):
         self.assert_fixture_preserved(record, None)
 
 
+class ScriptedClock:
+    """Monotonic time that moves only when slept through or advanced by an observation."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
 class MeasuredAdmission(unittest.TestCase):
     """Admission against a measured idle baseline, with scripted process listings."""
 
@@ -670,16 +683,32 @@ class MeasuredAdmission(unittest.TestCase):
             values = iter([(None, None, list(names))] + [(s, 0.01, list(names)) for s in samples])
             return type("Meter", (), {"observe": lambda self: next(values)})()
 
-        idle = benchmark.measure_idle(meter([0.4, 1.2, 0.8]), 3, 1, pressure=lambda: "1", sleep=lambda _: None)
-        self.assertEqual((idle["ceiling_cores"], idle["refusals"]), (1.2, []))
-        self.assertEqual(idle["background_cores"]["median"], 0.8)
-        building = benchmark.measure_idle(meter([0.4, 0.5, 0.6], ["/opt/bin/cargo"]), 3, 1, pressure=lambda: "1",
-                                          sleep=lambda _: None)
-        self.assertEqual(building["refusals"], ["build_tools"])
-        pressured = benchmark.measure_idle(meter([0.4, 0.5, 0.6]), 3, 1, pressure=lambda: "2", sleep=lambda _: None)
-        self.assertEqual(pressured["refusals"], ["memory_pressure"])
-        short = benchmark.measure_idle(meter([0.4]), 1, 1, pressure=lambda: "1", sleep=lambda _: None)
-        self.assertEqual(short["refusals"], ["too_few_samples"])
+        def idle(meter, seconds, level="1"):
+            clock = ScriptedClock()
+            return benchmark.measure_idle(meter, seconds, 1, pressure=lambda: level, sleep=clock.sleep, clock=clock)
+
+        quiet = idle(meter([0.4, 1.2, 0.8]), 3)
+        self.assertEqual((quiet["ceiling_cores"], quiet["refusals"], quiet["elapsed_s"]), (1.2, [], 3.0))
+        self.assertEqual(quiet["background_cores"]["median"], 0.8)
+        self.assertEqual(idle(meter([0.4, 0.5, 0.6], ["/opt/bin/cargo"]), 3)["refusals"], ["build_tools"])
+        self.assertEqual(idle(meter([0.4, 0.5, 0.6]), 3, level="2")["refusals"], ["memory_pressure"])
+        self.assertEqual(idle(meter([0.4]), 1)["refusals"], ["too_few_samples"])
+
+    def test_an_idle_baseline_lasts_its_elapsed_time_however_long_each_observation_takes(self):
+        clock = ScriptedClock()
+
+        class SlowMeter:
+            top = []
+
+            def observe(self):
+                clock.now += 1.0
+                return 0.5, 0.01, []
+
+        idle = benchmark.measure_idle(SlowMeter(), 10, 1, pressure=lambda: "1", sleep=clock.sleep, clock=clock)
+        # Each sample costs one interval plus a 1 s listing, so 10 s holds five samples, not ten;
+        # it ends within the baseline plus one interval and one observation.
+        self.assertEqual((idle["background_cores"]["n"], idle["refusals"]), (5, []))
+        self.assertEqual(idle["elapsed_s"], 11.0)
 
     def test_a_ceiling_judges_background_instead_of_load(self):
         # The run's own VMs raise load; with a measured ceiling that alone does not flag timing.
@@ -767,22 +796,51 @@ class BoundedObservation(unittest.TestCase):
             metered = benchmark.admission(failing, ceiling=1.0)
         self.assertEqual(sorted(metered["reasons"]), ["background_unobserved", "processes_unobserved"])
 
-    def test_an_idle_baseline_with_a_failed_observation_refuses(self):
+    def test_an_idle_baseline_stops_at_its_first_failed_observation(self):
         calls = iter([(None, None, []), (0.4, 0.01, []), RuntimeError("listing unavailable"), (0.5, 0.01, []),
                       (0.6, 0.01, [])])
+        observed = []
 
         class Meter:
             top = []
 
             def observe(self):
-                value = next(calls)
+                value = next(calls, (0.6, 0.01, []))
+                observed.append(value)
                 if isinstance(value, Exception):
                     raise value
                 return value
 
-        idle = benchmark.measure_idle(Meter(), 4, 1, pressure=lambda: "1", sleep=lambda _: None)
-        self.assertEqual(idle["refusals"], ["observer_failed"])
-        self.assertEqual(idle["background_cores"]["n"], 3)
+        clock = ScriptedClock()
+        idle = benchmark.measure_idle(Meter(), 60, 1, pressure=lambda: "1", sleep=clock.sleep, clock=clock)
+        # It refuses at the failure rather than sampling out the remaining 58 s.
+        self.assertEqual((len(observed), idle["elapsed_s"], idle["background_cores"]["n"]), (3, 2.0, 1))
+        self.assertIn("observer_failed", idle["refusals"])
+        # An unreadable memory pressure ends it just the same.
+        clock, levels = ScriptedClock(), iter(["1", ""] + ["1"] * 100)
+        steady = type("Meter", (), {"top": [], "observe": lambda self: (0.4, 0.01, [])})()
+        idle = benchmark.measure_idle(steady, 60, 1, pressure=lambda: next(levels), sleep=clock.sleep, clock=clock)
+        self.assertEqual((idle["elapsed_s"], idle["pressure_levels"]), (2.0, ["1", "unobserved"]))
+        self.assertIn("observer_failed", idle["refusals"])
+
+    def test_a_hung_process_listing_ends_the_baseline_within_its_timeout(self):
+        real, calls = benchmark.observed_output, []
+
+        def observed(argv, timeout=None):
+            calls.append(argv[0])
+            # The first listing answers; every later one hangs past the observation bound.
+            if argv[0] == "ps" and len(calls) > 1:
+                return real([sys.executable, "-c", "import time; time.sleep(30)"], timeout)
+            return "  10 0:01.00 /usr/bin/mds\n" if argv[0] == "ps" else "1\n"
+
+        started = time.monotonic()
+        with mock.patch.object(benchmark, "OBSERVATION_TIMEOUT", 0.5), \
+                mock.patch.object(benchmark, "observed_output", side_effect=observed):
+            idle = benchmark.measure_idle(benchmark.Background("/run-root", interval=0.2), 20, 0.2)
+        # Real time: one interval and one bounded listing, not the 20 s baseline.
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(calls, ["ps", "ps"])
+        self.assertIn("observer_failed", idle["refusals"])
 
 
 class DistressAndInvalidation(unittest.TestCase):

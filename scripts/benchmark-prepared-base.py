@@ -442,29 +442,38 @@ class Background:
         return round(background / elapsed, 3), round(watched / elapsed, 3), names
 
 
-def measure_idle(meter, seconds, interval, pressure=None, sleep=time.sleep):
-    """Sample the host while nothing of this run is running. The maximum background observed
-    becomes the admission ceiling: a timed sample may not exceed what idle already showed."""
+def measure_idle(meter, seconds, interval, pressure=None, sleep=time.sleep, clock=time.monotonic):
+    """Sample the host for `seconds` of elapsed monotonic time while nothing of this run exists.
+    The maximum background observed becomes the admission ceiling: a timed sample may not exceed
+    what idle already showed.
+
+    The first failed or timed-out observation (process listing or memory pressure) ends the
+    baseline at once with `observer_failed`: an unobserved host sets no ceiling, and sampling on
+    would only spend the window. It therefore takes at most `seconds`, plus one interval and the
+    observations in progress (each at most OBSERVATION_TIMEOUT)."""
     pressure = pressure or (lambda: (observed_output(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"]) or "").strip())
-    background, watched, levels, tools, ceiling_top, failed = [], [], set(), set(), [], 0
+    background, watched, levels, tools, ceiling_top, failed = [], [], set(), set(), [], False
+    started = clock()
     try:
         meter.observe()
     except (OSError, RuntimeError):
-        failed += 1
-    for _ in range(max(1, round(seconds / interval))):
+        failed = True
+    while not failed and clock() - started < seconds:
         sleep(interval)
         try:
             cores, vm, names = meter.observe()
         except (OSError, RuntimeError):
-            failed += 1
-            continue
+            failed = True
+            break
         if cores is not None:
             background.append(cores)
             watched.append(vm)
             if cores == max(background):
                 ceiling_top = list(getattr(meter, "top", []))
-        levels.add(pressure() or "unobserved")
         tools |= {Path(n).name for n in names if BUILD_TOOLS.match(Path(n).name)}
+        level = pressure()
+        levels.add(level or "unobserved")
+        failed = not level
 
     def spread(values):
         ordered = sorted(values)
@@ -473,8 +482,9 @@ def measure_idle(meter, seconds, interval, pressure=None, sleep=time.sleep):
 
     refusals = ([] if len(background) >= 3 else ["too_few_samples"]) + (["build_tools"] if tools else []) \
         + ([] if levels == {"1"} else ["memory_pressure"]) + (["observer_failed"] if failed else [])
-    return {"seconds": seconds, "interval_s": interval, "background_cores": spread(background),
-            "watched_cores": spread(watched), "pressure_levels": sorted(levels), "build_tools": sorted(tools),
+    return {"seconds": seconds, "elapsed_s": round(clock() - started, 3), "interval_s": interval,
+            "background_cores": spread(background), "watched_cores": spread(watched),
+            "pressure_levels": sorted(levels), "build_tools": sorted(tools),
             "ceiling_cores": max(background) if background else None, "ceiling_top": ceiling_top,
             "refusals": refusals}
 

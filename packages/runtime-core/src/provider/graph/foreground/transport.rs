@@ -843,6 +843,7 @@ impl Publication {
         self.listener.as_raw_fd()
     }
     pub fn verify(&self) -> Result<(), CandidateError> {
+        super::super::host_pin_recovery::exact_lock_path(&self.pin.root, &self._lock)?;
         self.pin.verify()
     }
     pub fn accept(&self) -> Result<Option<UnixStream>, CandidateError> {

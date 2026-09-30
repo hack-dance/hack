@@ -237,6 +237,7 @@ fn serve_input<'a>(
             deadline,
             &mut runtime,
             generation,
+            &|| publication.verify(),
         )
     } else if let Some((compose, _)) = normalized {
         super::run_normalized_with_host_dependencies_until(

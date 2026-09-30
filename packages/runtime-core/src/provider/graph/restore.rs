@@ -71,6 +71,8 @@ pub(super) struct FreshOwnerRestore<'a> {
     pub identity: NormalizedInputIdentity,
     pub generation: &'a str,
     pub deadline: std::time::Instant,
+    #[cfg(target_os = "macos")]
+    pub verify_publication: &'a dyn Fn() -> Result<(), CandidateError>,
 }
 #[cfg(target_os = "macos")]
 pub(super) fn restore_normalized_foreground(
@@ -80,6 +82,7 @@ pub(super) fn restore_normalized_foreground(
     deadline: std::time::Instant,
     runtime: &mut HostRelayRuntime,
     generation: &str,
+    verify_publication: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<Receipt, CandidateError> {
     startup::Driver::check_cancelled(runtime)?;
     check_environment_deadline(deadline)?;
@@ -109,6 +112,7 @@ pub(super) fn restore_normalized_foreground(
             identity,
             generation,
             deadline,
+            verify_publication,
         }),
     )
 }
@@ -439,6 +443,15 @@ fn restore_inputs(
     source::verify_cache_scope(source, options.project.project)?;
     #[cfg(target_os = "macos")]
     super::source_device_rebind::verify_cache_scope_origin(candidate, &receipt)?;
+    #[cfg(target_os = "macos")]
+    if let Some(fresh) = &fresh {
+        super::absent_publication_cleanup::archive_retired_rebind_under(
+            candidate,
+            &engine,
+            &receipt,
+            fresh.verify_publication,
+        )?;
+    }
     // Retain the complete acknowledged old generation before replacing its
     // boot-bound dependency owner. Historical cleanup is verified in its own context.
     if fresh.is_some() {
@@ -572,6 +585,8 @@ mod tests {
             identity: next.normalized_input.unwrap(),
             generation: &generation,
             deadline: Instant::now() + Duration::from_secs(30),
+            #[cfg(target_os = "macos")]
+            verify_publication: &|| Ok(()),
         };
         let reviewed = "8".repeat(64);
         assert!(verify_fresh(&receipt, &reviewed, &fresh, &generation).is_err());
@@ -614,6 +629,8 @@ mod tests {
             identity: identity.clone(),
             generation: &generation,
             deadline: Instant::now() + Duration::from_secs(30),
+            #[cfg(target_os = "macos")]
+            verify_publication: &|| Ok(()),
         };
         verify_fresh(&receipt, &receipt.plan_id, &fresh, &generation).unwrap();
         assert!(verify_fresh(&receipt, &"2".repeat(64), &fresh, &generation).is_err());
@@ -648,6 +665,8 @@ mod tests {
             identity: identity.clone(),
             generation: &generation,
             deadline: Instant::now() + Duration::from_secs(30),
+            #[cfg(target_os = "macos")]
+            verify_publication: &|| Ok(()),
         };
         let changed = "2".repeat(64);
         assert!(verify_fresh(&receipt, &changed, &fresh, &generation).is_err());

@@ -870,3 +870,14 @@ Missing, changed or pending provenance and replaced Git metadata refuse. A secon
 device transition requires a separately supported explicit recovery; the runtime
 does not silently extend this projection. Older candidate binaries may refuse the
 new optional source metadata, so a downgrade must be qualified separately.
+
+Completed post-reboot absence recovery also retires the prior boot's completed
+dependency-rebind journal. A retained foreground restore can finish this archival
+for an earlier candidate: it selects the exact original ready receipt and exact
+completed stopped receipt from bounded history, verifies durable retirement,
+unchanged provider/boot and retained volumes, and proves old and current compute
+absent under the held foreground lock and provider lease. The journal's completed
+generation must match the original receipt. Original bytes remain in a digest-bound,
+resumable archive; a later current-boot journal is preserved for its own cleanup.
+Changed evidence, pending state or live compute refuses archival. This does not
+replay old dependencies or relax the fresh graph's endpoint/readiness checks.

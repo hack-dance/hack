@@ -293,6 +293,39 @@ pub(super) fn verify_cache_scope_origin(
     pin.reverify()
 }
 
+/// Historical cache provenance also pins the exact cleanup/retirement bytes
+/// used to archive its old journal; another same-schema proof is insufficient.
+pub(super) fn verify_cache_scope_cleanup_origin(
+    candidate: &Candidate,
+    receipt: &Receipt,
+    intent_sha256: &str,
+    retirement_sha256: &str,
+) -> Result<(), CandidateError> {
+    verify_cache_scope_origin(candidate, receipt)?;
+    let Some(scope) = receipt
+        .source
+        .as_ref()
+        .and_then(|source| source.cache_scope.as_ref())
+    else {
+        return Ok(());
+    };
+    let root = directory(candidate, &receipt.run)?;
+    let pin = pin_raw(&root.join(FILE), LIMIT, false)?;
+    let witness: Witness = serde_json::from_slice(&pin.bytes).map_err(|_| refused())?;
+    if encoded(&witness)? != pin.bytes
+        || !scope.matches_origin(
+            &sha256(&pin.bytes),
+            &witness.old_share,
+            &witness.current_share,
+        )
+        || witness.absent_intent_raw_sha256 != intent_sha256
+        || witness.retirement_raw_sha256 != retirement_sha256
+    {
+        return Err(refused());
+    }
+    pin.reverify()
+}
+
 /// Pinned complete witness for the original stopped receipt only. A subsequent
 /// graph generation cannot use this object as cleanup or source authority.
 pub(super) struct Selected {
@@ -655,6 +688,31 @@ mod tests {
         assert!(verify_cache_scope_origin(&candidate, &projected).is_err());
         private_file(&root.join(FILE), &encoded(&witness).unwrap());
         verify_cache_scope_origin(&candidate, &projected).unwrap();
+        verify_cache_scope_cleanup_origin(
+            &candidate,
+            &projected,
+            &witness.absent_intent_raw_sha256,
+            &witness.retirement_raw_sha256,
+        )
+        .unwrap();
+        assert!(
+            verify_cache_scope_cleanup_origin(
+                &candidate,
+                &projected,
+                &"7".repeat(64),
+                &witness.retirement_raw_sha256
+            )
+            .is_err()
+        );
+        assert!(
+            verify_cache_scope_cleanup_origin(
+                &candidate,
+                &projected,
+                &witness.absent_intent_raw_sha256,
+                &"7".repeat(64)
+            )
+            .is_err()
+        );
         let mut changed_plan = projected.clone();
         changed_plan.plan_id = "7".repeat(64);
         assert!(verify_cache_scope_origin(&candidate, &changed_plan).is_err());

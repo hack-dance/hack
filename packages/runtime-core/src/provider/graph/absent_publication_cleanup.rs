@@ -22,6 +22,8 @@ use std::{
 const INTENT: &str = "absent-publication-cleanup.json";
 const RETIREMENT: &str = "absent-publication-retirement.json";
 const LIMIT: u64 = 2 * 1024 * 1024;
+mod rebind_history;
+pub(super) use rebind_history::archive_retired_rebind_under;
 
 fn refused() -> CandidateError {
     CandidateError::new(
@@ -1168,6 +1170,7 @@ pub fn recover(
         dependency_slots::recover_cleaned(candidate, &current, None)?;
     }
     retire(candidate, &engine, &intent, &current, &root, &reservation)?;
+    archive_retired_rebind_under(candidate, &engine, &current, &|| reservation.verify())?;
     Ok(json!({
         "run": run,
         "phase": "stopped-data-retained",

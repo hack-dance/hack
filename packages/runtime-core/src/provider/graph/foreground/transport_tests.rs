@@ -2,6 +2,30 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn publication_refuses_a_replaced_operation_lock_and_preserves_it() {
+    let fixture = super::super::super::tests::Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    let run = "a".repeat(32);
+    let publication = Publication::bind(&candidate, &run).unwrap();
+    publication.verify().unwrap();
+    let directory = root(&candidate, &run).unwrap();
+    fs::rename(
+        directory.join("operation.lock"),
+        directory.join("original.lock"),
+    )
+    .unwrap();
+    let replacement = state::Lock::acquire(&directory).unwrap();
+    let replaced = fs::read(directory.join("operation.lock")).unwrap();
+    assert!(publication.verify().is_err());
+    assert_eq!(
+        fs::read(directory.join("operation.lock")).unwrap(),
+        replaced
+    );
+    assert!(directory.join("original.lock").exists());
+    drop(replacement);
+}
+
+#[test]
 fn pool_gate_excludes_publication_before_engine_for_every_run() {
     let fixture = super::super::super::tests::Fixture::new();
     let candidate = Candidate::discover(&fixture.0).unwrap();

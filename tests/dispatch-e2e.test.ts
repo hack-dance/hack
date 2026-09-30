@@ -8,6 +8,7 @@ import {
 } from "../src/lib/nodes-registry.ts";
 import { findProjectContext } from "../src/lib/project.ts";
 import { upsertProjectRegistration } from "../src/lib/projects-registry.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const shouldRun = process.env.HACK_DISPATCH_E2E === "1";
 const runTest = shouldRun ? test : test.skip;
@@ -52,11 +53,11 @@ afterEach(async () => {
     await rm(tempHome, { recursive: true, force: true });
     tempHome = null;
   }
-  process.env.HOME = previousHome;
+  restoreEnv("HOME", previousHome);
   if (previousGlobalConfigPath !== undefined) {
-    process.env.HACK_GLOBAL_CONFIG_PATH = previousGlobalConfigPath;
+    restoreEnv("HACK_GLOBAL_CONFIG_PATH", previousGlobalConfigPath);
   } else {
-    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
   }
 });
 

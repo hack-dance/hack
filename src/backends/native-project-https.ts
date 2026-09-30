@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { connect as tlsConnect } from "node:tls";
 import { isRecord } from "../lib/guards.ts";
+import { listenPublishedUnixSocket } from "../lib/unix-socket-publish.ts";
 import { checkNativeHttpsPort } from "./native-https-port.ts";
 import {
   invokeNativeRuntime,
@@ -709,22 +710,11 @@ async function startOwnerChallenge(
       }
     });
   });
-  let listening = false;
   let identity: { dev: number; ino: number } | undefined;
   try {
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(path, () => {
-        server.off("error", reject);
-        listening = true;
-        resolve();
-      });
-    });
-    const metadata = await lstat(path);
-    if (!metadata.isSocket() || metadata.uid !== process.getuid?.()) {
-      throw refused();
-    }
-    identity = { dev: metadata.dev, ino: metadata.ino };
+    // Published by link from an owner-only staging name (a verified socket of
+    // this user): closing the server never removes a replacement at path.
+    identity = await listenPublishedUnixSocket(server, path);
     await setMode(path, 0o600);
     const prepared = await lstat(path);
     if (
@@ -738,10 +728,9 @@ async function startOwnerChallenge(
     }
     return { server, publicKey, identity };
   } catch {
+    // Without an identity, publication failed and already closed the server.
     if (identity) {
       await stopOwnerChallenge({ path, server, identity });
-    } else if (listening) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
     throw refused();
   }

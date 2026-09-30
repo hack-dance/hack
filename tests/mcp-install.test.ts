@@ -9,12 +9,13 @@ import {
   removeMcpConfig,
   renderMcpConfigSnippet,
 } from "../src/mcp/install.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 const originalHome = process.env.HOME;
 
 afterEach(async () => {
-  process.env.HOME = originalHome;
+  restoreEnv("HOME", originalHome);
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;

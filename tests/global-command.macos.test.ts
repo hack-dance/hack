@@ -25,6 +25,7 @@ import {
 import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
 import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
 import { CURRENT_CA_PEM, OLD_CA_PEM } from "./helpers/ca-certificates.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 // These fixtures exercise macOS host commands and require that platform.
@@ -268,9 +269,9 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = originalHome;
-  process.env.USER = originalUser;
-  process.env.HACK_LOGGER = originalLogger;
+  restoreEnv("HOME", originalHome);
+  restoreEnv("USER", originalUser);
+  restoreEnv("HACK_LOGGER", originalLogger);
   if (originalNoInteractive === undefined) {
     Reflect.deleteProperty(process.env, "HACK_NO_INTERACTIVE");
   } else {
@@ -1660,8 +1661,8 @@ test("native global install refuses before touching the Docker global stack", as
     expect(runCalls).toHaveLength(0);
     expect(execCalls).toHaveLength(0);
   } finally {
-    process.env.HACK_RUNTIME_BACKEND = previousBackend;
-    process.env.HACK_NATIVE_BINARY = previousBinary;
-    process.env.HACK_NATIVE_HOME = previousNativeHome;
+    restoreEnv("HACK_RUNTIME_BACKEND", previousBackend);
+    restoreEnv("HACK_NATIVE_BINARY", previousBinary);
+    restoreEnv("HACK_NATIVE_HOME", previousNativeHome);
   }
 });

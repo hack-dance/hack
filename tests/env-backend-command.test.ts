@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { restoreEnv } from "./helpers/env.ts";
 
 type RunResult = {
   readonly exitCode: number;
@@ -29,14 +30,14 @@ afterEach(async () => {
   }
   tempGlobalConfigPath = null;
   if (previousGlobalConfigPath !== undefined) {
-    process.env.HACK_GLOBAL_CONFIG_PATH = previousGlobalConfigPath;
+    restoreEnv("HACK_GLOBAL_CONFIG_PATH", previousGlobalConfigPath);
   } else {
-    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
   }
   if (previousSecretsKey !== undefined) {
     process.env.HACK_SECRETS_FILE_KEY = previousSecretsKey;
   } else {
-    process.env.HACK_SECRETS_FILE_KEY = undefined;
+    Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
   }
 });
 

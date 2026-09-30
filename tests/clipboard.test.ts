@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { copyToClipboard } from "../src/ui/clipboard.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const ORIGINAL_PATH = process.env.PATH;
 
@@ -9,7 +10,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  process.env.PATH = ORIGINAL_PATH;
+  restoreEnv("PATH", ORIGINAL_PATH);
 });
 
 test("copyToClipboard returns error when no helper is available", async () => {

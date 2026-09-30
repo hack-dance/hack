@@ -16,14 +16,15 @@ import {
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const roots: string[] = [];
 const originalCI = process.env.CI;
 const originalMode = process.env.HACK_EXECUTION_MODE;
 
 afterEach(async () => {
-  process.env.CI = originalCI;
-  process.env.HACK_EXECUTION_MODE = originalMode;
+  restoreEnv("CI", originalCI);
+  restoreEnv("HACK_EXECUTION_MODE", originalMode);
   for (const root of roots.splice(0)) {
     await rm(root, { recursive: true, force: true });
   }
@@ -61,8 +62,8 @@ async function config(
 }
 
 async function fixture() {
-  process.env.CI = undefined;
-  process.env.HACK_EXECUTION_MODE = undefined;
+  Reflect.deleteProperty(process.env, "CI");
+  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
   const root = await realpath(await mkdtemp(join(tmpdir(), "hack-local-env-")));
   roots.push(root);
   const primaryRoot = join(root, "primary");
@@ -236,7 +237,7 @@ test("CI and slim execution do not inherit primary local environment", async () 
   });
   process.env.CI = "true";
   expect((await f.resolve())?.globalEnv.PRIMARY).toBeUndefined();
-  process.env.CI = undefined;
+  Reflect.deleteProperty(process.env, "CI");
   process.env.HACK_EXECUTION_MODE = "slim";
   expect((await f.resolve())?.globalEnv.PRIMARY).toBeUndefined();
 });

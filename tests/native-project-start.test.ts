@@ -291,6 +291,39 @@ test("caller cancellation is forwarded and lifecycle cleanup remains owned", asy
   expect(events).not.toContain("save");
 });
 
+test("cancellation while runtime up waits on a held lease issues no later runtime request", async () => {
+  const { opts, events } = await fixture(false);
+  const invoke = opts.dependencies.invoke!;
+  const controller = new AbortController();
+  const after: string[] = [];
+  let up: AbortSignal | undefined;
+  opts.dependencies.invoke = async (call) => {
+    if (call.args[0] === "runtime" && call.args[1] === "up") {
+      up = call.signal;
+      // The runtime is still waiting for a provider lease that another operation holds.
+      queueMicrotask(() => controller.abort());
+      await new Promise((_, reject) =>
+        call.signal?.addEventListener(
+          "abort",
+          () => reject(new Error("runtime killed while waiting")),
+          { once: true }
+        )
+      );
+    }
+    if (up) {
+      after.push(call.args.slice(0, 2).join(" "));
+    }
+    return await invoke(call);
+  };
+  await expect(
+    startNativeProject({ ...opts, signal: controller.signal })
+  ).rejects.toThrow();
+  expect(up?.aborted).toBe(true);
+  expect(after).toEqual([]);
+  expect(events.at(-1)).toBe("cleanup");
+  expect(events).not.toContain("save");
+});
+
 test("cancellation after readiness retains mapping when data is preserved", async () => {
   const { opts, events } = await fixture();
   const controller = new AbortController();

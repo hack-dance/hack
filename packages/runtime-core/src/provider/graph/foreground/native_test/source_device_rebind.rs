@@ -468,11 +468,6 @@ fn selected_source_device_rebind_restores_same_run_and_two_ordinary_generations(
         fs::read(graph_root.join("state.json")).unwrap(),
         original_ready_bytes
     );
-    fs::write(&marker_path, b"source-host-edit\n").unwrap();
-    shared_source_marker(&binary, &candidate, &run, b"source-host-edit\n", deadline);
-    fs::write(&marker_path, initial_marker).unwrap();
-    shared_source_marker(&binary, &candidate, &run, initial_marker, deadline);
-
     // The selected witness is now historical. Each later cleanup/restore takes
     // an ordinary generation and reads the same named retained data.
     for generation in 0..2 {
@@ -516,6 +511,10 @@ fn selected_source_device_rebind_restores_same_run_and_two_ordinary_generations(
             share.device
         );
     }
+    // A source edit changes the reviewed plan's metadata identity even if its
+    // bytes are changed back. Prove the live share after all pinned-plan restores.
+    fs::write(&marker_path, b"source-host-edit\n").unwrap();
+    shared_source_marker(&binary, &candidate, &run, b"source-host-edit\n", deadline);
     let removed = checked_cli(
         "remove-selected-data",
         &binary,

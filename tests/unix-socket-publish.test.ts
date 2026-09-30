@@ -326,6 +326,41 @@ test("a replacement after publication is kept when the staging name is retired",
   );
 });
 
+test("an occupied holding name is never overwritten; the next free one keeps the staging entry", async () => {
+  const directory = await privateDirectory();
+  const path = join(directory, "owner.sock");
+  const server = echoServer();
+  let staging = "";
+  let original: { ino: number; mode: number } | undefined;
+  let occupied: { ino: number; mode: number } | undefined;
+  await expect(
+    listenPublishedUnixSocket(server, path, {
+      hooks: {
+        afterBind: async (name) => {
+          staging = name;
+          await unlink(name);
+          original = await foreignFile(name);
+          await writeFile(`${name}.held-a`, "holding bytes", { mode: 0o640 });
+          const stat = await lstat(`${name}.held-a`);
+          occupied = { ino: stat.ino, mode: stat.mode & 0o777 };
+        },
+        holdingNames: (name) => [`${name}.held-a`, `${name}.held-b`],
+      },
+    })
+  ).rejects.toThrow("changed before publication");
+  expect(server.listening).toBe(false);
+  // The staging entry went to the free name for the close and came back unchanged.
+  await expectForeignFileKept(staging, original ?? { ino: 0, mode: 0 });
+  const held = await lstat(`${staging}.held-a`);
+  expect({ ino: held.ino, mode: held.mode & 0o777 }).toEqual(
+    occupied ?? { ino: 0, mode: 0 }
+  );
+  expect(await readFile(`${staging}.held-a`, "utf8")).toBe("holding bytes");
+  expect((await readdir(directory)).sort()).toEqual(
+    [basename(staging), `${basename(staging)}.held-a`].sort()
+  );
+});
+
 test("an endpoint at the AF_UNIX path limit publishes and serves, and one byte over is refused cleanly or served at its full name", async () => {
   // sun_path holds 104 bytes on macOS and 108 on Linux, including the terminating NUL.
   // Bun 1.3.9 refuses a longer path; Bun 1.4 binds it in full. Neither may truncate it

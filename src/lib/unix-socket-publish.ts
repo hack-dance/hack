@@ -1,5 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { chmod, link, lstat, unlink } from "node:fs/promises";
+import {
+  linkSync,
+  lstatSync,
+  renameSync,
+  type Stats,
+  unlinkSync,
+} from "node:fs";
 import type { Server } from "node:net";
 import { basename, dirname, join } from "node:path";
 
@@ -19,51 +25,86 @@ export class UnixSocketEndpointExists extends Error {
   }
 }
 
-function missing(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "ENOENT"
-  );
+/** Test seams between publication steps; production passes none. */
+export interface UnixSocketPublishHooks {
+  /** After this server bound the staging name and its identity was recorded. */
+  readonly afterBind?: (staging: string) => Promise<void>;
+  /** After the endpoint was linked and verified, before the staging name is retired. */
+  readonly afterLink?: (staging: string) => Promise<void>;
 }
 
-async function removeIfSame(
-  path: string,
-  identity: UnixSocketIdentity
-): Promise<void> {
-  const current = await lstat(path).catch((error: unknown) => {
-    if (missing(error)) {
+function errorCode(error: unknown): unknown {
+  return typeof error === "object" && error !== null && "code" in error
+    ? error.code
+    : undefined;
+}
+
+function entry(path: string): Stats | null {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") {
       return null;
     }
     throw error;
-  });
-  if (current && current.dev === identity.dev && current.ino === identity.ino) {
-    await unlink(path);
+  }
+}
+
+function same(
+  stat: Stats | null,
+  identity: UnixSocketIdentity | undefined
+): boolean {
+  return (
+    stat !== null &&
+    identity !== undefined &&
+    stat.dev === identity.dev &&
+    stat.ino === identity.ino
+  );
+}
+
+/** Removes `path` only while it is `identity`; the check and the removal run back to back. */
+function removeIfSame(path: string, identity: UnixSocketIdentity): void {
+  if (same(entry(path), identity)) {
+    unlinkSync(path);
   }
 }
 
 /**
- * Removes the staging name after a failed start: the socket this attempt bound (by identity once
- * known) or, before that, only a socket of this user, since the fresh private name held nothing
- * before listen.
+ * Closes `server` without letting its close-time unlink by name (Bun 1.3.14 and later, as in Node)
+ * reach an entry at the staging name that this attempt cannot prove is its own. Whatever the name
+ * holds is moved to a fresh holding name while the server closes. Afterwards this attempt's socket
+ * is removed; anything else is put back by link, which never replaces a newer entry, so its inode,
+ * bytes and mode are unchanged (if the name was taken meanwhile, it stays at the holding name).
  */
-async function removeStaging(
+async function closeKeepingStaging(
+  server: Server,
   staging: string,
   bound: UnixSocketIdentity | undefined
 ): Promise<void> {
-  const current = await lstat(staging).catch((error: unknown) => {
-    if (missing(error)) {
-      return null;
+  let held: string | undefined;
+  if (entry(staging)) {
+    const candidate = `${staging}.${randomBytes(4).toString("hex")}`;
+    if (!entry(candidate)) {
+      renameSync(staging, candidate);
+      held = candidate;
     }
-    throw error;
-  });
-  if (
-    current?.isSocket() &&
-    current.uid === process.getuid?.() &&
-    (!bound || (current.dev === bound.dev && current.ino === bound.ino))
-  ) {
-    await unlink(staging);
+  }
+  // Closing a server that never listened reports an error; either way it is closed.
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (!held) {
+    return;
+  }
+  if (bound && same(entry(held), bound)) {
+    unlinkSync(held);
+    return;
+  }
+  try {
+    linkSync(held, staging);
+    unlinkSync(held);
+  } catch (error) {
+    if (errorCode(error) !== "EEXIST") {
+      throw error;
+    }
   }
 }
 
@@ -75,28 +116,31 @@ async function removeStaging(
  * unlinks the bound path by name when the server closes, whatever that path holds by then. Binding
  * `path` directly would let a close remove a foreign replacement. Instead the server binds a fresh
  * staging name in the same directory, never longer than `path`'s own name so path-length budgets
- * hold, under an owner-only umask, and set to `mode` before publication. It is then published with link(2), which refuses an existing
- * `path` (EEXIST) rather than replacing it. The staging name is removed right away, so a
- * close-time unlink by the runtime finds nothing. `path` is removed only by the caller's
- * identity-checked cleanup, using the returned identity.
+ * hold. The socket is created with exactly `mode` (the umask during the synchronous bind), so no
+ * name is ever chmodded, and its identity is recorded in the same tick. It is published with
+ * link(2), which refuses an existing `path` (EEXIST) rather than replacing it, and the staging name
+ * is then retired only while it is still this socket. `path` is removed only by the caller's
+ * identity-checked cleanup, using the returned identity; callers keep it at once and compare every
+ * later observation of `path` against it.
  *
- * The directory must be private to this user. On any failure, including a listen that bound the
- * staging name and then failed, the server is closed, a staging socket this attempt created is
- * removed, and `path` is removed only while it still holds this server's socket. Callers keep the
- * returned identity at once and compare every later observation of `path` against it.
+ * The directory must be private to this user. On any failure the server is closed without its
+ * close-time unlink reaching an unproven staging entry, only this attempt's socket is removed, and
+ * `path` is removed only while it still holds this socket. An entry at the staging name that is
+ * not this socket, or that cannot be proven to be (an ambiguous partial bind), is kept. After a
+ * successful return the staging name is retired; an entry placed there later is outside this
+ * function, and a runtime close-time unlink by name can still reach it.
  */
 export async function listenPublishedUnixSocket(
   server: Server,
   path: string,
   options: {
-    /** Endpoint permissions, applied before publication. */
+    /** Endpoint permissions, set at creation. */
     readonly mode?: number;
-    /** Changes a mode by path; replaceable to inject a preparation failure. */
-    readonly setMode?: typeof chmod;
+    readonly hooks?: UnixSocketPublishHooks;
   } = {}
 ): Promise<UnixSocketIdentity> {
   const mode = options.mode ?? 0o600;
-  const setMode = options.setMode ?? chmod;
+  const hooks = options.hooks ?? {};
   const name = basename(path);
   const staging = join(
     dirname(path),
@@ -104,85 +148,70 @@ export async function listenPublishedUnixSocket(
       .toString("hex")
       .slice(0, Math.max(4, name.length - 1))}`
   );
-  if (
-    await lstat(staging).then(
-      () => true,
-      (error: unknown) => (missing(error) ? false : Promise.reject(error))
-    )
-  ) {
+  if (entry(staging)) {
     throw new Error("Unix socket staging name is already in use");
   }
   let bound: UnixSocketIdentity | undefined;
-  let published: UnixSocketIdentity | undefined;
+  let published = false;
   try {
     // Inside the cleanup: a runtime can create the staging socket and still fail
-    // the listen, which must not leave that socket or a listener behind.
+    // the listen, which must not leave a listener behind.
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
-      // Bun binds synchronously inside listen(); keep the socket owner-only from
-      // creation and restore the mask before any await.
+      // Bun binds synchronously inside listen(): create the socket with exactly
+      // `mode` and restore the mask before any await.
       const previousMask = process.umask();
-      process.umask(previousMask | 0o077);
+      process.umask(0o777 & ~mode);
       try {
         server.listen(staging, () => {
           server.off("error", reject);
           resolve();
         });
+        // Record what this server bound before anything else runs here.
+        const created = entry(staging);
+        if (
+          created?.isSocket() &&
+          created.uid === process.getuid?.() &&
+          (created.mode & 0o777) === mode
+        ) {
+          bound = { dev: created.dev, ino: created.ino };
+        }
       } finally {
         process.umask(previousMask);
       }
     });
-    const created = await lstat(staging);
-    if (!created.isSocket() || created.uid !== process.getuid?.()) {
+    if (!bound) {
       throw new Error(
-        "Unix socket staging endpoint changed before publication"
+        "Unix socket staging endpoint is not this server's socket"
       );
     }
-    bound = { dev: created.dev, ino: created.ino };
-    // Set the mode before publication, so the endpoint is never changed by path
-    // afterwards (a replacement there is never chmodded or adopted).
-    await setMode(staging, mode);
-    const prepared = await lstat(staging);
-    if (
-      !prepared.isSocket() ||
-      prepared.dev !== bound.dev ||
-      prepared.ino !== bound.ino ||
-      (prepared.mode & 0o777) !== mode
-    ) {
+    await hooks.afterBind?.(staging);
+    // Publish only this server's socket; the check and the link run back to back.
+    if (!same(entry(staging), bound)) {
       throw new Error(
         "Unix socket staging endpoint changed before publication"
       );
     }
     try {
-      await link(staging, path);
+      linkSync(staging, path);
     } catch (error) {
-      if (
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        error.code === "EEXIST"
-      ) {
+      if (errorCode(error) === "EEXIST") {
         throw new UnixSocketEndpointExists(path);
       }
       throw error;
     }
-    published = bound;
-    const current = await lstat(path);
-    if (
-      !current.isSocket() ||
-      current.dev !== bound.dev ||
-      current.ino !== bound.ino
-    ) {
+    published = true;
+    if (!same(entry(path), bound)) {
       throw new Error("Unix socket endpoint changed during publication");
     }
-    await unlink(staging);
-    return published;
+    await hooks.afterLink?.(staging);
+    // Retire the staging name only while it is this socket; anything else is kept.
+    removeIfSame(staging, bound);
+    return bound;
   } catch (error) {
-    // Closing a server that never listened reports an error; either way it is closed.
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await removeStaging(staging, bound);
-    if (published) {
-      await removeIfSame(path, published);
+    await closeKeepingStaging(server, staging, bound);
+    if (published && bound) {
+      removeIfSame(path, bound);
     }
     throw error;
   }

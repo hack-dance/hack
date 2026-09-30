@@ -223,19 +223,107 @@ test("a listen that binds the staging name and then fails leaves no socket or li
   expect(await readdir(directory)).toEqual([]);
 });
 
-test("a mode preparation failure publishes nothing", async () => {
+async function foreignFile(path: string) {
+  await writeFile(path, "foreign bytes", { mode: 0o644 });
+  const stat = await lstat(path);
+  return { ino: stat.ino, mode: stat.mode & 0o777 };
+}
+
+async function expectForeignFileKept(
+  path: string,
+  original: { ino: number; mode: number }
+) {
+  const stat = await lstat(path);
+  expect({ ino: stat.ino, mode: stat.mode & 0o777 }).toEqual(original);
+  expect(await readFile(path, "utf8")).toBe("foreign bytes");
+}
+
+test("an ambiguous partial bind keeps a foreign same-uid socket at the staging name", async () => {
+  const directory = await privateDirectory();
+  const path = join(directory, "control.sock");
+  const foreign = createServer((socket) => socket.end("foreign"));
+  servers.push(foreign);
+  let closed = false;
+  let original: { ino: number; mode: number } | undefined;
+  // A listen that never proves it bound anything, while a foreign socket takes the name.
+  const partial = Object.assign(new EventEmitter(), {
+    listen(staging: string) {
+      setTimeout(() => {
+        foreign.listen(staging, async () => {
+          const stat = await lstat(staging);
+          original = { ino: stat.ino, mode: stat.mode & 0o777 };
+          partial.emit("error", new Error("injected ambiguous bind failure"));
+        });
+      }, 10);
+      return partial;
+    },
+    close(callback?: () => void) {
+      closed = true;
+      callback?.();
+      return partial;
+    },
+  });
+  await expect(
+    listenPublishedUnixSocket(partial as unknown as Server, path)
+  ).rejects.toThrow("injected ambiguous bind failure");
+  expect(closed).toBe(true);
+  const [staging] = (await readdir(directory)).filter((name) =>
+    name.startsWith(".")
+  );
+  expect(staging).toBeDefined();
+  const stat = await lstat(join(directory, staging ?? ""));
+  expect({ ino: stat.ino, mode: stat.mode & 0o777 }).toEqual(
+    original ?? { ino: 0, mode: 0 }
+  );
+  expect(await reply(join(directory, staging ?? ""))).toBe("foreign");
+  expect(await readdir(directory)).toEqual([staging ?? ""]);
+});
+
+test("a replacement after bind is refused and kept: never chmodded, adopted or removed", async () => {
   const directory = await privateDirectory();
   const path = join(directory, "owner.sock");
   const server = echoServer();
+  let staging = "";
+  let original: { ino: number; mode: number } | undefined;
   await expect(
     listenPublishedUnixSocket(server, path, {
-      setMode: async () => {
-        throw new Error("injected mode failure");
+      hooks: {
+        afterBind: async (name) => {
+          staging = name;
+          await unlink(name);
+          original = await foreignFile(name);
+        },
       },
     })
-  ).rejects.toThrow("injected mode failure");
+  ).rejects.toThrow("changed before publication");
   expect(server.listening).toBe(false);
-  expect(await readdir(directory)).toEqual([]);
+  // The helper's own server close could not remove it either.
+  await expectForeignFileKept(staging, original ?? { ino: 0, mode: 0 });
+  expect(await readdir(directory)).toEqual([basename(staging)]);
+});
+
+test("a replacement after publication is kept when the staging name is retired", async () => {
+  const directory = await privateDirectory();
+  const path = join(directory, "mcp.sock");
+  const server = echoServer();
+  let staging = "";
+  let original: { ino: number; mode: number } | undefined;
+  const identity = await listenPublishedUnixSocket(server, path, {
+    hooks: {
+      afterLink: async (name) => {
+        staging = name;
+        await unlink(name);
+        original = await foreignFile(name);
+      },
+    },
+  });
+  const stat = await lstat(path);
+  expect({ dev: stat.dev, ino: stat.ino }).toEqual(identity);
+  expect(await reply(path)).toBe("ok");
+  await expectForeignFileKept(staging, original ?? { ino: 0, mode: 0 });
+  expect((await readdir(directory)).sort()).toEqual(
+    [basename(staging), "mcp.sock"].sort()
+  );
 });
 
 test("an endpoint at the AF_UNIX path limit publishes and serves, and one byte over is refused cleanly or served at its full name", async () => {

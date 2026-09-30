@@ -11,10 +11,21 @@ use std::{
 
 pub(super) fn ready(owner: &mut Process, run: &str, deadline: Instant) {
     loop {
-        assert!(
-            owner.poll().is_none(),
-            "foreground owner exited before ready"
-        );
+        if let Some(status) = owner.poll() {
+            let error: Option<Value> = serde_json::from_slice(&owner.err).ok();
+            let code = error
+                .as_ref()
+                .and_then(|value| value["code"].as_str())
+                .unwrap_or("unstructured");
+            let cause_code = error
+                .as_ref()
+                .and_then(|value| value["cause_code"].as_str())
+                .unwrap_or("none");
+            panic!(
+                "foreground owner exited before ready: status={:?}, code={code}, cause_code={cause_code}",
+                status.code()
+            );
+        }
         if let Some(end) = owner.out.iter().position(|byte| *byte == b'\n') {
             let value: Value = serde_json::from_slice(&owner.out[..end]).unwrap();
             assert_eq!(value["kind"], "graph_foreground_ready");

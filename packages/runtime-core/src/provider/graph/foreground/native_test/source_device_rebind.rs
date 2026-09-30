@@ -146,30 +146,6 @@ fn selected_source_device_rebind_restores_same_run_and_two_ordinary_generations(
     )
     .unwrap();
     let normalized = project.join("compose.yaml");
-    let publication = checked_cli(
-        "publish-source",
-        &binary,
-        &candidate,
-        &[
-            "project",
-            "publish-source",
-            "--project",
-            project.to_str().unwrap(),
-            "--file",
-            "compose.yaml",
-            "--expect-plan",
-            &review.plan_id,
-            "--normalized-file",
-            normalized.to_str().unwrap(),
-            "--expect-original",
-            &review.plan.compose_sha256,
-            "--expect-namespace",
-            &review.plan.namespace,
-            "--json",
-        ],
-        deadline,
-    );
-    let revision = publication["revision"].as_str().unwrap();
     let dependencies_path = fixture.0.join("dependencies.json");
     state::write(
         &dependencies_path,
@@ -215,8 +191,6 @@ fn selected_source_device_rebind_restores_same_run_and_two_ordinary_generations(
             dependencies_path.to_str().unwrap(),
             "--expect-dependencies",
             dependency["dependency_plan_id"].as_str().unwrap(),
-            "--source-revision",
-            revision,
             "--shared-source",
             "--normalized-file",
             normalized.to_str().unwrap(),

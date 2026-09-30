@@ -200,6 +200,35 @@ directory itself during reboot, this command refuses: the old pin receipts no
 longer exist, and absent pathnames cannot stand in for their recorded owner
 identities. That case requires a separate selected absence-recovery procedure.
 
+When a **physical host reboot** removed both the deterministic foreground
+publication root and this run's relay-control root, inspect the distinct
+absence path with the private original provider Owner and its exact
+pre-migration host-filesystem inspection:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph inspect-absent-publication-cleanup --run-id <run-id> --original-owner-file <private-original-owner.json> --host-inspection-file <private-inspection.json> --json
+./hack-native --candidate-root /absolute/private/candidate-home graph recover-absent-publication-cleanup --run-id <run-id> --original-owner-file <private-original-owner.json> --host-inspection-file <private-inspection.json> --expect-selection <selection_sha256> --retain-data --accept-unpinned-post-reboot --json
+```
+
+Inspection does not create a publication root. A failed selected action can
+leave only its private lock reservation; inspection recognizes that exact
+lock-only state. Recovery locks the foreground publication before acquiring
+the VM lease, then durably records the selected absence before any cleanup.
+It retains volumes, verifies the stopped receipt, and records a separate
+absent-publisher retirement. Ordinary publication and cleanup cannot infer
+ownership from missing paths. The old foreground PID and original physical
+volume are not proved by legacy graph receipts; this path requires explicit
+acceptance of that post-reboot limitation and refuses a changed boot, present
+or foreign publication, stale selection, pending state, or changed resources.
+An interrupted recovery can resume only its exact selected intent on the same
+host and immediate guest boot. A later successful restore treats this witness
+as history; it never grants cleanup of the new generation.
+
+This operation does not change historical shared-source device identity.
+Source-mounted projects require the separate selected source-continuity step
+before normal same-run restore. The command's stopped/data-retained result is
+not proof of application startup or routing.
+
 Compatibility is qualified for specific bundle hashes and state formats. The
 displayed version alone does not establish frontend/executor or downgrade
 compatibility. V4 and candidate homes remain separate; this procedure does not

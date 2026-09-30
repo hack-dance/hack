@@ -583,7 +583,8 @@ enter the admitted summaries and the paired pair and cohort ratios. `--summarize
 recomputes the summary from a retained raw file without running anything. Cleanup stops each
 pool and removes only the trial's home and provider alias, with a readback. Store raw output
 outside the repository. The negative controls run with
-`python3 -m unittest discover -s tests/python -p test_prepared_base_benchmark.py`.
+`python3 -m unittest discover -s tests/python -p test_prepared_base_benchmark.py`, locally and
+in CI's runtime state models job.
 
 This measures pool creation and a synthetic single-service graph. Worktree cohorts add real
 linked-worktree roots through the runtime interface, one pool per root. They do not exercise

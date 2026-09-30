@@ -473,11 +473,13 @@ class Trial:
         }
 
     def disks(self):
-        libc = Libc()
         # The pool's provider HOME holds each machine's disks under SmolVM's cache directory.
         vms = self.home.joinpath(".hack-local", "run", "smolvm", "home", "Library", "Caches", "smolvm", "vms")
+        disks = sorted(vms.glob("*/*.raw"))
+        # macOS-only; loaded only when there are disks to measure.
+        libc = Libc() if disks else None
         result = {}
-        for disk in sorted(vms.glob("*/*.raw")):
+        for disk in disks:
             stat = disk.stat()
             result[disk.name] = {"logical": stat.st_size, "allocated": stat.st_blocks * 512, "private": libc.private_bytes(disk)}
         return result
@@ -988,8 +990,11 @@ def main():
             + (2 * len(sizes) * args.cohort_repeats if "cohort" in modes else 0)
             + (args.concurrent if "concurrent" in modes else 0)
             + 2 * sum(worktree_sizes) * args.worktree_repeats}
-    probe = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True)
-    host_memory = int(probe.stdout) if probe.returncode == 0 and probe.stdout.strip().isdigit() else None
+    try:
+        probe = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True)
+    except OSError:
+        probe = None
+    host_memory = int(probe.stdout) if probe and probe.returncode == 0 and probe.stdout.strip().isdigit() else None
     if worktree_sizes:
         plan["worktrees"] = worktree_plan(worktree_sizes, args.worktree_repeats, args.worktree_parallel,
                                           args.profile, host_memory)

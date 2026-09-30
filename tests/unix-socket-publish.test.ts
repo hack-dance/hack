@@ -1,7 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import {
   chmod,
   lstat,
+  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -96,7 +98,7 @@ test("a published endpoint serves clients, survives close and is removed only by
   expect(await readdir(directory)).toEqual(["mcp.sock"]);
   const stat = await lstat(path);
   expect(stat.isSocket()).toBe(true);
-  expect(stat.mode & 0o777 & 0o077).toBe(0);
+  expect(stat.mode & 0o777).toBe(0o600);
   expect({ dev: stat.dev, ino: stat.ino }).toEqual(identity);
   expect(await reply(path)).toBe("ok");
   await close(server);
@@ -191,4 +193,80 @@ test("a startup that cannot bind creates nothing", async () => {
   await expect(listenPublishedUnixSocket(server, path)).rejects.toThrow();
   expect(server.listening).toBe(false);
   expect(await readdir(directory)).toEqual([]);
+});
+
+test("a listen that binds the staging name and then fails leaves no socket or listener", async () => {
+  const directory = await privateDirectory();
+  const path = join(directory, "control.sock");
+  const inner = createServer();
+  servers.push(inner);
+  let closed = false;
+  // A runtime that creates the staging socket and then reports a listen error.
+  const partial = Object.assign(new EventEmitter(), {
+    listen(staging: string) {
+      inner.listen(staging, () => {
+        partial.emit("error", new Error("injected failure after bind"));
+      });
+      return partial;
+    },
+    close(callback?: () => void) {
+      closed = true;
+      inner.close(() => callback?.());
+      return partial;
+    },
+  });
+  await expect(
+    listenPublishedUnixSocket(partial as unknown as Server, path)
+  ).rejects.toThrow("injected failure after bind");
+  expect(closed).toBe(true);
+  expect(inner.listening).toBe(false);
+  expect(await readdir(directory)).toEqual([]);
+});
+
+test("a mode preparation failure publishes nothing", async () => {
+  const directory = await privateDirectory();
+  const path = join(directory, "owner.sock");
+  const server = echoServer();
+  await expect(
+    listenPublishedUnixSocket(server, path, {
+      setMode: async () => {
+        throw new Error("injected mode failure");
+      },
+    })
+  ).rejects.toThrow("injected mode failure");
+  expect(server.listening).toBe(false);
+  expect(await readdir(directory)).toEqual([]);
+});
+
+test("an endpoint at the AF_UNIX path limit publishes and serves, and one byte over is refused cleanly or served at its full name", async () => {
+  // sun_path holds 104 bytes on macOS and 108 on Linux, including the terminating NUL.
+  // Bun 1.3.9 refuses a longer path; Bun 1.4 binds it in full. Neither may truncate it
+  // or leave a partial staging entry.
+  const limit = process.platform === "darwin" ? 103 : 107;
+  const name = "mcp.sock";
+  for (const extra of [0, 1]) {
+    const directory = await privateDirectory();
+    const fill = limit - Buffer.byteLength(directory) - 2 - name.length + extra;
+    expect(fill).toBeGreaterThan(0);
+    const parent = join(directory, "d".repeat(fill));
+    await mkdir(parent, { mode: 0o700 });
+    const path = join(parent, name);
+    expect(Buffer.byteLength(path)).toBe(limit + extra);
+    const server = echoServer();
+    const identity = await listenPublishedUnixSocket(server, path).catch(
+      () => null
+    );
+    if (identity) {
+      const stat = await lstat(path);
+      expect({ dev: stat.dev, ino: stat.ino }).toEqual(identity);
+      expect(await reply(path)).toBe("ok");
+      expect(await readdir(parent)).toEqual([name]);
+      await close(server);
+      await removeOwned(path, identity);
+    } else {
+      expect(extra).toBe(1);
+      expect(server.listening).toBe(false);
+    }
+    expect(await readdir(parent)).toEqual([]);
+  }
 });

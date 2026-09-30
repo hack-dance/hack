@@ -4,11 +4,70 @@ use std::{
     fs,
     os::{
         fd::AsRawFd,
-        unix::{fs::MetadataExt, net::UnixListener},
+        unix::{
+            fs::{DirBuilderExt, MetadataExt},
+            net::UnixListener,
+        },
     },
     path::PathBuf,
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
 };
+
+static NEXT_POOL: AtomicU64 = AtomicU64::new(0);
+
+fn pool_directory(timestamp: u128) -> PathBuf {
+    fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!(
+            "hack-home-recovery-{}-{timestamp}-{}",
+            std::process::id(),
+            NEXT_POOL.fetch_add(1, Ordering::Relaxed)
+        ))
+}
+
+fn create_pool_directory(path: &std::path::Path) -> std::io::Result<()> {
+    fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+#[test]
+fn parallel_pool_roots_are_unique_at_the_same_timestamp_and_never_adopt() {
+    let paths: Vec<_> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..16)
+            .map(|_| {
+                scope.spawn(|| {
+                    let path = pool_directory(123);
+                    create_pool_directory(&path).unwrap();
+                    path
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    assert_eq!(
+        paths
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        16
+    );
+    for path in paths {
+        let before = fs::symlink_metadata(&path).unwrap();
+        assert_eq!(before.mode() & 0o777, 0o700);
+        fs::write(path.join("marker"), b"owned fixture").unwrap();
+        assert_eq!(
+            create_pool_directory(&path).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::symlink_metadata(&path).unwrap().ino(), before.ino());
+        assert_eq!(fs::read(path.join("marker")).unwrap(), b"owned fixture");
+        fs::remove_file(path.join("marker")).unwrap();
+        fs::remove_dir(path).unwrap();
+    }
+}
 
 struct Pool {
     candidate: Candidate,
@@ -21,17 +80,13 @@ impl Pool {
         let mut process = identity::observe(child.id() as i32).unwrap();
         child.kill().unwrap();
         child.wait().unwrap();
-        let directory = fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!(
-                "hack-home-recovery-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-        state::private_directory(&directory).unwrap();
+        let directory = pool_directory(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        );
+        create_pool_directory(&directory).unwrap();
         let candidate = Candidate::discover(&directory).unwrap();
         let operation = state::Lock::acquire(&root(&candidate)).unwrap();
         let mut owner = Owner::create(

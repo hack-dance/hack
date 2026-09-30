@@ -13,6 +13,7 @@ import type { acquireNativeHttpsLease } from "../src/backends/native-https-owner
 import { beginNativeProjectFinalization } from "../src/backends/native-project-finalization.ts";
 import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
 import { preflightNativeRestart } from "../src/backends/native-project-restart-preflight.ts";
+import { selectNativeRetainedImages } from "../src/backends/native-project-retained-images.ts";
 import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
 import {
   parseNativeHttpsSelection,
@@ -50,6 +51,7 @@ async function fixture(withEnvironment = true) {
     Parameters<typeof startNativeProject>[0]["dependencies"]
   > = {
     prepareStorage: async () => {},
+    retainedImages: async () => new Map(),
     load: async () => null,
     loadRestart: async () => null,
     save: async () => {
@@ -2049,4 +2051,65 @@ test("retained startup selects legacy labels only after runtime admission and be
       expect(reviewed).toBe(true);
     }
   }
+});
+
+test("retained startup reviews the saved content ID instead of a newly resolved mutable tag", async () => {
+  const { opts, events } = await fixture(false);
+  const saved = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+  };
+  const image = `sha256:${"e".repeat(64)}`;
+  const stopped = stoppedGraph(saved);
+  const observed = {
+    ...stopped,
+    receipt: {
+      ...stopped.receipt,
+      normalized_input: {
+        namespace: saved.namespace,
+        original_compose_sha256: "d".repeat(64),
+        normalized_compose_sha256: "f".repeat(64),
+      },
+      resources: {
+        "container:web": {
+          ...stopped.receipt.resources["container:web"],
+          image,
+        },
+      },
+    },
+  };
+  opts.dependencies.retainedImages = selectNativeRetainedImages;
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: { web: { image: "redis:latest" } },
+    }),
+  });
+  const invoke = opts.dependencies.invoke!;
+  let beforeReview = true;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-image") {
+      throw new Error("mutable tag was unexpectedly resolved");
+    }
+    if (request.args[1] === "inspect" && beforeReview) {
+      expect(events).toContain("runtime up");
+      return observed;
+    }
+    if (request.args[1] === "restore-selection") {
+      return { ...saved, plan: saved.planId, generation: "2".repeat(64) };
+    }
+    return await invoke(request);
+  };
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) => {
+    beforeReview = false;
+    expect(
+      JSON.parse(request.input.normalizedComposeJson).services.web.image
+    ).toBe(image);
+    return await review(request);
+  };
+  expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
 });

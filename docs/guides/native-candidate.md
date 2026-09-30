@@ -360,6 +360,12 @@ and route selections.
 Normal foreground `hack restart` performs this selection and retained-data restore.
 It verifies the old containers and networks are absent and the retained volumes
 still have their recorded identities; it does not silently create replacement data.
+When the original Compose file is unchanged, retained startup also selects the
+authenticated container image IDs from that stopped graph. Mutable tags are not
+resolved again for those services. Missing images still refuse native admission;
+this selection never replaces generation, source or resource checks. Changing the
+original Compose file uses normal image resolution and the existing compatibility
+rules, rather than silently adopting an old image for a new declaration.
 For a shared-source graph admitted with a retained compatibility contract, ordinary
 source-content edits may change the reviewed plan ID: restart checks the stable
 execution, exclusion, mount and dependency-cache inputs before cleanup and again

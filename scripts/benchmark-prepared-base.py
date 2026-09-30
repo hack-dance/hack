@@ -11,8 +11,13 @@ Modes:
               restore and persistent readback (the prepared base only changes pool creation).
   cohort      N registered graphs in ONE shared pool per lane (N from --cohorts), started with
               bounded parallelism; distinct per-graph data. Normal source-mounted worktree
-              startup is out of scope.
+              startup is the `worktrees` mode.
   concurrent  K pools created at once from one base; distinct identities and data.
+  worktrees   N real linked Git worktrees of one harness-owned repository (N from --worktrees),
+              each on its own branch and exactly shared with its own fresh pool, because a pool
+              cannot add a different source root. Each graph serves its worktree through the
+              share. The mode checks pool, namespace, data and live-source isolation, then
+              restarts every pool and requires its data and source back.
 
 Timing admission is observed at the start and end of each trial's timed work and every
 --admission-interval seconds in between. A sample is flagged when build tools run, the 1-minute
@@ -60,10 +65,47 @@ volumes:
   data: {{}}
 """
 TOKEN = re.compile(r"^[0-9a-f]{32}$")
+# The committed fixture compose names no pullable image; each worktree's copy is rewritten
+# with the ensured image ID before planning.
+WORKTREE_COMPOSE = """services:
+  web:
+    image: {image_id}
+    restart: "no"
+    network_mode: none
+    command:
+      - sh
+      - -c
+      - test -s /data/token || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \\n' > /data/token; exec httpd -f -p 8080 -h /workspace
+    volumes:
+      - .:/workspace
+      - data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/branch.txt"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+volumes:
+  data: {{}}
+"""
+PLACEHOLDER_IMAGE = "sha256:" + "0" * 64
+# Configured guest maxima per pool, from Profile::memory_mib and Profile::cpus in
+# packages/runtime-core/src/provider/profile.rs; plan metadata, not measured use. A project
+# share requires `development`.
+GUEST_MEMORY_MIB = {"research": 2048, "development": 6144}
+GUEST_CPUS = {"research": 2, "development": 4}
+# The runtime refuses project shares below these components (a Codex worktree only at its
+# exact registered path), so fixture roots must avoid them.
+SENSITIVE_COMPONENTS = {".codex", ".aws", ".ssh", ".gnupg", ".config"}
 
 
 class Failure(RuntimeError):
     pass
+
+
+def healthy(body):
+    """A run or restore receipt records the requested readiness goals; the command itself
+    succeeds only once they hold. Both are required."""
+    return (body.get("readiness") or {}).get("web") == "healthy"
 
 
 def sha256(path):
@@ -134,6 +176,119 @@ def allocated(root):
             except FileNotFoundError:
                 pass
     return total
+
+
+def git(*argv):
+    """Run Git without system or global configuration, templates, hooks or signing."""
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/"),
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "LC_ALL": "C"}
+    result = subprocess.run(
+        ["git", "-c", "init.templateDir=", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+         "-c", "user.name=Hack benchmark", "-c", "user.email=benchmark@example.invalid", *argv],
+        env=env, capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        raise Failure(f"git {' '.join(argv)[:160]}: {result.stderr.strip()[-300:]}")
+    return result.stdout.strip()
+
+
+class Worktrees:
+    """A harness-owned repository with `count` linked worktrees. Each is an ordinary
+    `git worktree add` checkout on its own branch with a committed random marker; all share one
+    common Git directory, and only each exact worktree root is shared with its own pool."""
+
+    def __init__(self, root, count):
+        self.dir = Path(root).resolve() / f"worktrees{count:02d}-{secrets.token_hex(3)}"
+        self.repo = self.dir / "repo"
+        self.count = count
+        self.entries = []
+
+    def create(self):
+        self.dir.mkdir(mode=0o700)
+        git("init", "--quiet", "--initial-branch=main", str(self.repo))
+        (self.repo / "compose.yaml").write_text(WORKTREE_COMPOSE.format(image_id=PLACEHOLDER_IMAGE))
+        git("-C", str(self.repo), "add", "compose.yaml")
+        git("-C", str(self.repo), "commit", "--quiet", "-m", "fixture")
+        for index in range(self.count):
+            root, branch, marker = self.dir / f"w{index:02d}", f"wt-{index:02d}", secrets.token_hex(16)
+            git("-C", str(self.repo), "worktree", "add", "--quiet", "-b", branch, str(root), "main")
+            # The runtime refuses a share that other users can write.
+            root.chmod(0o700)
+            (root / "branch.txt").write_text(marker)
+            git("-C", str(root), "add", "branch.txt")
+            git("-C", str(root), "commit", "--quiet", "-m", branch)
+            self.entries.append({"root": root, "branch": branch, "marker": marker,
+                                 "head": git("-C", str(root), "rev-parse", "HEAD")})
+        return self.entries
+
+    def provenance(self):
+        """Git's own view of the fixture: registered roots and branches, distinct heads, and the
+        number of common directories (one for real linked worktrees)."""
+        registered, current = {}, None
+        for line in git("-C", str(self.repo), "worktree", "list", "--porcelain").splitlines():
+            if line.startswith("worktree "):
+                current = line[len("worktree "):]
+            elif line.startswith("branch refs/heads/") and current:
+                registered[current] = line[len("branch refs/heads/"):]
+        common = {git("-C", str(e["root"]), "rev-parse", "--path-format=absolute", "--git-common-dir")
+                  for e in self.entries}
+        return {
+            "registered": sum(registered.get(str(e["root"])) == e["branch"] for e in self.entries),
+            "roots": len({str(e["root"]) for e in self.entries}),
+            "branches": len({e["branch"] for e in self.entries}),
+            "heads": len({e["head"] for e in self.entries}),
+            "common_dirs": len(common),
+            "checkout_allocated_bytes": allocated(self.dir),
+        }
+
+    def cleanup(self, pools_disposed):
+        """Remove the fixture only after every pool that could mount one of its roots is
+        confirmed disposed; otherwise keep every root, its registration and its source for
+        diagnosis. A process listing without the path is an extra refusal, never proof."""
+        if not self.dir.exists():
+            return {"removed": True, "created": False}
+        if not pools_disposed:
+            return {"preserved": str(self.dir), "error": "an owned pool was not confirmed disposed"}
+        listing = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,args="], capture_output=True, text=True)
+        if listing.returncode != 0 or str(self.dir) in listing.stdout:
+            return {"preserved": str(self.dir), "error": "a process may still reference this fixture"}
+        shutil.rmtree(self.dir)
+        return {"removed": not self.dir.exists()}
+
+
+def each(function, count, workers):
+    """Call `function(i)` for every index with bounded parallelism. Every call settles before the
+    first failure is raised, so cleanup never races a start still in flight."""
+    results, errors = [None] * count, []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(function, index): index for index in range(count)}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                results[futures[future]] = future.result()
+            except Failure as error:
+                errors.append((futures[future], str(error)))
+    if errors:
+        raise Failure("; ".join(f"{index}: {error}" for index, error in sorted(errors))[:1500])
+    return results
+
+
+SEEN_BASES, SEEN_LOCK = set(), threading.Lock()
+
+
+def provenance(body, lane, start):
+    """Where a pool's first-start disks came from, and whether this start created the pool
+    (`cold`) or restarted a retained one (`warm`). Host caches are never purged, so `base_use`
+    says only whether this harness process had cloned the same base before."""
+    prepared = body.get("prepared_base") or {}
+    selection = prepared.get("selection") or {}
+    base = selection.get("base_id")
+    use = None
+    if start == "cold" and base:
+        with SEEN_LOCK:
+            use = "repeat-in-run" if base in SEEN_BASES else "first-in-run"
+            SEEN_BASES.add(base)
+    return {"start": start, "lane": lane, "source": selection.get("source") or "stock", "base_id": base,
+            "reason": selection.get("reason"), "activation": prepared.get("activation"), "base_use": use}
 
 
 def admission_from(load, names, pressure, cpus):
@@ -292,8 +447,10 @@ class Trial:
         ):
             self.step(f"setup_{name}", *argv, json_output=False)
 
-    def up(self, name, lane):
+    def up(self, name, lane, share=None):
         argv = ["runtime", "up", "--profile", self.args.profile]
+        if share:
+            argv += ["--project-share", str(share), "--unfiltered-source"]
         if lane == "prepared":
             argv += ["--prepared-base", "require", "--prepared-base-store", self.args.store]
         body = self.step(name, *argv, timeout=600, check=lambda b: b.get("phase") == "running")
@@ -306,26 +463,46 @@ class Trial:
         return body
 
     def provider(self, body):
-        resources = (body.get("provider_resources") or {}).get("processes") or []
-        binary = str(self.home / ".hack-local/providers")
-        own = [p for p in resources if str(p["identity"]["executable"]).startswith(binary)]
+        """The provider tree the runtime returned (its identity-bound root and current
+        descendants, whatever their executables), each process counted once. The tree must
+        contain this home's provider binary. It holds only processes live at the snapshot,
+        while each command's wait4 CPU covers only its terminated, reaped children, so adding
+        the two never counts a process twice."""
+        returned = (body.get("provider_resources") or {}).get("processes") or []
+        tree = list({(p["identity"]["pid"], p["identity"]["start_micros"]): p for p in returned}.values())
+        binary = str(self.home / ".hack-local/providers") + "/"
+        own = [p for p in tree if str(p["identity"]["executable"]).startswith(binary)]
         if not own:
             return {}
-        cpu = sum(p["user_cpu_nanoseconds"] + p["system_cpu_nanoseconds"] for p in own) / 1e9
-        peak = Libc().peak_footprint(own[0]["identity"]["pid"])
+        cpu = sum(p["user_cpu_nanoseconds"] + p["system_cpu_nanoseconds"] for p in tree) / 1e9
+        try:
+            libc = Libc()
+            peaks = [libc.peak_footprint(p["identity"]["pid"]) for p in tree]
+        except OSError:
+            peaks = [None]
+        memory = body.get("guest_memory_mib")
+        # Resident size and physical footprint are measured; the guest's configured maximum is
+        # not. They are reported side by side, never added together.
         return {
             "vm_identity": [own[0]["identity"]["pid"], own[0]["identity"]["start_micros"]],
+            "tree_processes": len(tree),
+            "tree_helpers": len(tree) - len(own),
             "vm_cpu_s": round(cpu, 3),
-            "vm_footprint_bytes": sum(p["physical_footprint_bytes"] for p in own),
-            "vm_peak_footprint_bytes": peak,
+            "vm_resident_bytes": sum(p["resident_bytes"] for p in tree),
+            "vm_footprint_bytes": sum(p["physical_footprint_bytes"] for p in tree),
+            # Per-process lifetime peaks need not coincide: an upper bound on the tree's peak.
+            "vm_peak_footprint_bytes": total(peaks),
+            "guest_memory_configured_bytes": None if memory is None else memory << 20,
         }
 
     def disks(self):
-        libc = Libc()
         # The pool's provider HOME holds each machine's disks under SmolVM's cache directory.
         vms = self.home.joinpath(".hack-local", "run", "smolvm", "home", "Library", "Caches", "smolvm", "vms")
+        disks = sorted(vms.glob("*/*.raw"))
+        # macOS-only; loaded only when there are disks to measure.
+        libc = Libc() if disks else None
         result = {}
-        for disk in sorted(vms.glob("*/*.raw")):
+        for disk in disks:
             stat = disk.stat()
             result[disk.name] = {"logical": stat.st_size, "allocated": stat.st_blocks * 512, "private": libc.private_bytes(disk)}
         return result
@@ -336,20 +513,26 @@ class Trial:
         (project / "compose.yaml").write_text(COMPOSE.format(image_id=image_id))
         return project
 
-    def graph(self, project, prefix):
+    def graph(self, project, prefix, branch=None, shared_source=False):
         compose = str(project / "compose.yaml")
-        plan = self.step(f"{prefix}plan", "project", "plan", "--project", str(project), "--file", compose)["plan_id"]
+        selector = ["--branch", branch] if branch else []
+        plan = self.step(f"{prefix}plan", "project", "plan", "--project", str(project), *selector, "--file", compose)
         run = secrets.token_hex(16)
         self.step(
-            f"{prefix}run", "graph", "run", "--project", str(project), "--file", compose, "--expect-plan", plan,
-            "--run-id", run, "--ready", "web=healthy", "--timeout-seconds", "120", timeout=180,
-            check=lambda b: (b.get("readiness") or {}).get("web") == "healthy",
+            f"{prefix}run", "graph", "run", "--project", str(project), *selector, "--file", compose,
+            "--expect-plan", plan["plan_id"], "--run-id", run, *(["--shared-source"] if shared_source else []),
+            "--ready", "web=healthy", "--timeout-seconds", "120", timeout=180, check=healthy,
         )
-        return {"project": project, "compose": compose, "plan": plan, "run": run, "token": self.token(run, f"{prefix}token")}
+        return {"project": project, "compose": compose, "plan": plan["plan_id"],
+                "namespace": (plan.get("plan") or {}).get("namespace"), "run": run,
+                "token": self.token(run, f"{prefix}token")}
+
+    def read(self, run, path, name):
+        body = self.step(name, "graph", "exec", "--run-id", run, "--service", "web", "--", "/bin/cat", path)
+        return base64.b64decode(body.get("stdout_base64") or "").decode()
 
     def token(self, run, name):
-        body = self.step(name, "graph", "exec", "--run-id", run, "--service", "web", "--", "/bin/cat", "/data/token")
-        value = base64.b64decode(body.get("stdout_base64") or "").decode()
+        value = self.read(run, "/data/token", name)
         if not TOKEN.match(value):
             raise Failure(f"{name}: unexpected token {value!r}")
         return value
@@ -373,6 +556,11 @@ class Trial:
             result["down"] = body.get("phase") or body.get("code")
             if code != 0:
                 result["error"] = f"down failed: {json.dumps(body)[:300]}"
+                return result
+            # The runtime's identity-checked readback, not a process listing, proves the VM stopped.
+            code, body, _, _ = self.cli("runtime", "status")
+            if code != 0 or body.get("process_alive") is not False:
+                result["error"] = f"pool not confirmed stopped after down: {json.dumps(body)[:300]}"
                 return result
         running = subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True).stdout
         if str(self.dir) in running:
@@ -407,7 +595,7 @@ def pair_trial(args, index, lane):
         trial.step(
             "restore", "graph", "restore", "--project", str(graph["project"]), "--file", graph["compose"],
             "--expect-plan", graph["plan"], "--run-id", graph["run"], "--ready", "web=healthy",
-            "--timeout-seconds", "120", timeout=180,
+            "--timeout-seconds", "120", timeout=180, check=healthy,
         )
         if trial.token(graph["run"], "restore_token") != graph["token"]:
             raise Failure("persistent token changed across restart")
@@ -501,6 +689,157 @@ def concurrent_trial(args, count):
     return record
 
 
+def pool_resources(pools, statuses):
+    """Cohort totals from one reading per pool, taken in turn rather than at one instant. A
+    total is null when any pool's value is unobserved.
+    `cli_cpu_s` covers every timed command so far (excluding setup); `vm_cpu_s` is each live
+    VM process's CPU since it started."""
+    vms = [pool.provider(status) for pool, status in zip(pools, statuses)]
+    disks = [pool.disks() for pool in pools]
+    cli = total(v.get("cli_cpu_s") for pool in pools for k, v in pool.samples.items() if not k.startswith("setup_"))
+    vm = total(v.get("vm_cpu_s") for v in vms)
+    return {
+        "cli_cpu_s": cli,
+        "vm_cpu_s": vm,
+        "cpu_attributed_s": total([cli, vm]),
+        "vm_resident_bytes": total(v.get("vm_resident_bytes") for v in vms),
+        "vm_footprint_bytes": total(v.get("vm_footprint_bytes") for v in vms),
+        # Lifetime peaks need not coincide: an upper bound, not a simultaneous cohort peak.
+        "vm_peak_footprint_sum_bytes": total(v.get("vm_peak_footprint_bytes") for v in vms),
+        "guest_memory_configured_bytes": total(v.get("guest_memory_configured_bytes") for v in vms),
+        "disk_allocated_bytes": total(total(d.get("allocated") for d in disk.values()) for disk in disks),
+        "disk_private_bytes": total(total(d.get("private") for d in disk.values()) for disk in disks),
+        # Everything under each home, VM disks included, so it overlaps the disk totals. Block
+        # counts are not clone-aware; clone-private bytes are.
+        "homes_allocated_bytes": total(allocated(pool.dir) for pool in pools),
+        "vms": vms,
+    }
+
+
+def worktree_trial(args, size, repeat, lane):
+    """`size` linked worktrees, each exactly shared with its own fresh pool in its own private
+    home, started `--worktree-parallel` at a time. Setup (provider, engine and network tools
+    per home) is untimed."""
+    fixture = Worktrees(args.root, size)
+    pools = [Trial(args, f"wt{size:02d}r{repeat}-{lane}-{index:02d}") for index in range(size)]
+    record = {"mode": "worktrees", "size": size, "repeat": repeat, "lane": lane, "home": str(fixture.dir),
+              "homes": [str(pool.dir) for pool in pools]}
+    sampler = None
+    try:
+        entries = fixture.create()
+        for pool in pools:
+            pool.setup()
+        record["admission"] = admission()
+        sampler = Sampler(args.admission_interval).start()
+        started = time.monotonic()
+
+        def start(index):
+            pool, entry = pools[index], entries[index]
+            body = pool.up("up", lane, share=entry["root"])
+            image = pool.step("ensure_image", "runtime", "ensure-image", "--reference", args.image, timeout=600)
+            (entry["root"] / "compose.yaml").write_text(WORKTREE_COMPOSE.format(image_id=image["image_id"]))
+            graph = pool.graph(entry["root"], "", branch=entry["branch"], shared_source=True)
+            if pool.read(graph["run"], "/workspace/branch.txt", "marker") != entry["marker"]:
+                raise Failure(f"worktree {index} did not serve its own committed marker")
+            return {"graph": graph, "provenance": provenance(body, lane, "cold"),
+                    "ready_s": round(time.monotonic() - started, 3)}
+
+        ready = each(start, size, args.worktree_parallel)
+        record["all_ready_s"] = round(time.monotonic() - started, 3)
+        record["ready_offsets_s"] = sorted(r["ready_s"] for r in ready)
+        record["provenance"] = [r["provenance"] for r in ready]
+        observed_from = round(time.monotonic() - started, 3)
+        statuses = [pool.status() for pool in pools]
+        record["resources"] = pool_resources(pools, statuses)
+        # Pools are read one after another, so the cohort sums are a staggered snapshot over
+        # this window (seconds since the cohort started), not one instant.
+        record["resources"]["observed"] = {"kind": "staggered-per-pool", "from_s": observed_from,
+                                           "to_s": round(time.monotonic() - started, 3)}
+
+        record["fixture"] = fixture.provenance()
+        record["isolation"] = {
+            "pools": len({(s["machine"], s["guest_boot_id"]) for s in statuses
+                          if s.get("machine") and s.get("guest_boot_id")}),
+            "namespaces": len({r["graph"]["namespace"] for r in ready}),
+            "tokens": len({r["graph"]["token"] for r in ready}),
+        }
+        counts = {**record["isolation"], **{k: record["fixture"][k] for k in ("registered", "roots", "branches", "heads")}}
+        if any(value != size for value in counts.values()) or record["fixture"]["common_dirs"] != 1:
+            raise Failure(f"worktree isolation failed: {counts}, common_dirs={record['fixture']['common_dirs']}")
+
+        # Warm: stop every pool, start it again and restore; data and source must come back.
+        warm_started = time.monotonic()
+
+        def retain(index):
+            pool, entry, graph = pools[index], entries[index], ready[index]["graph"]
+            pool.step("graph_cleanup", "graph", "cleanup", "--run-id", graph["run"])
+            pool.step("down", "runtime", "down")
+            body = pool.up("restart_up", lane, share=entry["root"])
+            # A raw (non-normalized) graph restores only its exact accepted source; the runtime
+            # honors a changed review only for normalized receipts. The source must therefore
+            # still plan to the run's identity, checked before any restore effect.
+            plan = pool.step("replan", "project", "plan", "--project", str(entry["root"]), "--branch", entry["branch"],
+                             "--file", graph["compose"])["plan_id"]
+            if plan != graph["plan"]:
+                raise Failure(f"worktree {index} source changed since its run: plan {plan} != {graph['plan']}")
+            pool.step(
+                "restore", "graph", "restore", "--project", str(entry["root"]), "--branch", entry["branch"],
+                "--file", graph["compose"], "--expect-plan", plan, "--run-id", graph["run"],
+                "--shared-source", "--ready", "web=healthy", "--timeout-seconds", "120", timeout=180,
+                check=healthy,
+            )
+            kept = {"token": pool.token(graph["run"], "restore_token") == graph["token"],
+                    "marker": pool.read(graph["run"], "/workspace/branch.txt", "restore_marker") == entry["marker"]}
+            if not all(kept.values()):
+                raise Failure(f"worktree {index} did not retain data and source across down/up: {kept}")
+            return {"provenance": provenance(body, lane, "warm"), "ready_s": round(time.monotonic() - warm_started, 3)}
+
+        warm = each(retain, size, args.worktree_parallel)
+        record["warm_all_ready_s"] = round(time.monotonic() - warm_started, 3)
+        record["warm_provenance"] = [w["provenance"] for w in warm]
+        record["retained"] = size
+
+        # A fresh host edit in every root must reach exactly its own restored pool: each share is
+        # live and attached to its own root. It comes last because it changes the source.
+        live = [secrets.token_hex(16) for _ in range(size)]
+        for entry, value in zip(entries, live):
+            (entry["root"] / "live.txt").write_text(value)
+        seen = each(lambda i: pools[i].read(ready[i]["graph"]["run"], "/workspace/live.txt", "live"),
+                    size, args.worktree_parallel)
+        record["isolation"]["live_edits_read_back"] = sum(a == b for a, b in zip(seen, live))
+        if record["isolation"]["live_edits_read_back"] != size:
+            raise Failure(f"a host edit did not reach exactly its own pool: {record['isolation']}")
+        record["admission_end"] = admission()
+        record["ok"] = True
+    except Failure as error:
+        record["ok"] = False
+        record["error"] = str(error)
+    finally:
+        if sampler:
+            record["admission_during"] = sampler.stop()
+        record["samples"] = [pool.samples for pool in pools]
+        disposal = [pool.cleanup() for pool in pools]
+        disposed = all(c.get("removed") is True and "error" not in c for c in disposal)
+        record["cleanup"] = disposal + [fixture.cleanup(disposed)]
+        record["cleanup_failed"] = any("error" in c or not c.get("removed") for c in record["cleanup"])
+    return record
+
+
+def run_worktrees(args, sizes, keep):
+    """Worktree cohorts in order. A failed cleanup can leave live pools and their roots behind;
+    any later cohort would exceed the planned peak and share the host with them, so none starts.
+    Returns whether every planned cohort ran."""
+    for repeat in range(args.worktree_repeats):
+        for size in sizes:
+            lanes = ("stock", "prepared") if (repeat + size) % 2 == 0 else ("prepared", "stock")
+            for lane in lanes:
+                record = worktree_trial(args, size, repeat, lane)
+                keep(record)
+                if record["cleanup_failed"]:
+                    return False
+    return True
+
+
 def stats(values):
     """Median/min/max over observed values. `of` counts every sample; a metric with any
     unobserved sample is labeled unqualified instead of treating the gap as zero."""
@@ -548,6 +887,33 @@ def cohort_metrics(r):
     }
 
 
+def median_of(samples, step):
+    values = [s[step]["wall_s"] for s in samples if step in s]
+    return round(statistics.median(values), 3) if values else None
+
+
+def worktree_metrics(r):
+    """Cold (`up`, create-to-ready) and warm (`restart_up`) starts stay separate; image
+    acquisition into each fresh home is reported on its own."""
+    resources = r.get("resources") or {}
+    observed = resources.get("observed") or {}
+    metrics = {
+        "all_ready_s": r["all_ready_s"],
+        "resource_snapshot_span_s": (round(observed["to_s"] - observed["from_s"], 3)
+                                     if "to_s" in observed and "from_s" in observed else None),
+        "warm_all_ready_s": r.get("warm_all_ready_s"),
+        "cold_up_median_s": median_of(r["samples"], "up"),
+        "warm_up_median_s": median_of(r["samples"], "restart_up"),
+        "image_median_s": median_of(r["samples"], "ensure_image"),
+        "checkout_allocated_bytes": (r.get("fixture") or {}).get("checkout_allocated_bytes"),
+    }
+    for name in ("cpu_attributed_s", "cli_cpu_s", "vm_cpu_s", "vm_resident_bytes", "vm_footprint_bytes",
+                 "vm_peak_footprint_sum_bytes", "guest_memory_configured_bytes", "disk_allocated_bytes",
+                 "disk_private_bytes", "homes_allocated_bytes"):
+        metrics[name] = resources.get(name)
+    return metrics
+
+
 def summarize(records, cpus=None):
     cpus = cpus or os.cpu_count() or 1
     summary = {"admission_boundaries": {}}
@@ -589,6 +955,25 @@ def summarize(records, cpus=None):
                         for size in sorted({r["size"] for r in chosen})}
     summary["admitted_cohort_all_ready_ratio_by_size"] = paired(
         cohorts, lambda r: (r["size"], r["repeat"]), lambda r: r["all_ready_s"])
+    # A cohort whose cleanup failed shared the host with pools it could not dispose of; its
+    # timings and resources are unqualified whatever its admission.
+    worktrees = [(r, ok, why) for r, ok, why in classified
+                 if r["mode"] == "worktrees" and r.get("ok") and not r.get("cleanup_failed")]
+    summary["worktrees_unqualified_cleanup"] = [
+        {k: r.get(k) for k in ("size", "repeat", "lane", "home")}
+        for r in records if r["mode"] == "worktrees" and r.get("cleanup_failed")]
+    for admitted_flag, key in ((True, "worktrees_admitted"), (False, "worktrees_flagged")):
+        chosen = [r for r, ok, _ in worktrees if ok == admitted_flag]
+        summary[key] = {str(size): lanes([r for r in chosen if r["size"] == size], worktree_metrics)
+                        for size in sorted({r["size"] for r in chosen})}
+    summary["admitted_worktree_all_ready_ratio_by_size"] = paired(
+        worktrees, lambda r: (r["size"], r["repeat"]), lambda r: r["all_ready_s"])
+    selections = {}
+    for r, _, _ in worktrees:
+        for p in r.get("provenance", []) + r.get("warm_provenance", []):
+            key = "/".join(str(p.get(k)) for k in ("lane", "start", "source", "base_use"))
+            selections[key] = selections.get(key, 0) + 1
+    summary["worktree_selections"] = dict(sorted(selections.items()))
     summary["concurrent"] = [
         {"count": r["count"], "ok": r.get("ok"), "admitted": ok, "reasons": why, "distinct": r.get("distinct"),
          "up_wall_s": r.get("up_wall_s"), "disk_private_bytes": r.get("disk_private_bytes")}
@@ -598,6 +983,22 @@ def summarize(records, cpus=None):
     summary["failures"] = [{k: r.get(k) for k in ("mode", "index", "size", "lane", "error")} for r in records if not r.get("ok")]
     summary["cleanup_failures"] = [r.get("home") or r.get("homes") for r in records if any("error" in c or not c.get("removed") for c in (r["cleanup"] if isinstance(r["cleanup"], list) else [r["cleanup"]]))]
     return summary
+
+
+def worktree_plan(sizes, repeats, parallel, profile, host_memory):
+    """Preview metadata for worktree cohorts. The configured guest maxima are not measured use and
+    never block a run: the runtime's own admission decides each start, measured footprint is
+    recorded per trial, and a refused start is recorded as the cohort's outcome."""
+    peak = max(sizes)
+    memory = peak * GUEST_MEMORY_MIB[profile] << 20
+    plan = {"sizes": sizes, "repeats": repeats, "parallel": parallel, "peak_simultaneous_pools": peak,
+            "peak_configured_guest_memory_bytes": memory, "peak_configured_guest_cpus": peak * GUEST_CPUS[profile],
+            "host_memory_bytes": host_memory}
+    if host_memory is not None and memory > host_memory:
+        plan["warning"] = (f"{peak} pools configure {memory >> 30} GiB of guest memory, more than this host's "
+                           f"{host_memory >> 30} GiB. These are maxima, not measured footprint; the runtime's "
+                           "admission decides whether each start proceeds.")
+    return plan
 
 
 def load_samples(path):
@@ -623,12 +1024,16 @@ def main():
     parser.add_argument("--network-tools", help="directory of pinned network-tool packages")
     parser.add_argument("--image", help="pinned image reference (repository@sha256:...)")
     parser.add_argument("--profile", default="development", choices=("development", "research"))
-    parser.add_argument("--mode", action="append", choices=("pairs", "cohort", "concurrent"))
+    parser.add_argument("--mode", action="append", choices=("pairs", "cohort", "concurrent", "worktrees"),
+                        help="repeatable; default pairs, cohort and concurrent")
     parser.add_argument("--pairs", type=int, default=5)
     parser.add_argument("--cohorts", default="1,8,32")
     parser.add_argument("--cohort-repeats", type=int, default=2)
     parser.add_argument("--parallel", type=int, default=4, help="concurrent graph start requests within one pool (they serialize)")
     parser.add_argument("--concurrent", type=int, default=4)
+    parser.add_argument("--worktrees", default="1,8,32", help="worktree cohort sizes (one pool per worktree)")
+    parser.add_argument("--worktree-repeats", type=int, default=1)
+    parser.add_argument("--worktree-parallel", type=int, default=4, help="worktree pools started at once")
     parser.add_argument("--admission-interval", type=float, default=1.0, help="seconds between admission samples during timed work")
     parser.add_argument("--output", help="JSON lines of raw samples (default <root>/samples-<time>.jsonl)")
     parser.add_argument("--run", action="store_true", help="execute; without it only the plan is printed")
@@ -644,12 +1049,26 @@ def main():
         if not getattr(args, name) or not os.path.isabs(getattr(args, name)):
             parser.error(f"--{name.replace('_', '-')} must be absolute")
     sizes = [int(s) for s in args.cohorts.split(",") if s]
+    worktree_sizes = [int(s) for s in args.worktrees.split(",") if s] if "worktrees" in modes else []
+    if worktree_sizes and args.profile != "development":
+        parser.error("worktree mode shares exact source roots, which requires --profile development")
+    if any(n < 1 for n in worktree_sizes) or args.worktree_repeats < 1 or args.worktree_parallel < 1:
+        parser.error("worktree sizes, repeats and parallelism must be positive")
     plan = {"modes": modes, "pairs": args.pairs, "cohorts": sizes, "cohort_repeats": args.cohort_repeats,
             "parallel": args.parallel, "concurrent": args.concurrent, "root": args.root,
             "admission_interval_s": args.admission_interval,
             "pools_created": (2 * args.pairs if "pairs" in modes else 0)
             + (2 * len(sizes) * args.cohort_repeats if "cohort" in modes else 0)
-            + (args.concurrent if "concurrent" in modes else 0)}
+            + (args.concurrent if "concurrent" in modes else 0)
+            + 2 * sum(worktree_sizes) * args.worktree_repeats}
+    try:
+        probe = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True)
+    except OSError:
+        probe = None
+    host_memory = int(probe.stdout) if probe and probe.returncode == 0 and probe.stdout.strip().isdigit() else None
+    if worktree_sizes:
+        plan["worktrees"] = worktree_plan(worktree_sizes, args.worktree_repeats, args.worktree_parallel,
+                                          args.profile, host_memory)
     if not args.run:
         print(json.dumps({"preview": plan}, indent=2))
         return
@@ -659,13 +1078,16 @@ def main():
     args.root = str(root)
     if not root.is_dir() or root.stat().st_mode & 0o077 or root.stat().st_uid != os.geteuid():
         parser.error("--root must be an existing private (0700) directory owned by this user")
+    if worktree_sizes and SENSITIVE_COMPONENTS & set(root.parts):
+        parser.error(f"worktree mode needs a --root outside {sorted(SENSITIVE_COMPONENTS)} directories")
     output = Path(args.output or root / f"samples-{int(time.time())}.jsonl")
     context = {
         "harness_sha256": sha256(__file__), "bundle_sha256": sha256(args.bundle),
         "host": {"model": subprocess.run(["sysctl", "-n", "hw.model"], capture_output=True, text=True).stdout.strip(),
-                 "cpus": os.cpu_count(), "memory_bytes": int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout),
-                 "os": platform.mac_ver()[0]},
+                 "cpus": os.cpu_count(), "memory_bytes": host_memory, "os": platform.mac_ver()[0]},
         "image": args.image, "profile": args.profile, "plan": plan,
+        # Shared by every prepared pool; reported once, apart from per-pool private disk.
+        "base_store_allocated_bytes": allocated(args.store),
     }
     records = []
     with output.open("a") as sink:
@@ -690,6 +1112,9 @@ def main():
                         keep(cohort_trial(args, size, repeat, lane))
         if "concurrent" in modes:
             keep(concurrent_trial(args, args.concurrent))
+        if worktree_sizes and not run_worktrees(args, worktree_sizes, keep):
+            print(json.dumps({"stopped": "a worktree cohort's cleanup failed; its pools and roots are kept"}),
+                  flush=True)
         summary = summarize(records, context["host"]["cpus"])
         sink.write(json.dumps({"summary": summary}) + "\n")
     print(json.dumps({"output": str(output), "summary": summary}, indent=2))

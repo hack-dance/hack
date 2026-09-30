@@ -41,6 +41,8 @@ jobs:
           python3 -m unittest discover -s .ai/skills/hack-repo-tla/tests
           bun test tests/tla-result.test.ts
           bun run test:models
+      - name: Check prepared-base benchmark harness controls
+        run: python3 -m unittest discover -s tests/python -p test_prepared_base_benchmark.py
 
   runtime-core:
     name: Candidate core (${{ matrix.os }})

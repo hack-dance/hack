@@ -57,9 +57,10 @@ impl Drop for Fixture {
     }
 }
 
-/// The first non-empty report after a creator released its lock. A fork-based spawn in another
-/// test thread briefly holds a copy of every descriptor until it execs, delaying the release by
-/// moments; a lock that is never released still fails after two seconds.
+/// The first non-empty report after a lock was released, by its creator or by a previous
+/// recovery probe. A fork-based spawn in another test thread briefly holds a copy of every
+/// descriptor until it execs, so a released lock can stay held for moments and recovery skips
+/// the root as live; a lock that is never released still fails after two seconds.
 fn after_release(store: &Path, remove: bool) -> Vec<AbandonedWork> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -94,8 +95,9 @@ fn a_live_work_root_is_untouched_and_recovered_once_its_creator_is_gone() {
         [abandoned(&name, false, None)]
     );
     assert_eq!(fixture.roots(), [name.as_str()], "status never removes");
+    // The status probe itself held the lock a moment ago.
     assert_eq!(
-        abandoned_work(&fixture.store, true).unwrap(),
+        after_release(&fixture.store, true),
         [abandoned(&name, true, None)]
     );
     assert!(fixture.roots().is_empty());
@@ -152,8 +154,9 @@ fn an_abandoned_root_whose_provider_still_runs_is_kept_until_it_exits() {
     running.wait().unwrap();
     assert_eq!(first, [abandoned(&name, false, Some("stop_uncertain"))]);
     assert_eq!(fixture.roots(), [name.as_str()]);
+    // The first probe itself held the lock a moment ago.
     assert_eq!(
-        abandoned_work(&fixture.store, true).unwrap(),
+        after_release(&fixture.store, true),
         [abandoned(&name, true, None)]
     );
 }

@@ -549,10 +549,41 @@ cache is not flushed.
   fixed offset that later graph starts amortize.
 - `concurrent` creates several pools at once from one base and requires distinct machines,
   guest boots and data.
+- `worktrees` (opt-in with `--mode worktrees`) creates a harness-owned repository with 1/8/32
+  (by default) real linked `git worktree add` checkouts, each on its own branch with a
+  committed random marker. A running pool cannot mount another root, so each worktree gets its
+  own fresh development pool and private home, with `runtime up --project-share ROOT
+  --unfiltered-source`. Pools start `--worktree-parallel` at a time. Each graph runs with
+  `--shared-source --branch` and must serve its own committed marker before readiness counts.
+  The trial then requires distinct pools, branch namespaces and volume data. It stops and
+  restarts every pool, re-plans, and restores the same run. The re-plan must still match the
+  run's plan: the harness drives raw runtime graphs, which restore only their exact accepted
+  source, while a changed review is honored only for normalized receipts (the `hack up`
+  path). The restore must report `healthy` and return the same data and marker. Last, it
+  writes a new host file into every root, which must reach only that root's restored pool. The
+  fixture is
+  removed only after every pool is confirmed disposed; otherwise every root, its Git
+  registration and its source are kept. After any cleanup failure no further worktree cohort
+  starts, and that cohort's measurements are excluded from the qualified summaries. Cold
+  create-to-ready and warm restart are summarized separately, with each start's selection
+  (`stock` or `prepared`, base ID, and whether this run had used that base before).
+  Configured guest memory and vCPUs for the largest cohort appear in the preview, with a
+  warning when they exceed host memory. They are maxima, not measured use, and never block a
+  run: the runtime's own admission decides each start, and a refused start is recorded as the
+  cohort's outcome.
 
-Every sample records the complete CLI process tree's CPU (via `wait4`), the VM process's CPU,
-current and lifetime-peak physical footprint, and each disk's logical, allocated and
-clone-private bytes. Unobserved values stay null. Each summarized metric reports its coverage
+Every sample records the CPU of each command's CLI process tree (via `wait4`, covering
+terminated children it reaped). It also records the provider tree the runtime returns, counting
+each process once, helpers included: that tree's CPU, resident size and physical footprint, the
+sum of per-process lifetime peaks (an upper bound), and each disk's logical, allocated and
+clone-private bytes. The provider tree lists only processes live at the snapshot, so the two
+CPU figures never count a process twice. Worktree cohorts also report attributed CPU (their
+sum), configured guest memory, each home's allocated bytes (including its disks, and not
+clone-aware), the checkout's allocated bytes, and the shared base store once. Cohort sums are
+read one pool after another, a staggered snapshot whose window is recorded, not one instant;
+the summed lifetime peaks are not a simultaneous cohort peak. Resident size, physical
+footprint, configured guest memory and clone-private bytes are reported side by side and never
+added together. Unobserved values stay null. Each summarized metric reports its coverage
 (`n` of `of`) and is labeled unqualified when any sample lacks it, instead of counting the gap
 as zero.
 
@@ -563,12 +594,17 @@ exceeds half the CPU count, memory pressure is raised, or any of these could not
 any sample. A failed observation or a gap longer than five intervals also flags the trial. Only admitted samples
 enter the admitted summaries and the paired pair and cohort ratios. `--summarize SAMPLES`
 recomputes the summary from a retained raw file without running anything. Cleanup stops each
-pool and removes only the trial's home and provider alias, with a readback. Store raw output
+pool and requires `runtime status` to report its VM process gone. Only then does it remove the
+trial's home and provider alias, with a readback; otherwise it keeps them and reports the
+failure. Store raw output
 outside the repository. The negative controls run with
-`python3 -m unittest discover -s tests/python -p test_prepared_base_benchmark.py`.
+`python3 -m unittest discover -s tests/python -p test_prepared_base_benchmark.py`, locally and
+in CI's runtime state models job.
 
-This measures pool creation and a synthetic single-service graph. It does not qualify normal
-source-mounted worktree startup, application-specific images or cold host caches.
+This measures pool creation and a synthetic single-service graph. Worktree cohorts add real
+linked-worktree roots through the runtime interface, one pool per root. They do not exercise
+the `hack up` frontend, routing, application-specific images or cold host caches, and each
+fresh home still acquires the image, which is timed separately.
 
 Prepared bases carry no application images. On an M3 (September 2026, one prepared pool, three
 repeats), `ensure-image` for `postgres:16-alpine` (114 MB archive) took 10.6 s cold. The engine

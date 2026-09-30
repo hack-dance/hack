@@ -651,6 +651,17 @@ fn pending_replacement_child() {
     let mut pending = endpoint
         .begin_connect(Duration::from_secs(1), &session)
         .unwrap();
+    // The nonblocking handshake may still be in flight. Let it reach the original listener
+    // first: completed later, it lands on the replacement, which the endpoint refuses but
+    // which leaves that connection queued there.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while pending.stream.as_ref().unwrap().peer_addr().is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "pending connect never reached its listener"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     drop(listener);
     let replacement = TcpListener::bind(address).unwrap();
     assert!(pending.progress().is_err());

@@ -246,7 +246,7 @@ class Accounting(unittest.TestCase):
 # the files of the worktree they were started from; FAKE_FAULT injects the failures the trial
 # must catch.
 FAKE_RUNTIME = r'''#!PYTHON
-import base64, hashlib, json, os, pathlib, secrets, sys
+import base64, hashlib, json, os, pathlib, secrets, sys, time
 
 argv = sys.argv[1:]
 home, argv = pathlib.Path(argv[1]), [a for a in argv[2:] if a != "--json"]
@@ -299,6 +299,9 @@ if command == ["runtime", "status"]:
            "guest_boot_id": f"{trial}-{state['boots']}", "guest_memory_mib": 6144,
            "provider_resources": {"processes": [root, helper, helper] if alive else []}})
 if command == ["runtime", "down"]:
+    # `hang-down`: final disposal (after the live edits) never returns.
+    if fault == "hang-down" and any((pathlib.Path(r["root"]) / "live.txt").exists() for r in state["runs"].values()):
+        time.sleep(60)
     if fault == "down-fails":
         reply({"code": "provider_down"}, 1)
     if fault == "drift-on-down":
@@ -308,6 +311,8 @@ if command == ["runtime", "down"]:
     state["alive"] = fault == "still-alive"
     reply({"phase": "stopped"})
 if command == ["runtime", "ensure-image"]:
+    if fault == "hang-ensure":
+        time.sleep(60)
     reply({"image_id": "sha256:" + "a" * 64})
 if command == ["project", "plan"]:
     namespace = hashlib.sha256((option("--project") + option("--branch")).encode()).hexdigest()
@@ -450,7 +455,8 @@ class WorktreeTrials(unittest.TestCase):
     def assert_fixture_preserved(self, record, pool_error):
         """Every root keeps its registration, branch and committed marker, and every home stays."""
         *pools, fixture = record["cleanup"]
-        self.assertTrue(all(pool_error in c.get("error", "") for c in pools), pools)
+        if pool_error:
+            self.assertTrue(all(pool_error in c.get("error", "") for c in pools), pools)
         self.assertIn("not confirmed disposed", fixture["error"])
         self.assertTrue(all(Path(home).is_dir() for home in record["homes"]))
         base = Path(fixture["preserved"])
@@ -527,9 +533,9 @@ class WorktreeTrials(unittest.TestCase):
     def test_an_unavailable_process_listing_keeps_every_home_and_the_fixture(self):
         real = benchmark.observed_output
 
-        def observed(argv):
+        def observed(argv, timeout=None):
             # Trial cleanup's own listing hangs or fails; everything else observes normally.
-            return None if argv[:2] == ["ps", "-axww"] else real(argv)
+            return None if argv[:2] == ["ps", "-axww"] else real(argv, timeout)
 
         with mock.patch.object(benchmark, "observed_output", side_effect=observed):
             record = benchmark.worktree_trial(self.args, 2, 0, "prepared")
@@ -547,6 +553,82 @@ class WorktreeTrials(unittest.TestCase):
         self.assertEqual(stopped, "budget")
         self.assertEqual([(r["lane"], r["ok"]) for r in records], [("prepared", True)])
         self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_every_command_is_bounded_by_the_time_left_and_cleanup_by_its_own_budget(self):
+        self.args.cohort_deadline, self.args.cleanup_budget = 100.0, 50.0
+        real_command, real_git, seen = benchmark.command, benchmark.git, []
+
+        def command(argv, timeout):
+            seen.append((argv[3:5], timeout))
+            return real_command(argv, timeout)
+
+        def git(*argv, timeout=120):
+            seen.append((["git"], timeout))
+            return real_git(*argv, timeout=timeout)
+
+        with mock.patch.object(benchmark, "command", side_effect=command), \
+                mock.patch.object(benchmark, "git", side_effect=git):
+            record = self.trial()
+        self.assertTrue(record["ok"], record.get("error"))
+        self.assertEqual({k: record["deadline"][k] for k in ("cohort_s", "cohort_expired", "cleanup_budget_s", "cleanup_expired")},
+                         {"cohort_s": 100.0, "cohort_expired": False, "cleanup_budget_s": 50.0, "cleanup_expired": False})
+        # Disposal is the last down and status of each pool, in turn.
+        work, disposal = seen[:-4], seen[-4:]
+        self.assertEqual([c for c, _ in disposal], [["runtime", "down"], ["runtime", "status"]] * 2)
+        self.assertIn(["git"], [c for c, _ in work])
+        # `runtime up` asks for 600 s and a graph run for 180 s; every timeout is what the cohort
+        # had left, and disposal draws on its own fresh budget instead of the cohort's remainder.
+        self.assertTrue(all(50 < timeout <= 100 for _, timeout in work), work)
+        self.assertTrue(all(40 < timeout <= 50 for _, timeout in disposal), disposal)
+
+    def test_an_expired_cohort_starts_nothing_more_and_still_disposes_everything(self):
+        self.args.cohort_deadline, self.args.cleanup_budget, self.args.worktree_repeats = 8.0, 60.0, 1
+        os.environ["FAKE_FAULT"] = "hang-ensure"
+        records, started = [], time.monotonic()
+        stopped = benchmark.run_worktrees(self.args, [2], records.append)
+        # Each image acquisition would hang for 60 s; the deadline stops both where it falls.
+        self.assertLess(time.monotonic() - started, 40)
+        self.assertEqual(stopped, "cohort_deadline")
+        (record,) = records
+        self.assertFalse(record["ok"])
+        self.assertIn("ensure_image: cohort deadline expired", record["error"])
+        self.assertEqual({k: record["deadline"][k] for k in ("cohort_expired", "cleanup_expired")},
+                         {"cohort_expired": True, "cleanup_expired": False})
+        self.assertEqual(len(self.calls(("runtime", "ensure-image"))), 2)
+        self.assertEqual(self.calls(("project", "plan"), ("graph", "run")), [])
+        # Disposal, under its own budget, confirmed both pools stopped before removing anything.
+        self.assertEqual(len(self.calls(("runtime", "down"))), 2)
+        self.assertEqual(len(self.calls(("runtime", "status"))), 2)
+        self.assertTrue(all(c.get("removed") for c in record["cleanup"]), record["cleanup"])
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_a_cohort_whose_deadline_has_passed_creates_and_runs_nothing(self):
+        self.args.cohort_deadline, self.args.cleanup_budget = 0.0, 60.0
+        record = benchmark.worktree_trial(self.args, 2, 0, "prepared")
+        self.assertFalse(record["ok"])
+        self.assertEqual(record["error"], "cohort deadline expired")
+        self.assertEqual(record["cleanup"], [{"removed": True, "created": False}] * 3)
+        self.assertFalse((self.tools / "argv.log").exists())
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_a_spent_cleanup_budget_keeps_every_pool_it_could_not_confirm_and_the_fixture(self):
+        self.args.cohort_deadline, self.args.cleanup_budget = 300.0, 4.0
+        os.environ["FAKE_FAULT"] = "hang-down"
+        started = time.monotonic()
+        record = benchmark.worktree_trial(self.args, 2, 0, "prepared")
+        self.assertLess(time.monotonic() - started, 40)
+        self.assertTrue(record["ok"], record.get("error"))
+        self.assertTrue(record["cleanup_failed"])
+        self.assertEqual({k: record["deadline"][k] for k in ("cohort_expired", "cleanup_expired")},
+                         {"cohort_expired": False, "cleanup_expired": True})
+        first, second, _ = record["cleanup"]
+        # The first down was stopped at the budget, so whether its pool stopped is unknown; the
+        # second never started. Neither counts as disposed, so both homes and the fixture stay.
+        self.assertIn("cleanup budget expired during down", first["error"])
+        self.assertEqual(second.get("error"), "cleanup budget expired; this trial's home is kept")
+        # Two warm restarts, then the one disposal down the budget allowed.
+        self.assertEqual(len(self.calls(("runtime", "down"))), 3)
+        self.assert_fixture_preserved(record, None)
 
 
 class MeasuredAdmission(unittest.TestCase):
@@ -790,6 +872,18 @@ class WorktreePlan(unittest.TestCase):
         preview = self.preview()
         self.assertEqual(preview["pools_created"], 2 * (1 + 8 + 32))
         self.assertEqual(preview["worktrees"]["peak_simultaneous_pools"], 32)
+
+    def test_a_worktree_run_needs_both_bounds_and_the_preview_shows_them(self):
+        worktrees = self.preview("--cohort-deadline", "1800", "--cleanup-budget", "600")["worktrees"]
+        self.assertEqual({k: worktrees[k] for k in ("cohort_deadline_s", "cleanup_budget_s", "cohort_bound_s")},
+                         {"cohort_deadline_s": 1800.0, "cleanup_budget_s": 600.0, "cohort_bound_s": 2400.0})
+        for extra, message in (((), "needs --cohort-deadline and --cleanup-budget"),
+                               (("--cohort-deadline", "1800"), "needs --cohort-deadline and --cleanup-budget"),
+                               (("--cleanup-budget", "600"), "needs --cohort-deadline and --cleanup-budget"),
+                               (("--cohort-deadline", "0", "--cleanup-budget", "600"), "must be positive")):
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr", new_callable=io.StringIO) as error:
+                self.preview("--run", *extra)
+            self.assertIn(message, error.getvalue())
 
     def test_worktree_mode_requires_the_development_profile(self):
         with self.assertRaises(SystemExit), mock.patch("sys.stderr", new_callable=io.StringIO):

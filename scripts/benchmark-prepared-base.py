@@ -181,26 +181,64 @@ def allocated(root):
 OBSERVATION_TIMEOUT = 30
 
 
-def observed_output(argv):
+def observed_output(argv, timeout=None):
     """Stdout of a short host observation (`ps`, `sysctl`), or None when it failed or did not
-    finish within OBSERVATION_TIMEOUT seconds. A hung observation must never hold a trial, or
-    its cleanup, forever; every caller treats None as unobserved and fails closed."""
+    finish within `timeout` seconds (default OBSERVATION_TIMEOUT). A hung observation must never
+    hold a trial, or its cleanup, forever; every caller treats None as unobserved and fails
+    closed."""
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=OBSERVATION_TIMEOUT)
+        result = subprocess.run(argv, capture_output=True, text=True,
+                                timeout=OBSERVATION_TIMEOUT if timeout is None else timeout)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return result.stdout if result.returncode == 0 else None
 
 
-def git(*argv):
+class Expired(Failure):
+    """A deadline passed before an effect could start, or while it ran."""
+
+
+class Deadline:
+    """One monotonic end point for every command it bounds. `budget(requested)` is the timeout
+    for the next command: its own bound, shortened to the time left, so a command still running
+    at the deadline is killed there. Once no time is left, `budget` and `check` raise `Expired`
+    instead, and no new effect starts. `seconds=None` is unbounded."""
+
+    def __init__(self, seconds, label, clock=time.monotonic):
+        self.seconds, self.label, self.clock = seconds, label, clock
+        self.at = None if seconds is None else clock() + seconds
+
+    def expired(self):
+        return self.at is not None and self.clock() >= self.at
+
+    def check(self):
+        if self.expired():
+            raise Expired(f"{self.label} expired")
+
+    def budget(self, requested):
+        if self.at is None:
+            return requested
+        left = self.at - self.clock()
+        if left <= 0:
+            raise Expired(f"{self.label} expired")
+        return min(requested, left)
+
+
+UNBOUNDED = Deadline(None, "no deadline")
+
+
+def git(*argv, timeout=120):
     """Run Git without system or global configuration, templates, hooks or signing."""
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/"),
            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "LC_ALL": "C"}
-    result = subprocess.run(
-        ["git", "-c", "init.templateDir=", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
-         "-c", "user.name=Hack benchmark", "-c", "user.email=benchmark@example.invalid", *argv],
-        env=env, capture_output=True, text=True, timeout=120,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-c", "init.templateDir=", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+             "-c", "user.name=Hack benchmark", "-c", "user.email=benchmark@example.invalid", *argv],
+            env=env, capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise Failure(f"git {' '.join(argv)[:160]}: no result within {timeout:.1f} s") from None
     if result.returncode != 0:
         raise Failure(f"git {' '.join(argv)[:160]}: {result.stderr.strip()[-300:]}")
     return result.stdout.strip()
@@ -209,42 +247,48 @@ def git(*argv):
 class Worktrees:
     """A harness-owned repository with `count` linked worktrees. Each is an ordinary
     `git worktree add` checkout on its own branch with a committed random marker; all share one
-    common Git directory, and only each exact worktree root is shared with its own pool."""
+    common Git directory, and only each exact worktree root is shared with its own pool. Every
+    Git command and observation is bounded by `deadline`."""
 
-    def __init__(self, root, count):
+    def __init__(self, root, count, deadline=UNBOUNDED):
         self.dir = Path(root).resolve() / f"worktrees{count:02d}-{secrets.token_hex(3)}"
         self.repo = self.dir / "repo"
         self.count = count
         self.entries = []
+        self.deadline = deadline
+
+    def git(self, *argv):
+        return git(*argv, timeout=self.deadline.budget(120))
 
     def create(self):
+        self.deadline.check()
         self.dir.mkdir(mode=0o700)
-        git("init", "--quiet", "--initial-branch=main", str(self.repo))
+        self.git("init", "--quiet", "--initial-branch=main", str(self.repo))
         (self.repo / "compose.yaml").write_text(WORKTREE_COMPOSE.format(image_id=PLACEHOLDER_IMAGE))
-        git("-C", str(self.repo), "add", "compose.yaml")
-        git("-C", str(self.repo), "commit", "--quiet", "-m", "fixture")
+        self.git("-C", str(self.repo), "add", "compose.yaml")
+        self.git("-C", str(self.repo), "commit", "--quiet", "-m", "fixture")
         for index in range(self.count):
             root, branch, marker = self.dir / f"w{index:02d}", f"wt-{index:02d}", secrets.token_hex(16)
-            git("-C", str(self.repo), "worktree", "add", "--quiet", "-b", branch, str(root), "main")
+            self.git("-C", str(self.repo), "worktree", "add", "--quiet", "-b", branch, str(root), "main")
             # The runtime refuses a share that other users can write.
             root.chmod(0o700)
             (root / "branch.txt").write_text(marker)
-            git("-C", str(root), "add", "branch.txt")
-            git("-C", str(root), "commit", "--quiet", "-m", branch)
+            self.git("-C", str(root), "add", "branch.txt")
+            self.git("-C", str(root), "commit", "--quiet", "-m", branch)
             self.entries.append({"root": root, "branch": branch, "marker": marker,
-                                 "head": git("-C", str(root), "rev-parse", "HEAD")})
+                                 "head": self.git("-C", str(root), "rev-parse", "HEAD")})
         return self.entries
 
     def provenance(self):
         """Git's own view of the fixture: registered roots and branches, distinct heads, and the
         number of common directories (one for real linked worktrees)."""
         registered, current = {}, None
-        for line in git("-C", str(self.repo), "worktree", "list", "--porcelain").splitlines():
+        for line in self.git("-C", str(self.repo), "worktree", "list", "--porcelain").splitlines():
             if line.startswith("worktree "):
                 current = line[len("worktree "):]
             elif line.startswith("branch refs/heads/") and current:
                 registered[current] = line[len("branch refs/heads/"):]
-        common = {git("-C", str(e["root"]), "rev-parse", "--path-format=absolute", "--git-common-dir")
+        common = {self.git("-C", str(e["root"]), "rev-parse", "--path-format=absolute", "--git-common-dir")
                   for e in self.entries}
         return {
             "registered": sum(registered.get(str(e["root"])) == e["branch"] for e in self.entries),
@@ -263,7 +307,10 @@ class Worktrees:
             return {"removed": True, "created": False}
         if not pools_disposed:
             return {"preserved": str(self.dir), "error": "an owned pool was not confirmed disposed"}
-        listing = observed_output(["ps", "-A", "-ww", "-o", "pid=,args="])
+        try:
+            listing = observed_output(["ps", "-A", "-ww", "-o", "pid=,args="], self.deadline.budget(OBSERVATION_TIMEOUT))
+        except Expired as error:
+            return {"preserved": str(self.dir), "error": f"{error}; the fixture is kept"}
         if listing is None or str(self.dir) in listing:
             return {"preserved": str(self.dir), "error": "a process may still reference this fixture"}
         shutil.rmtree(self.dir)
@@ -592,20 +639,22 @@ class Sampler:
 
 
 class Trial:
-    """One private candidate home and the projects it serves."""
+    """One private candidate home and the projects it serves. Every command is bounded by
+    `deadline`: a worktree cohort's deadline, then its separate cleanup budget."""
 
     def __init__(self, args, label):
         self.args = args
         self.dir = Path(args.root, f"{label}-{secrets.token_hex(3)}")
         self.home = self.dir / "home"
         self.samples = {}
+        self.deadline = UNBOUNDED
 
     def cli(self, *argv, timeout=300, json_output=True):
         argv = list(argv)
         if json_output:
             # Options precede a `--` program separator.
             argv.insert(argv.index("--") if "--" in argv else len(argv), "--json")
-        return command([self.args.bundle, "--candidate-root", str(self.home), *argv], timeout)
+        return command([self.args.bundle, "--candidate-root", str(self.home), *argv], self.deadline.budget(timeout))
 
     def step(self, name, *argv, timeout=300, check=None, json_output=True):
         """Run one timed command. Graph operations in one pool serialize on the provider lock and
@@ -621,10 +670,13 @@ class Trial:
             time.sleep(0.2)
         self.samples[name] = {"wall_s": round(time.monotonic() - started, 3), "cli_cpu_s": round(cpu, 3), "busy_retries": retries}
         if code != 0 or (check and not check(body)):
+            if self.deadline.expired():
+                raise Expired(f"{name}: {self.deadline.label} expired: exit {code}")
             raise Failure(f"{name}: exit {code}: {json.dumps(body)[:400]}")
         return body
 
     def setup(self):
+        self.deadline.check()
         self.dir.mkdir(mode=0o700)
         self.home.mkdir(mode=0o700)
         (self.dir / "projects").mkdir(mode=0o700)
@@ -730,7 +782,8 @@ class Trial:
         return body if code == 0 else {}
 
     def cleanup(self):
-        """Stop this home's pool and remove only this trial's directory and provider alias."""
+        """Stop this home's pool and remove only this trial's directory and provider alias. When
+        the deadline ends first, or any readback fails, the home is kept for diagnosis."""
         result = {}
         if not self.dir.exists():
             return {"removed": True, "created": False}
@@ -739,18 +792,24 @@ class Trial:
             alias = Path(owner["short_home"])
         except (OSError, ValueError, KeyError):
             alias = None
-        if self.home.exists():
-            code, body, _, _ = self.cli("runtime", "down", timeout=300)
-            result["down"] = body.get("phase") or body.get("code")
-            if code != 0:
-                result["error"] = f"down failed: {json.dumps(body)[:300]}"
-                return result
-            # The runtime's identity-checked readback, not a process listing, proves the VM stopped.
-            code, body, _, _ = self.cli("runtime", "status")
-            if code != 0 or body.get("process_alive") is not False:
-                result["error"] = f"pool not confirmed stopped after down: {json.dumps(body)[:300]}"
-                return result
-        running = observed_output(["ps", "-axww", "-o", "pid=,command="])
+        try:
+            if self.home.exists():
+                code, body, _, _ = self.cli("runtime", "down", timeout=300)
+                result["down"] = body.get("phase") or body.get("code")
+                if code != 0:
+                    # A down stopped at the deadline may or may not have stopped the pool.
+                    failed = f"{self.deadline.label} expired during down" if self.deadline.expired() else "down failed"
+                    result["error"] = f"{failed}: exit {code}: {json.dumps(body)[:300]}"
+                    return result
+                # The runtime's identity-checked readback, not a process listing, proves the VM stopped.
+                code, body, _, _ = self.cli("runtime", "status")
+                if code != 0 or body.get("process_alive") is not False:
+                    result["error"] = f"pool not confirmed stopped after down: {json.dumps(body)[:300]}"
+                    return result
+            running = observed_output(["ps", "-axww", "-o", "pid=,command="], self.deadline.budget(OBSERVATION_TIMEOUT))
+        except Expired as error:
+            result["error"] = f"{error}; this trial's home is kept"
+            return result
         if running is None:
             result["error"] = "process listing unavailable; this trial's home is kept"
             return result
@@ -907,12 +966,21 @@ def pool_resources(pools, statuses):
     }
 
 
-def worktree_trial(args, size, repeat, lane):
+def worktree_trial(args, size, repeat, lane, clock=time.monotonic):
     """`size` linked worktrees, each exactly shared with its own fresh pool in its own private
     home, started `--worktree-parallel` at a time. Setup (provider, engine and network tools
-    per home) is untimed."""
-    fixture = Worktrees(args.root, size)
+    per home) is untimed.
+
+    Everything before disposal runs under one cohort deadline (`--cohort-deadline`): every
+    runtime and Git command's timeout is shortened to the time left, one still running at the
+    deadline is killed, and none starts after it. Disposal then runs under its own
+    `--cleanup-budget`, so an expired cohort still gets a bounded, ownership-checked cleanup;
+    whatever that budget cannot confirm disposed is kept."""
+    deadline = Deadline(getattr(args, "cohort_deadline", None), "cohort deadline", clock)
+    fixture = Worktrees(args.root, size, deadline)
     pools = [Trial(args, f"wt{size:02d}r{repeat}-{lane}-{index:02d}") for index in range(size)]
+    for pool in pools:
+        pool.deadline = deadline
     record = {"mode": "worktrees", "size": size, "repeat": repeat, "lane": lane, "home": str(fixture.dir),
               "homes": [str(pool.dir) for pool in pools]}
     sampler = None
@@ -920,6 +988,7 @@ def worktree_trial(args, size, repeat, lane):
         entries = fixture.create()
         for pool in pools:
             pool.setup()
+        deadline.check()
         record["admission"] = trial_start_admission(args)
         sampler = Sampler(args.admission_interval, observe=lambda: observe_admission(args)).start()
         started = time.monotonic()
@@ -992,6 +1061,7 @@ def worktree_trial(args, size, repeat, lane):
 
         # A fresh host edit in every root must reach exactly its own restored pool: each share is
         # live and attached to its own root. It comes last because it changes the source.
+        deadline.check()
         live = [secrets.token_hex(16) for _ in range(size)]
         for entry, value in zip(entries, live):
             (entry["root"] / "live.txt").write_text(value)
@@ -1006,13 +1076,22 @@ def worktree_trial(args, size, repeat, lane):
         record["ok"] = False
         record["error"] = str(error)
     finally:
+        expired = deadline.expired()
         if sampler:
             record["admission_during"] = sampler.stop()
         record["samples"] = [pool.samples for pool in pools]
+        cleanup_started = clock()
+        cleanup = Deadline(getattr(args, "cleanup_budget", None), "cleanup budget", clock)
+        fixture.deadline = cleanup
+        for pool in pools:
+            pool.deadline = cleanup
         disposal = [pool.cleanup() for pool in pools]
         disposed = all(c.get("removed") is True and "error" not in c for c in disposal)
         record["cleanup"] = disposal + [fixture.cleanup(disposed)]
         record["cleanup_failed"] = any("error" in c or not c.get("removed") for c in record["cleanup"])
+        record["deadline"] = {"cohort_s": deadline.seconds, "cohort_expired": expired,
+                              "cleanup_budget_s": cleanup.seconds, "cleanup_expired": cleanup.expired(),
+                              "cleanup_s": round(clock() - cleanup_started, 3)}
     return record
 
 
@@ -1021,9 +1100,11 @@ def run_worktrees(args, sizes, keep, deadline=None, clock=time.monotonic, distre
     did not start:
     - `cleanup_failed`: a failed cleanup can leave live pools and their roots behind, and any
       later cohort would exceed the planned peak and share the host with them;
+    - `cohort_deadline`: the cohort's work outlived its deadline, so its pair is incomplete and
+      the host or runtime was slower than the plan allows;
     - `budget`: the run budget was spent;
     - `distress: ...`: `distress.check` found host distress before the next cohort.
-    A cohort in progress always finishes its bounded work and cleanup."""
+    A cohort in progress always finishes within its own deadline and cleanup budget."""
     previous = None
     for repeat in range(args.worktree_repeats):
         for size in sizes:
@@ -1038,6 +1119,8 @@ def run_worktrees(args, sizes, keep, deadline=None, clock=time.monotonic, distre
                 keep(previous)
                 if previous["cleanup_failed"]:
                     return "cleanup_failed"
+                if previous["deadline"]["cohort_expired"]:
+                    return "cohort_deadline"
     return None
 
 
@@ -1296,6 +1379,11 @@ def main():
                         help="a VM left running beside the run (repeatable); counted as background and reported")
     parser.add_argument("--budget", type=float, default=0.0,
                         help="seconds after which no further worktree cohort starts (0: no budget)")
+    parser.add_argument("--cohort-deadline", type=float,
+                        help="seconds a worktree cohort's work may take; later commands are refused (required to run)")
+    parser.add_argument("--cleanup-budget", type=float,
+                        help="seconds a worktree cohort's disposal may take after its work; whatever it cannot "
+                             "confirm disposed is kept (required to run)")
     parser.add_argument("--output", help="JSON lines of raw samples (default <root>/samples-<time>.jsonl)")
     parser.add_argument("--run", action="store_true", help="execute; without it only the plan is printed")
     args = parser.parse_args()
@@ -1329,9 +1417,18 @@ def main():
     if worktree_sizes:
         plan["worktrees"] = worktree_plan(worktree_sizes, args.worktree_repeats, args.worktree_parallel,
                                           args.profile, host_memory)
+        bounds = (args.cohort_deadline, args.cleanup_budget)
+        if any(bound is not None and bound <= 0 for bound in bounds):
+            parser.error("--cohort-deadline and --cleanup-budget must be positive")
+        # Runtime and Git commands end within these; bounded host observations and local file
+        # removal can run briefly past them (docs/performance.md).
+        plan["worktrees"].update(cohort_deadline_s=args.cohort_deadline, cleanup_budget_s=args.cleanup_budget,
+                                 cohort_bound_s=None if None in bounds else sum(bounds))
     if not args.run:
         print(json.dumps({"preview": plan}, indent=2))
         return
+    if worktree_sizes and None in (args.cohort_deadline, args.cleanup_budget):
+        parser.error("a worktree run needs --cohort-deadline and --cleanup-budget")
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         parser.error("native qualification requires macOS arm64")
     root = Path(args.root).resolve()

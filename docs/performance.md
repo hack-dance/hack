@@ -610,7 +610,7 @@ intervals are observed.
 - **Bounded observation.** Every host observation (`ps`, `sysctl`) is limited to 30 s. One
   that fails or times out is unobserved and fails closed: admission flags the sample, the idle
   baseline refuses to start, and trial or fixture cleanup keeps its state. Trial runtime
-  commands keep their own step timeouts.
+  commands keep their own step timeouts, shortened by a worktree cohort's deadlines.
 - **Attribution.** Each sample records its three largest background commands. The sampler
   summary reports those behind its peak sample, and the idle baseline reports those behind its
   ceiling, so a flagged sample can be traced (for example to Gatekeeper scanning a new home's
@@ -626,8 +626,19 @@ intervals are observed.
 - **Stops.** Before each worktree cohort, the run stops scheduling when a new syspolicyd,
   WindowServer, panic, Jetsam or reset report has appeared since it began, memory pressure is
   raised, a build tool runs or ran during the finished trial, or an idle VM changed. The same
-  applies when `--budget SECONDS` is spent. A cohort in progress always finishes its bounded
-  work and cleanup.
+  applies when `--budget SECONDS` is spent, and after a cohort outlives its deadline. A cohort
+  in progress always ends within its own deadline and cleanup budget.
+- **Deadlines.** A worktree run requires `--cohort-deadline SECONDS` and `--cleanup-budget
+  SECONDS`, and the preview shows both with their sum. A cohort's work (fixture, setup, starts,
+  warm restarts and live edits) runs under one deadline. Every runtime and Git command's timeout
+  is shortened to the time left, a command still running at the deadline is killed, and none
+  starts after it. Disposal then runs under its own budget, so an expired cohort still stops
+  each pool and confirms it stopped before removing only what it owns. A `down` stopped at the
+  budget, or a pool the budget never reached, is not confirmed disposed: its home and the whole
+  fixture are kept, and the run stops as after any cleanup failure. Each record carries both
+  bounds, whether each expired, and how long disposal took. Runtime and Git commands end within
+  the deadline plus the budget; a host observation already in progress (at most 30 s each) and
+  local file removal can run briefly past either.
 
 `--summarize SAMPLES`
 recomputes the summary from a retained raw file without running anything. Cleanup stops each

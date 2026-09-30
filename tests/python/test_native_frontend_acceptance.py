@@ -22,11 +22,16 @@ spec.loader.exec_module(driver)
 # One stand-in serves as both hack-native and hack-v5 (by file name) over a shared state file.
 # `up` refuses unless a prepared base is required, then stays in the foreground until `down`.
 FAKE = r'''#!PYTHON
-import json, os, pathlib, secrets, sys, time
+import fcntl, json, os, pathlib, secrets, sys, time
 here = pathlib.Path(__file__).parent
 name = pathlib.Path(__file__).name
 path = here / "state.json"
 fault = os.environ.get("FAKE_FAULT", "")
+# Invocations run concurrently (a foreground `up` while the driver polls `ps`). Each holds this
+# exclusive lock across its read-modify-write of the shared state, so no invocation saves a stale
+# copy over another's update; it is released only before a long wait.
+lock = open(here / "state.lock", "a")
+fcntl.flock(lock, fcntl.LOCK_EX)
 
 
 def load():
@@ -86,6 +91,7 @@ if argv[0] == "up":
                  up_env={k: v for k, v in os.environ.items() if k.startswith("HACK_NATIVE_")})
     state.setdefault("run", "r" + secrets.token_hex(8))
     save(state)
+    fcntl.flock(lock, fcntl.LOCK_UN)
     deadline = time.time() + 30
     while time.time() < deadline:
         time.sleep(0.02)
@@ -94,6 +100,7 @@ if argv[0] == "up":
     sys.exit(3)
 if argv[0] == "ps":
     if fault == "ps-hang":
+        fcntl.flock(lock, fcntl.LOCK_UN)
         time.sleep(10)
     if state.get("foreground"):
         reply({"status": "observed", "phase": "ready-observed", "backend": "native", "run": state["run"],

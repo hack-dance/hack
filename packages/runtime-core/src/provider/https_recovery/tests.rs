@@ -74,6 +74,7 @@ fn fixture() -> Fixture {
         owner_sha256: digest(&receipt),
         configuration_sha256: digest(&config),
         frontend_pid: 999997,
+        legacy_device_rebind: None,
         ca: inode(&ca).unwrap(),
         ca_file_sha256: digest(&fs::read(&ca).unwrap()),
         configuration: inode(&root.join("shared-owner/configuration.json")).unwrap(),
@@ -422,4 +423,148 @@ fn exclusive_port_guards_retain_both_families_across_effects() {
     assert!(std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)).is_err());
     drop(guards);
     port_absent(port).unwrap();
+}
+
+#[test]
+fn legacy_device_rebind_requires_both_selected_identities_and_preserves_receipt_bytes() {
+    let mut f = fixture();
+    let p = f.root.join("active-owner.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+    let current = f.journal.entries[0].id.dev;
+    let old = current + 7;
+    value["owner"]["dev"] = serde_json::json!(old);
+    value["lock"]["dev"] = serde_json::json!(old);
+    let bytes = serde_json::to_vec(&value).unwrap();
+    fs::write(&p, &bytes).unwrap();
+    f.journal.owner_sha256 = digest(&bytes);
+    assert!(archive_under(&f.root, &f.journal, verify_socket).is_err());
+    all_original(&f);
+    let selection = LegacyDeviceRebind::parse(&format!(
+        "{}:{}:{}:{}:{}:{}",
+        "a".repeat(32),
+        "b".repeat(64),
+        current,
+        f.journal.entries[0].id.ino,
+        current,
+        f.journal.entries[3].id.ino
+    ))
+    .unwrap();
+    let receipt: Receipt = serde_json::from_slice(&bytes).unwrap();
+    assert!(selection.matches(&receipt, old, current));
+    assert!(!selection.matches(&receipt, old + 1, current));
+    assert!(!selection.matches(&receipt, old, current + 1));
+    let mut wrong = selection.clone();
+    wrong.lock.ino += 1;
+    f.journal.legacy_device_rebind = Some(wrong);
+    assert!(archive_under(&f.root, &f.journal, verify_socket).is_err());
+    all_original(&f);
+    f.journal.legacy_device_rebind = Some(selection.clone());
+    archive_under(&f.root, &f.journal, |receipt, _, socket| {
+        if !selection.matches(receipt, old, current) {
+            return Err(refused());
+        }
+        socket_absent(socket)
+    })
+    .unwrap();
+    assert_eq!(
+        fs::read(destination(&f.root, "active-owner.json", &suffix(&f))).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        inode(&destination(&f.root, "owner.sock", &suffix(&f))).unwrap(),
+        selection.socket
+    );
+}
+
+#[test]
+fn full_command_refuses_unconfirmed_legacy_witness_before_publishing_journal() {
+    let (f, candidate, _alias) = complete_fixture();
+    let (owner, config) = hashes(&f);
+    let selection = format!(
+        "{}:{}:{}:{}:{}:{}",
+        "a".repeat(32),
+        "b".repeat(64),
+        f.journal.entries[0].id.dev,
+        f.journal.entries[0].id.ino,
+        f.journal.entries[3].id.dev,
+        f.journal.entries[3].id.ino
+    );
+    assert!(recover_legacy_device_rebind(&candidate, &owner, &config, 999997, &selection).is_err());
+    all_original(&f);
+    assert!(
+        !names(&f.root)
+            .unwrap()
+            .iter()
+            .any(|p| p.starts_with("recovery-"))
+    );
+}
+
+#[test]
+fn full_legacy_command_archives_with_real_current_witness_and_exact_retry() {
+    let (f, candidate, _alias) = complete_fixture();
+    fs::write(f.home.join("compose.yaml"), "services: {}\n").unwrap();
+    let share = crate::provider::ProjectShareIntent::approve(&f.home, true).unwrap();
+    let mut pool = state::Owner::load(&candidate).unwrap();
+    pool.project_share = Some(share.clone());
+    pool.save(&candidate).unwrap();
+    let run = "a".repeat(32);
+    let graphs = candidate.state_root.join("run/graphs");
+    directory(&graphs);
+    let graph_root = graphs.join(&run);
+    directory(&graph_root);
+    let graph: crate::provider::graph::Receipt = serde_json::from_value(serde_json::json!({
+        "version":1,"run":run,"owner":pool.token,"namespace":"c".repeat(64),"plan_id":"d".repeat(64),
+        "phase":"stopped-data-retained","readiness":{},"resources":{},
+        "source":{"shared":share,"revision":"e".repeat(64),"archive_sha256":"f".repeat(64),"selection_sha256":"0".repeat(64)}
+    })).unwrap();
+    write(
+        &graph_root.join("state.json"),
+        &serde_json::to_vec_pretty(&graph).unwrap(),
+    );
+    let current = f.journal.entries[0].id.dev;
+    let witness = crate::provider::graph::fixture_https_witness(&candidate, &graph, current + 7);
+    write(&graph_root.join("source-device-rebind.json"), &witness);
+    let p = f.root.join("active-owner.json");
+    let mut receipt: serde_json::Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+    receipt["owner"]["dev"] = serde_json::json!(current + 7);
+    receipt["lock"]["dev"] = serde_json::json!(current + 7);
+    let before = serde_json::to_vec(&receipt).unwrap();
+    fs::write(&p, &before).unwrap();
+    let (owner, config) = hashes(&f);
+    assert!(recover(&candidate, &owner, &config, 999997).is_err());
+    let selection = format!(
+        "{run}:{}:{current}:{}:{current}:{}",
+        digest(&witness),
+        f.journal.entries[0].id.ino,
+        f.journal.entries[3].id.ino
+    );
+    let result =
+        recover_legacy_device_rebind(&candidate, &owner, &config, 999997, &selection).unwrap();
+    assert_eq!(
+        result["qualification"],
+        "explicit-legacy-device-migration-original-volume-continuity-unproven"
+    );
+    assert_eq!(
+        recover_legacy_device_rebind(&candidate, &owner, &config, 999997, &selection).unwrap(),
+        result
+    );
+    let journal: Journal = serde_json::from_slice(
+        &fs::read(f.root.join(format!("recovery-{owner}-{config}.json"))).unwrap(),
+    )
+    .unwrap();
+    let suffix = digest(&serde_json::to_vec(&journal).unwrap());
+    assert_eq!(
+        fs::read(destination(&f.root, "active-owner.json", &suffix)).unwrap(),
+        before
+    );
+    for entry in &f.journal.entries {
+        assert_eq!(
+            inode(&destination(&f.root, &entry.name, &suffix)).unwrap(),
+            entry.id
+        );
+    }
+    assert_eq!(
+        inode(&f.root.join("data/caddy/pki/authorities/local/root.crt")).unwrap(),
+        f.journal.ca
+    );
 }

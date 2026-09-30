@@ -206,11 +206,56 @@ struct Journal {
     owner_sha256: String,
     configuration_sha256: String,
     frontend_pid: i32,
+    legacy_device_rebind: Option<LegacyDeviceRebind>,
     ca: Inode,
     ca_file_sha256: String,
     configuration: Inode,
     leases: Inode,
     entries: Vec<Entry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LegacyDeviceRebind {
+    run: String,
+    witness_sha256: String,
+    socket: Inode,
+    lock: Inode,
+}
+impl LegacyDeviceRebind {
+    fn parse(value: &str) -> Result<Self, CandidateError> {
+        let parts: Vec<_> = value.split(':').collect();
+        if parts.len() != 6 || !valid_hex(parts[0], 32) || !valid_hash(parts[1]) {
+            return Err(refused());
+        }
+        let number = |part: &str| {
+            part.parse::<u64>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(refused)
+        };
+        Ok(Self {
+            run: parts[0].into(),
+            witness_sha256: parts[1].into(),
+            socket: Inode {
+                dev: number(parts[2])?,
+                ino: number(parts[3])?,
+            },
+            lock: Inode {
+                dev: number(parts[4])?,
+                ino: number(parts[5])?,
+            },
+        })
+    }
+    fn matches(&self, receipt: &Receipt, old: u64, current: u64) -> bool {
+        old != current
+            && receipt.owner.dev == old
+            && receipt.lock.dev == old
+            && self.socket.dev == current
+            && self.lock.dev == current
+            && self.socket.ino == receipt.owner.ino
+            && self.lock.ino == receipt.lock.ino
+    }
 }
 fn selected(root: &Path, entry: &Entry, suffix: &str) -> Result<PathBuf, CandidateError> {
     let source = root.join(&entry.name);
@@ -286,14 +331,22 @@ fn observe(
         return Err(refused());
     }
     let socket = fs::symlink_metadata(&paths[0]).map_err(|_| refused())?;
+    let socket_id = journal.entries[0].id;
+    let lock_id = private_directory(&paths[3])?;
+    let exact = socket_id
+        == (Inode {
+            dev: receipt.owner.dev,
+            ino: receipt.owner.ino,
+        })
+        && lock_id == receipt.lock;
+    let explicitly_selected = journal.legacy_device_rebind.as_ref().is_some_and(|s| {
+        s.socket == socket_id
+            && s.lock == lock_id
+            && s.matches(&receipt, receipt.owner.dev, socket_id.dev)
+    });
     if !socket.file_type().is_socket()
         || socket.mode() & 0o777 != 0o600
-        || journal.entries[0].id
-            != (Inode {
-                dev: receipt.owner.dev,
-                ino: receipt.owner.ino,
-            })
-        || private_directory(&paths[3])? != receipt.lock
+        || !(exact && journal.legacy_device_rebind.is_none() || explicitly_selected)
         || !names(&paths[3])?.is_empty()
     {
         return Err(refused());
@@ -481,6 +534,33 @@ pub fn recover(
     config_hash: &str,
     frontend_pid: i32,
 ) -> Result<serde_json::Value, CandidateError> {
+    recover_selected(candidate, owner_hash, config_hash, frontend_pid, None)
+}
+
+/// Explicit legacy migration only; original host-volume continuity remains unproven.
+pub fn recover_legacy_device_rebind(
+    candidate: &Candidate,
+    owner_hash: &str,
+    config_hash: &str,
+    frontend_pid: i32,
+    selection: &str,
+) -> Result<serde_json::Value, CandidateError> {
+    recover_selected(
+        candidate,
+        owner_hash,
+        config_hash,
+        frontend_pid,
+        Some(LegacyDeviceRebind::parse(selection)?),
+    )
+}
+
+fn recover_selected(
+    candidate: &Candidate,
+    owner_hash: &str,
+    config_hash: &str,
+    frontend_pid: i32,
+    legacy_device_rebind: Option<LegacyDeviceRebind>,
+) -> Result<serde_json::Value, CandidateError> {
     if !cfg!(target_os = "macos")
         || !valid_hash(owner_hash)
         || !valid_hash(config_hash)
@@ -502,6 +582,7 @@ pub fn recover(
             owner_sha256: owner_hash.into(),
             configuration_sha256: config_hash.into(),
             frontend_pid,
+            legacy_device_rebind: legacy_device_rebind.clone(),
             ca: inode(&root.join("data/caddy/pki/authorities/local/root.crt"))?,
             ca_file_sha256: digest(&certificate(
                 &root.join("data/caddy/pki/authorities/local/root.crt"),
@@ -532,6 +613,7 @@ pub fn recover(
         || journal.owner_sha256 != owner_hash
         || journal.configuration_sha256 != config_hash
         || journal.frontend_pid != frontend_pid
+        || journal.legacy_device_rebind != legacy_device_rebind
     {
         return Err(refused());
     }
@@ -571,6 +653,14 @@ pub fn recover(
         {
             return Err(refused());
         }
+        #[cfg(target_os = "macos")]
+        if let Some(selection) = &journal.legacy_device_rebind {
+            let (old, current) =
+                super::graph::https_devices(candidate, &selection.run, &selection.witness_sha256)?;
+            if !selection.matches(receipt, old, current) {
+                return Err(refused());
+            }
+        }
         if ca_hash(&root.join("data/caddy/pki/authorities/local/root.crt"))? != receipt.ca_sha256 {
             return Err(refused());
         }
@@ -603,7 +693,7 @@ pub fn recover(
         verify(receipt, config, socket)
     })?;
     Ok(
-        serde_json::json!({"https_evidence_archived":true,"owner_sha256":owner_hash,"configuration_sha256":config_hash,"entries":journal.entries.len(),"ca_preserved":true,"processes_signaled":0}),
+        serde_json::json!({"https_evidence_archived":true,"owner_sha256":owner_hash,"configuration_sha256":config_hash,"entries":journal.entries.len(),"ca_preserved":true,"processes_signaled":0,"qualification":if journal.legacy_device_rebind.is_some(){"explicit-legacy-device-migration-original-volume-continuity-unproven"}else{"exact-recorded-device-and-inode"}}),
     )
 }
 

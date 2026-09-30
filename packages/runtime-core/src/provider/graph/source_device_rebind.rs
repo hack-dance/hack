@@ -250,6 +250,101 @@ impl Witness {
     }
 }
 
+/// Corroborate an explicitly selected legacy HTTPS device translation. This
+/// witness does not establish original host-volume continuity or authorize any
+/// HTTPS effect; the caller must independently select and pin both current inodes.
+pub(in crate::provider) fn https_devices(
+    candidate: &Candidate,
+    run: &str,
+    expected: &str,
+) -> Result<(u64, u64), CandidateError> {
+    if !super::hex(run, 32) || !super::hex(expected, 64) {
+        return Err(refused());
+    }
+    let root = directory(candidate, run)?;
+    no_pending(&root)?;
+    for entry in fs::read_dir(&root).map_err(|_| refused())? {
+        let name = entry.map_err(|_| refused())?.file_name();
+        if name.to_str().is_none_or(|s| s.ends_with(".pending")) {
+            return Err(refused());
+        }
+    }
+    let pin = pin_raw(&root.join(FILE), LIMIT, false)?;
+    let witness: Witness = serde_json::from_slice(&pin.bytes).map_err(|_| refused())?;
+    let owner_root = candidate.state_root.join("run/smolvm");
+    let owner_pin = pin_raw(&owner_root.join("owner.json"), STATE_LIMIT, false)?;
+    let owner: state::Owner = serde_json::from_slice(&owner_pin.bytes).map_err(|_| refused())?;
+    let receipt_pin = pin_raw(&root.join("state.json"), STATE_LIMIT, false)?;
+    let receipt: Receipt = serde_json::from_slice(&receipt_pin.bytes).map_err(|_| refused())?;
+    if sha256(&pin.bytes) != expected
+        || pin.bytes != encoded(&witness)?
+        || witness.version != 1
+        || witness.run != run
+        || witness.owner != owner.token
+        || sha256(&owner_pin.bytes) != witness.current_owner_raw_sha256
+        || owner.project_share.as_ref() != Some(&witness.current_share)
+        || owner.guest_boot_id.as_deref() != Some(witness.current_guest_boot.as_str())
+        || lifecycle::host_filesystem::host_boot_micros()? != witness.host_boot_micros
+        || witness.old_share.device == witness.current_share.device
+        || witness.old_share.project != witness.current_share.project
+        || witness.old_share.guest_path != witness.current_share.guest_path
+        || witness.old_share.inode != witness.current_share.inode
+        || witness.old_share.unfiltered_source != witness.current_share.unfiltered_source
+        || receipt.run != witness.run
+        || receipt.owner != witness.owner
+        || receipt.namespace != witness.namespace
+        || receipt.plan_id != witness.plan
+        || receipt.phase != "stopped-data-retained"
+        || receipt.source.as_ref().and_then(|s| s.shared.as_ref()) != Some(&witness.current_share)
+        || receipt
+            .resources
+            .values()
+            .any(|r| r.kind != Kind::Volume && r.phase != "absent")
+    {
+        return Err(refused());
+    }
+    witness.current_share.validate().map_err(|_| refused())?;
+    pin.reverify()?;
+    owner_pin.reverify()?;
+    receipt_pin.reverify()?;
+    Ok((witness.old_share.device, witness.current_share.device))
+}
+
+#[cfg(test)]
+pub(in crate::provider) fn fixture_https_witness(
+    candidate: &Candidate,
+    receipt: &Receipt,
+    old_device: u64,
+) -> Vec<u8> {
+    let owner = state::Owner::load(candidate).unwrap();
+    let current_share = owner.project_share.clone().unwrap();
+    let mut old_share = current_share.clone();
+    old_share.device = old_device;
+    encoded(&Witness {
+        version: 1,
+        run: receipt.run.clone(),
+        owner: owner.token,
+        namespace: receipt.namespace.clone(),
+        plan: receipt.plan_id.clone(),
+        original_ready_sha256: "1".repeat(64),
+        stopped_raw_sha256: sha256(&encoded(receipt).unwrap()),
+        absent_intent_raw_sha256: "3".repeat(64),
+        retirement_raw_sha256: "4".repeat(64),
+        original_owner_raw_sha256: "5".repeat(64),
+        current_owner_raw_sha256: sha256(
+            &fs::read(candidate.state_root.join("run/smolvm/owner.json")).unwrap(),
+        ),
+        host_boot_micros: lifecycle::host_filesystem::host_boot_micros().unwrap(),
+        previous_guest_boot: "old".into(),
+        current_guest_boot: owner.guest_boot_id.unwrap(),
+        old_share,
+        current_share,
+        retained_volume_projections: BTreeMap::new(),
+        retained_volumes: BTreeMap::new(),
+    })
+    .unwrap()
+}
+
 /// A later ordinary replay uses the original witness as immutable provenance,
 /// never as authority to change the current Owner, guest boot or source device.
 pub(super) fn verify_cache_scope_origin(
@@ -605,6 +700,102 @@ pub(in crate::provider::graph) fn fixture_wrong_volume_projection(bytes: &[u8]) 
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn https_translation_requires_selected_witness_current_owner_boot_share_and_scope() {
+        let fixture = super::super::tests::Fixture::new();
+        fs::write(fixture.0.join("compose.yaml"), "services: {}\n").unwrap();
+        let candidate = Candidate::discover(&fixture.0).unwrap();
+        let share = ProjectShareIntent::approve(&fixture.0, true).unwrap();
+        let mut owner = state::Owner::create(
+            &candidate,
+            crate::provider::Profile::Research,
+            None,
+            crate::provider::NetworkIntent::Isolated,
+        )
+        .unwrap();
+        owner.project_share = Some(share.clone());
+        owner.guest_boot_id = Some("new".into());
+        owner.save(&candidate).unwrap();
+        struct Alias(PathBuf, PathBuf);
+        impl Drop for Alias {
+            fn drop(&mut self) {
+                if fs::read_link(&self.0).ok().as_ref() == Some(&self.1) {
+                    let _ = fs::remove_file(&self.0);
+                }
+            }
+        }
+        let _alias = Alias(
+            owner.short_home.clone(),
+            candidate.state_root.join("run/smolvm/home"),
+        );
+        let mut old_share = share.clone();
+        old_share.device += 7;
+        let run = "a".repeat(32);
+        let parent = candidate.state_root.join("run/graphs");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = parent.join(&run);
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let receipt: Receipt = serde_json::from_value(json!({
+            "version":1,"run":run,"owner":owner.token,"namespace":"c".repeat(64),
+            "plan_id":"d".repeat(64),"phase":"stopped-data-retained","readiness":{},
+            "source":{"shared":share,"revision":"e".repeat(64),"archive_sha256":"f".repeat(64),"selection_sha256":"0".repeat(64)},
+            "resources":{}
+        })).unwrap();
+        private_file(&root.join("state.json"), &encoded(&receipt).unwrap());
+        let witness = Witness {
+            version: 1,
+            run: run.clone(),
+            owner: owner.token.clone(),
+            namespace: receipt.namespace.clone(),
+            plan: receipt.plan_id.clone(),
+            original_ready_sha256: "1".repeat(64),
+            stopped_raw_sha256: "2".repeat(64),
+            absent_intent_raw_sha256: "3".repeat(64),
+            retirement_raw_sha256: "4".repeat(64),
+            original_owner_raw_sha256: "5".repeat(64),
+            current_owner_raw_sha256: sha256(
+                &fs::read(candidate.state_root.join("run/smolvm/owner.json")).unwrap(),
+            ),
+            host_boot_micros: lifecycle::host_filesystem::host_boot_micros().unwrap(),
+            previous_guest_boot: "old".into(),
+            current_guest_boot: "new".into(),
+            old_share,
+            current_share: share.clone(),
+            retained_volume_projections: BTreeMap::new(),
+            retained_volumes: BTreeMap::new(),
+        };
+        let path = root.join(FILE);
+        let bytes = encoded(&witness).unwrap();
+        private_file(&path, &bytes);
+        let expected = sha256(&bytes);
+        assert_eq!(
+            https_devices(&candidate, &run, &expected).unwrap(),
+            (share.device + 7, share.device)
+        );
+        assert!(https_devices(&candidate, &run, &"f".repeat(64)).is_err());
+        private_file(&root.join("unknown.pending"), b"retained pending intent");
+        assert!(https_devices(&candidate, &run, &expected).is_err());
+        fs::remove_file(root.join("unknown.pending")).unwrap();
+        for control in ["namespace", "owner", "boot", "share", "one_device"] {
+            let mut changed = witness.clone();
+            match control {
+                "namespace" => changed.namespace = "9".repeat(64),
+                "owner" => changed.current_owner_raw_sha256 = "9".repeat(64),
+                "boot" => changed.host_boot_micros += 1,
+                "share" => changed.current_share.inode += 1,
+                _ => changed.old_share.device = changed.current_share.device,
+            }
+            let changed = encoded(&changed).unwrap();
+            fs::write(&path, &changed).unwrap();
+            assert!(
+                https_devices(&candidate, &run, &sha256(&changed)).is_err(),
+                "{control}"
+            );
+        }
+    }
 
     fn private_file(path: &Path, bytes: &[u8]) {
         let mut file = OpenOptions::new()

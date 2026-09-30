@@ -936,3 +936,14 @@ retry before archival rather than guessing or discarding that evidence. Global
 HTTPS evidence archival does not itself recover a project finalization token or
 prove application readiness: run the explicit frontend recovery and normal
 startup checks afterward.
+
+Legacy receipts may predate a host filesystem device-number change. The strict
+command refuses those records. An explicit additional
+`--accept-legacy-device-rebind RUN:WITNESS_SHA:SOCKET_DEV:SOCKET_INO:LOCK_DEV:LOCK_INO`
+selects the existing graph source-device witness and both current HTTPS identities.
+Both old receipt devices must match its old device; both current devices must match
+its current device, with each respective inode unchanged. Current owner bytes,
+host/guest boot, project share, stopped graph scope and witness bytes are rechecked
+before each effect. Mixed changes refuse. The journal pins the current identities;
+the legacy receipt stays byte-identical. This is explicit legacy migration with
+**original host-volume continuity unproven**, not an automatic identity relaxation.

@@ -803,6 +803,22 @@ capacity pins, and otherwise keeps the stock templates; `runtime status` records
 with `runtime prepared-base remove --base-id BASE_ID`; a pool never depends on its base after the
 first start.
 
+`scripts/accept-native-frontend.py` checks this path end to end for one owned linked worktree.
+- It builds and verifies a base, then runs ordinary `hack-v5 up` with `require`, so the frontend
+  creates the pool from that base with the worktree as its exact share.
+- It checks healthy HTTPS against the home's private Caddy root and writes a `/data` marker.
+- It runs `down`, edits the served file on the host, and runs `up` again. It then requires the
+  same run in a new container, HTTPS serving exactly the edit, and the marker.
+- Finally it disposes of the pool, base, provider alias and fixture with readbacks.
+
+It prints its plan unless `--run` is given and is a correctness check only. On any failure, or
+when its `--budget` runs out, it issues no further commands and keeps all state for diagnosis.
+The only process it can terminate is one of its own bounded commands, whose direct child
+`subprocess.run` kills when its timeout expires; it never signals a foreground or a VM. Ambient
+`HACK_NATIVE_*` variables are dropped, so only its declared selections reach the candidate. Its
+stand-in controls run with
+`python3 -m unittest discover -s tests/python -p test_native_frontend_acceptance.py`.
+
 ### Optional native HTTPS frontend
 
 For routed foreground startup, explicitly set all three public selections:

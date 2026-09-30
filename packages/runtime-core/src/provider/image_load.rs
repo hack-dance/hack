@@ -12,6 +12,7 @@ use std::{
     io::{Cursor, Read, Seek},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Component, Path, PathBuf},
+    time::Duration,
 };
 
 const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
@@ -267,11 +268,45 @@ fn inspect(engine: &Engine<'_>, image: &str) -> Result<bool, CandidateError> {
     }
 }
 
+/// How long an import waits for a provider lease that another operation holds, such as the
+/// `graph inspect` behind `hack ps`. Everything `load` does before taking the lease is read-only
+/// archive verification, and an `ensure-image` cache entry written before it (under the image
+/// cache's own lock) is complete and reusable on its own, so waiting admits nothing early. On
+/// expiry the load refuses `provider_busy` before any engine or receipt mutation.
+const IMPORT_LEASE_WAIT: Duration = Duration::from_secs(5);
+
+/// The provider lease for one import, waiting at most `wait` for a holder to release it. Only
+/// acquisition is retried: identity is verified under the acquired lease, and an import that
+/// has started is never retried here.
+#[cfg(target_os = "macos")]
+fn connect_for_import(candidate: &Candidate, wait: Duration) -> Result<Engine<'_>, CandidateError> {
+    Engine::connect_until(candidate, std::time::Instant::now() + wait, || false)
+}
+
+/// Bounded acquisition exists only on macOS, the provider's host; elsewhere the lease stays strict.
+#[cfg(not(target_os = "macos"))]
+fn connect_for_import(
+    candidate: &Candidate,
+    _wait: Duration,
+) -> Result<Engine<'_>, CandidateError> {
+    Engine::connect(candidate)
+}
+
 pub fn load(
     candidate: &Candidate,
     path: &Path,
     expected_sha: &str,
     image: &str,
+) -> Result<ImageReceipt, CandidateError> {
+    load_waiting(candidate, path, expected_sha, image, IMPORT_LEASE_WAIT)
+}
+
+fn load_waiting(
+    candidate: &Candidate,
+    path: &Path,
+    expected_sha: &str,
+    image: &str,
+    lease_wait: Duration,
 ) -> Result<ImageReceipt, CandidateError> {
     if !hex(expected_sha) || !image.strip_prefix("sha256:").is_some_and(hex) {
         return Err(error("Expected archive and image hashes are required."));
@@ -292,7 +327,7 @@ pub fn load(
     if verify_digest(&mut file, expected_sha, MAX_ARCHIVE)? != metadata.len() {
         return Err(error("Image archive size changed during verification."));
     }
-    let engine = Engine::connect(candidate)?;
+    let engine = connect_for_import(candidate, lease_wait)?;
     let directory = candidate.state_root.join("run/image-loads");
     state::private_directory(&directory)?;
     let path = directory.join(format!("{expected_sha}.json"));
@@ -493,6 +528,114 @@ mod tests {
         ] {
             assert!(validate_archive(&bytes, &image, 4096).is_err());
         }
+    }
+
+    /// A candidate whose provider looks running to every check before the lease. Its recorded
+    /// process is synthetic, so identity verification under an acquired lease always fails:
+    /// an attempt that got past the lease is visible without any engine being reached.
+    #[cfg(target_os = "macos")]
+    struct RunningPool {
+        root: PathBuf,
+        candidate: Candidate,
+        alias: PathBuf,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl RunningPool {
+        fn new() -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+            let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+                "hkl-image-lease-{}-{}",
+                std::process::id(),
+                crate::node::now()
+            ));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .unwrap();
+            let candidate = Candidate::discover(&root).unwrap();
+            let mut owner = state::Owner::create(
+                &candidate,
+                super::super::Profile::Development,
+                None,
+                super::super::NetworkIntent::Isolated,
+            )
+            .unwrap();
+            owner.phase = "running".into();
+            owner.guest_boot_id = Some("11111111-1111-1111-1111-111111111111".into());
+            owner.process = Some(super::super::identity::ProcessIdentity {
+                pid: 2_000_000,
+                start_micros: 1,
+                uid: unsafe { libc::geteuid() },
+                executable: PathBuf::from("/fixture/provider"),
+            });
+            owner.save(&candidate).unwrap();
+            let alias = owner.short_home.clone();
+            Self {
+                root,
+                candidate,
+                alias,
+            }
+        }
+
+        fn lease(&self) -> state::Lock {
+            state::Lock::acquire(&self.candidate.state_root.join("run/smolvm")).unwrap()
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for RunningPool {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.alias);
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_import_waits_out_a_brief_lease_holder_and_refuses_a_lasting_one_before_any_effect() {
+        use std::time::Instant;
+        let pool = RunningPool::new();
+        let (bytes, image) = fixture("arm64", false, false);
+        let path = pool.root.join("image.tar");
+        std::fs::write(&path, &bytes).unwrap();
+        let sha = hash(&bytes);
+        let loads = pool.candidate.state_root.join("run/image-loads");
+
+        // A holder that outlasts the wait: provider_busy once the wait ends, with no import
+        // receipt and the verified archive untouched.
+        let held = pool.lease();
+        let started = Instant::now();
+        let refused = load_waiting(
+            &pool.candidate,
+            &path,
+            &sha,
+            &image,
+            Duration::from_millis(300),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refused.code, "provider_busy", "{refused:?}");
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(!loads.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        // A holder that releases within the wait: the same attempt gets past the lease after
+        // waiting and reaches identity verification under it, which the synthetic process fails
+        // before any engine is reached or receipt written.
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        let started = Instant::now();
+        let admitted = load_waiting(&pool.candidate, &path, &sha, &image, Duration::from_secs(5))
+            .err()
+            .unwrap();
+        release.join().unwrap();
+        assert_ne!(admitted.code, "provider_busy", "{admitted:?}");
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!loads.exists());
     }
 
     #[test]

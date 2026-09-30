@@ -6,6 +6,44 @@ const PLAN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const GENERATION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 #[test]
+fn acknowledged_retirement_requires_every_selector_and_forbids_other_effects() {
+    let fixture = Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    let args = vec![
+        "retire-acknowledged-publisher",
+        "--run-id",
+        RUN,
+        "--expect-owner",
+        RUN,
+        "--expect-receipt",
+        PLAN,
+        "--expect-publisher",
+        GENERATION,
+    ];
+    for offset in [1, 3, 5, 7] {
+        let mut missing = args.clone();
+        missing.drain(offset..offset + 2);
+        assert_eq!(
+            command(&candidate, &missing).unwrap_err().code,
+            "graph_arguments"
+        );
+    }
+    for effect in [
+        "--remove-data",
+        "--accept-legacy-device-rebind",
+        "--environment-stdin",
+    ] {
+        let mut expanded = args.clone();
+        expanded.push(effect);
+        assert_eq!(
+            command(&candidate, &expanded).unwrap_err().code,
+            "graph_arguments"
+        );
+    }
+    assert!(!candidate.state_root.exists());
+}
+
+#[test]
 fn same_boot_recovery_requires_explicit_receipt_and_forbids_data_removal() {
     let fixture = Fixture::new();
     let candidate = Candidate::discover(&fixture.0).unwrap();

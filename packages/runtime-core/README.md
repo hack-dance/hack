@@ -840,6 +840,25 @@ precedence over older cleanup records. Pending operations, unresolved initialize
 effects and mismatched receipt or retirement identities still refuse recovery;
 historical records cannot authorize a later generation.
 
+Ordinary cleanup can be acknowledged before a later dependency-journal archival
+step fails. If this leaves a dead foreground publication for the current stopped
+graph, use the explicit private `graph retire-acknowledged-publisher --run-id RUN
+--expect-owner OWNER --expect-receipt RECEIPT_SHA --expect-publisher PUBLISHER_SHA
+--json` recovery. The SHA selectors identify the exact stopped receipt and
+foreground owner-record bytes. Admission requires the current guest boot's
+confirmed cleanup acknowledgement, no pending operation, independent absence of
+compute by both immutable ID and reserved name, and all named volumes present.
+Environment, startup, probe and bridge cleanup inventories are rechecked while
+holding the publisher and provider locks, including at each publication effect.
+The existing retirement journal preserves both original publication files and
+resumes an interrupted socket-first rename. Active owners, replacement listeners,
+stale selectors and incomplete acknowledgements refuse without falling back to
+historical recovery. This operation changes no graph receipt, VM, dependency
+journal or retained data; it does not authorize a restore by itself.
+An old completed or cleanup-completed dependency journal is accepted as inert
+evidence only; malformed, incomplete or pending rebind state refuses at each
+effect boundary. Safe archival and the next restore remain separate checks.
+
 `restore-selection` then binds the witness's raw hash to the selected generation.
 The source checks use only an in-memory device projection; original retention and
 restore history consume the unchanged stopped receipt. The new receipt receives

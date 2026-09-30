@@ -27,6 +27,7 @@ Usage:
   hack-local graph recover-cleanup --run-id <32-hex> --expect-receipt <sha256> [--json]
   hack-local graph recover-live-owner --run-id <32-hex> --expect-receipt <sha256> [--json]
   hack-local graph retire-recovered-publisher --run-id <32-hex> --expect-owner <32-hex> [--json]
+  hack-local graph retire-acknowledged-publisher --run-id <32-hex> --expect-owner <32-hex> --expect-receipt <64-hex> --expect-publisher <64-hex> [--json]
   hack-local graph inspect-host-pin-recovery --run-id <32-hex> [--json]
   hack-local graph recover-host-pins --run-id <32-hex> --expect-selection <64-hex> --accept-legacy-device-rebind [--json]
   hack-local graph inspect-absent-publication-cleanup --run-id <32-hex> --original-owner-file <private-json> --host-inspection-file <private-json> [--json]

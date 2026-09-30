@@ -56,7 +56,13 @@ mod bridge_recovery;
 mod bridges;
 pub use bridge_recovery::{export_bridge_recovery, inspect_bridge_recovery};
 pub(in crate::provider) use bridges::{initialize_owner_registry, verify_owner_registry};
+#[cfg(target_os = "macos")]
+mod acknowledged_publisher;
 mod cleanup_enrollment;
+#[cfg(target_os = "macos")]
+pub use acknowledged_publisher::{
+    AcknowledgedPublisherSelection, retire as retire_acknowledged_publisher,
+};
 #[cfg(target_os = "macos")]
 mod dead_owner_cleanup;
 #[cfg(target_os = "macos")]

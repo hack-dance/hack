@@ -361,6 +361,28 @@ pub(in crate::provider::graph) fn retire_recovered_publisher_locked(
     device_rebind: Option<DeviceRebind>,
     lock: &state::Lock,
 ) -> Result<(), CandidateError> {
+    retire_recovered_publisher_locked_fenced(
+        candidate,
+        run,
+        expected_owner,
+        expected_receipt,
+        device_rebind,
+        lock,
+        &|| Ok(()),
+    )
+}
+
+/// The caller's current cleanup proof remains valid at each publication effect.
+pub(in crate::provider::graph) fn retire_recovered_publisher_locked_fenced(
+    candidate: &Candidate,
+    run: &str,
+    expected_owner: &str,
+    expected_receipt: &str,
+    device_rebind: Option<DeviceRebind>,
+    lock: &state::Lock,
+    verify_cleanup: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    verify_cleanup()?;
     let root = root(candidate, run)?;
     let path = retirement_path(&root, expected_owner);
     let pending = path.with_extension("pending");
@@ -368,6 +390,7 @@ pub(in crate::provider::graph) fn retire_recovered_publisher_locked(
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(retirement_refused)?;
+    verify_cleanup()?;
     super::super::journal::retain_file(&root, name, "publisher-retirement-interrupted", 8192)?;
     let intent: Retirement = if metadata(&path)?.is_some() {
         state::read(&path).map_err(|_| retirement_refused())?
@@ -391,6 +414,7 @@ pub(in crate::provider::graph) fn retire_recovered_publisher_locked(
             record: pin.record_id,
             owner: pin.record,
         };
+        verify_cleanup()?;
         state::write(&path, &selected).map_err(|_| retirement_refused())?;
         selected
     };
@@ -404,6 +428,7 @@ pub(in crate::provider::graph) fn retire_recovered_publisher_locked(
         device_rebind,
     )?;
     if socket_original {
+        verify_cleanup()?;
         fs::rename(
             root.join("control.sock"),
             retired_path(&root, expected_owner, true),
@@ -414,6 +439,7 @@ pub(in crate::provider::graph) fn retire_recovered_publisher_locked(
             .map_err(|_| retirement_refused())?;
     }
     if record_original {
+        verify_cleanup()?;
         let _ = verify_retirement(
             candidate,
             run,
@@ -444,6 +470,7 @@ pub(in crate::provider::graph) fn retire_recovered_publisher_locked(
     if socket_original || record_original {
         return Err(retirement_refused());
     }
+    verify_cleanup()?;
     Ok(())
 }
 

@@ -291,14 +291,106 @@ def provenance(body, lane, start):
             "reason": selection.get("reason"), "activation": prepared.get("activation"), "base_use": use}
 
 
-def admission_from(load, names, pressure, cpus):
+def cpu_seconds(text):
+    """Cumulative CPU time as `ps` prints it ([dd-][hh:]mm:ss.cc; minutes may exceed 59), or None."""
+    days, _, clock = text.strip().rpartition("-")
+    try:
+        seconds = 0.0
+        for part in clock.split(":"):
+            seconds = seconds * 60 + float(part)
+        return seconds + (int(days) * 86400 if days else 0)
+    except ValueError:
+        return None
+
+
+class Background:
+    """CPU cores used, between consecutive observations, by processes this run does not own.
+
+    A process is owned when its command line names the run root: trial homes, their VMs, CLI
+    calls, fixtures and the harness itself. `watched` PIDs (for example an idle VM left running
+    beside the run) count as background and are also reported on their own. A process that
+    starts and exits between two observations is not seen, so short-lived work is undercounted."""
+
+    def __init__(self, root, watched=(), listing=None, clock=time.monotonic):
+        self.root, self.watched, self.clock = str(root), set(watched), clock
+        self.listing = listing or (lambda: subprocess.run(
+            ["ps", "-A", "-o", "pid=,time=,args="], capture_output=True, text=True, check=True).stdout)
+        self.previous = None
+        self.lock = threading.Lock()
+
+    def observe(self):
+        """(background cores, watched cores, names) since the previous observation. Cores are None
+        until an interval exists; names are every listed command, for build-tool detection."""
+        with self.lock:
+            now, table, names = self.clock(), {}, []
+            for line in self.listing().splitlines():
+                fields = line.split(None, 2)
+                if len(fields) < 3 or not fields[0].isdigit():
+                    continue
+                names.append(fields[2].split()[0])
+                seconds = cpu_seconds(fields[1])
+                if seconds is not None:
+                    table[(int(fields[0]), fields[2])] = (seconds, self.root in fields[2])
+            previous, self.previous = self.previous, (now, table)
+            if previous is None or now <= previous[0]:
+                return None, None, names
+            background = watched = 0.0
+            for key, (seconds, owned) in table.items():
+                if owned or key not in previous[1]:
+                    continue
+                delta = max(0.0, seconds - previous[1][key][0])
+                background += delta
+                if key[0] in self.watched:
+                    watched += delta
+            elapsed = now - previous[0]
+            return round(background / elapsed, 3), round(watched / elapsed, 3), names
+
+
+def measure_idle(meter, seconds, interval, pressure=None, sleep=time.sleep):
+    """Sample the host while nothing of this run is running. The maximum background observed
+    becomes the admission ceiling: a timed sample may not exceed what idle already showed."""
+    pressure = pressure or (lambda: subprocess.run(
+        ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True).stdout.strip())
+    background, watched, levels, tools = [], [], set(), set()
+    meter.observe()
+    for _ in range(max(1, round(seconds / interval))):
+        sleep(interval)
+        cores, vm, names = meter.observe()
+        if cores is not None:
+            background.append(cores)
+            watched.append(vm)
+        levels.add(pressure() or "unobserved")
+        tools |= {Path(n).name for n in names if BUILD_TOOLS.match(Path(n).name)}
+
+    def spread(values):
+        ordered = sorted(values)
+        return {"n": len(ordered), "median": round(statistics.median(ordered), 3), "max": ordered[-1],
+                "p95": ordered[min(len(ordered) - 1, round(0.95 * (len(ordered) - 1)))]} if ordered else {"n": 0}
+
+    refusals = ([] if len(background) >= 3 else ["too_few_samples"]) + (["build_tools"] if tools else []) \
+        + ([] if levels == {"1"} else ["memory_pressure"])
+    return {"seconds": seconds, "interval_s": interval, "background_cores": spread(background),
+            "watched_cores": spread(watched), "pressure_levels": sorted(levels), "build_tools": sorted(tools),
+            "ceiling_cores": max(background) if background else None, "refusals": refusals}
+
+
+def admission_from(load, names, pressure, cpus, background=None, ceiling=None):
     """Admission from one host observation. `None` marks an input that could not be observed;
-    any unobserved input or failed condition flags the sample with its reason (fail closed)."""
+    any unobserved input or failed condition flags the sample with its reason (fail closed).
+
+    With a measured idle `ceiling`, background CPU from processes the run does not own must stay
+    within it, and load (which includes the run's own VMs) is recorded but not judged. Without a
+    ceiling the legacy rule applies: load above half the CPUs flags the sample."""
     reasons = []
     if load is None:
         reasons.append("load_unobserved")
-    elif load > cpus / 2:
+    elif ceiling is None and load > cpus / 2:
         reasons.append("load_high")
+    if ceiling is not None:
+        if background is None:
+            reasons.append("background_unobserved")
+        elif background > ceiling:
+            reasons.append("background_above_idle")
     tools = []
     if names is None:
         reasons.append("processes_unobserved")
@@ -310,20 +402,38 @@ def admission_from(load, names, pressure, cpus):
         reasons.append("pressure_unobserved")
     elif pressure != "1":
         reasons.append("memory_pressure")
-    return {"load1": None if load is None else round(load, 2), "build_tools": tools,
-            "memory_pressure": pressure, "reasons": reasons, "admitted": not reasons}
+    observed = {"load1": None if load is None else round(load, 2), "build_tools": tools,
+                "memory_pressure": pressure, "reasons": reasons, "admitted": not reasons}
+    if ceiling is not None:
+        observed.update(background_cores=background, idle_ceiling_cores=ceiling)
+    return observed
 
 
-def admission():
+def admission(meter=None, ceiling=None):
     try:
         load = os.getloadavg()[0]
     except OSError:
         load = None
-    listing = subprocess.run(["ps", "-axo", "comm="], capture_output=True, text=True)
-    names = listing.stdout.split("\n") if listing.returncode == 0 and listing.stdout.strip() else None
+    background = watched = None
+    if meter is None:
+        listing = subprocess.run(["ps", "-axo", "comm="], capture_output=True, text=True)
+        names = listing.stdout.split("\n") if listing.returncode == 0 and listing.stdout.strip() else None
+    else:
+        try:
+            background, watched, names = meter.observe()
+        except (OSError, subprocess.CalledProcessError):
+            names = None
     level = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True)
     pressure = level.stdout.strip() if level.returncode == 0 else None
-    return admission_from(load, names, pressure, os.cpu_count() or 1)
+    observed = admission_from(load, names, pressure, os.cpu_count() or 1, background, ceiling)
+    if meter is not None:
+        observed["watched_cores"] = watched
+    return observed
+
+
+def observe_admission(args):
+    """Admission against the run's measured idle baseline when one was taken, else the legacy rule."""
+    return admission(getattr(args, "background", None), getattr(args, "idle_ceiling", None))
 
 
 def admitted(record, cpus):
@@ -398,9 +508,13 @@ class Sampler:
         if gaps and max(gaps) > self.GAP_INTERVALS * self.interval:
             reasons.add("sampling_gap")
         loads = [sample["load1"] for sample in self.samples if sample["load1"] is not None]
+        background = [s["background_cores"] for s in self.samples if s.get("background_cores") is not None]
+        watched = [s["watched_cores"] for s in self.samples if s.get("watched_cores") is not None]
         return {"samples": len(self.samples), "interval_s": self.interval, "reasons": sorted(reasons),
                 "max_gap_s": round(max(gaps), 3) if gaps else None,
-                "max_load1": max(loads) if loads else None, "admitted": not reasons}
+                "max_load1": max(loads) if loads else None,
+                "max_background_cores": max(background) if background else None,
+                "max_watched_cores": max(watched) if watched else None, "admitted": not reasons}
 
 
 class Trial:
@@ -580,8 +694,8 @@ def pair_trial(args, index, lane):
     sampler = None
     try:
         trial.setup()
-        record["admission"] = admission()
-        sampler = Sampler(args.admission_interval).start()
+        record["admission"] = observe_admission(args)
+        sampler = Sampler(args.admission_interval, observe=lambda: observe_admission(args)).start()
         trial.up("up", lane)
         record["disks_at_ready"] = trial.disks()
         image = trial.step("ensure_image", "runtime", "ensure-image", "--reference", args.image, timeout=600)
@@ -600,7 +714,7 @@ def pair_trial(args, index, lane):
         if trial.token(graph["run"], "restore_token") != graph["token"]:
             raise Failure("persistent token changed across restart")
         record["token_sha256"] = hashlib.sha256(graph["token"].encode()).hexdigest()[:16]
-        record["admission_end"] = admission()
+        record["admission_end"] = observe_admission(args)
         record["ok"] = True
     except Failure as error:
         record["ok"] = False
@@ -619,8 +733,8 @@ def cohort_trial(args, size, repeat, lane):
     sampler = None
     try:
         trial.setup()
-        record["admission"] = admission()
-        sampler = Sampler(args.admission_interval).start()
+        record["admission"] = observe_admission(args)
+        sampler = Sampler(args.admission_interval, observe=lambda: observe_admission(args)).start()
         started = time.monotonic()
         trial.up("up", lane)
         image = trial.step("ensure_image", "runtime", "ensure-image", "--reference", args.image, timeout=600)
@@ -640,7 +754,7 @@ def cohort_trial(args, size, repeat, lane):
         record["after_all_ready"] = trial.provider(trial.status())
         record["disks_at_ready"] = trial.disks()
         record["busy_retries"] = sum(v.get("busy_retries", 0) for v in trial.samples.values())
-        record["admission_end"] = admission()
+        record["admission_end"] = observe_admission(args)
         record["ok"] = True
     except Failure as error:
         record["ok"] = False
@@ -660,8 +774,8 @@ def concurrent_trial(args, count):
     try:
         for trial in trials:
             trial.setup()
-        record["admission"] = admission()
-        sampler = Sampler(args.admission_interval).start()
+        record["admission"] = observe_admission(args)
+        sampler = Sampler(args.admission_interval, observe=lambda: observe_admission(args)).start()
         with concurrent.futures.ThreadPoolExecutor(max_workers=count) as pool:
             bodies = list(pool.map(lambda t: t.up("up", "prepared"), trials))
         record["up_wall_s"] = [t.samples["up"]["wall_s"] for t in trials]
@@ -676,7 +790,7 @@ def concurrent_trial(args, count):
             raise Failure(f"identities collided: machines={len(machines)} boots={len(boots)} tokens={len(tokens)}")
         record["distinct"] = {"machines": len(machines), "guest_boots": len(boots), "tokens": len(tokens)}
         record["disk_private_bytes"] = [{k: v["private"] for k, v in d.items()} for d in disks]
-        record["admission_end"] = admission()
+        record["admission_end"] = observe_admission(args)
         record["ok"] = True
     except Failure as error:
         record["ok"] = False
@@ -729,8 +843,8 @@ def worktree_trial(args, size, repeat, lane):
         entries = fixture.create()
         for pool in pools:
             pool.setup()
-        record["admission"] = admission()
-        sampler = Sampler(args.admission_interval).start()
+        record["admission"] = observe_admission(args)
+        sampler = Sampler(args.admission_interval, observe=lambda: observe_admission(args)).start()
         started = time.monotonic()
 
         def start(index):
@@ -809,7 +923,7 @@ def worktree_trial(args, size, repeat, lane):
         record["isolation"]["live_edits_read_back"] = sum(a == b for a, b in zip(seen, live))
         if record["isolation"]["live_edits_read_back"] != size:
             raise Failure(f"a host edit did not reach exactly its own pool: {record['isolation']}")
-        record["admission_end"] = admission()
+        record["admission_end"] = observe_admission(args)
         record["ok"] = True
     except Failure as error:
         record["ok"] = False
@@ -825,19 +939,28 @@ def worktree_trial(args, size, repeat, lane):
     return record
 
 
-def run_worktrees(args, sizes, keep):
-    """Worktree cohorts in order. A failed cleanup can leave live pools and their roots behind;
-    any later cohort would exceed the planned peak and share the host with them, so none starts.
-    Returns whether every planned cohort ran."""
+def run_worktrees(args, sizes, keep, deadline=None, clock=time.monotonic):
+    """Worktree cohorts in order. Returns None when every planned cohort ran, else why the rest
+    did not start: `cleanup_failed` (a failed cleanup can leave live pools and their roots behind,
+    and any later cohort would exceed the planned peak and share the host with them) or `budget`
+    (the run budget was spent; a cohort in progress always finishes)."""
     for repeat in range(args.worktree_repeats):
         for size in sizes:
             lanes = ("stock", "prepared") if (repeat + size) % 2 == 0 else ("prepared", "stock")
             for lane in lanes:
+                if deadline is not None and clock() >= deadline:
+                    return "budget"
                 record = worktree_trial(args, size, repeat, lane)
                 keep(record)
                 if record["cleanup_failed"]:
-                    return False
-    return True
+                    return "cleanup_failed"
+    return None
+
+
+def process_identity(pid):
+    """Start time and command of a live PID, or None; used to show an idle VM stayed the same."""
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart=,args="], capture_output=True, text=True)
+    return result.stdout.strip() or None if result.returncode == 0 else None
 
 
 def stats(values):
@@ -1035,6 +1158,12 @@ def main():
     parser.add_argument("--worktree-repeats", type=int, default=1)
     parser.add_argument("--worktree-parallel", type=int, default=4, help="worktree pools started at once")
     parser.add_argument("--admission-interval", type=float, default=1.0, help="seconds between admission samples during timed work")
+    parser.add_argument("--idle-baseline", type=float, default=0.0,
+                        help="seconds to measure idle background CPU first; its maximum becomes the admission ceiling")
+    parser.add_argument("--idle-vm-pid", type=int, action="append", default=[],
+                        help="a VM left running beside the run (repeatable); counted as background and reported")
+    parser.add_argument("--budget", type=float, default=0.0,
+                        help="seconds after which no further worktree cohort starts (0: no budget)")
     parser.add_argument("--output", help="JSON lines of raw samples (default <root>/samples-<time>.jsonl)")
     parser.add_argument("--run", action="store_true", help="execute; without it only the plan is printed")
     args = parser.parse_args()
@@ -1060,7 +1189,8 @@ def main():
             "pools_created": (2 * args.pairs if "pairs" in modes else 0)
             + (2 * len(sizes) * args.cohort_repeats if "cohort" in modes else 0)
             + (args.concurrent if "concurrent" in modes else 0)
-            + 2 * sum(worktree_sizes) * args.worktree_repeats}
+            + 2 * sum(worktree_sizes) * args.worktree_repeats,
+            "idle_baseline_s": args.idle_baseline, "idle_vm_pids": args.idle_vm_pid, "budget_s": args.budget}
     try:
         probe = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True)
     except OSError:
@@ -1081,6 +1211,18 @@ def main():
     if worktree_sizes and SENSITIVE_COMPONENTS & set(root.parts):
         parser.error(f"worktree mode needs a --root outside {sorted(SENSITIVE_COMPONENTS)} directories")
     output = Path(args.output or root / f"samples-{int(time.time())}.jsonl")
+    started = time.monotonic()
+    idle_vms = {pid: process_identity(pid) for pid in args.idle_vm_pid}
+    if any(identity is None for identity in idle_vms.values()):
+        parser.error(f"--idle-vm-pid must name running processes: {idle_vms}")
+    baseline = None
+    if args.idle_baseline > 0:
+        meter = Background(root, watched=args.idle_vm_pid)
+        baseline = measure_idle(meter, args.idle_baseline, args.admission_interval)
+        if baseline["refusals"]:
+            print(json.dumps({"idle_baseline": baseline}, indent=2))
+            parser.error(f"the idle baseline was not idle ({baseline['refusals']}); nothing was started")
+        args.background, args.idle_ceiling = meter, baseline["ceiling_cores"]
     context = {
         "harness_sha256": sha256(__file__), "bundle_sha256": sha256(args.bundle),
         "host": {"model": subprocess.run(["sysctl", "-n", "hw.model"], capture_output=True, text=True).stdout.strip(),
@@ -1088,6 +1230,7 @@ def main():
         "image": args.image, "profile": args.profile, "plan": plan,
         # Shared by every prepared pool; reported once, apart from per-pool private disk.
         "base_store_allocated_bytes": allocated(args.store),
+        "idle_baseline": baseline, "idle_vms": idle_vms,
     }
     records = []
     with output.open("a") as sink:
@@ -1112,10 +1255,14 @@ def main():
                         keep(cohort_trial(args, size, repeat, lane))
         if "concurrent" in modes:
             keep(concurrent_trial(args, args.concurrent))
-        if worktree_sizes and not run_worktrees(args, worktree_sizes, keep):
-            print(json.dumps({"stopped": "a worktree cohort's cleanup failed; its pools and roots are kept"}),
-                  flush=True)
+        stopped = run_worktrees(args, worktree_sizes, keep, started + args.budget if args.budget else None) \
+            if worktree_sizes else None
+        if stopped:
+            print(json.dumps({"stopped": stopped}), flush=True)
         summary = summarize(records, context["host"]["cpus"])
+        summary["stopped"] = stopped
+        # An idle VM that restarted or vanished during the run changed the background it measured.
+        summary["idle_vms_unchanged"] = {pid: process_identity(pid) == identity for pid, identity in idle_vms.items()}
         sink.write(json.dumps({"summary": summary}) + "\n")
     print(json.dumps({"output": str(output), "summary": summary}, indent=2))
 

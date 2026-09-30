@@ -592,7 +592,25 @@ Admission is sampled at the start and end of each trial's timed work and every
 and one sysctl. A trial is flagged, not dropped, when build tools run, the 1-minute load
 exceeds half the CPU count, memory pressure is raised, or any of these could not be observed at
 any sample. A failed observation or a gap longer than five intervals also flags the trial. Only admitted samples
-enter the admitted summaries and the paired pair and cohort ratios. `--summarize SAMPLES`
+enter the admitted summaries and the paired pair and cohort ratios.
+
+The load rule counts the run's own VMs, and half the CPU count is not a measurement of this
+host, so a measured baseline can replace it. `--idle-baseline SECONDS` first samples the host
+while nothing of the run exists. It refuses to start anything if build tools appear, memory
+pressure rises, or fewer than three intervals are observed.
+- **Background.** It measures background CPU as per-process CPU-time deltas of processes whose
+  command line does not name `--root`. Trial VMs, CLI calls, fixtures and the harness are
+  therefore excluded. A process that starts and exits between two samples is not seen.
+- **Ceiling.** The maximum background observed becomes the admission ceiling. A timed sample
+  is flagged `background_above_idle` when background exceeds it, and load is then recorded but
+  not judged.
+- **Idle VMs.** `--idle-vm-pid` names a VM left running beside the run (repeatable). It counts
+  as background, is reported on its own, and the summary shows whether it stayed the same
+  process.
+- **Budget.** `--budget SECONDS` stops scheduling further worktree cohorts once it is spent; a
+  cohort in progress finishes and cleans up.
+
+`--summarize SAMPLES`
 recomputes the summary from a retained raw file without running anything. Cleanup stops each
 pool and requires `runtime status` to report its VM process gone. Only then does it remove the
 trial's home and provider alias, with a readback; otherwise it keeps them and reports the

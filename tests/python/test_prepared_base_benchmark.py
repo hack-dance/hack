@@ -487,7 +487,7 @@ class WorktreeTrials(unittest.TestCase):
         os.environ["FAKE_FAULT"] = "still-alive"
         self.args.worktree_repeats = 2
         records = []
-        self.assertFalse(benchmark.run_worktrees(self.args, [2, 1], records.append))
+        self.assertEqual(benchmark.run_worktrees(self.args, [2, 1], records.append), "cleanup_failed")
         self.assertEqual([(r["size"], r["repeat"], r["lane"]) for r in records], [(2, 0, "stock")])
         record = records[0]
         self.assert_fixture_preserved(record, "not confirmed stopped")
@@ -502,10 +502,88 @@ class WorktreeTrials(unittest.TestCase):
     def test_every_planned_cohort_runs_when_cleanup_succeeds(self):
         self.args.worktree_repeats = 1
         records = []
-        self.assertTrue(benchmark.run_worktrees(self.args, [1], records.append))
+        self.assertIsNone(benchmark.run_worktrees(self.args, [1], records.append))
         self.assertEqual([(r["lane"], r["ok"], r["cleanup_failed"]) for r in records],
                          [("prepared", True, False), ("stock", True, False)])
         self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_a_spent_budget_starts_no_further_cohort(self):
+        self.args.worktree_repeats = 1
+        records, now = [], iter([0.0, 99.0])
+        stopped = benchmark.run_worktrees(self.args, [1], records.append, deadline=50.0, clock=lambda: next(now))
+        self.assertEqual(stopped, "budget")
+        self.assertEqual([(r["lane"], r["ok"]) for r in records], [("prepared", True)])
+        self.assertEqual(list(self.root.iterdir()), [])
+
+
+class MeasuredAdmission(unittest.TestCase):
+    """Admission against a measured idle baseline, with scripted process listings."""
+
+    ROOT = "/private/run-root"
+
+    def listing(self, *rows):
+        return "\n".join(f"{pid} {cpu} {args}" for pid, cpu, args in rows)
+
+    def test_cpu_time_parses_every_ps_shape(self):
+        self.assertEqual(benchmark.cpu_seconds("0:01.13"), 1.13)
+        self.assertAlmostEqual(benchmark.cpu_seconds("96:22.89"), 5782.89)
+        self.assertAlmostEqual(benchmark.cpu_seconds("1:02:03.45"), 3723.45)
+        self.assertEqual(benchmark.cpu_seconds("2-01:00:00.00"), 176400.0)
+        self.assertIsNone(benchmark.cpu_seconds("n/a"))
+
+    def test_background_counts_only_processes_the_run_does_not_own(self):
+        listings = iter([
+            self.listing((10, "0:01.00", "/usr/bin/mds"), (20, "0:05.00", "/vm/smolvm-bin idle"),
+                         (30, "0:00.00", f"{self.ROOT}/trial/smolvm-bin _boot-vm"),
+                         (40, "0:00.00", f"python3 bench.py --root {self.ROOT}")),
+            self.listing((10, "0:02.00", "/usr/bin/mds"), (20, "0:05.50", "/vm/smolvm-bin idle"),
+                         (30, "0:09.00", f"{self.ROOT}/trial/smolvm-bin _boot-vm"),
+                         (40, "0:03.00", f"python3 bench.py --root {self.ROOT}"),
+                         (50, "0:30.00", "/usr/bin/newcomer")),
+        ])
+        clock = iter([0.0, 2.0])
+        meter = benchmark.Background(self.ROOT, watched=[20], listing=lambda: next(listings), clock=lambda: next(clock))
+        self.assertEqual(meter.observe()[:2], (None, None))
+        background, watched, names = meter.observe()
+        # mds 1.0 s and the idle VM 0.5 s over 2 s; owned trial VM and harness excluded; a process
+        # first seen now has no interval yet.
+        self.assertEqual((background, watched), (0.75, 0.25))
+        self.assertIn("/usr/bin/newcomer", names)
+
+    def test_the_idle_maximum_becomes_the_ceiling_and_builds_or_pressure_refuse(self):
+        def meter(samples, names=()):
+            values = iter([(None, None, list(names))] + [(s, 0.01, list(names)) for s in samples])
+            return type("Meter", (), {"observe": lambda self: next(values)})()
+
+        idle = benchmark.measure_idle(meter([0.4, 1.2, 0.8]), 3, 1, pressure=lambda: "1", sleep=lambda _: None)
+        self.assertEqual((idle["ceiling_cores"], idle["refusals"]), (1.2, []))
+        self.assertEqual(idle["background_cores"]["median"], 0.8)
+        building = benchmark.measure_idle(meter([0.4, 0.5, 0.6], ["/opt/bin/cargo"]), 3, 1, pressure=lambda: "1",
+                                          sleep=lambda _: None)
+        self.assertEqual(building["refusals"], ["build_tools"])
+        pressured = benchmark.measure_idle(meter([0.4, 0.5, 0.6]), 3, 1, pressure=lambda: "2", sleep=lambda _: None)
+        self.assertEqual(pressured["refusals"], ["memory_pressure"])
+        short = benchmark.measure_idle(meter([0.4]), 1, 1, pressure=lambda: "1", sleep=lambda _: None)
+        self.assertEqual(short["refusals"], ["too_few_samples"])
+
+    def test_a_ceiling_judges_background_instead_of_load(self):
+        # The run's own VMs raise load; with a measured ceiling that alone does not flag timing.
+        busy_self = benchmark.admission_from(14.0, ["zsh"], "1", 16, background=0.9, ceiling=1.2)
+        self.assertEqual((busy_self["reasons"], busy_self["background_cores"]), ([], 0.9))
+        noisy = benchmark.admission_from(2.0, ["zsh"], "1", 16, background=1.5, ceiling=1.2)
+        self.assertEqual(noisy["reasons"], ["background_above_idle"])
+        unmeasured = benchmark.admission_from(2.0, ["zsh"], "1", 16, background=None, ceiling=1.2)
+        self.assertEqual(unmeasured["reasons"], ["background_unobserved"])
+        # Without a baseline the legacy rule is unchanged.
+        self.assertEqual(benchmark.admission_from(14.0, ["zsh"], "1", 16)["reasons"], ["load_high"])
+
+    def test_trials_use_the_runs_baseline_when_one_was_measured(self):
+        args = argparse.Namespace(background=type("M", (), {"observe": lambda self: (2.5, 0.1, ["zsh"])})(),
+                                  idle_ceiling=1.0)
+        observed = benchmark.observe_admission(args)
+        self.assertIn("background_above_idle", observed["reasons"])
+        self.assertEqual(observed["watched_cores"], 0.1)
+        self.assertNotIn("background_cores", benchmark.observe_admission(argparse.Namespace()))
 
 
 class WorktreeFixture(unittest.TestCase):

@@ -1,5 +1,4 @@
 import {
-  chmod,
   lstat,
   mkdtemp,
   readdir,
@@ -51,6 +50,11 @@ export interface NativeHttpsOwnerServerDependencies {
     phase: "acquire" | "release"
   ) => Promise<void>;
   readonly verifyIdle: (binding: NativeHttpsOwnerBinding) => Promise<void>;
+  /**
+   * Test seam: runs after the control socket is published and before its first
+   * ownership observation. Production passes none.
+   */
+  readonly afterPublish?: (socketPath: string) => Promise<void>;
 }
 
 function verifyCleanGraphObservations(
@@ -251,9 +255,10 @@ export async function serveNativeHttpsOwner(opts: {
     }
   };
   const closeServer = async () => {
-    // Refuse before closing when any owned path changed. The runtime's close-time
-    // unlink reaches only the retired staging name (listenPublishedUnixSocket).
-    await checkPaths();
+    // Always close the listener: the runtime's close-time unlink reaches only the
+    // retired staging name (listenPublishedUnixSocket). retireSocketPath then
+    // removes the endpoint only while it is this listener's inode; a replacement
+    // is kept and the failure retained.
     for (const client of clients) {
       client.destroy();
     }
@@ -584,21 +589,21 @@ export async function serveNativeHttpsOwner(opts: {
       }
     };
     void frontend.exited.then(exited, exited);
-    // Published by link from a staging name: closing the server never removes
-    // the control endpoint, which only retireSocketPath removes by identity.
-    await listenPublishedUnixSocket(server, socketPath);
-    const before = await lstat(socketPath);
-    await chmod(socketPath, 0o600);
-    const after = await lstat(socketPath);
+    // Keep the published inode at once: failure cleanup then closes this listener
+    // and retires only this inode, and every later observation compares against it.
+    // The helper set its mode before publication, so the path is never chmodded.
+    socketIdentity = await listenPublishedUnixSocket(server, socketPath);
+    await opts.dependencies.afterPublish?.(socketPath);
+    const published = await lstat(socketPath);
     if (
-      !after.isSocket() ||
-      before.dev !== after.dev ||
-      before.ino !== after.ino ||
-      after.uid !== process.getuid?.()
+      !published.isSocket() ||
+      published.dev !== socketIdentity.dev ||
+      published.ino !== socketIdentity.ino ||
+      published.uid !== process.getuid?.() ||
+      (published.mode & 0o777) !== 0o600
     ) {
       throw nativeHttpsOwnerRefused();
     }
-    socketIdentity = { dev: after.dev, ino: after.ino };
     if (frontendFailed) {
       throw nativeHttpsOwnerRefused();
     }

@@ -714,8 +714,7 @@ async function startOwnerChallenge(
   try {
     // Published by link from an owner-only staging name (a verified socket of
     // this user): closing the server never removes a replacement at path.
-    identity = await listenPublishedUnixSocket(server, path);
-    await setMode(path, 0o600);
+    identity = await listenPublishedUnixSocket(server, path, { setMode });
     const prepared = await lstat(path);
     if (
       !prepared.isSocket() ||

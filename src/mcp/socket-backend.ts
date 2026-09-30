@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, realpath, rmdir, unlink } from "node:fs/promises";
+import { lstat, mkdir, realpath, rmdir, unlink } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { isAbsolute, join } from "node:path";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -188,8 +188,6 @@ async function prepareBackend(
       }
       throw error;
     });
-    startup.check();
-    await chmod(socketPath, 0o600);
     startup.check();
     releaseReceipt = await recordMcpSocketReceipt({
       directory,

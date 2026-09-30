@@ -118,6 +118,21 @@ complete bundle to change the candidate.
    binary refusing newer state is an unsupported downgrade, not a successful rollback.
    Preserve that state; do not rewrite receipts or adopt another home's data.
 
+Host cleanup or a reboot can remove the temporary `/private/tmp/hkl-<owner>` HOME
+alias while the private candidate home and disks remain intact. Normal commands
+report `provider_home_missing`; they do not initialize another pool or recreate the
+alias during observation. Explicit `runtime recover --json` can restore only that
+absent exact alias, after verifying the receipt-bound dead provider, both recorded
+disks, free VM lock, closed disk handles, and no active provider command. Existing
+files, directories, foreign links, a live or reused PID, and uncertain ownership
+refuse without replacement. Recovery rechecks the receipt before exclusive creation,
+then validates socket absence and flushes the disks before recording
+`recovered-unclean`. If those final checks fail, it reports
+`provider_home_restored_recovery_incomplete`, keeps the exact owned alias and retained
+data, and requires inspection before retry. No guest is started by alias recovery.
+Interrupted starts without a recorded process or both identified disks remain
+outside this repair path.
+
 Compatibility is qualified for specific bundle hashes and state formats. The
 displayed version alone does not establish frontend/executor or downgrade
 compatibility. V4 and candidate homes remain separate; this procedure does not

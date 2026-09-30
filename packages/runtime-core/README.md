@@ -859,6 +859,23 @@ An old completed or cleanup-completed dependency journal is accepted as inert
 evidence only; malformed, incomplete or pending rebind state refuses at each
 effect boundary. Safe archival and the next restore remain separate checks.
 
+If ordinary cleanup closed all dependency sockets but a later archival failure
+left its reservation, first complete that exact publisher retirement. Inspect
+`graph dependency-reservations --json`, then use `graph
+release-acknowledged-dependencies --run-id RUN --expect-owner OWNER
+--expect-receipt RECEIPT_SHA --expect-publisher PUBLISHER_SHA
+--expect-reservation RESERVATION_SHA --json`. The final selector is the inspected
+reservation fingerprint. This requires the current boot's acknowledged cleanup,
+the exact completed publisher retirement, a dead reservation process matching
+that publisher, the same run/Owner/boot and precisely the receipt's dependency
+slots. Every selected socket must already be absent; even a matching stale socket
+refuses. The selected record moves atomically without overwriting into the graph's
+`dependency-reservation-retired-SHA.json` history, preserving bytes and inode.
+Retry verifies that same record and proof. Changed selectors, another publisher,
+pending/foreign records, occupied history and any reappearing socket refuse.
+No socket, VM, graph receipt, dependency journal, data or sibling is removed.
+This explicit recovery frees the claim; normal `up` still performs its own checks.
+
 `restore-selection` then binds the witness's raw hash to the selected generation.
 The source checks use only an in-memory device projection; original retention and
 restore history consume the unchanged stopped receipt. The new receipt receives

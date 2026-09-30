@@ -1082,6 +1082,34 @@ pub(in crate::provider::graph) struct Retired {
     _lock: state::Lock,
 }
 impl Retired {
+    /// Obtain the process identity only from the exact completed retirement.
+    /// This does not infer ownership from pathname absence or PID death.
+    pub fn publisher_process(
+        &self,
+        candidate: &Candidate,
+        run: &str,
+        owner_sha256: &str,
+        complete_sha256: &str,
+    ) -> Result<ProcessIdentity, CandidateError> {
+        self.verify_recovery(candidate, run, owner_sha256, complete_sha256)?;
+        let intent: Retirement = state::read(&retirement_path(&self.root, owner_sha256))
+            .map_err(|_| retirement_refused())?;
+        let (socket_original, record_original) = verify_retirement(
+            candidate,
+            run,
+            (owner_sha256, complete_sha256),
+            &self.root,
+            &self._lock,
+            &intent,
+            None,
+        )?;
+        if socket_original || record_original {
+            return Err(retirement_refused());
+        }
+        self.verify()?;
+        Ok(intent.owner.process)
+    }
+
     pub fn acquire(candidate: &Candidate, run: &str) -> Result<Option<Self>, CandidateError> {
         let root = root(candidate, run)?;
         state::check_private_directory(&root)?;

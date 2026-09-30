@@ -14,6 +14,8 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+mod acknowledged;
+pub(super) use acknowledged::archive_acknowledged;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,6 +53,9 @@ fn read(path: &Path) -> Result<Record, CandidateError> {
     read_with_bytes(path).map(|(record, _)| record)
 }
 fn read_with_bytes(path: &Path) -> Result<(Record, Vec<u8>), CandidateError> {
+    read_with_identity(path).map(|(record, bytes, _)| (record, bytes))
+}
+fn read_with_identity(path: &Path) -> Result<(Record, Vec<u8>, (u64, u64)), CandidateError> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -74,8 +79,12 @@ fn read_with_bytes(path: &Path) -> Result<(Record, Vec<u8>), CandidateError> {
     if bytes.len() as u64 != m.len() {
         return Err(refused());
     }
+    let current = fs::symlink_metadata(path).map_err(|_| refused())?;
+    if (current.dev(), current.ino()) != (m.dev(), m.ino()) || current.nlink() != 1 {
+        return Err(refused());
+    }
     let record = serde_json::from_slice(&bytes).map_err(|_| refused())?;
-    Ok((record, bytes))
+    Ok((record, bytes, (m.dev(), m.ino())))
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -95,6 +95,32 @@ fn acknowledged_effect(receipt: &Receipt, effect: [u8; 32]) -> Result<(), Candid
     Ok(())
 }
 
+fn verify_cleanup(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    root: &Path,
+    selected: &AcknowledgedPublisherSelection<'_>,
+) -> Result<(), CandidateError> {
+    eligible(receipt, selected, engine.guest().boot_id())?;
+    exact_receipt(root, selected.receipt_sha256)?;
+    startup::require_dependency_rebind_complete(root, receipt)?;
+    let environment = environment::cleanup_inventory(candidate, engine, receipt, root)?;
+    let bridges = bridges::cleanup::read(engine, receipt, root)?;
+    acknowledged_effect(
+        receipt,
+        host_relay::cleanup_effect(
+            receipt,
+            engine.guest().boot_id(),
+            false,
+            &(&environment, &bridges),
+        )?,
+    )?;
+    host_relay::require_acknowledged_enrollment(receipt)?;
+    host_relay::inspect_cleanup(candidate, engine, receipt, false, &environment, &bridges)?;
+    engine.guest().verify()
+}
+
 /// Retire only a selected dead publication after independent current-boot ACK
 /// and guest absence checks. The existing immutable publisher journal preserves
 /// both original files and resumes either rename interruption. No graph receipt,
@@ -117,27 +143,9 @@ pub fn retire(
     let lock = state::Lock::acquire_existing(&publication)?;
     host_pin_recovery::exact_lock_path(&publication, &lock)?;
     let (receipt, root) = load(candidate, &engine, selected.run)?;
-    eligible(&receipt, &selected, engine.guest().boot_id())?;
-    exact_receipt(&root, selected.receipt_sha256)?;
-    host_relay::require_acknowledged_enrollment(&receipt)?;
-    let environment = environment::cleanup_inventory(candidate, &engine, &receipt, &root)?;
-    let bridges = bridges::cleanup::read(&engine, &receipt, &root)?;
     let verify = || {
         host_pin_recovery::exact_lock_path(&publication, &lock)?;
-        exact_receipt(&root, selected.receipt_sha256)?;
-        startup::require_dependency_rebind_complete(&root, &receipt)?;
-        acknowledged_effect(
-            &receipt,
-            host_relay::cleanup_effect(
-                &receipt,
-                engine.guest().boot_id(),
-                false,
-                &(&environment, &bridges),
-            )?,
-        )?;
-        host_relay::require_acknowledged_enrollment(&receipt)?;
-        host_relay::inspect_cleanup(candidate, &engine, &receipt, false, &environment, &bridges)?;
-        engine.guest().verify()
+        verify_cleanup(candidate, &engine, &receipt, &root, &selected)
     };
     verify()?;
     // This helper checks the selected publisher bytes, dead process, refused
@@ -155,6 +163,56 @@ pub fn retire(
     verify()?;
     Ok(
         json!({"run":selected.run,"publisher_retired":true,"data_retained":true,"same_boot":true,"acknowledged_cleanup":true}),
+    )
+}
+
+/// Release a selected same-boot dependency claim only after exact publisher
+/// retirement and current acknowledged cleanup. Every socket must be absent;
+/// the record is exclusively moved to history, never deleted or overwritten.
+pub fn release_dependencies(
+    candidate: &Candidate,
+    selected: AcknowledgedPublisherSelection<'_>,
+    expected_reservation: &str,
+) -> Result<Value, CandidateError> {
+    if !hex(selected.run, 32)
+        || !hex(selected.owner, 32)
+        || !hex(selected.receipt_sha256, 64)
+        || !hex(selected.publisher_sha256, 64)
+        || !hex(expected_reservation, 64)
+    {
+        return Err(refused());
+    }
+    let engine = Engine::connect_cleanup_wait(candidate)?;
+    let retired =
+        foreground::transport::Retired::acquire(candidate, selected.run)?.ok_or_else(refused)?;
+    let (receipt, root) = load(candidate, &engine, selected.run)?;
+    let verify = || {
+        retired.verify_recovery(
+            candidate,
+            selected.run,
+            selected.publisher_sha256,
+            selected.receipt_sha256,
+        )?;
+        verify_cleanup(candidate, &engine, &receipt, &root, &selected)
+    };
+    verify()?;
+    let process = retired.publisher_process(
+        candidate,
+        selected.run,
+        selected.publisher_sha256,
+        selected.receipt_sha256,
+    )?;
+    dependency_slots::archive_acknowledged(
+        candidate,
+        &receipt,
+        engine.guest().boot_id(),
+        &process,
+        expected_reservation,
+        &verify,
+    )?;
+    verify()?;
+    Ok(
+        json!({"run":selected.run,"reservation_released":true,"record_retained":true,"data_retained":true,"same_boot":true}),
     )
 }
 

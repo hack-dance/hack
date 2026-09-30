@@ -117,7 +117,8 @@ pub(super) fn ordinary_mutation(root: &Path, receipt: &Receipt) -> Result<(), Ca
 }
 pub(super) fn retention(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
     #[cfg(target_os = "macos")]
-    if super::live_owner_cleanup::retained(root, receipt)?
+    if super::absent_publication_cleanup::retained_current(root, receipt)?
+        || super::live_owner_cleanup::retained(root, receipt)?
         || super::dead_owner_cleanup::retained(root, receipt)?
         || super::absent_publication_cleanup::retained(root, receipt)?
     {

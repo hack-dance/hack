@@ -847,6 +847,32 @@ pub(super) fn publication_allowed(
     Ok(())
 }
 
+/// Prefer only an exact current completion over historical cleanup sidecars.
+/// A later generation must still pass the ordinary enrollment checks.
+pub(super) fn retained_current(root: &Path, receipt: &Receipt) -> Result<bool, CandidateError> {
+    let Some(intent) = read_intent(root)? else {
+        return Ok(false);
+    };
+    no_pending(root)?;
+    require_absent(&root.join("live-owner-cleanup.pending"))?;
+    super::initializer_cache::require_resolved(receipt)?;
+    let requested = digest(&serde_json::to_vec_pretty(receipt).map_err(|_| refused())?);
+    if intent.complete_sha256.as_deref() != Some(requested.as_str()) {
+        return Ok(false);
+    }
+    if !intent.selection.matches_graph(receipt) || receipt.relay_cleanup.is_some() {
+        return Err(refused());
+    }
+    let bridges: super::bridges::cleanup::Selection =
+        state::read_bounded(&root.join("relay-cleanup-bridges.json"), 65536)?;
+    if bridges != intent.bridges {
+        return Err(refused());
+    }
+    dead_owner_cleanup::require_historical_recovery(root, receipt)?;
+    super::live_owner_cleanup::require_historical_recovery(root, receipt)?;
+    retained(root, receipt)
+}
+
 /// Retention is bound to the completed stopped receipt, not to missing paths.
 pub(super) fn retained(root: &Path, receipt: &Receipt) -> Result<bool, CandidateError> {
     let Some(intent) = read_intent(root)? else {
@@ -1161,6 +1187,159 @@ mod tests {
         let fixture = super::super::tests::Fixture::new();
         let candidate = Candidate::discover(&fixture.0).unwrap();
         (fixture, candidate)
+    }
+
+    #[test]
+    fn current_absent_completion_precedes_historical_enrollment_but_never_partial_proofs() {
+        let (fixture, _) = candidate();
+        let root = &fixture.0;
+        let original: Receipt = serde_json::from_value(json!({
+            "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),
+            "namespace":"c".repeat(64),"plan_id":"d".repeat(64),
+            "phase":"ready-observed","readiness":{},"resources":{"container:web":{
+                "kind":"container","key":"web","name":"owned-web","id":"b".repeat(64),"image":null,"phase":"absent"}},
+            "relay_startup":{"control_only":true,"guest_root":null,
+                "control_root":"/private/control","artifact":"e".repeat(64),"services":{}}
+        }))
+        .unwrap();
+        let mut current = original.clone();
+        current.phase = "stopped-data-retained".into();
+        let original_hash = digest(&serde_json::to_vec_pretty(&original).unwrap());
+        let complete = digest(&serde_json::to_vec_pretty(&current).unwrap());
+        let selection: Selection = serde_json::from_value(json!({
+            "version":1,"candidate":root,"run":current.run,"owner":current.owner,
+            "namespace":current.namespace,"plan":current.plan_id,
+            "original_owner_path":"/private/owner","original_owner_sha256":"1".repeat(64),
+            "filesystem_inspection_path":"/private/inspection","filesystem_inspection_sha256":"2".repeat(64),
+            "current_owner_sha256":"3".repeat(64),"graph_sha256":original_hash,
+            "host_boot_micros":1,"old_device":2,"new_device":3,
+            "previous_guest_boot":"previous","current_guest_boot":"current",
+            "foreground_root":"/private/foreground","control_root":"/private/control",
+            "source_shared":null,"environment_inventory":{},"scoped_bridge_projection":{},
+            "retained_volumes":{},"dependency_reservation":null,"qualification":"test"
+        })).unwrap();
+        let intent = Intent {
+            version: 1,
+            selection_sha256: selection.digest().unwrap(),
+            selection,
+            original: original.clone(),
+            environment: json!({}),
+            bridges: serde_json::from_value(json!({"version":1,"owner":current.owner,
+                "boot":"current","run":current.run,"plan":current.plan_id,
+                "capacity":1,"serial":1,"selected":{}}))
+            .unwrap(),
+            prior_bridges: None,
+            complete_sha256: Some(complete.clone()),
+        };
+        let retirement = Retirement {
+            version: 1,
+            selection_sha256: intent.selection_sha256.clone(),
+            complete_sha256: complete,
+            owner: current.owner.clone(),
+            run: current.run.clone(),
+        };
+        state::write(&root.join("state.json"), &current).unwrap();
+        state::write(&root.join(INTENT), &intent).unwrap();
+        state::write(&root.join(RETIREMENT), &retirement).unwrap();
+        state::write(&root.join("relay-cleanup-bridges.json"), &intent.bridges).unwrap();
+        // A completed older recovery is retained as exact history, not current authority.
+        let mut prior = current.clone();
+        prior.resources.get_mut("container:web").unwrap().id = Some("a".repeat(64));
+        let mut prior_original = prior.clone();
+        prior_original.phase = "ready-observed".into();
+        let dead = json!({
+            "version":1,"original_sha256":digest(&serde_json::to_vec_pretty(&prior_original).unwrap()),
+            "owner_sha256":"4".repeat(64),"old_boot":"older","new_boot":"previous",
+            "original":prior_original,"environment":null,"bridges":null,
+            "complete_sha256":digest(&serde_json::to_vec_pretty(&prior).unwrap())
+        });
+        state::write(&root.join("dead-owner-cleanup.json"), &dead).unwrap();
+        state::write(
+            &root.join("restore-history.json"),
+            &json!({
+                "version":1,"run":current.run,"owner":current.owner,"namespace":current.namespace,
+                "truncated":false,"entries":[prior],"legacy":{}
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::dead_owner_cleanup::retained(root, &current)
+                .unwrap_err()
+                .code,
+            "graph_relay_enrollment"
+        );
+        assert!(super::super::cleanup_enrollment::retention(root, &current).is_ok());
+        let live = json!({
+            "version":1,"boot":"previous","original":prior_original,
+            "original_sha256":dead["original_sha256"],"foreground_sha256":"f".repeat(64),
+            "relay":{"bytes":[],"record_id":[1,1]},"environment":{},"bridges":intent.bridges,
+            "prior_bridges":null,"listeners_retired":true,"complete_sha256":dead["complete_sha256"]
+        });
+        state::write(&root.join("live-owner-cleanup.json"), &live).unwrap();
+        assert!(super::super::cleanup_enrollment::retention(root, &current).is_ok());
+        for (name, valid) in [
+            ("dead-owner-cleanup.json", &dead),
+            ("live-owner-cleanup.json", &live),
+        ] {
+            for field in ["complete_sha256", "original_sha256"] {
+                let mut invalid = valid.clone();
+                invalid[field] = if field == "complete_sha256" {
+                    Value::Null
+                } else {
+                    json!("0".repeat(64))
+                };
+                state::write(&root.join(name), &invalid).unwrap();
+                assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
+            }
+            let mut invalid = valid.clone();
+            invalid["original"]["owner"] = json!("0".repeat(32));
+            state::write(&root.join(name), &invalid).unwrap();
+            assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
+            state::write(&root.join(name), valid).unwrap();
+        }
+        let mut unretired = live.clone();
+        unretired["listeners_retired"] = json!(false);
+        state::write(&root.join("live-owner-cleanup.json"), &unretired).unwrap();
+        assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
+        state::write(&root.join("live-owner-cleanup.json"), &live).unwrap();
+        let history = fs::read(root.join("restore-history.json")).unwrap();
+        fs::remove_file(root.join("restore-history.json")).unwrap();
+        assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
+        fs::write(root.join("restore-history.json"), history).unwrap();
+        let mut changed_bridges = serde_json::to_value(&intent.bridges).unwrap();
+        changed_bridges["serial"] = json!(99);
+        state::write(&root.join("relay-cleanup-bridges.json"), &changed_bridges).unwrap();
+        assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
+        state::write(&root.join("relay-cleanup-bridges.json"), &intent.bridges).unwrap();
+        let before = fs::read(root.join("state.json")).unwrap();
+        for pending in [
+            "state.pending",
+            "dead-owner-cleanup.pending",
+            "live-owner-cleanup.pending",
+            "absent-publication-cleanup.pending",
+            "absent-publication-retirement.pending",
+        ] {
+            fs::write(root.join(pending), b"interrupted").unwrap();
+            assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
+            fs::remove_file(root.join(pending)).unwrap();
+        }
+        for change in 0..4 {
+            let mut invalid = intent.clone();
+            match change {
+                0 => invalid.complete_sha256 = None,
+                1 => invalid.complete_sha256 = Some("6".repeat(64)),
+                2 => invalid.selection.owner = "7".repeat(32),
+                _ => invalid.selection.plan = "8".repeat(64),
+            }
+            state::write(&root.join(INTENT), &invalid).unwrap();
+            assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
+        }
+        state::write(&root.join(INTENT), &intent).unwrap();
+        let mut invalid = retirement.clone();
+        invalid.complete_sha256 = "9".repeat(64);
+        state::write(&root.join(RETIREMENT), &invalid).unwrap();
+        assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
+        assert_eq!(fs::read(root.join("state.json")).unwrap(), before);
     }
 
     #[test]

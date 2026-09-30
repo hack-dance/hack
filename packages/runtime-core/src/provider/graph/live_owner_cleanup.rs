@@ -384,6 +384,40 @@ fn finish_retirement(
     engine.guest().verify()
 }
 
+/// A committed older cleanup is diagnostic history only after its exact stopped
+/// generation and listener retirement are independently confirmed.
+pub(super) fn require_historical_recovery(
+    root: &Path,
+    current: &Receipt,
+) -> Result<(), CandidateError> {
+    if exists(&root.join("live-owner-cleanup.pending"))? {
+        return Err(refused());
+    }
+    if !exists(&root.join(FILE))? {
+        return Ok(());
+    }
+    let prior: Intent = state::read(&root.join(FILE))?;
+    let complete = prior.complete_sha256.as_deref().ok_or_else(refused)?;
+    let stopped =
+        restore_history::completed_for_recovery(root, current, complete)?.ok_or_else(refused)?;
+    validate(&prior, &stopped, &prior.original_sha256, &prior.boot)?;
+    if !prior.listeners_retired
+        || !stopped.resources.iter().any(|(key, old)| {
+            old.kind == Kind::Container
+                && old.id.as_ref().is_some_and(|id| {
+                    current
+                        .resources
+                        .get(key)
+                        .and_then(|now| now.id.as_ref())
+                        .is_some_and(|current_id| current_id != id)
+                })
+        })
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 pub(super) fn retained(root: &Path, receipt: &Receipt) -> Result<bool, CandidateError> {
     if !exists(&root.join(FILE))? {
         return Ok(false);

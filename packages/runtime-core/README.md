@@ -820,6 +820,11 @@ identities are checked independently. The explicit acceptance records that
 legacy receipts cannot establish original physical volume continuity across the
 host reboot.
 
+An exact completed cleanup and retirement for the current stopped receipt takes
+precedence over older cleanup records. Pending operations, unresolved initializer
+effects and mismatched receipt or retirement identities still refuse recovery;
+historical records cannot authorize a later generation.
+
 `restore-selection` then binds the witness's raw hash to the selected generation.
 The source checks use only an in-memory device projection; original retention and
 restore history consume the unchanged stopped receipt. The new receipt receives

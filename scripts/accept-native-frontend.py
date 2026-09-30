@@ -19,8 +19,14 @@ Sequence, all inside one private owned --root:
      base is removed, no process or provider alias references the root, and only evidence
      remains.
 
-On any failure, or when --budget runs out, nothing is stopped or removed: live foregrounds and
-state stay for diagnosis, and evidence/failure.json records what happened.
+On any failure, or when --budget runs out, the driver issues no further commands and removes
+nothing: the pool, its state and any live `hack up` foreground stay for diagnosis, and
+evidence/failure.json records what happened. The only process it can terminate is one of its
+own bounded commands: `subprocess.run` kills that direct child when its timeout expires. It
+never signals a foreground, a VM or any other process.
+
+Only the selections declared here reach the candidate: ambient HACK_NATIVE_* variables are
+dropped, so another session's overrides cannot change what this run tests.
 """
 import argparse
 import hashlib
@@ -107,13 +113,15 @@ class Acceptance:
         self.https_wait = 60
         self.foregrounds = []
         self.checks = []
-        self.env = dict(os.environ)
-        self.env.update({
+        self.declared = {
             "HACK_NATIVE_HOME": str(self.home), "HACK_HOME": str(self.root / "cli-home"),
             "HACK_NATIVE_SHARED_SOURCE": "1", "HACK_NO_INTERACTIVE": "1", "HACK_LOGGER": "console",
-            "HACK_NATIVE_CADDY_BINARY": args.caddy, "HACK_NATIVE_HTTPS_PORT": str(args.https_port),
+            "HACK_NATIVE_CADDY_BINARY": args.caddy, "HACK_NATIVE_CADDY_SHA256": args.caddy_sha256 or "",
+            "HACK_NATIVE_HTTPS_PORT": str(args.https_port),
             "HACK_NATIVE_PREPARED_BASE": "require", "HACK_NATIVE_PREPARED_BASE_STORE": str(self.store),
-        })
+        }
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith("HACK_NATIVE_")}
+        self.env.update(self.declared)
 
     def note(self, line):
         self.checks.append(line)
@@ -297,6 +305,10 @@ class Acceptance:
 
     def run(self):
         self.evidence.mkdir(mode=0o700)
+        (self.evidence / "preflight.json").write_text(json.dumps({
+            "declared_env": self.declared, "branch": self.branch, "budget_s": self.args.budget,
+            "bundle_sha256": {p.name: sha256(p) for p in sorted(self.bundle.iterdir()) if p.is_file()},
+            "free_disk_bytes": shutil.disk_usage(self.root).free}, indent=2))
         self.deadline = time.monotonic() + self.args.budget
         try:
             accepted = self.accept()
@@ -309,7 +321,8 @@ class Acceptance:
             (self.evidence / "failure.json").write_text(json.dumps({
                 "failure": f"{type(failure).__name__}: {failure}", "checks": self.checks,
                 "live_foregrounds": [(label, p.pid) for label, p in self.foregrounds if p.poll() is None],
-                "note": "nothing stopped or removed; state kept for diagnosis"}, indent=2))
+                "note": "no further commands; nothing removed; foregrounds and the pool were not signalled"},
+                indent=2))
             print(f"FAILED: {failure}", flush=True)
             return 1
 
@@ -351,9 +364,7 @@ def main():
         parser.error("--caddy must be an existing executable")
     if not port_free(args.https_port):
         parser.error(f"port {args.https_port} is in use")
-    acceptance = Acceptance(args)
-    acceptance.env["HACK_NATIVE_CADDY_SHA256"] = args.caddy_sha256
-    return acceptance.run()
+    return Acceptance(args).run()
 
 
 if __name__ == "__main__":

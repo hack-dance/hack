@@ -811,8 +811,12 @@ first start.
   same run in a new container, HTTPS serving exactly the edit, and the marker.
 - Finally it disposes of the pool, base, provider alias and fixture with readbacks.
 
-It prints its plan unless `--run` is given, is a correctness check only, and keeps all state
-for diagnosis on any failure or when its `--budget` runs out. Its stand-in controls run with
+It prints its plan unless `--run` is given and is a correctness check only. On any failure, or
+when its `--budget` runs out, it issues no further commands and keeps all state for diagnosis.
+The only process it can terminate is one of its own bounded commands, whose direct child
+`subprocess.run` kills when its timeout expires; it never signals a foreground or a VM. Ambient
+`HACK_NATIVE_*` variables are dropped, so only its declared selections reach the candidate. Its
+stand-in controls run with
 `python3 -m unittest discover -s tests/python -p test_native_frontend_acceptance.py`.
 
 ### Optional native HTTPS frontend

@@ -80,7 +80,8 @@ if argv[0] == "up":
         reply("prepared base not requested", 2)
     token = secrets.token_hex(4)
     state = load()
-    state.update(foreground=token, alive=True, share=option("--path"), container=state.get("container", 0) + 1)
+    state.update(foreground=token, alive=True, share=option("--path"), container=state.get("container", 0) + 1,
+                 up_env={k: v for k, v in os.environ.items() if k.startswith("HACK_NATIVE_")})
     state.setdefault("run", "r" + secrets.token_hex(8))
     save(state)
     deadline = time.time() + 30
@@ -90,6 +91,8 @@ if argv[0] == "up":
             sys.exit(0)
     sys.exit(3)
 if argv[0] == "ps":
+    if fault == "ps-hang":
+        time.sleep(10)
     if state.get("foreground"):
         reply({"status": "observed", "phase": "ready-observed", "backend": "native", "run": state["run"],
                "items": [{"container": f"c{state['container']}"}]})
@@ -121,7 +124,8 @@ class Acceptance(unittest.TestCase):
             (self.bundle / name).chmod(0o700)
         self.args = argparse.Namespace(
             bundle=str(self.bundle), root=str(self.root), provider_archive="/p", engine_archive="/e",
-            network_tools="/n", image="example@sha256:" + "d" * 64, caddy="/caddy", https_port=41443, budget=60.0)
+            network_tools="/n", image="example@sha256:" + "d" * 64, caddy="/caddy", caddy_sha256="c" * 64,
+            https_port=41443, budget=60.0)
 
     def accept(self, fault="", stale=False):
         os.environ["FAKE_FAULT"] = fault
@@ -206,6 +210,36 @@ class Acceptance(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("live budget exhausted", self.failure())
         self.assertTrue((self.root / "main").exists())
+
+    def test_only_declared_native_selections_reach_the_candidate(self):
+        ambient = {"HACK_NATIVE_PREPARED_BASE": "off", "HACK_NATIVE_ALLOW_HOSTS": "example.invalid",
+                   "HACK_NATIVE_HOME": "/elsewhere"}
+        with mock.patch.dict(os.environ, ambient):
+            code, acceptance = self.accept()
+        self.assertEqual(code, 0)
+        seen = json.loads((self.bundle / "state.json").read_text())["up_env"]
+        self.assertEqual(seen, {k: v for k, v in acceptance.declared.items() if k.startswith("HACK_NATIVE_")})
+        self.assertEqual((seen["HACK_NATIVE_PREPARED_BASE"], seen["HACK_NATIVE_HOME"]), ("require", str(acceptance.home)))
+
+    def test_a_timed_out_command_fails_without_signalling_the_foreground(self):
+        os.environ["FAKE_FAULT"] = "ps-hang"
+        self.args.budget = 3.0
+        acceptance = driver.Acceptance(self.args)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(acceptance.run(), 1)
+            self.assertIn("TimeoutExpired", self.failure())
+            live = json.loads((self.root / "evidence/failure.json").read_text())["live_foregrounds"]
+            (label, pid), = live
+            self.assertEqual(label, "up-first")
+            # Only the hung `ps` was killed; the foreground is still running, untouched.
+            self.assertIsNone(acceptance.foregrounds[0][1].poll())
+            self.assert_preserved()
+        finally:
+            for _, process in acceptance.foregrounds:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
 
     def test_the_preview_runs_nothing(self):
         argv = ["accept", "--bundle", str(self.bundle), "--root", str(self.root), "--provider-archive", "/p",

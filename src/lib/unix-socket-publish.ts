@@ -1,11 +1,5 @@
 import { randomBytes } from "node:crypto";
-import {
-  linkSync,
-  lstatSync,
-  renameSync,
-  type Stats,
-  unlinkSync,
-} from "node:fs";
+import { linkSync, lstatSync, type Stats, unlinkSync } from "node:fs";
 import type { Server } from "node:net";
 import { basename, dirname, join } from "node:path";
 
@@ -31,6 +25,18 @@ export interface UnixSocketPublishHooks {
   readonly afterBind?: (staging: string) => Promise<void>;
   /** After the endpoint was linked and verified, before the staging name is retired. */
   readonly afterLink?: (staging: string) => Promise<void>;
+  /** Holding names tried, in order, when an unproven staging entry is moved aside. */
+  readonly holdingNames?: (staging: string) => readonly string[];
+}
+
+/** How many fresh holding names are tried before a close proceeds without one. */
+const HOLDING_ATTEMPTS = 8;
+
+function freshHoldingNames(staging: string): string[] {
+  return Array.from(
+    { length: HOLDING_ATTEMPTS },
+    () => `${staging}.${randomBytes(4).toString("hex")}`
+  );
 }
 
 function errorCode(error: unknown): unknown {
@@ -70,25 +76,52 @@ function removeIfSame(path: string, identity: UnixSocketIdentity): void {
 }
 
 /**
+ * Moves the staging entry to the first free holding name: link(2) never replaces an existing
+ * holding entry, and the staging name is dropped only while it is still the linked entry.
+ * Returns the holding name, or undefined when no holding name was free or the entry cannot be
+ * hard-linked (the entry stays put).
+ */
+function moveAside(
+  staging: string,
+  names: readonly string[]
+): string | undefined {
+  for (const candidate of names) {
+    try {
+      linkSync(staging, candidate);
+    } catch (error) {
+      if (errorCode(error) === "EEXIST") {
+        continue;
+      }
+      // Not linkable (a directory, for example): it cannot be moved aside.
+      return undefined;
+    }
+    const held = entry(candidate);
+    if (held && same(entry(staging), { dev: held.dev, ino: held.ino })) {
+      unlinkSync(staging);
+    }
+    return candidate;
+  }
+  return undefined;
+}
+
+/**
  * Closes `server` without letting its close-time unlink by name (Bun 1.3.14 and later, as in Node)
  * reach an entry at the staging name that this attempt cannot prove is its own. Whatever the name
- * holds is moved to a fresh holding name while the server closes. Afterwards this attempt's socket
+ * holds is moved to a free holding name while the server closes. Afterwards this attempt's socket
  * is removed; anything else is put back by link, which never replaces a newer entry, so its inode,
  * bytes and mode are unchanged (if the name was taken meanwhile, it stays at the holding name).
+ * If none of the bounded holding names is free, or the entry cannot be hard-linked, the close
+ * proceeds and the runtime can remove the entry.
  */
 async function closeKeepingStaging(
   server: Server,
   staging: string,
-  bound: UnixSocketIdentity | undefined
+  bound: UnixSocketIdentity | undefined,
+  holdingNames: (staging: string) => readonly string[]
 ): Promise<void> {
-  let held: string | undefined;
-  if (entry(staging)) {
-    const candidate = `${staging}.${randomBytes(4).toString("hex")}`;
-    if (!entry(candidate)) {
-      renameSync(staging, candidate);
-      held = candidate;
-    }
-  }
+  const held = entry(staging)
+    ? moveAside(staging, holdingNames(staging))
+    : undefined;
   // Closing a server that never listened reports an error; either way it is closed.
   await new Promise<void>((resolve) => server.close(() => resolve()));
   if (!held) {
@@ -123,12 +156,21 @@ async function closeKeepingStaging(
  * identity-checked cleanup, using the returned identity; callers keep it at once and compare every
  * later observation of `path` against it.
  *
- * The directory must be private to this user. On any failure the server is closed without its
- * close-time unlink reaching an unproven staging entry, only this attempt's socket is removed, and
- * `path` is removed only while it still holds this socket. An entry at the staging name that is
- * not this socket, or that cannot be proven to be (an ambiguous partial bind), is kept. After a
- * successful return the staging name is retired; an entry placed there later is outside this
- * function, and a runtime close-time unlink by name can still reach it.
+ * On any failure the server is closed, only this attempt's socket is removed, and `path` is
+ * removed only while it still holds this socket. An entry at the staging name that is not this
+ * socket, or cannot be proven to be (an ambiguous partial bind), is moved to a free holding name
+ * for the close and put back.
+ *
+ * Scope: the directory must be private to this user. These guarantees cover accidental and
+ * concurrent entries, not an adversarial process of the same user, which can race any path-based
+ * check. Residuals:
+ * - Each check and its operation run back to back, but by path: an entry changed between them is
+ *   outside the guarantee.
+ * - If the staging entry cannot be moved aside (every bounded holding name occupied, or an entry
+ *   that cannot be hard-linked, such as a directory), the failure close proceeds and the runtime's
+ *   close-time unlink can remove it.
+ * - After a successful return the staging name is retired. The runtime's normal close later
+ *   unlinks that name, and can remove an entry placed there afterwards.
  */
 export async function listenPublishedUnixSocket(
   server: Server,
@@ -209,7 +251,12 @@ export async function listenPublishedUnixSocket(
     removeIfSame(staging, bound);
     return bound;
   } catch (error) {
-    await closeKeepingStaging(server, staging, bound);
+    await closeKeepingStaging(
+      server,
+      staging,
+      bound,
+      hooks.holdingNames ?? freshHoldingNames
+    );
     if (published && bound) {
       removeIfSame(path, bound);
     }

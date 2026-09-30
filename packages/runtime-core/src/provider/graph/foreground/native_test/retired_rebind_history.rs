@@ -30,11 +30,11 @@ fn selection(
     endpoint: &crate::provider::host_endpoint::HostEndpoint,
     port: u16,
 ) {
-    let bindings = ["web", "init"].map(|service| {
-        json!({"service":service,"binding":"default","slot":0,"guest_port":25252,
-            "host_pid":endpoint.process_identity().pid,"host_port":port,
-            "host_executable":std::env::current_exe().unwrap()})
-    });
+    let bindings = [
+        json!({"service":"web","binding":"default","slot":0,"guest_port":25252,
+        "host_pid":endpoint.process_identity().pid,"host_port":port,
+        "host_executable":std::env::current_exe().unwrap()}),
+    ];
     state::write(
         path,
         &json!({"version":1,"plan":plan,"artifact":artifact,

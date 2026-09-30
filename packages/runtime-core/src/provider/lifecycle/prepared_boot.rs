@@ -14,17 +14,27 @@
 //!   record is never evidence.
 //!
 //! Teardown deletes only the work root's own machine (named by its owner receipt, inside the
-//! root's private provider home), its short-HOME alias, and the root. If teardown fails the
-//! root is kept and reported for inspection.
+//! root's private provider home), its short-HOME alias, and the root, and only once no process
+//! executes the root's provider. If teardown fails the root is kept and reported for inspection.
+//!
+//! Each work root holds an exclusive lock (`work.lock`, taken before anything else is created in
+//! it) for as long as its creating process lives; the kernel releases it when that process ends,
+//! however it ends. A root whose lock is free was therefore abandoned by an interrupted build or
+//! verification. `status` lists such roots; `build` and `verify` first tear them down under their
+//! lock (a root still holding a provider is kept). Nothing whose lock is held, or that is not a
+//! work root, is touched.
 use super::super::prepared_base::{self, Pins, PoolTarget, PublishRequest, Receipt, Sanitization};
 use super::super::prepared_store::{self, Entry, StoreLock, Verification};
 use super::super::{Profile, artifact, identity, prepared_inventory, prepared_start};
-use super::{Owner, agent, guest, invoke, prepare_rootfs, recorded_process, root, socket, state};
+use super::{
+    Owner, agent, binary, guest, invoke, prepare_rootfs, recorded_process, root, socket, state,
+};
 use crate::{Candidate, CandidateError};
 use serde::Serialize;
-use std::fs::{self, File};
-use std::io::Read;
-use std::os::unix::fs::DirBuilderExt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Read};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -60,22 +70,61 @@ fn current_pins(candidate: &Candidate, profile: Profile) -> Result<Pins, Candida
     Ok(Pins::current(profile, &rootfs))
 }
 
+const WORK: &str = ".work";
+const WORK_LOCK: &str = "work.lock";
+
+/// Open (or with `create`, exclusively create) `dir`'s work lock and take it without waiting.
+/// `None` when a live process holds it.
+fn lock_work(dir: &Path, create: bool) -> Result<Option<File>, CandidateError> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600);
+    if create {
+        options.create_new(true);
+    }
+    let file = options.open(dir.join(WORK_LOCK)).map_err(state::io)?;
+    let metadata = file.metadata().map_err(state::io)?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return Err(error("foreign_state", "Unsafe prepared-base work lock."));
+    }
+    // SAFETY: the descriptor is owned by `file` and open for the duration of the call.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(file));
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EWOULDBLOCK) => Ok(None),
+        _ => Err(error(
+            "prepared_base_store_busy",
+            "Cannot establish whether a work root is in use.",
+        )),
+    }
+}
+
 /// A disposable state root for one seed build or verification.
 struct Work {
     dir: PathBuf,
     candidate: Candidate,
+    /// Held for the root's lifetime; its release marks the root abandoned.
+    _lock: File,
 }
 
 impl Work {
     fn create(candidate: &Candidate, store: &Path) -> Result<Self, CandidateError> {
         prepared_store::open(store)?;
-        let parent = store.join(".work");
+        let parent = store.join(WORK);
         state::private_directory(&parent)?;
         let dir = parent.join(random_hex()?);
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&dir)
             .map_err(state::io)?;
+        let lock = lock_work(&dir, true)?
+            .ok_or_else(|| error("prepared_base_store_busy", "A new work root was locked."))?;
         let state_root = dir.join(".hack-local");
         fs::DirBuilder::new()
             .mode(0o700)
@@ -87,23 +136,50 @@ impl Work {
             &state_root.join("providers"),
         )?;
         let candidate = Candidate::discover(&dir)?;
-        Ok(Self { dir, candidate })
+        Ok(Self {
+            dir,
+            candidate,
+            _lock: lock,
+        })
     }
 
     /// Delete this root's machine, alias and directory. Returns the kept root on failure.
     fn teardown(&self) -> Result<(), CandidateError> {
         let receipt = root(&self.candidate).join("owner.json");
         if fs::symlink_metadata(&receipt).is_ok() {
-            let owner = Owner::load(&self.candidate)?;
-            if owner.created {
-                invoke(
-                    &self.candidate,
-                    &owner,
-                    &["machine", "delete", "--name", &owner.machine, "--force"],
-                )?;
+            match Owner::load(&self.candidate) {
+                Ok(owner) => {
+                    if owner.created {
+                        invoke(
+                            &self.candidate,
+                            &owner,
+                            &["machine", "delete", "--name", &owner.machine, "--force"],
+                        )?;
+                    }
+                    // `Owner::load` proved the alias points at this root's home.
+                    fs::remove_file(&owner.short_home).map_err(state::io)?;
+                }
+                Err(failure) => {
+                    // The receipt is saved just before its alias is created, and nothing external
+                    // happens before both exist. A receipt without an alias and without a created
+                    // machine therefore left nothing outside this root.
+                    let owner: Owner = state::read(&receipt)?;
+                    let alias_absent = matches!(
+                        fs::symlink_metadata(&owner.short_home),
+                        Err(missing) if missing.kind() == ErrorKind::NotFound
+                    );
+                    if owner.created || !alias_absent || owner.checkout != self.candidate.checkout {
+                        return Err(failure);
+                    }
+                }
             }
-            // `Owner::load` proved the alias points at this root's home.
-            fs::remove_file(&owner.short_home).map_err(state::io)?;
+        }
+        // Deleting the machine stops its provider; nothing is removed while one still runs.
+        if identity::executable_running(&binary(&self.candidate))? {
+            return Err(error(
+                "stop_uncertain",
+                "A provider still runs in the work root; it was kept.",
+            ));
         }
         fs::remove_dir_all(&self.dir).map_err(state::io)
     }
@@ -125,6 +201,106 @@ impl Work {
             )),
         }
     }
+}
+
+/// A work root whose creating process is gone.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct AbandonedWork {
+    /// The root's name under `<store>/.work`.
+    pub root: String,
+    pub removed: bool,
+    /// Why it was kept, when recovery was attempted and refused.
+    pub kept: Option<String>,
+}
+
+/// Find, and with `remove` tear down, work roots abandoned by interrupted builds or
+/// verifications. A root is abandoned only when its lock is free, or it is still empty (its
+/// creator stopped before taking the lock). Other entries are reported and never touched.
+fn abandoned_work(store: &Path, remove: bool) -> Result<Vec<AbandonedWork>, CandidateError> {
+    let parent = store.join(WORK);
+    match fs::symlink_metadata(&parent) {
+        Err(missing) if missing.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(failure) => return Err(state::io(failure)),
+        Ok(_) => state::private_directory(&parent)?,
+    }
+    let mut names = Vec::new();
+    for entry in fs::read_dir(&parent).map_err(state::io)? {
+        names.push(entry.map_err(state::io)?.file_name());
+    }
+    names.sort();
+    let mut found = Vec::new();
+    for name in names {
+        let label = name.to_string_lossy().into_owned();
+        let kept = |reason: &str| AbandonedWork {
+            root: label.clone(),
+            removed: false,
+            kept: Some(reason.into()),
+        };
+        let dir = parent.join(&name);
+        let metadata = fs::symlink_metadata(&dir).map_err(state::io)?;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let own = metadata.is_dir() && metadata.uid() == unsafe { libc::geteuid() };
+        let named = label.len() == 32
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !own || !named {
+            found.push(kept("foreign_state"));
+            continue;
+        }
+        if let Err(missing) = fs::symlink_metadata(dir.join(WORK_LOCK))
+            && missing.kind() == ErrorKind::NotFound
+        {
+            // The lock is created before anything else, so only an empty root may lack it.
+            if fs::read_dir(&dir).map_err(state::io)?.next().is_some() {
+                found.push(kept("work_lock_missing"));
+                continue;
+            }
+            if remove {
+                fs::remove_dir(&dir).map_err(state::io)?;
+            }
+            found.push(AbandonedWork {
+                root: label,
+                removed: remove,
+                kept: None,
+            });
+            continue;
+        }
+        let lock = match lock_work(&dir, false) {
+            Ok(Some(lock)) => lock,
+            // A live build or verification.
+            Ok(None) => continue,
+            Err(failure) => {
+                found.push(kept(failure.code));
+                continue;
+            }
+        };
+        if !remove {
+            found.push(AbandonedWork {
+                root: label,
+                removed: false,
+                kept: None,
+            });
+            continue;
+        }
+        let outcome = Candidate::discover(&dir).and_then(|candidate| {
+            Work {
+                dir: dir.clone(),
+                candidate,
+                _lock: lock,
+            }
+            .teardown()
+        });
+        found.push(match outcome {
+            Ok(()) => AbandonedWork {
+                root: label,
+                removed: true,
+                kept: None,
+            },
+            Err(failure) => kept(failure.code),
+        });
+    }
+    Ok(found)
 }
 
 /// Ask the provider to stop the machine and wait for its verified process to exit.
@@ -153,11 +329,27 @@ fn stop(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
     Ok(())
 }
 
-/// A published base and whether its work root was removed.
+/// A published base, whether its work root was removed, and abandoned roots recovered first.
 #[derive(Debug, Serialize)]
 pub struct Built {
     pub receipt: Receipt,
     pub work_removed: bool,
+    pub recovered_work: Vec<AbandonedWork>,
+}
+
+/// A recorded verification and abandoned roots recovered first.
+#[derive(Debug, Serialize)]
+pub struct Verified {
+    #[serde(flatten)]
+    pub verification: Verification,
+    pub recovered_work: Vec<AbandonedWork>,
+}
+
+/// The store's bases and any work roots abandoned by interrupted builds or verifications.
+#[derive(Debug, Serialize)]
+pub struct StoreStatus {
+    pub bases: Vec<Entry>,
+    pub abandoned_work: Vec<AbandonedWork>,
 }
 
 /// Build and publish a base for `profile` into `store` (created private if missing).
@@ -190,12 +382,15 @@ pub fn build_prepared_base(
             format!("Prepared base {base_id} already exists; it was not changed."),
         ));
     }
+    prepared_store::open(store)?;
+    let recovered_work = abandoned_work(store, true)?;
     let work = Work::create(candidate, store)?;
     let outcome = seed(&work.candidate, store, profile, &base_id);
     let (receipt, work_removed) = work.finish(outcome)?;
     Ok(Built {
         receipt,
         work_removed,
+        recovered_work,
     })
 }
 
@@ -255,10 +450,11 @@ pub fn verify_prepared_base(
     candidate: &Candidate,
     store: &Path,
     base_id: &str,
-) -> Result<Verification, CandidateError> {
+) -> Result<Verified, CandidateError> {
     let base = prepared_base::open_published(store, base_id)?;
     let profile = profile_for(&base.receipt.pins)?;
     base.bind(&current_pins(candidate, profile)?)?;
+    let recovered_work = abandoned_work(store, true)?;
     let work = Work::create(candidate, store)?;
     let outcome = inspect(&work.candidate, store, &base, profile);
     let (inventory, _) = work.finish(outcome)?;
@@ -289,7 +485,10 @@ pub fn verify_prepared_base(
     }
     let exclusive = StoreLock::exclusive(store)?;
     prepared_store::record_verification(store, &exclusive, &verification)?;
-    Ok(verification)
+    Ok(Verified {
+        verification,
+        recovered_work,
+    })
 }
 
 fn inspect(
@@ -405,8 +604,11 @@ pub fn prepared_base_status(
     candidate: &Candidate,
     store: &Path,
     profile: Profile,
-) -> Result<Vec<Entry>, CandidateError> {
-    prepared_store::entries(store, &current_pins(candidate, profile)?)
+) -> Result<StoreStatus, CandidateError> {
+    Ok(StoreStatus {
+        bases: prepared_store::entries(store, &current_pins(candidate, profile)?)?,
+        abandoned_work: abandoned_work(store, false)?,
+    })
 }
 
 /// Remove one base and its verification under the exclusive store lock.
@@ -414,3 +616,6 @@ pub fn remove_prepared_base(store: &Path, base_id: &str) -> Result<(), Candidate
     let exclusive = StoreLock::exclusive(store)?;
     prepared_store::remove(store, &exclusive, base_id)
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests;

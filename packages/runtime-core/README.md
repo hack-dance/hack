@@ -167,8 +167,12 @@ fails activation; `require` refuses before anything is created. Ambiguous pool s
 template or an unprovable interrupted record) refuses in both modes. `runtime status` reports the
 selection, activation and any deferred consumption. Stores are locked shared while a pool clones
 and exclusively to publish, record a verification or remove a base
-(`runtime prepared-base status|remove`), so no base disappears mid-clone. A pool never depends on
-its base after the first start. Prepared bases change only how a pool's disks are first formatted,
+(`runtime prepared-base status|remove`), so no base disappears mid-clone. Each seed build or
+verification runs in its own work root under `<store>/.work`, holding a lock there for as long as
+its process lives. A root whose lock is free was abandoned by an interrupted build or verification:
+`status` lists it, and the next `build` or `verify` tears it down first (its own machine, alias and
+directory), keeping any root where a provider still runs. A pool never depends on its base after
+the first start. Prepared bases change only how a pool's disks are first formatted,
 so they speed up creating a pool (the first one, or one recreated during recovery), not starting
 graphs inside a running pool. macOS APFS only: elsewhere `prefer` keeps the stock templates and
 `require` refuses.

@@ -405,7 +405,7 @@ test("owner socket preparation failure retires only its bound socket and lock", 
       ...f.opts,
       dependencies: {
         ...f.opts.dependencies,
-        chmodOwnerSocket: async () => {
+        afterOwnerSocketPublish: async () => {
           throw new Error("simulated socket preparation failure");
         },
       },

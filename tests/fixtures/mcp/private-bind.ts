@@ -1,4 +1,5 @@
 import { mock } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
@@ -7,32 +8,47 @@ if (!(root && sourceRoot)) {
   throw new Error("Missing fixture paths");
 }
 const original = { ...fs };
+const originalSync = { ...fsSync };
 const directory = await original.realpath(root);
-const socketPath = join(directory, "mcp.sock");
 process.umask(0o022);
 let observed = false;
+const refuseChmod = (path: unknown) => {
+  // The socket is created private with its final mode; no socket name is ever
+  // chmodded, so a replacement there can never be changed by path.
+  if (typeof path === "string" && dirname(path) === directory) {
+    throw new Error("A socket name was chmodded by path");
+  }
+};
 mock.module("node:fs/promises", () => ({
   ...original,
   chmod: async (path: string, mode: number) => {
-    // The endpoint mode is set on its staging socket before publication; the
-    // published endpoint must never be changed by path.
-    if (path === socketPath) {
-      throw new Error("Published endpoint was chmodded by path");
-    }
-    if (dirname(path) === directory && basename(path).startsWith(".")) {
-      const socket = await original.lstat(path);
-      if (!socket.isSocket() || (socket.mode & 0o077) !== 0) {
-        throw new Error("Socket was public before chmod");
-      }
-      if (process.umask() !== 0o022) {
-        throw new Error("Creation mask leaked across await");
-      }
-      if (mode !== 0o600) {
-        throw new Error("Unexpected endpoint mode");
+    refuseChmod(path);
+    return original.chmod(path, mode);
+  },
+}));
+mock.module("node:fs", () => ({
+  ...originalSync,
+  chmodSync: (path: string, mode: number) => {
+    refuseChmod(path);
+    return originalSync.chmodSync(path, mode);
+  },
+  lstatSync: (...args: Parameters<typeof originalSync.lstatSync>) => {
+    const stat = originalSync.lstatSync(...args);
+    const [path] = args;
+    // The first observation of the staging socket, in the tick that created it.
+    if (
+      !observed &&
+      stat?.isSocket() &&
+      typeof path === "string" &&
+      dirname(path) === directory &&
+      basename(path).startsWith(".")
+    ) {
+      if ((Number(stat.mode) & 0o777) !== 0o600) {
+        throw new Error("Socket was not created private with mode 0600");
       }
       observed = true;
     }
-    return original.chmod(path, mode);
+    return stat;
   },
 }));
 const { startMcpSocketBackend } = await import(
@@ -43,6 +59,9 @@ const backend = await startMcpSocketBackend({
   backendId: "private-bind",
   idleTimeoutMs: 50,
 });
+if (process.umask() !== 0o022) {
+  throw new Error("Creation mask leaked past startup");
+}
 await backend.closed;
 if (!observed || process.umask() !== 0o022) {
   throw new Error("Private bind was not observed or mask was not restored");

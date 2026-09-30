@@ -556,8 +556,10 @@ cache is not flushed.
   --unfiltered-source`. Pools start `--worktree-parallel` at a time. Each graph runs with
   `--shared-source --branch` and must serve its own committed marker before readiness counts.
   The trial then requires distinct pools, branch namespaces and volume data. It writes a new
-  host file into every root, which must reach only that root's pool. Finally it stops, restarts
-  and restores every pool and requires the same data, marker and host edit back. The fixture is
+  host file into every root, which must reach only that root's pool. Finally it stops and
+  restarts every pool, replans (the edit changed the source inventory), and restores the same
+  run under the current plan. The restore must report `healthy` and return the same data,
+  marker and host edit. The fixture is
   removed only after every pool is confirmed disposed; otherwise every root, its Git
   registration and its source are kept. Cold
   create-to-ready and warm restart are summarized separately, with each start's selection
@@ -567,12 +569,18 @@ cache is not flushed.
   run: the runtime's own admission decides each start, and a refused start is recorded as the
   cohort's outcome.
 
-Every sample records the complete CLI process tree's CPU (via `wait4`), the VM process's CPU,
-resident size, current and lifetime-peak physical footprint, and each disk's logical, allocated
-and clone-private bytes. Worktree cohorts also report attributed CPU (CLI tree plus live VM
-processes), configured guest memory, each home's allocated bytes (including its disks, and not
-clone-aware), the checkout's allocated bytes, and the shared base store once. Resident size, footprint and configured guest memory
-are reported side by side and never added together. Unobserved values stay null. Each summarized metric reports its coverage
+Every sample records the CPU of each command's CLI process tree (via `wait4`, covering
+terminated children it reaped). It also records the provider tree the runtime returns, counting
+each process once, helpers included: that tree's CPU, resident size and physical footprint, the
+sum of per-process lifetime peaks (an upper bound), and each disk's logical, allocated and
+clone-private bytes. The provider tree lists only processes live at the snapshot, so the two
+CPU figures never count a process twice. Worktree cohorts also report attributed CPU (their
+sum), configured guest memory, each home's allocated bytes (including its disks, and not
+clone-aware), the checkout's allocated bytes, and the shared base store once. Cohort sums are
+read one pool after another, a staggered snapshot whose window is recorded, not one instant;
+the summed lifetime peaks are not a simultaneous cohort peak. Resident size, physical
+footprint, configured guest memory and clone-private bytes are reported side by side and never
+added together. Unobserved values stay null. Each summarized metric reports its coverage
 (`n` of `of`) and is labeled unqualified when any sample lacks it, instead of counting the gap
 as zero.
 

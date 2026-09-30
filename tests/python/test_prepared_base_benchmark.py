@@ -84,6 +84,21 @@ class Harness(unittest.TestCase):
         with self.assertRaisesRegex(benchmark.Failure, "stock lane"):
             self.trial.up("up", "stock")
 
+    def test_provider_accounting_counts_each_returned_process_once(self):
+        def usage(pid, executable, cpu, resident):
+            return {"identity": {"pid": pid, "start_micros": pid * 10, "uid": 501, "executable": executable},
+                    "resident_bytes": resident, "physical_footprint_bytes": resident,
+                    "user_cpu_nanoseconds": cpu, "system_cpu_nanoseconds": cpu}
+
+        provider = usage(4000001, str(self.trial.home / ".hack-local/providers/smolvm/smolvm-bin"), 500_000_000, 100)
+        helper = usage(4000002, "/usr/libexec/stand-in-helper", 250_000_000, 10)
+        observed = self.trial.provider({"provider_resources": {"processes": [provider, helper, helper]}})
+        self.assertEqual((observed["vm_cpu_s"], observed["vm_resident_bytes"], observed["tree_processes"],
+                          observed["tree_helpers"]), (1.5, 110, 2, 1))
+        # Without this home's provider binary the tree is not owned, however it is spelled.
+        lookalike = usage(4000003, str(self.trial.home / ".hack-local/providers-other/smolvm-bin"), 1, 1)
+        self.assertEqual(self.trial.provider({"provider_resources": {"processes": [lookalike, helper]}}), {})
+
     def test_cleanup_of_an_uncreated_trial_touches_nothing(self):
         self.assertEqual(self.trial.cleanup(), {"removed": True, "created": False})
         self.assertFalse((self.root / "argv.log").exists())
@@ -246,6 +261,20 @@ def option(name):
     return argv[argv.index(name) + 1] if name in argv else None
 
 
+def current_plan():
+    """Like the real planner, the plan identity covers the source inventory."""
+    root = pathlib.Path(option("--project"))
+    files = sorted(p for p in root.rglob("*") if p.is_file() and ".git" not in p.relative_to(root).parts)
+    inventory = [str(p.relative_to(root)) + ":" + p.read_text() for p in files]
+    return "p" + hashlib.sha256(json.dumps([str(root), option("--branch"), inventory]).encode()).hexdigest()[:16]
+
+
+def usage(pid, executable, cpu, resident, footprint):
+    return {"identity": {"pid": pid, "start_micros": pid * 10, "uid": 501, "executable": executable},
+            "resident_bytes": resident, "physical_footprint_bytes": footprint,
+            "user_cpu_nanoseconds": cpu, "system_cpu_nanoseconds": 0}
+
+
 def reply(body, code=0):
     path.write_text(json.dumps(state))
     print(json.dumps(body))
@@ -263,9 +292,12 @@ if command == ["runtime", "up"]:
     reply(body)
 if command == ["runtime", "status"]:
     trial, alive = home.parent.name, bool(state.get("alive"))
+    # The root provider, a helper descendant outside the providers directory, and a repeat.
+    root = usage(4000001, str(home / ".hack-local/providers/smolvm/smolvm-bin"), 1_000_000_000, 100, 80)
+    helper = usage(4000002, "/usr/libexec/stand-in-helper", 500_000_000, 10, 8)
     reply({"phase": "running" if alive else "stopped", "process_alive": alive, "machine": "m-" + trial,
            "guest_boot_id": f"{trial}-{state['boots']}", "guest_memory_mib": 6144,
-           "provider_resources": {"processes": []}})
+           "provider_resources": {"processes": [root, helper, helper] if alive else []}})
 if command == ["runtime", "down"]:
     if fault == "down-fails":
         reply({"code": "provider_down"}, 1)
@@ -276,12 +308,22 @@ if command == ["runtime", "ensure-image"]:
     reply({"image_id": "sha256:" + "a" * 64})
 if command == ["project", "plan"]:
     namespace = hashlib.sha256((option("--project") + option("--branch")).encode()).hexdigest()
-    reply({"plan_id": "p" + namespace[:16], "plan": {"namespace": namespace}})
-if command in (["graph", "run"], ["graph", "restore"]):
-    if command == ["graph", "run"] or fault == "lose-data":
-        token = "c" * 32 if fault == "shared-token" else secrets.token_hex(16)
-        state["runs"][option("--run-id")] = {"root": option("--project"), "token": token}
+    reply({"plan_id": current_plan(), "plan": {"namespace": namespace}})
+if command in (["graph", "run"], ["graph", "restore"]) and option("--expect-plan") != current_plan():
+    reply({"code": "execution_plan_changed"}, 2)
+if command == ["graph", "run"]:
+    token = "c" * 32 if fault == "shared-token" else secrets.token_hex(16)
+    state["runs"][option("--run-id")] = {"root": option("--project"), "token": token, "plan": option("--expect-plan"),
+                                         "shared": "--shared-source" in argv}
     reply({"readiness": {"web": "healthy"}})
+if command == ["graph", "restore"]:
+    run = state["runs"].get(option("--run-id"))
+    # Only a shared-source run may restore under a changed plan, and only as the same run.
+    if not run or run["root"] != option("--project") or (option("--expect-plan") != run["plan"] and not run["shared"]):
+        reply({"code": "graph_restore_refused"}, 2)
+    if fault == "lose-data":
+        run["token"] = secrets.token_hex(16)
+    reply({"readiness": {"web": "starting" if fault == "restore-unready" else "healthy"}})
 if command == ["graph", "exec"]:
     run = state["runs"][option("--run-id")]
     if argv[-1] == "/data/token":
@@ -345,9 +387,26 @@ class WorktreeTrials(unittest.TestCase):
         self.assertEqual(len(graphs), 4)
         self.assertTrue(all("--shared-source" in c for c in graphs))
         self.assertEqual({c[c.index("--branch") + 1] for c in graphs}, {"wt-00", "wt-01"})
-        # The stand-in reports no provider processes, so measured resources stay null.
-        self.assertIsNone(record["resources"]["vm_resident_bytes"])
-        self.assertIsNone(record["resources"]["cpu_attributed_s"])
+        # Each pool's tree is its provider plus one helper outside providers, returned twice.
+        resources = record["resources"]
+        self.assertEqual((resources["vm_cpu_s"], resources["vm_resident_bytes"], resources["vm_footprint_bytes"]),
+                         (3.0, 220, 176))
+        self.assertEqual({(vm["tree_processes"], vm["tree_helpers"]) for vm in resources["vms"]}, {(2, 1)})
+        self.assertGreater(resources["cpu_attributed_s"], resources["vm_cpu_s"])
+        self.assertEqual(resources["observed"]["kind"], "staggered-per-pool")
+        self.assertLessEqual(resources["observed"]["from_s"], resources["observed"]["to_s"])
+        # Warm restore keeps the run but uses the plan re-derived after the host edit.
+        plans = {c[c.index("--run-id") + 1]: c[c.index("--expect-plan") + 1] for c in self.calls(("graph", "run"))}
+        for restore in self.calls(("graph", "restore")):
+            run = restore[restore.index("--run-id") + 1]
+            self.assertIn(run, plans)
+            self.assertNotEqual(restore[restore.index("--expect-plan") + 1], plans[run])
+
+    def test_an_unready_restore_fails_even_when_reads_succeed(self):
+        record = self.trial(fault="restore-unready")
+        self.assertFalse(record["ok"])
+        self.assertIn("restore: exit 0", record["error"])
+        self.assertNotIn("warm_all_ready_s", record)
 
     def test_a_pool_serving_another_worktree_fails_before_readiness_counts(self):
         record = self.trial(lane="stock", fault="cross-source")
@@ -462,7 +521,8 @@ def worktree_record(size, repeat, lane, all_ready, admission, resident=100):
         "warm_provenance": [{"lane": lane, "start": "warm", "source": lane, "base_use": None}] * size,
         "fixture": {"checkout_allocated_bytes": 10},
         "resources": {"cpu_attributed_s": 3.0, "vm_resident_bytes": resident, "vm_footprint_bytes": 80,
-                      "guest_memory_configured_bytes": 6 << 30},
+                      "guest_memory_configured_bytes": 6 << 30,
+                      "observed": {"kind": "staggered-per-pool", "from_s": 5.0, "to_s": 5.5}},
         "samples": [{"up": {"wall_s": 2.0}, "restart_up": {"wall_s": 1.0}, "ensure_image": {"wall_s": 4.0}}] * size,
         "cleanup": [{"removed": True}],
     }
@@ -484,6 +544,7 @@ class WorktreeSummary(unittest.TestCase):
         self.assertEqual({k: prepared["vm_resident_bytes"][k] for k in ("n", "of", "qualified")},
                          {"n": 1, "of": 2, "qualified": False})
         self.assertEqual(prepared["guest_memory_configured_bytes"]["median"], 6 << 30)
+        self.assertEqual(prepared["resource_snapshot_span_s"]["median"], 0.5)
         self.assertEqual(summary["worktree_selections"]["prepared/cold/prepared/first-in-run"], 16)
         self.assertEqual(summary["worktree_selections"]["stock/warm/stock/None"], 16)
 

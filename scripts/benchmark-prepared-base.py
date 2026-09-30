@@ -102,6 +102,12 @@ class Failure(RuntimeError):
     pass
 
 
+def healthy(body):
+    """A run or restore receipt records the requested readiness goals; the command itself
+    succeeds only once they hold. Both are required."""
+    return (body.get("readiness") or {}).get("web") == "healthy"
+
+
 def sha256(path):
     digest = hashlib.sha256()
     with open(path, "rb") as file:
@@ -457,22 +463,35 @@ class Trial:
         return body
 
     def provider(self, body):
-        resources = (body.get("provider_resources") or {}).get("processes") or []
-        binary = str(self.home / ".hack-local/providers")
-        own = [p for p in resources if str(p["identity"]["executable"]).startswith(binary)]
+        """The provider tree the runtime returned (its identity-bound root and current
+        descendants, whatever their executables), each process counted once. The tree must
+        contain this home's provider binary. It holds only processes live at the snapshot,
+        while each command's wait4 CPU covers only its terminated, reaped children, so adding
+        the two never counts a process twice."""
+        returned = (body.get("provider_resources") or {}).get("processes") or []
+        tree = list({(p["identity"]["pid"], p["identity"]["start_micros"]): p for p in returned}.values())
+        binary = str(self.home / ".hack-local/providers") + "/"
+        own = [p for p in tree if str(p["identity"]["executable"]).startswith(binary)]
         if not own:
             return {}
-        cpu = sum(p["user_cpu_nanoseconds"] + p["system_cpu_nanoseconds"] for p in own) / 1e9
-        peak = Libc().peak_footprint(own[0]["identity"]["pid"])
+        cpu = sum(p["user_cpu_nanoseconds"] + p["system_cpu_nanoseconds"] for p in tree) / 1e9
+        try:
+            libc = Libc()
+            peaks = [libc.peak_footprint(p["identity"]["pid"]) for p in tree]
+        except OSError:
+            peaks = [None]
         memory = body.get("guest_memory_mib")
         # Resident size and physical footprint are measured; the guest's configured maximum is
         # not. They are reported side by side, never added together.
         return {
             "vm_identity": [own[0]["identity"]["pid"], own[0]["identity"]["start_micros"]],
+            "tree_processes": len(tree),
+            "tree_helpers": len(tree) - len(own),
             "vm_cpu_s": round(cpu, 3),
-            "vm_resident_bytes": sum(p["resident_bytes"] for p in own),
-            "vm_footprint_bytes": sum(p["physical_footprint_bytes"] for p in own),
-            "vm_peak_footprint_bytes": peak,
+            "vm_resident_bytes": sum(p["resident_bytes"] for p in tree),
+            "vm_footprint_bytes": sum(p["physical_footprint_bytes"] for p in tree),
+            # Per-process lifetime peaks need not coincide: an upper bound on the tree's peak.
+            "vm_peak_footprint_bytes": total(peaks),
             "guest_memory_configured_bytes": None if memory is None else memory << 20,
         }
 
@@ -502,8 +521,7 @@ class Trial:
         self.step(
             f"{prefix}run", "graph", "run", "--project", str(project), *selector, "--file", compose,
             "--expect-plan", plan["plan_id"], "--run-id", run, *(["--shared-source"] if shared_source else []),
-            "--ready", "web=healthy", "--timeout-seconds", "120", timeout=180,
-            check=lambda b: (b.get("readiness") or {}).get("web") == "healthy",
+            "--ready", "web=healthy", "--timeout-seconds", "120", timeout=180, check=healthy,
         )
         return {"project": project, "compose": compose, "plan": plan["plan_id"],
                 "namespace": (plan.get("plan") or {}).get("namespace"), "run": run,
@@ -577,7 +595,7 @@ def pair_trial(args, index, lane):
         trial.step(
             "restore", "graph", "restore", "--project", str(graph["project"]), "--file", graph["compose"],
             "--expect-plan", graph["plan"], "--run-id", graph["run"], "--ready", "web=healthy",
-            "--timeout-seconds", "120", timeout=180,
+            "--timeout-seconds", "120", timeout=180, check=healthy,
         )
         if trial.token(graph["run"], "restore_token") != graph["token"]:
             raise Failure("persistent token changed across restart")
@@ -672,7 +690,8 @@ def concurrent_trial(args, count):
 
 
 def pool_resources(pools, statuses):
-    """Cohort totals at one instant. A total is null when any pool's value is unobserved.
+    """Cohort totals from one reading per pool, taken in turn rather than at one instant. A
+    total is null when any pool's value is unobserved.
     `cli_cpu_s` covers every timed command so far (excluding setup); `vm_cpu_s` is each live
     VM process's CPU since it started."""
     vms = [pool.provider(status) for pool, status in zip(pools, statuses)]
@@ -685,7 +704,7 @@ def pool_resources(pools, statuses):
         "cpu_attributed_s": total([cli, vm]),
         "vm_resident_bytes": total(v.get("vm_resident_bytes") for v in vms),
         "vm_footprint_bytes": total(v.get("vm_footprint_bytes") for v in vms),
-        # Lifetime peaks need not coincide, so their sum bounds the simultaneous peak from above.
+        # Lifetime peaks need not coincide: an upper bound, not a simultaneous cohort peak.
         "vm_peak_footprint_sum_bytes": total(v.get("vm_peak_footprint_bytes") for v in vms),
         "guest_memory_configured_bytes": total(v.get("guest_memory_configured_bytes") for v in vms),
         "disk_allocated_bytes": total(total(d.get("allocated") for d in disk.values()) for disk in disks),
@@ -729,8 +748,13 @@ def worktree_trial(args, size, repeat, lane):
         record["all_ready_s"] = round(time.monotonic() - started, 3)
         record["ready_offsets_s"] = sorted(r["ready_s"] for r in ready)
         record["provenance"] = [r["provenance"] for r in ready]
+        observed_from = round(time.monotonic() - started, 3)
         statuses = [pool.status() for pool in pools]
         record["resources"] = pool_resources(pools, statuses)
+        # Pools are read one after another, so the cohort sums are a staggered snapshot over
+        # this window (seconds since the cohort started), not one instant.
+        record["resources"]["observed"] = {"kind": "staggered-per-pool", "from_s": observed_from,
+                                           "to_s": round(time.monotonic() - started, 3)}
 
         # A fresh host edit in every root must reach exactly its own pool.
         live = [secrets.token_hex(16) for _ in range(size)]
@@ -758,10 +782,15 @@ def worktree_trial(args, size, repeat, lane):
             pool.step("graph_cleanup", "graph", "cleanup", "--run-id", graph["run"])
             pool.step("down", "runtime", "down")
             body = pool.up("restart_up", lane, share=entry["root"])
+            # The host edit changed the source inventory, so the saved plan is stale. Restore the
+            # same run under the current plan, which shared-source restore allows.
+            plan = pool.step("replan", "project", "plan", "--project", str(entry["root"]), "--branch", entry["branch"],
+                             "--file", graph["compose"])["plan_id"]
             pool.step(
                 "restore", "graph", "restore", "--project", str(entry["root"]), "--branch", entry["branch"],
-                "--file", graph["compose"], "--expect-plan", graph["plan"], "--run-id", graph["run"],
+                "--file", graph["compose"], "--expect-plan", plan, "--run-id", graph["run"],
                 "--shared-source", "--ready", "web=healthy", "--timeout-seconds", "120", timeout=180,
+                check=healthy,
             )
             kept = {"token": pool.token(graph["run"], "restore_token") == graph["token"],
                     "marker": pool.read(graph["run"], "/workspace/branch.txt", "restore_marker") == entry["marker"],
@@ -845,8 +874,11 @@ def worktree_metrics(r):
     """Cold (`up`, create-to-ready) and warm (`restart_up`) starts stay separate; image
     acquisition into each fresh home is reported on its own."""
     resources = r.get("resources") or {}
+    observed = resources.get("observed") or {}
     metrics = {
         "all_ready_s": r["all_ready_s"],
+        "resource_snapshot_span_s": (round(observed["to_s"] - observed["from_s"], 3)
+                                     if "to_s" in observed and "from_s" in observed else None),
         "warm_all_ready_s": r.get("warm_all_ready_s"),
         "cold_up_median_s": median_of(r["samples"], "up"),
         "warm_up_median_s": median_of(r["samples"], "restart_up"),

@@ -85,6 +85,31 @@ def git(*argv):
     return result.stdout.strip()
 
 
+def lineage(listing):
+    """This process and the processes that launched it, from `pid ppid args` rows."""
+    parents = {}
+    for line in listing.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) >= 2 and fields[0].isdigit() and fields[1].isdigit():
+            parents[int(fields[0])] = int(fields[1])
+    own, pid = set(), os.getpid()
+    while pid > 1 and pid not in own:
+        own.add(pid)
+        pid = parents.get(pid, 0)
+    return own
+
+
+def referencing(root, listing, own):
+    """Rows outside `own` whose command line names `root`. The driver and its launchers name
+    the root in their own arguments, so they alone are excluded."""
+    hits = []
+    for line in listing.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) == 3 and fields[0].isdigit() and int(fields[0]) not in own and str(root) in fields[2]:
+            hits.append(line.strip())
+    return hits
+
+
 def port_free(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         try:
@@ -287,9 +312,10 @@ class Acceptance:
                              "--store", str(self.store), "--json")
         if bases["bases"] or bases["abandoned_work"]:
             raise Failure(f"store not empty after removal: {bases}")
-        listing = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,args="], capture_output=True, text=True)
-        if listing.returncode != 0 or str(self.root) in listing.stdout:
-            raise Failure("a process may still reference the acceptance root")
+        listing = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,args="], capture_output=True, text=True)
+        others = referencing(self.root, listing.stdout, lineage(listing.stdout)) if listing.returncode == 0 else None
+        if others is None or others:
+            raise Failure(f"a process may still reference the acceptance root: {others}")
         if alias and alias.is_symlink():
             if not os.readlink(alias).startswith(str(self.home) + "/"):
                 raise Failure(f"provider alias {alias} does not point into this home")

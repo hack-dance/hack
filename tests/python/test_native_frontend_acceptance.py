@@ -7,8 +7,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -240,6 +242,35 @@ class Acceptance(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                 process.wait()
+
+    def test_the_driver_naming_the_root_in_its_own_arguments_does_not_block_disposal(self):
+        # As in a real run, the process running the driver names the root in its arguments.
+        code = textwrap.dedent(f"""
+            import argparse, importlib.util, sys
+            spec = importlib.util.spec_from_file_location("driver", {str(source)!r})
+            driver = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(driver)
+            acceptance = driver.Acceptance(argparse.Namespace(**{vars(self.args)!r}))
+            acceptance.fetch = lambda: (acceptance.project / "index.txt").read_text()
+            acceptance.https_wait = 1
+            sys.exit(acceptance.run())
+        """)
+        env = {k: v for k, v in os.environ.items() if k != "FAKE_FAULT"}
+        result = subprocess.run([sys.executable, "-c", code, "--root", str(self.root)], env=env,
+                                capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout[-800:])
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["evidence"])
+
+    def test_another_process_naming_the_root_blocks_disposal(self):
+        bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", str(self.root)])
+        try:
+            code, _ = self.accept()
+            self.assertEqual(code, 1)
+            self.assertIn("may still reference the acceptance root", self.failure())
+            self.assert_preserved()
+        finally:
+            bystander.kill()
+            bystander.wait()
 
     def test_the_preview_runs_nothing(self):
         argv = ["accept", "--bundle", str(self.bundle), "--root", str(self.root), "--provider-archive", "/p",

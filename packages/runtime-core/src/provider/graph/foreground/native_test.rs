@@ -545,5 +545,7 @@ mod startup_cancellation;
 mod absent_publication_recovery;
 mod host_pin_recovery;
 mod retired_recovery_cleanup;
+#[cfg(feature = "native-http-probe")]
+mod retired_rebind_history;
 mod same_boot_recovery;
 mod source_device_rebind;

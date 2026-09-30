@@ -881,3 +881,18 @@ generation must match the original receipt. Original bytes remain in a digest-bo
 resumable archive; a later current-boot journal is preserved for its own cleanup.
 Changed evidence, pending state or live compute refuses archival. This does not
 replay old dependencies or relax the fresh graph's endpoint/readiness checks.
+
+The ignored native regression
+`foreground::native_test::retired_rebind_history::completed_prior_boot_rebind_archives_after_newer_stopped_generation`
+uses an isolated capacity-two candidate, a pinned pre-archive native executable
+(`7dc0811cd0179f40340e48c540699933dc099cf7`) and a current executable with
+`retire-acknowledged-publisher`. Supply `HACK_LOCAL_TEST_ROOT`,
+`HACK_LOCAL_TEST_BINARY`, `HACK_LOCAL_TEST_LEGACY_BINARY`,
+`HACK_LOCAL_TEST_LEGACY_SHA256`, `HACK_LOCAL_TEST_IMAGE`,
+`HACK_GRAPH_RELAY_ARTIFACT` and `HACK_GRAPH_RELAY_SHA256`. The image must contain
+`/bin/busybox` with `httpd` and `/bin/hack-graph-startup-app`. Precompile the
+test, then run it under an external 300-second watchdog with one test thread.
+It uses normal refresh, recovery, cleanup and restore paths, plus an injected
+archive interruption at the owned verifier boundary. A passing test proves
+same-run retained marker and sibling isolation in that fixture; it does not
+establish application or physical host-reboot acceptance.

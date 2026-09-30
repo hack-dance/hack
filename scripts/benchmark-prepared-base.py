@@ -309,41 +309,54 @@ class Background:
     A process is owned when its command line names the run root: trial homes, their VMs, CLI
     calls, fixtures and the harness itself. `watched` PIDs (for example an idle VM left running
     beside the run) count as background and are also reported on their own. A process that
-    starts and exits between two observations is not seen, so short-lived work is undercounted."""
+    starts and exits between two observations is not seen, so short-lived work is undercounted.
 
-    def __init__(self, root, watched=(), listing=None, clock=time.monotonic):
-        self.root, self.watched, self.clock = str(root), set(watched), clock
+    Every measurement spans at least 90% of `interval`. `ps` rounds CPU time to 10 ms, so a call
+    that comes sooner (for example a trial's start or end check right after a continuous sample)
+    returns the last measurement instead of dividing that rounding by a tiny interval."""
+
+    def __init__(self, root, watched=(), listing=None, clock=time.monotonic, interval=1.0):
+        self.root, self.watched, self.clock, self.interval = str(root), set(watched), clock, interval
         self.listing = listing or (lambda: subprocess.run(
             ["ps", "-A", "-o", "pid=,time=,args="], capture_output=True, text=True, check=True).stdout)
         self.previous = None
+        self.latest = (None, None, [])
         self.lock = threading.Lock()
 
     def observe(self):
-        """(background cores, watched cores, names) since the previous observation. Cores are None
+        """(background cores, watched cores, names) over the latest full interval. Cores are None
         until an interval exists; names are every listed command, for build-tool detection."""
         with self.lock:
-            now, table, names = self.clock(), {}, []
-            for line in self.listing().splitlines():
-                fields = line.split(None, 2)
-                if len(fields) < 3 or not fields[0].isdigit():
-                    continue
-                names.append(fields[2].split()[0])
-                seconds = cpu_seconds(fields[1])
-                if seconds is not None:
-                    table[(int(fields[0]), fields[2])] = (seconds, self.root in fields[2])
-            previous, self.previous = self.previous, (now, table)
-            if previous is None or now <= previous[0]:
-                return None, None, names
-            background = watched = 0.0
-            for key, (seconds, owned) in table.items():
-                if owned or key not in previous[1]:
-                    continue
-                delta = max(0.0, seconds - previous[1][key][0])
-                background += delta
-                if key[0] in self.watched:
-                    watched += delta
-            elapsed = now - previous[0]
-            return round(background / elapsed, 3), round(watched / elapsed, 3), names
+            now = self.clock()
+            if self.previous is not None and now - self.previous[0] < 0.9 * self.interval:
+                return self.latest
+            self.latest = self._measure(now)
+            return self.latest
+
+    def _measure(self, now):
+        """One new snapshot at `now`, measured against the previous one."""
+        table, names = {}, []
+        for line in self.listing().splitlines():
+            fields = line.split(None, 2)
+            if len(fields) < 3 or not fields[0].isdigit():
+                continue
+            names.append(fields[2].split()[0])
+            seconds = cpu_seconds(fields[1])
+            if seconds is not None:
+                table[(int(fields[0]), fields[2])] = (seconds, self.root in fields[2])
+        previous, self.previous = self.previous, (now, table)
+        if previous is None or now <= previous[0]:
+            return None, None, names
+        background = watched = 0.0
+        for key, (seconds, owned) in table.items():
+            if owned or key not in previous[1]:
+                continue
+            delta = max(0.0, seconds - previous[1][key][0])
+            background += delta
+            if key[0] in self.watched:
+                watched += delta
+        elapsed = now - previous[0]
+        return round(background / elapsed, 3), round(watched / elapsed, 3), names
 
 
 def measure_idle(meter, seconds, interval, pressure=None, sleep=time.sleep):
@@ -939,20 +952,27 @@ def worktree_trial(args, size, repeat, lane):
     return record
 
 
-def run_worktrees(args, sizes, keep, deadline=None, clock=time.monotonic):
+def run_worktrees(args, sizes, keep, deadline=None, clock=time.monotonic, distress=None):
     """Worktree cohorts in order. Returns None when every planned cohort ran, else why the rest
-    did not start: `cleanup_failed` (a failed cleanup can leave live pools and their roots behind,
-    and any later cohort would exceed the planned peak and share the host with them) or `budget`
-    (the run budget was spent; a cohort in progress always finishes)."""
+    did not start:
+    - `cleanup_failed`: a failed cleanup can leave live pools and their roots behind, and any
+      later cohort would exceed the planned peak and share the host with them;
+    - `budget`: the run budget was spent;
+    - `distress: ...`: `distress.check` found host distress before the next cohort.
+    A cohort in progress always finishes its bounded work and cleanup."""
+    previous = None
     for repeat in range(args.worktree_repeats):
         for size in sizes:
             lanes = ("stock", "prepared") if (repeat + size) % 2 == 0 else ("prepared", "stock")
             for lane in lanes:
                 if deadline is not None and clock() >= deadline:
                     return "budget"
-                record = worktree_trial(args, size, repeat, lane)
-                keep(record)
-                if record["cleanup_failed"]:
+                reasons = distress.check(previous) if distress else []
+                if reasons:
+                    return "distress: " + "; ".join(reasons)
+                previous = worktree_trial(args, size, repeat, lane)
+                keep(previous)
+                if previous["cleanup_failed"]:
                     return "cleanup_failed"
     return None
 
@@ -961,6 +981,38 @@ def process_identity(pid):
     """Start time and command of a live PID, or None; used to show an idle VM stayed the same."""
     result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart=,args="], capture_output=True, text=True)
     return result.stdout.strip() or None if result.returncode == 0 else None
+
+
+class Distress:
+    """Host conditions after which no further cohort starts. A new crash or watchdog report since
+    the run began, raised memory pressure, a build tool (now, or in the finished trial's own
+    admission samples), or an idle VM that is no longer the same process."""
+
+    PREFIXES = ("syspolicyd", "WindowServer", "panic", "Jetsam", "ResetCounter")
+    REPORTS = (Path("/Library/Logs/DiagnosticReports"), Path("/Library/Logs/DiagnosticReports/Retired"))
+    TRIAL = ("memory_pressure", "build_tools")
+
+    def __init__(self, idle_vms, reports=REPORTS, identity=process_identity, host=None):
+        self.idle_vms, self.dirs, self.identity = dict(idle_vms), reports, identity
+        self.host = host or (lambda: admission())
+        self.baseline = self.reports()
+
+    def reports(self):
+        return {p.name for d in self.dirs if d.is_dir() for p in d.iterdir() if p.name.startswith(self.PREFIXES)}
+
+    def check(self, record=None):
+        reasons = []
+        new = sorted(self.reports() - self.baseline)
+        if new:
+            reasons.append("new_report: " + ", ".join(new))
+        reasons += [f"idle_vm_changed: {pid}" for pid, identity in self.idle_vms.items() if self.identity(pid) != identity]
+        now = self.host()
+        reasons += [f"host: {reason}" for reason in now["reasons"] if reason in self.TRIAL]
+        seen = set()
+        for key in ("admission", "admission_during", "admission_end"):
+            seen |= {r for r in ((record or {}).get(key) or {}).get("reasons", []) if r in self.TRIAL}
+        reasons += [f"trial: {reason}" for reason in sorted(seen)]
+        return reasons
 
 
 def stats(values):
@@ -1037,12 +1089,25 @@ def worktree_metrics(r):
     return metrics
 
 
-def summarize(records, cpus=None):
+def idle_vms_changed(started, ended):
+    """PIDs of idle VMs whose identity at the end differs from the start (keys as strings)."""
+    started = {str(k): v for k, v in (started or {}).items()}
+    ended = {str(k): v for k, v in (ended or {}).items()}
+    return sorted(pid for pid, identity in started.items() if ended.get(pid) != identity)
+
+
+def summarize(records, cpus=None, idle_vms=None, idle_vms_end=None):
+    """Summaries of raw records. When an idle VM measured by the baseline is no longer the same
+    process at the end, the background every trial was admitted against changed, so no trial's
+    timing is admitted; all records stay, in the flagged summaries."""
     cpus = cpus or os.cpu_count() or 1
-    summary = {"admission_boundaries": {}}
+    changed = idle_vms_changed(idle_vms, idle_vms_end) if idle_vms else []
+    summary = {"admission_boundaries": {}, "timing_invalidated": [f"idle_vm_changed: {pid}" for pid in changed]}
     classified = []
     for r in records:
         ok, reasons, boundary = admitted(r, cpus)
+        if changed:
+            ok, reasons = False, reasons + ["run:idle_vm_changed"]
         summary["admission_boundaries"][boundary] = summary["admission_boundaries"].get(boundary, 0) + 1
         classified.append((r, ok, reasons))
 
@@ -1125,15 +1190,18 @@ def worktree_plan(sizes, repeats, parallel, profile, host_memory):
 
 
 def load_samples(path):
-    """(context, records) from a raw samples file; a trailing summary line is ignored."""
-    context, records = {}, []
+    """(context, records, idle-VM identities at the end) from a raw samples file; a trailing
+    summary line is ignored."""
+    context, records, ended = {}, [], None
     for line in Path(path).read_text().splitlines():
         entry = json.loads(line)
         if "context" in entry:
             context = entry["context"]
+        elif "idle_vms_end" in entry:
+            ended = entry["idle_vms_end"]
         elif "summary" not in entry:
             records.append(entry)
-    return context, records
+    return context, records, ended
 
 
 def main():
@@ -1168,8 +1236,9 @@ def main():
     parser.add_argument("--run", action="store_true", help="execute; without it only the plan is printed")
     args = parser.parse_args()
     if args.summarize:
-        context, records = load_samples(args.summarize)
-        print(json.dumps({"context": context, "summary": summarize(records, (context.get("host") or {}).get("cpus"))}, indent=2))
+        context, records, ended = load_samples(args.summarize)
+        summary = summarize(records, (context.get("host") or {}).get("cpus"), context.get("idle_vms"), ended)
+        print(json.dumps({"context": context, "summary": summary}, indent=2))
         return
     modes = args.mode or ["pairs", "cohort", "concurrent"]
     if not args.image:
@@ -1215,10 +1284,14 @@ def main():
     idle_vms = {pid: process_identity(pid) for pid in args.idle_vm_pid}
     if any(identity is None for identity in idle_vms.values()):
         parser.error(f"--idle-vm-pid must name running processes: {idle_vms}")
+    # Reports and idle-VM identity are baselined before any measurement, so anything new during
+    # the idle baseline refuses the run as well.
+    distress = Distress(idle_vms)
     baseline = None
     if args.idle_baseline > 0:
-        meter = Background(root, watched=args.idle_vm_pid)
+        meter = Background(root, watched=args.idle_vm_pid, interval=args.admission_interval)
         baseline = measure_idle(meter, args.idle_baseline, args.admission_interval)
+        baseline["refusals"] += distress.check()
         if baseline["refusals"]:
             print(json.dumps({"idle_baseline": baseline}, indent=2))
             parser.error(f"the idle baseline was not idle ({baseline['refusals']}); nothing was started")
@@ -1255,14 +1328,16 @@ def main():
                         keep(cohort_trial(args, size, repeat, lane))
         if "concurrent" in modes:
             keep(concurrent_trial(args, args.concurrent))
-        stopped = run_worktrees(args, worktree_sizes, keep, started + args.budget if args.budget else None) \
-            if worktree_sizes else None
+        stopped = run_worktrees(args, worktree_sizes, keep, started + args.budget if args.budget else None,
+                                distress=distress) if worktree_sizes else None
         if stopped:
             print(json.dumps({"stopped": stopped}), flush=True)
-        summary = summarize(records, context["host"]["cpus"])
+        # An idle VM that restarted or vanished changed the background every trial was admitted
+        # against; the end identity is kept in the raw file so --summarize reaches the same verdict.
+        ended = {pid: process_identity(pid) for pid in idle_vms}
+        sink.write(json.dumps({"idle_vms_end": ended}) + "\n")
+        summary = summarize(records, context["host"]["cpus"], idle_vms, ended)
         summary["stopped"] = stopped
-        # An idle VM that restarted or vanished during the run changed the background it measured.
-        summary["idle_vms_unchanged"] = {pid: process_identity(pid) == identity for pid, identity in idle_vms.items()}
         sink.write(json.dumps({"summary": summary}) + "\n")
     print(json.dumps({"output": str(output), "summary": summary}, indent=2))
 

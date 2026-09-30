@@ -597,18 +597,27 @@ enter the admitted summaries and the paired pair and cohort ratios.
 The load rule counts the run's own VMs, and half the CPU count is not a measurement of this
 host, so a measured baseline can replace it. `--idle-baseline SECONDS` first samples the host
 while nothing of the run exists. It refuses to start anything if build tools appear, memory
-pressure rises, or fewer than three intervals are observed.
+pressure rises, a new crash or watchdog report appears, an idle VM changes, or fewer than three
+intervals are observed.
 - **Background.** It measures background CPU as per-process CPU-time deltas of processes whose
   command line does not name `--root`. Trial VMs, CLI calls, fixtures and the harness are
   therefore excluded. A process that starts and exits between two samples is not seen.
+- **Interval.** Every measurement spans at least 90% of the admission interval. A trial's start
+  or end check that follows a continuous sample reuses that sample rather than dividing `ps`'s
+  10 ms rounding by a tiny interval.
 - **Ceiling.** The maximum background observed becomes the admission ceiling. A timed sample
   is flagged `background_above_idle` when background exceeds it, and load is then recorded but
   not judged.
 - **Idle VMs.** `--idle-vm-pid` names a VM left running beside the run (repeatable). It counts
-  as background, is reported on its own, and the summary shows whether it stayed the same
-  process.
-- **Budget.** `--budget SECONDS` stops scheduling further worktree cohorts once it is spent; a
-  cohort in progress finishes and cleans up.
+  as background and is reported on its own. If it is no longer the same process at the end,
+  the background every trial was admitted against changed. No trial's timing is then admitted,
+  and all records stay in the flagged summaries. The raw file keeps the end identity, so
+  `--summarize` reaches the same verdict.
+- **Stops.** Before each worktree cohort, the run stops scheduling when a new syspolicyd,
+  WindowServer, panic, Jetsam or reset report has appeared since it began, memory pressure is
+  raised, a build tool runs or ran during the finished trial, or an idle VM changed. The same
+  applies when `--budget SECONDS` is spent. A cohort in progress always finishes its bounded
+  work and cleanup.
 
 `--summarize SAMPLES`
 recomputes the summary from a retained raw file without running anything. Cleanup stops each

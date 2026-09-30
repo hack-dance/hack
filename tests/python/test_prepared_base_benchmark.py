@@ -507,6 +507,23 @@ class WorktreeTrials(unittest.TestCase):
                          [("prepared", True, False), ("stock", True, False)])
         self.assertEqual(list(self.root.iterdir()), [])
 
+    def test_distress_stops_scheduling_after_the_current_cohort_cleans_up(self):
+        self.args.worktree_repeats = 2
+        checks = []
+
+        class Scripted:
+            def check(self, record=None):
+                checks.append(record is not None)
+                return ["new_report: syspolicyd-now.ips"] if record is not None else []
+
+        records = []
+        stopped = benchmark.run_worktrees(self.args, [1], records.append, distress=Scripted())
+        self.assertEqual(stopped, "distress: new_report: syspolicyd-now.ips")
+        # The first cohort ran and cleaned up; no later lane or repeat started.
+        self.assertEqual([(r["lane"], r["ok"], r["cleanup_failed"]) for r in records], [("prepared", True, False)])
+        self.assertEqual(checks, [False, True])
+        self.assertEqual(list(self.root.iterdir()), [])
+
     def test_a_spent_budget_starts_no_further_cohort(self):
         self.args.worktree_repeats = 1
         records, now = [], iter([0.0, 99.0])
@@ -577,6 +594,20 @@ class MeasuredAdmission(unittest.TestCase):
         # Without a baseline the legacy rule is unchanged.
         self.assertEqual(benchmark.admission_from(14.0, ["zsh"], "1", 16)["reasons"], ["load_high"])
 
+    def test_boundary_calls_reuse_the_last_full_interval_and_never_shorten_the_next(self):
+        # A snapshot 50 ms after a sample would turn ps's 10 ms rounding into 0.2 cores; it is never
+        # taken. Only three listings exist: a fourth snapshot would consume the next one early.
+        listings = iter([self.listing((10, "0:01.00", "/usr/bin/mds")),
+                         self.listing((10, "0:01.50", "/usr/bin/mds")),
+                         self.listing((10, "0:02.30", "/usr/bin/mds"))])
+        clock = iter([0.0, 1.0, 1.05, 2.0])
+        meter = benchmark.Background(self.ROOT, listing=lambda: next(listings), clock=lambda: next(clock), interval=1.0)
+        meter.observe()
+        self.assertEqual(meter.observe()[0], 0.5)
+        self.assertEqual(meter.observe()[0], 0.5)
+        # Measured against the snapshot at 1.0 s, not the boundary call at 1.05 s.
+        self.assertEqual(meter.observe()[0], 0.8)
+
     def test_trials_use_the_runs_baseline_when_one_was_measured(self):
         args = argparse.Namespace(background=type("M", (), {"observe": lambda self: (2.5, 0.1, ["zsh"])})(),
                                   idle_ceiling=1.0)
@@ -584,6 +615,52 @@ class MeasuredAdmission(unittest.TestCase):
         self.assertIn("background_above_idle", observed["reasons"])
         self.assertEqual(observed["watched_cores"], 0.1)
         self.assertNotIn("background_cores", benchmark.observe_admission(argparse.Namespace()))
+
+
+class DistressAndInvalidation(unittest.TestCase):
+    def test_each_distress_source_is_reported(self):
+        reports = Path(tempfile.mkdtemp(prefix="hack-reports-"))
+        self.addCleanup(shutil.rmtree, reports, True)
+        (reports / "syspolicyd-old.ips").write_text("")
+        identity = {"value": "Tue 51003 smolvm-bin"}
+        host = {"reasons": []}
+        distress = benchmark.Distress({51003: "Tue 51003 smolvm-bin"}, reports=(reports,),
+                                      identity=lambda pid: identity["value"], host=lambda: host)
+        self.assertEqual(distress.check(), [])
+        (reports / "WindowServer-new.spin").write_text("")
+        (reports / "unrelated-app.ips").write_text("")
+        self.assertEqual(distress.check(), ["new_report: WindowServer-new.spin"])
+        (reports / "WindowServer-new.spin").unlink()
+        identity["value"] = "Wed 61000 smolvm-bin"
+        self.assertEqual(distress.check(), ["idle_vm_changed: 51003"])
+        identity["value"] = "Tue 51003 smolvm-bin"
+        host["reasons"] = ["memory_pressure", "load_high"]
+        self.assertEqual(distress.check(), ["host: memory_pressure"])
+        host["reasons"] = []
+        trial = {"admission": {"reasons": []}, "admission_during": {"reasons": ["build_tools", "background_above_idle"]}}
+        self.assertEqual(distress.check(trial), ["trial: build_tools"])
+
+    def test_invalidated_timing_keeps_every_record_flagged(self):
+        records = [worktree_record(1, 0, "stock", 20.0, CLEAN), worktree_record(1, 0, "prepared", 10.0, CLEAN)]
+        kept = benchmark.summarize(records, 16, {51003: "A"}, {"51003": "A"})
+        self.assertEqual((kept["timing_invalidated"], kept["admitted_worktree_all_ready_ratio_by_size"]["1"]["n"]), ([], 1))
+        changed = benchmark.summarize(records, 16, {51003: "A"}, {"51003": None})
+        self.assertEqual(changed["timing_invalidated"], ["idle_vm_changed: 51003"])
+        self.assertEqual((changed["worktrees_admitted"], changed["admitted_worktree_all_ready_ratio_by_size"]), ({}, {}))
+        self.assertEqual(changed["worktrees_flagged"]["1"]["prepared"]["all_ready_s"]["median"], 10.0)
+        self.assertIn("run:idle_vm_changed", changed["flag_reasons"])
+
+    def test_summarize_from_raw_samples_reaches_the_same_verdict(self):
+        directory = Path(tempfile.mkdtemp(prefix="hack-samples-"))
+        self.addCleanup(shutil.rmtree, directory, True)
+        raw = directory / "samples.jsonl"
+        lines = [{"context": {"host": {"cpus": 16}, "idle_vms": {"51003": "A"}}},
+                 worktree_record(1, 0, "stock", 20.0, CLEAN), worktree_record(1, 0, "prepared", 10.0, CLEAN),
+                 {"idle_vms_end": {"51003": "B"}}, {"summary": {}}]
+        raw.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+        context, records, ended = benchmark.load_samples(raw)
+        summary = benchmark.summarize(records, context["host"]["cpus"], context["idle_vms"], ended)
+        self.assertEqual((len(records), summary["timing_invalidated"]), (2, ["idle_vm_changed: 51003"]))
 
 
 class WorktreeFixture(unittest.TestCase):

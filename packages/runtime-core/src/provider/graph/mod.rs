@@ -1765,6 +1765,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
     if options.timeout.is_zero() || options.timeout > Duration::from_secs(600) {
         return Err(error("graph_budget", "Invalid graph timeout."));
     }
+    let project_path = options.project.project;
     let inputs = project::inputs::compile(
         candidate,
         options.project,
@@ -1853,6 +1854,9 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
             ));
         }
     }
+    source::verify_cache_scope(source.as_ref(), project_path)?;
+    #[cfg(target_os = "macos")]
+    source_device_rebind::verify_cache_scope_origin(candidate, &receipt)?;
     receipt.phase = "restarting".into();
     for resource in receipt
         .resources

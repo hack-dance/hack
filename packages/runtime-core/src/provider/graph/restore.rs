@@ -436,6 +436,9 @@ fn restore_inputs(
     if let Some(driver) = startup.as_ref() {
         driver.check_cancelled()?;
     }
+    source::verify_cache_scope(source, options.project.project)?;
+    #[cfg(target_os = "macos")]
+    super::source_device_rebind::verify_cache_scope_origin(candidate, &receipt)?;
     // Retain the complete acknowledged old generation before replacing its
     // boot-bound dependency owner. Historical cleanup is verified in its own context.
     if fresh.is_some() {

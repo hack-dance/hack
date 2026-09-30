@@ -1,7 +1,7 @@
 //! One explicit source-device translation for an acknowledged stopped graph.
 //!
 //! The stopped receipt and its cleanup proofs remain immutable. This witness may
-//! project only the share device for source admission into the next generation.
+//! project the share device and a proven retained cache scope into the next generation.
 use super::{
     Candidate, CandidateError, Engine, Kind, Receipt, cleanup_enrollment, directory, foreground,
     host_pin_recovery, inspect_resource, load, restore, source, state,
@@ -219,6 +219,19 @@ impl Witness {
         if *shared != self.current_share {
             return Err(refused());
         }
+        let scopes = receipt
+            .resources
+            .values()
+            .filter_map(|resource| resource.cache.as_ref().map(|cache| cache.scope.as_str()))
+            .collect::<Vec<_>>();
+        let binding = projected.source.as_mut().ok_or_else(refused)?;
+        binding.cache_scope = super::dependency_cache::ReplayScope::project(
+            &self.old_share,
+            &self.current_share,
+            binding.cache_scope.as_ref(),
+            &scopes,
+            &sha256(&encoded(self)?),
+        )?;
         Ok(projected)
     }
 
@@ -235,6 +248,49 @@ impl Witness {
             && self.old_share.unfiltered_source == self.current_share.unfiltered_source
             && receipt.source.as_ref().and_then(|s| s.shared.as_ref()) == Some(&self.old_share)
     }
+}
+
+/// A later ordinary replay uses the original witness as immutable provenance,
+/// never as authority to change the current Owner, guest boot or source device.
+pub(super) fn verify_cache_scope_origin(
+    candidate: &Candidate,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    let Some(binding) = &receipt.source else {
+        return Ok(());
+    };
+    let Some(scope) = &binding.cache_scope else {
+        return Ok(());
+    };
+    let root = directory(candidate, &receipt.run)?;
+    no_pending(&root)?;
+    let pin = pin_raw(&root.join(FILE), LIMIT, false)?;
+    let witness: Witness = serde_json::from_slice(&pin.bytes).map_err(|_| refused())?;
+    if encoded(&witness)? != pin.bytes
+        || witness.version != 1
+        || witness.run != receipt.run
+        || witness.owner != receipt.owner
+        || witness.namespace != receipt.namespace
+        || witness.plan != receipt.plan_id
+        || binding.shared.as_ref() != Some(&witness.current_share)
+        || !scope.matches_origin(
+            &sha256(&pin.bytes),
+            &witness.old_share,
+            &witness.current_share,
+        )
+    {
+        return Err(refused());
+    }
+    let expected = scope.scope(&witness.current_share.project)?;
+    if receipt
+        .resources
+        .values()
+        .filter_map(|resource| resource.cache.as_ref())
+        .any(|cache| cache.scope != expected)
+    {
+        return Err(refused());
+    }
+    pin.reverify()
 }
 
 /// Pinned complete witness for the original stopped receipt only. A subsequent
@@ -270,7 +326,9 @@ impl Selected {
         self.pin.reverify()?;
         validate_current(engine, &self.root, &self.original, &self.witness)?;
         let current: Receipt = state::read(&self.root.join("state.json"))?;
-        if encoded(&current)? != encoded(&self.original)? {
+        if encoded(&current)? != encoded(&self.original)?
+            || encoded(&self.witness.project(&current)?)? != encoded(&self.projected)?
+        {
             return Err(refused());
         }
         Ok(())
@@ -524,6 +582,117 @@ mod tests {
             .unwrap();
         use std::io::Write;
         file.write_all(bytes).unwrap();
+    }
+
+    #[test]
+    fn cached_projection_adds_continuity_only_to_the_new_attempt() {
+        let fixture = super::super::tests::Fixture::new();
+        fs::write(fixture.0.join("compose.yaml"), "services: {}\n").unwrap();
+        let current_share = ProjectShareIntent::approve(&fixture.0, true).unwrap();
+        let mut old_share = current_share.clone();
+        old_share.device += 7;
+        let legacy_scope = sha256(
+            &serde_json::to_vec(&(
+                "hack-dependency-cache-scope-v1",
+                &fixture.0,
+                old_share.device,
+                old_share.inode,
+            ))
+            .unwrap(),
+        );
+        let receipt: Receipt = serde_json::from_value(json!({
+            "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),
+            "plan_id":"d".repeat(64),"phase":"stopped-data-retained","readiness":{},
+            "source":{"shared":old_share,"revision":"e".repeat(64),"archive_sha256":"f".repeat(64),"selection_sha256":"0".repeat(64)},
+            "resources":{"volume:deps":{"kind":"volume","key":"deps","name":format!("hack-cache-v5-{}","9".repeat(64)),"phase":"present","id":null,"image":null,"cache":{"scope":legacy_scope,"fingerprint":"9".repeat(64),"image":format!("sha256:{}","8".repeat(64))}}}
+        })).unwrap();
+        let original = encoded(&receipt).unwrap();
+        let witness = Witness {
+            version: 1,
+            run: receipt.run.clone(),
+            owner: receipt.owner.clone(),
+            namespace: receipt.namespace.clone(),
+            plan: receipt.plan_id.clone(),
+            original_ready_sha256: "1".repeat(64),
+            stopped_raw_sha256: "2".repeat(64),
+            absent_intent_raw_sha256: "3".repeat(64),
+            retirement_raw_sha256: "4".repeat(64),
+            original_owner_raw_sha256: "5".repeat(64),
+            current_owner_raw_sha256: "6".repeat(64),
+            host_boot_micros: 7,
+            previous_guest_boot: "old".into(),
+            current_guest_boot: "new".into(),
+            old_share,
+            current_share,
+            retained_volume_projections: BTreeMap::new(),
+            retained_volumes: BTreeMap::new(),
+        };
+        let projected = witness.project(&receipt).unwrap();
+        let scope = projected
+            .source
+            .as_ref()
+            .unwrap()
+            .cache_scope
+            .as_ref()
+            .unwrap();
+        assert_eq!(scope.scope(&fixture.0).unwrap(), legacy_scope);
+        assert_eq!(
+            projected.source.as_ref().unwrap().shared,
+            Some(witness.current_share.clone())
+        );
+        assert!(super::super::same_resource_bindings(
+            &projected.resources,
+            &receipt.resources
+        ));
+        assert_eq!(encoded(&receipt).unwrap(), original);
+        let decoded: Receipt = serde_json::from_slice(&encoded(&projected).unwrap()).unwrap();
+        assert_eq!(decoded.source, projected.source);
+
+        let home = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&home.0).unwrap();
+        let root = directory(&candidate, &receipt.run).unwrap();
+        state::private_directory(&root).unwrap();
+        assert!(verify_cache_scope_origin(&candidate, &projected).is_err());
+        private_file(&root.join(FILE), &encoded(&witness).unwrap());
+        verify_cache_scope_origin(&candidate, &projected).unwrap();
+        let mut changed_plan = projected.clone();
+        changed_plan.plan_id = "7".repeat(64);
+        assert!(verify_cache_scope_origin(&candidate, &changed_plan).is_err());
+        let mut foreign_origin = witness.clone();
+        foreign_origin.owner = "7".repeat(32);
+        fs::remove_file(root.join(FILE)).unwrap();
+        private_file(&root.join(FILE), &encoded(&foreign_origin).unwrap());
+        assert!(verify_cache_scope_origin(&candidate, &projected).is_err());
+        fs::remove_file(root.join(FILE)).unwrap();
+        private_file(&root.join(FILE), &encoded(&witness).unwrap());
+        let mut foreign_cache = projected.clone();
+        foreign_cache
+            .resources
+            .get_mut("volume:deps")
+            .unwrap()
+            .cache
+            .as_mut()
+            .unwrap()
+            .scope = "0".repeat(64);
+        assert!(verify_cache_scope_origin(&candidate, &foreign_cache).is_err());
+        private_file(&root.join(FILE).with_extension("pending"), b"partial");
+        assert!(verify_cache_scope_origin(&candidate, &projected).is_err());
+        assert_eq!(
+            fs::read(root.join(FILE).with_extension("pending")).unwrap(),
+            b"partial"
+        );
+
+        let mut foreign = receipt.clone();
+        foreign
+            .resources
+            .get_mut("volume:deps")
+            .unwrap()
+            .cache
+            .as_mut()
+            .unwrap()
+            .scope = "0".repeat(64);
+        assert!(witness.project(&foreign).is_err());
+        assert_eq!(encoded(&receipt).unwrap(), original);
     }
 
     #[test]

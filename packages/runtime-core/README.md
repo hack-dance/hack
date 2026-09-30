@@ -853,3 +853,20 @@ there is no automatic prefix-based adoption or deletion. The ignored native
 synthetic-device fixture checks this same-run transition and later retained
 marker reads, but only an actual host-reboot application run can qualify the
 physical continuity claim.
+
+A selected source-device witness also preserves an existing dependency cache's
+namespace when the Git common directory is on that same filesystem. The runtime
+reconstructs the old scope hash from the unchanged common directory path/inode
+and selected prior device number, and requires every retained cache scope to
+match. Only the new attempt receives optional cache-scope continuity metadata;
+the stopped receipt, original cache names/fingerprints, volumes and witness bytes
+stay unchanged. All package inputs, image, command, environment, host mappings
+and volume layouts are still freshly fingerprinted, with strict resource equality.
+This is not a fallback for changed lockfiles or an unrelated repository.
+
+Later ordinary replays verify the immutable witness's raw hash and run/owner/share
+linkage, the current common directory path/device/inode and retained scopes.
+Missing, changed or pending provenance and replaced Git metadata refuse. A second
+device transition requires a separately supported explicit recovery; the runtime
+does not silently extend this projection. Older candidate binaries may refuse the
+new optional source metadata, so a downgrade must be qualified separately.

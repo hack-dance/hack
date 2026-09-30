@@ -257,7 +257,7 @@ fn metadata_text(path: &Path) -> Result<String, CandidateError> {
     Ok(value.to_owned())
 }
 /// Uses bounded Git metadata only; never invokes Git or reads configuration/credentials.
-pub fn scope(project: &Path) -> Result<String, CandidateError> {
+fn scope_root(project: &Path) -> Result<ScopeRoot, CandidateError> {
     let project = owned_directory(project)?;
     let dotgit = project.join(".git");
     let metadata = match fs::symlink_metadata(&dotgit) {
@@ -285,13 +285,148 @@ pub fn scope(project: &Path) -> Result<String, CandidateError> {
         }
         _ => return Err(refused()),
     };
-    let metadata = fs::metadata(&common).map_err(|_| refused())?;
-    hash(&(
-        "hack-dependency-cache-scope-v1",
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(&common)
+        .map_err(|_| refused())?;
+    let metadata = directory.metadata().map_err(|_| refused())?;
+    let observed = fs::symlink_metadata(&common).map_err(|_| refused())?;
+    if !metadata.is_dir()
+        || !observed.is_dir()
+        || metadata.dev() != observed.dev()
+        || metadata.ino() != observed.ino()
+    {
+        return Err(refused());
+    }
+    Ok(ScopeRoot {
         common,
-        metadata.dev(),
-        metadata.ino(),
-    ))
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+struct ScopeRoot {
+    common: PathBuf,
+    device: u64,
+    inode: u64,
+}
+impl ScopeRoot {
+    fn hash(&self, device: u64) -> Result<String, CandidateError> {
+        hash(&(
+            "hack-dependency-cache-scope-v1",
+            &self.common,
+            device,
+            self.inode,
+        ))
+    }
+}
+
+pub fn scope(project: &Path) -> Result<String, CandidateError> {
+    let root = scope_root(project)?;
+    root.hash(root.device)
+}
+
+/// Continuity of an existing cache namespace after a selected device rebind.
+/// This records no package inputs and grants no volume creation or adoption.
+/// Every replay still recomputes the full fingerprint and compares exact resources.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayScope {
+    common: PathBuf,
+    device: u64,
+    inode: u64,
+    original_device: u64,
+    origin_sha256: String,
+}
+impl ReplayScope {
+    pub(super) fn valid(&self) -> bool {
+        self.common.is_absolute()
+            && self.common.as_os_str().len() <= 4096
+            && self.common.to_str().is_some_and(|path| {
+                !path.chars().any(char::is_control)
+                    && self
+                        .common
+                        .components()
+                        .all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
+            })
+            && self.inode != 0
+            && hex(&self.origin_sha256)
+    }
+
+    pub(super) fn scope(&self, project: &Path) -> Result<String, CandidateError> {
+        let root = scope_root(project)?;
+        if !self.valid()
+            || root.common != self.common
+            || root.device != self.device
+            || root.inode != self.inode
+        {
+            return Err(refused());
+        }
+        root.hash(self.original_device)
+    }
+
+    /// Called only by an already selected source-device witness. Reconstruct the
+    /// old hash using the same Git common path/inode and require every retained
+    /// cache to match it. Git metadata on a different filesystem is not projected.
+    #[cfg(any(target_os = "macos", test))]
+    pub(super) fn project(
+        old: &crate::provider::ProjectShareIntent,
+        current: &crate::provider::ProjectShareIntent,
+        previous: Option<&Self>,
+        retained: &[&str],
+        origin_sha256: &str,
+    ) -> Result<Option<Self>, CandidateError> {
+        if retained.is_empty() {
+            return if previous.is_none() {
+                Ok(None)
+            } else {
+                Err(refused())
+            };
+        }
+        if !hex(origin_sha256)
+            || previous.is_some()
+            || old.device == current.device
+            || old.project != current.project
+            || old.inode != current.inode
+        {
+            return Err(refused());
+        }
+        let root = scope_root(&current.project)?;
+        if root.device != current.device {
+            return Err(refused());
+        }
+        let original_device = old.device;
+        let expected = root.hash(original_device)?;
+        if retained.iter().any(|scope| *scope != expected) {
+            return Err(refused());
+        }
+        Ok(Some(Self {
+            common: root.common,
+            device: root.device,
+            inode: root.inode,
+            original_device,
+            origin_sha256: origin_sha256.into(),
+        }))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn matches_origin(
+        &self,
+        sha256: &str,
+        old: &crate::provider::ProjectShareIntent,
+        current: &crate::provider::ProjectShareIntent,
+    ) -> bool {
+        self.valid()
+            && self.origin_sha256 == sha256
+            && self.original_device == old.device
+            && self.device == current.device
+            && old.device != current.device
+            && old.project == current.project
+            && old.inode == current.inode
+            && old.guest_path == current.guest_path
+            && old.unfiltered_source == current.unfiltered_source
+    }
 }
 
 #[cfg(test)]
@@ -363,6 +498,130 @@ mod tests {
             _ => panic!("unknown fixture manifest version"),
         }
         .unwrap();
+    }
+
+    #[test]
+    fn selected_device_replay_keeps_exact_scope_and_fingerprint_inputs() {
+        let (source, _home, plan, manifest) = prepared();
+        let root = scope_root(&source.0).unwrap();
+        let current = crate::provider::ProjectShareIntent::approve(&source.0, true).unwrap();
+        let mut old = current.clone();
+        old.device += 7;
+        let retained = root.hash(old.device).unwrap();
+        let projected = ReplayScope::project(&old, &current, None, &[&retained], &"e".repeat(64))
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.scope(&source.0).unwrap(), retained);
+        assert_ne!(scope(&source.0).unwrap(), retained);
+        let persisted: ReplayScope =
+            serde_json::from_slice(&serde_json::to_vec(&projected).unwrap()).unwrap();
+        assert_eq!(persisted.scope(&source.0).unwrap(), retained);
+        let expected = resolve(&plan, &manifest, &retained).unwrap();
+        assert_eq!(
+            resolve(&plan, &manifest, &persisted.scope(&source.0).unwrap()).unwrap(),
+            expected
+        );
+
+        let mut changed = manifest.clone();
+        changed
+            .entries
+            .iter_mut()
+            .find(|entry| entry.path == "bun.lock")
+            .unwrap()
+            .sha256 = Some("f".repeat(64));
+        resign(&mut changed);
+        assert_ne!(resolve(&plan, &changed, &retained).unwrap(), expected);
+        for field in ["environment", "extra_hosts", "entrypoint"] {
+            let mut executable = executable(&plan);
+            let service = executable.get_mut("deps").unwrap();
+            match field {
+                "environment" => service.environment.push("NEW=public".into()),
+                "extra_hosts" => {
+                    service
+                        .extra_hosts
+                        .insert("changed.example".into(), "host-gateway".into());
+                }
+                "entrypoint" => service.entrypoint = Some(vec!["/changed".into()]),
+                _ => unreachable!(),
+            }
+            assert_ne!(
+                super::resolve(&plan, &manifest, &retained, &executable).unwrap(),
+                expected
+            );
+        }
+        assert!(
+            ReplayScope::project(&old, &current, None, &[&"a".repeat(64)], &"e".repeat(64))
+                .is_err()
+        );
+        let mut other_filesystem = current.clone();
+        other_filesystem.device += 1;
+        assert!(
+            ReplayScope::project(&old, &other_filesystem, None, &[&retained], &"e".repeat(64))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn replay_scope_refuses_replaced_git_root_and_a_second_device_change() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.0.join(".git")).unwrap();
+        let root = scope_root(&fixture.0).unwrap();
+        let current = crate::provider::ProjectShareIntent {
+            project: fixture.0.clone(),
+            guest_path: "/mnt/hack-projects/exact".into(),
+            device: root.device,
+            inode: fs::metadata(&fixture.0).unwrap().ino(),
+            unfiltered_source: true,
+        };
+        let mut old = current.clone();
+        old.device += 2;
+        let retained = root.hash(old.device).unwrap();
+        let projected = ReplayScope::project(&old, &current, None, &[&retained], &"e".repeat(64))
+            .unwrap()
+            .unwrap();
+        let mut previous = projected.clone();
+        previous.device = old.device + 1;
+        let mut intermediate = old.clone();
+        intermediate.device = previous.device;
+        assert!(
+            ReplayScope::project(
+                &intermediate,
+                &current,
+                Some(&previous),
+                &[&retained],
+                &"e".repeat(64)
+            )
+            .is_err()
+        );
+        previous.inode += 1;
+        assert!(
+            ReplayScope::project(
+                &intermediate,
+                &current,
+                Some(&previous),
+                &[&retained],
+                &"e".repeat(64)
+            )
+            .is_err()
+        );
+
+        fs::rename(fixture.0.join(".git"), fixture.0.join("original-git")).unwrap();
+        fs::create_dir(fixture.0.join(".git")).unwrap();
+        assert!(projected.scope(&fixture.0).is_err());
+        assert!(ReplayScope::project(&old, &current, None, &[&retained], &"e".repeat(64)).is_err());
+        assert!(
+            ReplayScope::project(
+                &old,
+                &current,
+                Some(&projected),
+                &[&retained],
+                &"e".repeat(64)
+            )
+            .is_err()
+        );
+        fs::remove_dir(fixture.0.join(".git")).unwrap();
+        symlink(fixture.0.join("original-git"), fixture.0.join(".git")).unwrap();
+        assert!(projected.scope(&fixture.0).is_err());
     }
     #[test]
     fn subpath_layout_changes_cache_identity_without_compose_digest_shortcut() {

@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { buildLifecycleJsonData } from "../src/commands/project.ts";
 import { setLoggerBackendOverride } from "../src/ui/logger.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 type CapturedRunResult = {
   readonly exitCode: number;
@@ -27,7 +28,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = originalHome;
+  restoreEnv("HOME", originalHome);
 });
 
 test("buildLifecycleJsonData shapes the envelope payload with sorted services", () => {

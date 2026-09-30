@@ -11,6 +11,7 @@ import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
+import { listenPublishedUnixSocket } from "../lib/unix-socket-publish.ts";
 import {
   decodeNativeHttpsOwnerFrame,
   encodeNativeHttpsOwnerFrame,
@@ -250,7 +251,8 @@ export async function serveNativeHttpsOwner(opts: {
     }
   };
   const closeServer = async () => {
-    // Node may unlink its bound path on close. Refuse before invoking it when replaced.
+    // Refuse before closing when any owned path changed. The runtime's close-time
+    // unlink reaches only the retired staging name (listenPublishedUnixSocket).
     await checkPaths();
     for (const client of clients) {
       client.destroy();
@@ -582,10 +584,9 @@ export async function serveNativeHttpsOwner(opts: {
       }
     };
     void frontend.exited.then(exited, exited);
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(socketPath, resolve);
-    });
+    // Published by link from a staging name: closing the server never removes
+    // the control endpoint, which only retireSocketPath removes by identity.
+    await listenPublishedUnixSocket(server, socketPath);
     const before = await lstat(socketPath);
     await chmod(socketPath, 0o600);
     const after = await lstat(socketPath);

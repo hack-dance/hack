@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareNativeProjectInput } from "../src/backends/native-project-input.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -152,8 +153,8 @@ test("linked worktree inherits primary local environment and observes checkout o
   const linked = `${opts.projectRoot}-linked`;
   roots.push(linked);
   try {
-    process.env.CI = undefined;
-    process.env.HACK_EXECUTION_MODE = undefined;
+    Reflect.deleteProperty(process.env, "CI");
+    Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
     await writeFile(
       join(opts.projectDir, "hack.config.json"),
       '{"name":"native-test"}'
@@ -198,7 +199,7 @@ test("linked worktree inherits primary local environment and observes checkout o
     );
     expect(result.normalizedComposeJson).not.toContain("private");
   } finally {
-    process.env.CI = oldCI;
-    process.env.HACK_EXECUTION_MODE = oldMode;
+    restoreEnv("CI", oldCI);
+    restoreEnv("HACK_EXECUTION_MODE", oldMode);
   }
 });

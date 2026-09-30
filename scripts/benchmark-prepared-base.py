@@ -235,13 +235,17 @@ class Worktrees:
             "checkout_allocated_bytes": allocated(self.dir),
         }
 
-    def cleanup(self):
-        """Remove the fixture once no process references it (its pools must be down)."""
+    def cleanup(self, pools_disposed):
+        """Remove the fixture only after every pool that could mount one of its roots is
+        confirmed disposed; otherwise keep every root, its registration and its source for
+        diagnosis. A process listing without the path is an extra refusal, never proof."""
         if not self.dir.exists():
             return {"removed": True, "created": False}
+        if not pools_disposed:
+            return {"preserved": str(self.dir), "error": "an owned pool was not confirmed disposed"}
         listing = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,args="], capture_output=True, text=True)
         if listing.returncode != 0 or str(self.dir) in listing.stdout:
-            return {"error": "a process may still reference this fixture"}
+            return {"preserved": str(self.dir), "error": "a process may still reference this fixture"}
         shutil.rmtree(self.dir)
         return {"removed": not self.dir.exists()}
 
@@ -535,6 +539,11 @@ class Trial:
             if code != 0:
                 result["error"] = f"down failed: {json.dumps(body)[:300]}"
                 return result
+            # The runtime's identity-checked readback, not a process listing, proves the VM stopped.
+            code, body, _, _ = self.cli("runtime", "status")
+            if code != 0 or body.get("process_alive") is not False:
+                result["error"] = f"pool not confirmed stopped after down: {json.dumps(body)[:300]}"
+                return result
         running = subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True).stdout
         if str(self.dir) in running:
             result["error"] = "a process still references this trial"
@@ -774,7 +783,9 @@ def worktree_trial(args, size, repeat, lane):
         if sampler:
             record["admission_during"] = sampler.stop()
         record["samples"] = [pool.samples for pool in pools]
-        record["cleanup"] = [pool.cleanup() for pool in pools] + [fixture.cleanup()]
+        disposal = [pool.cleanup() for pool in pools]
+        disposed = all(c.get("removed") is True and "error" not in c for c in disposal)
+        record["cleanup"] = disposal + [fixture.cleanup(disposed)]
     return record
 
 

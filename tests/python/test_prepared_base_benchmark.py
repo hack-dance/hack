@@ -246,24 +246,32 @@ def option(name):
     return argv[argv.index(name) + 1] if name in argv else None
 
 
-def reply(body):
+def reply(body, code=0):
     path.write_text(json.dumps(state))
     print(json.dumps(body))
-    sys.exit(0)
+    sys.exit(code)
 
 
 command = argv[:2]
 if command == ["runtime", "up"]:
     state["boots"] += 1
+    state["alive"] = True
     body = {"phase": "running"}
     if "--prepared-base" in argv:
         body["prepared_base"] = {"selection": {"mode": "require", "source": "prepared", "base_id": "b" * 64},
                                  "activation": "consumed"}
     reply(body)
 if command == ["runtime", "status"]:
-    trial = home.parent.name
-    reply({"phase": "running", "machine": "m-" + trial, "guest_boot_id": f"{trial}-{state['boots']}",
-           "guest_memory_mib": 6144, "provider_resources": {"processes": []}})
+    trial, alive = home.parent.name, bool(state.get("alive"))
+    reply({"phase": "running" if alive else "stopped", "process_alive": alive, "machine": "m-" + trial,
+           "guest_boot_id": f"{trial}-{state['boots']}", "guest_memory_mib": 6144,
+           "provider_resources": {"processes": []}})
+if command == ["runtime", "down"]:
+    if fault == "down-fails":
+        reply({"code": "provider_down"}, 1)
+    # `still-alive`: down reports success but the VM process is still observed.
+    state["alive"] = fault == "still-alive"
+    reply({"phase": "stopped"})
 if command == ["runtime", "ensure-image"]:
     reply({"image_id": "sha256:" + "a" * 64})
 if command == ["project", "plan"]:
@@ -285,7 +293,7 @@ if command == ["graph", "exec"]:
             root = siblings[(siblings.index(root) + 1) % len(siblings)]
         data = (root / argv[-1][len("/workspace/"):]).read_text()
     reply({"exit_code": 0, "stdout_base64": base64.b64encode(data.encode()).decode()})
-reply({"phase": "stopped"} if command == ["runtime", "down"] else {})
+reply({})
 '''
 
 
@@ -359,6 +367,37 @@ class WorktreeTrials(unittest.TestCase):
         self.assertIn("did not retain data and source", record["error"])
         self.assertNotIn("retained", record)
 
+    def assert_fixture_preserved(self, record, pool_error):
+        """Every root keeps its registration, branch and committed marker, and every home stays."""
+        *pools, fixture = record["cleanup"]
+        self.assertTrue(all(pool_error in c.get("error", "") for c in pools), pools)
+        self.assertIn("not confirmed disposed", fixture["error"])
+        self.assertTrue(all(Path(home).is_dir() for home in record["homes"]))
+        base = Path(fixture["preserved"])
+        listed = subprocess.run(["git", "-C", str(base / "repo"), "worktree", "list", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout
+        for index in range(2):
+            root = base / f"w{index:02d}"
+            self.assertIn(f"worktree {root}\n", listed)
+            self.assertIn(f"branch refs/heads/wt-{index:02d}\n", listed)
+            committed = subprocess.run(["git", "-C", str(root), "show", "HEAD:branch.txt"],
+                                       capture_output=True, text=True, check=True).stdout
+            self.assertRegex(committed, r"^[0-9a-f]{32}$")
+            self.assertEqual((root / "branch.txt").read_text(), committed)
+
+    def test_failed_down_preserves_every_worktree_and_home(self):
+        os.environ["FAKE_FAULT"] = "down-fails"
+        record = benchmark.worktree_trial(self.args, 2, 0, "prepared")
+        self.assertFalse(record["ok"])
+        self.assert_fixture_preserved(record, "down failed")
+
+    def test_a_vm_still_alive_after_down_preserves_every_worktree_and_home(self):
+        os.environ["FAKE_FAULT"] = "still-alive"
+        record = benchmark.worktree_trial(self.args, 2, 0, "prepared")
+        self.assertTrue(record["ok"], record.get("error"))
+        self.assert_fixture_preserved(record, "not confirmed stopped")
+        self.assertTrue(benchmark.summarize([record], 16)["cleanup_failures"])
+
 
 class WorktreeFixture(unittest.TestCase):
     def test_worktrees_are_registered_linked_checkouts_on_their_own_branches(self):
@@ -377,7 +416,9 @@ class WorktreeFixture(unittest.TestCase):
         self.assertEqual({k: provenance[k] for k in ("registered", "roots", "branches", "heads", "common_dirs")},
                          {"registered": 3, "roots": 3, "branches": 3, "heads": 3, "common_dirs": 1})
         self.assertGreater(provenance["checkout_allocated_bytes"], 0)
-        self.assertEqual(fixture.cleanup(), {"removed": True})
+        self.assertIn("preserved", fixture.cleanup(pools_disposed=False))
+        self.assertTrue(all(entry["root"].is_dir() for entry in entries))
+        self.assertEqual(fixture.cleanup(pools_disposed=True), {"removed": True})
 
 
 class WorktreePlan(unittest.TestCase):

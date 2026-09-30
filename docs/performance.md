@@ -557,7 +557,9 @@ cache is not flushed.
   `--shared-source --branch` and must serve its own committed marker before readiness counts.
   The trial then requires distinct pools, branch namespaces and volume data. It writes a new
   host file into every root, which must reach only that root's pool. Finally it stops, restarts
-  and restores every pool and requires the same data, marker and host edit back. Cold
+  and restores every pool and requires the same data, marker and host edit back. The fixture is
+  removed only after every pool is confirmed disposed; otherwise every root, its Git
+  registration and its source are kept. Cold
   create-to-ready and warm restart are summarized separately, with each start's selection
   (`stock` or `prepared`, base ID, and whether this run had used that base before).
   Configured guest memory and vCPUs for the largest cohort appear in the preview, with a
@@ -581,7 +583,9 @@ exceeds half the CPU count, memory pressure is raised, or any of these could not
 any sample. A failed observation or a gap longer than five intervals also flags the trial. Only admitted samples
 enter the admitted summaries and the paired pair and cohort ratios. `--summarize SAMPLES`
 recomputes the summary from a retained raw file without running anything. Cleanup stops each
-pool and removes only the trial's home and provider alias, with a readback. Store raw output
+pool and requires `runtime status` to report its VM process gone. Only then does it remove the
+trial's home and provider alias, with a readback; otherwise it keeps them and reports the
+failure. Store raw output
 outside the repository. The negative controls run with
 `python3 -m unittest discover -s tests/python -p test_prepared_base_benchmark.py`, locally and
 in CI's runtime state models job.

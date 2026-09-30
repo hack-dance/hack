@@ -549,10 +549,28 @@ cache is not flushed.
   fixed offset that later graph starts amortize.
 - `concurrent` creates several pools at once from one base and requires distinct machines,
   guest boots and data.
+- `worktrees` (opt-in with `--mode worktrees`) creates a harness-owned repository with 1/8/32
+  (by default) real linked `git worktree add` checkouts, each on its own branch with a
+  committed random marker. A running pool cannot mount another root, so each worktree gets its
+  own fresh development pool and private home, with `runtime up --project-share ROOT
+  --unfiltered-source`. Pools start `--worktree-parallel` at a time. Each graph runs with
+  `--shared-source --branch` and must serve its own committed marker before readiness counts.
+  The trial then requires distinct pools, branch namespaces and volume data. It writes a new
+  host file into every root, which must reach only that root's pool. Finally it stops, restarts
+  and restores every pool and requires the same data, marker and host edit back. Cold
+  create-to-ready and warm restart are summarized separately, with each start's selection
+  (`stock` or `prepared`, base ID, and whether this run had used that base before).
+  Configured guest memory and vCPUs for the largest cohort appear in the preview, with a
+  warning when they exceed host memory. They are maxima, not measured use, and never block a
+  run: the runtime's own admission decides each start, and a refused start is recorded as the
+  cohort's outcome.
 
 Every sample records the complete CLI process tree's CPU (via `wait4`), the VM process's CPU,
-current and lifetime-peak physical footprint, and each disk's logical, allocated and
-clone-private bytes. Unobserved values stay null. Each summarized metric reports its coverage
+resident size, current and lifetime-peak physical footprint, and each disk's logical, allocated
+and clone-private bytes. Worktree cohorts also report attributed CPU (CLI tree plus live VM
+processes), configured guest memory, each home's allocated bytes (including its disks, and not
+clone-aware), the checkout's allocated bytes, and the shared base store once. Resident size, footprint and configured guest memory
+are reported side by side and never added together. Unobserved values stay null. Each summarized metric reports its coverage
 (`n` of `of`) and is labeled unqualified when any sample lacks it, instead of counting the gap
 as zero.
 
@@ -567,8 +585,10 @@ pool and removes only the trial's home and provider alias, with a readback. Stor
 outside the repository. The negative controls run with
 `python3 -m unittest discover -s tests/python -p test_prepared_base_benchmark.py`.
 
-This measures pool creation and a synthetic single-service graph. It does not qualify normal
-source-mounted worktree startup, application-specific images or cold host caches.
+This measures pool creation and a synthetic single-service graph. Worktree cohorts add real
+linked-worktree roots through the runtime interface, one pool per root. They do not exercise
+the `hack up` frontend, routing, application-specific images or cold host caches, and each
+fresh home still acquires the image, which is timed separately.
 
 Prepared bases carry no application images. On an M3 (September 2026, one prepared pool, three
 repeats), `ensure-image` for `postgres:16-alpine` (114 MB archive) took 10.6 s cold. The engine

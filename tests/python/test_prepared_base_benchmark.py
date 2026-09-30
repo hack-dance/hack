@@ -1,13 +1,18 @@
 """Failure controls for the prepared-base startup harness."""
 import argparse
 import importlib.util
+import io
 import json
+import os
 from pathlib import Path
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 source = Path(__file__).resolve().parents[2] / "scripts/benchmark-prepared-base.py"
 spec = importlib.util.spec_from_file_location("prepared_base_benchmark", source)
@@ -220,6 +225,226 @@ class Accounting(unittest.TestCase):
             self.assertNotIn("median", stock[metric])
             self.assertTrue(prepared[metric]["qualified"])
         self.assertEqual(prepared["up_cpu_s"]["median"], 2.0)
+
+
+# A stand-in runtime for worktree trials, with one state file per candidate home. Graphs serve
+# the files of the worktree they were started from; FAKE_FAULT injects the failures the trial
+# must catch.
+FAKE_RUNTIME = r'''#!PYTHON
+import base64, hashlib, json, os, pathlib, secrets, sys
+
+argv = sys.argv[1:]
+home, argv = pathlib.Path(argv[1]), [a for a in argv[2:] if a != "--json"]
+with open(pathlib.Path(__file__).with_name("argv.log"), "a") as log:
+    log.write(json.dumps(argv) + "\n")
+path = home / "fake.json"
+state = json.loads(path.read_text()) if path.exists() else {"boots": 0, "runs": {}}
+fault = os.environ.get("FAKE_FAULT", "")
+
+
+def option(name):
+    return argv[argv.index(name) + 1] if name in argv else None
+
+
+def reply(body):
+    path.write_text(json.dumps(state))
+    print(json.dumps(body))
+    sys.exit(0)
+
+
+command = argv[:2]
+if command == ["runtime", "up"]:
+    state["boots"] += 1
+    body = {"phase": "running"}
+    if "--prepared-base" in argv:
+        body["prepared_base"] = {"selection": {"mode": "require", "source": "prepared", "base_id": "b" * 64},
+                                 "activation": "consumed"}
+    reply(body)
+if command == ["runtime", "status"]:
+    trial = home.parent.name
+    reply({"phase": "running", "machine": "m-" + trial, "guest_boot_id": f"{trial}-{state['boots']}",
+           "guest_memory_mib": 6144, "provider_resources": {"processes": []}})
+if command == ["runtime", "ensure-image"]:
+    reply({"image_id": "sha256:" + "a" * 64})
+if command == ["project", "plan"]:
+    namespace = hashlib.sha256((option("--project") + option("--branch")).encode()).hexdigest()
+    reply({"plan_id": "p" + namespace[:16], "plan": {"namespace": namespace}})
+if command in (["graph", "run"], ["graph", "restore"]):
+    if command == ["graph", "run"] or fault == "lose-data":
+        token = "c" * 32 if fault == "shared-token" else secrets.token_hex(16)
+        state["runs"][option("--run-id")] = {"root": option("--project"), "token": token}
+    reply({"readiness": {"web": "healthy"}})
+if command == ["graph", "exec"]:
+    run = state["runs"][option("--run-id")]
+    if argv[-1] == "/data/token":
+        data = run["token"]
+    else:
+        root = pathlib.Path(run["root"])
+        if fault == "cross-source":
+            siblings = sorted(p for p in root.parent.iterdir() if p.name.startswith("w"))
+            root = siblings[(siblings.index(root) + 1) % len(siblings)]
+        data = (root / argv[-1][len("/workspace/"):]).read_text()
+    reply({"exit_code": 0, "stdout_base64": base64.b64encode(data.encode()).decode()})
+reply({"phase": "stopped"} if command == ["runtime", "down"] else {})
+'''
+
+
+class WorktreeTrials(unittest.TestCase):
+    """Real linked worktrees against the stand-in runtime: the passing path and each source,
+    isolation and retention failure, all ending with the owned homes and fixture removed."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="hack-worktree-bench-")).resolve()
+        self.tools = Path(tempfile.mkdtemp(prefix="hack-worktree-fake-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.tools, True)
+        self.addCleanup(os.environ.pop, "FAKE_FAULT", None)
+        bundle = self.tools / "bundle"
+        bundle.write_text(FAKE_RUNTIME.replace("PYTHON", sys.executable, 1))
+        bundle.chmod(0o700)
+        self.args = argparse.Namespace(
+            bundle=str(bundle), root=str(self.root), store="/store", profile="development",
+            image="example@sha256:" + "d" * 64, provider_archive="/p", engine_archive="/e", network_tools="/n",
+            admission_interval=1.0, worktree_parallel=2)
+        benchmark.SEEN_BASES.clear()
+
+    def trial(self, lane="prepared", fault=""):
+        os.environ["FAKE_FAULT"] = fault
+        record = benchmark.worktree_trial(self.args, 2, 0, lane)
+        self.assertEqual(list(self.root.iterdir()), [])
+        self.assertTrue(all(c.get("removed") for c in record["cleanup"]), record["cleanup"])
+        return record
+
+    def calls(self, *commands):
+        lines = (self.tools / "argv.log").read_text().splitlines()
+        return [c for c in map(json.loads, lines) if c[:2] in [list(command) for command in commands]]
+
+    def test_each_worktree_is_shared_isolated_and_retained(self):
+        record = self.trial()
+        self.assertTrue(record["ok"], record.get("error"))
+        self.assertEqual(record["isolation"], {"pools": 2, "namespaces": 2, "tokens": 2, "live_edits_read_back": 2})
+        self.assertEqual({k: record["fixture"][k] for k in ("registered", "roots", "branches", "heads", "common_dirs")},
+                         {"registered": 2, "roots": 2, "branches": 2, "heads": 2, "common_dirs": 1})
+        self.assertEqual(record["retained"], 2)
+        self.assertEqual(sorted(p["base_use"] for p in record["provenance"]), ["first-in-run", "repeat-in-run"])
+        self.assertEqual({(p["start"], p["source"], p["base_use"]) for p in record["warm_provenance"]},
+                         {("warm", "prepared", None)})
+        ups = self.calls(("runtime", "up"))
+        shares = [c[c.index("--project-share") + 1] for c in ups]
+        self.assertEqual((len(ups), len(set(shares))), (4, 2))
+        self.assertTrue(all("--unfiltered-source" in c and s.startswith(f"{self.root}/") for c, s in zip(ups, shares)))
+        graphs = self.calls(("graph", "run"), ("graph", "restore"))
+        self.assertEqual(len(graphs), 4)
+        self.assertTrue(all("--shared-source" in c for c in graphs))
+        self.assertEqual({c[c.index("--branch") + 1] for c in graphs}, {"wt-00", "wt-01"})
+        # The stand-in reports no provider processes, so measured resources stay null.
+        self.assertIsNone(record["resources"]["vm_resident_bytes"])
+        self.assertIsNone(record["resources"]["cpu_attributed_s"])
+
+    def test_a_pool_serving_another_worktree_fails_before_readiness_counts(self):
+        record = self.trial(lane="stock", fault="cross-source")
+        self.assertFalse(record["ok"])
+        self.assertIn("did not serve its own committed marker", record["error"])
+        self.assertNotIn("all_ready_s", record)
+
+    def test_shared_data_fails_isolation(self):
+        record = self.trial(fault="shared-token")
+        self.assertFalse(record["ok"])
+        self.assertIn("isolation failed", record["error"])
+        self.assertNotIn("warm_all_ready_s", record)
+
+    def test_data_lost_across_down_up_fails_retention(self):
+        record = self.trial(fault="lose-data")
+        self.assertFalse(record["ok"])
+        self.assertIn("did not retain data and source", record["error"])
+        self.assertNotIn("retained", record)
+
+
+class WorktreeFixture(unittest.TestCase):
+    def test_worktrees_are_registered_linked_checkouts_on_their_own_branches(self):
+        root = Path(tempfile.mkdtemp(prefix="hack-worktree-fixture-")).resolve()
+        self.addCleanup(shutil.rmtree, root, True)
+        fixture = benchmark.Worktrees(root, 3)
+        entries = fixture.create()
+        for entry in entries:
+            self.assertTrue((entry["root"] / ".git").is_file(), "a linked worktree has a .git pointer file")
+            self.assertEqual(entry["root"].stat().st_mode & 0o777, 0o700)
+            self.assertEqual((entry["root"] / "branch.txt").read_text(), entry["marker"])
+            current = subprocess.run(["git", "-C", str(entry["root"]), "branch", "--show-current"],
+                                     capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(current, entry["branch"])
+        provenance = fixture.provenance()
+        self.assertEqual({k: provenance[k] for k in ("registered", "roots", "branches", "heads", "common_dirs")},
+                         {"registered": 3, "roots": 3, "branches": 3, "heads": 3, "common_dirs": 1})
+        self.assertGreater(provenance["checkout_allocated_bytes"], 0)
+        self.assertEqual(fixture.cleanup(), {"removed": True})
+
+
+class WorktreePlan(unittest.TestCase):
+    def preview(self, *extra):
+        argv = ["benchmark", "--image", "i", "--bundle", "/b", "--root", "/r", "--store", "/s",
+                "--provider-archive", "/p", "--engine-archive", "/e", "--network-tools", "/n",
+                "--mode", "worktrees", *extra]
+        with mock.patch.object(sys, "argv", argv), mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            benchmark.main()
+        return json.loads(out.getvalue())["preview"]
+
+    def test_configured_guest_maxima_warn_but_never_refuse(self):
+        plan = benchmark.worktree_plan([1, 8, 32], 1, 4, "development", 128 << 30)
+        self.assertEqual(plan["peak_configured_guest_memory_bytes"], 32 * 6144 << 20)
+        self.assertEqual(plan["peak_configured_guest_cpus"], 128)
+        self.assertIn("not measured footprint", plan["warning"])
+        self.assertNotIn("warning", benchmark.worktree_plan([1, 8], 1, 4, "development", 128 << 30))
+        self.assertNotIn("warning", benchmark.worktree_plan([32], 1, 4, "development", None))
+        preview = self.preview()
+        self.assertEqual(preview["pools_created"], 2 * (1 + 8 + 32))
+        self.assertEqual(preview["worktrees"]["peak_simultaneous_pools"], 32)
+
+    def test_worktree_mode_requires_the_development_profile(self):
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", new_callable=io.StringIO):
+            self.preview("--profile", "research")
+
+    def test_configured_maxima_match_the_runtime_profiles(self):
+        text = (source.parents[1] / "packages/runtime-core/src/provider/profile.rs").read_text()
+        for function, table in (("memory_mib", benchmark.GUEST_MEMORY_MIB), ("cpus", benchmark.GUEST_CPUS)):
+            body = re.search(rf"fn {function}\(self\)[^{{]*\{{(.*?)\n    \}}", text, re.S).group(1)
+            self.assertEqual({name.lower(): int(value) for name, value in re.findall(r"Self::(\w+) => (\d+)", body)},
+                             table)
+
+
+def worktree_record(size, repeat, lane, all_ready, admission, resident=100):
+    use = "first-in-run" if lane == "prepared" else None
+    return {
+        "mode": "worktrees", "size": size, "repeat": repeat, "lane": lane, "ok": True, "all_ready_s": all_ready,
+        "warm_all_ready_s": all_ready / 2, "admission": admission, "admission_end": CLEAN,
+        "provenance": [{"lane": lane, "start": "cold", "source": lane, "base_use": use}] * size,
+        "warm_provenance": [{"lane": lane, "start": "warm", "source": lane, "base_use": None}] * size,
+        "fixture": {"checkout_allocated_bytes": 10},
+        "resources": {"cpu_attributed_s": 3.0, "vm_resident_bytes": resident, "vm_footprint_bytes": 80,
+                      "guest_memory_configured_bytes": 6 << 30},
+        "samples": [{"up": {"wall_s": 2.0}, "restart_up": {"wall_s": 1.0}, "ensure_image": {"wall_s": 4.0}}] * size,
+        "cleanup": [{"removed": True}],
+    }
+
+
+class WorktreeSummary(unittest.TestCase):
+    def test_worktree_cohorts_split_by_admission_and_keep_cold_warm_and_memory_kinds_apart(self):
+        records = [
+            worktree_record(8, 0, "stock", 20.0, CLEAN), worktree_record(8, 0, "prepared", 10.0, CLEAN),
+            worktree_record(8, 1, "stock", 30.0, LOADED), worktree_record(8, 1, "prepared", 10.0, CLEAN, resident=None),
+        ]
+        summary = benchmark.summarize(records, 16)
+        prepared = summary["worktrees_admitted"]["8"]["prepared"]
+        self.assertEqual(summary["worktrees_flagged"]["8"]["stock"]["all_ready_s"]["median"], 30.0)
+        ratio = summary["admitted_worktree_all_ready_ratio_by_size"]["8"]
+        self.assertEqual((ratio["n"], ratio["median"]), (1, 0.5))
+        self.assertEqual((prepared["cold_up_median_s"]["median"], prepared["warm_up_median_s"]["median"]), (2.0, 1.0))
+        self.assertEqual(prepared["vm_footprint_bytes"]["median"], 80)
+        self.assertEqual({k: prepared["vm_resident_bytes"][k] for k in ("n", "of", "qualified")},
+                         {"n": 1, "of": 2, "qualified": False})
+        self.assertEqual(prepared["guest_memory_configured_bytes"]["median"], 6 << 30)
+        self.assertEqual(summary["worktree_selections"]["prepared/cold/prepared/first-in-run"], 16)
+        self.assertEqual(summary["worktree_selections"]["stock/warm/stock/None"], 16)
 
 
 if __name__ == "__main__":

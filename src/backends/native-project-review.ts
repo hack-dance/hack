@@ -18,6 +18,8 @@ import {
 } from "./native-runtime-client.ts";
 
 const DIGEST = /^[a-f0-9]{64}$/;
+const CONTROL = /[\x00-\x1f\x7f]/;
+const SERVICE = /^[a-zA-Z0-9_.-]{1,128}$/;
 
 export interface NativeProjectReview {
   readonly planId: string;
@@ -29,12 +31,120 @@ export interface NativeProjectReview {
   readonly projectArgs: readonly string[];
 }
 
+/** Authenticated active service selection; never a stopped restore generation. */
+export interface NativeActiveReviewProof {
+  readonly run: string;
+  readonly owner: string;
+  readonly namespace: string;
+  readonly plan: string;
+  readonly service: string;
+  readonly container: string;
+  readonly boot: string;
+  readonly generation: string;
+}
+
+async function selectActiveReview(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly retained: NativeProjectRun;
+  readonly service: string;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<NativeActiveReviewProof> {
+  const selected = await opts.invoke({
+    runtime: opts.runtime,
+    cwd: opts.projectRoot,
+    args: [
+      "graph",
+      "run-selection",
+      "--run-id",
+      opts.retained.run,
+      "--service",
+      opts.service,
+      "--json",
+    ],
+  });
+  const { generation } = validateNativeRestoreSelection({
+    selected,
+    saved: opts.retained,
+    namespace: opts.retained.namespace,
+  });
+  if (
+    !isRecord(selected) ||
+    selected.ok !== true ||
+    selected.service !== opts.service ||
+    typeof selected.container !== "string" ||
+    !DIGEST.test(selected.container) ||
+    typeof selected.boot !== "string" ||
+    selected.boot.length < 1 ||
+    selected.boot.length > 128 ||
+    CONTROL.test(selected.boot)
+  ) {
+    throw new Error(
+      "Native active review identity changed; the current graph was not stopped."
+    );
+  }
+  return {
+    run: opts.retained.run,
+    owner: opts.retained.owner,
+    namespace: opts.retained.namespace,
+    plan: opts.retained.planId,
+    service: opts.service,
+    container: selected.container,
+    boot: selected.boot,
+    generation,
+  };
+}
+
+function activeReviewService(plan: Readonly<Record<string, unknown>>): string {
+  // `active` means profile-enabled. Native run-selection also verifies admitted
+  // completed initializers; selecting their identity never executes them again.
+  const services = isRecord(plan.services) ? plan.services : {};
+  const service = Object.keys(services)
+    .sort()
+    .find(
+      (key) =>
+        SERVICE.test(key) &&
+        isRecord(services[key]) &&
+        services[key].active === true
+    );
+  if (!service) {
+    throw new Error(
+      "Native active review has no supported service authority; the current graph was not stopped."
+    );
+  }
+  return service;
+}
+
+/** Repeat the exact active selection after compatibility review, before cleanup eligibility. */
+export async function verifyNativeActiveReview(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly retained: NativeProjectRun;
+  readonly proof?: NativeActiveReviewProof;
+  readonly invoke?: typeof invokeNativeRuntime;
+}): Promise<void> {
+  if (!opts.proof) {
+    return;
+  }
+  const current = await selectActiveReview({
+    ...opts,
+    service: opts.proof.service,
+    invoke: opts.invoke ?? invokeNativeRuntime,
+  });
+  if (JSON.stringify(current) !== JSON.stringify(opts.proof)) {
+    throw new Error(
+      "Native active review identity changed; the current graph was not stopped."
+    );
+  }
+}
+
 /** Original-input identity chosen before any branch route normalization. */
 export interface NativeProjectReviewIdentity {
   readonly namespace: string;
   readonly branch: string | null;
   readonly projectArgs: readonly string[];
   readonly retainedGeneration?: string;
+  readonly activeProof?: NativeActiveReviewProof;
 }
 
 export async function selectNativeProjectReviewIdentity(opts: {
@@ -83,31 +193,36 @@ export async function selectNativeProjectReviewIdentity(opts: {
     );
   }
   let namespace = original.plan.namespace;
+  let branch = opts.branch ?? null;
   let retainedGeneration: string | undefined;
+  let activeProof: NativeActiveReviewProof | undefined;
   if (opts.branch && opts.retained && namespace !== opts.retained.namespace) {
     if (opts.retainedMode === "active") {
-      throw new Error(
-        "Active legacy native branch review requires explicit retained recovery; the current graph was not stopped."
-      );
+      activeProof = await selectActiveReview({
+        runtime: opts.runtime,
+        projectRoot: opts.projectRoot,
+        retained: opts.retained,
+        service: activeReviewService(original.plan),
+        invoke,
+      });
+    } else {
+      const selected = await invoke({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        args: [
+          "graph",
+          "restore-selection",
+          "--run-id",
+          opts.retained.run,
+          "--json",
+        ],
+      });
+      retainedGeneration = validateNativeRestoreSelection({
+        selected,
+        saved: opts.retained,
+        namespace: opts.retained.namespace,
+      }).generation;
     }
-    // Legacy mappings may predate native branch namespaces. Only native proofs
-    // for this exact retained run and canonical project permit unscoped review.
-    const selected = await invoke({
-      runtime: opts.runtime,
-      cwd: opts.projectRoot,
-      args: [
-        "graph",
-        "restore-selection",
-        "--run-id",
-        opts.retained.run,
-        "--json",
-      ],
-    });
-    retainedGeneration = validateNativeRestoreSelection({
-      selected,
-      saved: opts.retained,
-      namespace: opts.retained.namespace,
-    }).generation;
     const unbranchedArgs = [
       "--project",
       opts.projectRoot,
@@ -134,12 +249,14 @@ export async function selectNativeProjectReviewIdentity(opts: {
     }
     projectArgs = unbranchedArgs;
     namespace = opts.retained.namespace;
+    branch = null;
   }
   return {
     namespace,
-    branch: retainedGeneration ? null : (opts.branch ?? null),
+    branch,
     projectArgs,
     ...(retainedGeneration ? { retainedGeneration } : {}),
+    ...(activeProof ? { activeProof } : {}),
   };
 }
 

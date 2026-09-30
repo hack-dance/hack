@@ -23,6 +23,7 @@ import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
 import {
   prepareNativeReviewBranch,
   selectNativeProjectReviewIdentity,
+  verifyNativeActiveReview,
   withNativeProjectReview,
 } from "./native-project-review.ts";
 import {
@@ -341,6 +342,7 @@ export async function preflightNativeRestart(opts: {
     retained: opts.run,
     retainedMode: opts.cleanedRetry ? "stopped" : "active",
     reviewIdentity,
+    invoke: deps.invoke,
     input: { ...input, normalizedComposeJson: JSON.stringify(compose) },
     run: async (review) => {
       if (review.namespace !== opts.run.namespace) {
@@ -364,6 +366,13 @@ export async function preflightNativeRestart(opts: {
         dependencies,
         invoke: deps.invoke,
         cleanedRetry: opts.cleanedRetry === true,
+      });
+      await verifyNativeActiveReview({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        retained: opts.run,
+        proof: reviewIdentity?.activeProof,
+        invoke: deps.invoke,
       });
     },
   });

@@ -95,18 +95,22 @@ inside one VM pool.
 
 An existing frontend branch mapping may retain a graph admitted before native
 branch namespaces. If its current scoped review differs, the frontend first
-checks native restore selection against that exact saved run, owner, namespace
-and plan. A native unbranched review of the same canonical project and unchanged
+checks native selection against that exact saved run, owner, namespace and plan:
+restore selection for a stopped graph, or authenticated service selection for an
+active graph. A native unbranched review of the same canonical project and unchanged
 original Compose must then return the saved namespace. Only that retained run
 continues with unbranched review and execution arguments and keeps its original
 adapted route labels, before branch hostname rewriting. This preserves legacy
 source contracts that did not enroll hostname changes. The selected generation,
 restore selection and shared-source semantic compatibility are checked again
 before admission; mappings, graph receipts and ownership namespaces are not
-rewritten. An active legacy graph still refuses restart preflight before cleanup;
-this stopped-run compatibility path does not migrate its live identity. Fresh and
-already branch-scoped graphs keep their normal branch namespace. This compatibility path
-does not authorize adopting an unrelated branch or project.
+rewritten. Active legacy restart also rechecks its service, container, boot and
+receipt generation after compatibility review, before cleanup eligibility. A
+changed selection refuses before stopping the graph. This preflight check does
+not make cleanup atomic with that generation; existing ownership and frontend
+finalization checks still apply. Fresh and already branch-scoped graphs keep
+their normal branch namespace. This compatibility path does not authorize
+adopting an unrelated branch or project.
 
 ## Manual candidate upgrade and rollback
 

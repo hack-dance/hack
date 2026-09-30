@@ -7,6 +7,7 @@ import { selectNativeProjectRestore } from "../src/backends/native-project-resto
 import {
   prepareNativeReviewBranch,
   selectNativeProjectReviewIdentity,
+  verifyNativeActiveReview,
   withNativeProjectReview,
 } from "../src/backends/native-project-review.ts";
 import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
@@ -154,11 +155,16 @@ async function legacyFixture() {
     namespace: retained.namespace,
     plan: retained.planId,
     generation: "f".repeat(64),
+    ok: true,
+    service: "web",
+    container: "1".repeat(64),
+    boot: "owned-boot",
   };
   const unbranched: Record<string, unknown> = {
     namespace: retained.namespace,
     source: await realpath(options.projectRoot),
     compose_sha256: options.input.originalSha256,
+    services: { web: { active: true } },
   };
   const invoke: typeof invokeNativeRuntime = async ({ args }) => {
     calls.push([...args]);
@@ -375,29 +381,37 @@ test("early identity proof is rechecked after route preparation before normalize
   }
 });
 
-test("active branch-native review needs no stopped selection; active legacy mismatch refuses before cleanup", async () => {
+test("active branch-native needs no stopped selection and legacy selects authenticated service authority", async () => {
   const { options, calls, invoke } = await legacyFixture();
-  const identity = await selectNativeProjectReviewIdentity({
+  const scoped = await selectNativeProjectReviewIdentity({
     ...options,
     branch: "feature-a",
     retained: { ...retained, namespace: "c".repeat(64) },
     retainedMode: "active",
     invoke,
   });
-  expect(identity.branch).toBe("feature-a");
+  expect(scoped.branch).toBe("feature-a");
   expect(calls).toHaveLength(1);
   calls.splice(0);
-  await expect(
-    selectNativeProjectReviewIdentity({
-      ...options,
-      branch: "feature-a",
-      retained,
-      retainedMode: "active",
-      invoke,
-    })
-  ).rejects.toThrow("Active legacy native branch review");
-  expect(calls).toHaveLength(1);
-  expect(calls[0]?.[0]).toBe("project");
+  const identity = await selectNativeProjectReviewIdentity({
+    ...options,
+    branch: "feature-a",
+    retained,
+    retainedMode: "active",
+    invoke,
+  });
+  expect(identity.branch).toBeNull();
+  expect(identity.retainedGeneration).toBeUndefined();
+  expect(identity.activeProof?.service).toBe("web");
+  await verifyNativeActiveReview({
+    ...options,
+    retained,
+    proof: identity.activeProof,
+    invoke,
+  });
+  expect(
+    calls.filter((args) => args[0] === "graph").map((args) => args[1])
+  ).toEqual(["run-selection", "run-selection"]);
 });
 
 test("deferred retained review rejects malformed branch before hooks or runtime selection", async () => {
@@ -417,4 +431,84 @@ test("deferred retained review rejects malformed branch before hooks or runtime 
     })
   ).rejects.toThrow("canonical branch");
   expect(calls).toHaveLength(0);
+});
+
+test("active proof refuses every tuple drift after compatibility and unavailable service authority", async () => {
+  for (const key of [
+    "run",
+    "owner",
+    "namespace",
+    "plan",
+    "service",
+    "container",
+    "boot",
+    "generation",
+  ]) {
+    const { options, selected, invoke } = await legacyFixture();
+    const identity = await selectNativeProjectReviewIdentity({
+      ...options,
+      branch: "feature-a",
+      retained,
+      retainedMode: "active",
+      invoke,
+    });
+    selected[key] =
+      key === "boot"
+        ? "another-boot"
+        : "2".repeat(key === "run" || key === "owner" ? 32 : 64);
+    await expect(
+      verifyNativeActiveReview({
+        ...options,
+        retained,
+        proof: identity.activeProof,
+        invoke,
+      })
+    ).rejects.toThrow("changed");
+  }
+  for (const services of [{}, { web: { active: false } }]) {
+    const { options, calls, unbranched, invoke } = await legacyFixture();
+    unbranched.services = services;
+    await expect(
+      selectNativeProjectReviewIdentity({
+        ...options,
+        branch: "feature-a",
+        retained,
+        retainedMode: "active",
+        invoke,
+      })
+    ).rejects.toThrow("no supported service authority");
+    expect(calls).toHaveLength(1);
+  }
+});
+
+test("active legacy proof never grants an unrelated source and propagates stale dependency refusal", async () => {
+  for (const failure of ["source", "dependencies"]) {
+    const { options, invoke, unbranched, calls } = await legacyFixture();
+    const checked: typeof invokeNativeRuntime = async (request) => {
+      if (failure === "dependencies" && request.args[1] === "run-selection") {
+        throw new Error("stale dependency");
+      }
+      if (failure === "source") {
+        unbranched.source = "/foreign/project";
+      }
+      return await invoke(request);
+    };
+    await expect(
+      selectNativeProjectReviewIdentity({
+        ...options,
+        branch: "feature-a",
+        retained,
+        retainedMode: "active",
+        invoke: checked,
+      })
+    ).rejects.toThrow(
+      failure === "source" ? "review changed" : "stale dependency"
+    );
+    expect(
+      calls.some(
+        (args) =>
+          args[1] === "run-service" || args.includes("--normalized-file")
+      )
+    ).toBe(false);
+  }
 });

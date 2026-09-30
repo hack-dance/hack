@@ -607,6 +607,10 @@ intervals are observed.
   tiny interval. A trial's start check restarts the meter and measures one full interval
   immediately before timed work, so untimed setup and the previous trial's cleanup never enter
   it.
+- **Bounded observation.** Every host observation (`ps`, `sysctl`) is limited to 30 s. One
+  that fails or times out is unobserved and fails closed: admission flags the sample, the idle
+  baseline refuses to start, and trial or fixture cleanup keeps its state. Trial runtime
+  commands keep their own step timeouts.
 - **Attribution.** Each sample records its three largest background commands. The sampler
   summary reports those behind its peak sample, and the idle baseline reports those behind its
   ceiling, so a flagged sample can be traced (for example to Gatekeeper scanning a new home's

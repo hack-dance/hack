@@ -178,6 +178,20 @@ def allocated(root):
     return total
 
 
+OBSERVATION_TIMEOUT = 30
+
+
+def observed_output(argv):
+    """Stdout of a short host observation (`ps`, `sysctl`), or None when it failed or did not
+    finish within OBSERVATION_TIMEOUT seconds. A hung observation must never hold a trial, or
+    its cleanup, forever; every caller treats None as unobserved and fails closed."""
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=OBSERVATION_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
 def git(*argv):
     """Run Git without system or global configuration, templates, hooks or signing."""
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/"),
@@ -249,8 +263,8 @@ class Worktrees:
             return {"removed": True, "created": False}
         if not pools_disposed:
             return {"preserved": str(self.dir), "error": "an owned pool was not confirmed disposed"}
-        listing = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,args="], capture_output=True, text=True)
-        if listing.returncode != 0 or str(self.dir) in listing.stdout:
+        listing = observed_output(["ps", "-A", "-ww", "-o", "pid=,args="])
+        if listing is None or str(self.dir) in listing:
             return {"preserved": str(self.dir), "error": "a process may still reference this fixture"}
         shutil.rmtree(self.dir)
         return {"removed": not self.dir.exists()}
@@ -317,14 +331,20 @@ class Background:
 
     def __init__(self, root, watched=(), listing=None, clock=time.monotonic, interval=1.0):
         self.root, self.watched, self.clock, self.interval = str(root), set(watched), clock, interval
-        self.listing = listing or (lambda: subprocess.run(
-            ["ps", "-A", "-o", "pid=,time=,args="], capture_output=True, text=True, check=True).stdout)
+        self.listing = listing or self._listing
         self.previous = None
         self.latest = (None, None, [])
         # The largest background contributors in the latest measurement, [[command, cores], ...],
         # so a flagged sample can be attributed (for example to Gatekeeper scanning new binaries).
         self.top = []
         self.lock = threading.Lock()
+
+    @staticmethod
+    def _listing():
+        listing = observed_output(["ps", "-A", "-o", "pid=,time=,args="])
+        if listing is None:
+            raise RuntimeError("process listing unavailable")
+        return listing
 
     def restart(self):
         """Begin a fresh interval now: the next measurement covers only what follows, not an
@@ -378,13 +398,19 @@ class Background:
 def measure_idle(meter, seconds, interval, pressure=None, sleep=time.sleep):
     """Sample the host while nothing of this run is running. The maximum background observed
     becomes the admission ceiling: a timed sample may not exceed what idle already showed."""
-    pressure = pressure or (lambda: subprocess.run(
-        ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True).stdout.strip())
-    background, watched, levels, tools, ceiling_top = [], [], set(), set(), []
-    meter.observe()
+    pressure = pressure or (lambda: (observed_output(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"]) or "").strip())
+    background, watched, levels, tools, ceiling_top, failed = [], [], set(), set(), [], 0
+    try:
+        meter.observe()
+    except (OSError, RuntimeError):
+        failed += 1
     for _ in range(max(1, round(seconds / interval))):
         sleep(interval)
-        cores, vm, names = meter.observe()
+        try:
+            cores, vm, names = meter.observe()
+        except (OSError, RuntimeError):
+            failed += 1
+            continue
         if cores is not None:
             background.append(cores)
             watched.append(vm)
@@ -399,7 +425,7 @@ def measure_idle(meter, seconds, interval, pressure=None, sleep=time.sleep):
                 "p95": ordered[min(len(ordered) - 1, round(0.95 * (len(ordered) - 1)))]} if ordered else {"n": 0}
 
     refusals = ([] if len(background) >= 3 else ["too_few_samples"]) + (["build_tools"] if tools else []) \
-        + ([] if levels == {"1"} else ["memory_pressure"])
+        + ([] if levels == {"1"} else ["memory_pressure"]) + (["observer_failed"] if failed else [])
     return {"seconds": seconds, "interval_s": interval, "background_cores": spread(background),
             "watched_cores": spread(watched), "pressure_levels": sorted(levels), "build_tools": sorted(tools),
             "ceiling_cores": max(background) if background else None, "ceiling_top": ceiling_top,
@@ -448,15 +474,15 @@ def admission(meter=None, ceiling=None):
         load = None
     background = watched = None
     if meter is None:
-        listing = subprocess.run(["ps", "-axo", "comm="], capture_output=True, text=True)
-        names = listing.stdout.split("\n") if listing.returncode == 0 and listing.stdout.strip() else None
+        listing = observed_output(["ps", "-axo", "comm="])
+        names = listing.split("\n") if listing and listing.strip() else None
     else:
         try:
             background, watched, names = meter.observe()
-        except (OSError, subprocess.CalledProcessError):
+        except (OSError, RuntimeError):
             names = None
-    level = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True)
-    pressure = level.stdout.strip() if level.returncode == 0 else None
+    level = observed_output(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"])
+    pressure = level.strip() if level is not None else None
     observed = admission_from(load, names, pressure, os.cpu_count() or 1, background, ceiling)
     if meter is not None:
         observed.update(watched_cores=watched, background_top=list(getattr(meter, "top", [])))
@@ -473,7 +499,10 @@ def trial_start_admission(args, sleep=time.sleep):
     first, so the untimed setup and the previous trial's cleanup never enter the measurement."""
     meter = getattr(args, "background", None)
     if meter is not None:
-        meter.restart()
+        try:
+            meter.restart()
+        except (OSError, RuntimeError):
+            pass
         sleep(meter.interval)
     return observe_admission(args)
 
@@ -721,7 +750,10 @@ class Trial:
             if code != 0 or body.get("process_alive") is not False:
                 result["error"] = f"pool not confirmed stopped after down: {json.dumps(body)[:300]}"
                 return result
-        running = subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True).stdout
+        running = observed_output(["ps", "-axww", "-o", "pid=,command="])
+        if running is None:
+            result["error"] = "process listing unavailable; this trial's home is kept"
+            return result
         if str(self.dir) in running:
             result["error"] = "a process still references this trial"
             return result
@@ -1011,8 +1043,8 @@ def run_worktrees(args, sizes, keep, deadline=None, clock=time.monotonic, distre
 
 def process_identity(pid):
     """Start time and command of a live PID, or None; used to show an idle VM stayed the same."""
-    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart=,args="], capture_output=True, text=True)
-    return result.stdout.strip() or None if result.returncode == 0 else None
+    output = observed_output(["ps", "-p", str(pid), "-o", "lstart=,args="])
+    return (output.strip() or None) if output is not None else None
 
 
 class Distress:
@@ -1292,11 +1324,8 @@ def main():
             + (args.concurrent if "concurrent" in modes else 0)
             + 2 * sum(worktree_sizes) * args.worktree_repeats,
             "idle_baseline_s": args.idle_baseline, "idle_vm_pids": args.idle_vm_pid, "budget_s": args.budget}
-    try:
-        probe = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True)
-    except OSError:
-        probe = None
-    host_memory = int(probe.stdout) if probe and probe.returncode == 0 and probe.stdout.strip().isdigit() else None
+    probe = (observed_output(["sysctl", "-n", "hw.memsize"]) or "").strip()
+    host_memory = int(probe) if probe.isdigit() else None
     if worktree_sizes:
         plan["worktrees"] = worktree_plan(worktree_sizes, args.worktree_repeats, args.worktree_parallel,
                                           args.profile, host_memory)
@@ -1330,7 +1359,7 @@ def main():
         args.background, args.idle_ceiling = meter, baseline["ceiling_cores"]
     context = {
         "harness_sha256": sha256(__file__), "bundle_sha256": sha256(args.bundle),
-        "host": {"model": subprocess.run(["sysctl", "-n", "hw.model"], capture_output=True, text=True).stdout.strip(),
+        "host": {"model": (observed_output(["sysctl", "-n", "hw.model"]) or "").strip() or None,
                  "cpus": os.cpu_count(), "memory_bytes": host_memory, "os": platform.mac_ver()[0]},
         "image": args.image, "profile": args.profile, "plan": plan,
         # Shared by every prepared pool; reported once, apart from per-pool private disk.

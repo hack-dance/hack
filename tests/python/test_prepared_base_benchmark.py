@@ -524,6 +524,22 @@ class WorktreeTrials(unittest.TestCase):
         self.assertEqual(checks, [False, True])
         self.assertEqual(list(self.root.iterdir()), [])
 
+    def test_an_unavailable_process_listing_keeps_every_home_and_the_fixture(self):
+        real = benchmark.observed_output
+
+        def observed(argv):
+            # Trial cleanup's own listing hangs or fails; everything else observes normally.
+            return None if argv[:2] == ["ps", "-axww"] else real(argv)
+
+        with mock.patch.object(benchmark, "observed_output", side_effect=observed):
+            record = benchmark.worktree_trial(self.args, 2, 0, "prepared")
+        self.assertTrue(record["ok"], record.get("error"))
+        self.assertTrue(record["cleanup_failed"])
+        *pools, fixture = record["cleanup"]
+        self.assertTrue(all("process listing unavailable" in c["error"] for c in pools), pools)
+        self.assertIn("not confirmed disposed", fixture["error"])
+        self.assertTrue(all(Path(home).is_dir() for home in record["homes"]))
+
     def test_a_spent_budget_starts_no_further_cohort(self):
         self.args.worktree_repeats = 1
         records, now = [], iter([0.0, 99.0])
@@ -647,6 +663,44 @@ class MeasuredAdmission(unittest.TestCase):
         self.assertIn("background_above_idle", observed["reasons"])
         self.assertEqual(observed["watched_cores"], 0.1)
         self.assertNotIn("background_cores", benchmark.observe_admission(argparse.Namespace()))
+
+
+class BoundedObservation(unittest.TestCase):
+    """Every host observation is bounded, and an unobserved input fails closed."""
+
+    def test_an_observation_that_outlives_its_bound_is_unobserved(self):
+        with mock.patch.object(benchmark, "OBSERVATION_TIMEOUT", 0.2):
+            self.assertIsNone(benchmark.observed_output([sys.executable, "-c", "import time; time.sleep(5)"]))
+        self.assertIsNone(benchmark.observed_output([sys.executable, "-c", "raise SystemExit(3)"]))
+        self.assertEqual(benchmark.observed_output([sys.executable, "-c", "print('ok')"]), "ok\n")
+
+    def test_admission_fails_closed_without_observations(self):
+        with mock.patch.object(benchmark, "observed_output", return_value=None):
+            observed = benchmark.admission()
+            self.assertIsNone(benchmark.process_identity(1))
+        self.assertIn("processes_unobserved", observed["reasons"])
+        self.assertIn("pressure_unobserved", observed["reasons"])
+        failing = type("Meter", (), {"observe": lambda self: (_ for _ in ()).throw(RuntimeError("listing unavailable"))})()
+        with mock.patch.object(benchmark, "observed_output", return_value="1"):
+            metered = benchmark.admission(failing, ceiling=1.0)
+        self.assertEqual(sorted(metered["reasons"]), ["background_unobserved", "processes_unobserved"])
+
+    def test_an_idle_baseline_with_a_failed_observation_refuses(self):
+        calls = iter([(None, None, []), (0.4, 0.01, []), RuntimeError("listing unavailable"), (0.5, 0.01, []),
+                      (0.6, 0.01, [])])
+
+        class Meter:
+            top = []
+
+            def observe(self):
+                value = next(calls)
+                if isinstance(value, Exception):
+                    raise value
+                return value
+
+        idle = benchmark.measure_idle(Meter(), 4, 1, pressure=lambda: "1", sleep=lambda _: None)
+        self.assertEqual(idle["refusals"], ["observer_failed"])
+        self.assertEqual(idle["background_cores"]["n"], 3)
 
 
 class DistressAndInvalidation(unittest.TestCase):

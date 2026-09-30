@@ -321,7 +321,17 @@ class Background:
             ["ps", "-A", "-o", "pid=,time=,args="], capture_output=True, text=True, check=True).stdout)
         self.previous = None
         self.latest = (None, None, [])
+        # The largest background contributors in the latest measurement, [[command, cores], ...],
+        # so a flagged sample can be attributed (for example to Gatekeeper scanning new binaries).
+        self.top = []
         self.lock = threading.Lock()
+
+    def restart(self):
+        """Begin a fresh interval now: the next measurement covers only what follows, not an
+        untimed gap such as a trial's setup or the previous trial's cleanup."""
+        with self.lock:
+            self.previous = None
+            self.latest = self._measure(self.clock())
 
     def observe(self):
         """(background cores, watched cores, names) over the latest full interval. Cores are None
@@ -346,16 +356,22 @@ class Background:
                 table[(int(fields[0]), fields[2])] = (seconds, self.root in fields[2])
         previous, self.previous = self.previous, (now, table)
         if previous is None or now <= previous[0]:
+            self.top = []
             return None, None, names
         background = watched = 0.0
+        by_command = {}
         for key, (seconds, owned) in table.items():
             if owned or key not in previous[1]:
                 continue
             delta = max(0.0, seconds - previous[1][key][0])
             background += delta
+            command = Path(key[1].split()[0]).name
+            by_command[command] = by_command.get(command, 0.0) + delta
             if key[0] in self.watched:
                 watched += delta
         elapsed = now - previous[0]
+        ranked = sorted(by_command.items(), key=lambda item: item[1], reverse=True)[:3]
+        self.top = [[command, round(delta / elapsed, 3)] for command, delta in ranked if delta > 0]
         return round(background / elapsed, 3), round(watched / elapsed, 3), names
 
 
@@ -364,7 +380,7 @@ def measure_idle(meter, seconds, interval, pressure=None, sleep=time.sleep):
     becomes the admission ceiling: a timed sample may not exceed what idle already showed."""
     pressure = pressure or (lambda: subprocess.run(
         ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True).stdout.strip())
-    background, watched, levels, tools = [], [], set(), set()
+    background, watched, levels, tools, ceiling_top = [], [], set(), set(), []
     meter.observe()
     for _ in range(max(1, round(seconds / interval))):
         sleep(interval)
@@ -372,6 +388,8 @@ def measure_idle(meter, seconds, interval, pressure=None, sleep=time.sleep):
         if cores is not None:
             background.append(cores)
             watched.append(vm)
+            if cores == max(background):
+                ceiling_top = list(getattr(meter, "top", []))
         levels.add(pressure() or "unobserved")
         tools |= {Path(n).name for n in names if BUILD_TOOLS.match(Path(n).name)}
 
@@ -384,7 +402,8 @@ def measure_idle(meter, seconds, interval, pressure=None, sleep=time.sleep):
         + ([] if levels == {"1"} else ["memory_pressure"])
     return {"seconds": seconds, "interval_s": interval, "background_cores": spread(background),
             "watched_cores": spread(watched), "pressure_levels": sorted(levels), "build_tools": sorted(tools),
-            "ceiling_cores": max(background) if background else None, "refusals": refusals}
+            "ceiling_cores": max(background) if background else None, "ceiling_top": ceiling_top,
+            "refusals": refusals}
 
 
 def admission_from(load, names, pressure, cpus, background=None, ceiling=None):
@@ -440,13 +459,23 @@ def admission(meter=None, ceiling=None):
     pressure = level.stdout.strip() if level.returncode == 0 else None
     observed = admission_from(load, names, pressure, os.cpu_count() or 1, background, ceiling)
     if meter is not None:
-        observed["watched_cores"] = watched
+        observed.update(watched_cores=watched, background_top=list(getattr(meter, "top", [])))
     return observed
 
 
 def observe_admission(args):
     """Admission against the run's measured idle baseline when one was taken, else the legacy rule."""
     return admission(getattr(args, "background", None), getattr(args, "idle_ceiling", None))
+
+
+def trial_start_admission(args, sleep=time.sleep):
+    """Admission for the full interval right before a trial's timed work. With a meter, it restarts
+    first, so the untimed setup and the previous trial's cleanup never enter the measurement."""
+    meter = getattr(args, "background", None)
+    if meter is not None:
+        meter.restart()
+        sleep(meter.interval)
+    return observe_admission(args)
 
 
 def admitted(record, cpus):
@@ -522,11 +551,14 @@ class Sampler:
             reasons.add("sampling_gap")
         loads = [sample["load1"] for sample in self.samples if sample["load1"] is not None]
         background = [s["background_cores"] for s in self.samples if s.get("background_cores") is not None]
+        peak = max((s for s in self.samples if s.get("background_cores") is not None),
+                   key=lambda s: s["background_cores"], default={})
         watched = [s["watched_cores"] for s in self.samples if s.get("watched_cores") is not None]
         return {"samples": len(self.samples), "interval_s": self.interval, "reasons": sorted(reasons),
                 "max_gap_s": round(max(gaps), 3) if gaps else None,
                 "max_load1": max(loads) if loads else None,
                 "max_background_cores": max(background) if background else None,
+                "max_background_top": peak.get("background_top"),
                 "max_watched_cores": max(watched) if watched else None, "admitted": not reasons}
 
 
@@ -707,7 +739,7 @@ def pair_trial(args, index, lane):
     sampler = None
     try:
         trial.setup()
-        record["admission"] = observe_admission(args)
+        record["admission"] = trial_start_admission(args)
         sampler = Sampler(args.admission_interval, observe=lambda: observe_admission(args)).start()
         trial.up("up", lane)
         record["disks_at_ready"] = trial.disks()
@@ -746,7 +778,7 @@ def cohort_trial(args, size, repeat, lane):
     sampler = None
     try:
         trial.setup()
-        record["admission"] = observe_admission(args)
+        record["admission"] = trial_start_admission(args)
         sampler = Sampler(args.admission_interval, observe=lambda: observe_admission(args)).start()
         started = time.monotonic()
         trial.up("up", lane)
@@ -787,7 +819,7 @@ def concurrent_trial(args, count):
     try:
         for trial in trials:
             trial.setup()
-        record["admission"] = observe_admission(args)
+        record["admission"] = trial_start_admission(args)
         sampler = Sampler(args.admission_interval, observe=lambda: observe_admission(args)).start()
         with concurrent.futures.ThreadPoolExecutor(max_workers=count) as pool:
             bodies = list(pool.map(lambda t: t.up("up", "prepared"), trials))
@@ -856,7 +888,7 @@ def worktree_trial(args, size, repeat, lane):
         entries = fixture.create()
         for pool in pools:
             pool.setup()
-        record["admission"] = observe_admission(args)
+        record["admission"] = trial_start_admission(args)
         sampler = Sampler(args.admission_interval, observe=lambda: observe_admission(args)).start()
         started = time.monotonic()
 

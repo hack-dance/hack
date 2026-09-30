@@ -602,9 +602,15 @@ intervals are observed.
 - **Background.** It measures background CPU as per-process CPU-time deltas of processes whose
   command line does not name `--root`. Trial VMs, CLI calls, fixtures and the harness are
   therefore excluded. A process that starts and exits between two samples is not seen.
-- **Interval.** Every measurement spans at least 90% of the admission interval. A trial's start
-  or end check that follows a continuous sample reuses that sample rather than dividing `ps`'s
-  10 ms rounding by a tiny interval.
+- **Interval.** Every measurement spans at least 90% of the admission interval. A check that
+  follows a continuous sample reuses that sample rather than dividing `ps`'s 10 ms rounding by a
+  tiny interval. A trial's start check restarts the meter and measures one full interval
+  immediately before timed work, so untimed setup and the previous trial's cleanup never enter
+  it.
+- **Attribution.** Each sample records its three largest background commands. The sampler
+  summary reports those behind its peak sample, and the idle baseline reports those behind its
+  ceiling, so a flagged sample can be traced (for example to Gatekeeper scanning a new home's
+  provider binary).
 - **Ceiling.** The maximum background observed becomes the admission ceiling. A timed sample
   is flagged `background_above_idle` when background exceeds it, and load is then recorded but
   not judged.

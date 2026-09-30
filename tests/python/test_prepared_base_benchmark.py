@@ -608,6 +608,38 @@ class MeasuredAdmission(unittest.TestCase):
         # Measured against the snapshot at 1.0 s, not the boundary call at 1.05 s.
         self.assertEqual(meter.observe()[0], 0.8)
 
+    def test_a_trial_start_measures_only_the_interval_before_timed_work(self):
+        # A long untimed gap (setup, the previous cleanup) where mds burned 45 s of CPU; the start
+        # admission restarts the meter at 50 s and measures only [50, 51].
+        listings = iter([self.listing((10, "0:00.00", "/usr/bin/mds"), (11, "0:00.00", "/usr/libexec/syspolicyd")),
+                         self.listing((10, "0:45.00", "/usr/bin/mds"), (11, "0:00.00", "/usr/libexec/syspolicyd")),
+                         self.listing((10, "0:45.20", "/usr/bin/mds"), (11, "0:00.60", "/usr/libexec/syspolicyd"))])
+        clock = iter([0.0, 50.0, 51.0, 51.0])
+        meter = benchmark.Background(self.ROOT, listing=lambda: next(listings), clock=lambda: next(clock), interval=1.0)
+        meter.observe()
+        slept = []
+        args = argparse.Namespace(background=meter, idle_ceiling=1.0)
+        with mock.patch.object(benchmark, "os") as fake_os, mock.patch.object(benchmark.subprocess, "run") as run:
+            fake_os.getloadavg.return_value = (1.0, 1.0, 1.0)
+            fake_os.cpu_count.return_value = 16
+            run.return_value = mock.Mock(returncode=0, stdout="1")
+            observed = benchmark.trial_start_admission(args, sleep=slept.append)
+        self.assertEqual(slept, [1.0])
+        self.assertEqual((observed["background_cores"], observed["reasons"]), (0.8, []))
+        # Attribution of the measured interval, largest first.
+        self.assertEqual(observed["background_top"], [["syspolicyd", 0.6], ["mds", 0.2]])
+
+    def test_the_sampler_reports_what_dominated_its_peak_sample(self):
+        samples = iter([{"reasons": [], "load1": 1.0, "background_cores": 0.5, "background_top": [["mds", 0.4]]},
+                        {"reasons": ["background_above_idle"], "load1": 1.0, "background_cores": 6.0,
+                         "background_top": [["syspolicyd", 3.2], ["mds", 1.1]]}])
+        sampler = benchmark.Sampler(1.0, observe=lambda: next(samples))
+        sampler.samples = [next(samples), next(samples)]
+        sampler.started, sampler.times, sampler.stopped = 0.0, [0.5, 1.5], 2.0
+        result = sampler.result()
+        self.assertEqual((result["max_background_cores"], result["max_background_top"]),
+                         (6.0, [["syspolicyd", 3.2], ["mds", 1.1]]))
+
     def test_trials_use_the_runs_baseline_when_one_was_measured(self):
         args = argparse.Namespace(background=type("M", (), {"observe": lambda self: (2.5, 0.1, ["zsh"])})(),
                                   idle_ceiling=1.0)

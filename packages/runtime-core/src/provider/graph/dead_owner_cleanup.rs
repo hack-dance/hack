@@ -38,7 +38,7 @@ fn selected(receipt: &Receipt) -> Result<String, CandidateError> {
         &serde_json::to_vec_pretty(receipt).map_err(|_| refused())?,
     ))
 }
-fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
+pub(super) fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
     let mut value = serde_json::to_value(receipt).map_err(|_| refused())?;
     value.as_object_mut().ok_or_else(refused)?.remove("phase");
     for group in ["resources", "probes"] {

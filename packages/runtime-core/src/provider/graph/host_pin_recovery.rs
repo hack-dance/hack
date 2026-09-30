@@ -40,7 +40,7 @@ fn digest(bytes: &[u8]) -> String {
 /// guest check so a changed receipt cannot impersonate the running kernel boot.
 /// execute_cleanup itself compares /proc boot ID and /storage owner under the
 /// held Engine/Guest lease before this fixed acknowledgement is emitted.
-fn verify_guest_identity(engine: &Engine<'_>) -> Result<(), CandidateError> {
+pub(super) fn verify_guest_identity(engine: &Engine<'_>) -> Result<(), CandidateError> {
     let acknowledged = engine
         .guest()
         .execute_cleanup("printf 'host-pin-guest-identity-v1\\n'", &[])
@@ -50,7 +50,7 @@ fn verify_guest_identity(engine: &Engine<'_>) -> Result<(), CandidateError> {
     }
     Ok(())
 }
-fn read_raw(path: &Path, limit: u64) -> Result<Vec<u8>, CandidateError> {
+pub(super) fn read_raw(path: &Path, limit: u64) -> Result<Vec<u8>, CandidateError> {
     read_raw_with(path, limit, || {})
 }
 fn read_raw_with(
@@ -114,7 +114,7 @@ fn absent(path: &Path) -> Result<bool, CandidateError> {
     }
 }
 
-fn exact_lock_path(root: &Path, held: &state::Lock) -> Result<(), CandidateError> {
+pub(super) fn exact_lock_path(root: &Path, held: &state::Lock) -> Result<(), CandidateError> {
     let pathname = fs::symlink_metadata(root.join("operation.lock")).map_err(|_| refused())?;
     if !pathname.is_file()
         || pathname.nlink() != 1
@@ -258,7 +258,7 @@ pub(super) fn selected_for_old_publisher(
     Ok(Some(witness))
 }
 
-fn verify_volume_projections(
+pub(super) fn verify_volume_projections(
     engine: &Engine<'_>,
     receipt: &Receipt,
     selected: &BTreeMap<String, Value>,

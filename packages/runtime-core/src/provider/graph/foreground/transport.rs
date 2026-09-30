@@ -772,6 +772,7 @@ impl Publication {
         Self::bind_mode(candidate, run, true)
     }
     fn bind_mode(candidate: &Candidate, run: &str, retired: bool) -> Result<Self, CandidateError> {
+        super::super::absent_publication_cleanup::publication_allowed(candidate, run, retired)?;
         let root = root(candidate, run)?;
         let lock = if retired {
             state::check_private_directory(&root).map_err(|_| refused())?;
@@ -780,6 +781,8 @@ impl Publication {
             state::private_directory(&root).map_err(|_| refused())?;
             state::Lock::acquire(&root).map_err(|_| refused())?
         };
+        // The foreground lock serializes a concurrent absence-intent writer.
+        super::super::absent_publication_cleanup::publication_allowed(candidate, run, retired)?;
         for name in ["control.sock", "owner.json"] {
             match fs::symlink_metadata(root.join(name)) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

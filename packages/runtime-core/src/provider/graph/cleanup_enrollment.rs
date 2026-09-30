@@ -119,6 +119,7 @@ pub(super) fn retention(root: &Path, receipt: &Receipt) -> Result<(), CandidateE
     #[cfg(target_os = "macos")]
     if super::live_owner_cleanup::retained(root, receipt)?
         || super::dead_owner_cleanup::retained(root, receipt)?
+        || super::absent_publication_cleanup::retained(root, receipt)?
     {
         return Ok(());
     }

@@ -8,7 +8,7 @@ use super::{Owner, binary, identity, lock_absent_disks, root, state};
 use crate::{Candidate, CandidateError};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::{fs, os::unix::fs::MetadataExt};
+use std::{fs, os::unix::fs::MetadataExt, path::Path};
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct Inspection {
@@ -121,6 +121,34 @@ fn same_disk(before: &identity::DiskIdentity, after: &identity::DiskIdentity) ->
         && before.uuid == after.uuid
 }
 
+/// A retained flock cannot fence a writer that opens a substituted lock pathname.
+fn bound_locks(
+    candidate: &Candidate,
+    owner: &Owner,
+    operation: &state::Lock,
+    vm: &fs::File,
+) -> Result<(), CandidateError> {
+    let check = |path: &Path, expected: (u64, u64)| -> Result<(), CandidateError> {
+        let metadata = fs::symlink_metadata(path).map_err(state::io)?;
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || (metadata.dev(), metadata.ino()) != expected
+        {
+            return Err(refused("Held lock pathname was replaced"));
+        }
+        Ok(())
+    };
+    check(
+        &root(candidate).join("operation.lock"),
+        operation.identity()?,
+    )?;
+    let metadata = vm.metadata().map_err(state::io)?;
+    check(
+        &owner.real_data_dir(candidate)?.join("vm.lock"),
+        (metadata.dev(), metadata.ino()),
+    )
+}
+
 /// Build a candidate owner in memory. This function neither adopts a new disk nor writes state.
 fn selection(
     candidate: &Candidate,
@@ -204,13 +232,14 @@ fn selection(
 
 /// Read-only inspection holds both existing locks and proves disks have no open handles.
 pub fn inspect(candidate: &Candidate) -> Result<Inspection, CandidateError> {
-    let _operation = state::Lock::acquire_existing(&root(candidate))?;
+    let operation = state::Lock::acquire_existing(&root(candidate))?;
     let owner = Owner::load_for_short_home_recovery(candidate)?;
     let (inspection, next) = selection(candidate, &owner, host_boot_micros()?)?;
-    let _vm = lock_absent_disks(candidate, &next)?;
+    let vm = lock_absent_disks(candidate, &next)?;
     if selection(candidate, &owner, host_boot_micros()?)?.0 != inspection {
         return Err(refused("Inspection changed during absence verification"));
     }
+    bound_locks(candidate, &owner, &operation, &vm)?;
     Ok(inspection)
 }
 
@@ -229,16 +258,17 @@ fn recover_with_boot(
     if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(refused("An exact inspection SHA-256 is required"));
     }
-    let _operation = state::Lock::acquire_existing(&root(candidate))?;
+    let operation = state::Lock::acquire_existing(&root(candidate))?;
     let owner = Owner::load_for_short_home_recovery(candidate)?;
     let (inspection, next) = selection(candidate, &owner, boot()?)?;
     if inspection.selection_sha256 != expected {
         return Err(refused("Inspection selection is stale"));
     }
-    let _vm = lock_absent_disks(candidate, &next)?;
+    let vm = lock_absent_disks(candidate, &next)?;
     if selection(candidate, &owner, boot()?)?.0 != inspection {
         return Err(refused("Selected identities changed before publication"));
     }
+    bound_locks(candidate, &owner, &operation, &vm)?;
     next.save(candidate)?;
     if Owner::load_for_short_home_recovery(candidate)? != next {
         return Err(CandidateError::new(

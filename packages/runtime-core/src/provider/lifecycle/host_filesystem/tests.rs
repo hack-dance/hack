@@ -292,3 +292,28 @@ fn final_recheck_rejects_identity_change_before_publication() {
         b"changed"
     );
 }
+
+#[test]
+fn substituted_lock_paths_do_not_authorize_publication_on_an_old_descriptor() {
+    for name in ["operation.lock", "vm.lock"] {
+        let pool = Pool::new();
+        let selected = pool.selected();
+        let before = pool.receipt();
+        let called = std::cell::Cell::new(false);
+        let path = if name == "operation.lock" {
+            root(&pool.candidate).join(name)
+        } else {
+            pool.data().join(name)
+        };
+        let result = recover_with_boot(&pool.candidate, &selected.selection_sha256, || {
+            if called.replace(true) {
+                fs::rename(&path, path.with_extension("preserved")).unwrap();
+                fs::write(&path, b"replacement lock").unwrap();
+            }
+            Ok(pool.boot)
+        });
+        assert!(matches!(result, Err(e) if e.code == "host_filesystem_recovery"));
+        pool.unchanged(&before);
+        assert_eq!(fs::read(path).unwrap(), b"replacement lock");
+    }
+}

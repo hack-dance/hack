@@ -546,3 +546,4 @@ mod absent_publication_recovery;
 mod host_pin_recovery;
 mod retired_recovery_cleanup;
 mod same_boot_recovery;
+mod source_device_rebind;

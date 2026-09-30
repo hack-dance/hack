@@ -783,6 +783,10 @@ impl Publication {
         };
         // The foreground lock serializes a concurrent absence-intent writer.
         super::super::absent_publication_cleanup::publication_allowed(candidate, run, retired)?;
+        #[cfg(target_os = "macos")]
+        if retired {
+            super::super::source_device_rebind::require_no_pending(candidate, run)?;
+        }
         for name in ["control.sock", "owner.json"] {
             match fs::symlink_metadata(root.join(name)) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

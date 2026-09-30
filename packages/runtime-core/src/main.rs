@@ -31,6 +31,8 @@ Usage:
   hack-local graph recover-host-pins --run-id <32-hex> --expect-selection <64-hex> --accept-legacy-device-rebind [--json]
   hack-local graph inspect-absent-publication-cleanup --run-id <32-hex> --original-owner-file <private-json> --host-inspection-file <private-json> [--json]
   hack-local graph recover-absent-publication-cleanup --run-id <32-hex> --original-owner-file <private-json> --host-inspection-file <private-json> --expect-selection <64-hex> --retain-data --accept-unpinned-post-reboot [--json]
+  hack-local graph inspect-source-device-rebind --run-id <32-hex> [--json]
+  hack-local graph recover-source-device-rebind --run-id <32-hex> --expect-selection <64-hex> --accept-legacy-device-rebind [--json]
   hack-local graph logs --run-id <32-hex> --service <name> [--tail <1..1000>] [--json]
   hack-local graph exec --run-id <32-hex> --service <name> [--workdir /path] [--timeout-seconds <1..120>] [--json] -- <program> [args...]
   hack-local graph dependency-plan --dependencies <reviewed.json> [--json]

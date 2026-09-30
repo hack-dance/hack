@@ -9,7 +9,7 @@ use std::{
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
 };
 
-fn ready(owner: &mut Process, run: &str, deadline: Instant) {
+pub(super) fn ready(owner: &mut Process, run: &str, deadline: Instant) {
     loop {
         assert!(
             owner.poll().is_none(),
@@ -26,7 +26,7 @@ fn ready(owner: &mut Process, run: &str, deadline: Instant) {
     }
 }
 
-fn refused_cli(
+pub(super) fn refused_cli(
     binary: &Path,
     candidate: &Candidate,
     args: &[&str],
@@ -45,7 +45,7 @@ fn refused_cli(
     assert_eq!(error["code"], expected_code);
 }
 
-fn inspect_args<'a>(run: &'a str, old: &'a str, prior: &'a str) -> [&'a str; 9] {
+pub(super) fn inspect_args<'a>(run: &'a str, old: &'a str, prior: &'a str) -> [&'a str; 9] {
     [
         "graph",
         "inspect-absent-publication-cleanup",
@@ -58,7 +58,12 @@ fn inspect_args<'a>(run: &'a str, old: &'a str, prior: &'a str) -> [&'a str; 9] 
         "--json",
     ]
 }
-fn recover_args<'a>(run: &'a str, old: &'a str, prior: &'a str, hash: &'a str) -> [&'a str; 13] {
+pub(super) fn recover_args<'a>(
+    run: &'a str,
+    old: &'a str,
+    prior: &'a str,
+    hash: &'a str,
+) -> [&'a str; 13] {
     [
         "graph",
         "recover-absent-publication-cleanup",

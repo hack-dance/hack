@@ -47,6 +47,25 @@ fn fresh_restore_publication_requires_prior_retirement_and_exclusive_lock() {
     drop(second);
     fs::remove_dir_all(path).unwrap();
 }
+#[cfg(target_os = "macos")]
+#[test]
+fn retired_publication_refuses_incomplete_source_device_witness_before_binding() {
+    let (_fixture, candidate, run) = fixture();
+    let publisher = root(&candidate, &run);
+    let mut first = Publication::bind(&candidate, &run).unwrap();
+    first.finish().unwrap();
+    drop(first);
+    let graph_root = super::super::directory(&candidate, &run).unwrap();
+    crate::provider::state::private_directory(&graph_root).unwrap();
+    let pending = graph_root.join("source-device-rebind.pending");
+    fs::write(&pending, b"foreign incomplete witness").unwrap();
+
+    assert!(Publication::bind_retired(&candidate, &run).is_err());
+    assert!(!publisher.join("control.sock").exists());
+    assert!(!publisher.join("owner.json").exists());
+    assert_eq!(fs::read(&pending).unwrap(), b"foreign incomplete witness");
+    fs::remove_dir_all(publisher).unwrap();
+}
 #[test]
 fn publication_serializes_and_pins_exact_server_socket() {
     let (_fixture, candidate, run) = fixture();

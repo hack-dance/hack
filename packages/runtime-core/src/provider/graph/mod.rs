@@ -26,11 +26,17 @@ pub use absent_publication_cleanup::{
     inspect as inspect_absent_publication_cleanup, recover as recover_absent_publication_cleanup,
 };
 #[cfg(target_os = "macos")]
+mod source_device_rebind;
+#[cfg(target_os = "macos")]
 pub use dependency_slots::{
     inspect as dependency_reservations, recover_orphan as recover_dependency_reservation,
 };
 #[cfg(target_os = "macos")]
 pub use host_pin_recovery::{inspect as inspect_host_pin_recovery, recover as recover_host_pins};
+#[cfg(target_os = "macos")]
+pub use source_device_rebind::{
+    inspect as inspect_source_device_rebind, recover as recover_source_device_rebind,
+};
 mod initializer_cache;
 mod volume_subpaths;
 pub use dependency_hosts::dependency_address;
@@ -1446,6 +1452,14 @@ pub fn source_compatibility(
     }
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
+    #[cfg(target_os = "macos")]
+    let source_rebind = source_device_rebind::select(&engine, &receipt, &root)?;
+    #[cfg(target_os = "macos")]
+    let source_receipt = source_rebind
+        .as_ref()
+        .map_or(&receipt, |selected| selected.source_receipt());
+    #[cfg(not(target_os = "macos"))]
+    let source_receipt = &receipt;
     if !hex(plan_id, 64)
         || project::identity(plan)? != plan_id
         || !normalized.matches_plan(plan)
@@ -1463,7 +1477,7 @@ pub fn source_compatibility(
         .services
         .values()
         .any(|service| service.active && service.dependency_cache.is_some());
-    let revision = receipt
+    let revision = source_receipt
         .source
         .as_ref()
         .map(|binding| binding.revision.as_str());
@@ -1476,8 +1490,13 @@ pub fn source_compatibility(
     }
     if !unchanged_normalized_review(&receipt, plan_id, normalized) {
         let revision = revision.ok_or_else(refused)?;
-        if hostname_change::prepare(&engine, plan, &receipt, normalized)?.is_none() {
-            source::prepare_shared_changed(&engine, plan, &receipt, cached.then_some(revision))?;
+        if hostname_change::prepare(&engine, plan, source_receipt, normalized)?.is_none() {
+            source::prepare_shared_changed(
+                &engine,
+                plan,
+                source_receipt,
+                cached.then_some(revision),
+            )?;
         }
     }
     Ok(json!({

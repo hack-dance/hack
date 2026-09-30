@@ -163,10 +163,20 @@ pub fn restore_selection(candidate: &Candidate, run: &str) -> Result<Value, Cand
             return Err(refused());
         }
     }
+    #[cfg(target_os = "macos")]
+    let source_rebind = super::source_device_rebind::select(&engine, &receipt, &root)?;
+    #[cfg(target_os = "macos")]
+    let generation = super::restore::restore_generation_with_source_rebind(
+        &engine,
+        &receipt,
+        source_rebind.as_ref(),
+    )?;
+    #[cfg(not(target_os = "macos"))]
+    let generation = super::restore::restore_generation(&engine, &receipt)?;
     retired.verify()?;
     Ok(
         json!({"run":receipt.run,"owner":receipt.owner,"namespace":receipt.namespace,"plan":receipt.plan_id,
-        "generation":super::restore::restore_generation(&engine,&receipt)?,"normalized_input":receipt.normalized_input}),
+        "generation":generation,"normalized_input":receipt.normalized_input}),
     )
 }
 

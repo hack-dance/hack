@@ -25,6 +25,50 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let Some((action, args)) = args.split_first() else {
         return Err(invalid());
     };
+    if *action == "inspect-host-pin-recovery" {
+        let run = match *args {
+            ["--run-id", run] | ["--run-id", run, "--json"] => run,
+            _ => return Err(invalid()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            return graph::inspect_host_pin_recovery(candidate, run);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = run;
+            return Err(invalid());
+        }
+    }
+    if *action == "recover-host-pins" {
+        let (run, expected) = match *args {
+            [
+                "--run-id",
+                run,
+                "--expect-selection",
+                expected,
+                "--accept-legacy-device-rebind",
+            ]
+            | [
+                "--run-id",
+                run,
+                "--expect-selection",
+                expected,
+                "--accept-legacy-device-rebind",
+                "--json",
+            ] => (run, expected),
+            _ => return Err(invalid()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            return graph::recover_host_pins(candidate, run, expected);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (run, expected);
+            return Err(invalid());
+        }
+    }
     if ["run-selection", "run-service"].contains(action) {
         return one_off::command(candidate, action, args);
     }

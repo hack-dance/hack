@@ -47,6 +47,14 @@ fn validate_selection(
     receipt: &Receipt,
     selection: &Selection,
 ) -> Result<(), CandidateError> {
+    validate_selection_recovery(engine, receipt, selection, None)
+}
+fn validate_selection_recovery(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    selection: &Selection,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
+) -> Result<(), CandidateError> {
     let capacity = engine.guest().bridge_intent().map_or(0, |v| v.slots);
     if selection.version != 1
         || selection.owner != engine.guest().incarnation()
@@ -67,6 +75,7 @@ fn validate_selection(
         if predecessor_owner(
             receipt,
             selection.previous_boot.as_deref().ok_or_else(invalid)?,
+            host_pin,
         )? != *expected
         {
             return Err(invalid());
@@ -183,17 +192,39 @@ fn pinned_predecessor_eligible(receipt: &Receipt) -> bool {
     })
 }
 
-fn predecessor_owner(receipt: &Receipt, previous: &str) -> Result<String, CandidateError> {
+fn predecessor_owner(
+    receipt: &Receipt,
+    previous: &str,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
+) -> Result<String, CandidateError> {
     let startup = receipt
         .relay_startup
         .as_ref()
         .filter(|_| pinned_predecessor_eligible(receipt))
         .ok_or_else(invalid)?;
-    let pin = crate::provider::relay_owner::publication::PinnedEndpoint::load(
-        &startup.control_root,
-        super::super::host_relay::context(&receipt.owner, previous)?,
-    )?;
-    pin.verify_dead()?;
+    let context = super::super::host_relay::context(&receipt.owner, previous)?;
+    let pin = if let Some(selected) = host_pin {
+        if !selected.matches_graph(receipt) || selected.control_root() != startup.control_root {
+            return Err(invalid());
+        }
+        let pin = crate::provider::relay_owner::publication::PinnedEndpoint::load_legacy_recovery(
+            &startup.control_root,
+            context,
+            selected.rebind(),
+            selected.host_boot_micros(),
+        )?;
+        if &pin.legacy_summary() != selected.control() {
+            return Err(invalid());
+        }
+        pin
+    } else {
+        let pin = crate::provider::relay_owner::publication::PinnedEndpoint::load(
+            &startup.control_root,
+            context,
+        )?;
+        pin.verify_dead()?;
+        pin
+    };
     Ok(pin
         .fingerprint()
         .iter()
@@ -208,6 +239,7 @@ pub(crate) fn capture_previous_boot(
     engine: &Engine<'_>,
     receipt: &Receipt,
     previous: &str,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
 ) -> Result<Selection, CandidateError> {
     let store = strict_store(candidate, engine)?;
     let mut selection = Selection {
@@ -271,22 +303,23 @@ pub(crate) fn capture_previous_boot(
                 })
                 .collect();
         } else {
-            selection.predecessor_owner = Some(predecessor_owner(receipt, previous)?);
+            selection.predecessor_owner = Some(predecessor_owner(receipt, previous, host_pin)?);
         }
     }
-    validate_selection(engine, receipt, &selection)?;
+    validate_selection_recovery(engine, receipt, &selection, host_pin)?;
     Ok(selection)
 }
 
 /// Pending recovery may resume only the exact remaining reservations. Released
 /// slots may be absent; a replacement or new reservation is never adopted.
-pub(crate) fn verify_remaining(
+pub(crate) fn verify_remaining_recovery(
     candidate: &Candidate,
     engine: &Engine<'_>,
     receipt: &Receipt,
     selection: &Selection,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
 ) -> Result<(), CandidateError> {
-    validate_selection(engine, receipt, selection)?;
+    validate_selection_recovery(engine, receipt, selection, host_pin)?;
     if selection.previous_boot.is_none() {
         return Ok(());
     }
@@ -530,18 +563,27 @@ pub(crate) fn read(
     receipt: &Receipt,
     root: &std::path::Path,
 ) -> Result<Selection, CandidateError> {
+    read_recovery(engine, receipt, root, None)
+}
+pub(crate) fn read_recovery(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    root: &std::path::Path,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
+) -> Result<Selection, CandidateError> {
     let selection = state::read_bounded(&selection_path(root)?, 65536)?;
-    validate_selection(engine, receipt, &selection)?;
+    validate_selection_recovery(engine, receipt, &selection, host_pin)?;
     Ok(selection)
 }
 
-pub(crate) fn verify(
+pub(crate) fn verify_recovery(
     candidate: &Candidate,
     engine: &Engine<'_>,
     receipt: &Receipt,
     selection: &Selection,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
 ) -> Result<(), CandidateError> {
-    validate_selection(engine, receipt, selection)?;
+    validate_selection_recovery(engine, receipt, selection, host_pin)?;
     let store = strict_store(candidate, engine)?;
     if store.next_launch_serial < selection.serial
         || store.slots.values().any(|a| a.run == receipt.run)
@@ -555,6 +597,16 @@ pub(crate) fn verify(
     }
     engine.guest().verify()?;
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn verify(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    selection: &Selection,
+) -> Result<(), CandidateError> {
+    verify_recovery(candidate, engine, receipt, selection, None)
 }
 
 #[cfg(test)]

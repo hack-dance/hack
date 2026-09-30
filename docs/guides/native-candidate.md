@@ -165,6 +165,41 @@ graph receipts. Use ordinary recovery afterward. Historical shared-source graphs
 retain the prior identity and may require verified cleanup plus a new generation;
 successful metadata migration alone does not establish application recovery.
 
+After that explicit provider recovery and one audited VM boot, a retained graph
+from the immediately preceding guest boot can still carry old host device numbers
+in its publisher, relay-control, and dependency-socket receipts. Inspect and select
+one run's host-pin recovery separately:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph inspect-host-pin-recovery --run-id <run-id> --json
+./hack-native --candidate-root /absolute/private/candidate-home graph recover-host-pins --run-id <run-id> --expect-selection <selection_sha256> --accept-legacy-device-rebind --json
+./hack-native --candidate-root /absolute/private/candidate-home graph recover-cleanup --run-id <run-id> --expect-receipt <original_receipt_sha256> --json
+./hack-native --candidate-root /absolute/private/candidate-home graph retire-recovered-publisher --run-id <run-id> --expect-owner <owner> --json
+```
+
+The first command only inspects. The second publishes a private, exact-run
+witness before cleanup; it changes no graph, publisher, control, or dependency
+receipt. It requires the provider's repaired current disks/source, unchanged
+recorded inodes and raw receipts, dead owners whose recorded starts precede the
+current physical host boot, refused socket listeners, and the immediate guest
+boot transition. It also binds retained volume names and actual labels. Cleanup
+and retirement can use the witness only for those selected old pins; ordinary
+reads and later publisher generations remain strict. Missing or foreign pins,
+active listeners, changed resources, pending journals, or further guest boots
+refuse without adopting another run. A completed older cleanup journal is
+retained as history and does not itself block a later selected generation.
+
+Legacy receipts do not identify the original APFS volume. This explicit
+device-number rebind cannot prove pre-reboot volume continuity. Completing these
+commands retains the old run's data and proves cleanup of its dead generation;
+it does not migrate `graph.source.shared`, restore the application, establish
+route readiness, or claim overall v5 acceptance. Same-run source continuity
+requires a separate explicit witness-bound transition after cleanup and
+publisher retirement. If macOS removed the foreground or relay-control
+directory itself during reboot, this command refuses: the old pin receipts no
+longer exist, and absent pathnames cannot stand in for their recorded owner
+identities. That case requires a separate selected absence-recovery procedure.
+
 Compatibility is qualified for specific bundle hashes and state formats. The
 displayed version alone does not establish frontend/executor or downgrade
 compatibility. V4 and candidate homes remain separate; this procedure does not

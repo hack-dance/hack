@@ -19,6 +19,8 @@ pub mod environment;
 mod environment_probe_test;
 pub mod environment_recovery;
 pub mod graph;
+#[cfg(target_os = "macos")]
+mod host_pin;
 pub use engine::{EngineInfo, info as engine_info};
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 mod gateway_probe_test;

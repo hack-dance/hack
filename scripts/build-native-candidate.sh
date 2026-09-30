@@ -25,8 +25,8 @@ if [ "$(zig version)" != 0.15.2 ]; then
   exit 69
 fi
 command -v python3 >/dev/null
-if [ "$(bun --version)" != 1.3.9 ]; then
-  echo "Pinned Bun 1.3.9 is required" >&2
+if [ "$(bun --version)" != 1.4.2 ]; then
+  echo "Pinned Bun 1.4.2 is required" >&2
   exit 69
 fi
 stdlib=$(rustc --print target-libdir --target aarch64-unknown-linux-musl)

@@ -6,7 +6,7 @@ projects, or install DNS or trust automatically. Its graph commands support a
 bounded subset;
 this bundle is not application parity or release qualification.
 
-Build with the repository's pinned Bun 1.3.9, Rust 1.97.1 and Zig 0.15.2 toolchain, Python 3,
+Build with the repository's pinned Bun 1.4.2, Rust 1.97.1 and Zig 0.15.2 toolchain, Python 3,
 and the Rust `aarch64-unknown-linux-musl` standard library already installed. The
 build refuses missing prerequisites; it does not install toolchains:
 

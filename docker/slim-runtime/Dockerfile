@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM oven/bun:1.3.9 AS hack-build
+FROM oven/bun:1.4.2 AS hack-build
 
 WORKDIR /src
 COPY package.json bun.lock bunfig.toml tsconfig.json index.ts ./
@@ -10,7 +10,7 @@ COPY src ./src
 RUN bun install --frozen-lockfile
 RUN bun build index.ts --compile --outfile /out/hack
 
-FROM oven/bun:1.3.9
+FROM oven/bun:1.4.2
 
 ARG HACK_VERSION=dev
 ARG BUILD_DATE=unknown

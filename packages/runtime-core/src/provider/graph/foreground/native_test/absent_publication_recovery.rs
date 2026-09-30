@@ -4,7 +4,10 @@
 use super::dependency_rebind::{checked_cli, exec, snapshot};
 use super::*;
 use crate::provider::{lifecycle, state::Owner};
-use std::os::unix::fs::MetadataExt;
+use std::{
+    io::Write,
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+};
 
 fn ready(owner: &mut Process, run: &str, deadline: Instant) {
     loop {
@@ -306,6 +309,8 @@ fn explicit_absent_publication_cleanup_retains_selected_volume_and_sibling() {
     .unwrap();
     let graph_root = graph::directory(&candidate, &runs[0]).unwrap();
     let raw_graph = fs::read(graph_root.join("state.json")).unwrap();
+    let provider_owner_path = candidate.state_root.join("run/smolvm/owner.json");
+    let raw_provider_owner = fs::read(&provider_owner_path).unwrap();
     let publisher_root = transport::root(&candidate, &runs[0]).unwrap();
     let control_root = original
         .relay_startup
@@ -318,9 +323,61 @@ fn explicit_absent_publication_cleanup_retains_selected_volume_and_sibling() {
     fs::remove_dir_all(&control_root).unwrap();
 
     let old = old_path.to_str().unwrap();
-    let prior = inspection_path.to_str().unwrap();
+    let original_inspection = inspection_path.to_str().unwrap();
+    let original_selection = checked_cli(
+        "inspect-private-original-inspection",
+        &binary,
+        &candidate,
+        &inspect_args(&runs[0], old, original_inspection),
+        deadline,
+    );
+    let original_selection_hash = original_selection["selection_sha256"].as_str().unwrap();
+    assert_eq!(original_selection_hash.len(), 64);
+    let inspection_bytes = fs::read(&inspection_path).unwrap();
+    fs::set_permissions(&inspection_path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        fs::symlink_metadata(&inspection_path).unwrap().mode() & 0o7777,
+        0o644
+    );
+    refused_cli(
+        &binary,
+        &candidate,
+        &inspect_args(&runs[0], old, original_inspection),
+        "graph_absent_publication_recovery",
+        deadline,
+    );
+    assert!(
+        !publisher_root.exists(),
+        "read-only refusal did not reserve a publisher"
+    );
+    assert_eq!(fs::read(&provider_owner_path).unwrap(), raw_provider_owner);
+    assert_eq!(fs::read(graph_root.join("state.json")).unwrap(), raw_graph);
+
+    // A new private path retains the exact inspected bytes, while its path is
+    // deliberately part of the fresh selection hash. The historical 0644
+    // receipt remains untouched after the copy.
+    let private_inspection = private.0.join("private-inspection-copy.json");
+    let mut copy = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&private_inspection)
+        .unwrap();
+    copy.write_all(&inspection_bytes).unwrap();
+    copy.sync_all().unwrap();
+    fs::File::open(&private.0).unwrap().sync_all().unwrap();
+    assert_eq!(fs::read(&private_inspection).unwrap(), inspection_bytes);
+    assert_eq!(
+        fs::symlink_metadata(&private_inspection).unwrap().mode() & 0o7777,
+        0o600
+    );
+    assert_eq!(
+        fs::symlink_metadata(&inspection_path).unwrap().mode() & 0o7777,
+        0o644
+    );
+    let prior = private_inspection.to_str().unwrap();
     let initial = checked_cli(
-        "inspect-absent-publications",
+        "inspect-exact-private-inspection-copy",
         &binary,
         &candidate,
         &inspect_args(&runs[0], old, prior),
@@ -328,7 +385,21 @@ fn explicit_absent_publication_cleanup_retains_selected_volume_and_sibling() {
     );
     let selection = initial["selection_sha256"].as_str().unwrap();
     assert_eq!(selection.len(), 64);
+    assert_ne!(
+        selection, original_selection_hash,
+        "selection binds the new canonical path"
+    );
+    assert_eq!(fs::read(&provider_owner_path).unwrap(), raw_provider_owner);
+    assert_eq!(fs::read(graph_root.join("state.json")).unwrap(), raw_graph);
     let intent_path = graph_root.join("absent-publication-cleanup.json");
+    assert!(!intent_path.exists());
+    refused_cli(
+        &binary,
+        &candidate,
+        &recover_args(&runs[0], old, prior, original_selection_hash),
+        "graph_absent_publication_recovery",
+        deadline,
+    );
     refused_cli(
         &binary,
         &candidate,
@@ -360,7 +431,7 @@ fn explicit_absent_publication_cleanup_retains_selected_volume_and_sibling() {
         assert!(!intent_path.exists());
     }
     {
-        let _missing = Moved::new(inspection_path.clone());
+        let _missing = Moved::new(private_inspection.clone());
         refused_cli(
             &binary,
             &candidate,

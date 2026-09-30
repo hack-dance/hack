@@ -32,6 +32,7 @@ import concurrent.futures
 import ctypes
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -1346,6 +1347,19 @@ def worktree_plan(sizes, repeats, parallel, profile, host_memory):
     return plan
 
 
+def positive_seconds(text):
+    """An argparse type for a duration: a positive, finite number of seconds. Checked while the
+    arguments are parsed, before any host observation or effect, so a negative, zero, NaN or
+    infinite bound can never start a run."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(f"{text!r} must be a positive, finite number of seconds")
+    return value
+
+
 def load_samples(path):
     """(context, records, idle-VM identities at the end) from a raw samples file; a trailing
     summary line is ignored."""
@@ -1387,11 +1401,11 @@ def main():
                         help="seconds to measure idle background CPU first; its maximum becomes the admission ceiling")
     parser.add_argument("--idle-vm-pid", type=int, action="append", default=[],
                         help="a VM left running beside the run (repeatable); counted as background and reported")
-    parser.add_argument("--budget", type=float, default=0.0,
-                        help="seconds after which no further worktree cohort starts (0: no budget)")
-    parser.add_argument("--cohort-deadline", type=float,
+    parser.add_argument("--budget", type=positive_seconds,
+                        help="seconds after which no further worktree cohort starts (default: no budget)")
+    parser.add_argument("--cohort-deadline", type=positive_seconds,
                         help="seconds a worktree cohort's work may take; later commands are refused (required to run)")
-    parser.add_argument("--cleanup-budget", type=float,
+    parser.add_argument("--cleanup-budget", type=positive_seconds,
                         help="seconds a worktree cohort's disposal may take after its work; whatever it cannot "
                              "confirm disposed is kept (required to run)")
     parser.add_argument("--output", help="JSON lines of raw samples (default <root>/samples-<time>.jsonl)")
@@ -1428,8 +1442,6 @@ def main():
         plan["worktrees"] = worktree_plan(worktree_sizes, args.worktree_repeats, args.worktree_parallel,
                                           args.profile, host_memory)
         bounds = (args.cohort_deadline, args.cleanup_budget)
-        if any(bound is not None and bound <= 0 for bound in bounds):
-            parser.error("--cohort-deadline and --cleanup-budget must be positive")
         # Runtime and Git commands end within these; bounded host observations and local file
         # removal can run briefly past them (docs/performance.md).
         plan["worktrees"].update(cohort_deadline_s=args.cohort_deadline, cleanup_budget_s=args.cleanup_budget,
@@ -1496,7 +1508,7 @@ def main():
                         keep(cohort_trial(args, size, repeat, lane))
         if "concurrent" in modes:
             keep(concurrent_trial(args, args.concurrent))
-        stopped = run_worktrees(args, worktree_sizes, keep, started + args.budget if args.budget else None,
+        stopped = run_worktrees(args, worktree_sizes, keep, started + args.budget if args.budget is not None else None,
                                 distress=distress) if worktree_sizes else None
         if stopped:
             print(json.dumps({"stopped": stopped}), flush=True)

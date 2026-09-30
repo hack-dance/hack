@@ -938,10 +938,25 @@ class WorktreePlan(unittest.TestCase):
         for extra, message in (((), "needs --cohort-deadline and --cleanup-budget"),
                                (("--cohort-deadline", "1800"), "needs --cohort-deadline and --cleanup-budget"),
                                (("--cleanup-budget", "600"), "needs --cohort-deadline and --cleanup-budget"),
-                               (("--cohort-deadline", "0", "--cleanup-budget", "600"), "must be positive")):
+                               (("--cohort-deadline", "0", "--cleanup-budget", "600"), "must be a positive, finite")):
             with self.assertRaises(SystemExit), mock.patch("sys.stderr", new_callable=io.StringIO) as error:
                 self.preview("--run", *extra)
             self.assertIn(message, error.getvalue())
+
+    def test_every_duration_must_be_positive_and_finite_before_any_host_observation(self):
+        valid = {"--budget": "1500", "--cohort-deadline": "600", "--cleanup-budget": "300"}
+        for flag in valid:
+            for value in ("-1", "0", "nan", "inf", "-inf", "soon"):
+                argv = [f"{name}={given}" for name, given in {**valid, flag: value}.items()]
+                with self.subTest(flag=flag, value=value):
+                    with mock.patch.object(benchmark, "observed_output", return_value=None) as observed, \
+                            mock.patch("sys.stderr", new_callable=io.StringIO) as error, self.assertRaises(SystemExit):
+                        self.preview("--run", *argv)
+                    self.assertIn(f"argument {flag}: {value!r}", error.getvalue())
+                    observed.assert_not_called()
+        plan = self.preview(*(f"{name}={given}" for name, given in valid.items()))
+        self.assertEqual((plan["budget_s"], plan["worktrees"]["cohort_bound_s"]), (1500.0, 900.0))
+        self.assertIsNone(self.preview()["budget_s"])
 
     def test_worktree_mode_requires_the_development_profile(self):
         with self.assertRaises(SystemExit), mock.patch("sys.stderr", new_callable=io.StringIO):

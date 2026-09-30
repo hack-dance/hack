@@ -640,7 +640,10 @@ observations in progress.
   fixture are kept, and the run stops as after any cleanup failure. Each record carries both
   bounds, whether each expired, and how long disposal took. Runtime and Git commands end within
   the deadline plus the budget; a host observation already in progress (at most 30 s each) and
-  local file removal can run briefly past either.
+  local file removal can run briefly past either. `--budget`, `--cohort-deadline` and
+  `--cleanup-budget` must each be a positive, finite number of seconds: any other value is refused
+  while the arguments are parsed, before any host observation. Omitting `--budget` means no run
+  budget.
 
 `--summarize SAMPLES`
 recomputes the summary from a retained raw file without running anything. Cleanup stops each

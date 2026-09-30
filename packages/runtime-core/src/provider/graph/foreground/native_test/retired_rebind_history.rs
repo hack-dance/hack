@@ -2,7 +2,7 @@
 //! A pinned pre-archive binary creates the previously admitted state; this
 //! source resumes its exact completed proof without fabricating a journal.
 use super::absent_publication_recovery::{inspect_args, ready, recover_args};
-use super::dependency_rebind::{checked_cli, exec, snapshot};
+use super::dependency_rebind::{checked_cli, snapshot};
 use super::*;
 use crate::provider::{graph::startup::native_test::RestartableBackend, lifecycle, state::Owner};
 use sha2::{Digest, Sha256};
@@ -43,6 +43,51 @@ fn selection(
     .unwrap();
 }
 
+fn marker(
+    binary: &Path,
+    candidate: &Candidate,
+    run: &str,
+    value: &str,
+    write: bool,
+    deadline: Instant,
+) {
+    let value = serde_json::to_string(value).unwrap();
+    let script = if write {
+        format!("await Bun.write('/data/retired-rebind-marker',{value});")
+    } else {
+        format!(
+            "if((await Bun.file('/data/retired-rebind-marker').text())!=={value})process.exit(91);"
+        )
+    };
+    let mut process = Process::start(
+        binary,
+        candidate,
+        &[
+            "graph",
+            "exec",
+            "--run-id",
+            run,
+            "--service",
+            "web",
+            "--timeout-seconds",
+            "12",
+            "--json",
+            "--",
+            "/usr/local/bin/bun",
+            "-e",
+            &script,
+        ],
+        None,
+    );
+    assert!(
+        process.wait(deadline).success(),
+        "owned marker exec refused"
+    );
+    let result: Value = serde_json::from_slice(&process.out).unwrap();
+    assert_eq!(result["exit_code"], 0, "owned marker check failed");
+    assert_eq!(result["truncated"], false);
+}
+
 #[test]
 #[ignore = "Owned capacity-two VM, pinned prior/current binaries, image and relay artifact, external 300s watchdog required"]
 fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
@@ -75,13 +120,10 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         &json!({
             "services":{
                 "web":{"image":image,"read_only":true,"init":true,"user":"0:0",
-                    "entrypoint":["/bin/sh","-ec", "printf ready > /data/index.html; exec /bin/busybox httpd -f -p 3000 -h /data"],
+                    "entrypoint":["/usr/local/bin/bun","-e", "Bun.serve({hostname:'0.0.0.0',port:3000,fetch(){return new Response('ready')}})"],
                     "command":[],"volumes":["data:/data"],"networks":["private"],
                     "healthcheck":{"x-hack-http":{"port":3000,"path":"/","interval_ms":100,
-                        "timeout_ms":500,"retries":20,"start_period_ms":0}}},
-                "init":{"image":image,"read_only":true,"network_mode":"none","init":true,
-                    "user":"0:0","entrypoint":["/bin/hack-graph-startup-app","complete"],
-                    "command":[]}
+                        "timeout_ms":500,"retries":20,"start_period_ms":0}}}
             },"networks":{"private":{"internal":true}},"volumes":{"data":{}}
         }),
     )
@@ -90,9 +132,9 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         &sibling.0.join("compose.yaml"),
         &json!({
             "services":{"web":{"image":image,"read_only":true,"network_mode":"none",
-                "init":true,"user":"0:0","entrypoint":["/bin/sleep","300"],"command":[],
+                "init":true,"user":"0:0","entrypoint":["/usr/local/bin/bun","-e","setInterval(()=>{},1000)"],"command":[],
                 "volumes":["data:/data"],"healthcheck":{"test":["CMD",
-                    "/bin/hack-graph-startup-app","complete"],"interval":"200ms",
+                    "/usr/local/bin/bun","-e","process.exit(0)"],"interval":"200ms",
                     "timeout":"2s","retries":10,"start_period":"500ms"}}},
             "volumes":{"data":{}}
         }),
@@ -189,8 +231,6 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
             run.as_str(),
             "--ready",
             "web=healthy",
-            "--ready",
-            "init=completed",
             "--timeout-seconds",
             "90",
             "--dependencies",
@@ -218,9 +258,13 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         done: false,
     };
     ready(&mut owner, &run, deadline);
-    assert_eq!(
-        exec(&legacy, &candidate, &run, "web", "write-data", deadline)["exit_code"],
-        0
+    marker(
+        &legacy,
+        &candidate,
+        &run,
+        "selected-marker-v1",
+        true,
+        deadline,
     );
     let before = snapshot(&candidate, &run, deadline).receipt;
     assert!(
@@ -298,16 +342,13 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         done: false,
     };
     ready(&mut sibling_owner, &sibling_run, deadline);
-    assert_eq!(
-        exec(
-            &binary,
-            &candidate,
-            &sibling_run,
-            "web",
-            "write-data",
-            deadline
-        )["exit_code"],
-        0
+    marker(
+        &binary,
+        &candidate,
+        &sibling_run,
+        "sibling-marker-v1",
+        true,
+        deadline,
     );
     let sibling_before = snapshot(&candidate, &sibling_run, deadline).receipt;
     let current_owner = Owner::load(&candidate).unwrap();
@@ -560,20 +601,21 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         true
     );
     assert!(!journal_path.exists());
-    assert_eq!(
-        exec(&binary, &candidate, &run, "web", "read-data", deadline)["exit_code"],
-        0
+    marker(
+        &binary,
+        &candidate,
+        &run,
+        "selected-marker-v1",
+        false,
+        deadline,
     );
-    assert_eq!(
-        exec(
-            &binary,
-            &candidate,
-            &sibling_run,
-            "web",
-            "read-data",
-            deadline
-        )["exit_code"],
-        0
+    marker(
+        &binary,
+        &candidate,
+        &sibling_run,
+        "sibling-marker-v1",
+        false,
+        deadline,
     );
     assert_eq!(
         serde_json::to_value(

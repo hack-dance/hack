@@ -889,8 +889,8 @@ uses an isolated capacity-two candidate, a pinned pre-archive native executable
 `retire-acknowledged-publisher`. Supply `HACK_LOCAL_TEST_ROOT`,
 `HACK_LOCAL_TEST_BINARY`, `HACK_LOCAL_TEST_LEGACY_BINARY`,
 `HACK_LOCAL_TEST_LEGACY_SHA256`, `HACK_LOCAL_TEST_IMAGE`,
-`HACK_GRAPH_RELAY_ARTIFACT` and `HACK_GRAPH_RELAY_SHA256`. The image must contain
-`/bin/busybox` with `httpd` and `/bin/hack-graph-startup-app`. Precompile the
+`HACK_GRAPH_RELAY_ARTIFACT` and `HACK_GRAPH_RELAY_SHA256`. The pinned image must
+contain `/usr/local/bin/bun` for the HTTP server and retained marker. Precompile the
 test, then run it under an external 300-second watchdog with one test thread.
 It uses normal refresh, recovery, cleanup and restore paths, plus an injected
 archive interruption at the owned verifier boundary. A passing test proves

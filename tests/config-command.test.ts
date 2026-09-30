@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -30,9 +31,9 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = originalHome;
-  process.env.HACK_LOGGER = originalLogger;
-  process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
+  restoreEnv("HOME", originalHome);
+  restoreEnv("HACK_LOGGER", originalLogger);
+  restoreEnv("HACK_GLOBAL_CONFIG_PATH", originalGlobalConfigPath);
 });
 
 test("config set --global updates extension enabled using bracket path", async () => {

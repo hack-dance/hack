@@ -7,6 +7,7 @@ import {
   resolveDependencyCacheBootstrapServices,
   resolveDependencyCacheOverride,
 } from "../src/lib/dependency-cache.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const tempDirs: string[] = [];
 
@@ -155,7 +156,7 @@ test("default platform is explicit and never inferred from host architecture", a
   const project = await createProject();
   const original = process.env.DOCKER_DEFAULT_PLATFORM;
   try {
-    process.env.DOCKER_DEFAULT_PLATFORM = undefined;
+    Reflect.deleteProperty(process.env, "DOCKER_DEFAULT_PLATFORM");
     expect(
       (await changeRuntime(project, { image: "oven/bun" }))
         .sharingDisabledReason
@@ -175,7 +176,7 @@ test("default platform is explicit and never inferred from host architecture", a
       ).fingerprint
     ).toBe(amd.fingerprint);
   } finally {
-    process.env.DOCKER_DEFAULT_PLATFORM = original;
+    restoreEnv("DOCKER_DEFAULT_PLATFORM", original);
   }
 });
 

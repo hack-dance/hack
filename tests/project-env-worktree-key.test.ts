@@ -34,7 +34,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
-  process.env.HACK_ENV_SECRET_KEY = undefined;
+  Reflect.deleteProperty(process.env, "HACK_ENV_SECRET_KEY");
 });
 
 async function runGit(args: readonly string[], cwd: string): Promise<string> {

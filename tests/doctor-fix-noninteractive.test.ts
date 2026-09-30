@@ -16,6 +16,7 @@ import {
   GLOBAL_HACK_DIR_NAME,
 } from "../src/constants.ts";
 import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 /**
@@ -138,7 +139,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = originalHome;
+  restoreEnv("HOME", originalHome);
   if (originalNoInteractive === undefined) {
     Reflect.deleteProperty(process.env, "HACK_NO_INTERACTIVE");
   } else {
@@ -149,7 +150,7 @@ afterEach(async () => {
   } else {
     process.env.HACK_MUTAGEN_PATH = originalMutagenPath;
   }
-  process.env.HACK_LOGGER = originalLogger;
+  restoreEnv("HACK_LOGGER", originalLogger);
 });
 
 afterAll(() => {

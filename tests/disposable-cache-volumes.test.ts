@@ -13,6 +13,7 @@ import type {
   RuntimeProject,
 } from "../src/lib/runtime-projects.ts";
 import { serializeRuntimeProject } from "../src/lib/runtime-projects.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let originalPath: string | undefined;
@@ -23,7 +24,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  process.env.PATH = originalPath;
+  restoreEnv("PATH", originalPath);
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;

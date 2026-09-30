@@ -468,10 +468,7 @@ fn run() -> Result<(), CandidateError> {
             };
             let candidate = discover_candidate(&requested)?;
             if *action == "probe" {
-                print_json(&provider::admission::probe_for(
-                    &candidate.checkout,
-                    profile,
-                )?)?;
+                print_json(&provider::probe_with_profile(&candidate, profile)?)?;
             } else {
                 print_json(&provider::up_with_profile(&candidate, profile)?)?;
             }

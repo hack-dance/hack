@@ -947,3 +947,14 @@ host/guest boot, project share, stopped graph scope and witness bytes are rechec
 before each effect. Mixed changes refuse. The journal pins the current identities;
 the legacy receipt stays byte-identical. This is explicit legacy migration with
 **original host-volume continuity unproven**, not an automatic identity relaxation.
+
+Development admission distinguishes fresh capacity from a verified running pool.
+A fresh VM retains the 58 GiB disk floor (32 GiB storage, 10 GiB overlay and
+16 GiB host reserve). Reusing the exact owned running pool requires the 16 GiB
+host reserve, with memory-pressure, memory-headroom and thermal checks unchanged.
+`runtime probe --profile development --json` reports `disk_budget_basis`. Reuse
+requires matching profile, creation receipt, native process/PID-file identity,
+machine name and both disks' current identities and declared sizes. Every sample
+and the acquired startup lease recheck the selected owner; changed ownership
+refuses, and a reserve-qualified request cannot enter VM create or boot. Stopped,
+missing or unproved capacity retains fresh-allocation requirements or refuses.

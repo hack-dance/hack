@@ -97,10 +97,10 @@ mod socket_requests;
 mod state;
 pub use lifecycle::{
     PreparedBaseBuilt, build_prepared_base, check_project_share, down, prepared_base_status,
-    recover, remove_prepared_base, status, up, up_with_bridge, up_with_capabilities,
-    up_with_minimum_bridges, up_with_network_sockets, up_with_prepared_base, up_with_profile,
-    up_with_project_share, up_with_retained_project_share, up_with_socket_requests,
-    up_with_sockets, verify_prepared_base,
+    probe_with_profile, recover, remove_prepared_base, status, up, up_with_bridge,
+    up_with_capabilities, up_with_minimum_bridges, up_with_network_sockets, up_with_prepared_base,
+    up_with_profile, up_with_project_share, up_with_retained_project_share,
+    up_with_socket_requests, up_with_sockets, verify_prepared_base,
 };
 pub use socket_requests::SocketRequests;
 pub use source_transfer::{

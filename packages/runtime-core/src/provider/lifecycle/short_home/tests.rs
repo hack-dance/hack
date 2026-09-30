@@ -263,3 +263,51 @@ fn pending_owner_update_is_preserved_and_refuses_alias_repair() {
     pool.unchanged(&before);
     assert_eq!(fs::read(&pending).unwrap(), b"interrupted update");
 }
+
+#[test]
+fn vm_lock_releases_on_success_and_error_even_with_an_inherited_descriptor() {
+    for fail in [false, true] {
+        let pool = Pool::new();
+        let listener =
+            fail.then(|| UnixListener::bind(pool.owner.data_dir().join("agent.sock")).unwrap());
+        let before = pool.receipt();
+        let guard = lock_absent_disks(&pool.candidate, &pool.owner).unwrap();
+        // A dup shares the open-file description, exactly as an inherited fork FD does.
+        let inherited = guard.try_clone().unwrap();
+        let independent = fs::File::open(pool.data().join("vm.lock")).unwrap();
+        assert_ne!(
+            unsafe { libc::flock(independent.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let mut owner = pool.owner.clone();
+        let result = finish_absent_locked(
+            &pool.candidate,
+            &mut owner,
+            "recovered-unclean",
+            false,
+            &guard,
+        );
+        if fail {
+            assert_eq!(result.unwrap_err().code, "stop_uncertain");
+            assert_eq!(pool.receipt(), before);
+        } else {
+            result.unwrap();
+            assert_eq!(
+                Owner::load(&pool.candidate).unwrap().phase,
+                "recovered-unclean"
+            );
+        }
+        drop(guard);
+        assert!(inherited.metadata().is_ok());
+        assert_eq!(
+            unsafe { libc::flock(independent.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        assert_eq!(
+            unsafe { libc::flock(independent.as_raw_fd(), libc::LOCK_UN) },
+            0
+        );
+        drop(inherited);
+        drop(listener);
+    }
+}

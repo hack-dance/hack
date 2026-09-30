@@ -20,6 +20,19 @@ struct Intent {
     listeners_retired: bool,
     complete_sha256: Option<String>,
 }
+/// Dispatch only an exact completed recovery generation; history is inert.
+pub(super) fn current_completion(
+    root: &std::path::Path,
+    receipt: &Receipt,
+) -> Result<bool, CandidateError> {
+    if !exists(&root.join(FILE))? {
+        return Ok(false);
+    }
+    let intent: Intent = state::read(&root.join(FILE))?;
+    let complete = digest(receipt)?;
+    Ok(intent.complete_sha256.as_deref() == Some(complete.as_str()))
+}
+
 fn refused() -> CandidateError {
     error(
         "graph_live_owner_recovery",
@@ -494,6 +507,26 @@ mod tests {
     fn receipt() -> Receipt {
         serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"ready-observed","readiness":{},"resources":{},"relay_startup":{"control_only":true,"guest_root":null,"control_root":"/private/owned","artifact":"e".repeat(64),"services":{}}})).unwrap()
     }
+    #[test]
+    fn current_recovery_dispatch_does_not_select_historical_completion() {
+        let fixture = super::super::tests::Fixture::new();
+        let mut receipt = receipt();
+        receipt.phase = "stopped-data-retained".into();
+        assert!(!current_completion(&fixture.0, &receipt).unwrap());
+        let mut proof = completed(receipt.clone());
+        proof.complete_sha256 = Some(digest(&receipt).unwrap());
+        let path = fixture.0.join(FILE);
+        state::write(&path, &proof).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(current_completion(&fixture.0, &receipt).unwrap());
+        receipt.owner = "9".repeat(32);
+        assert!(!current_completion(&fixture.0, &receipt).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::write(&path, b"unconfirmed").unwrap();
+        assert!(current_completion(&fixture.0, &receipt).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"unconfirmed");
+    }
+
     #[test]
     fn only_fully_ready_receipts_are_admitted() {
         let mut value = receipt();

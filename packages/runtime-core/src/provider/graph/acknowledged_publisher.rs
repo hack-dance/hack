@@ -45,9 +45,25 @@ fn no_pending(root: &Path) -> Result<(), CandidateError> {
     Ok(())
 }
 
+/// Cleanup proof is independent of the publisher selected for archival.
+struct CleanupSelection<'a> {
+    run: &'a str,
+    owner: &'a str,
+    receipt_sha256: &'a str,
+}
+impl<'a> From<&AcknowledgedPublisherSelection<'a>> for CleanupSelection<'a> {
+    fn from(selected: &AcknowledgedPublisherSelection<'a>) -> Self {
+        Self {
+            run: selected.run,
+            owner: selected.owner,
+            receipt_sha256: selected.receipt_sha256,
+        }
+    }
+}
+
 fn eligible(
     receipt: &Receipt,
-    selected: &AcknowledgedPublisherSelection<'_>,
+    selected: &CleanupSelection<'_>,
     boot: &str,
 ) -> Result<(), CandidateError> {
     let marker = receipt.relay_cleanup.as_ref().ok_or_else(refused)?;
@@ -100,7 +116,7 @@ fn verify_cleanup(
     engine: &Engine<'_>,
     receipt: &Receipt,
     root: &Path,
-    selected: &AcknowledgedPublisherSelection<'_>,
+    selected: &CleanupSelection<'_>,
 ) -> Result<(), CandidateError> {
     eligible(receipt, selected, engine.guest().boot_id())?;
     exact_receipt(root, selected.receipt_sha256)?;
@@ -121,6 +137,57 @@ fn verify_cleanup(
     engine.guest().verify()
 }
 
+/// Normal foreground shutdown removes its publication after acknowledged
+/// cleanup. Confirm that current proof under the publisher lock; historical
+/// recovery sidecars and archived publisher journals cannot select this path.
+/// A selected acknowledgement never falls back to historical recovery on error.
+pub(super) fn confirm_retired(
+    candidate: &Candidate,
+    run: &str,
+    owner: &str,
+) -> Result<Option<Value>, CandidateError> {
+    let engine = Engine::connect_cleanup_wait(candidate)?;
+    let (receipt, root) = load(candidate, &engine, run)?;
+    if !uses_acknowledgement(&receipt, engine.guest().boot_id())?
+        || super::live_owner_cleanup::current_completion(&root, &receipt)?
+        || super::dead_owner_cleanup::current_completion(&root, &receipt)?
+    {
+        return Ok(None);
+    }
+    // Selection grants no effects. Release the Engine lease before acquiring
+    // the publication lock, matching serve-restore's lock order. The exact
+    // selected receipt and current boot are validated again under both locks.
+    drop(engine);
+    let retired = foreground::transport::Retired::acquire(candidate, run)?.ok_or_else(refused)?;
+    let engine = Engine::connect_cleanup_wait(candidate)?;
+    let bytes = serde_json::to_vec_pretty(&receipt).map_err(|_| refused())?;
+    let receipt_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let selected = CleanupSelection {
+        run,
+        owner,
+        receipt_sha256: &receipt_sha256,
+    };
+    verify_cleanup(candidate, &engine, &receipt, &root, &selected)?;
+    retired.verify()?;
+    exact_receipt(&root, &receipt_sha256)?;
+    engine.guest().verify()?;
+    Ok(Some(
+        json!({"run":run,"publisher_retired":true,"data_retained":true,
+        "same_boot":true,"acknowledged_cleanup":true}),
+    ))
+}
+
+fn uses_acknowledgement(receipt: &Receipt, boot: &str) -> Result<bool, CandidateError> {
+    let context = host_relay::context(&receipt.owner, boot)?;
+    // Current-boot enrollment cannot borrow historical recovery on failure.
+    // A prior-boot marker may use only the existing exact completed recovery
+    // proof, including its already-retired publisher, on a later boot.
+    Ok(receipt
+        .relay_cleanup
+        .as_ref()
+        .is_some_and(|marker| marker.boot == context.boot))
+}
+
 /// Retire only a selected dead publication after independent current-boot ACK
 /// and guest absence checks. The existing immutable publisher journal preserves
 /// both original files and resumes either rename interruption. No graph receipt,
@@ -136,16 +203,22 @@ pub fn retire(
     {
         return Err(refused());
     }
-    // Match the existing explicit recovery lock order; both locks stay held
-    // through observation, journal publication and each retirement rename.
-    let engine = Engine::connect_cleanup_wait(candidate)?;
+    // Match foreground restore's publication-before-Engine lock order; both
+    // locks stay held through observation and each retirement rename.
     let publication = foreground::transport::root(candidate, selected.run)?;
     let lock = state::Lock::acquire_existing(&publication)?;
     host_pin_recovery::exact_lock_path(&publication, &lock)?;
+    let engine = Engine::connect_cleanup_wait(candidate)?;
     let (receipt, root) = load(candidate, &engine, selected.run)?;
     let verify = || {
         host_pin_recovery::exact_lock_path(&publication, &lock)?;
-        verify_cleanup(candidate, &engine, &receipt, &root, &selected)
+        verify_cleanup(
+            candidate,
+            &engine,
+            &receipt,
+            &root,
+            &CleanupSelection::from(&selected),
+        )
     };
     verify()?;
     // This helper checks the selected publisher bytes, dead process, refused
@@ -182,9 +255,9 @@ pub fn release_dependencies(
     {
         return Err(refused());
     }
-    let engine = Engine::connect_cleanup_wait(candidate)?;
     let retired =
         foreground::transport::Retired::acquire(candidate, selected.run)?.ok_or_else(refused)?;
+    let engine = Engine::connect_cleanup_wait(candidate)?;
     let (receipt, root) = load(candidate, &engine, selected.run)?;
     let verify = || {
         retired.verify_recovery(
@@ -193,7 +266,13 @@ pub fn release_dependencies(
             selected.publisher_sha256,
             selected.receipt_sha256,
         )?;
-        verify_cleanup(candidate, &engine, &receipt, &root, &selected)
+        verify_cleanup(
+            candidate,
+            &engine,
+            &receipt,
+            &root,
+            &CleanupSelection::from(&selected),
+        )
     };
     verify()?;
     let process = retired.publisher_process(
@@ -230,13 +309,52 @@ mod tests {
     }
 
     #[test]
-    fn acknowledgement_eligibility_refuses_other_generations_and_partial_cleanup() {
-        let value = receipt();
-        let selected = AcknowledgedPublisherSelection {
+    fn current_acknowledgement_is_selected_even_when_invalid_and_never_uses_old_recovery() {
+        let mut value = receipt();
+        assert!(uses_acknowledgement(&value, "fixture-boot").unwrap());
+        assert!(!uses_acknowledgement(&value, "later-boot").unwrap());
+        // Selection is deliberately separate from validation: a stale boot,
+        // incomplete graph or malformed confirmed marker must refuse in this
+        // path, not borrow authority from historical cleanup sidecars.
+        value.phase = "cleanup-intent".into();
+        value.relay_cleanup.as_mut().unwrap().version = 0;
+        assert!(uses_acknowledgement(&value, "fixture-boot").unwrap());
+        let selected = CleanupSelection {
             run: &value.run,
             owner: &value.owner,
             receipt_sha256: &"1".repeat(64),
-            publisher_sha256: &"2".repeat(64),
+        };
+        assert!(eligible(&value, &selected, "fixture-boot").is_err());
+        for phase in [
+            cleanup_enrollment::Phase::Pending,
+            cleanup_enrollment::Phase::Dormant,
+        ] {
+            value.relay_cleanup.as_mut().unwrap().phase = phase;
+            assert!(uses_acknowledgement(&value, "fixture-boot").unwrap());
+            assert!(
+                eligible(
+                    &value,
+                    &CleanupSelection {
+                        run: &value.run,
+                        owner: &value.owner,
+                        receipt_sha256: &"1".repeat(64)
+                    },
+                    "fixture-boot"
+                )
+                .is_err()
+            );
+        }
+        value.relay_cleanup = None;
+        assert!(!uses_acknowledgement(&value, "fixture-boot").unwrap());
+    }
+
+    #[test]
+    fn acknowledgement_eligibility_refuses_other_generations_and_partial_cleanup() {
+        let value = receipt();
+        let selected = CleanupSelection {
+            run: &value.run,
+            owner: &value.owner,
+            receipt_sha256: &"1".repeat(64),
         };
         eligible(&value, &selected, "fixture-boot").unwrap();
         assert!(eligible(&value, &selected, "other-boot").is_err());

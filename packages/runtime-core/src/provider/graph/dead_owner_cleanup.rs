@@ -23,6 +23,19 @@ struct Intent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     one_off_sha256: Option<String>,
 }
+/// Dispatch only an exact completed recovery generation; history is inert.
+pub(super) fn current_completion(
+    root: &std::path::Path,
+    receipt: &Receipt,
+) -> Result<bool, CandidateError> {
+    if !exists(&root.join(FILE))? {
+        return Ok(false);
+    }
+    let intent: Intent = state::read(&root.join(FILE))?;
+    let complete = selected(receipt)?;
+    Ok(intent.complete_sha256.as_deref() == Some(complete.as_str()))
+}
+
 fn refused() -> CandidateError {
     error(
         "graph_dead_owner_recovery",
@@ -277,6 +290,11 @@ pub fn retire_recovered_publisher(
 ) -> Result<Value, CandidateError> {
     if !hex(expected_owner, 32) {
         return Err(refused());
+    }
+    if let Some(result) =
+        super::acknowledged_publisher::confirm_retired(candidate, run, expected_owner)?
+    {
+        return Ok(result);
     }
     if let Some(result) = super::live_owner_cleanup::retire(candidate, run, expected_owner)? {
         return Ok(result);
@@ -1053,6 +1071,26 @@ mod tests {
             one_off_sha256: None,
         }
     }
+    #[test]
+    fn current_recovery_dispatch_does_not_select_historical_completion() {
+        let fixture = super::super::tests::Fixture::new();
+        let mut receipt = partial();
+        receipt.phase = "stopped-data-retained".into();
+        assert!(!current_completion(&fixture.0, &receipt).unwrap());
+        let mut proof = intent(&receipt);
+        proof.complete_sha256 = Some(selected(&receipt).unwrap());
+        let path = fixture.0.join(FILE);
+        state::write(&path, &proof).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(current_completion(&fixture.0, &receipt).unwrap());
+        receipt.owner = "9".repeat(32);
+        assert!(!current_completion(&fixture.0, &receipt).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::write(&path, b"unconfirmed").unwrap();
+        assert!(current_completion(&fixture.0, &receipt).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"unconfirmed");
+    }
+
     #[test]
     fn archived_bridge_proof_requires_exact_stopped_receipt_and_selection() {
         let fixture = super::super::tests::Fixture::new();

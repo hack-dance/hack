@@ -840,6 +840,13 @@ precedence over older cleanup records. Pending operations, unresolved initialize
 effects and mismatched receipt or retirement identities still refuse recovery;
 historical records cannot authorize a later generation.
 
+When a normal foreground shutdown has already removed its publisher endpoints,
+`graph retire-recovered-publisher` confirms the current boot's acknowledged
+cleanup under the publisher lock. It checks the exact stopped receipt, cleanup
+effect, guest inventories, retained volumes and absent endpoints. It changes no
+publisher files or graph data. A confirmed but invalid acknowledgement refuses;
+historical crash-recovery receipts cannot override it.
+
 Ordinary cleanup can be acknowledged before a later dependency-journal archival
 step fails. If this leaves a dead foreground publication for the current stopped
 graph, use the explicit private `graph retire-acknowledged-publisher --run-id RUN

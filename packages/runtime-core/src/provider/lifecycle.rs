@@ -268,6 +268,17 @@ fn operation_lease<T>(
     Ok((lock, current))
 }
 
+/// How long ordinary startup waits for a provider lease that another operation holds, such as
+/// the `graph inspect` behind `hack ps`.
+const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
+
+/// Startup's provider lease. Everything `start_pool` does before taking it is read-only
+/// validation, admission sampling and RAII guards, so waiting for a briefly held lease admits
+/// nothing early, and on expiry it refuses `provider_busy` with nothing admitted.
+fn startup_lease(root: &Path, wait: Duration) -> Result<state::Lock, CandidateError> {
+    operation_lease(root, Some(Instant::now() + wait), || Ok(())).map(|(lock, ())| lock)
+}
+
 /// Read-only observation takes no mutation lease and detects lifecycle changes around each read.
 pub(super) struct ObservedGuest<'a> {
     candidate: &'a Candidate,
@@ -1039,7 +1050,7 @@ fn start_pool(
     artifact::verify(candidate)?;
     artifact::verify_engine(candidate)?;
     super::network_tools::verify(candidate)?;
-    let lock = state::Lock::acquire(&root(candidate))?;
+    let lock = startup_lease(&root(candidate), STARTUP_LEASE_WAIT)?;
     #[cfg(target_os = "macos")]
     if let Some(guard) = &retained_guard {
         guard.verify(candidate)?;
@@ -2108,6 +2119,48 @@ mod tests {
         assert!(matches!(expired, Err(e) if e.code == "provider_busy"));
         assert!(!called.get());
         assert_eq!(std::fs::read_to_string(&identity).unwrap(), "replacement");
+    }
+
+    #[test]
+    fn startup_lease_waits_out_a_brief_holder_and_refuses_a_lasting_one() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "hkl-startup-lease-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        struct Remove(std::path::PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _remove = Remove(root.clone());
+        state::private_directory(&root).unwrap();
+        // A brief holder, such as the inspection behind `hack ps`: startup waits, then takes it.
+        let held = state::Lock::acquire(&root).unwrap();
+        let started = Instant::now();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(held);
+        });
+        let lock = startup_lease(&root, Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        // The lease stays exclusive: an immediate acquisition is still refused while held.
+        assert!(matches!(state::Lock::acquire(&root), Err(e) if e.code == "provider_busy"));
+        drop(lock);
+        // A holder that outlasts the wait is refused with nothing admitted.
+        let _held = state::Lock::acquire(&root).unwrap();
+        let refused = startup_lease(&root, Duration::from_millis(100));
+        assert!(matches!(
+            &refused,
+            Err(e) if e.code == "provider_busy" && e.message.contains("no operation was admitted")
+        ));
     }
 
     #[test]

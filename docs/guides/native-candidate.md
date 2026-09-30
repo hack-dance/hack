@@ -165,6 +165,30 @@ graph receipts. Use ordinary recovery afterward. Historical shared-source graphs
 retain the prior identity and may require verified cleanup plus a new generation;
 successful metadata migration alone does not establish application recovery.
 
+The frontend project-run mapping also records directory device numbers. If native
+inspection succeeds after provider recovery but ordinary project commands refuse
+the mapping, inspect the exact instance with the current bundle:
+
+```sh
+./hack-v5 doctor --path /absolute/project --branch my-instance --native-run-mapping inspect --json
+./hack-v5 doctor --path /absolute/project --branch my-instance --native-run-mapping repair --expect-selection <selectionSha256> --accept-legacy-device-rebind --json
+```
+
+Omitting `--branch` uses the same linked-worktree default as project commands;
+detached linked worktrees require an explicit instance. Inspection writes nothing.
+Repair requires the exact selection and explicit acceptance of unproven original
+filesystem volume continuity. It changes only the three scope directory device
+numbers, preserving canonical paths, inodes, branch, run, owner, plan, environment
+selection, profiles and AWS selector. The selected graph and current project share
+must still match native authority. An audit copy retains the original private
+mapping. Held locks, pending restart state, substituted directories, stale hashes
+and changed native identities refuse publication.
+
+This is a metadata repair, not an app restart: it does not retire sockets, modify
+graph history, remove data or establish browser readiness. Doctor's ordinary
+`--fix` never applies it. Run the normal project command separately after reviewing
+the result; its existing native graph and ownership checks still apply.
+
 Compatibility is qualified for specific bundle hashes and state formats. The
 displayed version alone does not establish frontend/executor or downgrade
 compatibility. V4 and candidate homes remain separate; this procedure does not

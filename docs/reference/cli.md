@@ -1263,6 +1263,10 @@ hack doctor [options]
 | `--json` | Output JSON (machine-readable) |
 | `--browser-url https://app.hack` | HTTPS origin manually tested in the browser (no path or credentials) |
 | `--browser-result unknown|works|fails|permission-denied` | Your manual browser observation for --browser-url (default: unknown) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--native-run-mapping inspect|repair` | Inspect or explicitly repair a native run mapping after filesystem device renumbering |
+| `--expect-selection <64-hex>` | Require the exact run-mapping recovery inspection selection |
+| `--accept-legacy-device-rebind` | Explicitly accept legacy migration without proof of original filesystem volume continuity |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

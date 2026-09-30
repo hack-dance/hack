@@ -301,6 +301,9 @@ if command == ["runtime", "status"]:
 if command == ["runtime", "down"]:
     if fault == "down-fails":
         reply({"code": "provider_down"}, 1)
+    if fault == "drift-on-down":
+        for run in state["runs"].values():
+            (pathlib.Path(run["root"]) / "drift.txt").write_text("changed while down")
     # `still-alive`: down reports success but the VM process is still observed.
     state["alive"] = fault == "still-alive"
     reply({"phase": "stopped"})
@@ -314,13 +317,17 @@ if command in (["graph", "run"], ["graph", "restore"]) and option("--expect-plan
 if command == ["graph", "run"]:
     token = "c" * 32 if fault == "shared-token" else secrets.token_hex(16)
     state["runs"][option("--run-id")] = {"root": option("--project"), "token": token, "plan": option("--expect-plan"),
-                                         "shared": "--shared-source" in argv}
+                                         "shared": "--shared-source" in argv, "normalized": "--normalized-file" in argv}
     reply({"readiness": {"web": "healthy"}})
 if command == ["graph", "restore"]:
     run = state["runs"].get(option("--run-id"))
-    # Only a shared-source run may restore under a changed plan, and only as the same run.
-    if not run or run["root"] != option("--project") or (option("--expect-plan") != run["plan"] and not run["shared"]):
+    if not run or run["root"] != option("--project"):
         reply({"code": "graph_restore_refused"}, 2)
+    # As in the runtime: a changed review restores only a shared, normalized receipt, whose
+    # compatibility contract is honored; a raw receipt restores only its exact source.
+    if option("--expect-plan") != run["plan"] and not (run["shared"] and run["normalized"]):
+        reply({"code": "graph_shared_source",
+               "message": "Changed shared-source review has no retained compatibility contract."}, 2)
     if fault == "lose-data":
         run["token"] = secrets.token_hex(16)
     reply({"readiness": {"web": "starting" if fault == "restore-unready" else "healthy"}})
@@ -330,7 +337,7 @@ if command == ["graph", "exec"]:
         data = run["token"]
     else:
         root = pathlib.Path(run["root"])
-        if fault == "cross-source":
+        if fault == "cross-source" or (fault == "cross-live" and argv[-1] == "/workspace/live.txt"):
             siblings = sorted(p for p in root.parent.iterdir() if p.name.startswith("w"))
             root = siblings[(siblings.index(root) + 1) % len(siblings)]
         data = (root / argv[-1][len("/workspace/"):]).read_text()
@@ -395,12 +402,26 @@ class WorktreeTrials(unittest.TestCase):
         self.assertGreater(resources["cpu_attributed_s"], resources["vm_cpu_s"])
         self.assertEqual(resources["observed"]["kind"], "staggered-per-pool")
         self.assertLessEqual(resources["observed"]["from_s"], resources["observed"]["to_s"])
-        # Warm restore keeps the run but uses the plan re-derived after the host edit.
+        # Warm restore keeps the run and its exact plan: the source is unchanged until the
+        # post-restore host edit, which each restored pool then reads back.
         plans = {c[c.index("--run-id") + 1]: c[c.index("--expect-plan") + 1] for c in self.calls(("graph", "run"))}
-        for restore in self.calls(("graph", "restore")):
+        restores = self.calls(("graph", "restore"))
+        self.assertEqual(len(restores), 2)
+        for restore in restores:
             run = restore[restore.index("--run-id") + 1]
-            self.assertIn(run, plans)
-            self.assertNotEqual(restore[restore.index("--expect-plan") + 1], plans[run])
+            self.assertEqual(restore[restore.index("--expect-plan") + 1], plans[run])
+
+    def test_a_host_edit_reaching_another_pool_fails_after_restore(self):
+        record = self.trial(fault="cross-live")
+        self.assertFalse(record["ok"])
+        self.assertIn("did not reach exactly its own pool", record["error"])
+        self.assertEqual(record["retained"], 2)
+
+    def test_source_drift_before_restore_fails_before_any_restore_effect(self):
+        record = self.trial(fault="drift-on-down")
+        self.assertFalse(record["ok"])
+        self.assertIn("source changed since its run", record["error"])
+        self.assertEqual(self.calls(("graph", "restore")), [])
 
     def test_an_unready_restore_fails_even_when_reads_succeed(self):
         record = self.trial(fault="restore-unready")

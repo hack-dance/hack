@@ -555,11 +555,13 @@ cache is not flushed.
   own fresh development pool and private home, with `runtime up --project-share ROOT
   --unfiltered-source`. Pools start `--worktree-parallel` at a time. Each graph runs with
   `--shared-source --branch` and must serve its own committed marker before readiness counts.
-  The trial then requires distinct pools, branch namespaces and volume data. It writes a new
-  host file into every root, which must reach only that root's pool. Finally it stops and
-  restarts every pool, replans (the edit changed the source inventory), and restores the same
-  run under the current plan. The restore must report `healthy` and return the same data,
-  marker and host edit. The fixture is
+  The trial then requires distinct pools, branch namespaces and volume data. It stops and
+  restarts every pool, re-plans, and restores the same run. The re-plan must still match the
+  run's plan: the harness drives raw runtime graphs, which restore only their exact accepted
+  source, while a changed review is honored only for normalized receipts (the `hack up`
+  path). The restore must report `healthy` and return the same data and marker. Last, it
+  writes a new host file into every root, which must reach only that root's restored pool. The
+  fixture is
   removed only after every pool is confirmed disposed; otherwise every root, its Git
   registration and its source are kept. After any cleanup failure no further worktree cohort
   starts, and that cohort's measurements are excluded from the qualified summaries. Cold

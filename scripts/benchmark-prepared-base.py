@@ -756,19 +756,12 @@ def worktree_trial(args, size, repeat, lane):
         record["resources"]["observed"] = {"kind": "staggered-per-pool", "from_s": observed_from,
                                            "to_s": round(time.monotonic() - started, 3)}
 
-        # A fresh host edit in every root must reach exactly its own pool.
-        live = [secrets.token_hex(16) for _ in range(size)]
-        for entry, value in zip(entries, live):
-            (entry["root"] / "live.txt").write_text(value)
-        seen = each(lambda i: pools[i].read(ready[i]["graph"]["run"], "/workspace/live.txt", "live"),
-                    size, args.worktree_parallel)
         record["fixture"] = fixture.provenance()
         record["isolation"] = {
             "pools": len({(s["machine"], s["guest_boot_id"]) for s in statuses
                           if s.get("machine") and s.get("guest_boot_id")}),
             "namespaces": len({r["graph"]["namespace"] for r in ready}),
             "tokens": len({r["graph"]["token"] for r in ready}),
-            "live_edits_read_back": sum(a == b for a, b in zip(seen, live)),
         }
         counts = {**record["isolation"], **{k: record["fixture"][k] for k in ("registered", "roots", "branches", "heads")}}
         if any(value != size for value in counts.values()) or record["fixture"]["common_dirs"] != 1:
@@ -782,10 +775,13 @@ def worktree_trial(args, size, repeat, lane):
             pool.step("graph_cleanup", "graph", "cleanup", "--run-id", graph["run"])
             pool.step("down", "runtime", "down")
             body = pool.up("restart_up", lane, share=entry["root"])
-            # The host edit changed the source inventory, so the saved plan is stale. Restore the
-            # same run under the current plan, which shared-source restore allows.
+            # A raw (non-normalized) graph restores only its exact accepted source; the runtime
+            # honors a changed review only for normalized receipts. The source must therefore
+            # still plan to the run's identity, checked before any restore effect.
             plan = pool.step("replan", "project", "plan", "--project", str(entry["root"]), "--branch", entry["branch"],
                              "--file", graph["compose"])["plan_id"]
+            if plan != graph["plan"]:
+                raise Failure(f"worktree {index} source changed since its run: plan {plan} != {graph['plan']}")
             pool.step(
                 "restore", "graph", "restore", "--project", str(entry["root"]), "--branch", entry["branch"],
                 "--file", graph["compose"], "--expect-plan", plan, "--run-id", graph["run"],
@@ -793,8 +789,7 @@ def worktree_trial(args, size, repeat, lane):
                 check=healthy,
             )
             kept = {"token": pool.token(graph["run"], "restore_token") == graph["token"],
-                    "marker": pool.read(graph["run"], "/workspace/branch.txt", "restore_marker") == entry["marker"],
-                    "live": pool.read(graph["run"], "/workspace/live.txt", "restore_live") == live[index]}
+                    "marker": pool.read(graph["run"], "/workspace/branch.txt", "restore_marker") == entry["marker"]}
             if not all(kept.values()):
                 raise Failure(f"worktree {index} did not retain data and source across down/up: {kept}")
             return {"provenance": provenance(body, lane, "warm"), "ready_s": round(time.monotonic() - warm_started, 3)}
@@ -803,6 +798,17 @@ def worktree_trial(args, size, repeat, lane):
         record["warm_all_ready_s"] = round(time.monotonic() - warm_started, 3)
         record["warm_provenance"] = [w["provenance"] for w in warm]
         record["retained"] = size
+
+        # A fresh host edit in every root must reach exactly its own restored pool: each share is
+        # live and attached to its own root. It comes last because it changes the source.
+        live = [secrets.token_hex(16) for _ in range(size)]
+        for entry, value in zip(entries, live):
+            (entry["root"] / "live.txt").write_text(value)
+        seen = each(lambda i: pools[i].read(ready[i]["graph"]["run"], "/workspace/live.txt", "live"),
+                    size, args.worktree_parallel)
+        record["isolation"]["live_edits_read_back"] = sum(a == b for a, b in zip(seen, live))
+        if record["isolation"]["live_edits_read_back"] != size:
+            raise Failure(f"a host edit did not reach exactly its own pool: {record['isolation']}")
         record["admission_end"] = admission()
         record["ok"] = True
     except Failure as error:

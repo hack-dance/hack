@@ -133,6 +133,38 @@ data, and requires inspection before retry. No guest is started by alias recover
 Interrupted starts without a recorded process or both identified disks remain
 outside this repair path.
 
+A physical macOS reboot may also renumber the mounted filesystem device. Strict
+disk and source checks still refuse a changed device number; missing-HOME recovery
+does not waive them. For an offline **stock pool**, inspect the separate migration:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime host-filesystem-recovery --json
+./hack-native --candidate-root /absolute/private/candidate-home runtime recover-host-filesystem --expect-sha256 <selection_sha256> --accept-legacy-device-rebind --json
+./hack-native --candidate-root /absolute/private/candidate-home runtime recover --json
+```
+
+Review the inspection before selecting its hash. This explicit legacy migration
+requires an absent recorded provider whose start predates the current host boot,
+no active provider commands, exclusive existing operation/VM locks and closed disk
+handles. Both disk inodes, sizes and ext4 UUIDs, the exact source path/inode and its
+ownership must be unchanged; only one common old-to-new device-number change is
+allowed. The inspection is read-only. Publication atomically changes only the
+owner's disk and source device numbers, retaining its phase and process record.
+Normal commands keep their strict identity checks.
+
+Legacy receipts have no original host boot UUID or filesystem volume UUID. Calendar
+timestamps corroborate a reboot, and matching retained file identities constrain
+the migration, but neither proves original volume continuity. The opt-in explicitly
+accepts that limitation; copied or relocated pools are outside this procedure.
+Prepared-base pools and pending owner/network/activation updates require separate
+recovery and are refused. A torn owner publication preserves `owner.pending` and
+blocks another migration; do not delete or adopt that file manually.
+
+This does not start the VM, restore HOME, retire stale sockets or rewrite historical
+graph receipts. Use ordinary recovery afterward. Historical shared-source graphs
+retain the prior identity and may require verified cleanup plus a new generation;
+successful metadata migration alone does not establish application recovery.
+
 Compatibility is qualified for specific bundle hashes and state formats. The
 displayed version alone does not establish frontend/executor or downgrade
 compatibility. V4 and candidate homes remain separate; this procedure does not

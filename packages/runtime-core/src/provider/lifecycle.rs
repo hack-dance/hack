@@ -1,3 +1,4 @@
+pub mod host_filesystem;
 mod interrupted;
 mod prepared_boot;
 #[cfg(any(target_os = "macos", test))]

@@ -176,7 +176,7 @@ impl Default for ReclamationPolicy {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Owner {
     #[serde(default, skip_serializing_if = "Option::is_none")]

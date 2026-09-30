@@ -1,25 +1,34 @@
 import { mock } from "bun:test";
 import * as fs from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 const [root, sourceRoot] = process.argv.slice(2);
 if (!(root && sourceRoot)) {
   throw new Error("Missing fixture paths");
 }
 const original = { ...fs };
-const socketPath = join(await original.realpath(root), "mcp.sock");
+const directory = await original.realpath(root);
+const socketPath = join(directory, "mcp.sock");
 process.umask(0o022);
 let observed = false;
 mock.module("node:fs/promises", () => ({
   ...original,
   chmod: async (path: string, mode: number) => {
+    // The endpoint mode is set on its staging socket before publication; the
+    // published endpoint must never be changed by path.
     if (path === socketPath) {
+      throw new Error("Published endpoint was chmodded by path");
+    }
+    if (dirname(path) === directory && basename(path).startsWith(".")) {
       const socket = await original.lstat(path);
       if (!socket.isSocket() || (socket.mode & 0o077) !== 0) {
         throw new Error("Socket was public before chmod");
       }
       if (process.umask() !== 0o022) {
         throw new Error("Creation mask leaked across await");
+      }
+      if (mode !== 0o600) {
+        throw new Error("Unexpected endpoint mode");
       }
       observed = true;
     }

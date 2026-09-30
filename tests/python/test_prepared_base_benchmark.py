@@ -454,8 +454,37 @@ class WorktreeTrials(unittest.TestCase):
         os.environ["FAKE_FAULT"] = "still-alive"
         record = benchmark.worktree_trial(self.args, 2, 0, "prepared")
         self.assertTrue(record["ok"], record.get("error"))
+        self.assertTrue(record["cleanup_failed"])
         self.assert_fixture_preserved(record, "not confirmed stopped")
-        self.assertTrue(benchmark.summarize([record], 16)["cleanup_failures"])
+        summary = benchmark.summarize([record], 16)
+        self.assertTrue(summary["cleanup_failures"])
+        # Its checks passed, but its measurements shared the host with a pool left alive.
+        self.assertEqual((summary["worktrees_admitted"], summary["worktrees_flagged"]), ({}, {}))
+        self.assertEqual(summary["worktrees_unqualified_cleanup"][0]["lane"], "prepared")
+
+    def test_no_later_cohort_starts_after_a_cleanup_failure(self):
+        os.environ["FAKE_FAULT"] = "still-alive"
+        self.args.worktree_repeats = 2
+        records = []
+        self.assertFalse(benchmark.run_worktrees(self.args, [2, 1], records.append))
+        self.assertEqual([(r["size"], r["repeat"], r["lane"]) for r in records], [(2, 0, "stock")])
+        record = records[0]
+        self.assert_fixture_preserved(record, "not confirmed stopped")
+        # Nothing beyond the failed cohort's own fixture and homes was ever created.
+        fixture = record["cleanup"][-1]["preserved"]
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()),
+                         sorted([Path(fixture).name, *(Path(home).name for home in record["homes"])]))
+        shares = [c[c.index("--project-share") + 1] for c in self.calls(("runtime", "up"))]
+        self.assertEqual(len(shares), 4)
+        self.assertTrue(all(share.startswith(fixture + "/") for share in shares))
+
+    def test_every_planned_cohort_runs_when_cleanup_succeeds(self):
+        self.args.worktree_repeats = 1
+        records = []
+        self.assertTrue(benchmark.run_worktrees(self.args, [1], records.append))
+        self.assertEqual([(r["lane"], r["ok"], r["cleanup_failed"]) for r in records],
+                         [("prepared", True, False), ("stock", True, False)])
+        self.assertEqual(list(self.root.iterdir()), [])
 
 
 class WorktreeFixture(unittest.TestCase):

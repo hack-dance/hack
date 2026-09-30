@@ -815,7 +815,23 @@ def worktree_trial(args, size, repeat, lane):
         disposal = [pool.cleanup() for pool in pools]
         disposed = all(c.get("removed") is True and "error" not in c for c in disposal)
         record["cleanup"] = disposal + [fixture.cleanup(disposed)]
+        record["cleanup_failed"] = any("error" in c or not c.get("removed") for c in record["cleanup"])
     return record
+
+
+def run_worktrees(args, sizes, keep):
+    """Worktree cohorts in order. A failed cleanup can leave live pools and their roots behind;
+    any later cohort would exceed the planned peak and share the host with them, so none starts.
+    Returns whether every planned cohort ran."""
+    for repeat in range(args.worktree_repeats):
+        for size in sizes:
+            lanes = ("stock", "prepared") if (repeat + size) % 2 == 0 else ("prepared", "stock")
+            for lane in lanes:
+                record = worktree_trial(args, size, repeat, lane)
+                keep(record)
+                if record["cleanup_failed"]:
+                    return False
+    return True
 
 
 def stats(values):
@@ -933,7 +949,13 @@ def summarize(records, cpus=None):
                         for size in sorted({r["size"] for r in chosen})}
     summary["admitted_cohort_all_ready_ratio_by_size"] = paired(
         cohorts, lambda r: (r["size"], r["repeat"]), lambda r: r["all_ready_s"])
-    worktrees = [(r, ok, why) for r, ok, why in classified if r["mode"] == "worktrees" and r.get("ok")]
+    # A cohort whose cleanup failed shared the host with pools it could not dispose of; its
+    # timings and resources are unqualified whatever its admission.
+    worktrees = [(r, ok, why) for r, ok, why in classified
+                 if r["mode"] == "worktrees" and r.get("ok") and not r.get("cleanup_failed")]
+    summary["worktrees_unqualified_cleanup"] = [
+        {k: r.get(k) for k in ("size", "repeat", "lane", "home")}
+        for r in records if r["mode"] == "worktrees" and r.get("cleanup_failed")]
     for admitted_flag, key in ((True, "worktrees_admitted"), (False, "worktrees_flagged")):
         chosen = [r for r, ok, _ in worktrees if ok == admitted_flag]
         summary[key] = {str(size): lanes([r for r in chosen if r["size"] == size], worktree_metrics)
@@ -1084,11 +1106,9 @@ def main():
                         keep(cohort_trial(args, size, repeat, lane))
         if "concurrent" in modes:
             keep(concurrent_trial(args, args.concurrent))
-        for repeat in range(args.worktree_repeats if worktree_sizes else 0):
-            for size in worktree_sizes:
-                lanes = ("stock", "prepared") if (repeat + size) % 2 == 0 else ("prepared", "stock")
-                for lane in lanes:
-                    keep(worktree_trial(args, size, repeat, lane))
+        if worktree_sizes and not run_worktrees(args, worktree_sizes, keep):
+            print(json.dumps({"stopped": "a worktree cohort's cleanup failed; its pools and roots are kept"}),
+                  flush=True)
         summary = summarize(records, context["host"]["cpus"])
         sink.write(json.dumps({"summary": summary}) + "\n")
     print(json.dumps({"output": str(output), "summary": summary}, indent=2))

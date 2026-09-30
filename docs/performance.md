@@ -561,7 +561,8 @@ cache is not flushed.
   run under the current plan. The restore must report `healthy` and return the same data,
   marker and host edit. The fixture is
   removed only after every pool is confirmed disposed; otherwise every root, its Git
-  registration and its source are kept. Cold
+  registration and its source are kept. After any cleanup failure no further worktree cohort
+  starts, and that cohort's measurements are excluded from the qualified summaries. Cold
   create-to-ready and warm restart are summarized separately, with each start's selection
   (`stock` or `prepared`, base ID, and whether this run had used that base before).
   Configured guest memory and vCPUs for the largest cohort appear in the preview, with a

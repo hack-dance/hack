@@ -615,8 +615,21 @@ observations in progress.
   commands keep their own step timeouts, shortened by a worktree cohort's deadlines.
 - **Attribution.** Each sample records its three largest background commands. The sampler
   summary reports those behind its peak sample, and the idle baseline reports those behind its
-  ceiling, so a flagged sample can be traced (for example to Gatekeeper scanning a new home's
-  provider binary).
+  ceiling.
+- **Host services.** Background CPU of two named host services is also recorded on its own:
+  security assessment of new executables (XProtect, `syspolicyd`, `amfid`) and Spotlight
+  indexing (`mds`, `mds_stores`, `mdworker`). A fresh home's binaries and files are new, so a run
+  can induce this work.
+  - The idle baseline reports each service and the rest separately, as the reference for what
+    the host does without the run.
+  - Worktree cohorts report mean background per phase, split the same way: cold start (to
+    all-ready) and warm restart. The warm restart re-executes the same binaries, so security
+    scanning in cold phases but not warm ones is consistent with the run inducing it.
+  - The summary's `worktree_flag_attribution` breaks each flagged cohort's peak sample into its
+    excess over the ceiling, each service and the rest.
+  - Membership is by process name and timing, not causal tracing. The services stay in
+    background: admission, thresholds and flags are unchanged, and a cohort flagged by induced
+    scanning stays flagged.
 - **Ceiling.** The maximum background observed becomes the admission ceiling. A timed sample
   is flagged `background_above_idle` when background exceeds it, and load is then recorded but
   not judged.

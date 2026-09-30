@@ -406,6 +406,9 @@ class WorktreeTrials(unittest.TestCase):
         self.assertEqual({(vm["tree_processes"], vm["tree_helpers"]) for vm in resources["vms"]}, {(2, 1)})
         self.assertGreater(resources["cpu_attributed_s"], resources["vm_cpu_s"])
         self.assertEqual(resources["observed"]["kind"], "staggered-per-pool")
+        # Cold start ends before the warm restart begins, and both phases carry host activity.
+        self.assertLess(record["phases_s"]["cold"][1], record["phases_s"]["warm"][0])
+        self.assertEqual(set(record["host_activity"]), {"cold", "warm"})
         self.assertLessEqual(resources["observed"]["from_s"], resources["observed"]["to_s"])
         # Warm restore keeps the run and its exact plan: the source is unchanged until the
         # post-restore host edit, which each restored pool then reads back.
@@ -756,6 +759,61 @@ class MeasuredAdmission(unittest.TestCase):
         # Attribution of the measured interval, largest first.
         self.assertEqual(observed["background_top"], [["syspolicyd", 0.6], ["mds", 0.2]])
 
+    def test_named_host_services_are_split_out_of_background_without_changing_admission(self):
+        scanner = "/System/Library/PrivateFrameworks/XprotectFramework.framework/XPCServices/XprotectService"
+        indexer = "/System/Library/Frameworks/CoreServices.framework/Support/mds_stores"
+        app, owned = "/Applications/Codex.app/Contents/MacOS/Codex", "/run-root/trials/pool/smolvm-bin _boot-vm"
+
+        def listing(scan, index, other, vm):
+            return (f"  10 {scan} {scanner}\n  11 {index} {indexer}\n  12 {other} {app}\n  13 {vm} {owned}\n")
+
+        listings = iter([listing("0:01.00", "0:01.00", "0:01.00", "0:01.00"),
+                         listing("0:03.00", "0:02.00", "0:04.00", "0:09.00")])
+        clock = iter([0.0, 2.0])
+        meter = benchmark.Background("/run-root", listing=lambda: next(listings), clock=lambda: next(clock))
+        with mock.patch.object(benchmark, "observed_output", return_value="1"):
+            benchmark.admission(meter, ceiling=2.5)
+            sample = benchmark.admission(meter, ceiling=2.5)
+        # Over 2 s: XProtect 1.0 core, Spotlight 0.5, the app 1.5; the run's own VM is excluded.
+        self.assertEqual(sample["background_cores"], 3.0)
+        self.assertEqual(sample["host_services"], {"security_scan": 1.0, "indexing": 0.5})
+        # Named services stay in background: the sample is flagged exactly as before.
+        self.assertIn("background_above_idle", sample["reasons"])
+
+    def test_the_idle_baseline_reports_named_services_and_the_rest(self):
+        readings = iter([(None, {}), (2.0, {"security_scan": 0.1, "indexing": 0.4}),
+                         (3.0, {"security_scan": 0.0, "indexing": 1.0}), (2.5, {"security_scan": 0.2, "indexing": 0.3})])
+
+        class Meter:
+            top, services = [], {}
+
+            def observe(self):
+                cores, self.services = next(readings)
+                return cores, 0.0, []
+
+        clock = ScriptedClock()
+        idle = benchmark.measure_idle(Meter(), 3, 1, pressure=lambda: "1", sleep=clock.sleep, clock=clock)
+        self.assertEqual((idle["ceiling_cores"], idle["ceiling_services"]), (3.0, {"security_scan": 0.0, "indexing": 1.0}))
+        self.assertEqual({name: spread["max"] for name, spread in idle["host_services_cores"].items()},
+                         {"security_scan": 0.2, "indexing": 1.0})
+        self.assertEqual((idle["other_cores"]["max"], idle["other_cores"]["n"]), (2.0, 3))
+
+    def test_phase_activity_separates_cold_start_from_warm_restart(self):
+        series = [{"t_s": 1.0, "background_cores": 3.0, "security_scan": 1.2, "indexing": 0.1},
+                  {"t_s": 2.0, "background_cores": 3.4, "security_scan": 1.4, "indexing": 0.0},
+                  {"t_s": 3.0, "background_cores": None},
+                  {"t_s": 6.0, "background_cores": 9.0, "security_scan": 5.0, "indexing": 0.0},
+                  {"t_s": 11.0, "background_cores": 2.0, "security_scan": 0.0, "indexing": 0.2},
+                  {"t_s": 12.0, "background_cores": 2.2, "security_scan": 0.0, "indexing": 0.0}]
+        activity = benchmark.host_activity(series, {"cold": [0.0, 3.0], "warm": [10.0, 12.0]})
+        # The unobserved sample is counted, not averaged; the sample between phases is in neither.
+        self.assertEqual(activity["cold"], {"seconds": 3.0, "samples": 3, "observed": 2, "background_cores": 3.2,
+                                            "security_scan_cores": 1.3, "indexing_cores": 0.05, "other_cores": 1.85})
+        self.assertEqual(activity["warm"], {"seconds": 2.0, "samples": 2, "observed": 2, "background_cores": 2.1,
+                                            "security_scan_cores": 0.0, "indexing_cores": 0.1, "other_cores": 2.0})
+        self.assertEqual(benchmark.host_activity([{"t_s": 1.0, "background_cores": None}], {"cold": [0.0, 2.0]}),
+                         {"cold": {"seconds": 2.0, "samples": 1, "observed": 0}})
+
     def test_the_sampler_reports_what_dominated_its_peak_sample(self):
         samples = iter([{"reasons": [], "load1": 1.0, "background_cores": 0.5, "background_top": [["mds", 0.4]]},
                         {"reasons": ["background_above_idle"], "load1": 1.0, "background_cores": 6.0,
@@ -987,6 +1045,26 @@ def worktree_record(size, repeat, lane, all_ready, admission, resident=100):
 
 
 class WorktreeSummary(unittest.TestCase):
+    def test_a_flag_driven_by_host_services_is_decomposed_but_stays_flagged(self):
+        stock = worktree_record(8, 0, "stock", 36.0, {**CLEAN, "idle_ceiling_cores": 3.8})
+        prepared = worktree_record(8, 0, "prepared", 18.0, {**CLEAN, "idle_ceiling_cores": 3.8})
+        prepared["admission_during"] = {"reasons": ["background_above_idle"], "max_background_cores": 4.8,
+                                        "max_background_services": {"security_scan": 1.2, "indexing": 0.0},
+                                        "max_background_top": [["XprotectService", 1.2], ["Codex", 1.0]]}
+        summary = benchmark.summarize([stock, prepared], 16)
+        # All of the excess could be security scanning, yet the cohort is neither admitted nor paired.
+        self.assertEqual(summary["admitted_worktree_all_ready_ratio_by_size"], {})
+        self.assertIsNone(summary["worktrees_admitted"]["8"]["prepared"])
+        self.assertEqual(summary["worktrees_flagged"]["8"]["prepared"]["all_ready_s"]["median"], 18.0)
+        (attribution,) = summary["worktree_flag_attribution"]
+        self.assertEqual({k: attribution[k] for k in ("lane", "peak_background_cores", "idle_ceiling_cores",
+                                                      "excess_cores", "peak_services_cores", "peak_other_cores")},
+                         {"lane": "prepared", "peak_background_cores": 4.8, "idle_ceiling_cores": 3.8,
+                          "excess_cores": 1.0, "peak_services_cores": {"security_scan": 1.2, "indexing": 0.0},
+                          "peak_other_cores": 3.6})
+        # Records written before this instrumentation keep null phase metrics, labeled unqualified.
+        self.assertFalse(summary["worktrees_admitted"]["8"]["stock"]["cold_security_scan_cores"]["qualified"])
+
     def test_worktree_cohorts_split_by_admission_and_keep_cold_warm_and_memory_kinds_apart(self):
         records = [
             worktree_record(8, 0, "stock", 20.0, CLEAN), worktree_record(8, 0, "prepared", 10.0, CLEAN),

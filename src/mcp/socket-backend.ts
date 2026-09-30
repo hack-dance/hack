@@ -4,6 +4,10 @@ import { isAbsolute, join } from "node:path";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
 import { isRecord } from "../lib/guards.ts";
+import {
+  listenPublishedUnixSocket,
+  UnixSocketEndpointExists,
+} from "../lib/unix-socket-publish.ts";
 import { McpCommandAdmission } from "./command-admission.ts";
 import { createMcpServer } from "./server.ts";
 import { recordMcpSocketReceipt } from "./socket-receipt.ts";
@@ -173,24 +177,17 @@ async function prepareBackend(
       throw new Error("MCP socket endpoint already exists");
     }
     startup.check();
-    await new Promise<void>((resolve, reject) => {
-      listener.once("error", reject);
-      // Bun binds a local Unix endpoint synchronously in listen(). Restrict its
-      // creation mode so concurrent adapters cannot observe a public socket
-      // before chmod. Restore immediately; never retain this mask across await
-      // or apply it to commands executed for connected clients.
-      const previousMask = process.umask();
-      process.umask(previousMask | 0o077);
-      try {
-        listener.listen(socketPath, () => {
-          listener.off("error", reject);
-          resolve();
-        });
-      } finally {
-        process.umask(previousMask);
+    // Published by link from an owner-only staging name, so no runtime close can
+    // remove a replacement at socketPath; only removeOwnedEndpoint removes it.
+    endpointIdentity = await listenPublishedUnixSocket(
+      listener,
+      socketPath
+    ).catch((error: unknown) => {
+      if (error instanceof UnixSocketEndpointExists) {
+        throw new Error("MCP socket endpoint already exists");
       }
+      throw error;
     });
-    endpointIdentity = await lstat(socketPath);
     startup.check();
     await chmod(socketPath, 0o600);
     startup.check();

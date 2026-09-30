@@ -578,7 +578,10 @@ must prove absent containers/networks and present retained volumes, and repeat
 that proof after review before cleanup. The normal intent, retaining down,
 frontend recovery and startup sequence still runs. An active graph keeps its
 authenticated service selection and live-listener checks; uncertain observations
-cannot select the stopped path. New attempts retain their frontend
+cannot select the stopped path. Stopped preflight retains the admitted
+image IDs when the original Compose input is unchanged, matching retained startup
+instead of resolving mutable tags again. Changed original input keeps normal
+image resolution and the existing compatibility checks. New attempts retain their frontend
 PID and HTTPS port in the private token. Older v1 attempts additionally require
 `--expect-frontend-pid <previously-observed-pid>`; a guessed PID is not recovery
 evidence. Recovery requires the exact stopped graph receipt with its volumes

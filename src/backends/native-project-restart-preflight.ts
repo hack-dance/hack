@@ -20,6 +20,7 @@ import {
   verifyNativeSourceCompatibility,
 } from "./native-project-restore.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
+import { selectNativeRetainedImages } from "./native-project-retained-images.ts";
 import {
   prepareNativeReviewBranch,
   selectNativeProjectReviewIdentity,
@@ -46,6 +47,7 @@ const DEFAULTS = {
   invoke: invokeNativeRuntime,
   review: withNativeProjectReview,
   selectReview: selectNativeProjectReviewIdentity,
+  retainedImages: selectNativeRetainedImages,
 };
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const SHA = /^[a-f0-9]{64}$/;
@@ -260,6 +262,40 @@ async function stoppedRestartMode(opts: {
   return confirmed;
 }
 
+async function pinRestartImages(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly specs: Record<string, Record<string, unknown>>;
+  readonly retainedImages: ReadonlyMap<string, string>;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<void> {
+  for (const [name, spec] of Object.entries(opts.specs)) {
+    const retainedImage = opts.retainedImages.get(name);
+    if (retainedImage) {
+      spec.image = retainedImage;
+      continue;
+    }
+    const image = String(spec.image);
+    if (IMAGE.test(image)) {
+      continue;
+    }
+    // Owned cache acquisition grants no authority to stop the current graph.
+    const pinned = await opts.invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: ["runtime", "ensure-image", "--reference", image, "--json"],
+    });
+    if (
+      !isRecord(pinned) ||
+      typeof pinned.image_id !== "string" ||
+      !IMAGE.test(pinned.image_id)
+    ) {
+      throw new Error("Native restart image selection failed before cleanup.");
+    }
+    spec.image = pinned.image_id;
+  }
+}
+
 /** Review the same public graph before stopping anything; never run startup hooks here. */
 export async function preflightNativeRestart(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -345,26 +381,22 @@ export async function preflightNativeRestart(opts: {
           }),
       });
   prepareNativeDependencyServices({ dependencies, services: specs });
-  for (const spec of Object.values(specs)) {
-    const image = String(spec.image);
-    if (IMAGE.test(image)) {
-      continue;
-    }
-    // Image acquisition may populate an owned cache, but cannot stop the current graph.
-    const pinned = await deps.invoke({
-      runtime: opts.runtime,
-      cwd: opts.scope.projectRoot,
-      args: ["runtime", "ensure-image", "--reference", image, "--json"],
-    });
-    if (
-      !isRecord(pinned) ||
-      typeof pinned.image_id !== "string" ||
-      !IMAGE.test(pinned.image_id)
-    ) {
-      throw new Error("Native restart image selection failed before cleanup.");
-    }
-    spec.image = pinned.image_id;
-  }
+  const retainedImages = stoppedRetry
+    ? await deps.retainedImages({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        originalSha256: input.originalSha256,
+        restore: opts.run,
+        invoke: deps.invoke,
+      })
+    : new Map<string, string>();
+  await pinRestartImages({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    specs,
+    retainedImages,
+    invoke: deps.invoke,
+  });
   const compose = JSON.parse(input.normalizedComposeJson);
   compose.services = specs;
   await deps.review({

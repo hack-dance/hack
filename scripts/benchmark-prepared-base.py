@@ -14,9 +14,10 @@ Modes:
               startup is out of scope.
   concurrent  K pools created at once from one base; distinct identities and data.
 
-Timing admission is observed at the start and end of each trial's timed work, not continuously.
-A sample is flagged when build tools run, the 1-minute load exceeds half the CPU count, memory
-pressure is raised, or any of those could not be observed. Flagged samples are kept and
+Timing admission is observed at the start and end of each trial's timed work and every
+--admission-interval seconds in between. A sample is flagged when build tools run, the 1-minute
+load exceeds half the CPU count, memory pressure is raised, or any of those could not be observed
+at any of those points; a failed observation or an unobserved gap also flags it. Flagged samples are kept and
 summarized separately. Resource metrics keep unobserved values as null, report coverage and
 are labeled unqualified when incomplete.
 """
@@ -175,7 +176,7 @@ def admitted(record, cpus):
     reasons are re-evaluated from their recorded fields; their process listing's exit status was
     not recorded, so that limitation is named rather than assumed."""
     reasons, legacy = [], False
-    for key, label in (("admission", "start"), ("admission_end", "end")):
+    for key, label in (("admission", "start"), ("admission_during", "during"), ("admission_end", "end")):
         observed = record.get(key)
         if observed is None:
             if key == "admission":
@@ -185,10 +186,66 @@ def admitted(record, cpus):
             legacy = True
             observed = admission_from(observed.get("load1"), observed.get("build_tools"), observed.get("memory_pressure"), cpus)
         reasons += [f"{label}:{reason}" for reason in observed["reasons"]]
-    boundary = "start-and-end" if record.get("admission_end") is not None else "start-only"
+    if record.get("admission_during") is not None:
+        boundary = "continuous"
+    else:
+        boundary = "start-and-end" if record.get("admission_end") is not None else "start-only"
     if legacy:
         boundary += " (legacy: process listing status unrecorded)"
     return not reasons, reasons, boundary
+
+
+class Sampler:
+    """Admission observed every `interval` seconds while a trial's timed work runs. Its own cost
+    is one process listing and one sysctl per sample.
+
+    It fails closed: an observation that raises becomes an `observer_failed` sample, and a gap
+    longer than `GAP_INTERVALS` intervals between samples (or before the first, or after the last
+    until stop) is reported as `sampling_gap`, since load during that gap was not observed."""
+
+    GAP_INTERVALS = 5
+
+    def __init__(self, interval, observe=None, clock=time.monotonic):
+        self.interval, self.observe, self.clock = interval, observe or admission, clock
+        self.samples, self.times = [], []
+        self.started = self.stopped = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self.started = self.clock()
+        self._thread.start()
+        return self
+
+    def _run(self):
+        while True:
+            try:
+                sample = self.observe()
+            except Exception:  # noqa: BLE001 - any observer failure must flag, not end sampling.
+                sample = {"reasons": ["observer_failed"], "load1": None}
+            self.samples.append(sample)
+            self.times.append(self.clock())
+            if self._stop.wait(self.interval):
+                return
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join()
+        self.stopped = self.clock()
+        return self.result()
+
+    def result(self):
+        reasons = {reason for sample in self.samples for reason in sample["reasons"]}
+        if not self.samples:
+            reasons.add("unobserved")
+        edges = [t for t in (self.started, *self.times, self.stopped) if t is not None]
+        gaps = [later - earlier for earlier, later in zip(edges, edges[1:])]
+        if gaps and max(gaps) > self.GAP_INTERVALS * self.interval:
+            reasons.add("sampling_gap")
+        loads = [sample["load1"] for sample in self.samples if sample["load1"] is not None]
+        return {"samples": len(self.samples), "interval_s": self.interval, "reasons": sorted(reasons),
+                "max_gap_s": round(max(gaps), 3) if gaps else None,
+                "max_load1": max(loads) if loads else None, "admitted": not reasons}
 
 
 class Trial:
@@ -332,9 +389,11 @@ class Trial:
 def pair_trial(args, index, lane):
     trial = Trial(args, f"pair{index:02d}-{lane}")
     record = {"mode": "pairs", "index": index, "lane": lane, "home": str(trial.dir)}
+    sampler = None
     try:
         trial.setup()
         record["admission"] = admission()
+        sampler = Sampler(args.admission_interval).start()
         trial.up("up", lane)
         record["disks_at_ready"] = trial.disks()
         image = trial.step("ensure_image", "runtime", "ensure-image", "--reference", args.image, timeout=600)
@@ -359,6 +418,8 @@ def pair_trial(args, index, lane):
         record["ok"] = False
         record["error"] = str(error)
     finally:
+        if sampler:
+            record["admission_during"] = sampler.stop()
         record["samples"] = trial.samples
         record["cleanup"] = trial.cleanup()
     return record
@@ -367,9 +428,11 @@ def pair_trial(args, index, lane):
 def cohort_trial(args, size, repeat, lane):
     trial = Trial(args, f"cohort{size:02d}r{repeat}-{lane}")
     record = {"mode": "cohort", "size": size, "repeat": repeat, "lane": lane, "home": str(trial.dir)}
+    sampler = None
     try:
         trial.setup()
         record["admission"] = admission()
+        sampler = Sampler(args.admission_interval).start()
         started = time.monotonic()
         trial.up("up", lane)
         image = trial.step("ensure_image", "runtime", "ensure-image", "--reference", args.image, timeout=600)
@@ -395,6 +458,8 @@ def cohort_trial(args, size, repeat, lane):
         record["ok"] = False
         record["error"] = str(error)
     finally:
+        if sampler:
+            record["admission_during"] = sampler.stop()
         record["samples"] = trial.samples
         record["cleanup"] = trial.cleanup()
     return record
@@ -403,10 +468,12 @@ def cohort_trial(args, size, repeat, lane):
 def concurrent_trial(args, count):
     trials = [Trial(args, f"concurrent{i}-prepared") for i in range(count)]
     record = {"mode": "concurrent", "count": count, "homes": [str(t.dir) for t in trials]}
+    sampler = None
     try:
         for trial in trials:
             trial.setup()
         record["admission"] = admission()
+        sampler = Sampler(args.admission_interval).start()
         with concurrent.futures.ThreadPoolExecutor(max_workers=count) as pool:
             bodies = list(pool.map(lambda t: t.up("up", "prepared"), trials))
         record["up_wall_s"] = [t.samples["up"]["wall_s"] for t in trials]
@@ -427,6 +494,8 @@ def concurrent_trial(args, count):
         record["ok"] = False
         record["error"] = str(error)
     finally:
+        if sampler:
+            record["admission_during"] = sampler.stop()
         record["samples"] = [t.samples for t in trials]
         record["cleanup"] = [t.cleanup() for t in trials]
     return record
@@ -560,6 +629,7 @@ def main():
     parser.add_argument("--cohort-repeats", type=int, default=2)
     parser.add_argument("--parallel", type=int, default=4, help="concurrent graph start requests within one pool (they serialize)")
     parser.add_argument("--concurrent", type=int, default=4)
+    parser.add_argument("--admission-interval", type=float, default=1.0, help="seconds between admission samples during timed work")
     parser.add_argument("--output", help="JSON lines of raw samples (default <root>/samples-<time>.jsonl)")
     parser.add_argument("--run", action="store_true", help="execute; without it only the plan is printed")
     args = parser.parse_args()
@@ -576,6 +646,7 @@ def main():
     sizes = [int(s) for s in args.cohorts.split(",") if s]
     plan = {"modes": modes, "pairs": args.pairs, "cohorts": sizes, "cohort_repeats": args.cohort_repeats,
             "parallel": args.parallel, "concurrent": args.concurrent, "root": args.root,
+            "admission_interval_s": args.admission_interval,
             "pools_created": (2 * args.pairs if "pairs" in modes else 0)
             + (2 * len(sizes) * args.cohort_repeats if "cohort" in modes else 0)
             + (args.concurrent if "concurrent" in modes else 0)}

@@ -556,9 +556,11 @@ clone-private bytes. Unobserved values stay null. Each summarized metric reports
 (`n` of `of`) and is labeled unqualified when any sample lacks it, instead of counting the gap
 as zero.
 
-Admission is sampled at the start and end of each trial's timed work, not continuously. A
-sample is flagged, not dropped, when build tools run, the 1-minute load exceeds half the CPU
-count, memory pressure is raised, or any of these could not be observed. Only admitted samples
+Admission is sampled at the start and end of each trial's timed work and every
+`--admission-interval` seconds (default 1) in between. Each sample costs one process listing
+and one sysctl. A trial is flagged, not dropped, when build tools run, the 1-minute load
+exceeds half the CPU count, memory pressure is raised, or any of these could not be observed at
+any sample. A failed observation or a gap longer than five intervals also flags the trial. Only admitted samples
 enter the admitted summaries and the paired pair and cohort ratios. `--summarize SAMPLES`
 recomputes the summary from a retained raw file without running anything. Cleanup stops each
 pool and removes only the trial's home and provider alias, with a readback. Store raw output
@@ -567,3 +569,14 @@ outside the repository. The negative controls run with
 
 This measures pool creation and a synthetic single-service graph. It does not qualify normal
 source-mounted worktree startup, application-specific images or cold host caches.
+
+Prepared bases carry no application images. On an M3 (September 2026, one prepared pool, three
+repeats), `ensure-image` for `postgres:16-alpine` (114 MB archive) took 10.6 s cold. The engine
+load itself took 3.1 s and host digest and layer validation about 1.8 s; the rest was registry
+acquisition into the home's image cache. `node:22-alpine` (61 MB) took 6.3 s cold, with a 1.7 s
+engine load.
+
+Preloading an image into a base could skip only the engine load. A fresh pool's load receipt is
+bound to its incarnation, so it still acquires and validates every image. Preloading would also
+make bases project-specific and require the verifier to check layer contents, so bases stay
+image-free. The larger remaining costs are image acquisition and per-incarnation revalidation.

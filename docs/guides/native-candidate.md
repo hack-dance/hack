@@ -98,10 +98,14 @@ branch namespaces. If its current scoped review differs, the frontend first
 checks native restore selection against that exact saved run, owner, namespace
 and plan. A native unbranched review of the same canonical project and unchanged
 original Compose must then return the saved namespace. Only that retained run
-continues with unbranched review and execution arguments. Restore selection and
-shared-source semantic compatibility are checked again before admission; mappings,
-graph receipts and ownership namespaces are not rewritten. Fresh and already
-branch-scoped graphs keep their normal branch namespace. This compatibility path
+continues with unbranched review and execution arguments and keeps its original
+adapted route labels, before branch hostname rewriting. This preserves legacy
+source contracts that did not enroll hostname changes. The selected generation,
+restore selection and shared-source semantic compatibility are checked again
+before admission; mappings, graph receipts and ownership namespaces are not
+rewritten. An active legacy graph still refuses restart preflight before cleanup;
+this stopped-run compatibility path does not migrate its live identity. Fresh and
+already branch-scoped graphs keep their normal branch namespace. This compatibility path
 does not authorize adopting an unrelated branch or project.
 
 ## Manual candidate upgrade and rollback

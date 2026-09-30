@@ -14,7 +14,6 @@ import {
   preparedBaseArguments,
 } from "./native-prepared-base.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
-import { prepareNativeProjectBranch } from "./native-project-branch.ts";
 import {
   nativeSharedSourceFlags,
   nativeStartCacheSource,
@@ -40,7 +39,11 @@ import {
   verifyNativeResumedRetainedGraph,
   verifyNativeRetainedMapping,
 } from "./native-project-retained-startup.ts";
-import { withNativeProjectReview } from "./native-project-review.ts";
+import {
+  prepareNativeReviewBranch,
+  selectNativeProjectReviewIdentity,
+  withNativeProjectReview,
+} from "./native-project-review.ts";
 import {
   hasOnlyNativeSupportedLabels,
   nativeBridgeCapacity,
@@ -211,6 +214,7 @@ type Dependencies = {
   prepareStorage: typeof prepareNativeProjectRunStorage;
   adaptAws: typeof adaptNativeAwsEnvironment;
   review: typeof withNativeProjectReview;
+  selectReview: typeof selectNativeProjectReviewIdentity;
   serve: typeof serveNativeProjectGraph;
   https: typeof acquireNativeHttpsLease;
   recoverHttps: typeof recoverNativeHttpsLease;
@@ -226,6 +230,7 @@ const DEFAULTS: Dependencies = {
   prepareStorage: prepareNativeProjectRunStorage,
   adaptAws: adaptNativeAwsEnvironment,
   review: withNativeProjectReview,
+  selectReview: selectNativeProjectReviewIdentity,
   serve: serveNativeProjectGraph,
   https: acquireNativeHttpsLease,
   recoverHttps: recoverNativeHttpsLease,
@@ -735,11 +740,16 @@ export async function startNativeProject(opts: {
     input,
     path: opts.adaptationFile,
   });
-  input = await prepareNativeProjectBranch({
-    input,
-    scope: opts.scope,
-    composeFile: opts.composeFile,
-  });
+  input = (
+    await prepareNativeReviewBranch({
+      runtime: opts.runtime,
+      scope: opts.scope,
+      composeFile: opts.composeFile,
+      input,
+      retained: restore,
+      phase: "before-runtime",
+    })
+  ).input;
   let specs = prepareNativeProjectServices(
     input,
     opts.dependencyFile !== undefined
@@ -854,6 +864,28 @@ export async function startNativeProject(opts: {
       run: retained,
       invoke: deps.invoke,
     });
+    const reviewedBranch = await prepareNativeReviewBranch({
+      runtime: opts.runtime,
+      scope: opts.scope,
+      composeFile: opts.composeFile,
+      profiles,
+      input,
+      retained: restore,
+      invoke: deps.invoke,
+      select: deps.selectReview,
+      phase: "after-runtime",
+    });
+    input = reviewedBranch.input;
+    const reviewIdentity = reviewedBranch.identity;
+    requireActiveStartup(controller.signal);
+    specs = prepareNativeProjectServices(
+      input,
+      opts.dependencyFile !== undefined
+    );
+    prepareNativeDependencyServices({
+      dependencies: hostDependencies,
+      services: specs,
+    });
     for (const spec of Object.values(specs)) {
       if (controller.signal.aborted) {
         throw refused();
@@ -887,6 +919,7 @@ export async function startNativeProject(opts: {
       profiles,
       branch: opts.scope.branch,
       retained: restore,
+      reviewIdentity,
       input: pinned,
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);

@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { prepareNativeProjectInput } from "../src/backends/native-project-input.ts";
 import { selectNativeProjectRestore } from "../src/backends/native-project-restore.ts";
-import { withNativeProjectReview } from "../src/backends/native-project-review.ts";
+import {
+  prepareNativeReviewBranch,
+  selectNativeProjectReviewIdentity,
+  withNativeProjectReview,
+} from "../src/backends/native-project-review.ts";
 import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
 
 const roots: string[] = [];
@@ -298,4 +302,119 @@ test("legacy review cleans temporary input and refuses selection drift after rev
     })
   ).rejects.toThrow("restore selection changed");
   expect(await Bun.file(temporary).exists()).toBe(false);
+});
+
+test("legacy identity is selected before route normalization and original adapted labels survive", async () => {
+  const { options, invoke } = await legacyFixture();
+  const compose = JSON.parse(options.input.normalizedComposeJson);
+  compose.services.web.labels = {
+    caddy: "app.hack, app.hack.gy",
+    "caddy.reverse_proxy": "{{upstreams 3000}}",
+  };
+  const input = {
+    ...options.input,
+    normalizedComposeJson: JSON.stringify(compose),
+  };
+  const scope = {
+    projectRoot: options.projectRoot,
+    projectDir: join(options.projectRoot, ".hack"),
+    nativeHome: options.runtime.home,
+    branch: "feature-a",
+  };
+  const prepared = await prepareNativeReviewBranch({
+    ...options,
+    scope,
+    input,
+    retained,
+    invoke,
+  });
+  expect(prepared.input.normalizedComposeJson).toBe(
+    input.normalizedComposeJson
+  );
+  expect(prepared.identity?.branch).toBeNull();
+  await withNativeProjectReview({
+    ...options,
+    input: prepared.input,
+    branch: scope.branch,
+    retained,
+    invoke,
+    reviewIdentity: prepared.identity,
+    run: async (review) => {
+      expect(review.namespace).toBe(retained.namespace);
+      expect(review.projectArgs).not.toContain("--branch");
+    },
+  });
+});
+
+test("early identity proof is rechecked after route preparation before normalized publication", async () => {
+  for (const key of ["generation", "owner"]) {
+    const { options, selected, calls, invoke } = await legacyFixture();
+    const identity = await selectNativeProjectReviewIdentity({
+      ...options,
+      branch: "feature-a",
+      retained,
+      invoke,
+    });
+    selected[key] = "1".repeat(key === "generation" ? 64 : 32);
+    calls.splice(0);
+    await expect(
+      withNativeProjectReview({
+        ...options,
+        branch: "feature-a",
+        retained,
+        invoke,
+        reviewIdentity: identity,
+        run: async () => {
+          throw new Error("unexpected admission");
+        },
+      })
+    ).rejects.toThrow("selection changed");
+    expect(calls.some((args) => args.includes("--normalized-file"))).toBe(
+      false
+    );
+  }
+});
+
+test("active branch-native review needs no stopped selection; active legacy mismatch refuses before cleanup", async () => {
+  const { options, calls, invoke } = await legacyFixture();
+  const identity = await selectNativeProjectReviewIdentity({
+    ...options,
+    branch: "feature-a",
+    retained: { ...retained, namespace: "c".repeat(64) },
+    retainedMode: "active",
+    invoke,
+  });
+  expect(identity.branch).toBe("feature-a");
+  expect(calls).toHaveLength(1);
+  calls.splice(0);
+  await expect(
+    selectNativeProjectReviewIdentity({
+      ...options,
+      branch: "feature-a",
+      retained,
+      retainedMode: "active",
+      invoke,
+    })
+  ).rejects.toThrow("Active legacy native branch review");
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.[0]).toBe("project");
+});
+
+test("deferred retained review rejects malformed branch before hooks or runtime selection", async () => {
+  const { options, calls, invoke } = await legacyFixture();
+  await expect(
+    prepareNativeReviewBranch({
+      ...options,
+      retained,
+      invoke,
+      phase: "before-runtime",
+      scope: {
+        projectRoot: options.projectRoot,
+        projectDir: join(options.projectRoot, ".hack"),
+        nativeHome: options.runtime.home,
+        branch: "foreign/branch",
+      },
+    })
+  ).rejects.toThrow("canonical branch");
+  expect(calls).toHaveLength(0);
 });

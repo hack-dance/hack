@@ -5,7 +5,6 @@ import { dirname, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
-import { prepareNativeProjectBranch } from "./native-project-branch.ts";
 import {
   discoverNativeHostDependency,
   type NativeHostDependency,
@@ -21,7 +20,11 @@ import {
   verifyNativeSourceCompatibility,
 } from "./native-project-restore.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
-import { withNativeProjectReview } from "./native-project-review.ts";
+import {
+  prepareNativeReviewBranch,
+  selectNativeProjectReviewIdentity,
+  withNativeProjectReview,
+} from "./native-project-review.ts";
 import {
   type NativeProjectRun,
   type NativeProjectRunScope,
@@ -41,6 +44,7 @@ const DEFAULTS = {
   dependencies: readNativeHostDependencies,
   invoke: invokeNativeRuntime,
   review: withNativeProjectReview,
+  selectReview: selectNativeProjectReviewIdentity,
 };
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const SHA = /^[a-f0-9]{64}$/;
@@ -268,11 +272,19 @@ export async function preflightNativeRestart(opts: {
     input,
     path: opts.adaptationFile,
   });
-  input = await prepareNativeProjectBranch({
-    input,
+  const reviewedBranch = await prepareNativeReviewBranch({
+    runtime: opts.runtime,
     scope: opts.scope,
     composeFile: opts.composeFile,
+    profiles: selected.profiles,
+    input,
+    retained: opts.run,
+    retainedMode: opts.cleanedRetry ? "stopped" : "active",
+    invoke: deps.invoke,
+    select: deps.selectReview,
   });
+  input = reviewedBranch.input;
+  const reviewIdentity = reviewedBranch.identity;
   if (selected.aws) {
     input = (await deps.aws({ input, ...selected.aws })).input;
   }
@@ -326,6 +338,9 @@ export async function preflightNativeRestart(opts: {
     composeFile: opts.composeFile,
     profiles: selected.profiles,
     branch: opts.scope.branch,
+    retained: opts.run,
+    retainedMode: opts.cleanedRetry ? "stopped" : "active",
+    reviewIdentity,
     input: { ...input, normalizedComposeJson: JSON.stringify(compose) },
     run: async (review) => {
       if (review.namespace !== opts.run.namespace) {

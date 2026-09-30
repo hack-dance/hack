@@ -2,10 +2,16 @@ import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { isRecord } from "../lib/guards.ts";
-import { nativeProjectBranchArgs } from "./native-project-branch.ts";
+import {
+  nativeProjectBranchArgs,
+  prepareNativeProjectBranch,
+} from "./native-project-branch.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
 import { validateNativeRestoreSelection } from "./native-project-restore.ts";
-import type { NativeProjectRun } from "./native-project-run.ts";
+import type {
+  NativeProjectRun,
+  NativeProjectRunScope,
+} from "./native-project-run.ts";
 import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
@@ -23,13 +29,15 @@ export interface NativeProjectReview {
   readonly projectArgs: readonly string[];
 }
 
-/**
- * Native code owns namespace and plan identities. Hold only public normalized
- * bytes in a private temporary directory while the caller publishes/starts the
- * exact plan. The native side rechecks original input identity at every effect.
- * Managed values remain in the caller's in-memory input, outside this file.
- */
-export async function withNativeProjectReview<T>(opts: {
+/** Original-input identity chosen before any branch route normalization. */
+export interface NativeProjectReviewIdentity {
+  readonly namespace: string;
+  readonly branch: string | null;
+  readonly projectArgs: readonly string[];
+  readonly retainedGeneration?: string;
+}
+
+export async function selectNativeProjectReviewIdentity(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly composeFile: string;
@@ -38,8 +46,8 @@ export async function withNativeProjectReview<T>(opts: {
   readonly input: NativeProjectInput;
   readonly retained?: NativeProjectRun;
   readonly invoke?: typeof invokeNativeRuntime;
-  readonly run: (review: NativeProjectReview) => Promise<T>;
-}): Promise<T> {
+  readonly retainedMode?: "stopped" | "active";
+}): Promise<NativeProjectReviewIdentity> {
   const file = relative(opts.projectRoot, opts.composeFile);
   if (
     !file ||
@@ -77,6 +85,11 @@ export async function withNativeProjectReview<T>(opts: {
   let namespace = original.plan.namespace;
   let retainedGeneration: string | undefined;
   if (opts.branch && opts.retained && namespace !== opts.retained.namespace) {
+    if (opts.retainedMode === "active") {
+      throw new Error(
+        "Active legacy native branch review requires explicit retained recovery; the current graph was not stopped."
+      );
+    }
     // Legacy mappings may predate native branch namespaces. Only native proofs
     // for this exact retained run and canonical project permit unscoped review.
     const selected = await invoke({
@@ -122,6 +135,44 @@ export async function withNativeProjectReview<T>(opts: {
     projectArgs = unbranchedArgs;
     namespace = opts.retained.namespace;
   }
+  return {
+    namespace,
+    branch: retainedGeneration ? null : (opts.branch ?? null),
+    projectArgs,
+    ...(retainedGeneration ? { retainedGeneration } : {}),
+  };
+}
+
+/**
+ * Native code owns namespace and plan identities. Hold only public normalized
+ * bytes in a private temporary directory while the caller publishes/starts the
+ * exact plan. The native side rechecks original input identity at every effect.
+ * Managed values remain in the caller's in-memory input, outside this file.
+ */
+export async function withNativeProjectReview<T>(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly composeFile: string;
+  readonly profiles?: readonly string[];
+  readonly branch?: string | null;
+  readonly input: NativeProjectInput;
+  readonly retained?: NativeProjectRun;
+  readonly invoke?: typeof invokeNativeRuntime;
+  readonly retainedMode?: "stopped" | "active";
+  readonly reviewIdentity?: NativeProjectReviewIdentity;
+  readonly run: (review: NativeProjectReview) => Promise<T>;
+}): Promise<T> {
+  const identity = await selectNativeProjectReviewIdentity(opts);
+  if (
+    opts.reviewIdentity &&
+    JSON.stringify(opts.reviewIdentity) !== JSON.stringify(identity)
+  ) {
+    throw new Error(
+      "Native project review selection changed; retained data was not adopted."
+    );
+  }
+  const { namespace, projectArgs, retainedGeneration } = identity;
+  const invoke = opts.invoke ?? invokeNativeRuntime;
   const directory = await mkdtemp(join(tmpdir(), "hack-native-review-"));
   try {
     await chmod(directory, 0o700);
@@ -162,4 +213,50 @@ export async function withNativeProjectReview<T>(opts: {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+/** Choose retained native identity before rewriting any adapted route labels. */
+export async function prepareNativeReviewBranch(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly phase?: "before-runtime" | "after-runtime";
+  readonly scope: NativeProjectRunScope;
+  readonly composeFile: string;
+  readonly profiles?: readonly string[];
+  readonly input: NativeProjectInput;
+  readonly retained?: NativeProjectRun;
+  readonly retainedMode?: "stopped" | "active";
+  readonly invoke?: typeof invokeNativeRuntime;
+  readonly select?: typeof selectNativeProjectReviewIdentity;
+}): Promise<{
+  input: NativeProjectInput;
+  identity?: NativeProjectReviewIdentity;
+}> {
+  nativeProjectBranchArgs(opts.scope.branch);
+  const deferred = Boolean(opts.retained && opts.scope.branch);
+  if (
+    (opts.phase === "before-runtime" && deferred) ||
+    (opts.phase === "after-runtime" && !deferred)
+  ) {
+    return { input: opts.input };
+  }
+  const identity =
+    opts.retained && opts.scope.branch
+      ? await (opts.select ?? selectNativeProjectReviewIdentity)({
+          runtime: opts.runtime,
+          projectRoot: opts.scope.projectRoot,
+          composeFile: opts.composeFile,
+          profiles: opts.profiles,
+          branch: opts.scope.branch,
+          input: opts.input,
+          retained: opts.retained,
+          retainedMode: opts.retainedMode,
+          invoke: opts.invoke,
+        })
+      : undefined;
+  const input = await prepareNativeProjectBranch({
+    input: opts.input,
+    composeFile: opts.composeFile,
+    scope: identity ? { ...opts.scope, branch: identity.branch } : opts.scope,
+  });
+  return { input, ...(identity ? { identity } : {}) };
 }

@@ -1,5 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { acquireNativeHttpsLease } from "../src/backends/native-https-owner.ts";
@@ -1909,13 +1916,21 @@ test("startup and restart review use identical branch routes after adaptation", 
     };
     return { ...input, normalizedComposeJson: JSON.stringify(compose) };
   };
+  const before = async (input: NativeProjectInput) => {
+    expect(
+      JSON.parse(input.normalizedComposeJson).services.web.labels.caddy
+    ).toBe("feature-a.app.hack.local, feature-a.app.hack.gy");
+    return await opts.before();
+  };
   const observed: NativeProjectInput[] = [];
   opts.dependencies.review = async (request) => {
     expect(request.branch).toBe("feature-a");
     observed.push(request.input);
     return await review(request);
   };
-  expect(await startNativeProject({ ...opts, scope, adaptationFile })).toBe(0);
+  expect(
+    await startNativeProject({ ...opts, scope, adaptationFile, before })
+  ).toBe(0);
   await preflightNativeRestart({
     runtime: opts.runtime,
     scope,
@@ -1935,6 +1950,12 @@ test("startup and restart review use identical branch routes after adaptation", 
       review: opts.dependencies.review,
       dependencies: async () => [],
       invoke: async ({ args }) => {
+        if (args[0] === "project") {
+          expect(args).toContain("--branch");
+          return {
+            plan: { namespace: "b".repeat(64), compose_sha256: "d".repeat(64) },
+          };
+        }
         if (args[1] === "status") {
           return { network: "internet" };
         }
@@ -1953,4 +1974,79 @@ test("startup and restart review use identical branch routes after adaptation", 
     JSON.parse(observed[0]?.normalizedComposeJson ?? "{}").services.web.labels
       .caddy
   ).toBe("feature-a.app.hack.local, feature-a.app.hack.gy");
+});
+
+test("retained startup selects legacy labels only after runtime admission and before review", async () => {
+  for (const changed of [false, true]) {
+    const { opts } = await fixture(false);
+    const saved = {
+      run: "1".repeat(32),
+      owner: "c".repeat(32),
+      namespace: "b".repeat(64),
+      planId: "a".repeat(64),
+    };
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => {
+      const input = await prepare(request);
+      const compose = JSON.parse(input.normalizedComposeJson);
+      compose.services.web.labels = {
+        caddy: "app.hack.local",
+        "caddy.tls": "internal",
+        "caddy.reverse_proxy": "{{upstreams 3000}}",
+      };
+      return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+    };
+    const invoke = opts.dependencies.invoke!;
+    let admitted = false;
+    let reviewed = false;
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[0] === "runtime" && request.args[1] === "up") {
+        admitted = true;
+      }
+      if (request.args[0] === "project") {
+        expect(admitted).toBe(true);
+        return {
+          plan: {
+            namespace: request.args.includes("--branch")
+              ? "d".repeat(64)
+              : saved.namespace,
+            compose_sha256: "d".repeat(64),
+            source: await realpath(opts.scope.projectRoot),
+          },
+        };
+      }
+      if (request.args[1] === "restore-selection") {
+        expect(admitted).toBe(true);
+        return {
+          ...saved,
+          owner: changed ? "0".repeat(32) : saved.owner,
+          plan: saved.planId,
+          generation: "2".repeat(64),
+        };
+      }
+      return await invoke(request);
+    };
+    const review = opts.dependencies.review!;
+    opts.dependencies.review = async (request) => {
+      reviewed = true;
+      expect(request.reviewIdentity?.branch).toBeNull();
+      expect(
+        JSON.parse(request.input.normalizedComposeJson).services.web.labels
+          .caddy
+      ).toBe("app.hack.local");
+      return await review(request);
+    };
+    const running = startNativeProject({
+      ...opts,
+      scope: { ...opts.scope, branch: "feature-a" },
+      restore: saved,
+    });
+    if (changed) {
+      await expect(running).rejects.toThrow("restore selection changed");
+      expect(reviewed).toBe(false);
+    } else {
+      expect(await running).toBe(0);
+      expect(reviewed).toBe(true);
+    }
+  }
 });

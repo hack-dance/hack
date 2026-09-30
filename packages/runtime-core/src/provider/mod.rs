@@ -29,6 +29,7 @@ pub mod guest_storage;
 pub mod host_endpoint;
 pub mod hostname_authority;
 pub mod http_probe;
+pub mod https_recovery;
 mod identity;
 pub mod image_ensure;
 mod image_load;

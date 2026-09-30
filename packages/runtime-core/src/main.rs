@@ -50,6 +50,7 @@ Usage:
   hack-local runtime hostname-authority --socket <path> [--json]
   hack-local runtime recover-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
   hack-local runtime managed-hostname-authority [--json]
+  hack-local runtime recover-quiescent-https --expect-owner <64-hex> --expect-configuration <64-hex> --expect-frontend-pid <pid> --json
   hack-local runtime inspect-host-listener --pid <pid> --port <loopback-port> --executable <absolute-path> [--peer-port <open-client-port>] [--json]
   hack-local runtime serve-managed-hostnames [--certificate-name-limit <1..4096>] (owner pipe on stdin)
   hack-local runtime certificate-admission [--json]
@@ -513,6 +514,26 @@ fn run() -> Result<(), CandidateError> {
                     hash,
                 )?,
             )?;
+        }
+        [
+            "runtime",
+            "recover-quiescent-https",
+            "--expect-owner",
+            owner,
+            "--expect-configuration",
+            configuration,
+            "--expect-frontend-pid",
+            pid,
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::https_recovery::recover(
+                &discover_candidate(&requested)?,
+                owner,
+                configuration,
+                pid.parse().map_err(|_| {
+                    CandidateError::new("invalid_arguments", "Expected a positive frontend PID.")
+                })?,
+            )?)?;
         }
         ["runtime", "managed-hostname-authority"]
         | ["runtime", "managed-hostname-authority", "--json"] => {

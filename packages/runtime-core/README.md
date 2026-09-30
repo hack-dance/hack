@@ -917,3 +917,22 @@ generation must match the original receipt. Original bytes remain in a digest-bo
 resumable archive; a later current-boot journal is preserved for its own cleanup.
 Changed evidence, pending state or live compute refuses archival. This does not
 replay old dependencies or relax the fresh graph's endpoint/readiness checks.
+
+An interrupted legacy HTTPS frontend can leave its exact socket, Caddy receipt
+and lock alongside an unpublished shared-owner configuration. Explicit private
+`runtime recover-quiescent-https --expect-owner RECEIPT_SHA
+--expect-configuration CONFIG_SHA --expect-frontend-pid OBSERVED_DEAD_PID --json`
+archives this combined incident without signaling processes or changing CA data.
+It requires the current pool/boot, strict configuration, exact authority path,
+dead recorded processes and configured executables, no shared leases or release
+history for that generation, an inactive Unix socket, and exclusive IPv4/IPv6
+wildcard and loopback listeners held across each move. The legacy receipt and
+unpublished configuration must select the same Caddy path, binary hash and port.
+Receipt/config selectors identify raw file bytes; the CA must retain its original DER fingerprint. A durable journal
+and exclusive renames preserve original inodes and permit exact partial retries;
+foreign targets, changed evidence and live or uncertain effects refuse. A crash
+during initial journal publication may leave an incomplete journal: it refuses
+retry before archival rather than guessing or discarding that evidence. Global
+HTTPS evidence archival does not itself recover a project finalization token or
+prove application readiness: run the explicit frontend recovery and normal
+startup checks afterward.

@@ -46,6 +46,15 @@ import threading
 import time
 
 BUILD_TOOLS = re.compile(r"^(cargo|rustc|clang|clang\+\+|ld|ld64|zig|swift-frontend|swiftc|xcodebuild|cc1|cc1plus)$")
+# Host services named separately inside background CPU: macOS security assessment of new
+# executables (XProtect, Gatekeeper, code-signing checks) and Spotlight indexing. A fresh home's
+# provider and engine binaries are new executables and its files are new files, so a run can
+# induce this work. Membership is by process name only: it shows which service used the CPU, not
+# what it examined or why. Named services stay in background, so admission is unchanged.
+HOST_SERVICES = {
+    "security_scan": re.compile(r"^(XprotectService|XProtect[A-Za-z]*|xprotectd|syspolicyd|amfid)$"),
+    "indexing": re.compile(r"^(mds|mds_stores|mdworker|mdworker_shared|mdsync)$"),
+}
 COMPOSE = """services:
   web:
     image: {image_id}
@@ -385,6 +394,8 @@ class Background:
         # The largest background contributors in the latest measurement, [[command, cores], ...],
         # so a flagged sample can be attributed (for example to Gatekeeper scanning new binaries).
         self.top = []
+        # The latest measurement's cores per HOST_SERVICES entry, empty until an interval exists.
+        self.services = {}
         self.lock = threading.Lock()
 
     @staticmethod
@@ -424,7 +435,7 @@ class Background:
                 table[(int(fields[0]), fields[2])] = (seconds, self.root in fields[2])
         previous, self.previous = self.previous, (now, table)
         if previous is None or now <= previous[0]:
-            self.top = []
+            self.top, self.services = [], {}
             return None, None, names
         background = watched = 0.0
         by_command = {}
@@ -440,6 +451,8 @@ class Background:
         elapsed = now - previous[0]
         ranked = sorted(by_command.items(), key=lambda item: item[1], reverse=True)[:3]
         self.top = [[command, round(delta / elapsed, 3)] for command, delta in ranked if delta > 0]
+        self.services = {name: round(sum(d for c, d in by_command.items() if pattern.match(c)) / elapsed, 3)
+                         for name, pattern in HOST_SERVICES.items()}
         return round(background / elapsed, 3), round(watched / elapsed, 3), names
 
 
@@ -454,6 +467,7 @@ def measure_idle(meter, seconds, interval, pressure=None, sleep=time.sleep, cloc
     observations in progress (each at most OBSERVATION_TIMEOUT)."""
     pressure = pressure or (lambda: (observed_output(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"]) or "").strip())
     background, watched, levels, tools, ceiling_top, failed = [], [], set(), set(), [], False
+    services, other, ceiling_services = {name: [] for name in HOST_SERVICES}, [], {}
     started = clock()
     try:
         meter.observe()
@@ -469,8 +483,12 @@ def measure_idle(meter, seconds, interval, pressure=None, sleep=time.sleep, cloc
         if cores is not None:
             background.append(cores)
             watched.append(vm)
+            named = dict(getattr(meter, "services", {}))
+            for name, value in named.items():
+                services.setdefault(name, []).append(value)
+            other.append(round(cores - sum(named.values()), 3))
             if cores == max(background):
-                ceiling_top = list(getattr(meter, "top", []))
+                ceiling_top, ceiling_services = list(getattr(meter, "top", [])), named
         tools |= {Path(n).name for n in names if BUILD_TOOLS.match(Path(n).name)}
         level = pressure()
         levels.add(level or "unobserved")
@@ -487,7 +505,9 @@ def measure_idle(meter, seconds, interval, pressure=None, sleep=time.sleep, cloc
             "background_cores": spread(background), "watched_cores": spread(watched),
             "pressure_levels": sorted(levels), "build_tools": sorted(tools),
             "ceiling_cores": max(background) if background else None, "ceiling_top": ceiling_top,
-            "refusals": refusals}
+            "ceiling_services": ceiling_services,
+            "host_services_cores": {name: spread(values) for name, values in services.items()},
+            "other_cores": spread(other), "refusals": refusals}
 
 
 def admission_from(load, names, pressure, cpus, background=None, ceiling=None):
@@ -543,7 +563,8 @@ def admission(meter=None, ceiling=None):
     pressure = level.strip() if level is not None else None
     observed = admission_from(load, names, pressure, os.cpu_count() or 1, background, ceiling)
     if meter is not None:
-        observed.update(watched_cores=watched, background_top=list(getattr(meter, "top", [])))
+        observed.update(watched_cores=watched, background_top=list(getattr(meter, "top", [])),
+                        host_services=dict(getattr(meter, "services", {})))
     return observed
 
 
@@ -646,7 +667,12 @@ class Sampler:
                 "max_load1": max(loads) if loads else None,
                 "max_background_cores": max(background) if background else None,
                 "max_background_top": peak.get("background_top"),
-                "max_watched_cores": max(watched) if watched else None, "admitted": not reasons}
+                "max_background_services": peak.get("host_services"),
+                "max_watched_cores": max(watched) if watched else None, "admitted": not reasons,
+                # Seconds since start and background split per sample, for phase attribution.
+                "series": [{"t_s": round(t - self.started, 3), "background_cores": s.get("background_cores"),
+                            **(s.get("host_services") or {})}
+                           for s, t in zip(self.samples, self.times)] if self.started is not None else []}
 
 
 class Trial:
@@ -950,6 +976,27 @@ def concurrent_trial(args, count):
     return record
 
 
+def host_activity(series, phases):
+    """Mean background cores per phase, split into HOST_SERVICES and the rest, over the sampler
+    samples that ended inside each phase (seconds since the sampler started). A warm restart
+    re-executes the binaries its cold start ran first, so security scanning seen in cold phases
+    and not in warm ones is consistent with scans the run induced. That is timing evidence, not
+    causal tracing. Unobserved samples are counted and left out of the means."""
+    result = {}
+    for phase, (start, end) in phases.items():
+        inside = [s for s in series if start < s["t_s"] <= end]
+        observed = [s for s in inside if s.get("background_cores") is not None
+                    and all(s.get(name) is not None for name in HOST_SERVICES)]
+        entry = {"seconds": round(end - start, 3), "samples": len(inside), "observed": len(observed)}
+        if observed:
+            entry["background_cores"] = round(statistics.fmean(s["background_cores"] for s in observed), 3)
+            for name in HOST_SERVICES:
+                entry[f"{name}_cores"] = round(statistics.fmean(s[name] for s in observed), 3)
+            entry["other_cores"] = round(entry["background_cores"] - sum(entry[f"{n}_cores"] for n in HOST_SERVICES), 3)
+        result[phase] = entry
+    return result
+
+
 def pool_resources(pools, statuses):
     """Cohort totals from one reading per pool, taken in turn rather than at one instant. A
     total is null when any pool's value is unobserved.
@@ -994,7 +1041,7 @@ def worktree_trial(args, size, repeat, lane, clock=time.monotonic):
         pool.deadline = deadline
     record = {"mode": "worktrees", "size": size, "repeat": repeat, "lane": lane, "home": str(fixture.dir),
               "homes": [str(pool.dir) for pool in pools]}
-    sampler = None
+    sampler, marks = None, {}
     try:
         entries = fixture.create()
         for pool in pools:
@@ -1017,6 +1064,8 @@ def worktree_trial(args, size, repeat, lane, clock=time.monotonic):
 
         ready = each(start, size, args.worktree_parallel)
         record["all_ready_s"] = round(time.monotonic() - started, 3)
+        origin = started - sampler.started
+        marks["cold"] = [round(origin, 3), round(origin + record["all_ready_s"], 3)]
         record["ready_offsets_s"] = sorted(r["ready_s"] for r in ready)
         record["provenance"] = [r["provenance"] for r in ready]
         observed_from = round(time.monotonic() - started, 3)
@@ -1067,6 +1116,8 @@ def worktree_trial(args, size, repeat, lane, clock=time.monotonic):
 
         warm = each(retain, size, args.worktree_parallel)
         record["warm_all_ready_s"] = round(time.monotonic() - warm_started, 3)
+        origin = warm_started - sampler.started
+        marks["warm"] = [round(origin, 3), round(origin + record["warm_all_ready_s"], 3)]
         record["warm_provenance"] = [w["provenance"] for w in warm]
         record["retained"] = size
 
@@ -1090,6 +1141,9 @@ def worktree_trial(args, size, repeat, lane, clock=time.monotonic):
         expired = deadline.expired()
         if sampler:
             record["admission_during"] = sampler.stop()
+            if marks:
+                record["phases_s"] = marks
+                record["host_activity"] = host_activity(record["admission_during"]["series"], marks)
         record["samples"] = [pool.samples for pool in pools]
         cleanup_started = clock()
         cleanup = Deadline(getattr(args, "cleanup_budget", None), "cleanup budget", clock)
@@ -1244,7 +1298,28 @@ def worktree_metrics(r):
                  "vm_peak_footprint_sum_bytes", "guest_memory_configured_bytes", "disk_allocated_bytes",
                  "disk_private_bytes", "homes_allocated_bytes"):
         metrics[name] = resources.get(name)
+    # Background during each phase, by named host service and the rest (records without it: null).
+    activity = r.get("host_activity") or {}
+    for phase in ("cold", "warm"):
+        for name in (*HOST_SERVICES, "other"):
+            metrics[f"{phase}_{name}_cores"] = (activity.get(phase) or {}).get(f"{name}_cores")
     return metrics
+
+
+def flag_attribution(record):
+    """What a flagged cohort's peak background sample consisted of: its excess over the idle
+    ceiling, each named host service and the rest. Descriptive only: a flagged cohort stays
+    flagged, and the idle baseline's own per-service figures are the reference for each part."""
+    during = record.get("admission_during") or {}
+    peak = during.get("max_background_cores")
+    ceiling = (record.get("admission") or {}).get("idle_ceiling_cores")
+    services = during.get("max_background_services") or {}
+    return {**{k: record.get(k) for k in ("size", "repeat", "lane")},
+            "peak_background_cores": peak, "idle_ceiling_cores": ceiling,
+            "excess_cores": None if peak is None or ceiling is None else round(peak - ceiling, 3),
+            "peak_services_cores": services,
+            "peak_other_cores": None if peak is None or not services else round(peak - sum(services.values()), 3),
+            "peak_top": during.get("max_background_top")}
 
 
 def idle_vms_changed(started, ended):
@@ -1314,6 +1389,8 @@ def summarize(records, cpus=None, idle_vms=None, idle_vms_end=None):
                         for size in sorted({r["size"] for r in chosen})}
     summary["admitted_worktree_all_ready_ratio_by_size"] = paired(
         worktrees, lambda r: (r["size"], r["repeat"]), lambda r: r["all_ready_s"])
+    summary["worktree_flag_attribution"] = [flag_attribution(r) for r, ok, why in worktrees
+                                            if not ok and "during:background_above_idle" in why]
     selections = {}
     for r, _, _ in worktrees:
         for p in r.get("provenance", []) + r.get("warm_provenance", []):

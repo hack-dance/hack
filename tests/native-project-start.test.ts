@@ -1452,6 +1452,11 @@ test("restore startup passes the retained run and selected generation to its own
     namespace: "b".repeat(64),
     planId: "a".repeat(64),
   };
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) => {
+    expect(request.retained).toEqual(saved);
+    return await review(request);
+  };
   const invoke = opts.dependencies.invoke!;
   const serve = opts.dependencies.serve!;
   opts.dependencies.invoke = async (request) =>

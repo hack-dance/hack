@@ -886,6 +886,7 @@ export async function startNativeProject(opts: {
       composeFile: opts.composeFile,
       profiles,
       branch: opts.scope.branch,
+      retained: restore,
       input: pinned,
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);

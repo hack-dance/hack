@@ -1,9 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { prepareNativeProjectInput } from "../src/backends/native-project-input.ts";
+import { selectNativeProjectRestore } from "../src/backends/native-project-restore.ts";
 import { withNativeProjectReview } from "../src/backends/native-project-review.ts";
+import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -130,4 +132,170 @@ test("noncanonical branch review refuses before invoking the executor", async ()
       },
     })
   ).rejects.toThrow("canonical branch");
+});
+
+const retained = {
+  run: "d".repeat(32),
+  owner: "e".repeat(32),
+  namespace: "a".repeat(64),
+  planId: "b".repeat(64),
+};
+
+async function legacyFixture() {
+  const options = await fixture();
+  const calls: string[][] = [];
+  const selected: Record<string, unknown> = {
+    run: retained.run,
+    owner: retained.owner,
+    namespace: retained.namespace,
+    plan: retained.planId,
+    generation: "f".repeat(64),
+  };
+  const unbranched: Record<string, unknown> = {
+    namespace: retained.namespace,
+    source: await realpath(options.projectRoot),
+    compose_sha256: options.input.originalSha256,
+  };
+  const invoke: typeof invokeNativeRuntime = async ({ args }) => {
+    calls.push([...args]);
+    if (args[0] === "graph") {
+      return selected;
+    }
+    if (!args.includes("--branch")) {
+      return { plan_id: retained.planId, plan: unbranched };
+    }
+    return {
+      plan_id: retained.planId,
+      plan: { ...unbranched, namespace: "c".repeat(64) },
+    };
+  };
+  return { options, calls, selected, unbranched, invoke };
+}
+
+test("legacy retained review uses native unbranched authority and rechecks restore selection", async () => {
+  const { options, calls, invoke } = await legacyFixture();
+  let temporary = "";
+  await withNativeProjectReview({
+    ...options,
+    branch: "feature-a",
+    retained,
+    invoke,
+    run: async (review) => {
+      expect(review.namespace).toBe(retained.namespace);
+      expect(review.projectArgs).not.toContain("--branch");
+      temporary =
+        review.projectArgs[
+          review.projectArgs.indexOf("--normalized-file") + 1
+        ] ?? "";
+      expect(await Bun.file(temporary).text()).toBe(
+        options.input.normalizedComposeJson
+      );
+      const selection = await selectNativeProjectRestore({
+        runtime: options.runtime,
+        projectRoot: options.projectRoot,
+        restore: retained,
+        review,
+        invoke,
+      });
+      expect(selection.run).toBe(retained.run);
+      expect(selection.flags).toEqual(["--expect-generation", "f".repeat(64)]);
+    },
+  });
+  expect(calls.map((args) => args.slice(0, 2).join(" "))).toEqual([
+    "project plan",
+    "graph restore-selection",
+    "project plan",
+    "project plan",
+    "graph restore-selection",
+  ]);
+  expect(await Bun.file(temporary).exists()).toBe(false);
+});
+
+test("fresh and current branch-native review never consult legacy restore authority", async () => {
+  for (const saved of [undefined, { ...retained, namespace: "c".repeat(64) }]) {
+    const { options, calls, invoke } = await legacyFixture();
+    await withNativeProjectReview({
+      ...options,
+      branch: "feature-a",
+      retained: saved,
+      invoke,
+      run: async (review) => {
+        expect(review.namespace).toBe("c".repeat(64));
+        expect(review.projectArgs).toContain("--branch");
+      },
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls.every((args) => args.includes("--branch"))).toBe(true);
+  }
+});
+
+test("legacy review rejects changed native selection before unbranched review", async () => {
+  for (const key of ["run", "owner", "namespace", "plan", "generation"]) {
+    const { options, calls, selected, invoke } = await legacyFixture();
+    selected[key] = "invalid";
+    await expect(
+      withNativeProjectReview({
+        ...options,
+        branch: "feature-a",
+        retained,
+        invoke,
+        run: async () => {
+          throw new Error("unexpected callback");
+        },
+      })
+    ).rejects.toThrow("restore selection changed");
+    expect(calls).toHaveLength(2);
+  }
+});
+
+test("legacy review rejects a different project, namespace or edited original without admission", async () => {
+  for (const key of ["source", "namespace", "compose_sha256"]) {
+    const { options, calls, unbranched, invoke } = await legacyFixture();
+    const originalInvoke: typeof invokeNativeRuntime = async (request) => {
+      if (request.args[0] === "project" && !request.args.includes("--branch")) {
+        unbranched[key] = "foreign";
+      }
+      return await invoke(request);
+    };
+    await expect(
+      withNativeProjectReview({
+        ...options,
+        branch: "feature-a",
+        retained,
+        invoke: originalInvoke,
+        run: async () => {
+          throw new Error("unexpected callback");
+        },
+      })
+    ).rejects.toThrow("retained project review changed");
+    expect(calls).toHaveLength(3);
+  }
+});
+
+test("legacy review cleans temporary input and refuses selection drift after review", async () => {
+  const { options, selected, invoke } = await legacyFixture();
+  let temporary = "";
+  await expect(
+    withNativeProjectReview({
+      ...options,
+      branch: "feature-a",
+      retained,
+      invoke,
+      run: async (review) => {
+        temporary =
+          review.projectArgs[
+            review.projectArgs.indexOf("--normalized-file") + 1
+          ] ?? "";
+        selected.owner = "0".repeat(32);
+        await selectNativeProjectRestore({
+          runtime: options.runtime,
+          projectRoot: options.projectRoot,
+          restore: retained,
+          review,
+          invoke,
+        });
+      },
+    })
+  ).rejects.toThrow("restore selection changed");
+  expect(await Bun.file(temporary).exists()).toBe(false);
 });

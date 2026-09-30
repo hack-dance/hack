@@ -93,6 +93,17 @@ still apply. A same-checkout branch namespace does not create an isolated source
 tree. These planning contracts do not qualify multiple independent source roots
 inside one VM pool.
 
+An existing frontend branch mapping may retain a graph admitted before native
+branch namespaces. If its current scoped review differs, the frontend first
+checks native restore selection against that exact saved run, owner, namespace
+and plan. A native unbranched review of the same canonical project and unchanged
+original Compose must then return the saved namespace. Only that retained run
+continues with unbranched review and execution arguments. Restore selection and
+shared-source semantic compatibility are checked again before admission; mappings,
+graph receipts and ownership namespaces are not rewritten. Fresh and already
+branch-scoped graphs keep their normal branch namespace. This compatibility path
+does not authorize adopting an unrelated branch or project.
+
 ## Manual candidate upgrade and rollback
 
 Candidate bundles are selected by their full path. There is no automatic candidate

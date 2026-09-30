@@ -1,9 +1,11 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import { nativeProjectBranchArgs } from "./native-project-branch.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
+import { validateNativeRestoreSelection } from "./native-project-restore.ts";
+import type { NativeProjectRun } from "./native-project-run.ts";
 import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
@@ -15,6 +17,8 @@ export interface NativeProjectReview {
   readonly planId: string;
   readonly namespace: string;
   readonly report: Readonly<Record<string, unknown>>;
+  /** Exact legacy fallback selection; restore must observe it again after review. */
+  readonly retainedGeneration?: string;
   /** Reuse unchanged for source publication and admission within the callback. */
   readonly projectArgs: readonly string[];
 }
@@ -32,6 +36,8 @@ export async function withNativeProjectReview<T>(opts: {
   readonly profiles?: readonly string[];
   readonly branch?: string | null;
   readonly input: NativeProjectInput;
+  readonly retained?: NativeProjectRun;
+  readonly invoke?: typeof invokeNativeRuntime;
   readonly run: (review: NativeProjectReview) => Promise<T>;
 }): Promise<T> {
   const file = relative(opts.projectRoot, opts.composeFile);
@@ -44,7 +50,7 @@ export async function withNativeProjectReview<T>(opts: {
       "Native project review requires an owned original Compose file."
     );
   }
-  const projectArgs = [
+  let projectArgs = [
     "--project",
     opts.projectRoot,
     "--file",
@@ -52,7 +58,8 @@ export async function withNativeProjectReview<T>(opts: {
     ...nativeProjectBranchArgs(opts.branch),
     ...(opts.profiles ?? []).flatMap((profile) => ["--profile", profile]),
   ];
-  const original = await invokeNativeRuntime({
+  const invoke = opts.invoke ?? invokeNativeRuntime;
+  const original = await invoke({
     runtime: opts.runtime,
     cwd: opts.projectRoot,
     args: ["project", "plan", ...projectArgs, "--json"],
@@ -67,7 +74,54 @@ export async function withNativeProjectReview<T>(opts: {
       "Native project input changed before review; prepare it again."
     );
   }
-  const namespace = original.plan.namespace;
+  let namespace = original.plan.namespace;
+  let retainedGeneration: string | undefined;
+  if (opts.branch && opts.retained && namespace !== opts.retained.namespace) {
+    // Legacy mappings may predate native branch namespaces. Only native proofs
+    // for this exact retained run and canonical project permit unscoped review.
+    const selected = await invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: [
+        "graph",
+        "restore-selection",
+        "--run-id",
+        opts.retained.run,
+        "--json",
+      ],
+    });
+    retainedGeneration = validateNativeRestoreSelection({
+      selected,
+      saved: opts.retained,
+      namespace: opts.retained.namespace,
+    }).generation;
+    const unbranchedArgs = [
+      "--project",
+      opts.projectRoot,
+      "--file",
+      file,
+      ...(opts.profiles ?? []).flatMap((profile) => ["--profile", profile]),
+    ];
+    const unbranched = await invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: ["project", "plan", ...unbranchedArgs, "--json"],
+    });
+    const canonicalProject = await realpath(opts.projectRoot);
+    if (
+      !(isRecord(unbranched) && isRecord(unbranched.plan)) ||
+      unbranched.plan.namespace !== opts.retained.namespace ||
+      original.plan.source !== canonicalProject ||
+      unbranched.plan.source !== canonicalProject ||
+      unbranched.plan.compose_sha256 !== opts.input.originalSha256
+    ) {
+      throw new Error(
+        "Native retained project review changed; retained data was not adopted."
+      );
+    }
+    projectArgs = unbranchedArgs;
+    namespace = opts.retained.namespace;
+  }
   const directory = await mkdtemp(join(tmpdir(), "hack-native-review-"));
   try {
     await chmod(directory, 0o700);
@@ -85,7 +139,7 @@ export async function withNativeProjectReview<T>(opts: {
       "--expect-namespace",
       namespace,
     ];
-    const report = await invokeNativeRuntime({
+    const report = await invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
       args: ["project", "plan", ...normalizedArgs, "--json"],
@@ -102,6 +156,7 @@ export async function withNativeProjectReview<T>(opts: {
       planId: report.plan_id,
       namespace,
       report,
+      ...(retainedGeneration ? { retainedGeneration } : {}),
       projectArgs: normalizedArgs,
     });
   } finally {

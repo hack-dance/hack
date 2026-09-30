@@ -246,7 +246,7 @@ class Accounting(unittest.TestCase):
 # the files of the worktree they were started from; FAKE_FAULT injects the failures the trial
 # must catch.
 FAKE_RUNTIME = r'''#!PYTHON
-import base64, hashlib, json, os, pathlib, secrets, sys
+import base64, hashlib, json, os, pathlib, secrets, sys, time
 
 argv = sys.argv[1:]
 home, argv = pathlib.Path(argv[1]), [a for a in argv[2:] if a != "--json"]
@@ -299,6 +299,9 @@ if command == ["runtime", "status"]:
            "guest_boot_id": f"{trial}-{state['boots']}", "guest_memory_mib": 6144,
            "provider_resources": {"processes": [root, helper, helper] if alive else []}})
 if command == ["runtime", "down"]:
+    # `hang-down`: final disposal (after the live edits) never returns.
+    if fault == "hang-down" and any((pathlib.Path(r["root"]) / "live.txt").exists() for r in state["runs"].values()):
+        time.sleep(60)
     if fault == "down-fails":
         reply({"code": "provider_down"}, 1)
     if fault == "drift-on-down":
@@ -308,6 +311,8 @@ if command == ["runtime", "down"]:
     state["alive"] = fault == "still-alive"
     reply({"phase": "stopped"})
 if command == ["runtime", "ensure-image"]:
+    if fault == "hang-ensure":
+        time.sleep(60)
     reply({"image_id": "sha256:" + "a" * 64})
 if command == ["project", "plan"]:
     namespace = hashlib.sha256((option("--project") + option("--branch")).encode()).hexdigest()
@@ -450,7 +455,8 @@ class WorktreeTrials(unittest.TestCase):
     def assert_fixture_preserved(self, record, pool_error):
         """Every root keeps its registration, branch and committed marker, and every home stays."""
         *pools, fixture = record["cleanup"]
-        self.assertTrue(all(pool_error in c.get("error", "") for c in pools), pools)
+        if pool_error:
+            self.assertTrue(all(pool_error in c.get("error", "") for c in pools), pools)
         self.assertIn("not confirmed disposed", fixture["error"])
         self.assertTrue(all(Path(home).is_dir() for home in record["homes"]))
         base = Path(fixture["preserved"])
@@ -487,7 +493,7 @@ class WorktreeTrials(unittest.TestCase):
         os.environ["FAKE_FAULT"] = "still-alive"
         self.args.worktree_repeats = 2
         records = []
-        self.assertFalse(benchmark.run_worktrees(self.args, [2, 1], records.append))
+        self.assertEqual(benchmark.run_worktrees(self.args, [2, 1], records.append), "cleanup_failed")
         self.assertEqual([(r["size"], r["repeat"], r["lane"]) for r in records], [(2, 0, "stock")])
         record = records[0]
         self.assert_fixture_preserved(record, "not confirmed stopped")
@@ -502,10 +508,385 @@ class WorktreeTrials(unittest.TestCase):
     def test_every_planned_cohort_runs_when_cleanup_succeeds(self):
         self.args.worktree_repeats = 1
         records = []
-        self.assertTrue(benchmark.run_worktrees(self.args, [1], records.append))
+        self.assertIsNone(benchmark.run_worktrees(self.args, [1], records.append))
         self.assertEqual([(r["lane"], r["ok"], r["cleanup_failed"]) for r in records],
                          [("prepared", True, False), ("stock", True, False)])
         self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_distress_stops_scheduling_after_the_current_cohort_cleans_up(self):
+        self.args.worktree_repeats = 2
+        checks = []
+
+        class Scripted:
+            def check(self, record=None):
+                checks.append(record is not None)
+                return ["new_report: syspolicyd-now.ips"] if record is not None else []
+
+        records = []
+        stopped = benchmark.run_worktrees(self.args, [1], records.append, distress=Scripted())
+        self.assertEqual(stopped, "distress: new_report: syspolicyd-now.ips")
+        # The first cohort ran and cleaned up; no later lane or repeat started.
+        self.assertEqual([(r["lane"], r["ok"], r["cleanup_failed"]) for r in records], [("prepared", True, False)])
+        self.assertEqual(checks, [False, True])
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_an_unavailable_process_listing_keeps_every_home_and_the_fixture(self):
+        real = benchmark.observed_output
+
+        def observed(argv, timeout=None):
+            # Trial cleanup's own listing hangs or fails; everything else observes normally.
+            return None if argv[:2] == ["ps", "-axww"] else real(argv, timeout)
+
+        with mock.patch.object(benchmark, "observed_output", side_effect=observed):
+            record = benchmark.worktree_trial(self.args, 2, 0, "prepared")
+        self.assertTrue(record["ok"], record.get("error"))
+        self.assertTrue(record["cleanup_failed"])
+        *pools, fixture = record["cleanup"]
+        self.assertTrue(all("process listing unavailable" in c["error"] for c in pools), pools)
+        self.assertIn("not confirmed disposed", fixture["error"])
+        self.assertTrue(all(Path(home).is_dir() for home in record["homes"]))
+
+    def test_a_spent_budget_starts_no_further_cohort(self):
+        self.args.worktree_repeats = 1
+        records, now = [], iter([0.0, 99.0])
+        stopped = benchmark.run_worktrees(self.args, [1], records.append, deadline=50.0, clock=lambda: next(now))
+        self.assertEqual(stopped, "budget")
+        self.assertEqual([(r["lane"], r["ok"]) for r in records], [("prepared", True)])
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_every_command_is_bounded_by_the_time_left_and_cleanup_by_its_own_budget(self):
+        self.args.cohort_deadline, self.args.cleanup_budget = 100.0, 50.0
+        real_command, real_git, seen = benchmark.command, benchmark.git, []
+
+        def command(argv, timeout):
+            seen.append((argv[3:5], timeout))
+            return real_command(argv, timeout)
+
+        def git(*argv, timeout=120):
+            seen.append((["git"], timeout))
+            return real_git(*argv, timeout=timeout)
+
+        with mock.patch.object(benchmark, "command", side_effect=command), \
+                mock.patch.object(benchmark, "git", side_effect=git):
+            record = self.trial()
+        self.assertTrue(record["ok"], record.get("error"))
+        self.assertEqual({k: record["deadline"][k] for k in ("cohort_s", "cohort_expired", "cleanup_budget_s", "cleanup_expired")},
+                         {"cohort_s": 100.0, "cohort_expired": False, "cleanup_budget_s": 50.0, "cleanup_expired": False})
+        # Disposal is the last down and status of each pool, in turn.
+        work, disposal = seen[:-4], seen[-4:]
+        self.assertEqual([c for c, _ in disposal], [["runtime", "down"], ["runtime", "status"]] * 2)
+        self.assertIn(["git"], [c for c, _ in work])
+        # `runtime up` asks for 600 s and a graph run for 180 s; every timeout is what the cohort
+        # had left, and disposal draws on its own fresh budget instead of the cohort's remainder.
+        self.assertTrue(all(50 < timeout <= 100 for _, timeout in work), work)
+        self.assertTrue(all(40 < timeout <= 50 for _, timeout in disposal), disposal)
+
+    def test_an_expired_cohort_starts_nothing_more_and_still_disposes_everything(self):
+        self.args.cohort_deadline, self.args.cleanup_budget, self.args.worktree_repeats = 8.0, 60.0, 1
+        os.environ["FAKE_FAULT"] = "hang-ensure"
+        records, started = [], time.monotonic()
+        stopped = benchmark.run_worktrees(self.args, [2], records.append)
+        # Each image acquisition would hang for 60 s; the deadline stops both where it falls.
+        self.assertLess(time.monotonic() - started, 40)
+        self.assertEqual(stopped, "cohort_deadline")
+        (record,) = records
+        self.assertFalse(record["ok"])
+        self.assertIn("ensure_image: cohort deadline expired", record["error"])
+        self.assertEqual({k: record["deadline"][k] for k in ("cohort_expired", "cleanup_expired")},
+                         {"cohort_expired": True, "cleanup_expired": False})
+        self.assertEqual(len(self.calls(("runtime", "ensure-image"))), 2)
+        self.assertEqual(self.calls(("project", "plan"), ("graph", "run")), [])
+        # Disposal, under its own budget, confirmed both pools stopped before removing anything.
+        self.assertEqual(len(self.calls(("runtime", "down"))), 2)
+        self.assertEqual(len(self.calls(("runtime", "status"))), 2)
+        self.assertTrue(all(c.get("removed") for c in record["cleanup"]), record["cleanup"])
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_a_cohort_whose_deadline_has_passed_creates_and_runs_nothing(self):
+        self.args.cohort_deadline, self.args.cleanup_budget = 0.0, 60.0
+        record = benchmark.worktree_trial(self.args, 2, 0, "prepared")
+        self.assertFalse(record["ok"])
+        self.assertEqual(record["error"], "cohort deadline expired")
+        self.assertEqual(record["cleanup"], [{"removed": True, "created": False}] * 3)
+        self.assertFalse((self.tools / "argv.log").exists())
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_a_spent_cleanup_budget_keeps_every_pool_it_could_not_confirm_and_the_fixture(self):
+        self.args.cohort_deadline, self.args.cleanup_budget = 300.0, 4.0
+        os.environ["FAKE_FAULT"] = "hang-down"
+        started = time.monotonic()
+        record = benchmark.worktree_trial(self.args, 2, 0, "prepared")
+        self.assertLess(time.monotonic() - started, 40)
+        self.assertTrue(record["ok"], record.get("error"))
+        self.assertTrue(record["cleanup_failed"])
+        self.assertEqual({k: record["deadline"][k] for k in ("cohort_expired", "cleanup_expired")},
+                         {"cohort_expired": False, "cleanup_expired": True})
+        first, second, _ = record["cleanup"]
+        # The first down was stopped at the budget, so whether its pool stopped is unknown; the
+        # second never started. Neither counts as disposed, so both homes and the fixture stay.
+        self.assertIn("cleanup budget expired during down", first["error"])
+        self.assertEqual(second.get("error"), "cleanup budget expired; this trial's home is kept")
+        # Two warm restarts, then the one disposal down the budget allowed.
+        self.assertEqual(len(self.calls(("runtime", "down"))), 3)
+        self.assert_fixture_preserved(record, None)
+
+
+class ScriptedClock:
+    """Monotonic time that moves only when slept through or advanced by an observation."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class MeasuredAdmission(unittest.TestCase):
+    """Admission against a measured idle baseline, with scripted process listings."""
+
+    ROOT = "/private/run-root"
+
+    def listing(self, *rows):
+        return "\n".join(f"{pid} {cpu} {args}" for pid, cpu, args in rows)
+
+    def test_cpu_time_parses_every_ps_shape(self):
+        self.assertEqual(benchmark.cpu_seconds("0:01.13"), 1.13)
+        self.assertAlmostEqual(benchmark.cpu_seconds("96:22.89"), 5782.89)
+        self.assertAlmostEqual(benchmark.cpu_seconds("1:02:03.45"), 3723.45)
+        self.assertEqual(benchmark.cpu_seconds("2-01:00:00.00"), 176400.0)
+        self.assertIsNone(benchmark.cpu_seconds("n/a"))
+
+    def test_background_counts_only_processes_the_run_does_not_own(self):
+        listings = iter([
+            self.listing((10, "0:01.00", "/usr/bin/mds"), (20, "0:05.00", "/vm/smolvm-bin idle"),
+                         (30, "0:00.00", f"{self.ROOT}/trial/smolvm-bin _boot-vm"),
+                         (40, "0:00.00", f"python3 bench.py --root {self.ROOT}")),
+            self.listing((10, "0:02.00", "/usr/bin/mds"), (20, "0:05.50", "/vm/smolvm-bin idle"),
+                         (30, "0:09.00", f"{self.ROOT}/trial/smolvm-bin _boot-vm"),
+                         (40, "0:03.00", f"python3 bench.py --root {self.ROOT}"),
+                         (50, "0:30.00", "/usr/bin/newcomer")),
+        ])
+        clock = iter([0.0, 2.0])
+        meter = benchmark.Background(self.ROOT, watched=[20], listing=lambda: next(listings), clock=lambda: next(clock))
+        self.assertEqual(meter.observe()[:2], (None, None))
+        background, watched, names = meter.observe()
+        # mds 1.0 s and the idle VM 0.5 s over 2 s; owned trial VM and harness excluded; a process
+        # first seen now has no interval yet.
+        self.assertEqual((background, watched), (0.75, 0.25))
+        self.assertIn("/usr/bin/newcomer", names)
+
+    def test_the_idle_maximum_becomes_the_ceiling_and_builds_or_pressure_refuse(self):
+        def meter(samples, names=()):
+            values = iter([(None, None, list(names))] + [(s, 0.01, list(names)) for s in samples])
+            return type("Meter", (), {"observe": lambda self: next(values)})()
+
+        def idle(meter, seconds, level="1"):
+            clock = ScriptedClock()
+            return benchmark.measure_idle(meter, seconds, 1, pressure=lambda: level, sleep=clock.sleep, clock=clock)
+
+        quiet = idle(meter([0.4, 1.2, 0.8]), 3)
+        self.assertEqual((quiet["ceiling_cores"], quiet["refusals"], quiet["elapsed_s"]), (1.2, [], 3.0))
+        self.assertEqual(quiet["background_cores"]["median"], 0.8)
+        self.assertEqual(idle(meter([0.4, 0.5, 0.6], ["/opt/bin/cargo"]), 3)["refusals"], ["build_tools"])
+        self.assertEqual(idle(meter([0.4, 0.5, 0.6]), 3, level="2")["refusals"], ["memory_pressure"])
+        self.assertEqual(idle(meter([0.4]), 1)["refusals"], ["too_few_samples"])
+
+    def test_an_idle_baseline_lasts_its_elapsed_time_however_long_each_observation_takes(self):
+        clock = ScriptedClock()
+
+        class SlowMeter:
+            top = []
+
+            def observe(self):
+                clock.now += 1.0
+                return 0.5, 0.01, []
+
+        idle = benchmark.measure_idle(SlowMeter(), 10, 1, pressure=lambda: "1", sleep=clock.sleep, clock=clock)
+        # Each sample costs one interval plus a 1 s listing, so 10 s holds five samples, not ten;
+        # it ends within the baseline plus one interval and one observation.
+        self.assertEqual((idle["background_cores"]["n"], idle["refusals"]), (5, []))
+        self.assertEqual(idle["elapsed_s"], 11.0)
+
+    def test_a_ceiling_judges_background_instead_of_load(self):
+        # The run's own VMs raise load; with a measured ceiling that alone does not flag timing.
+        busy_self = benchmark.admission_from(14.0, ["zsh"], "1", 16, background=0.9, ceiling=1.2)
+        self.assertEqual((busy_self["reasons"], busy_self["background_cores"]), ([], 0.9))
+        noisy = benchmark.admission_from(2.0, ["zsh"], "1", 16, background=1.5, ceiling=1.2)
+        self.assertEqual(noisy["reasons"], ["background_above_idle"])
+        unmeasured = benchmark.admission_from(2.0, ["zsh"], "1", 16, background=None, ceiling=1.2)
+        self.assertEqual(unmeasured["reasons"], ["background_unobserved"])
+        # Without a baseline the legacy rule is unchanged.
+        self.assertEqual(benchmark.admission_from(14.0, ["zsh"], "1", 16)["reasons"], ["load_high"])
+
+    def test_boundary_calls_reuse_the_last_full_interval_and_never_shorten_the_next(self):
+        # A snapshot 50 ms after a sample would turn ps's 10 ms rounding into 0.2 cores; it is never
+        # taken. Only three listings exist: a fourth snapshot would consume the next one early.
+        listings = iter([self.listing((10, "0:01.00", "/usr/bin/mds")),
+                         self.listing((10, "0:01.50", "/usr/bin/mds")),
+                         self.listing((10, "0:02.30", "/usr/bin/mds"))])
+        clock = iter([0.0, 1.0, 1.05, 2.0])
+        meter = benchmark.Background(self.ROOT, listing=lambda: next(listings), clock=lambda: next(clock), interval=1.0)
+        meter.observe()
+        self.assertEqual(meter.observe()[0], 0.5)
+        self.assertEqual(meter.observe()[0], 0.5)
+        # Measured against the snapshot at 1.0 s, not the boundary call at 1.05 s.
+        self.assertEqual(meter.observe()[0], 0.8)
+
+    def test_a_trial_start_measures_only_the_interval_before_timed_work(self):
+        # A long untimed gap (setup, the previous cleanup) where mds burned 45 s of CPU; the start
+        # admission restarts the meter at 50 s and measures only [50, 51].
+        listings = iter([self.listing((10, "0:00.00", "/usr/bin/mds"), (11, "0:00.00", "/usr/libexec/syspolicyd")),
+                         self.listing((10, "0:45.00", "/usr/bin/mds"), (11, "0:00.00", "/usr/libexec/syspolicyd")),
+                         self.listing((10, "0:45.20", "/usr/bin/mds"), (11, "0:00.60", "/usr/libexec/syspolicyd"))])
+        clock = iter([0.0, 50.0, 51.0, 51.0])
+        meter = benchmark.Background(self.ROOT, listing=lambda: next(listings), clock=lambda: next(clock), interval=1.0)
+        meter.observe()
+        slept = []
+        args = argparse.Namespace(background=meter, idle_ceiling=1.0)
+        with mock.patch.object(benchmark, "os") as fake_os, mock.patch.object(benchmark.subprocess, "run") as run:
+            fake_os.getloadavg.return_value = (1.0, 1.0, 1.0)
+            fake_os.cpu_count.return_value = 16
+            run.return_value = mock.Mock(returncode=0, stdout="1")
+            observed = benchmark.trial_start_admission(args, sleep=slept.append)
+        self.assertEqual(slept, [1.0])
+        self.assertEqual((observed["background_cores"], observed["reasons"]), (0.8, []))
+        # Attribution of the measured interval, largest first.
+        self.assertEqual(observed["background_top"], [["syspolicyd", 0.6], ["mds", 0.2]])
+
+    def test_the_sampler_reports_what_dominated_its_peak_sample(self):
+        samples = iter([{"reasons": [], "load1": 1.0, "background_cores": 0.5, "background_top": [["mds", 0.4]]},
+                        {"reasons": ["background_above_idle"], "load1": 1.0, "background_cores": 6.0,
+                         "background_top": [["syspolicyd", 3.2], ["mds", 1.1]]}])
+        sampler = benchmark.Sampler(1.0, observe=lambda: next(samples))
+        sampler.samples = [next(samples), next(samples)]
+        sampler.started, sampler.times, sampler.stopped = 0.0, [0.5, 1.5], 2.0
+        result = sampler.result()
+        self.assertEqual((result["max_background_cores"], result["max_background_top"]),
+                         (6.0, [["syspolicyd", 3.2], ["mds", 1.1]]))
+
+    def test_trials_use_the_runs_baseline_when_one_was_measured(self):
+        args = argparse.Namespace(background=type("M", (), {"observe": lambda self: (2.5, 0.1, ["zsh"])})(),
+                                  idle_ceiling=1.0)
+        observed = benchmark.observe_admission(args)
+        self.assertIn("background_above_idle", observed["reasons"])
+        self.assertEqual(observed["watched_cores"], 0.1)
+        self.assertNotIn("background_cores", benchmark.observe_admission(argparse.Namespace()))
+
+
+class BoundedObservation(unittest.TestCase):
+    """Every host observation is bounded, and an unobserved input fails closed."""
+
+    def test_an_observation_that_outlives_its_bound_is_unobserved(self):
+        with mock.patch.object(benchmark, "OBSERVATION_TIMEOUT", 0.2):
+            self.assertIsNone(benchmark.observed_output([sys.executable, "-c", "import time; time.sleep(5)"]))
+        self.assertIsNone(benchmark.observed_output([sys.executable, "-c", "raise SystemExit(3)"]))
+        self.assertEqual(benchmark.observed_output([sys.executable, "-c", "print('ok')"]), "ok\n")
+
+    def test_admission_fails_closed_without_observations(self):
+        with mock.patch.object(benchmark, "observed_output", return_value=None):
+            observed = benchmark.admission()
+            self.assertIsNone(benchmark.process_identity(1))
+        self.assertIn("processes_unobserved", observed["reasons"])
+        self.assertIn("pressure_unobserved", observed["reasons"])
+        failing = type("Meter", (), {"observe": lambda self: (_ for _ in ()).throw(RuntimeError("listing unavailable"))})()
+        with mock.patch.object(benchmark, "observed_output", return_value="1"):
+            metered = benchmark.admission(failing, ceiling=1.0)
+        self.assertEqual(sorted(metered["reasons"]), ["background_unobserved", "processes_unobserved"])
+
+    def test_an_idle_baseline_stops_at_its_first_failed_observation(self):
+        calls = iter([(None, None, []), (0.4, 0.01, []), RuntimeError("listing unavailable"), (0.5, 0.01, []),
+                      (0.6, 0.01, [])])
+        observed = []
+
+        class Meter:
+            top = []
+
+            def observe(self):
+                value = next(calls, (0.6, 0.01, []))
+                observed.append(value)
+                if isinstance(value, Exception):
+                    raise value
+                return value
+
+        clock = ScriptedClock()
+        idle = benchmark.measure_idle(Meter(), 60, 1, pressure=lambda: "1", sleep=clock.sleep, clock=clock)
+        # It refuses at the failure rather than sampling out the remaining 58 s.
+        self.assertEqual((len(observed), idle["elapsed_s"], idle["background_cores"]["n"]), (3, 2.0, 1))
+        self.assertIn("observer_failed", idle["refusals"])
+        # An unreadable memory pressure ends it just the same.
+        clock, levels = ScriptedClock(), iter(["1", ""] + ["1"] * 100)
+        steady = type("Meter", (), {"top": [], "observe": lambda self: (0.4, 0.01, [])})()
+        idle = benchmark.measure_idle(steady, 60, 1, pressure=lambda: next(levels), sleep=clock.sleep, clock=clock)
+        self.assertEqual((idle["elapsed_s"], idle["pressure_levels"]), (2.0, ["1", "unobserved"]))
+        self.assertIn("observer_failed", idle["refusals"])
+
+    def test_a_hung_process_listing_ends_the_baseline_within_its_timeout(self):
+        real, calls = benchmark.observed_output, []
+
+        def observed(argv, timeout=None):
+            calls.append(argv[0])
+            # The first listing answers; every later one hangs past the observation bound.
+            if argv[0] == "ps" and len(calls) > 1:
+                return real([sys.executable, "-c", "import time; time.sleep(30)"], timeout)
+            return "  10 0:01.00 /usr/bin/mds\n" if argv[0] == "ps" else "1\n"
+
+        started = time.monotonic()
+        with mock.patch.object(benchmark, "OBSERVATION_TIMEOUT", 0.5), \
+                mock.patch.object(benchmark, "observed_output", side_effect=observed):
+            idle = benchmark.measure_idle(benchmark.Background("/run-root", interval=0.2), 20, 0.2)
+        # Real time: one interval and one bounded listing, not the 20 s baseline.
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(calls, ["ps", "ps"])
+        self.assertIn("observer_failed", idle["refusals"])
+
+
+class DistressAndInvalidation(unittest.TestCase):
+    def test_each_distress_source_is_reported(self):
+        reports = Path(tempfile.mkdtemp(prefix="hack-reports-"))
+        self.addCleanup(shutil.rmtree, reports, True)
+        (reports / "syspolicyd-old.ips").write_text("")
+        identity = {"value": "Tue 51003 smolvm-bin"}
+        host = {"reasons": []}
+        distress = benchmark.Distress({51003: "Tue 51003 smolvm-bin"}, reports=(reports,),
+                                      identity=lambda pid: identity["value"], host=lambda: host)
+        self.assertEqual(distress.check(), [])
+        (reports / "WindowServer-new.spin").write_text("")
+        (reports / "unrelated-app.ips").write_text("")
+        self.assertEqual(distress.check(), ["new_report: WindowServer-new.spin"])
+        (reports / "WindowServer-new.spin").unlink()
+        identity["value"] = "Wed 61000 smolvm-bin"
+        self.assertEqual(distress.check(), ["idle_vm_changed: 51003"])
+        identity["value"] = "Tue 51003 smolvm-bin"
+        host["reasons"] = ["memory_pressure", "load_high"]
+        self.assertEqual(distress.check(), ["host: memory_pressure"])
+        host["reasons"] = []
+        trial = {"admission": {"reasons": []}, "admission_during": {"reasons": ["build_tools", "background_above_idle"]}}
+        self.assertEqual(distress.check(trial), ["trial: build_tools"])
+
+    def test_invalidated_timing_keeps_every_record_flagged(self):
+        records = [worktree_record(1, 0, "stock", 20.0, CLEAN), worktree_record(1, 0, "prepared", 10.0, CLEAN)]
+        kept = benchmark.summarize(records, 16, {51003: "A"}, {"51003": "A"})
+        self.assertEqual((kept["timing_invalidated"], kept["admitted_worktree_all_ready_ratio_by_size"]["1"]["n"]), ([], 1))
+        changed = benchmark.summarize(records, 16, {51003: "A"}, {"51003": None})
+        self.assertEqual(changed["timing_invalidated"], ["idle_vm_changed: 51003"])
+        self.assertEqual((changed["worktrees_admitted"], changed["admitted_worktree_all_ready_ratio_by_size"]), ({}, {}))
+        self.assertEqual(changed["worktrees_flagged"]["1"]["prepared"]["all_ready_s"]["median"], 10.0)
+        self.assertIn("run:idle_vm_changed", changed["flag_reasons"])
+
+    def test_summarize_from_raw_samples_reaches_the_same_verdict(self):
+        directory = Path(tempfile.mkdtemp(prefix="hack-samples-"))
+        self.addCleanup(shutil.rmtree, directory, True)
+        raw = directory / "samples.jsonl"
+        lines = [{"context": {"host": {"cpus": 16}, "idle_vms": {"51003": "A"}}},
+                 worktree_record(1, 0, "stock", 20.0, CLEAN), worktree_record(1, 0, "prepared", 10.0, CLEAN),
+                 {"idle_vms_end": {"51003": "B"}}, {"summary": {}}]
+        raw.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+        context, records, ended = benchmark.load_samples(raw)
+        summary = benchmark.summarize(records, context["host"]["cpus"], context["idle_vms"], ended)
+        self.assertEqual((len(records), summary["timing_invalidated"]), (2, ["idle_vm_changed: 51003"]))
 
 
 class WorktreeFixture(unittest.TestCase):
@@ -549,6 +930,33 @@ class WorktreePlan(unittest.TestCase):
         preview = self.preview()
         self.assertEqual(preview["pools_created"], 2 * (1 + 8 + 32))
         self.assertEqual(preview["worktrees"]["peak_simultaneous_pools"], 32)
+
+    def test_a_worktree_run_needs_both_bounds_and_the_preview_shows_them(self):
+        worktrees = self.preview("--cohort-deadline", "1800", "--cleanup-budget", "600")["worktrees"]
+        self.assertEqual({k: worktrees[k] for k in ("cohort_deadline_s", "cleanup_budget_s", "cohort_bound_s")},
+                         {"cohort_deadline_s": 1800.0, "cleanup_budget_s": 600.0, "cohort_bound_s": 2400.0})
+        for extra, message in (((), "needs --cohort-deadline and --cleanup-budget"),
+                               (("--cohort-deadline", "1800"), "needs --cohort-deadline and --cleanup-budget"),
+                               (("--cleanup-budget", "600"), "needs --cohort-deadline and --cleanup-budget"),
+                               (("--cohort-deadline", "0", "--cleanup-budget", "600"), "must be a positive, finite")):
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr", new_callable=io.StringIO) as error:
+                self.preview("--run", *extra)
+            self.assertIn(message, error.getvalue())
+
+    def test_every_duration_must_be_positive_and_finite_before_any_host_observation(self):
+        valid = {"--budget": "1500", "--cohort-deadline": "600", "--cleanup-budget": "300"}
+        for flag in valid:
+            for value in ("-1", "0", "nan", "inf", "-inf", "soon"):
+                argv = [f"{name}={given}" for name, given in {**valid, flag: value}.items()]
+                with self.subTest(flag=flag, value=value):
+                    with mock.patch.object(benchmark, "observed_output", return_value=None) as observed, \
+                            mock.patch("sys.stderr", new_callable=io.StringIO) as error, self.assertRaises(SystemExit):
+                        self.preview("--run", *argv)
+                    self.assertIn(f"argument {flag}: {value!r}", error.getvalue())
+                    observed.assert_not_called()
+        plan = self.preview(*(f"{name}={given}" for name, given in valid.items()))
+        self.assertEqual((plan["budget_s"], plan["worktrees"]["cohort_bound_s"]), (1500.0, 900.0))
+        self.assertIsNone(self.preview()["budget_s"])
 
     def test_worktree_mode_requires_the_development_profile(self):
         with self.assertRaises(SystemExit), mock.patch("sys.stderr", new_callable=io.StringIO):

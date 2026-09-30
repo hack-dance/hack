@@ -592,7 +592,60 @@ Admission is sampled at the start and end of each trial's timed work and every
 and one sysctl. A trial is flagged, not dropped, when build tools run, the 1-minute load
 exceeds half the CPU count, memory pressure is raised, or any of these could not be observed at
 any sample. A failed observation or a gap longer than five intervals also flags the trial. Only admitted samples
-enter the admitted summaries and the paired pair and cohort ratios. `--summarize SAMPLES`
+enter the admitted summaries and the paired pair and cohort ratios.
+
+The load rule counts the run's own VMs, and half the CPU count is not a measurement of this
+host, so a measured baseline can replace it. `--idle-baseline SECONDS` first samples the host
+for SECONDS of elapsed monotonic time while nothing of the run exists. It refuses to start
+anything if build tools appear, memory pressure rises, a new crash or watchdog report appears, an
+idle VM changes, or fewer than three intervals are observed. The first failed or timed-out
+observation ends it at once and refuses, so it takes at most SECONDS plus one interval and the
+observations in progress.
+- **Background.** It measures background CPU as per-process CPU-time deltas of processes whose
+  command line does not name `--root`. Trial VMs, CLI calls, fixtures and the harness are
+  therefore excluded. A process that starts and exits between two samples is not seen.
+- **Interval.** Every measurement spans at least 90% of the admission interval. A check that
+  follows a continuous sample reuses that sample rather than dividing `ps`'s 10 ms rounding by a
+  tiny interval. A trial's start check restarts the meter and measures one full interval
+  immediately before timed work, so untimed setup and the previous trial's cleanup never enter
+  it.
+- **Bounded observation.** Every host observation (`ps`, `sysctl`) is limited to 30 s. One
+  that fails or times out is unobserved and fails closed: admission flags the sample, the idle
+  baseline stops at once and refuses to start, and trial or fixture cleanup keeps its state. Trial runtime
+  commands keep their own step timeouts, shortened by a worktree cohort's deadlines.
+- **Attribution.** Each sample records its three largest background commands. The sampler
+  summary reports those behind its peak sample, and the idle baseline reports those behind its
+  ceiling, so a flagged sample can be traced (for example to Gatekeeper scanning a new home's
+  provider binary).
+- **Ceiling.** The maximum background observed becomes the admission ceiling. A timed sample
+  is flagged `background_above_idle` when background exceeds it, and load is then recorded but
+  not judged.
+- **Idle VMs.** `--idle-vm-pid` names a VM left running beside the run (repeatable). It counts
+  as background and is reported on its own. If it is no longer the same process at the end,
+  the background every trial was admitted against changed. No trial's timing is then admitted,
+  and all records stay in the flagged summaries. The raw file keeps the end identity, so
+  `--summarize` reaches the same verdict.
+- **Stops.** Before each worktree cohort, the run stops scheduling when a new syspolicyd,
+  WindowServer, panic, Jetsam or reset report has appeared since it began, memory pressure is
+  raised, a build tool runs or ran during the finished trial, or an idle VM changed. The same
+  applies when `--budget SECONDS` is spent, and after a cohort outlives its deadline. A cohort
+  in progress always ends within its own deadline and cleanup budget.
+- **Deadlines.** A worktree run requires `--cohort-deadline SECONDS` and `--cleanup-budget
+  SECONDS`, and the preview shows both with their sum. A cohort's work (fixture, setup, starts,
+  warm restarts and live edits) runs under one deadline. Every runtime and Git command's timeout
+  is shortened to the time left, a command still running at the deadline is killed, and none
+  starts after it. Disposal then runs under its own budget, so an expired cohort still stops
+  each pool and confirms it stopped before removing only what it owns. A `down` stopped at the
+  budget, or a pool the budget never reached, is not confirmed disposed: its home and the whole
+  fixture are kept, and the run stops as after any cleanup failure. Each record carries both
+  bounds, whether each expired, and how long disposal took. Runtime and Git commands end within
+  the deadline plus the budget; a host observation already in progress (at most 30 s each) and
+  local file removal can run briefly past either. `--budget`, `--cohort-deadline` and
+  `--cleanup-budget` must each be a positive, finite number of seconds: any other value is refused
+  while the arguments are parsed, before any host observation. Omitting `--budget` means no run
+  budget.
+
+`--summarize SAMPLES`
 recomputes the summary from a retained raw file without running anything. Cleanup stops each
 pool and requires `runtime status` to report its VM process gone. Only then does it remove the
 trial's home and provider alias, with a readback; otherwise it keeps them and reports the

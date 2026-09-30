@@ -6052,6 +6052,7 @@ async function handleNativeUp({
         allowedHosts: startup.allowedHosts,
         run,
         cleanedRetry,
+        recoverStopped: recovery !== undefined,
       });
     },
     down: async () => {

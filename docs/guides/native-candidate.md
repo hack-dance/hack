@@ -572,7 +572,13 @@ requires ownership inspection rather than automatic removal. Restart does not
 implicitly migrate a shared pool's network policy or interrupt other projects.
 When an interrupted frontend cannot write that final acknowledgement, an explicit
 `restart --recover-frontend --expect-finalization-attempt <32-hex>` can resume
-the saved, already-cleaned restart intent. New attempts retain their frontend
+the saved, already-cleaned restart intent. It can also preflight an exact graph
+that was stopped before the frontend saved an intent: fresh native observations
+must prove absent containers/networks and present retained volumes, and repeat
+that proof after review before cleanup. The normal intent, retaining down,
+frontend recovery and startup sequence still runs. An active graph keeps its
+authenticated service selection and live-listener checks; uncertain observations
+cannot select the stopped path. New attempts retain their frontend
 PID and HTTPS port in the private token. Older v1 attempts additionally require
 `--expect-frontend-pid <previously-observed-pid>`; a guessed PID is not recovery
 evidence. Recovery requires the exact stopped graph receipt with its volumes

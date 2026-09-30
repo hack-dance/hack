@@ -772,6 +772,9 @@ impl Publication {
         Self::bind_mode(candidate, run, true)
     }
     fn bind_mode(candidate: &Candidate, run: &str, retired: bool) -> Result<Self, CandidateError> {
+        // Publication precedes the Engine lease. Recovery must exclude new runs
+        // at this boundary, rather than relying on a later provider lock alone.
+        let gate = super::super::publication_gate::Guard::acquire(candidate)?;
         super::super::absent_publication_cleanup::publication_allowed(candidate, run, retired)?;
         let root = root(candidate, run)?;
         let lock = if retired {
@@ -793,6 +796,7 @@ impl Publication {
                 _ => return Err(refused()),
             }
         }
+        gate.verify(candidate)?;
         let listener = UnixListener::bind(root.join("control.sock")).map_err(|_| refused())?;
         fs::set_permissions(root.join("control.sock"), fs::Permissions::from_mode(0o600))
             .map_err(|_| refused())?;
@@ -828,6 +832,7 @@ impl Publication {
             device_rebind: None,
         };
         pin.verify()?;
+        gate.verify(candidate)?;
         Ok(Self {
             listener,
             pin,

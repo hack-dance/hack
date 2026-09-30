@@ -22,6 +22,10 @@ mod dependency_slots;
 #[cfg(target_os = "macos")]
 mod host_pin_recovery;
 #[cfg(target_os = "macos")]
+pub(crate) mod publication_gate;
+#[cfg(target_os = "macos")]
+pub(crate) mod quiescent_dependency_recovery;
+#[cfg(target_os = "macos")]
 pub use absent_publication_cleanup::{
     inspect as inspect_absent_publication_cleanup, recover as recover_absent_publication_cleanup,
 };

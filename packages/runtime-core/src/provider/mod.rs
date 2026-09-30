@@ -6,6 +6,7 @@ mod bridge;
 mod config_audit;
 mod dependency_socket;
 pub use bridge::BridgeIntent;
+pub use dependency_socket::quiescent_recovery as quiescent_dependency_socket_recovery;
 pub use dependency_socket::recovery as dependency_socket_recovery;
 pub use dependency_socket::{
     DependencySocketIntent, DependencySocketObservation, DependencySocketPath,

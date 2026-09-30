@@ -59,6 +59,8 @@ Usage:
   hack-local runtime publication-recovery [--json]
   hack-local runtime recover-publications --expect-sha256 <sha256> [--json]
   hack-local runtime dependency-socket-recovery [--json]
+  hack-local runtime quiescent-dependency-socket-recovery [--json]
+  hack-local runtime recover-quiescent-dependency-sockets --expect-sha256 <hash> [--json]
   hack-local runtime recover-dependency-sockets --expect-sha256 <sha256> [--json]
   hack-local runtime bridge-recovery [--json]
   hack-local runtime export-bridge-recovery --slot <1..8> --expect-sha256 <sha256> [--json]
@@ -677,6 +679,34 @@ fn run() -> Result<(), CandidateError> {
             print_json(
                 &hack_runtime_core::provider::dependency_socket_recovery::inspect(
                     &discover_candidate(&requested)?,
+                )?,
+            )?;
+        }
+        ["runtime", "quiescent-dependency-socket-recovery"]
+        | ["runtime", "quiescent-dependency-socket-recovery", "--json"] => {
+            print_json(
+                &hack_runtime_core::provider::quiescent_dependency_socket_recovery::inspect(
+                    &discover_candidate(&requested)?,
+                )?,
+            )?;
+        }
+        [
+            "runtime",
+            "recover-quiescent-dependency-sockets",
+            "--expect-sha256",
+            hash,
+        ]
+        | [
+            "runtime",
+            "recover-quiescent-dependency-sockets",
+            "--expect-sha256",
+            hash,
+            "--json",
+        ] => {
+            print_json(
+                &hack_runtime_core::provider::quiescent_dependency_socket_recovery::recover(
+                    &discover_candidate(&requested)?,
+                    hash,
                 )?,
             )?;
         }

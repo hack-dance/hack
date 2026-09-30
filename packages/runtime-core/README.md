@@ -259,6 +259,21 @@ state or changed provider identity refuses recovery. VM disks and graph data rem
 This is cooperative same-user recovery for a stopped pool, not adoption of an
 unreceipted active relay or proof of application readiness.
 
+For an already-running VM whose retained graphs are all stopped, the separate
+`hack-local runtime quiescent-dependency-socket-recovery --json` command selects
+legacy unreceipted socket inodes without rebooting. Explicitly apply its selection
+with `hack-local runtime recover-quiescent-dependency-sockets --expect-sha256 <hash> --json`.
+This mode holds a pool publication gate before foreground retirement locks and the
+provider lease. It pins the exact provider receipt, host/guest boot, every retained
+graph receipt and volume identity, and requires absent compute, no foreground
+publisher, no dependency assignment and no untracked guest containers. It rechecks
+that proof before each inode-selected unlink and journals the selection separately
+from stopped-pool recovery so partial retries retain their original scope.
+An incomplete journal, live listener, replacement path or changed proof refuses
+recovery. Owner bytes, source-rebind witnesses, retained data and the running VM
+remain unchanged. This is explicit cooperative legacy cleanup, not proof of the
+original socket creator or a security boundary against another same-user process.
+
 TERM and INT are checked during initial graph startup, including readiness waits
 and before new service effects. Cancellation enters owned cleanup while preserving
 persistent data. Checks occur between bounded operations; an in-flight operation

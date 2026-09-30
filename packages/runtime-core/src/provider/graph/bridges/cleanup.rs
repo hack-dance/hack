@@ -51,6 +51,18 @@ fn strict_store(candidate: &Candidate, engine: &Engine<'_>) -> Result<Store, Can
     load_store(candidate, engine, false)
 }
 
+/// Observation under the caller's Engine lease. A missing enabled registry or
+/// any retained reservation is uncertain, even when no listener can be reached.
+pub(in crate::provider::graph) fn require_quiescent(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+) -> Result<(), CandidateError> {
+    if !strict_store(candidate, engine)?.slots.is_empty() {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 fn validate_selection(
     engine: &Engine<'_>,
     receipt: &Receipt,

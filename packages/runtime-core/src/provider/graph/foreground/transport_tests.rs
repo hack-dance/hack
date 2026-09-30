@@ -1,6 +1,43 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn pool_gate_excludes_publication_before_engine_for_every_run() {
+    let fixture = super::super::super::tests::Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    let gate = super::super::super::publication_gate::Guard::acquire(&candidate).unwrap();
+    for run in ["a".repeat(32), "b".repeat(32)] {
+        assert!(Publication::bind(&candidate, &run).is_err());
+        assert!(!root(&candidate, &run).unwrap().exists());
+    }
+    gate.verify(&candidate).unwrap();
+    drop(gate);
+    let mut first = Publication::bind(&candidate, &"a".repeat(32)).unwrap();
+    // A publisher keeps its own run lock, not the pool gate for its lifetime.
+    let mut second = Publication::bind(&candidate, &"b".repeat(32)).unwrap();
+    first.finish().unwrap();
+    second.finish().unwrap();
+    for run in ["a".repeat(32), "b".repeat(32)] {
+        fs::remove_dir_all(root(&candidate, &run).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn pool_gate_refuses_a_replaced_lock_path() {
+    let fixture = super::super::super::tests::Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    let gate = super::super::super::publication_gate::Guard::acquire(&candidate).unwrap();
+    let directory = candidate.state_root.join("run/graph-publication-gate");
+    fs::rename(
+        directory.join("operation.lock"),
+        directory.join("original.lock"),
+    )
+    .unwrap();
+    let _replacement = state::Lock::acquire(&directory).unwrap();
+    assert!(gate.verify(&candidate).is_err());
+    assert!(directory.join("original.lock").exists());
+}
+
 #[cfg(target_os = "macos")]
 fn abandoned_publisher() -> (
     super::super::super::tests::Fixture,

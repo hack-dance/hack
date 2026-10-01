@@ -915,3 +915,132 @@ test("malformed dependency intent refuses cleaned retry without capture or start
     await rm(listener.directory, { recursive: true, force: true });
   }
 });
+
+test("active legacy restart preserves adapted labels and rechecks authenticated selection before cleanup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-active-review-"));
+  try {
+    const projectRoot = await realpath(root);
+    for (const drift of [false, true]) {
+      const f = fixture();
+      const scoped = {
+        ...scope,
+        projectRoot,
+        projectDir: join(projectRoot, ".hack"),
+        branch: "feature-a",
+      };
+      const calls: string[] = [];
+      let compatible = false;
+      const input = {
+        originalSha256: "1".repeat(64),
+        environmentFiles: [],
+        serviceNames: ["app"],
+        normalizedComposeJson: JSON.stringify({
+          services: {
+            app: {
+              image: `sha256:${"a".repeat(64)}`,
+              labels: {
+                caddy: "app.hack, app.hack.gy",
+                "caddy.tls": "internal",
+                "caddy.reverse_proxy": "{{upstreams 3000}}",
+              },
+            },
+          },
+        }),
+        managedEnvironment: {},
+        lifecycleHostEnvironment: {},
+        effectiveEnvName: "qa",
+      };
+      const result = restartNativeProject({
+        ...f.options,
+        scope: scoped,
+        preflight: async () =>
+          await preflightNativeRestart({
+            runtime: { binary: "/unused", home: "/candidate" },
+            scope: scoped,
+            composeFile: join(projectRoot, "compose.yml"),
+            run,
+            dependencies: {
+              prepare: async () => input,
+              adapt: async ({ input: value }) => value,
+              dependencies: async () => [],
+              invoke: async ({ args }) => {
+                calls.push(args[1] ?? "unknown");
+                if (args[1] === "status") {
+                  return { network: "internet" };
+                }
+                if (args[1] === "probe") {
+                  return { admitted: true };
+                }
+                if (args[0] === "project") {
+                  if (args.includes("--normalized-file")) {
+                    const value = JSON.parse(
+                      await readFile(
+                        args[args.indexOf("--normalized-file") + 1] ?? "",
+                        "utf8"
+                      )
+                    );
+                    expect(value.services.app.labels.caddy).toBe(
+                      "app.hack, app.hack.gy"
+                    );
+                    expect(args).not.toContain("--branch");
+                  }
+                  return {
+                    plan_id: "e".repeat(64),
+                    plan: {
+                      source: projectRoot,
+                      namespace: args.includes("--branch")
+                        ? "f".repeat(64)
+                        : run.namespace,
+                      compose_sha256: input.originalSha256,
+                      services: { app: { active: true } },
+                    },
+                  };
+                }
+                if (args[1] === "run-selection") {
+                  expect(args[args.indexOf("--service") + 1]).toBe("app");
+                  return {
+                    ok: true,
+                    run: run.run,
+                    owner: run.owner,
+                    namespace: run.namespace,
+                    plan: run.planId,
+                    service: "app",
+                    container: "2".repeat(64),
+                    boot: compatible && drift ? "changed-boot" : "owned-boot",
+                    generation: "3".repeat(64),
+                  };
+                }
+                if (args[1] === "source-compatibility") {
+                  compatible = true;
+                  return {
+                    run: run.run,
+                    owner: run.owner,
+                    namespace: run.namespace,
+                    plan: run.planId,
+                    reviewed_plan: "e".repeat(64),
+                    source_revision: null,
+                  };
+                }
+                throw new Error("Unexpected effect");
+              },
+            },
+          }),
+      });
+      if (drift) {
+        await expect(result).rejects.toThrow("active review identity changed");
+        expect(f.events).toEqual([]);
+      } else {
+        expect(await result).toBe(0);
+        expect(f.events).toContain("down");
+      }
+      expect(calls.at(-1)).toBe("run-selection");
+      expect(calls.filter((action) => action === "run-selection")).toHaveLength(
+        3
+      );
+      expect(calls).not.toContain("restore-selection");
+      expect(calls).not.toContain("run-service");
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

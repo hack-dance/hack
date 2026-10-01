@@ -16,6 +16,47 @@ pinned artifact. Each check has a 120-second timeout, 512 MiB Java heap, two wor
 and bounded output; temporary TLC metadata is removed after success or failure.
 No credentials or running VM are needed.
 
+## Missing post-reboot publications
+
+`absent-publication-recovery/Absent.tla` checks one explicitly selected cleanup
+racing one foreground publisher. The positive configuration explores 247 distinct
+states, including one recovery-process crash, two non-volume cleanup effects and
+one input-version change. Both participants acquire the foreground lock before the
+Engine lease. Ordinary publication occurs under the foreground lock before Engine
+admission, matching the implementation. The durable absence intent survives a
+crash; a restart cannot publish until cleanup and separate absence retirement are
+confirmed. A changed selection
+cannot resume cleanup. Completion and retirement are separate steps, so a crash
+between them remains visible.
+
+Four guard-removal controls require TLC exit 12 and a named same-state witness:
+
+| Control | Required failure |
+| --- | --- |
+| `negative` | `NoPrematurePublication` in `Publish`, with a durable intent, incomplete cleanup, no retirement and a newly published owner |
+| `unwitnessed-cleanup` | `NoUnwitnessedCleanup` in `CleanupOne`, with both locks held but no intent |
+| `stale-selection` | `NoUnwitnessedCleanup` in `CleanupOne`, with a durable intent but selected version 1 and current version 2 |
+| `unconfirmed-retirement` | `NoUnconfirmedRetirement` in `RetireAbsentPublisher`, before cleanup or intent |
+
+| Model action | Implementation boundary under `packages/runtime-core/src/provider/` |
+| --- | --- |
+| `AcquireRecoveryForeground` / `AcquireRecoveryEngine` | `graph/absent_publication_cleanup.rs`: deterministic lock-only reservation before the Engine lease; matches foreground startup's lock order |
+| `WriteIntent` | Private durable run-scoped absence intent before any cleanup effects |
+| `CleanupOne` / `CommitCleanup` | Exact selected, data-retaining `cleanup_owned(..., false)` and stopped receipt confirmation; tagged absent bridge authority remains distinct from pinned predecessors |
+| `RetireAbsentPublisher` | Separate durable absent-publication retirement proof tied to completed cleanup |
+| `AcquirePublisherForeground` / `AcquirePublisherEngine` / `Publish` | `graph/foreground/transport.rs` admission barrier plus `graph/foreground.rs` Engine acquisition; explicit retired binding needs completed proof |
+| `CrashRecovery` / `ChangeInputs` | Retained intent and exact retry; reinspection refuses changed host/guest boot, input bytes or resources |
+
+The model assumes validated legacy inputs, absent roots and resource observations
+are summarized by one version. It represents cooperating writers under two kernel
+locks and durable writes as atomic commits. It does not prove filesystem fsync,
+FD/path identity, raw hashes, PID reuse, private permissions, actual guest or
+physical host reboot, bridge cleanup, volume preservation, source-device migration,
+later restore generations, browser readiness or performance. Concrete refusal,
+interruption and data-marker tests remain required. The recorded old Owner is
+legacy corroboration, never a reconstructed foreground Pin or proof of original
+physical-volume continuity. No fairness or eventual recovery claim is made.
+
 ## Shared HTTPS lifetime
 
 `shared-https-lifetime/SharedHttps.tla` checks the last-lease release racing

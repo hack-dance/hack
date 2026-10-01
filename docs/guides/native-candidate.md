@@ -6,7 +6,7 @@ projects, or install DNS or trust automatically. Its graph commands support a
 bounded subset;
 this bundle is not application parity or release qualification.
 
-Build with the repository's pinned Bun 1.3.9, Rust 1.97.1 and Zig 0.15.2 toolchain, Python 3,
+Build with the repository's pinned Bun 1.4.2, Rust 1.97.1 and Zig 0.15.2 toolchain, Python 3,
 and the Rust `aarch64-unknown-linux-musl` standard library already installed. The
 build refuses missing prerequisites; it does not install toolchains:
 
@@ -572,7 +572,16 @@ requires ownership inspection rather than automatic removal. Restart does not
 implicitly migrate a shared pool's network policy or interrupt other projects.
 When an interrupted frontend cannot write that final acknowledgement, an explicit
 `restart --recover-frontend --expect-finalization-attempt <32-hex>` can resume
-the saved, already-cleaned restart intent. New attempts retain their frontend
+the saved, already-cleaned restart intent. It can also preflight an exact graph
+that was stopped before the frontend saved an intent: fresh native observations
+must prove absent containers/networks and present retained volumes, and repeat
+that proof after review before cleanup. The normal intent, retaining down,
+frontend recovery and startup sequence still runs. An active graph keeps its
+authenticated service selection and live-listener checks; uncertain observations
+cannot select the stopped path. Stopped preflight retains the admitted
+image IDs when the original Compose input is unchanged, matching retained startup
+instead of resolving mutable tags again. Changed original input keeps normal
+image resolution and the existing compatibility checks. New attempts retain their frontend
 PID and HTTPS port in the private token. Older v1 attempts additionally require
 `--expect-frontend-pid <previously-observed-pid>`; a guessed PID is not recovery
 evidence. Recovery requires the exact stopped graph receipt with its volumes
@@ -1063,8 +1072,15 @@ operation stops verified guest dependency listeners, removes owned containers an
 network resources, retains persistent data, retires stale foreground and relay
 publications, and releases the graph's dependency reservation before unlocking the
 pool. It does not restart the pool. Pending startup, one-off or dependency
-rebind state is refused. Completion records owner-death evidence independently of
+rebind state is refused. A completed dependency refresh is accepted only for the
+current boot and exact ready receipt generation, with matching terminal services
+and helper markers. After owned absence is independently verified, its journal is
+archived before stale publications are retired. An interrupted archive resumes
+from the committed cleanup proof and exact journal bytes; it never replays refresh.
+Completion records owner-death evidence independently of
 the live relay acknowledgement protocol.
+When a restored publisher is admitted, older absence-retirement records remain
+validated history; the exact current cleanup proof supplies retention authority.
 
 After completion, retained restore can create a fresh owner;
 `graph retire-recovered-publisher --run-id RUN --expect-owner OWNER` remains an

@@ -1,3 +1,4 @@
+mod admission_pool;
 pub mod host_filesystem;
 mod interrupted;
 mod prepared_boot;
@@ -759,6 +760,15 @@ pub fn up_with_profile(
     up_with_bridge(candidate, profile, None)
 }
 
+/// Resource admission distinguishes a proven running pool from a new VM allocation.
+pub fn probe_with_profile(
+    candidate: &Candidate,
+    profile: super::Profile,
+) -> Result<admission::Admission, CandidateError> {
+    let selected = admission_pool::select(candidate, profile)?;
+    admission_pool::probe(candidate, profile, selected.as_ref())
+}
+
 pub fn up_with_bridge(
     candidate: &Candidate,
     profile: super::Profile,
@@ -1040,19 +1050,26 @@ fn start_pool(
             "Existing capacity belongs to another profile. No resize, replacement or adoption was attempted.",
         ));
     }
-    // Admission before locks, aliases, provider commands, disks or VM effects.
-    let admission = admission::probe_for(&candidate.checkout, profile)?;
+    // Admission before aliases, provider commands, disks or VM effects. Only
+    // independently verified live ownership avoids charging a second VM's disks.
+    let admission_owner = admission_pool::select(candidate, profile)?;
+    let admission = admission_pool::probe(candidate, profile, admission_owner.as_ref())?;
     if !admission.admitted {
         return Err(CandidateError::new(
             "admission_rejected",
             admission.reasons.join(" "),
         ));
     }
-    let samples = admission::sample_for(&candidate.checkout, profile)?;
+    let samples = admission::sample_with(profile, || {
+        admission_pool::probe(candidate, profile, admission_owner.as_ref())
+    })?;
     artifact::verify(candidate)?;
     artifact::verify_engine(candidate)?;
     super::network_tools::verify(candidate)?;
     let lock = startup_lease(&root(candidate), STARTUP_LEASE_WAIT)?;
+    if let Some(selected) = &admission_owner {
+        selected.reverify(candidate)?;
+    }
     #[cfg(target_os = "macos")]
     if let Some(guard) = &retained_guard {
         guard.verify(candidate)?;
@@ -1112,6 +1129,9 @@ fn start_pool(
     super::dependency_socket::verify(candidate, &owner)?;
     state::write(&root(candidate).join("admission.json"), &samples)?;
     if owner.phase == "running" {
+        if let Some(selected) = &admission_owner {
+            selected.reverify(candidate)?;
+        }
         #[cfg(target_os = "macos")]
         if let Some(guard) = &retained_guard {
             guard.verify(candidate)?;
@@ -1119,6 +1139,12 @@ fn start_pool(
         verify_live(candidate, &owner)?;
         audit_boot(candidate, &owner)?;
         return status(candidate);
+    }
+    if admission_owner.is_some() {
+        return Err(CandidateError::new(
+            "admission_owner_changed",
+            "Reserve-qualified ownership no longer names a running pool; no create or boot was admitted.",
+        ));
     }
     if ![
         "initializing",

@@ -9,7 +9,6 @@ import {
 } from "node:crypto";
 import { closeSync, constants, mkdtempSync, openSync, rmSync } from "node:fs";
 import {
-  chmod,
   link,
   lstat,
   mkdir,
@@ -69,7 +68,11 @@ interface Dependencies {
   readonly spawn: (input: SpawnInput) => HttpsChild;
   readonly permissionPort: () => Promise<number>;
   readonly adminReady: (socket: string) => Promise<boolean>;
-  readonly chmodOwnerSocket: typeof chmod;
+  /**
+   * Test seam: runs after the owner socket is published and before it is
+   * verified. Production does nothing.
+   */
+  readonly afterOwnerSocketPublish: (path: string) => Promise<void>;
 }
 const SAFE_TLS_CODES = new Set([
   "ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR",
@@ -684,7 +687,7 @@ function caDerSha256(pem: Buffer): string {
 }
 async function startOwnerChallenge(
   path: string,
-  setMode: typeof chmod
+  afterPublish: (path: string) => Promise<void>
 ): Promise<{
   readonly server: Server;
   readonly publicKey: string;
@@ -712,10 +715,10 @@ async function startOwnerChallenge(
   });
   let identity: { dev: number; ino: number } | undefined;
   try {
-    // Published by link from an owner-only staging name (a verified socket of
-    // this user): closing the server never removes a replacement at path.
+    // Created with mode 0600 and published by link from a staging name: closing
+    // the server never removes a replacement at path, and path is never chmodded.
     identity = await listenPublishedUnixSocket(server, path);
-    await setMode(path, 0o600);
+    await afterPublish(path);
     const prepared = await lstat(path);
     if (
       !prepared.isSocket() ||
@@ -1253,7 +1256,7 @@ export async function startNativeProjectHttps(opts: {
     spawn: spawnNativeHttpsChild,
     permissionPort,
     adminReady,
-    chmodOwnerSocket: chmod,
+    afterOwnerSocketPublish: async () => undefined,
     ...opts.dependencies,
   };
   const limit = opts.certificateNameLimit ?? 256;
@@ -1372,7 +1375,10 @@ export async function startNativeProjectHttps(opts: {
       await removeOwnedDirectory(lock, lockIdentity, false);
     })());
   try {
-    owner = await startOwnerChallenge(ownerSocket, deps.chmodOwnerSocket);
+    owner = await startOwnerChallenge(
+      ownerSocket,
+      deps.afterOwnerSocketPublish
+    );
     const before = await inspect();
     if (
       !(

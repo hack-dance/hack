@@ -27,6 +27,8 @@ Usage:
   hack-local graph recover-cleanup --run-id <32-hex> --expect-receipt <sha256> [--json]
   hack-local graph recover-live-owner --run-id <32-hex> --expect-receipt <sha256> [--json]
   hack-local graph retire-recovered-publisher --run-id <32-hex> --expect-owner <32-hex> [--json]
+  hack-local graph retire-acknowledged-publisher --run-id <32-hex> --expect-owner <32-hex> --expect-receipt <64-hex> --expect-publisher <64-hex> [--json]
+  hack-local graph release-acknowledged-dependencies --run-id <32-hex> --expect-owner <32-hex> --expect-receipt <64-hex> --expect-publisher <64-hex> --expect-reservation <64-hex> [--json]
   hack-local graph inspect-host-pin-recovery --run-id <32-hex> [--json]
   hack-local graph recover-host-pins --run-id <32-hex> --expect-selection <64-hex> --accept-legacy-device-rebind [--json]
   hack-local graph inspect-absent-publication-cleanup --run-id <32-hex> --original-owner-file <private-json> --host-inspection-file <private-json> [--json]
@@ -48,6 +50,8 @@ Usage:
   hack-local runtime hostname-authority --socket <path> [--json]
   hack-local runtime recover-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
   hack-local runtime managed-hostname-authority [--json]
+  hack-local runtime recover-quiescent-https --expect-owner <64-hex> --expect-configuration <64-hex> --expect-frontend-pid <pid> --json
+  hack-local runtime recover-quiescent-https --expect-owner <64-hex> --expect-configuration <64-hex> --expect-frontend-pid <pid> --accept-legacy-device-rebind <run:witness-sha:socket-dev:socket-ino:lock-dev:lock-ino> --json
   hack-local runtime inspect-host-listener --pid <pid> --port <loopback-port> --executable <absolute-path> [--peer-port <open-client-port>] [--json]
   hack-local runtime serve-managed-hostnames [--certificate-name-limit <1..4096>] (owner pipe on stdin)
   hack-local runtime certificate-admission [--json]
@@ -464,10 +468,7 @@ fn run() -> Result<(), CandidateError> {
             };
             let candidate = discover_candidate(&requested)?;
             if *action == "probe" {
-                print_json(&provider::admission::probe_for(
-                    &candidate.checkout,
-                    profile,
-                )?)?;
+                print_json(&provider::probe_with_profile(&candidate, profile)?)?;
             } else {
                 print_json(&provider::up_with_profile(&candidate, profile)?)?;
             }
@@ -509,6 +510,54 @@ fn run() -> Result<(), CandidateError> {
                     &discover_candidate(&requested)?,
                     std::path::Path::new(socket),
                     hash,
+                )?,
+            )?;
+        }
+        [
+            "runtime",
+            "recover-quiescent-https",
+            "--expect-owner",
+            owner,
+            "--expect-configuration",
+            configuration,
+            "--expect-frontend-pid",
+            pid,
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::https_recovery::recover(
+                &discover_candidate(&requested)?,
+                owner,
+                configuration,
+                pid.parse().map_err(|_| {
+                    CandidateError::new("invalid_arguments", "Expected a positive frontend PID.")
+                })?,
+            )?)?;
+        }
+        [
+            "runtime",
+            "recover-quiescent-https",
+            "--expect-owner",
+            owner,
+            "--expect-configuration",
+            configuration,
+            "--expect-frontend-pid",
+            pid,
+            "--accept-legacy-device-rebind",
+            selection,
+            "--json",
+        ] => {
+            print_json(
+                &hack_runtime_core::provider::https_recovery::recover_legacy_device_rebind(
+                    &discover_candidate(&requested)?,
+                    owner,
+                    configuration,
+                    pid.parse().map_err(|_| {
+                        CandidateError::new(
+                            "invalid_arguments",
+                            "Expected a positive frontend PID.",
+                        )
+                    })?,
+                    selection,
                 )?,
             )?;
         }

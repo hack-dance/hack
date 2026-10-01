@@ -1,7 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import {
   chmod,
   lstat,
+  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -96,7 +98,7 @@ test("a published endpoint serves clients, survives close and is removed only by
   expect(await readdir(directory)).toEqual(["mcp.sock"]);
   const stat = await lstat(path);
   expect(stat.isSocket()).toBe(true);
-  expect(stat.mode & 0o777 & 0o077).toBe(0);
+  expect(stat.mode & 0o777).toBe(0o600);
   expect({ dev: stat.dev, ino: stat.ino }).toEqual(identity);
   expect(await reply(path)).toBe("ok");
   await close(server);
@@ -191,4 +193,203 @@ test("a startup that cannot bind creates nothing", async () => {
   await expect(listenPublishedUnixSocket(server, path)).rejects.toThrow();
   expect(server.listening).toBe(false);
   expect(await readdir(directory)).toEqual([]);
+});
+
+test("a listen that binds the staging name and then fails leaves no socket or listener", async () => {
+  const directory = await privateDirectory();
+  const path = join(directory, "control.sock");
+  const inner = createServer();
+  servers.push(inner);
+  let closed = false;
+  // A runtime that creates the staging socket and then reports a listen error.
+  const partial = Object.assign(new EventEmitter(), {
+    listen(staging: string) {
+      inner.listen(staging, () => {
+        partial.emit("error", new Error("injected failure after bind"));
+      });
+      return partial;
+    },
+    close(callback?: () => void) {
+      closed = true;
+      inner.close(() => callback?.());
+      return partial;
+    },
+  });
+  await expect(
+    listenPublishedUnixSocket(partial as unknown as Server, path)
+  ).rejects.toThrow("injected failure after bind");
+  expect(closed).toBe(true);
+  expect(inner.listening).toBe(false);
+  expect(await readdir(directory)).toEqual([]);
+});
+
+async function foreignFile(path: string) {
+  await writeFile(path, "foreign bytes", { mode: 0o644 });
+  const stat = await lstat(path);
+  return { ino: stat.ino, mode: stat.mode & 0o777 };
+}
+
+async function expectForeignFileKept(
+  path: string,
+  original: { ino: number; mode: number }
+) {
+  const stat = await lstat(path);
+  expect({ ino: stat.ino, mode: stat.mode & 0o777 }).toEqual(original);
+  expect(await readFile(path, "utf8")).toBe("foreign bytes");
+}
+
+test("an ambiguous partial bind keeps a foreign same-uid socket at the staging name", async () => {
+  const directory = await privateDirectory();
+  const path = join(directory, "control.sock");
+  const foreign = createServer((socket) => socket.end("foreign"));
+  servers.push(foreign);
+  let closed = false;
+  let original: { ino: number; mode: number } | undefined;
+  // A listen that never proves it bound anything, while a foreign socket takes the name.
+  const partial = Object.assign(new EventEmitter(), {
+    listen(staging: string) {
+      setTimeout(() => {
+        foreign.listen(staging, async () => {
+          const stat = await lstat(staging);
+          original = { ino: stat.ino, mode: stat.mode & 0o777 };
+          partial.emit("error", new Error("injected ambiguous bind failure"));
+        });
+      }, 10);
+      return partial;
+    },
+    close(callback?: () => void) {
+      closed = true;
+      callback?.();
+      return partial;
+    },
+  });
+  await expect(
+    listenPublishedUnixSocket(partial as unknown as Server, path)
+  ).rejects.toThrow("injected ambiguous bind failure");
+  expect(closed).toBe(true);
+  const [staging] = (await readdir(directory)).filter((name) =>
+    name.startsWith(".")
+  );
+  expect(staging).toBeDefined();
+  const stat = await lstat(join(directory, staging ?? ""));
+  expect({ ino: stat.ino, mode: stat.mode & 0o777 }).toEqual(
+    original ?? { ino: 0, mode: 0 }
+  );
+  expect(await reply(join(directory, staging ?? ""))).toBe("foreign");
+  expect(await readdir(directory)).toEqual([staging ?? ""]);
+});
+
+test("a replacement after bind is refused and kept: never chmodded, adopted or removed", async () => {
+  const directory = await privateDirectory();
+  const path = join(directory, "owner.sock");
+  const server = echoServer();
+  let staging = "";
+  let original: { ino: number; mode: number } | undefined;
+  await expect(
+    listenPublishedUnixSocket(server, path, {
+      hooks: {
+        afterBind: async (name) => {
+          staging = name;
+          await unlink(name);
+          original = await foreignFile(name);
+        },
+      },
+    })
+  ).rejects.toThrow("changed before publication");
+  expect(server.listening).toBe(false);
+  // The helper's own server close could not remove it either.
+  await expectForeignFileKept(staging, original ?? { ino: 0, mode: 0 });
+  expect(await readdir(directory)).toEqual([basename(staging)]);
+});
+
+test("a replacement after publication is kept when the staging name is retired", async () => {
+  const directory = await privateDirectory();
+  const path = join(directory, "mcp.sock");
+  const server = echoServer();
+  let staging = "";
+  let original: { ino: number; mode: number } | undefined;
+  const identity = await listenPublishedUnixSocket(server, path, {
+    hooks: {
+      afterLink: async (name) => {
+        staging = name;
+        await unlink(name);
+        original = await foreignFile(name);
+      },
+    },
+  });
+  const stat = await lstat(path);
+  expect({ dev: stat.dev, ino: stat.ino }).toEqual(identity);
+  expect(await reply(path)).toBe("ok");
+  await expectForeignFileKept(staging, original ?? { ino: 0, mode: 0 });
+  expect((await readdir(directory)).sort()).toEqual(
+    [basename(staging), "mcp.sock"].sort()
+  );
+});
+
+test("an occupied holding name is never overwritten; the next free one keeps the staging entry", async () => {
+  const directory = await privateDirectory();
+  const path = join(directory, "owner.sock");
+  const server = echoServer();
+  let staging = "";
+  let original: { ino: number; mode: number } | undefined;
+  let occupied: { ino: number; mode: number } | undefined;
+  await expect(
+    listenPublishedUnixSocket(server, path, {
+      hooks: {
+        afterBind: async (name) => {
+          staging = name;
+          await unlink(name);
+          original = await foreignFile(name);
+          await writeFile(`${name}.held-a`, "holding bytes", { mode: 0o640 });
+          const stat = await lstat(`${name}.held-a`);
+          occupied = { ino: stat.ino, mode: stat.mode & 0o777 };
+        },
+        holdingNames: (name) => [`${name}.held-a`, `${name}.held-b`],
+      },
+    })
+  ).rejects.toThrow("changed before publication");
+  expect(server.listening).toBe(false);
+  // The staging entry went to the free name for the close and came back unchanged.
+  await expectForeignFileKept(staging, original ?? { ino: 0, mode: 0 });
+  const held = await lstat(`${staging}.held-a`);
+  expect({ ino: held.ino, mode: held.mode & 0o777 }).toEqual(
+    occupied ?? { ino: 0, mode: 0 }
+  );
+  expect(await readFile(`${staging}.held-a`, "utf8")).toBe("holding bytes");
+  expect((await readdir(directory)).sort()).toEqual(
+    [basename(staging), `${basename(staging)}.held-a`].sort()
+  );
+});
+
+test("an endpoint at the AF_UNIX path limit publishes and serves, and one byte over is refused cleanly or served at its full name", async () => {
+  // sun_path holds 104 bytes on macOS and 108 on Linux, including the terminating NUL.
+  // Bun 1.3.9 refuses a longer path; Bun 1.4 binds it in full. Neither may truncate it
+  // or leave a partial staging entry.
+  const limit = process.platform === "darwin" ? 103 : 107;
+  const name = "mcp.sock";
+  for (const extra of [0, 1]) {
+    const directory = await privateDirectory();
+    const fill = limit - Buffer.byteLength(directory) - 2 - name.length + extra;
+    expect(fill).toBeGreaterThan(0);
+    const parent = join(directory, "d".repeat(fill));
+    await mkdir(parent, { mode: 0o700 });
+    const path = join(parent, name);
+    expect(Buffer.byteLength(path)).toBe(limit + extra);
+    const server = echoServer();
+    const identity = await listenPublishedUnixSocket(server, path).catch(
+      () => null
+    );
+    if (identity) {
+      const stat = await lstat(path);
+      expect({ dev: stat.dev, ino: stat.ino }).toEqual(identity);
+      expect(await reply(path)).toBe("ok");
+      expect(await readdir(parent)).toEqual([name]);
+      await close(server);
+      await removeOwned(path, identity);
+    } else {
+      expect(extra).toBe(1);
+      expect(server.listening).toBe(false);
+    }
+    expect(await readdir(parent)).toEqual([]);
+  }
 });

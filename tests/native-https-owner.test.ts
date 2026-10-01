@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   connectNativeHttpsOwner,
   ensureNativeHttpsOwner,
@@ -72,6 +72,8 @@ async function fixture(
   options: {
     readonly immediateExit?: boolean;
     readonly holdRetirement?: boolean;
+    /** Fault injected between control-socket publication and its first observation. */
+    readonly afterPublish?: "fail" | "replace";
   } = {}
 ) {
   const home = await mkdtemp(join(await realpath(tmpdir()), "hk-owner-test-"));
@@ -83,8 +85,9 @@ async function fixture(
     frontend,
     `#!${process.execPath}
 import { serveNativeHttpsOwner } from ${JSON.stringify(serverModule)};
-import { appendFile, readFile, writeFile } from "node:fs/promises";
+import { appendFile, readFile, unlink, writeFile } from "node:fs/promises";
 const home = ${JSON.stringify(home)};
+const fault = ${JSON.stringify(options.afterPublish ?? null)};
 await writeFile(home + "/helper-pid", String(process.pid));
 const never = ${options.immediateExit ? 'Promise.resolve({component:"fixture",code:1})' : "new Promise(() => {})"};
 try {
@@ -98,6 +101,11 @@ try {
     },
     verify: async (_binding, lease, phase) => {
       if (phase === "release" && await readFile(home + "/clean-" + lease.run, "utf8") !== "clean") { throw new Error("unproven"); }
+    },
+    afterPublish: async (path) => {
+      await writeFile(home + "/published-path", path);
+      if (fault === "fail") { throw new Error("injected failure after publication"); }
+      if (fault === "replace") { await unlink(path); await writeFile(path, "foreign replacement", { mode: 0o644 }); }
     },
     verifyIdle: async () => {
       ${
@@ -469,6 +477,53 @@ test("child exit during startup never publishes a reusable running endpoint", as
   );
   await expect(connectNativeHttpsOwner(configuration, false)).rejects.toThrow();
 }, 20_000);
+
+test("a failure or replacement right after publication closes the listener and retires only its own endpoint", async () => {
+  for (const fault of ["fail", "replace"] as const) {
+    const f = await fixture({ afterPublish: fault });
+    await ensureNativeHttpsOwner({ binding: f.binding });
+    const published = await until(() =>
+      readFile(join(f.home, "published-path"), "utf8")
+    );
+    const pid = Number(
+      await until(() => readFile(join(f.home, "helper-pid"), "utf8"))
+    );
+    // The owner exits: a listener left open would keep it running.
+    await until(async () => {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return true;
+      }
+      throw new Error("owner still running");
+    });
+    await expect(
+      lstat(join(nativeHttpsOwnerRoot(f.home), "endpoint.json"))
+    ).rejects.toThrow();
+    if (fault === "fail") {
+      // Its own endpoint and private socket directory are gone.
+      await expect(lstat(published)).rejects.toThrow();
+      await expect(lstat(dirname(published))).rejects.toThrow();
+    } else {
+      // The replacement is kept exactly: never removed, adopted or chmodded.
+      const stat = await lstat(published);
+      expect(stat.isFile()).toBe(true);
+      expect(stat.mode & 0o777).toBe(0o644);
+      expect(await readFile(published, "utf8")).toBe("foreign replacement");
+      await rm(dirname(published), { recursive: true, force: true });
+    }
+  }
+  // A later owner starts and serves normally.
+  const f = await fixture();
+  const started = await f.start();
+  const identity = await f.acquire(
+    started.socket,
+    started.configuration.ownerGeneration,
+    "b"
+  );
+  await f.clean("b");
+  await f.release(started.socket, identity);
+}, 40_000);
 
 test("dead helper and mismatched generation or binary binding are never adopted", async () => {
   const f = await fixture();

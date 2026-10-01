@@ -133,6 +133,114 @@ fn recovered_publisher_retirement_is_exact_and_idempotent() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn cleanup_fence_refuses_effects_and_resumes_each_retirement_rename() {
+    for fail_at in [1, 3, 4, 5, 6] {
+        let (_fixture, candidate, run, owner, directory) = abandoned_publisher();
+        let receipt = "f".repeat(64);
+        let before = fs::read(directory.join("owner.json")).unwrap();
+        let sibling_run = "b".repeat(32);
+        let mut sibling = Publication::bind(&candidate, &sibling_run).unwrap();
+        let sibling_root = root(&candidate, &sibling_run).unwrap();
+        let sibling_before = fs::read(sibling_root.join("owner.json")).unwrap();
+        let lock = state::Lock::acquire_existing(&directory).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let fence = || {
+            calls.set(calls.get() + 1);
+            if calls.get() == fail_at {
+                Err(retirement_refused())
+            } else {
+                Ok(())
+            }
+        };
+        assert!(
+            retire_recovered_publisher_locked_fenced(
+                &candidate, &run, &owner, &receipt, None, &lock, &fence,
+            )
+            .is_err()
+        );
+        assert_eq!(calls.get(), fail_at);
+        let owner_path = if fail_at == 6 {
+            retired_path(&directory, &owner, false)
+        } else {
+            directory.join("owner.json")
+        };
+        assert_eq!(fs::read(&owner_path).unwrap(), before);
+        let journal = retirement_path(&directory, &owner);
+        assert_eq!(journal.exists(), fail_at >= 4);
+        assert_eq!(directory.join("control.sock").exists(), fail_at < 5);
+        assert_eq!(
+            retired_path(&directory, &owner, true).exists(),
+            fail_at >= 5
+        );
+        if journal.exists() {
+            let retained = fs::read(&journal).unwrap();
+            assert!(
+                retire_recovered_publisher_locked_fenced(
+                    &candidate,
+                    &run,
+                    &owner,
+                    &"e".repeat(64),
+                    None,
+                    &lock,
+                    &|| Ok(()),
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&journal).unwrap(), retained);
+            assert_eq!(fs::read(&owner_path).unwrap(), before);
+        }
+        retire_recovered_publisher_locked_fenced(
+            &candidate,
+            &run,
+            &owner,
+            &receipt,
+            None,
+            &lock,
+            &|| Ok(()),
+        )
+        .unwrap();
+        assert!(!directory.join("control.sock").exists());
+        assert!(!directory.join("owner.json").exists());
+        assert_eq!(
+            fs::read(retired_path(&directory, &owner, false)).unwrap(),
+            before
+        );
+        let archived_owner = fs::symlink_metadata(retired_path(&directory, &owner, false)).unwrap();
+        let archived_socket = fs::symlink_metadata(retired_path(&directory, &owner, true)).unwrap();
+        let journal_bytes = fs::read(&journal).unwrap();
+        retire_recovered_publisher_locked_fenced(
+            &candidate,
+            &run,
+            &owner,
+            &receipt,
+            None,
+            &lock,
+            &|| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&journal).unwrap(), journal_bytes);
+        assert_eq!(
+            id(&fs::symlink_metadata(retired_path(&directory, &owner, false)).unwrap()),
+            id(&archived_owner)
+        );
+        assert_eq!(
+            id(&fs::symlink_metadata(retired_path(&directory, &owner, true)).unwrap()),
+            id(&archived_socket)
+        );
+        assert_eq!(
+            fs::read(sibling_root.join("owner.json")).unwrap(),
+            sibling_before
+        );
+        sibling.verify().unwrap();
+        sibling.finish().unwrap();
+        fs::remove_dir_all(sibling_root).unwrap();
+        drop(lock);
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn retired_recovery_refuses_pending_missing_and_partial_proof_without_mutation() {
     let (_fixture, candidate, run, owner, root) = abandoned_publisher();
     let receipt = "f".repeat(64);

@@ -461,6 +461,24 @@ fn incomplete_journal_blocks_ready_operations_and_is_never_replayed() {
     journal.completed_generation = Some(service_exec_generation(&receipt).unwrap());
     state::write(&root.join(JOURNAL), &journal).unwrap();
     require_complete(&root, &receipt).unwrap();
+    let evidence = fs::read(root.join(JOURNAL)).unwrap();
+    require_recovery_complete(&root, &receipt, "fixture-boot").unwrap();
+    for boot in ["", "other-boot"] {
+        assert!(require_recovery_complete(&root, &receipt, boot).is_err());
+        assert_eq!(fs::read(root.join(JOURNAL)).unwrap(), evidence);
+    }
+    // The ordinary readiness validator can accept a newer receipt, but recovery
+    // must select exactly the generation that committed this refresh.
+    let mut newer = receipt.clone();
+    newer.plan_id = "9".repeat(64);
+    require_complete(&root, &newer).unwrap();
+    assert!(require_recovery_complete(&root, &newer, "fixture-boot").is_err());
+    let mut incomplete = serde_json::to_value(&journal).unwrap();
+    incomplete["phase"] = json!("provisioning");
+    state::write(&root.join(JOURNAL), &incomplete).unwrap();
+    assert!(require_recovery_complete(&root, &receipt, "fixture-boot").is_err());
+    state::write(&root.join(JOURNAL), &journal).unwrap();
+    assert_eq!(fs::read(root.join(JOURNAL)).unwrap(), evidence);
     let mut changed = receipt.clone();
     changed
         .relay_startup

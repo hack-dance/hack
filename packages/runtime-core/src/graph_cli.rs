@@ -25,6 +25,97 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let Some((action, args)) = args.split_first() else {
         return Err(invalid());
     };
+    if *action == "release-acknowledged-dependencies" {
+        let (run, owner, receipt, publisher, reservation) = match *args {
+            [
+                "--run-id",
+                run,
+                "--expect-owner",
+                owner,
+                "--expect-receipt",
+                receipt,
+                "--expect-publisher",
+                publisher,
+                "--expect-reservation",
+                reservation,
+            ]
+            | [
+                "--run-id",
+                run,
+                "--expect-owner",
+                owner,
+                "--expect-receipt",
+                receipt,
+                "--expect-publisher",
+                publisher,
+                "--expect-reservation",
+                reservation,
+                "--json",
+            ] => (run, owner, receipt, publisher, reservation),
+            _ => return Err(invalid()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            return graph::release_acknowledged_dependencies(
+                candidate,
+                graph::AcknowledgedPublisherSelection {
+                    run,
+                    owner,
+                    receipt_sha256: receipt,
+                    publisher_sha256: publisher,
+                },
+                reservation,
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (run, owner, receipt, publisher, reservation);
+            return Err(invalid());
+        }
+    }
+    if *action == "retire-acknowledged-publisher" {
+        let (run, owner, receipt, publisher) = match *args {
+            [
+                "--run-id",
+                run,
+                "--expect-owner",
+                owner,
+                "--expect-receipt",
+                receipt,
+                "--expect-publisher",
+                publisher,
+            ]
+            | [
+                "--run-id",
+                run,
+                "--expect-owner",
+                owner,
+                "--expect-receipt",
+                receipt,
+                "--expect-publisher",
+                publisher,
+                "--json",
+            ] => (run, owner, receipt, publisher),
+            _ => return Err(invalid()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            return graph::retire_acknowledged_publisher(
+                candidate,
+                graph::AcknowledgedPublisherSelection {
+                    run,
+                    owner,
+                    receipt_sha256: receipt,
+                    publisher_sha256: publisher,
+                },
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (run, owner, receipt, publisher);
+            return Err(invalid());
+        }
+    }
     if *action == "inspect-host-pin-recovery" {
         let run = match *args {
             ["--run-id", run] | ["--run-id", run, "--json"] => run,

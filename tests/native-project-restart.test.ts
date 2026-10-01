@@ -16,6 +16,7 @@ import {
   nativeRestartSelection,
   preflightNativeRestart,
 } from "../src/backends/native-project-restart-preflight.ts";
+import { selectNativeRetainedImages } from "../src/backends/native-project-retained-images.ts";
 import {
   completeNativeRestartCleanup,
   loadNativeProjectRun,
@@ -534,6 +535,7 @@ async function listenerIntentFixture() {
     run,
     dependencyFile: path,
     dependencies: {
+      retainedImages: async () => new Map(),
       prepare: async ({ envName }) => {
         expect(envName).toBe("qa");
         return input;
@@ -628,6 +630,302 @@ test("cleaned retry with absent listeners reaches startup hooks before actual id
     expect(JSON.parse(await readFile(listener.path, "utf8"))).toEqual(
       listener.selection
     );
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
+test("explicit stopped recovery without an intent retains the normal cleanup and startup sequence", async () => {
+  const listener = await listenerIntentFixture();
+  try {
+    const f = fixture();
+    expect(
+      await restartNativeProject({
+        ...f.options,
+        preflight: async (selected, { cleanedRetry }) => {
+          expect(cleanedRetry).toBe(false);
+          await preflightNativeRestart({
+            ...listener.options,
+            run: selected,
+            cleanedRetry,
+            recoverStopped: true,
+          });
+        },
+      })
+    ).toBe(0);
+    expect(listener.calls).toEqual([
+      "graph inspect",
+      "runtime status",
+      "runtime probe",
+      "review",
+      "graph inspect",
+    ]);
+    expect(f.events).toEqual([
+      "capture",
+      "intent",
+      "down",
+      "finalized",
+      "start",
+      "remove",
+      "unlock",
+      "serving",
+    ]);
+    expect(JSON.parse(await readFile(listener.path, "utf8"))).toEqual(
+      listener.selection
+    );
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
+test("explicit stopped recovery refuses incomplete, foreign or missing retained observations before cleanup", async () => {
+  const listener = await listenerIntentFixture();
+  try {
+    const complete = stoppedRetainedGraph();
+    for (const observed of [
+      { ...complete, journal_incomplete: true },
+      { ...complete, receipt: { ...complete.receipt, run: "9".repeat(32) } },
+      { ...complete, receipt: { ...complete.receipt, owner: "9".repeat(32) } },
+      {
+        ...complete,
+        observations: {
+          ...complete.observations,
+          "volume:data": { state: "absent" },
+        },
+      },
+      {
+        ...complete,
+        observations: {
+          ...complete.observations,
+          "container:app": { state: "unknown" },
+        },
+      },
+    ]) {
+      const f = fixture();
+      const calls: string[] = [];
+      await expect(
+        restartNativeProject({
+          ...f.options,
+          preflight: async () =>
+            await preflightNativeRestart({
+              ...listener.options,
+              recoverStopped: true,
+              dependencies: {
+                ...listener.options.dependencies,
+                invoke: async ({ args }) => {
+                  calls.push(String(args[1]));
+                  return observed;
+                },
+              },
+            }),
+        })
+      ).rejects.toThrow("cannot confirm the stopped retained graph");
+      expect(calls).toEqual(["inspect"]);
+      expect(f.events).toEqual([]);
+      expect(f.state.pending).toBeNull();
+    }
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
+test("explicit stopped recovery rechecks compute and retained data after review", async () => {
+  const listener = await listenerIntentFixture();
+  try {
+    for (const changed of ["compute", "data"]) {
+      const f = fixture();
+      let inspections = 0;
+      await expect(
+        restartNativeProject({
+          ...f.options,
+          preflight: async () =>
+            await preflightNativeRestart({
+              ...listener.options,
+              recoverStopped: true,
+              dependencies: {
+                ...listener.options.dependencies,
+                invoke: async (options) => {
+                  if (options.args[1] !== "inspect") {
+                    return await listener.options.dependencies!.invoke!(
+                      options
+                    );
+                  }
+                  inspections += 1;
+                  const observed = stoppedRetainedGraph();
+                  if (inspections === 2) {
+                    observed.observations[
+                      changed === "compute" ? "container:app" : "volume:data"
+                    ].state = changed === "compute" ? "present" : "absent";
+                  }
+                  return observed;
+                },
+              },
+            }),
+        })
+      ).rejects.toThrow("stopped recovery changed during review");
+      expect(inspections).toBe(2);
+      expect(f.events).toEqual([]);
+      expect(f.state.pending).toBeNull();
+    }
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
+test("frontend recovery on an active graph still requires live host listeners", async () => {
+  const listener = await listenerIntentFixture();
+  try {
+    const f = fixture();
+    await expect(
+      restartNativeProject({
+        ...f.options,
+        preflight: async () =>
+          await preflightNativeRestart({
+            ...listener.options,
+            recoverStopped: true,
+            dependencies: {
+              ...listener.options.dependencies,
+              invoke: async (options) =>
+                options.args[1] === "inspect"
+                  ? {
+                      ...stoppedRetainedGraph(),
+                      receipt: {
+                        ...stoppedRetainedGraph().receipt,
+                        phase: "ready",
+                      },
+                    }
+                  : await listener.options.dependencies!.invoke!(options),
+            },
+          }),
+      })
+    ).rejects.toThrow("bounded explicit listener selection; values omitted");
+    expect(listener.calls).toEqual([
+      "runtime status",
+      "runtime probe",
+      "graph dependency-discover",
+    ]);
+    expect(f.events).toEqual([]);
+    expect(f.state.pending).toBeNull();
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
+test("stopped recovery reviews retained image IDs and resolves tags only after original input changes", async () => {
+  const listener = await listenerIntentFixture();
+  try {
+    for (const changedOriginal of [false, true]) {
+      let imageResolutions = 0;
+      let reviewedImage: unknown;
+      const oldImage = `sha256:${"7".repeat(64)}`;
+      const newImage = `sha256:${"8".repeat(64)}`;
+      await preflightNativeRestart({
+        ...listener.options,
+        recoverStopped: true,
+        dependencies: {
+          ...listener.options.dependencies,
+          retainedImages: selectNativeRetainedImages,
+          prepare: async () => ({
+            originalSha256: changedOriginal ? "2".repeat(64) : "1".repeat(64),
+            environmentFiles: [],
+            serviceNames: ["app"],
+            normalizedComposeJson: JSON.stringify({
+              services: { app: { image: "example/app:latest" } },
+            }),
+            managedEnvironment: {},
+            lifecycleHostEnvironment: {},
+            effectiveEnvName: "qa",
+          }),
+          invoke: async (options) => {
+            if (options.args[1] === "inspect") {
+              const observed = stoppedRetainedGraph();
+              return {
+                ...observed,
+                receipt: {
+                  ...observed.receipt,
+                  normalized_input: {
+                    namespace: run.namespace,
+                    original_compose_sha256: "1".repeat(64),
+                    normalized_compose_sha256: "3".repeat(64),
+                  },
+                  resources: {
+                    default: observed.receipt.resources.default,
+                    data: observed.receipt.resources.data,
+                    "container:app": {
+                      kind: "container",
+                      key: "app",
+                      image: oldImage,
+                    },
+                  },
+                },
+              };
+            }
+            if (options.args[1] === "ensure-image") {
+              imageResolutions += 1;
+              return { image_id: newImage };
+            }
+            return await listener.options.dependencies!.invoke!(options);
+          },
+          review: async (review) => {
+            reviewedImage = JSON.parse(review.input.normalizedComposeJson)
+              .services.app.image;
+            return await review.run({
+              planId: run.planId,
+              namespace: run.namespace,
+              report: {},
+              projectArgs: [],
+            });
+          },
+        },
+      });
+      expect(reviewedImage).toBe(changedOriginal ? newImage : oldImage);
+      expect(imageResolutions).toBe(changedOriginal ? 1 : 0);
+    }
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
+test("invalid retained image provenance refuses stopped preflight before tag resolution", async () => {
+  const listener = await listenerIntentFixture();
+  try {
+    const f = fixture();
+    const calls: string[] = [];
+    await expect(
+      restartNativeProject({
+        ...f.options,
+        preflight: async () =>
+          await preflightNativeRestart({
+            ...listener.options,
+            recoverStopped: true,
+            dependencies: {
+              ...listener.options.dependencies,
+              retainedImages: selectNativeRetainedImages,
+              invoke: async (options) => {
+                calls.push(String(options.args[1]));
+                if (options.args[1] === "inspect") {
+                  const observed = stoppedRetainedGraph();
+                  return {
+                    ...observed,
+                    receipt: {
+                      ...observed.receipt,
+                      normalized_input: {
+                        namespace: "9".repeat(64),
+                        original_compose_sha256: "1".repeat(64),
+                        normalized_compose_sha256: "3".repeat(64),
+                      },
+                    },
+                  };
+                }
+                return await listener.options.dependencies!.invoke!(options);
+              },
+            },
+          }),
+      })
+    ).rejects.toThrow("retained image provenance is invalid");
+    expect(calls).not.toContain("ensure-image");
+    expect(f.events).toEqual([]);
+    expect(f.state.pending).toBeNull();
   } finally {
     await rm(listener.directory, { recursive: true, force: true });
   }

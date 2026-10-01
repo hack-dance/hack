@@ -843,8 +843,15 @@ pub(super) fn publication_allowed(
         &root.join("state.json"),
         LIMIT,
     )?);
-    if current_sha256 != complete && retained(&root, &current)? {
-        return Err(refused());
+    if current_sha256 != complete {
+        if current_sha256 != digest(&serde_json::to_vec_pretty(&current).map_err(|_| refused())?) {
+            return Err(refused());
+        }
+        require_historical_retention(&root, &current, &intent)?;
+        // Historical absence retirement is not the current cleanup authority.
+        // Dispatch current retention outside `retained` to avoid recursion and
+        // admit only an independently confirmed current recovery or relay ACK.
+        super::cleanup_enrollment::retention(&root, &current)?;
     }
     Ok(())
 }
@@ -904,17 +911,26 @@ pub(super) fn retained(root: &Path, receipt: &Receipt) -> Result<bool, Candidate
         return Err(refused());
     }
     if requested_sha256 != complete {
-        if intent.original.run != receipt.run
-            || intent.original.owner != receipt.owner
-            || intent.original.namespace != receipt.namespace
-            || !super::restore_history::confirms_prior_generation(root, receipt)?
-        {
-            return Err(refused());
-        }
+        require_historical_retention(root, receipt, &intent)?;
         super::cleanup_enrollment::retention_receipt(receipt, false)?;
         return Ok(false);
     }
     Ok(true)
+}
+
+fn require_historical_retention(
+    root: &Path,
+    receipt: &Receipt,
+    intent: &Intent,
+) -> Result<(), CandidateError> {
+    if intent.original.run != receipt.run
+        || intent.original.owner != receipt.owner
+        || intent.original.namespace != receipt.namespace
+        || !super::restore_history::confirms_prior_generation(root, receipt)?
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 /// Exact completed, retired first-generation proof for a later independently
@@ -1194,8 +1210,10 @@ mod tests {
 
     #[test]
     fn current_absent_completion_precedes_historical_enrollment_but_never_partial_proofs() {
-        let (fixture, _) = candidate();
-        let root = &fixture.0;
+        let (_fixture, candidate) = candidate();
+        let root = directory(&candidate, &"a".repeat(32)).unwrap();
+        state::private_directory(&root).unwrap();
+        let root = &root;
         let original: Receipt = serde_json::from_value(json!({
             "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),
             "namespace":"c".repeat(64),"plan_id":"d".repeat(64),
@@ -1308,7 +1326,11 @@ mod tests {
         let history = fs::read(root.join("restore-history.json")).unwrap();
         fs::remove_file(root.join("restore-history.json")).unwrap();
         assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
-        fs::write(root.join("restore-history.json"), history).unwrap();
+        state::write(
+            &root.join("restore-history.json"),
+            &serde_json::from_slice::<Value>(&history).unwrap(),
+        )
+        .unwrap();
         let mut changed_bridges = serde_json::to_value(&intent.bridges).unwrap();
         changed_bridges["serial"] = json!(99);
         state::write(&root.join("relay-cleanup-bridges.json"), &changed_bridges).unwrap();
@@ -1342,6 +1364,51 @@ mod tests {
         invalid.complete_sha256 = "9".repeat(64);
         state::write(&root.join(RETIREMENT), &invalid).unwrap();
         assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
+        assert_eq!(fs::read(root.join("state.json")).unwrap(), before);
+
+        // An older absence retirement must not shadow a newer exact same-boot
+        // completion when the restored foreground publication is selected.
+        state::write(&root.join(RETIREMENT), &retirement).unwrap();
+        super::super::restore_history::retain(root, &current).unwrap();
+        let mut newer = current.clone();
+        newer.resources.get_mut("container:web").unwrap().id = Some("c".repeat(64));
+        let mut ready = newer.clone();
+        ready.phase = "ready-observed".into();
+        ready.resources.get_mut("container:web").unwrap().phase = "started".into();
+        let live = json!({"version":1,"boot":"current","original":ready,
+            "original_sha256":digest(&serde_json::to_vec_pretty(&ready).unwrap()),
+            "foreground_sha256":"f".repeat(64),"relay":{"bytes":[],"record_id":[1,1]},
+            "environment":{},"bridges":intent.bridges,"prior_bridges":null,
+            "listeners_retired":true,
+            "complete_sha256":digest(&serde_json::to_vec_pretty(&newer).unwrap())});
+        state::write(&root.join("state.json"), &newer).unwrap();
+        state::write(&root.join("live-owner-cleanup.json"), &live).unwrap();
+        let before = fs::read(root.join("state.json")).unwrap();
+        publication_allowed(&candidate, &newer.run, true).unwrap();
+        assert!(publication_allowed(&candidate, &newer.run, false).is_err());
+        // Equivalent JSON does not preserve the exact selected receipt bytes.
+        fs::write(root.join("state.json"), serde_json::to_vec(&newer).unwrap()).unwrap();
+        assert!(publication_allowed(&candidate, &newer.run, true).is_err());
+        state::write(&root.join("state.json"), &newer).unwrap();
+        publication_allowed(&candidate, &newer.run, true).unwrap();
+        let mut altered = live.clone();
+        altered["complete_sha256"] = json!("9".repeat(64));
+        state::write(&root.join("live-owner-cleanup.json"), &altered).unwrap();
+        assert!(publication_allowed(&candidate, &newer.run, true).is_err());
+        state::write(&root.join("live-owner-cleanup.json"), &live).unwrap();
+        let history = root.join("restore-history.json");
+        fs::rename(&history, root.join("selected-history.json")).unwrap();
+        assert!(publication_allowed(&candidate, &newer.run, true).is_err());
+        fs::rename(root.join("selected-history.json"), history).unwrap();
+        for pending in [
+            "absent-publication-cleanup.pending",
+            "absent-publication-retirement.pending",
+        ] {
+            fs::write(root.join(pending), b"interrupted").unwrap();
+            assert!(publication_allowed(&candidate, &newer.run, true).is_err());
+            fs::remove_file(root.join(pending)).unwrap();
+        }
+        publication_allowed(&candidate, &newer.run, true).unwrap();
         assert_eq!(fs::read(root.join("state.json")).unwrap(), before);
     }
 

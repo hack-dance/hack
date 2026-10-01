@@ -335,6 +335,26 @@ fn existing(root: &Path, receipt: &Receipt) -> Result<Option<RebindJournal>, Can
 pub(super) fn boot(root: &Path, receipt: &Receipt) -> Result<Option<String>, CandidateError> {
     Ok(existing(root, receipt)?.map(|journal| journal.boot))
 }
+/// A completed refresh is evidence for this exact ready generation only. It
+/// grants no host endpoint adoption or cleanup authority by itself.
+pub(super) fn require_recovery_complete(
+    root: &Path,
+    receipt: &Receipt,
+    boot: &str,
+) -> Result<(), CandidateError> {
+    require_complete(root, receipt)?;
+    if let Some(journal) = existing(root, receipt)? {
+        if receipt.phase != "ready-observed"
+            || boot.is_empty()
+            || journal.boot != boot
+            || journal.completed_generation.as_deref()
+                != Some(service_exec_generation(receipt)?.as_str())
+        {
+            return Err(stage_refused("graph_dependency_rebind_incomplete"));
+        }
+    }
+    Ok(())
+}
 pub(super) fn require_complete(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
     if pending_journal(root)? {
         return Err(stage_refused("graph_dependency_rebind_incomplete"));

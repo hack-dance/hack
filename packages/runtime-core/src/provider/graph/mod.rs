@@ -37,6 +37,10 @@ pub use dependency_slots::{
 };
 #[cfg(target_os = "macos")]
 pub use host_pin_recovery::{inspect as inspect_host_pin_recovery, recover as recover_host_pins};
+#[cfg(all(test, target_os = "macos"))]
+pub(in crate::provider) use source_device_rebind::fixture_https_witness;
+#[cfg(target_os = "macos")]
+pub(in crate::provider) use source_device_rebind::https_devices;
 #[cfg(target_os = "macos")]
 pub use source_device_rebind::{
     inspect as inspect_source_device_rebind, recover as recover_source_device_rebind,
@@ -56,7 +60,14 @@ mod bridge_recovery;
 mod bridges;
 pub use bridge_recovery::{export_bridge_recovery, inspect_bridge_recovery};
 pub(in crate::provider) use bridges::{initialize_owner_registry, verify_owner_registry};
+#[cfg(target_os = "macos")]
+mod acknowledged_publisher;
 mod cleanup_enrollment;
+#[cfg(target_os = "macos")]
+pub use acknowledged_publisher::{
+    AcknowledgedPublisherSelection, release_dependencies as release_acknowledged_dependencies,
+    retire as retire_acknowledged_publisher,
+};
 #[cfg(target_os = "macos")]
 mod dead_owner_cleanup;
 #[cfg(target_os = "macos")]

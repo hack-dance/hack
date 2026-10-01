@@ -423,8 +423,9 @@ fn archive_completed_refresh(
     }
 }
 
-/// A committed older cleanup is diagnostic history only after its exact stopped
-/// generation and listener retirement are independently confirmed.
+/// A superseded cleanup is inert history. Prefer its exact stopped generation;
+/// verified truncation may establish replacement of a validated original after
+/// that completion is evicted. Neither path supplies current cleanup authority.
 pub(super) fn require_historical_recovery(
     root: &Path,
     current: &Receipt,
@@ -437,11 +438,25 @@ pub(super) fn require_historical_recovery(
     }
     let prior: Intent = state::read(&root.join(FILE))?;
     let complete = prior.complete_sha256.as_deref().ok_or_else(refused)?;
-    let stopped =
-        restore_history::completed_for_recovery(root, current, complete)?.ok_or_else(refused)?;
-    validate(&prior, &stopped, &prior.original_sha256, &prior.boot)?;
+    let stopped = restore_history::completed_for_recovery(root, current, complete)?;
+    let historical = stopped.as_ref().unwrap_or(&prior.original);
+    validate(&prior, historical, &prior.original_sha256, &prior.boot)?;
+    if stopped.is_none()
+        && (prior.original.version != current.version
+            || prior.original.run != current.run
+            || prior.original.owner != current.owner
+            || prior.original.namespace != current.namespace
+            || prior.original.plan_id != current.plan_id
+            || !restore_history::confirms_truncated_newer_generation(
+                root,
+                current,
+                &prior.original,
+            )?)
+    {
+        return Err(refused());
+    }
     if !prior.listeners_retired
-        || !stopped.resources.iter().any(|(key, old)| {
+        || !historical.resources.iter().any(|(key, old)| {
             old.kind == Kind::Container
                 && old.id.as_ref().is_some_and(|id| {
                     current
@@ -703,6 +718,71 @@ mod tests {
             bridges: serde_json::from_value(json!({"version":1,"owner":original.owner,"boot":"boot","run":original.run,"plan":original.plan_id,"capacity":0,"serial":0,"selected":{}})).unwrap(),
             prior_bridges: None, listeners_retired: true, complete_sha256: Some(digest(&stopped).unwrap()), original,
         }
+    }
+    #[test]
+    fn historical_recovery_survives_eviction_without_lending_current_authority() {
+        let fixture = super::super::tests::Fixture::new();
+        let prior = completed(generation(1, "ready-observed"));
+        state::write(&fixture.0.join(FILE), &prior).unwrap();
+        for number in 1..=12 {
+            restore_history::retain(&fixture.0, &generation(number, "stopped-data-retained"))
+                .unwrap();
+        }
+        let current = generation(13, "ready-observed");
+        assert!(
+            restore_history::completed_for_recovery(
+                &fixture.0,
+                &current,
+                prior.complete_sha256.as_deref().unwrap(),
+            )
+            .unwrap()
+            .is_none()
+        );
+        let before = fs::read(fixture.0.join(FILE)).unwrap();
+        require_historical_recovery(&fixture.0, &current).unwrap();
+        assert!(!current_completion(&fixture.0, &current).unwrap());
+        assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), before);
+        let stopped = generation(13, "stopped-data-retained");
+        state::write(&fixture.0.join("state.json"), &stopped).unwrap();
+        assert!(retained(&fixture.0, &stopped).is_err());
+        assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), before);
+    }
+    #[test]
+    fn evicted_historical_recovery_requires_valid_retired_original_and_newer_history() {
+        let fixture = super::super::tests::Fixture::new();
+        let prior = completed(generation(1, "ready-observed"));
+        let current = generation(13, "ready-observed");
+        state::write(&fixture.0.join(FILE), &prior).unwrap();
+        assert!(require_historical_recovery(&fixture.0, &current).is_err());
+        restore_history::retain(&fixture.0, &generation(2, "stopped-data-retained")).unwrap();
+        assert!(require_historical_recovery(&fixture.0, &current).is_err());
+        for number in 3..=12 {
+            restore_history::retain(&fixture.0, &generation(number, "stopped-data-retained"))
+                .unwrap();
+        }
+        for case in 0..7 {
+            let mut bad = completed(generation(1, "ready-observed"));
+            match case {
+                0 => bad.complete_sha256 = None,
+                1 => bad.complete_sha256 = Some("invalid".into()),
+                2 => bad.listeners_retired = false,
+                3 => bad.original_sha256 = "0".repeat(64),
+                4 => {
+                    bad.original.owner = "0".repeat(32);
+                    bad.original_sha256 = digest(&bad.original).unwrap();
+                }
+                5 => bad.boot.clear(),
+                6 => bad = completed(current.clone()),
+                _ => unreachable!(),
+            }
+            state::write(&fixture.0.join(FILE), &bad).unwrap();
+            let before = fs::read(fixture.0.join(FILE)).unwrap();
+            assert!(require_historical_recovery(&fixture.0, &current).is_err());
+            assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), before);
+        }
+        state::write(&fixture.0.join(FILE), &prior).unwrap();
+        state::write(&fixture.0.join("live-owner-cleanup.pending"), &json!({})).unwrap();
+        assert!(require_historical_recovery(&fixture.0, &current).is_err());
     }
     #[test]
     fn repeated_recovery_does_not_depend_on_evicted_restore_history_or_grow_archives() {

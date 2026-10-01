@@ -55,6 +55,15 @@ pub(super) fn archive_retired_dependency_rebind(
 ) -> Result<(), CandidateError> {
     rebind::archive::retired_completed(root, original, cleaned, boot, verify)
 }
+
+#[cfg(target_os = "macos")]
+pub(super) fn retired_dependency_rebind_archive_complete(
+    root: &Path,
+    original: &Receipt,
+    boot: &str,
+) -> Result<bool, CandidateError> {
+    rebind::archive::retired_archive_complete(root, original, boot)
+}
 use sha2::{Digest, Sha256};
 use std::{
     io::Read,

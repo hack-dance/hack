@@ -68,6 +68,71 @@ fn sync(root: &Path) -> Result<(), CandidateError> {
         .map_err(state::io)
 }
 
+/// A fully moved archive is inert metadata. Validate its completed journal and
+/// every retained artifact without needing the evictable old stopped receipt.
+/// The caller independently verifies current cleanup authority and holds its lease.
+#[cfg(any(target_os = "macos", test))]
+pub(in crate::provider::graph::startup::runtime) fn retired_archive_complete(
+    root: &Path,
+    original: &Receipt,
+    boot: &str,
+) -> Result<bool, CandidateError> {
+    state::check_private_directory(root)?;
+    for name in [JOURNAL, "dependency-rebind.pending"] {
+        if bytes(&root.join(name))?.is_some() {
+            return Ok(false);
+        }
+    }
+    let generation = service_exec_generation(original)?;
+    let history = root.join(format!("dependency-rebind-history-{generation}"));
+    crate::reject_aliased_state(&history)?;
+    if !history.try_exists().map_err(state::io)? {
+        return Ok(false);
+    }
+    state::check_private_directory(&history)?;
+    if bytes(&history.join("proof.pending"))?.is_some() {
+        return Ok(false);
+    }
+    let Some(value) = bytes(&history.join("proof.json"))? else {
+        return Ok(false);
+    };
+    let proof: Proof = serde_json::from_slice(&value).map_err(|_| rejected())?;
+    if !proof.complete {
+        return Ok(false);
+    }
+    let names = [JOURNAL, "dependency-rebind.pending"];
+    if boot.is_empty()
+        || proof.version != 1
+        || proof.run != original.run
+        || proof.owner != original.owner
+        || proof.boot != boot
+        || proof.original_generation != generation
+        || !hex(&proof.cleaned_generation, 64)
+        || !proof.artifacts.contains_key(JOURNAL)
+        || proof.artifacts.len() > names.len()
+        || proof
+            .artifacts
+            .iter()
+            .any(|(name, hash)| !names.contains(&name.as_str()) || !hex(hash, 64))
+    {
+        return Err(rejected());
+    }
+    let journal = existing(&history, original)?.ok_or_else(rejected)?;
+    if journal.phase != "completed"
+        || journal.boot != boot
+        || journal.completed_generation.as_deref() != Some(generation.as_str())
+    {
+        return Err(rejected());
+    }
+    for (name, expected) in &proof.artifacts {
+        let value = bytes(&history.join(name))?.ok_or_else(rejected)?;
+        if digest(&value) != *expected {
+            return Err(rejected());
+        }
+    }
+    Ok(true)
+}
+
 /// Caller retains the provider/dead-owner lease and has verified exactly owned
 /// container/helper absence. Neither a phase label nor this proof removes a VM
 /// resource or authorizes future endpoint selection.

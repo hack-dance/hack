@@ -430,6 +430,15 @@ pub(super) fn archive_retired_dependency_rebind(
     runtime::archive_retired_dependency_rebind(root, original, cleaned, boot, verify)
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn retired_dependency_rebind_archive_complete(
+    root: &Path,
+    original: &Receipt,
+    boot: &str,
+) -> Result<bool, CandidateError> {
+    runtime::retired_dependency_rebind_archive_complete(root, original, boot)
+}
+
 pub(super) fn guest_directory(run: &str, generation: &str) -> String {
     format!("/storage/hack-graph-startup/{run}/{generation}")
 }

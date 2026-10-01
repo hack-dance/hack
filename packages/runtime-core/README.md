@@ -478,6 +478,10 @@ combined filesystem capacity, excluding kernel overhead). Partial paths also con
 capacity. Graph admission checks the complete requested batch under its runtime
 lease before graph effects; staging checks again. Verified retirement frees guest
 capacity, while immutable intent history retains its separate 4096-entry bound.
+Graph cleanup uses that same history capacity, counting active and archived
+records together, so repeated restores cannot exceed a smaller cleanup-only
+ceiling after allocation succeeds. Matching ownership, container bindings and
+unambiguous records are still required.
 No retained evidence is automatically deleted to admit new work. This environment
 budget does not increase the runtime's separate container, CPU or memory limits and
 does not establish 32-branch qualification.

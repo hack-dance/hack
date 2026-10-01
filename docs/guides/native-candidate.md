@@ -93,6 +93,25 @@ still apply. A same-checkout branch namespace does not create an isolated source
 tree. These planning contracts do not qualify multiple independent source roots
 inside one VM pool.
 
+An existing frontend branch mapping may retain a graph admitted before native
+branch namespaces. If its current scoped review differs, the frontend first
+checks native selection against that exact saved run, owner, namespace and plan:
+restore selection for a stopped graph, or authenticated service selection for an
+active graph. A native unbranched review of the same canonical project and unchanged
+original Compose must then return the saved namespace. Only that retained run
+continues with unbranched review and execution arguments and keeps its original
+adapted route labels, before branch hostname rewriting. This preserves legacy
+source contracts that did not enroll hostname changes. The selected generation,
+restore selection and shared-source semantic compatibility are checked again
+before admission; mappings, graph receipts and ownership namespaces are not
+rewritten. Active legacy restart also rechecks its service, container, boot and
+receipt generation after compatibility review, before cleanup eligibility. A
+changed selection refuses before stopping the graph. This preflight check does
+not make cleanup atomic with that generation; existing ownership and frontend
+finalization checks still apply. Fresh and already branch-scoped graphs keep
+their normal branch namespace. This compatibility path does not authorize
+adopting an unrelated branch or project.
+
 ## Manual candidate upgrade and rollback
 
 Candidate bundles are selected by their full path. There is no automatic candidate
@@ -117,6 +136,117 @@ complete bundle to change the candidate.
    verified bundle with the same home, and repeat application/data readback. A prior
    binary refusing newer state is an unsupported downgrade, not a successful rollback.
    Preserve that state; do not rewrite receipts or adopt another home's data.
+
+Host cleanup or a reboot can remove the temporary `/private/tmp/hkl-<owner>` HOME
+alias while the private candidate home and disks remain intact. Normal commands
+report `provider_home_missing`; they do not initialize another pool or recreate the
+alias during observation. Explicit `runtime recover --json` can restore only that
+absent exact alias, after verifying the receipt-bound dead provider, both recorded
+disks, free VM lock, closed disk handles, and no active provider command. Existing
+files, directories, foreign links, a live or reused PID, and uncertain ownership
+refuse without replacement. Recovery rechecks the receipt before exclusive creation,
+then validates socket absence and flushes the disks before recording
+`recovered-unclean`. If those final checks fail, it reports
+`provider_home_restored_recovery_incomplete`, keeps the exact owned alias and retained
+data, and requires inspection before retry. No guest is started by alias recovery.
+Interrupted starts without a recorded process or both identified disks remain
+outside this repair path.
+
+A physical macOS reboot may also renumber the mounted filesystem device. Strict
+disk and source checks still refuse a changed device number; missing-HOME recovery
+does not waive them. For an offline **stock pool**, inspect the separate migration:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime host-filesystem-recovery --json
+./hack-native --candidate-root /absolute/private/candidate-home runtime recover-host-filesystem --expect-sha256 <selection_sha256> --accept-legacy-device-rebind --json
+./hack-native --candidate-root /absolute/private/candidate-home runtime recover --json
+```
+
+Review the inspection before selecting its hash. This explicit legacy migration
+requires an absent recorded provider whose start predates the current host boot,
+no active provider commands, exclusive existing operation/VM locks and closed disk
+handles. Both disk inodes, sizes and ext4 UUIDs, the exact source path/inode and its
+ownership must be unchanged; only one common old-to-new device-number change is
+allowed. The inspection is read-only. Publication atomically changes only the
+owner's disk and source device numbers, retaining its phase and process record.
+Normal commands keep their strict identity checks.
+
+Legacy receipts have no original host boot UUID or filesystem volume UUID. Calendar
+timestamps corroborate a reboot, and matching retained file identities constrain
+the migration, but neither proves original volume continuity. The opt-in explicitly
+accepts that limitation; copied or relocated pools are outside this procedure.
+Prepared-base pools and pending owner/network/activation updates require separate
+recovery and are refused. A torn owner publication preserves `owner.pending` and
+blocks another migration; do not delete or adopt that file manually.
+
+This does not start the VM, restore HOME, retire stale sockets or rewrite historical
+graph receipts. Use ordinary recovery afterward. Historical shared-source graphs
+retain the prior identity and may require verified cleanup plus a new generation;
+successful metadata migration alone does not establish application recovery.
+
+After that explicit provider recovery and one audited VM boot, a retained graph
+from the immediately preceding guest boot can still carry old host device numbers
+in its publisher, relay-control, and dependency-socket receipts. Inspect and select
+one run's host-pin recovery separately:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph inspect-host-pin-recovery --run-id <run-id> --json
+./hack-native --candidate-root /absolute/private/candidate-home graph recover-host-pins --run-id <run-id> --expect-selection <selection_sha256> --accept-legacy-device-rebind --json
+./hack-native --candidate-root /absolute/private/candidate-home graph recover-cleanup --run-id <run-id> --expect-receipt <original_receipt_sha256> --json
+./hack-native --candidate-root /absolute/private/candidate-home graph retire-recovered-publisher --run-id <run-id> --expect-owner <owner> --json
+```
+
+The first command only inspects. The second publishes a private, exact-run
+witness before cleanup; it changes no graph, publisher, control, or dependency
+receipt. It requires the provider's repaired current disks/source, unchanged
+recorded inodes and raw receipts, dead owners whose recorded starts precede the
+current physical host boot, refused socket listeners, and the immediate guest
+boot transition. It also binds retained volume names and actual labels. Cleanup
+and retirement can use the witness only for those selected old pins; ordinary
+reads and later publisher generations remain strict. Missing or foreign pins,
+active listeners, changed resources, pending journals, or further guest boots
+refuse without adopting another run. A completed older cleanup journal is
+retained as history and does not itself block a later selected generation.
+
+Legacy receipts do not identify the original APFS volume. This explicit
+device-number rebind cannot prove pre-reboot volume continuity. Completing these
+commands retains the old run's data and proves cleanup of its dead generation;
+it does not migrate `graph.source.shared`, restore the application, establish
+route readiness, or claim overall v5 acceptance. Same-run source continuity
+requires a separate explicit witness-bound transition after cleanup and
+publisher retirement. If macOS removed the foreground or relay-control
+directory itself during reboot, this command refuses: the old pin receipts no
+longer exist, and absent pathnames cannot stand in for their recorded owner
+identities. That case requires a separate selected absence-recovery procedure.
+
+When a **physical host reboot** removed both the deterministic foreground
+publication root and this run's relay-control root, inspect the distinct
+absence path with the private original provider Owner and its exact
+pre-migration host-filesystem inspection:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph inspect-absent-publication-cleanup --run-id <run-id> --original-owner-file <private-original-owner.json> --host-inspection-file <private-inspection.json> --json
+./hack-native --candidate-root /absolute/private/candidate-home graph recover-absent-publication-cleanup --run-id <run-id> --original-owner-file <private-original-owner.json> --host-inspection-file <private-inspection.json> --expect-selection <selection_sha256> --retain-data --accept-unpinned-post-reboot --json
+```
+
+Inspection does not create a publication root. A failed selected action can
+leave only its private lock reservation; inspection recognizes that exact
+lock-only state. Recovery locks the foreground publication before acquiring
+the VM lease, then durably records the selected absence before any cleanup.
+It retains volumes, verifies the stopped receipt, and records a separate
+absent-publisher retirement. Ordinary publication and cleanup cannot infer
+ownership from missing paths. The old foreground PID and original physical
+volume are not proved by legacy graph receipts; this path requires explicit
+acceptance of that post-reboot limitation and refuses a changed boot, present
+or foreign publication, stale selection, pending state, or changed resources.
+An interrupted recovery can resume only its exact selected intent on the same
+host and immediate guest boot. A later successful restore treats this witness
+as history; it never grants cleanup of the new generation.
+
+This operation does not change historical shared-source device identity.
+Source-mounted projects require the separate selected source-continuity step
+before normal same-run restore. The command's stopped/data-retained result is
+not proof of application startup or routing.
 
 Compatibility is qualified for specific bundle hashes and state formats. The
 displayed version alone does not establish frontend/executor or downgrade
@@ -230,6 +360,12 @@ and route selections.
 Normal foreground `hack restart` performs this selection and retained-data restore.
 It verifies the old containers and networks are absent and the retained volumes
 still have their recorded identities; it does not silently create replacement data.
+When the original Compose file is unchanged, retained startup also selects the
+authenticated container image IDs from that stopped graph. Mutable tags are not
+resolved again for those services. Missing images still refuse native admission;
+this selection never replaces generation, source or resource checks. Changing the
+original Compose file uses normal image resolution and the existing compatibility
+rules, rather than silently adopting an old image for a new declaration.
 For a shared-source graph admitted with a retained compatibility contract, ordinary
 source-content edits may change the reviewed plan ID: restart checks the stable
 execution, exclusion, mount and dependency-cache inputs before cleanup and again

@@ -1,6 +1,43 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn pool_gate_excludes_publication_before_engine_for_every_run() {
+    let fixture = super::super::super::tests::Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    let gate = super::super::super::publication_gate::Guard::acquire(&candidate).unwrap();
+    for run in ["a".repeat(32), "b".repeat(32)] {
+        assert!(Publication::bind(&candidate, &run).is_err());
+        assert!(!root(&candidate, &run).unwrap().exists());
+    }
+    gate.verify(&candidate).unwrap();
+    drop(gate);
+    let mut first = Publication::bind(&candidate, &"a".repeat(32)).unwrap();
+    // A publisher keeps its own run lock, not the pool gate for its lifetime.
+    let mut second = Publication::bind(&candidate, &"b".repeat(32)).unwrap();
+    first.finish().unwrap();
+    second.finish().unwrap();
+    for run in ["a".repeat(32), "b".repeat(32)] {
+        fs::remove_dir_all(root(&candidate, &run).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn pool_gate_refuses_a_replaced_lock_path() {
+    let fixture = super::super::super::tests::Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    let gate = super::super::super::publication_gate::Guard::acquire(&candidate).unwrap();
+    let directory = candidate.state_root.join("run/graph-publication-gate");
+    fs::rename(
+        directory.join("operation.lock"),
+        directory.join("original.lock"),
+    )
+    .unwrap();
+    let _replacement = state::Lock::acquire(&directory).unwrap();
+    assert!(gate.verify(&candidate).is_err());
+    assert!(directory.join("original.lock").exists());
+}
+
 #[cfg(target_os = "macos")]
 fn abandoned_publisher() -> (
     super::super::super::tests::Fixture,
@@ -198,6 +235,78 @@ fn interrupted_socket_move_resumes_but_replaced_owner_refuses() {
     drop(lock);
     assert!(retire_recovered_publisher(&candidate, &run, &owner, &receipt).is_err());
     assert_eq!(fs::read(root.join("owner.json")).unwrap(), b"foreign");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn selected_legacy_device_socket_move_resumes_only_exact_retirement() {
+    let (_fixture, candidate, run, _original_owner, root) = abandoned_publisher();
+    let receipt = "f".repeat(64);
+    let current = id(&fs::symlink_metadata(&root).unwrap()).0;
+    let rebind = DeviceRebind {
+        old: current.checked_add(1).unwrap(),
+        current,
+    };
+    let mut record: Record = state::read(&root.join("owner.json")).unwrap();
+    assert_eq!(record.parent.0, current);
+    assert_eq!(record.socket.0, current);
+    record.parent.0 = rebind.old;
+    record.socket.0 = rebind.old;
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(root.join("owner.json"), &bytes).unwrap();
+    let owner = format!("{:x}", Sha256::digest(&bytes));
+    assert!(Pin::read(&candidate, &run).is_err());
+    let lock = state::Lock::acquire_existing(&root).unwrap();
+    let pin = Pin::read_with_rebind(&candidate, &run, Some(rebind)).unwrap();
+    let intent = Retirement {
+        version: 1,
+        candidate: candidate.checkout.clone(),
+        run: run.clone(),
+        receipt_sha256: receipt.clone(),
+        owner_sha256: owner.clone(),
+        parent: pin.record.parent,
+        lock: lock.identity().unwrap(),
+        socket: pin.record.socket,
+        record: pin.record_id,
+        owner: pin.record,
+    };
+    state::write(&retirement_path(&root, &owner), &intent).unwrap();
+    fs::rename(root.join("control.sock"), retired_path(&root, &owner, true)).unwrap();
+    drop(lock);
+    assert!(retire_recovered_publisher(&candidate, &run, &owner, &receipt).is_err());
+    retire_recovered_publisher_recovery(&candidate, &run, &owner, &receipt, Some(rebind)).unwrap();
+    let retired = Retired::acquire(&candidate, &run).unwrap().unwrap();
+    retired
+        .verify_recovery_with_rebind(&candidate, &run, &owner, &receipt, Some(rebind))
+        .unwrap();
+    assert!(
+        retired
+            .verify_recovery(&candidate, &run, &owner, &receipt)
+            .is_err()
+    );
+    drop(retired);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn dead_owner_guard_refuses_replaced_foreground_lock_path() {
+    let (_fixture, candidate, run, _owner, root) = abandoned_publisher();
+    let dead = DeadOwner::acquire(&candidate, &run).unwrap();
+    dead.verify().unwrap();
+    let pathname = root.join("operation.lock");
+    let saved = root.join("held-operation.lock");
+    fs::rename(&pathname, &saved).unwrap();
+    fs::write(&pathname, b"replacement").unwrap();
+    fs::set_permissions(&pathname, fs::Permissions::from_mode(0o600)).unwrap();
+    let replacement = id(&fs::symlink_metadata(&pathname).unwrap());
+    assert!(dead.verify().is_err());
+    assert_eq!(id(&fs::symlink_metadata(&pathname).unwrap()), replacement);
+    assert_eq!(fs::read(&pathname).unwrap(), b"replacement");
+    drop(dead);
+    fs::remove_file(&pathname).unwrap();
+    fs::rename(&saved, &pathname).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
 

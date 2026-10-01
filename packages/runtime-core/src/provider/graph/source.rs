@@ -75,8 +75,16 @@ fn shared_paths(
         )?;
         selected.insert(mount.source.clone(), path);
     }
-    engine.guest().execute("set -eu; test \"$(findmnt -n -o FSTYPE --mountpoint \"$1\")\" = virtiofs; case \",$(findmnt -n -o OPTIONS --mountpoint \"$1\"),\" in *,rw,*) ;; *) exit 1;; esac", &[&share.guest_path], None)?;
+    verify_shared_mount(engine, share)?;
     Ok(selected)
+}
+
+pub(super) fn verify_shared_mount(
+    engine: &Engine<'_>,
+    share: &super::super::ProjectShareIntent,
+) -> Result<(), CandidateError> {
+    engine.guest().execute("set -eu; test \"$(findmnt -n -o FSTYPE --mountpoint \"$1\")\" = virtiofs; case \",$(findmnt -n -o OPTIONS --mountpoint \"$1\"),\" in *,rw,*) ;; *) exit 1;; esac", &[&share.guest_path], None)?;
+    Ok(())
 }
 
 pub(super) fn requested(plan: &PlanData, revision: Option<&str>) -> Result<(), CandidateError> {

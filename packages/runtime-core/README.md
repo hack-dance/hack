@@ -939,7 +939,12 @@ Both executables must accept that exact candidate root; checkout-bound source
 binaries must be built for it, or use relocatable `hack-native` executables with
 a dedicated private root. The test stops and restarts the entire supplied pool,
 so the root must contain only this fixture, with no application or sibling-owner
-resources. Its host listener uses an ephemeral loopback port.
+resources. Its host listener uses an ephemeral loopback port. Project and private
+inputs live beneath that declared root and remain on failure, along with readiness
+stage labels and bounded foreground failure output. The test has no fallback
+`--remove-data` cleanup on unwind. Only its successful explicit graph cleanup
+removes data and disposes its own input directories; the external harness must
+stop the exact owned pool and preserve evidence after failure.
 The prior-host-boot owner and selected dependency reservation are synthetic:
 after proving the exact reservation owner dead and every recorded socket inactive
 and unchanged, test-only setup projects its process timestamp and socket device

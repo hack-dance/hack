@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
 const JOURNAL: &str = "dependency-rebind.json";
-mod archive;
+pub(super) mod archive;
 #[cfg(test)]
 mod nested_tests;
 pub(super) use archive::after_cleanup as archive_after_cleanup;
@@ -330,6 +330,10 @@ fn existing(root: &Path, receipt: &Receipt) -> Result<Option<RebindJournal>, Can
             Ok(Some(journal))
         }
     }
+}
+#[cfg(target_os = "macos")]
+pub(super) fn boot(root: &Path, receipt: &Receipt) -> Result<Option<String>, CandidateError> {
+    Ok(existing(root, receipt)?.map(|journal| journal.boot))
 }
 pub(super) fn require_complete(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
     if pending_journal(root)? {

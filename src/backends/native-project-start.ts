@@ -14,7 +14,6 @@ import {
   preparedBaseArguments,
 } from "./native-prepared-base.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
-import { prepareNativeProjectBranch } from "./native-project-branch.ts";
 import {
   nativeSharedSourceFlags,
   nativeStartCacheSource,
@@ -35,12 +34,17 @@ import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import { serveNativeProjectGraph } from "./native-project-process.ts";
 import { selectNativeProjectRestore } from "./native-project-restore.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
+import { selectNativeRetainedImages } from "./native-project-retained-images.ts";
 import {
   preflightNativeRetainedStartup,
   verifyNativeResumedRetainedGraph,
   verifyNativeRetainedMapping,
 } from "./native-project-retained-startup.ts";
-import { withNativeProjectReview } from "./native-project-review.ts";
+import {
+  prepareNativeReviewBranch,
+  selectNativeProjectReviewIdentity,
+  withNativeProjectReview,
+} from "./native-project-review.ts";
 import {
   hasOnlyNativeSupportedLabels,
   nativeBridgeCapacity,
@@ -211,6 +215,8 @@ type Dependencies = {
   prepareStorage: typeof prepareNativeProjectRunStorage;
   adaptAws: typeof adaptNativeAwsEnvironment;
   review: typeof withNativeProjectReview;
+  selectReview: typeof selectNativeProjectReviewIdentity;
+  retainedImages: typeof selectNativeRetainedImages;
   serve: typeof serveNativeProjectGraph;
   https: typeof acquireNativeHttpsLease;
   recoverHttps: typeof recoverNativeHttpsLease;
@@ -226,6 +232,8 @@ const DEFAULTS: Dependencies = {
   prepareStorage: prepareNativeProjectRunStorage,
   adaptAws: adaptNativeAwsEnvironment,
   review: withNativeProjectReview,
+  selectReview: selectNativeProjectReviewIdentity,
+  retainedImages: selectNativeRetainedImages,
   serve: serveNativeProjectGraph,
   https: acquireNativeHttpsLease,
   recoverHttps: recoverNativeHttpsLease,
@@ -272,6 +280,43 @@ export function prepareNativeProjectServices(
     result[name] = value;
   }
   return result;
+}
+/** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
+async function pinNativeProjectImages(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly specs: Record<string, Record<string, unknown>>;
+  readonly retainedImages: ReadonlyMap<string, string>;
+  readonly signal: AbortSignal;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<void> {
+  for (const [name, spec] of Object.entries(opts.specs)) {
+    if (opts.signal.aborted) {
+      throw refused();
+    }
+    const retainedImage = opts.retainedImages.get(name);
+    if (retainedImage) {
+      spec.image = retainedImage;
+      continue;
+    }
+    const image = String(spec.image);
+    if (IMAGE.test(image)) {
+      continue;
+    }
+    const ensured = await opts.invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: ["runtime", "ensure-image", "--reference", image, "--json"],
+    });
+    if (
+      !isRecord(ensured) ||
+      typeof ensured.image_id !== "string" ||
+      !IMAGE.test(ensured.image_id)
+    ) {
+      throw refused();
+    }
+    spec.image = ensured.image_id;
+  }
 }
 function readiness(
   specs: Record<string, Record<string, unknown>>,
@@ -735,11 +780,16 @@ export async function startNativeProject(opts: {
     input,
     path: opts.adaptationFile,
   });
-  input = await prepareNativeProjectBranch({
-    input,
-    scope: opts.scope,
-    composeFile: opts.composeFile,
-  });
+  input = (
+    await prepareNativeReviewBranch({
+      runtime: opts.runtime,
+      scope: opts.scope,
+      composeFile: opts.composeFile,
+      input,
+      retained: restore,
+      phase: "before-runtime",
+    })
+  ).input;
   let specs = prepareNativeProjectServices(
     input,
     opts.dependencyFile !== undefined
@@ -854,28 +904,43 @@ export async function startNativeProject(opts: {
       run: retained,
       invoke: deps.invoke,
     });
-    for (const spec of Object.values(specs)) {
-      if (controller.signal.aborted) {
-        throw refused();
-      }
-      const image = String(spec.image);
-      if (IMAGE.test(image)) {
-        continue;
-      }
-      const ensured = await deps.invoke({
-        runtime: opts.runtime,
-        cwd: opts.scope.projectRoot,
-        args: ["runtime", "ensure-image", "--reference", image, "--json"],
-      });
-      if (
-        !isRecord(ensured) ||
-        typeof ensured.image_id !== "string" ||
-        !IMAGE.test(ensured.image_id)
-      ) {
-        throw refused();
-      }
-      spec.image = ensured.image_id;
-    }
+    const reviewedBranch = await prepareNativeReviewBranch({
+      runtime: opts.runtime,
+      scope: opts.scope,
+      composeFile: opts.composeFile,
+      profiles,
+      input,
+      retained: restore,
+      invoke: deps.invoke,
+      select: deps.selectReview,
+      phase: "after-runtime",
+    });
+    input = reviewedBranch.input;
+    const reviewIdentity = reviewedBranch.identity;
+    requireActiveStartup(controller.signal);
+    specs = prepareNativeProjectServices(
+      input,
+      opts.dependencyFile !== undefined
+    );
+    prepareNativeDependencyServices({
+      dependencies: hostDependencies,
+      services: specs,
+    });
+    const retainedImages = await deps.retainedImages({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      originalSha256: input.originalSha256,
+      restore,
+      invoke: deps.invoke,
+    });
+    await pinNativeProjectImages({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      specs,
+      retainedImages,
+      signal: controller.signal,
+      invoke: deps.invoke,
+    });
     const compose = JSON.parse(input.normalizedComposeJson);
     compose.services = specs;
     const pinned = { ...input, normalizedComposeJson: JSON.stringify(compose) };
@@ -886,6 +951,8 @@ export async function startNativeProject(opts: {
       composeFile: opts.composeFile,
       profiles,
       branch: opts.scope.branch,
+      retained: restore,
+      reviewIdentity,
       input: pinned,
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);

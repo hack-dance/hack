@@ -41,6 +41,7 @@ impl Selection {
             receipt,
             receipt_id: self.record_id,
             bytes: self.bytes.clone(),
+            device_rebind: None,
         })
     }
 }

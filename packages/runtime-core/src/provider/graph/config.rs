@@ -155,7 +155,10 @@ pub(super) fn prepare_delivery(
                 "Dependency caches require an explicitly verified source publication.",
             )
         })?;
-        let scope = dependency_cache::scope(&plan.source)?;
+        let scope = source.binding.cache_scope.as_ref().map_or_else(
+            || dependency_cache::scope(&plan.source),
+            |scope| scope.scope(&plan.source),
+        )?;
         dependency_cache::resolve(
             plan,
             source.current_manifest.as_ref().unwrap_or(&source.manifest),

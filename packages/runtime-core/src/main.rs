@@ -27,6 +27,12 @@ Usage:
   hack-local graph recover-cleanup --run-id <32-hex> --expect-receipt <sha256> [--json]
   hack-local graph recover-live-owner --run-id <32-hex> --expect-receipt <sha256> [--json]
   hack-local graph retire-recovered-publisher --run-id <32-hex> --expect-owner <32-hex> [--json]
+  hack-local graph inspect-host-pin-recovery --run-id <32-hex> [--json]
+  hack-local graph recover-host-pins --run-id <32-hex> --expect-selection <64-hex> --accept-legacy-device-rebind [--json]
+  hack-local graph inspect-absent-publication-cleanup --run-id <32-hex> --original-owner-file <private-json> --host-inspection-file <private-json> [--json]
+  hack-local graph recover-absent-publication-cleanup --run-id <32-hex> --original-owner-file <private-json> --host-inspection-file <private-json> --expect-selection <64-hex> --retain-data --accept-unpinned-post-reboot [--json]
+  hack-local graph inspect-source-device-rebind --run-id <32-hex> [--json]
+  hack-local graph recover-source-device-rebind --run-id <32-hex> --expect-selection <64-hex> --accept-legacy-device-rebind [--json]
   hack-local graph logs --run-id <32-hex> --service <name> [--tail <1..1000>] [--json]
   hack-local graph exec --run-id <32-hex> --service <name> [--workdir /path] [--timeout-seconds <1..120>] [--json] -- <program> [args...]
   hack-local graph dependency-plan --dependencies <reviewed.json> [--json]
@@ -53,6 +59,8 @@ Usage:
   hack-local runtime publication-recovery [--json]
   hack-local runtime recover-publications --expect-sha256 <sha256> [--json]
   hack-local runtime dependency-socket-recovery [--json]
+  hack-local runtime quiescent-dependency-socket-recovery [--json]
+  hack-local runtime recover-quiescent-dependency-sockets --expect-sha256 <hash> [--json]
   hack-local runtime recover-dependency-sockets --expect-sha256 <sha256> [--json]
   hack-local runtime bridge-recovery [--json]
   hack-local runtime export-bridge-recovery --slot <1..8> --expect-sha256 <sha256> [--json]
@@ -86,6 +94,8 @@ Usage:
   hack-local runtime up --profile development --internet --json
   hack-local runtime network extend --allow-host <hostname> [--allow-host <hostname>] --json
   hack-local runtime up|status|down|recover [--json]
+  hack-local runtime host-filesystem-recovery [--json]
+  hack-local runtime recover-host-filesystem --expect-sha256 <sha256> --accept-legacy-device-rebind [--json]
   hack-local node serve|status|inspect
   hack-local node request <versioned-json>
   hack-local --version
@@ -672,6 +682,34 @@ fn run() -> Result<(), CandidateError> {
                 )?,
             )?;
         }
+        ["runtime", "quiescent-dependency-socket-recovery"]
+        | ["runtime", "quiescent-dependency-socket-recovery", "--json"] => {
+            print_json(
+                &hack_runtime_core::provider::quiescent_dependency_socket_recovery::inspect(
+                    &discover_candidate(&requested)?,
+                )?,
+            )?;
+        }
+        [
+            "runtime",
+            "recover-quiescent-dependency-sockets",
+            "--expect-sha256",
+            hash,
+        ]
+        | [
+            "runtime",
+            "recover-quiescent-dependency-sockets",
+            "--expect-sha256",
+            hash,
+            "--json",
+        ] => {
+            print_json(
+                &hack_runtime_core::provider::quiescent_dependency_socket_recovery::recover(
+                    &discover_candidate(&requested)?,
+                    hash,
+                )?,
+            )?;
+        }
         [
             "runtime",
             "recover-dependency-sockets",
@@ -855,6 +893,32 @@ fn run() -> Result<(), CandidateError> {
                 Path::new(archive),
                 digest,
                 image,
+            )?)?;
+        }
+        ["runtime", "host-filesystem-recovery"]
+        | ["runtime", "host-filesystem-recovery", "--json"] => {
+            print_json(&hack_runtime_core::provider::host_filesystem::inspect(
+                &discover_candidate(&requested)?,
+            )?)?;
+        }
+        [
+            "runtime",
+            "recover-host-filesystem",
+            "--expect-sha256",
+            hash,
+            "--accept-legacy-device-rebind",
+        ]
+        | [
+            "runtime",
+            "recover-host-filesystem",
+            "--expect-sha256",
+            hash,
+            "--accept-legacy-device-rebind",
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::host_filesystem::recover(
+                &discover_candidate(&requested)?,
+                hash,
             )?)?;
         }
         ["runtime", action] | ["runtime", action, "--json"] => {

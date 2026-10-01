@@ -1,5 +1,6 @@
 use super::{Candidate, CandidateError, refused};
 use crate::provider::{
+    host_pin::DeviceRebind,
     identity::{self, ProcessIdentity},
     state,
 };
@@ -239,6 +240,7 @@ fn selected_retirement_path(
     owner: &str,
     socket: bool,
     expected: (u64, u64),
+    device_rebind: Option<DeviceRebind>,
 ) -> Result<(PathBuf, bool), CandidateError> {
     let original = root.join(if socket { "control.sock" } else { "owner.json" });
     let retired = retired_path(root, owner, socket);
@@ -247,8 +249,9 @@ fn selected_retirement_path(
         (None, Some(found)) => (retired, found, false),
         _ => return Err(retirement_refused()),
     };
-    if id(&current) != expected
-        || !private(&current)
+    if !device_rebind.map_or(id(&current) == expected, |v| {
+        v.matches(expected, id(&current))
+    }) || !private(&current)
         || (socket && !current.file_type().is_socket())
         || (!socket && (!current.is_file() || current.nlink() != 1 || current.len() > 8192))
     {
@@ -260,19 +263,26 @@ fn selected_retirement_path(
 fn verify_retirement(
     candidate: &Candidate,
     run: &str,
-    expected_owner: &str,
-    expected_receipt: &str,
+    expected: (&str, &str),
     root: &Path,
     lock: &state::Lock,
     intent: &Retirement,
+    device_rebind: Option<DeviceRebind>,
 ) -> Result<(bool, bool), CandidateError> {
+    let root_id = id(&fs::symlink_metadata(root).map_err(|_| retirement_refused())?);
+    let lock_path_id =
+        id(&fs::symlink_metadata(root.join("operation.lock")).map_err(|_| retirement_refused())?);
+    let parent_matches = device_rebind.map_or(intent.parent == root_id, |v| {
+        v.matches(intent.parent, root_id)
+    });
     if intent.version != 1
         || intent.candidate != candidate.checkout
         || intent.run != run
-        || intent.owner_sha256 != expected_owner
-        || intent.receipt_sha256 != expected_receipt
-        || intent.parent != id(&fs::symlink_metadata(root).map_err(|_| retirement_refused())?)
+        || intent.owner_sha256 != expected.0
+        || intent.receipt_sha256 != expected.1
+        || !parent_matches
         || intent.lock != lock.identity().map_err(|_| retirement_refused())?
+        || lock_path_id != intent.lock
         || intent.owner.parent != intent.parent
         || intent.owner.socket != intent.socket
         || intent.owner.candidate != candidate.checkout
@@ -282,9 +292,9 @@ fn verify_retirement(
         return Err(retirement_refused());
     }
     let (socket_path, socket_original) =
-        selected_retirement_path(root, expected_owner, true, intent.socket)?;
+        selected_retirement_path(root, expected.0, true, intent.socket, device_rebind)?;
     let (record_path, record_original) =
-        selected_retirement_path(root, expected_owner, false, intent.record)?;
+        selected_retirement_path(root, expected.0, false, intent.record, None)?;
     // Socket retirement precedes record retirement. The inverse is foreign.
     if socket_original && !record_original {
         return Err(retirement_refused());
@@ -304,7 +314,7 @@ fn verify_retirement(
         .read_to_end(&mut bytes)
         .map_err(|_| retirement_refused())?;
     let record: Record = serde_json::from_slice(&bytes).map_err(|_| retirement_refused())?;
-    if record != intent.owner || format!("{:x}", Sha256::digest(&bytes)) != expected_owner {
+    if record != intent.owner || format!("{:x}", Sha256::digest(&bytes)) != expected.0 {
         return Err(retirement_refused());
     }
     Ok((socket_original, record_original))
@@ -319,12 +329,39 @@ pub(in crate::provider::graph) fn retire_recovered_publisher(
     expected_owner: &str,
     expected_receipt: &str,
 ) -> Result<(), CandidateError> {
+    retire_recovered_publisher_recovery(candidate, run, expected_owner, expected_receipt, None)
+}
+pub(in crate::provider::graph) fn retire_recovered_publisher_recovery(
+    candidate: &Candidate,
+    run: &str,
+    expected_owner: &str,
+    expected_receipt: &str,
+    device_rebind: Option<DeviceRebind>,
+) -> Result<(), CandidateError> {
     if !super::super::hex(expected_owner, 64) || !super::super::hex(expected_receipt, 64) {
         return Err(retirement_refused());
     }
     let root = root(candidate, run)?;
     state::check_private_directory(&root).map_err(|_| retirement_refused())?;
     let lock = state::Lock::acquire_existing(&root).map_err(|_| retirement_refused())?;
+    retire_recovered_publisher_locked(
+        candidate,
+        run,
+        expected_owner,
+        expected_receipt,
+        device_rebind,
+        &lock,
+    )
+}
+pub(in crate::provider::graph) fn retire_recovered_publisher_locked(
+    candidate: &Candidate,
+    run: &str,
+    expected_owner: &str,
+    expected_receipt: &str,
+    device_rebind: Option<DeviceRebind>,
+    lock: &state::Lock,
+) -> Result<(), CandidateError> {
+    let root = root(candidate, run)?;
     let path = retirement_path(&root, expected_owner);
     let pending = path.with_extension("pending");
     let name = pending
@@ -335,7 +372,7 @@ pub(in crate::provider::graph) fn retire_recovered_publisher(
     let intent: Retirement = if metadata(&path)?.is_some() {
         state::read(&path).map_err(|_| retirement_refused())?
     } else {
-        let pin = Pin::read(candidate, run)?;
+        let pin = Pin::read_with_rebind(candidate, run, device_rebind)?;
         if format!("{:x}", Sha256::digest(&pin.bytes)) != expected_owner
             || identity::alive(pin.record.process.pid).unwrap_or(true)
         {
@@ -360,11 +397,11 @@ pub(in crate::provider::graph) fn retire_recovered_publisher(
     let (socket_original, record_original) = verify_retirement(
         candidate,
         run,
-        expected_owner,
-        expected_receipt,
+        (expected_owner, expected_receipt),
         &root,
-        &lock,
+        lock,
         &intent,
+        device_rebind,
     )?;
     if socket_original {
         fs::rename(
@@ -380,11 +417,11 @@ pub(in crate::provider::graph) fn retire_recovered_publisher(
         let _ = verify_retirement(
             candidate,
             run,
-            expected_owner,
-            expected_receipt,
+            (expected_owner, expected_receipt),
             &root,
-            &lock,
+            lock,
             &intent,
+            device_rebind,
         )?;
         fs::rename(
             root.join("owner.json"),
@@ -398,11 +435,11 @@ pub(in crate::provider::graph) fn retire_recovered_publisher(
     let (socket_original, record_original) = verify_retirement(
         candidate,
         run,
-        expected_owner,
-        expected_receipt,
+        (expected_owner, expected_receipt),
         &root,
-        &lock,
+        lock,
         &intent,
+        device_rebind,
     )?;
     if socket_original || record_original {
         return Err(retirement_refused());
@@ -413,11 +450,27 @@ pub(in crate::provider::graph) fn retire_recovered_publisher(
 /** A later boot may resume frontend recovery only after retirement was fully
  * recorded. This read-only proof never begins or completes a partial move.
  */
+#[cfg(test)]
 pub(in crate::provider::graph) fn verify_recovered_publisher_retired(
     candidate: &Candidate,
     run: &str,
     expected_owner: &str,
     expected_receipt: &str,
+) -> Result<(), CandidateError> {
+    verify_recovered_publisher_retired_recovery(
+        candidate,
+        run,
+        expected_owner,
+        expected_receipt,
+        None,
+    )
+}
+pub(in crate::provider::graph) fn verify_recovered_publisher_retired_recovery(
+    candidate: &Candidate,
+    run: &str,
+    expected_owner: &str,
+    expected_receipt: &str,
+    device_rebind: Option<DeviceRebind>,
 ) -> Result<(), CandidateError> {
     if !super::super::hex(expected_owner, 64) || !super::super::hex(expected_receipt, 64) {
         return Err(retirement_refused());
@@ -430,11 +483,11 @@ pub(in crate::provider::graph) fn verify_recovered_publisher_retired(
     let (socket_original, record_original) = verify_retirement(
         candidate,
         run,
-        expected_owner,
-        expected_receipt,
+        (expected_owner, expected_receipt),
         &root,
         &lock,
         &intent,
+        device_rebind,
     )?;
     if socket_original || record_original {
         return Err(retirement_refused());
@@ -485,11 +538,12 @@ fn peer(stream: &UnixStream) -> Result<ProcessIdentity, CandidateError> {
     identity::verify(&observed, &observed, &observed.executable, uid).map_err(|_| refused())?;
     Ok(observed)
 }
-pub(super) struct Pin {
+pub(in crate::provider::graph) struct Pin {
     root: PathBuf,
     record: Record,
     bytes: Vec<u8>,
     record_id: (u64, u64),
+    device_rebind: Option<DeviceRebind>,
 }
 impl Pin {
     pub fn load(candidate: &Candidate, run: &str) -> Result<Self, CandidateError> {
@@ -498,6 +552,13 @@ impl Pin {
         Ok(pin)
     }
     fn read(candidate: &Candidate, run: &str) -> Result<Self, CandidateError> {
+        Self::read_with_rebind(candidate, run, None)
+    }
+    fn read_with_rebind(
+        candidate: &Candidate,
+        run: &str,
+        device_rebind: Option<DeviceRebind>,
+    ) -> Result<Self, CandidateError> {
         let root = root(candidate, run)?;
         state::check_private_directory(&root).map_err(|_| refused())?;
         let mut file = OpenOptions::new()
@@ -530,6 +591,7 @@ impl Pin {
             record,
             bytes,
             record_id: id(&metadata),
+            device_rebind,
         };
         pin.verify_files()?;
         Ok(pin)
@@ -540,10 +602,10 @@ impl Pin {
         let socket = fs::symlink_metadata(self.root.join("control.sock")).map_err(|_| refused())?;
         let file = fs::symlink_metadata(self.root.join("owner.json")).map_err(|_| refused())?;
         if !parent.is_dir()
-            || id(&parent) != self.record.parent
+            || !self.matches_pin(self.record.parent, id(&parent))
             || !socket.file_type().is_socket()
             || !private(&socket)
-            || id(&socket) != self.record.socket
+            || !self.matches_pin(self.record.socket, id(&socket))
             || !file.is_file()
             || !private(&file)
             || file.nlink() != 1
@@ -569,6 +631,46 @@ impl Pin {
             return Err(refused());
         }
         Ok(())
+    }
+    fn matches_pin(&self, recorded: (u64, u64), observed: (u64, u64)) -> bool {
+        self.device_rebind
+            .map_or(recorded == observed, |v| v.matches(recorded, observed))
+    }
+    pub(in crate::provider::graph) fn legacy_summary(
+        candidate: &Candidate,
+        run: &str,
+        device_rebind: DeviceRebind,
+        host_boot_micros: u64,
+    ) -> Result<LegacyPublisher, CandidateError> {
+        let pin = Self::read_with_rebind(candidate, run, Some(device_rebind))?;
+        // SAFETY: geteuid has no arguments or side effects.
+        identity::verify(
+            &pin.record.process,
+            &pin.record.process,
+            &pin.record.process.executable,
+            unsafe { libc::geteuid() },
+        )?;
+        device_rebind.definitely_dead_before_boot(&pin.record.process, host_boot_micros)?;
+        no_listener(&pin.root.join("control.sock"))?;
+        Ok(LegacyPublisher {
+            owner_sha256: format!("{:x}", Sha256::digest(&pin.bytes)),
+            parent: pin.record.parent,
+            socket: pin.record.socket,
+            record: pin.record_id,
+            process: pin.record.process,
+        })
+    }
+    pub(in crate::provider::graph) fn legacy_recorded_device(
+        candidate: &Candidate,
+        run: &str,
+    ) -> Result<u64, CandidateError> {
+        let root = root(candidate, run)?;
+        state::check_private_directory(&root)?;
+        let record: Record = state::read_bounded(&root.join("owner.json"), 8192)?;
+        if record.version != 1 || record.candidate != candidate.checkout || record.run != run {
+            return Err(refused());
+        }
+        Ok(record.parent.0)
     }
     pub fn verify(&self) -> Result<(), CandidateError> {
         self.verify_files()?;
@@ -647,6 +749,16 @@ impl Pin {
         Ok(stream)
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::provider::graph) struct LegacyPublisher {
+    pub owner_sha256: String,
+    pub parent: (u64, u64),
+    pub socket: (u64, u64),
+    pub record: (u64, u64),
+    pub process: ProcessIdentity,
+}
 pub(super) struct Publication {
     listener: UnixListener,
     pin: Pin,
@@ -660,6 +772,10 @@ impl Publication {
         Self::bind_mode(candidate, run, true)
     }
     fn bind_mode(candidate: &Candidate, run: &str, retired: bool) -> Result<Self, CandidateError> {
+        // Publication precedes the Engine lease. Recovery must exclude new runs
+        // at this boundary, rather than relying on a later provider lock alone.
+        let gate = super::super::publication_gate::Guard::acquire(candidate)?;
+        super::super::absent_publication_cleanup::publication_allowed(candidate, run, retired)?;
         let root = root(candidate, run)?;
         let lock = if retired {
             state::check_private_directory(&root).map_err(|_| refused())?;
@@ -668,12 +784,19 @@ impl Publication {
             state::private_directory(&root).map_err(|_| refused())?;
             state::Lock::acquire(&root).map_err(|_| refused())?
         };
+        // The foreground lock serializes a concurrent absence-intent writer.
+        super::super::absent_publication_cleanup::publication_allowed(candidate, run, retired)?;
+        #[cfg(target_os = "macos")]
+        if retired {
+            super::super::source_device_rebind::require_no_pending(candidate, run)?;
+        }
         for name in ["control.sock", "owner.json"] {
             match fs::symlink_metadata(root.join(name)) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 _ => return Err(refused()),
             }
         }
+        gate.verify(candidate)?;
         let listener = UnixListener::bind(root.join("control.sock")).map_err(|_| refused())?;
         fs::set_permissions(root.join("control.sock"), fs::Permissions::from_mode(0o600))
             .map_err(|_| refused())?;
@@ -706,8 +829,10 @@ impl Publication {
             record,
             bytes,
             record_id,
+            device_rebind: None,
         };
         pin.verify()?;
+        gate.verify(candidate)?;
         Ok(Self {
             listener,
             pin,
@@ -718,6 +843,7 @@ impl Publication {
         self.listener.as_raw_fd()
     }
     pub fn verify(&self) -> Result<(), CandidateError> {
+        super::super::host_pin_recovery::exact_lock_path(&self.pin.root, &self._lock)?;
         self.pin.verify()
     }
     pub fn accept(&self) -> Result<Option<UnixStream>, CandidateError> {
@@ -981,6 +1107,16 @@ impl Retired {
         owner_sha256: &str,
         complete_sha256: &str,
     ) -> Result<(), CandidateError> {
+        self.verify_recovery_with_rebind(candidate, run, owner_sha256, complete_sha256, None)
+    }
+    pub fn verify_recovery_with_rebind(
+        &self,
+        candidate: &Candidate,
+        run: &str,
+        owner_sha256: &str,
+        complete_sha256: &str,
+        device_rebind: Option<DeviceRebind>,
+    ) -> Result<(), CandidateError> {
         self.verify()?;
         if !super::super::hex(owner_sha256, 64)
             || !super::super::hex(complete_sha256, 64)
@@ -996,11 +1132,11 @@ impl Retired {
         let (socket_original, record_original) = verify_retirement(
             candidate,
             run,
-            owner_sha256,
-            complete_sha256,
+            (owner_sha256, complete_sha256),
             &self.root,
             &self._lock,
             &intent,
+            device_rebind,
         )?;
         if socket_original || record_original {
             return Err(retirement_refused());
@@ -1019,15 +1155,38 @@ impl DeadOwner {
         candidate: &Candidate,
         run: &str,
     ) -> Result<Self, CandidateError> {
+        Self::acquire_recovery(candidate, run, None, None)
+    }
+    pub(in crate::provider::graph) fn acquire_recovery(
+        candidate: &Candidate,
+        run: &str,
+        device_rebind: Option<DeviceRebind>,
+        host_boot_micros: Option<u64>,
+    ) -> Result<Self, CandidateError> {
         let lock = state::Lock::acquire_existing(&root(candidate, run)?)?;
         let value = Self {
-            pin: Pin::read(candidate, run)?,
+            pin: Pin::read_with_rebind(candidate, run, device_rebind)?,
             _lock: lock,
         };
+        if let Some(rebind) = device_rebind {
+            rebind.definitely_dead_before_boot(
+                &value.pin.record.process,
+                host_boot_micros.ok_or_else(refused)?,
+            )?;
+        }
         value.verify()?;
         Ok(value)
     }
     pub(in crate::provider::graph) fn verify(&self) -> Result<(), CandidateError> {
+        let pathname =
+            fs::symlink_metadata(self.pin.root.join("operation.lock")).map_err(|_| refused())?;
+        if !pathname.is_file()
+            || pathname.nlink() != 1
+            || !private(&pathname)
+            || id(&pathname) != self._lock.identity()?
+        {
+            return Err(refused());
+        }
         self.pin.verify_files()?;
         if identity::alive(self.pin.record.process.pid)? {
             return Err(refused());

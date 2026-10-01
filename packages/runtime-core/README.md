@@ -803,3 +803,38 @@ before fresh dependency ownership is admitted. This does not enable file-based
 `graph restart`/`restore` or normalized live-owner redelivery, and does not replay
 initializer cache-release effects. Native same-run restoration and cross-boot
 volume continuity require separate runtime qualification.
+
+An explicitly recovered post-reboot graph may retain a stopped shared-source
+receipt whose `source.shared.device` names the prior host filesystem device.
+After **completed** selected absent-publication cleanup and separate publisher
+retirement, inspect that same run with `graph inspect-source-device-rebind
+--run-id RUN --json`. Review the returned original stopped-receipt hash and
+qualification, then commit only that selection with `graph
+recover-source-device-rebind --run-id RUN --expect-selection SHA
+--accept-legacy-device-rebind --json`. This private candidate command changes no
+stopped receipt, cleanup proof, retirement proof or named volume. It writes one
+immutable witness for the current Owner share, requiring the same canonical
+project path, inode, guest path and unfiltered access, with only the host device
+number changed. The current guest's writable virtiofs mount and selected volume
+identities are checked independently. The explicit acceptance records that
+legacy receipts cannot establish original physical volume continuity across the
+host reboot.
+
+An exact completed cleanup and retirement for the current stopped receipt takes
+precedence over older cleanup records. Pending operations, unresolved initializer
+effects and mismatched receipt or retirement identities still refuse recovery;
+historical records cannot authorize a later generation.
+
+`restore-selection` then binds the witness's raw hash to the selected generation.
+The source checks use only an in-memory device projection; original retention and
+restore history consume the unchanged stopped receipt. The new receipt receives
+the projected source after history retention, before the first new-attempt write.
+The witness file remains pinned and is rechecked before that write. Once the
+first new generation replaces the stopped receipt, the witness is audit history
+and grants no authority to later ordinary down/up cycles. An incomplete
+`source-device-rebind.pending` file, including an empty or partial write, is
+preserved and refuses both explicit recovery and a new retired-publisher bind;
+there is no automatic prefix-based adoption or deletion. The ignored native
+synthetic-device fixture checks this same-run transition and later retained
+marker reads, but only an actual host-reboot application run can qualify the
+physical continuity claim.

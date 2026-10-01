@@ -1,9 +1,16 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { prepareNativeProjectInput } from "../src/backends/native-project-input.ts";
-import { withNativeProjectReview } from "../src/backends/native-project-review.ts";
+import { selectNativeProjectRestore } from "../src/backends/native-project-restore.ts";
+import {
+  prepareNativeReviewBranch,
+  selectNativeProjectReviewIdentity,
+  verifyNativeActiveReview,
+  withNativeProjectReview,
+} from "../src/backends/native-project-review.ts";
+import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -130,4 +137,378 @@ test("noncanonical branch review refuses before invoking the executor", async ()
       },
     })
   ).rejects.toThrow("canonical branch");
+});
+
+const retained = {
+  run: "d".repeat(32),
+  owner: "e".repeat(32),
+  namespace: "a".repeat(64),
+  planId: "b".repeat(64),
+};
+
+async function legacyFixture() {
+  const options = await fixture();
+  const calls: string[][] = [];
+  const selected: Record<string, unknown> = {
+    run: retained.run,
+    owner: retained.owner,
+    namespace: retained.namespace,
+    plan: retained.planId,
+    generation: "f".repeat(64),
+    ok: true,
+    service: "web",
+    container: "1".repeat(64),
+    boot: "owned-boot",
+  };
+  const unbranched: Record<string, unknown> = {
+    namespace: retained.namespace,
+    source: await realpath(options.projectRoot),
+    compose_sha256: options.input.originalSha256,
+    services: { web: { active: true } },
+  };
+  const invoke: typeof invokeNativeRuntime = async ({ args }) => {
+    calls.push([...args]);
+    if (args[0] === "graph") {
+      return selected;
+    }
+    if (!args.includes("--branch")) {
+      return { plan_id: retained.planId, plan: unbranched };
+    }
+    return {
+      plan_id: retained.planId,
+      plan: { ...unbranched, namespace: "c".repeat(64) },
+    };
+  };
+  return { options, calls, selected, unbranched, invoke };
+}
+
+test("legacy retained review uses native unbranched authority and rechecks restore selection", async () => {
+  const { options, calls, invoke } = await legacyFixture();
+  let temporary = "";
+  await withNativeProjectReview({
+    ...options,
+    branch: "feature-a",
+    retained,
+    invoke,
+    run: async (review) => {
+      expect(review.namespace).toBe(retained.namespace);
+      expect(review.projectArgs).not.toContain("--branch");
+      temporary =
+        review.projectArgs[
+          review.projectArgs.indexOf("--normalized-file") + 1
+        ] ?? "";
+      expect(await Bun.file(temporary).text()).toBe(
+        options.input.normalizedComposeJson
+      );
+      const selection = await selectNativeProjectRestore({
+        runtime: options.runtime,
+        projectRoot: options.projectRoot,
+        restore: retained,
+        review,
+        invoke,
+      });
+      expect(selection.run).toBe(retained.run);
+      expect(selection.flags).toEqual(["--expect-generation", "f".repeat(64)]);
+    },
+  });
+  expect(calls.map((args) => args.slice(0, 2).join(" "))).toEqual([
+    "project plan",
+    "graph restore-selection",
+    "project plan",
+    "project plan",
+    "graph restore-selection",
+  ]);
+  expect(await Bun.file(temporary).exists()).toBe(false);
+});
+
+test("fresh and current branch-native review never consult legacy restore authority", async () => {
+  for (const saved of [undefined, { ...retained, namespace: "c".repeat(64) }]) {
+    const { options, calls, invoke } = await legacyFixture();
+    await withNativeProjectReview({
+      ...options,
+      branch: "feature-a",
+      retained: saved,
+      invoke,
+      run: async (review) => {
+        expect(review.namespace).toBe("c".repeat(64));
+        expect(review.projectArgs).toContain("--branch");
+      },
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls.every((args) => args.includes("--branch"))).toBe(true);
+  }
+});
+
+test("legacy review rejects changed native selection before unbranched review", async () => {
+  for (const key of ["run", "owner", "namespace", "plan", "generation"]) {
+    const { options, calls, selected, invoke } = await legacyFixture();
+    selected[key] = "invalid";
+    await expect(
+      withNativeProjectReview({
+        ...options,
+        branch: "feature-a",
+        retained,
+        invoke,
+        run: async () => {
+          throw new Error("unexpected callback");
+        },
+      })
+    ).rejects.toThrow("restore selection changed");
+    expect(calls).toHaveLength(2);
+  }
+});
+
+test("legacy review rejects a different project, namespace or edited original without admission", async () => {
+  for (const key of ["source", "namespace", "compose_sha256"]) {
+    const { options, calls, unbranched, invoke } = await legacyFixture();
+    const originalInvoke: typeof invokeNativeRuntime = async (request) => {
+      if (request.args[0] === "project" && !request.args.includes("--branch")) {
+        unbranched[key] = "foreign";
+      }
+      return await invoke(request);
+    };
+    await expect(
+      withNativeProjectReview({
+        ...options,
+        branch: "feature-a",
+        retained,
+        invoke: originalInvoke,
+        run: async () => {
+          throw new Error("unexpected callback");
+        },
+      })
+    ).rejects.toThrow("retained project review changed");
+    expect(calls).toHaveLength(3);
+  }
+});
+
+test("legacy review cleans temporary input and refuses selection drift after review", async () => {
+  const { options, selected, invoke } = await legacyFixture();
+  let temporary = "";
+  await expect(
+    withNativeProjectReview({
+      ...options,
+      branch: "feature-a",
+      retained,
+      invoke,
+      run: async (review) => {
+        temporary =
+          review.projectArgs[
+            review.projectArgs.indexOf("--normalized-file") + 1
+          ] ?? "";
+        selected.owner = "0".repeat(32);
+        await selectNativeProjectRestore({
+          runtime: options.runtime,
+          projectRoot: options.projectRoot,
+          restore: retained,
+          review,
+          invoke,
+        });
+      },
+    })
+  ).rejects.toThrow("restore selection changed");
+  expect(await Bun.file(temporary).exists()).toBe(false);
+});
+
+test("legacy identity is selected before route normalization and original adapted labels survive", async () => {
+  const { options, invoke } = await legacyFixture();
+  const compose = JSON.parse(options.input.normalizedComposeJson);
+  compose.services.web.labels = {
+    caddy: "app.hack, app.hack.gy",
+    "caddy.reverse_proxy": "{{upstreams 3000}}",
+  };
+  const input = {
+    ...options.input,
+    normalizedComposeJson: JSON.stringify(compose),
+  };
+  const scope = {
+    projectRoot: options.projectRoot,
+    projectDir: join(options.projectRoot, ".hack"),
+    nativeHome: options.runtime.home,
+    branch: "feature-a",
+  };
+  const prepared = await prepareNativeReviewBranch({
+    ...options,
+    scope,
+    input,
+    retained,
+    invoke,
+  });
+  expect(prepared.input.normalizedComposeJson).toBe(
+    input.normalizedComposeJson
+  );
+  expect(prepared.identity?.branch).toBeNull();
+  await withNativeProjectReview({
+    ...options,
+    input: prepared.input,
+    branch: scope.branch,
+    retained,
+    invoke,
+    reviewIdentity: prepared.identity,
+    run: async (review) => {
+      expect(review.namespace).toBe(retained.namespace);
+      expect(review.projectArgs).not.toContain("--branch");
+    },
+  });
+});
+
+test("early identity proof is rechecked after route preparation before normalized publication", async () => {
+  for (const key of ["generation", "owner"]) {
+    const { options, selected, calls, invoke } = await legacyFixture();
+    const identity = await selectNativeProjectReviewIdentity({
+      ...options,
+      branch: "feature-a",
+      retained,
+      invoke,
+    });
+    selected[key] = "1".repeat(key === "generation" ? 64 : 32);
+    calls.splice(0);
+    await expect(
+      withNativeProjectReview({
+        ...options,
+        branch: "feature-a",
+        retained,
+        invoke,
+        reviewIdentity: identity,
+        run: async () => {
+          throw new Error("unexpected admission");
+        },
+      })
+    ).rejects.toThrow("selection changed");
+    expect(calls.some((args) => args.includes("--normalized-file"))).toBe(
+      false
+    );
+  }
+});
+
+test("active branch-native needs no stopped selection and legacy selects authenticated service authority", async () => {
+  const { options, calls, invoke } = await legacyFixture();
+  const scoped = await selectNativeProjectReviewIdentity({
+    ...options,
+    branch: "feature-a",
+    retained: { ...retained, namespace: "c".repeat(64) },
+    retainedMode: "active",
+    invoke,
+  });
+  expect(scoped.branch).toBe("feature-a");
+  expect(calls).toHaveLength(1);
+  calls.splice(0);
+  const identity = await selectNativeProjectReviewIdentity({
+    ...options,
+    branch: "feature-a",
+    retained,
+    retainedMode: "active",
+    invoke,
+  });
+  expect(identity.branch).toBeNull();
+  expect(identity.retainedGeneration).toBeUndefined();
+  expect(identity.activeProof?.service).toBe("web");
+  await verifyNativeActiveReview({
+    ...options,
+    retained,
+    proof: identity.activeProof,
+    invoke,
+  });
+  expect(
+    calls.filter((args) => args[0] === "graph").map((args) => args[1])
+  ).toEqual(["run-selection", "run-selection"]);
+});
+
+test("deferred retained review rejects malformed branch before hooks or runtime selection", async () => {
+  const { options, calls, invoke } = await legacyFixture();
+  await expect(
+    prepareNativeReviewBranch({
+      ...options,
+      retained,
+      invoke,
+      phase: "before-runtime",
+      scope: {
+        projectRoot: options.projectRoot,
+        projectDir: join(options.projectRoot, ".hack"),
+        nativeHome: options.runtime.home,
+        branch: "foreign/branch",
+      },
+    })
+  ).rejects.toThrow("canonical branch");
+  expect(calls).toHaveLength(0);
+});
+
+test("active proof refuses every tuple drift after compatibility and unavailable service authority", async () => {
+  for (const key of [
+    "run",
+    "owner",
+    "namespace",
+    "plan",
+    "service",
+    "container",
+    "boot",
+    "generation",
+  ]) {
+    const { options, selected, invoke } = await legacyFixture();
+    const identity = await selectNativeProjectReviewIdentity({
+      ...options,
+      branch: "feature-a",
+      retained,
+      retainedMode: "active",
+      invoke,
+    });
+    selected[key] =
+      key === "boot"
+        ? "another-boot"
+        : "2".repeat(key === "run" || key === "owner" ? 32 : 64);
+    await expect(
+      verifyNativeActiveReview({
+        ...options,
+        retained,
+        proof: identity.activeProof,
+        invoke,
+      })
+    ).rejects.toThrow("changed");
+  }
+  for (const services of [{}, { web: { active: false } }]) {
+    const { options, calls, unbranched, invoke } = await legacyFixture();
+    unbranched.services = services;
+    await expect(
+      selectNativeProjectReviewIdentity({
+        ...options,
+        branch: "feature-a",
+        retained,
+        retainedMode: "active",
+        invoke,
+      })
+    ).rejects.toThrow("no supported service authority");
+    expect(calls).toHaveLength(1);
+  }
+});
+
+test("active legacy proof never grants an unrelated source and propagates stale dependency refusal", async () => {
+  for (const failure of ["source", "dependencies"]) {
+    const { options, invoke, unbranched, calls } = await legacyFixture();
+    const checked: typeof invokeNativeRuntime = async (request) => {
+      if (failure === "dependencies" && request.args[1] === "run-selection") {
+        throw new Error("stale dependency");
+      }
+      if (failure === "source") {
+        unbranched.source = "/foreign/project";
+      }
+      return await invoke(request);
+    };
+    await expect(
+      selectNativeProjectReviewIdentity({
+        ...options,
+        branch: "feature-a",
+        retained,
+        retainedMode: "active",
+        invoke: checked,
+      })
+    ).rejects.toThrow(
+      failure === "source" ? "review changed" : "stale dependency"
+    );
+    expect(
+      calls.some(
+        (args) =>
+          args[1] === "run-service" || args.includes("--normalized-file")
+      )
+    ).toBe(false);
+  }
 });

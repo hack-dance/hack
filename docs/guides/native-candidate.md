@@ -1120,11 +1120,14 @@ A graph with completed host-dependency startup and no inbound routes can also us
 its exact dead relay publication as the previous-boot proof; an empty bridge
 registry alone never grants cleanup authority.
 A completed previous-boot recovery may remain as historical evidence after restore.
-Its exact stopped receipt must still be in the bounded restore history, and the
-current graph must have a different recorded container generation. Incomplete,
-foreign, one-off, altered or no-longer-verifiable records refuse without modifying
-them. The historical proof never authorizes cleanup of current resources; current
-owner, boot, process and resource checks remain required, including on retries.
+When its exact stopped receipt remains in bounded restore history, that receipt
+must match the completion proof. After history eviction, only a self-consistent
+proof for the same graph and a different container generation can be treated as
+inert history; the verified truncated history must independently contain a later
+stopped generation. This does not establish the evicted completion hash as current
+authority. Incomplete, foreign, one-off, conflicting or missing-history records
+refuse without modification. Current owner, boot, process, receipt and resource
+checks still authorize cleanup independently, including on retries.
 The same-boot completion proof does not authorize direct data removal: restore the
 graph and use ordinary cleanup for that operation. Native routed recovery has been
 qualified with repeated owner crashes, retained data and an unaffected sibling's

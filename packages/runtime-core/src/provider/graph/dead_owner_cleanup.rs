@@ -186,8 +186,9 @@ fn archive_completed_prior(
 }
 
 /// A completed recovery from an older container generation is diagnostic history,
-/// not a pending operation. Require its exact stopped receipt in restore history;
-/// this never supplies authority to retire current resources or mutates old proof.
+/// not a pending operation. Prefer its exact stopped receipt; after history
+/// truncation, validate the superseded original and a newer stopped generation.
+/// Neither path supplies current cleanup authority or mutates the old proof.
 pub(super) fn require_historical_recovery(
     root: &std::path::Path,
     current: &Receipt,
@@ -209,15 +210,29 @@ pub(super) fn require_historical_recovery(
     {
         return Err(refused());
     }
-    let stopped =
-        restore_history::completed_for_recovery(root, current, complete)?.ok_or_else(refused)?;
+    let stopped = restore_history::completed_for_recovery(root, current, complete)?;
+    let historical = stopped.as_ref().unwrap_or(&prior.original);
     validate(
         &prior,
-        &stopped,
+        historical,
         &prior.original_sha256,
         &prior.owner_sha256,
     )?;
-    if !stopped.resources.iter().any(|(key, old)| {
+    if stopped.is_none()
+        && (prior.original.version != current.version
+            || prior.original.run != current.run
+            || prior.original.owner != current.owner
+            || prior.original.namespace != current.namespace
+            || prior.original.plan_id != current.plan_id
+            || !restore_history::confirms_truncated_newer_generation(
+                root,
+                current,
+                &prior.original,
+            )?)
+    {
+        return Err(refused());
+    }
+    if !historical.resources.iter().any(|(key, old)| {
         old.kind == Kind::Container
             && old.id.as_ref().is_some_and(|id| {
                 current
@@ -1562,6 +1577,154 @@ mod tests {
         current.phase = "ready-observed".into();
         current.resources.get_mut("container:init").unwrap().id = Some("9".repeat(64));
         (fixture, current, stopped, proof)
+    }
+
+    fn evicted_historical_fixture() -> (super::super::tests::Fixture, Receipt, Receipt, Intent) {
+        let (fixture, mut current, stopped, proof) = historical_fixture();
+        for generation in 1..=12 {
+            let mut newer = stopped.clone();
+            newer.resources.get_mut("container:init").unwrap().id =
+                Some(format!("{generation:064x}"));
+            restore_history::retain(&fixture.0, &newer).unwrap();
+        }
+        current.resources.get_mut("container:init").unwrap().id = Some(format!("{:064x}", 13));
+        (fixture, current, stopped, proof)
+    }
+
+    #[test]
+    fn evicted_previous_boot_completion_is_read_only_superseded_history() {
+        let (fixture, current, _, proof) = evicted_historical_fixture();
+        let before = fs::read(fixture.0.join(FILE)).unwrap();
+        let history_before = fs::read(fixture.0.join("restore-history.json")).unwrap();
+        assert!(
+            restore_history::completed_for_recovery(
+                &fixture.0,
+                &current,
+                proof.complete_sha256.as_deref().unwrap()
+            )
+            .unwrap()
+            .is_none()
+        );
+        require_historical_recovery(&fixture.0, &current).unwrap();
+        assert!(!current_completion(&fixture.0, &current).unwrap());
+        assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), before);
+        assert_eq!(
+            fs::read(fixture.0.join("restore-history.json")).unwrap(),
+            history_before
+        );
+    }
+
+    #[test]
+    fn truncated_history_does_not_admit_invalid_or_current_recovery_proof() {
+        for (field, value) in [
+            ("version", json!(9)),
+            ("complete_sha256", Value::Null),
+            ("complete_sha256", json!("invalid")),
+            ("original_sha256", json!("8".repeat(64))),
+            ("owner_sha256", json!("invalid")),
+            ("new_boot", Value::Null),
+            ("new_boot", json!("")),
+            ("old_boot", json!("")),
+            ("old_boot", json!("successor-boot")),
+            ("one_off_sha256", json!("8".repeat(64))),
+        ] {
+            let (fixture, current, _, proof) = evicted_historical_fixture();
+            let mut changed = serde_json::to_value(proof).unwrap();
+            changed[field] = value;
+            state::write(&fixture.0.join(FILE), &changed).unwrap();
+            let bytes = fs::read(fixture.0.join(FILE)).unwrap();
+            let history = fs::read(fixture.0.join("restore-history.json")).unwrap();
+            assert!(
+                require_historical_recovery(&fixture.0, &current).is_err(),
+                "{field}"
+            );
+            assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), bytes);
+            assert_eq!(
+                fs::read(fixture.0.join("restore-history.json")).unwrap(),
+                history
+            );
+        }
+        for field in ["version", "owner", "run", "namespace", "plan_id"] {
+            let (fixture, current, _, mut proof) = evicted_historical_fixture();
+            let mut changed = serde_json::to_value(&proof.original).unwrap();
+            changed[field] = if field == "version" {
+                json!(9)
+            } else {
+                json!("e".repeat(64))
+            };
+            proof.original = serde_json::from_value(changed).unwrap();
+            proof.original_sha256 = selected(&proof.original).unwrap();
+            state::write(&fixture.0.join(FILE), &proof).unwrap();
+            let bytes = fs::read(fixture.0.join(FILE)).unwrap();
+            assert!(
+                require_historical_recovery(&fixture.0, &current).is_err(),
+                "{field}"
+            );
+            assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), bytes);
+        }
+        let (fixture, mut current, _, proof) = evicted_historical_fixture();
+        current.resources = proof.original.resources;
+        let bytes = fs::read(fixture.0.join(FILE)).unwrap();
+        assert!(require_historical_recovery(&fixture.0, &current).is_err());
+        assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn evicted_completion_requires_verified_truncation_and_newer_stopped_evidence() {
+        for fault in [
+            "missing",
+            "untruncated",
+            "same-generation",
+            "foreign",
+            "malformed",
+            "pending",
+        ] {
+            let (fixture, current, stopped, _) = evicted_historical_fixture();
+            let path = fixture.0.join("restore-history.json");
+            let mut history: Value = state::read(&path).unwrap();
+            match fault {
+                "missing" => fs::remove_file(&path).unwrap(),
+                "pending" => fs::write(
+                    fixture.0.join("dead-owner-cleanup.pending"),
+                    b"partial evidence",
+                )
+                .unwrap(),
+                _ => {
+                    match fault {
+                        "untruncated" => history["truncated"] = json!(false),
+                        "same-generation" => {
+                            let mut same_generation = stopped;
+                            same_generation
+                                .readiness
+                                .insert("init".into(), project::execution::Condition::Started);
+                            *history["entries"]
+                                .as_array_mut()
+                                .unwrap()
+                                .last_mut()
+                                .unwrap() = serde_json::to_value(&same_generation).unwrap()
+                        }
+                        "foreign" => history["entries"][0]["owner"] = json!("e".repeat(32)),
+                        "malformed" => history["version"] = json!(9),
+                        _ => unreachable!(),
+                    }
+                    state::write(&path, &history).unwrap();
+                }
+            }
+            let bytes = fs::read(fixture.0.join(FILE)).unwrap();
+            let history = fs::read(&path).ok();
+            assert!(
+                require_historical_recovery(&fixture.0, &current).is_err(),
+                "{fault}"
+            );
+            assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), bytes);
+            assert_eq!(fs::read(&path).ok(), history);
+            if fault == "pending" {
+                assert_eq!(
+                    fs::read(fixture.0.join("dead-owner-cleanup.pending")).unwrap(),
+                    b"partial evidence"
+                );
+            }
+        }
     }
 
     #[test]

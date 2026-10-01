@@ -542,5 +542,6 @@ mod dependency_rebind;
 mod dependency_slots;
 mod startup_cancellation;
 
+mod host_pin_recovery;
 mod retired_recovery_cleanup;
 mod same_boot_recovery;

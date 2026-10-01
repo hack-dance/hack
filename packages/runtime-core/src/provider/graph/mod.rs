@@ -18,9 +18,13 @@ mod dependency_hosts;
 #[cfg(target_os = "macos")]
 mod dependency_slots;
 #[cfg(target_os = "macos")]
+mod host_pin_recovery;
+#[cfg(target_os = "macos")]
 pub use dependency_slots::{
     inspect as dependency_reservations, recover_orphan as recover_dependency_reservation,
 };
+#[cfg(target_os = "macos")]
+pub use host_pin_recovery::{inspect as inspect_host_pin_recovery, recover as recover_host_pins};
 mod initializer_cache;
 mod volume_subpaths;
 pub use dependency_hosts::dependency_address;

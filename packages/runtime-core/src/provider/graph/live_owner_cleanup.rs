@@ -380,7 +380,7 @@ fn finish_retirement(
         &intent.foreground_sha256,
         &digest(receipt)?,
     )?;
-    dependency_slots::recover_cleaned(candidate, receipt)?;
+    dependency_slots::recover_cleaned(candidate, receipt, None)?;
     engine.guest().verify()
 }
 

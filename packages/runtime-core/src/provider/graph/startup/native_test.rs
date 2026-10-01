@@ -795,6 +795,8 @@ fn qualify_active_rebind(refreshable: bool, cancel_after_fence: bool) {
                 Instant::now() + Duration::from_secs(60),
                 &mut fresh,
                 &restored_generation,
+                // This owned driver fixture has no historical absence intent.
+                &|| Ok(()),
             );
             let assertions = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let restored = restored.as_ref().unwrap();

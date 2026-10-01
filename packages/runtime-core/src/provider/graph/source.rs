@@ -3,10 +3,13 @@
 use super::*;
 use crate::project::{PlanData, snapshot::ContentRevision};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_scope: Option<dependency_cache::ReplayScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared: Option<super::super::ProjectShareIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -30,6 +33,10 @@ impl SourceBinding {
             .all(|v| hex(v, 64))
             && !(self.live.is_some() && self.shared.is_some())
             && (self.shared_contract.is_none() || self.shared.is_some())
+            && self
+                .cache_scope
+                .as_ref()
+                .is_none_or(|scope| self.shared.is_some() && scope.valid())
             && self.live.as_ref().is_none_or(|live| live.workspace.valid())
             && self
                 .shared
@@ -75,8 +82,16 @@ fn shared_paths(
         )?;
         selected.insert(mount.source.clone(), path);
     }
-    engine.guest().execute("set -eu; test \"$(findmnt -n -o FSTYPE --mountpoint \"$1\")\" = virtiofs; case \",$(findmnt -n -o OPTIONS --mountpoint \"$1\"),\" in *,rw,*) ;; *) exit 1;; esac", &[&share.guest_path], None)?;
+    verify_shared_mount(engine, share)?;
     Ok(selected)
+}
+
+pub(super) fn verify_shared_mount(
+    engine: &Engine<'_>,
+    share: &super::super::ProjectShareIntent,
+) -> Result<(), CandidateError> {
+    engine.guest().execute("set -eu; test \"$(findmnt -n -o FSTYPE --mountpoint \"$1\")\" = virtiofs; case \",$(findmnt -n -o OPTIONS --mountpoint \"$1\"),\" in *,rw,*) ;; *) exit 1;; esac", &[&share.guest_path], None)?;
+    Ok(())
 }
 
 pub(super) fn requested(plan: &PlanData, revision: Option<&str>) -> Result<(), CandidateError> {
@@ -220,6 +235,7 @@ pub(super) fn prepare_mode(
         current_manifest: None,
         binding: SourceBinding {
             shared: Some(share.clone()),
+            cache_scope: None,
             shared_contract: Some(project::live_source::Contract::from_plan(plan, &manifest)?),
             live: None,
             revision: manifest.revision.clone(),
@@ -300,6 +316,19 @@ pub(super) fn prepare_replay(
     shared: bool,
     non_secret_values: &BTreeMap<String, String>,
 ) -> Result<Option<Inputs>, CandidateError> {
+    #[cfg(target_os = "macos")]
+    super::source_device_rebind::verify_cache_scope_origin(engine.guest().candidate(), receipt)?;
+    #[cfg(not(target_os = "macos"))]
+    if receipt
+        .source
+        .as_ref()
+        .is_some_and(|binding| binding.cache_scope.is_some())
+    {
+        return Err(error(
+            "graph_source_device_rebind",
+            "Cache device replay requires its native witness.",
+        ));
+    }
     if shared || receipt.source.as_ref().is_some_and(|s| s.shared.is_some()) {
         if !shared || live {
             return Err(error(
@@ -315,7 +344,7 @@ pub(super) fn prepare_replay(
                 revision,
             )?));
         }
-        let source = prepare_mode(
+        let mut source = prepare_mode(
             engine.guest().candidate(),
             engine,
             &inputs.review.plan,
@@ -323,6 +352,7 @@ pub(super) fn prepare_replay(
             false,
             true,
         )?;
+        inherit_cache_scope(&mut source, receipt, &inputs.review.plan.source)?;
         unchanged(&source, receipt)?;
         return Ok(source);
     }
@@ -577,6 +607,7 @@ fn published_inputs(
         manifest: publication.manifest.clone(),
         binding: SourceBinding {
             shared: None,
+            cache_scope: None,
             shared_contract: None,
             live: None,
             revision: revision.into(),
@@ -594,6 +625,36 @@ pub(super) fn unchanged(source: &Option<Inputs>, receipt: &Receipt) -> Result<()
             "graph_source_changed",
             "Restart and restore must retain the exact accepted source publication.",
         ));
+    }
+    Ok(())
+}
+
+fn inherit_cache_scope(
+    source: &mut Option<Inputs>,
+    receipt: &Receipt,
+    project: &Path,
+) -> Result<(), CandidateError> {
+    if let Some(scope) = receipt
+        .source
+        .as_ref()
+        .and_then(|binding| binding.cache_scope.as_ref())
+    {
+        scope.scope(project)?;
+        source
+            .as_mut()
+            .ok_or_else(|| error("graph_source_changed", "Missing replay source."))?
+            .binding
+            .cache_scope = Some(scope.clone());
+    }
+    Ok(())
+}
+
+pub(super) fn verify_cache_scope(
+    source: Option<&Inputs>,
+    project: &Path,
+) -> Result<(), CandidateError> {
+    if let Some(scope) = source.and_then(|source| source.binding.cache_scope.as_ref()) {
+        scope.scope(project)?;
     }
     Ok(())
 }
@@ -631,6 +692,7 @@ mod tests {
         };
         let binding = SourceBinding {
             shared: None,
+            cache_scope: None,
             shared_contract: None,
             revision: baseline.receipt().revision.clone(),
             archive_sha256: publication.archive_sha256.clone(),
@@ -770,6 +832,7 @@ mod tests {
             probes: BTreeMap::new(),
             source: Some(SourceBinding {
                 shared: None,
+                cache_scope: None,
                 shared_contract: None,
                 revision: manifest.revision,
                 archive_sha256: "d".repeat(64),
@@ -888,6 +951,7 @@ mod tests {
             manifest: manifest.clone(),
             binding: SourceBinding {
                 shared: None,
+                cache_scope: None,
                 shared_contract: None,
                 live: None,
                 revision: manifest.revision.clone(),
@@ -965,6 +1029,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&receipt).unwrap(), value);
         let binding = SourceBinding {
             shared: None,
+            cache_scope: None,
             shared_contract: None,
             live: None,
             revision: "a".repeat(64),
@@ -992,6 +1057,59 @@ mod tests {
         let decoded: Receipt =
             serde_json::from_value(serde_json::to_value(&receipt).unwrap()).unwrap();
         assert_eq!(decoded.source, receipt.source);
+    }
+
+    #[test]
+    fn ordinary_replay_propagates_verified_scope_without_adopting_changed_source() {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = super::super::tests::Fixture::new();
+        fs::write(fixture.0.join("compose.yaml"), "services: {}\n").unwrap();
+        let share = super::super::super::ProjectShareIntent::approve(&fixture.0, true).unwrap();
+        let metadata = fs::metadata(&fixture.0).unwrap();
+        let scope: dependency_cache::ReplayScope = serde_json::from_value(json!({
+            "common":fixture.0,"device":metadata.dev(),"inode":metadata.ino(),"original_device":metadata.dev()+7,"origin_sha256":"e".repeat(64),
+        })).unwrap();
+        let mut binding = SourceBinding {
+            cache_scope: Some(scope.clone()),
+            shared: Some(share),
+            shared_contract: None,
+            live: None,
+            revision: "a".repeat(64),
+            archive_sha256: "b".repeat(64),
+            selection_sha256: "c".repeat(64),
+        };
+        assert!(binding.valid());
+        let receipt:Receipt = serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"stopped-data-retained","readiness":{},"resources":{},"source":binding})).unwrap();
+        binding.cache_scope = None;
+        let mut source = Some(Inputs {
+            binding,
+            current_manifest: None,
+            manifest: ContentRevision {
+                schema_version: 1,
+                revision: "a".repeat(64),
+                selection_sha256: "c".repeat(64),
+                total_bytes: 0,
+                entries: vec![],
+            },
+            paths: BTreeMap::new(),
+        });
+        assert!(unchanged(&source, &receipt).is_err());
+        inherit_cache_scope(&mut source, &receipt, &fixture.0).unwrap();
+        unchanged(&source, &receipt).unwrap();
+        verify_cache_scope(source.as_ref(), &fixture.0).unwrap();
+        source
+            .as_mut()
+            .unwrap()
+            .binding
+            .shared
+            .as_mut()
+            .unwrap()
+            .inode += 1;
+        assert!(unchanged(&source, &receipt).is_err());
+        assert!(inherit_cache_scope(&mut None, &receipt, &fixture.0).is_err());
+        let foreign = super::super::tests::Fixture::new();
+        assert!(verify_cache_scope(source.as_ref(), &foreign.0).is_err());
+        assert!(inherit_cache_scope(&mut source, &receipt, &foreign.0).is_err());
     }
 
     #[test]
@@ -1025,6 +1143,7 @@ mod tests {
             shared: Some(
                 super::super::super::ProjectShareIntent::approve(&fixture.0, true).unwrap(),
             ),
+            cache_scope: None,
             shared_contract: Some(contract.clone()),
             live: None,
             revision: snapshot.receipt().revision.clone(),

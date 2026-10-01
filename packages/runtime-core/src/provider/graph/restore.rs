@@ -71,6 +71,8 @@ pub(super) struct FreshOwnerRestore<'a> {
     pub identity: NormalizedInputIdentity,
     pub generation: &'a str,
     pub deadline: std::time::Instant,
+    #[cfg(target_os = "macos")]
+    pub verify_publication: &'a dyn Fn() -> Result<(), CandidateError>,
 }
 #[cfg(target_os = "macos")]
 pub(super) fn restore_normalized_foreground(
@@ -80,6 +82,7 @@ pub(super) fn restore_normalized_foreground(
     deadline: std::time::Instant,
     runtime: &mut HostRelayRuntime,
     generation: &str,
+    verify_publication: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<Receipt, CandidateError> {
     startup::Driver::check_cancelled(runtime)?;
     check_environment_deadline(deadline)?;
@@ -109,6 +112,7 @@ pub(super) fn restore_normalized_foreground(
             identity,
             generation,
             deadline,
+            verify_publication,
         }),
     )
 }
@@ -149,11 +153,10 @@ fn verify_fresh_change(
 /// Binds the stopped selection to current boot and exact observed retained data.
 /// Existing receipts identify managed volumes by name/labels; this additionally
 /// fences replacement between explicit selection and restoration.
-pub(super) fn restore_generation(
+pub(super) fn observed_volumes(
     engine: &Engine<'_>,
     receipt: &Receipt,
-) -> Result<String, CandidateError> {
-    use sha2::{Digest, Sha256};
+) -> Result<BTreeMap<String, (String, String, String)>, CandidateError> {
     let mut volumes = BTreeMap::new();
     for (key, resource) in &receipt.resources {
         if resource.kind != Kind::Volume {
@@ -172,10 +175,42 @@ pub(super) fn restore_generation(
                 "Retained volume changed during selection.",
             ));
         }
-        volumes.insert(key, (resource.name.as_str(), created.to_owned(), directory));
+        volumes.insert(
+            key.clone(),
+            (resource.name.clone(), created.to_owned(), directory),
+        );
     }
-    let bytes = serde_json::to_vec(&(receipt, engine.guest().boot_id(), volumes))
+    Ok(volumes)
+}
+
+pub(super) fn restore_generation(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+) -> Result<String, CandidateError> {
+    use sha2::{Digest, Sha256};
+    let volumes = observed_volumes(engine, receipt)?;
+    let bytes = serde_json::to_vec(&(receipt, engine.guest().boot_id(), &volumes))
         .map_err(|_| error("graph_receipt", "Restore selection unavailable."))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn restore_generation_with_source_rebind(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    selected: Option<&super::source_device_rebind::Selected>,
+) -> Result<String, CandidateError> {
+    use sha2::{Digest, Sha256};
+    let original = restore_generation(engine, receipt)?;
+    let Some(selected) = selected else {
+        return Ok(original);
+    };
+    let bytes = serde_json::to_vec(&(
+        "hack-graph-restore-source-device-rebind-v1",
+        original,
+        selected.raw_sha256(),
+    ))
+    .map_err(|_| error("graph_receipt", "Restore selection unavailable."))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 fn restore_inputs(
@@ -198,9 +233,28 @@ fn restore_inputs(
         ));
     }
     let (mut receipt, root) = load(candidate, &engine, options.run_id)?;
+    #[cfg(target_os = "macos")]
+    let source_rebind = super::source_device_rebind::select(&engine, &receipt, &root)?;
+    #[cfg(target_os = "macos")]
+    if source_rebind.is_some() && fresh.is_none() {
+        return Err(error(
+            "graph_source_device_rebind",
+            "Source-device continuity requires a new foreground restore owner.",
+        ));
+    }
     let hostname_change = if let Some(fresh) = &fresh {
-        let change =
-            hostname_change::prepare(&engine, &inputs.review.plan, &receipt, &fresh.identity)?;
+        #[cfg(target_os = "macos")]
+        let source_receipt = source_rebind
+            .as_ref()
+            .map_or(&receipt, |selected| selected.source_receipt());
+        #[cfg(not(target_os = "macos"))]
+        let source_receipt = &receipt;
+        let change = hostname_change::prepare(
+            &engine,
+            &inputs.review.plan,
+            source_receipt,
+            &fresh.identity,
+        )?;
         if change.is_some()
             && (!options.shared_source
                 || options.live_source
@@ -216,6 +270,10 @@ fn restore_inputs(
         None
     };
     if let Some(fresh) = &fresh {
+        #[cfg(target_os = "macos")]
+        let generation =
+            restore_generation_with_source_rebind(&engine, &receipt, source_rebind.as_ref())?;
+        #[cfg(not(target_os = "macos"))]
         let generation = restore_generation(&engine, &receipt)?;
         if let Some(change) = &hostname_change {
             verify_fresh_change(
@@ -256,11 +314,17 @@ fn restore_inputs(
         ));
     }
     super::super::source_job::check_reservations(&engine)?;
+    #[cfg(target_os = "macos")]
+    let source_receipt = source_rebind
+        .as_ref()
+        .map_or(&receipt, |selected| selected.source_receipt());
+    #[cfg(not(target_os = "macos"))]
+    let source_receipt = &receipt;
     let ordinary_source = if hostname_change.is_none() {
         source::prepare_replay(
             &engine,
             &inputs,
-            &receipt,
+            source_receipt,
             options.source_revision,
             options.live_source,
             options.shared_source,
@@ -361,7 +425,12 @@ fn restore_inputs(
     }
     if let Some(fresh) = &fresh {
         check_environment_deadline(fresh.deadline)?;
-        if restore_generation(&engine, &receipt)? != fresh.generation {
+        #[cfg(target_os = "macos")]
+        let generation =
+            restore_generation_with_source_rebind(&engine, &receipt, source_rebind.as_ref())?;
+        #[cfg(not(target_os = "macos"))]
+        let generation = restore_generation(&engine, &receipt)?;
+        if generation != fresh.generation {
             return Err(error(
                 "graph_restore_refused",
                 "Retained restore selection changed before effects.",
@@ -371,10 +440,30 @@ fn restore_inputs(
     if let Some(driver) = startup.as_ref() {
         driver.check_cancelled()?;
     }
+    source::verify_cache_scope(source, options.project.project)?;
+    #[cfg(target_os = "macos")]
+    super::source_device_rebind::verify_cache_scope_origin(candidate, &receipt)?;
+    #[cfg(target_os = "macos")]
+    if let Some(fresh) = &fresh {
+        super::absent_publication_cleanup::archive_retired_rebind_under(
+            candidate,
+            &engine,
+            &receipt,
+            fresh.verify_publication,
+        )?;
+    }
     // Retain the complete acknowledged old generation before replacing its
     // boot-bound dependency owner. Historical cleanup is verified in its own context.
     if fresh.is_some() {
+        #[cfg(target_os = "macos")]
+        if let Some(selected) = &source_rebind {
+            selected.reverify(&engine)?;
+        }
         super::restore_history::retain(&root, &receipt)?;
+        #[cfg(target_os = "macos")]
+        if let Some(selected) = &source_rebind {
+            selected.apply_to_new_attempt(&mut receipt)?;
+        }
         receipt.relay_startup = None;
         receipt.relay_cleanup = None;
     } else {
@@ -435,6 +524,10 @@ fn restore_inputs(
         session.fault_pause("restore-intent")?;
     }
     let result = (|| {
+        #[cfg(target_os = "macos")]
+        if let Some(selected) = &source_rebind {
+            selected.reverify(&session.engine)?;
+        }
         if fresh.is_some()
             && let Some(driver) = session.startup.as_mut()
         {
@@ -492,6 +585,8 @@ mod tests {
             identity: next.normalized_input.unwrap(),
             generation: &generation,
             deadline: Instant::now() + Duration::from_secs(30),
+            #[cfg(target_os = "macos")]
+            verify_publication: &|| Ok(()),
         };
         let reviewed = "8".repeat(64);
         assert!(verify_fresh(&receipt, &reviewed, &fresh, &generation).is_err());
@@ -534,6 +629,8 @@ mod tests {
             identity: identity.clone(),
             generation: &generation,
             deadline: Instant::now() + Duration::from_secs(30),
+            #[cfg(target_os = "macos")]
+            verify_publication: &|| Ok(()),
         };
         verify_fresh(&receipt, &receipt.plan_id, &fresh, &generation).unwrap();
         assert!(verify_fresh(&receipt, &"2".repeat(64), &fresh, &generation).is_err());
@@ -568,6 +665,8 @@ mod tests {
             identity: identity.clone(),
             generation: &generation,
             deadline: Instant::now() + Duration::from_secs(30),
+            #[cfg(target_os = "macos")]
+            verify_publication: &|| Ok(()),
         };
         let changed = "2".repeat(64);
         assert!(verify_fresh(&receipt, &changed, &fresh, &generation).is_err());

@@ -401,6 +401,25 @@ pub(super) fn archive_dependency_rebind_after_cleanup(
     runtime::archive_dependency_rebind_after_cleanup(root, original, cleaned, boot)
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn dependency_rebind_boot(
+    root: &Path,
+    receipt: &Receipt,
+) -> Result<Option<String>, CandidateError> {
+    runtime::dependency_rebind_boot(root, receipt)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn archive_retired_dependency_rebind(
+    root: &Path,
+    original: &Receipt,
+    cleaned: &Receipt,
+    boot: &str,
+    verify: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    runtime::archive_retired_dependency_rebind(root, original, cleaned, boot, verify)
+}
+
 pub(super) fn guest_directory(run: &str, generation: &str) -> String {
     format!("/storage/hack-graph-startup/{run}/{generation}")
 }

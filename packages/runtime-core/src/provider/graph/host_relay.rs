@@ -490,6 +490,66 @@ pub(super) fn inspect_cleanup(
     environment: &super::super::environment_recovery::GraphInventory,
     bridge_selection: &bridges::cleanup::Selection,
 ) -> Result<[u8; 32], CandidateError> {
+    inspect_cleanup_recovery(
+        candidate,
+        engine,
+        expected,
+        remove_data,
+        environment,
+        bridge_selection,
+        None,
+    )
+}
+pub(super) fn inspect_cleanup_recovery(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    expected: &Receipt,
+    remove_data: bool,
+    environment: &super::super::environment_recovery::GraphInventory,
+    bridge_selection: &bridges::cleanup::Selection,
+    host_pin: Option<&super::host_pin_recovery::Witness>,
+) -> Result<[u8; 32], CandidateError> {
+    inspect_cleanup_selected(
+        candidate,
+        engine,
+        expected,
+        remove_data,
+        environment,
+        bridge_selection,
+        SelectedCleanupProof::Existing(host_pin),
+    )
+}
+pub(super) fn inspect_cleanup_absence(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    expected: &Receipt,
+    environment: &super::super::environment_recovery::GraphInventory,
+    bridge_selection: &bridges::cleanup::Selection,
+    witness: &super::absent_publication_cleanup::Selection,
+) -> Result<[u8; 32], CandidateError> {
+    inspect_cleanup_selected(
+        candidate,
+        engine,
+        expected,
+        false,
+        environment,
+        bridge_selection,
+        SelectedCleanupProof::Absence(witness),
+    )
+}
+enum SelectedCleanupProof<'a> {
+    Existing(Option<&'a super::host_pin_recovery::Witness>),
+    Absence(&'a super::absent_publication_cleanup::Selection),
+}
+fn inspect_cleanup_selected(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    expected: &Receipt,
+    remove_data: bool,
+    environment: &super::super::environment_recovery::GraphInventory,
+    bridge_selection: &bridges::cleanup::Selection,
+    proof: SelectedCleanupProof<'_>,
+) -> Result<[u8; 32], CandidateError> {
     let (receipt, root) = archive::load_confirmation(candidate, engine, &expected.run)?;
     match fs::symlink_metadata(root.join("state.pending")) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -533,10 +593,33 @@ pub(super) fn inspect_cleanup(
         require_retained_volume(resource, value.is_some(), remove_data)?;
         observations.insert(key, value);
     }
-    if &bridges::cleanup::read(engine, &receipt, &root)? != bridge_selection {
+    let recorded = match proof {
+        SelectedCleanupProof::Absence(witness) => {
+            bridges::cleanup::read_recovery_absence(engine, &receipt, &root, witness)?
+        }
+        SelectedCleanupProof::Existing(host_pin) => {
+            bridges::cleanup::read_recovery(engine, &receipt, &root, host_pin)?
+        }
+    };
+    if &recorded != bridge_selection {
         return Err(refused());
     }
-    bridges::cleanup::verify(candidate, engine, &receipt, bridge_selection)?;
+    match proof {
+        SelectedCleanupProof::Absence(witness) => bridges::cleanup::verify_recovery_absence(
+            candidate,
+            engine,
+            &receipt,
+            bridge_selection,
+            witness,
+        )?,
+        SelectedCleanupProof::Existing(host_pin) => bridges::cleanup::verify_recovery(
+            candidate,
+            engine,
+            &receipt,
+            bridge_selection,
+            host_pin,
+        )?,
+    }
     environment::verify_cleanup(candidate, engine, &receipt, &root, environment)?;
     probes::verify_cleanup(engine, &receipt)?;
     startup::verify_cleanup(engine, &receipt)?;

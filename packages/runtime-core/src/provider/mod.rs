@@ -6,6 +6,7 @@ mod bridge;
 mod config_audit;
 mod dependency_socket;
 pub use bridge::BridgeIntent;
+pub use dependency_socket::quiescent_recovery as quiescent_dependency_socket_recovery;
 pub use dependency_socket::recovery as dependency_socket_recovery;
 pub use dependency_socket::{
     DependencySocketIntent, DependencySocketObservation, DependencySocketPath,
@@ -19,6 +20,8 @@ pub mod environment;
 mod environment_probe_test;
 pub mod environment_recovery;
 pub mod graph;
+#[cfg(target_os = "macos")]
+mod host_pin;
 pub use engine::{EngineInfo, info as engine_info};
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 mod gateway_probe_test;
@@ -45,6 +48,7 @@ pub mod resources;
 pub mod storage_usage;
 pub use image_load::load as load_image;
 mod lifecycle;
+pub use lifecycle::host_filesystem;
 mod network_intent;
 mod network_update;
 pub use network_update::{enable_internet, extend_network};

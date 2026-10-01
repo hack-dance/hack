@@ -27,6 +27,61 @@ type ModelContract = {
 // Bounds and witnesses are reviewed contracts, not learned from each run.
 const contracts: readonly ModelContract[] = [
   {
+    name: "absent-publication-recovery",
+    module: "Absent",
+    states: 247,
+    invariant: "NoPrematurePublication",
+    action: "Publish",
+    fields: [
+      "intent = TRUE",
+      "complete = FALSE",
+      "retired = FALSE",
+      "published = TRUE",
+      "unsafePublication = TRUE",
+    ],
+    additionalControls: [
+      {
+        name: "unwitnessed-cleanup",
+        negative: true,
+        invariant: "NoUnwitnessedCleanup",
+        action: "CleanupOne",
+        fields: [
+          "intent = FALSE",
+          "progress = 1",
+          'engine = "recovery"',
+          'foreground = "recovery"',
+          "unsafeCleanup = TRUE",
+        ],
+      },
+      {
+        name: "stale-selection",
+        negative: true,
+        invariant: "NoUnwitnessedCleanup",
+        action: "CleanupOne",
+        fields: [
+          "intent = TRUE",
+          "selected = 1",
+          "version = 2",
+          "progress = 1",
+          "unsafeCleanup = TRUE",
+        ],
+      },
+      {
+        name: "unconfirmed-retirement",
+        negative: true,
+        invariant: "NoUnconfirmedRetirement",
+        action: "RetireAbsentPublisher",
+        fields: [
+          "intent = FALSE",
+          "complete = FALSE",
+          "progress = 0",
+          "retired = TRUE",
+          "unsafeRetirement = TRUE",
+        ],
+      },
+    ],
+  },
+  {
     name: "shared-https-lifetime",
     module: "SharedHttps",
     states: 64,

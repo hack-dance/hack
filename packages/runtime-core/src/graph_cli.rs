@@ -25,6 +25,131 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let Some((action, args)) = args.split_first() else {
         return Err(invalid());
     };
+    if *action == "inspect-host-pin-recovery" {
+        let run = match *args {
+            ["--run-id", run] | ["--run-id", run, "--json"] => run,
+            _ => return Err(invalid()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            return graph::inspect_host_pin_recovery(candidate, run);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = run;
+            return Err(invalid());
+        }
+    }
+    if *action == "recover-host-pins" {
+        let (run, expected) = match *args {
+            [
+                "--run-id",
+                run,
+                "--expect-selection",
+                expected,
+                "--accept-legacy-device-rebind",
+            ]
+            | [
+                "--run-id",
+                run,
+                "--expect-selection",
+                expected,
+                "--accept-legacy-device-rebind",
+                "--json",
+            ] => (run, expected),
+            _ => return Err(invalid()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            return graph::recover_host_pins(candidate, run, expected);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (run, expected);
+            return Err(invalid());
+        }
+    }
+    if *action == "inspect-absent-publication-cleanup" {
+        let (run, original, inspection) = match *args {
+            [
+                "--run-id",
+                run,
+                "--original-owner-file",
+                original,
+                "--host-inspection-file",
+                inspection,
+            ]
+            | [
+                "--run-id",
+                run,
+                "--original-owner-file",
+                original,
+                "--host-inspection-file",
+                inspection,
+                "--json",
+            ] => (run, original, inspection),
+            _ => return Err(invalid()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            return graph::inspect_absent_publication_cleanup(
+                candidate,
+                run,
+                Path::new(original),
+                Path::new(inspection),
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (run, original, inspection);
+            return Err(invalid());
+        }
+    }
+    if *action == "recover-absent-publication-cleanup" {
+        let (run, original, inspection, expected) = match *args {
+            [
+                "--run-id",
+                run,
+                "--original-owner-file",
+                original,
+                "--host-inspection-file",
+                inspection,
+                "--expect-selection",
+                expected,
+                "--retain-data",
+                "--accept-unpinned-post-reboot",
+            ]
+            | [
+                "--run-id",
+                run,
+                "--original-owner-file",
+                original,
+                "--host-inspection-file",
+                inspection,
+                "--expect-selection",
+                expected,
+                "--retain-data",
+                "--accept-unpinned-post-reboot",
+                "--json",
+            ] => (run, original, inspection, expected),
+            _ => return Err(invalid()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            return graph::recover_absent_publication_cleanup(
+                candidate,
+                run,
+                expected,
+                Path::new(original),
+                Path::new(inspection),
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (run, original, inspection, expected);
+            return Err(invalid());
+        }
+    }
     if ["run-selection", "run-service"].contains(action) {
         return one_off::command(candidate, action, args);
     }

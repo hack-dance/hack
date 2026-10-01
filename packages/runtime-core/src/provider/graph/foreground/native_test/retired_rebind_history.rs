@@ -8,6 +8,9 @@ use crate::provider::{graph::startup::native_test::RestartableBackend, lifecycle
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::MetadataExt;
 
+mod fixture;
+use fixture::{Files, ready_at};
+
 fn file_hash(path: &Path) -> String {
     let mut file = fs::File::open(path).unwrap();
     let mut digest = Sha256::new();
@@ -112,11 +115,14 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
     let artifact = PathBuf::from(std::env::var("HACK_GRAPH_RELAY_ARTIFACT").unwrap());
     let artifact_hash = std::env::var("HACK_GRAPH_RELAY_SHA256").unwrap();
     assert_eq!(file_hash(&artifact), artifact_hash);
-    let selected = graph::tests::Fixture::new();
-    let sibling = graph::tests::Fixture::new();
-    let private = graph::tests::Fixture::new();
+    // Inputs stay under this declared private candidate on every failed path.
+    // There is deliberately no panic-time graph cleanup or directory Drop.
+    let files = Files::new(&candidate.checkout);
+    let selected = &files.selected;
+    let sibling = &files.sibling;
+    let private = &files.private;
     state::write(
-        &selected.0.join("compose.yaml"),
+        &selected.join("compose.yaml"),
         &json!({
             "services":{
                 "web":{"image":image,"read_only":true,"init":true,"user":"0:0",
@@ -129,7 +135,7 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
     )
     .unwrap();
     state::write(
-        &sibling.0.join("compose.yaml"),
+        &sibling.join("compose.yaml"),
         &json!({
             "services":{"web":{"image":image,"read_only":true,"network_mode":"none",
                 "init":true,"user":"0:0","entrypoint":["/usr/local/bin/bun","-e","setInterval(()=>{},1000)"],"command":[],
@@ -144,7 +150,7 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         &candidate,
         project::PlanOptions {
             branch: None,
-            project: &selected.0,
+            project: selected,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
         },
@@ -154,7 +160,7 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         &candidate,
         project::PlanOptions {
             branch: None,
-            project: &sibling.0,
+            project: sibling,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
         },
@@ -162,9 +168,9 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
     .unwrap();
     let run = graph::probes::token().unwrap();
     let sibling_run = graph::probes::token().unwrap();
-    let selected_dependencies = private.0.join("selected-dependencies.json");
-    let sibling_dependencies = private.0.join("sibling-dependencies.json");
-    let selected_compose = selected.0.join("compose.yaml");
+    let selected_dependencies = private.join("selected-dependencies.json");
+    let sibling_dependencies = private.join("sibling-dependencies.json");
+    let selected_compose = selected.join("compose.yaml");
     state::write(
         &sibling_dependencies,
         &json!({"version":1,"plan":sibling_plan.plan_id,
@@ -222,7 +228,7 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
                 "serve"
             },
             "--project",
-            selected.0.to_str().unwrap(),
+            selected.to_str().unwrap(),
             "--file",
             "compose.yaml",
             "--expect-plan",
@@ -251,13 +257,7 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         Process::start(binary, &candidate, &args, None)
     };
     let mut owner = start_selected(&legacy, None, &selected_plan_id);
-    let mut selected_cleanup = Cleanup {
-        binary: &binary,
-        candidate: &candidate,
-        run: &run,
-        done: false,
-    };
-    ready(&mut owner, &run, deadline);
+    ready_at("initial-legacy", &files, &mut owner, &run, deadline);
     marker(
         &legacy,
         &candidate,
@@ -311,7 +311,7 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
             "graph",
             "serve",
             "--project",
-            sibling.0.to_str().unwrap(),
+            sibling.to_str().unwrap(),
             "--file",
             "compose.yaml",
             "--expect-plan",
@@ -327,7 +327,7 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
             "--expect-dependencies",
             &sibling_plan_id,
             "--normalized-file",
-            sibling.0.join("compose.yaml").to_str().unwrap(),
+            sibling.join("compose.yaml").to_str().unwrap(),
             "--expect-original",
             &sibling_plan.plan.compose_sha256,
             "--expect-namespace",
@@ -336,13 +336,13 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         ],
         None,
     );
-    let mut sibling_cleanup = Cleanup {
-        binary: &binary,
-        candidate: &candidate,
-        run: &sibling_run,
-        done: false,
-    };
-    ready(&mut sibling_owner, &sibling_run, deadline);
+    ready_at(
+        "sibling",
+        &files,
+        &mut sibling_owner,
+        &sibling_run,
+        deadline,
+    );
     marker(
         &binary,
         &candidate,
@@ -383,10 +383,10 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
     }
     synthetic.process.as_mut().unwrap().pid = i32::MAX;
     synthetic.process.as_mut().unwrap().start_micros = host_boot - 1;
-    let old_path = private.0.join("prior-owner.json");
+    let old_path = private.join("prior-owner.json");
     state::write(&old_path, &synthetic).unwrap();
     let pool = fs::symlink_metadata(candidate.state_root.join("run/smolvm")).unwrap();
-    let inspection_path = private.0.join("prior-inspection.json");
+    let inspection_path = private.join("prior-inspection.json");
     state::write(
         &inspection_path,
         &serde_json::from_slice::<Value>(&graph::absent_publication_cleanup::fixture_inspection(
@@ -479,7 +479,13 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         .unwrap()
         .to_owned();
     let mut first_owner = start_selected(&legacy, Some(&first_generation), &selected_plan_id);
-    ready(&mut first_owner, &run, deadline);
+    ready_at(
+        "first-legacy-restore",
+        &files,
+        &mut first_owner,
+        &run,
+        deadline,
+    );
     let first_ready = snapshot(&candidate, &run, deadline);
     assert_eq!(first_ready.receipt.phase, "ready-observed");
     assert_ne!(
@@ -606,7 +612,13 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         .unwrap()
         .to_owned();
     let mut recovered_owner = start_selected(&binary, Some(&current_generation), &selected_plan_id);
-    ready(&mut recovered_owner, &run, deadline);
+    ready_at(
+        "current-restore",
+        &files,
+        &mut recovered_owner,
+        &run,
+        deadline,
+    );
     let final_snapshot = snapshot(&candidate, &run, deadline);
     assert_eq!(final_snapshot.receipt.phase, "ready-observed");
     assert!(!final_snapshot.journal_incomplete);
@@ -657,7 +669,6 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
     );
     assert_eq!(removed["phase"], "removed");
     assert!(recovered_owner.wait(deadline).success());
-    selected_cleanup.done = true;
     let sibling_removed = checked_cli(
         "sibling-cleanup",
         &binary,
@@ -674,6 +685,7 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
     );
     assert_eq!(sibling_removed["phase"], "removed");
     assert!(sibling_owner.wait(deadline).success());
-    sibling_cleanup.done = true;
     backend.stop();
+    // Delete inputs only after both explicit managed data removals succeeded.
+    files.dispose().unwrap();
 }

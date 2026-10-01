@@ -20,6 +20,14 @@ pub(super) fn require_dependency_rebind_complete(
     rebind::require_complete(root, receipt)
 }
 
+pub(super) fn require_dependency_rebind_recovery_complete(
+    root: &Path,
+    receipt: &Receipt,
+    boot: &str,
+) -> Result<(), CandidateError> {
+    rebind::require_recovery_complete(root, receipt, boot)
+}
+
 pub(super) fn archive_dependency_rebind_after_cleanup(
     root: &Path,
     original: &Receipt,

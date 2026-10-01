@@ -389,9 +389,19 @@ pub(super) fn require_dependency_rebind_complete(
     }
 }
 
+/// Same-boot recovery accepts only a completed refresh for its exact selection.
+#[cfg(target_os = "macos")]
+pub(super) fn require_dependency_rebind_recovery_complete(
+    root: &Path,
+    receipt: &Receipt,
+    boot: &str,
+) -> Result<(), CandidateError> {
+    runtime::require_dependency_rebind_recovery_complete(root, receipt, boot)
+}
+
+#[cfg(target_os = "macos")]
 /// Explicit owned cleanup preserves dependency refresh evidence before a later
 /// restore may create new helper generations. This never replays the refresh.
-#[cfg(target_os = "macos")]
 pub(super) fn archive_dependency_rebind_after_cleanup(
     root: &Path,
     original: &Receipt,

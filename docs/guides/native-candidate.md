@@ -1072,7 +1072,12 @@ operation stops verified guest dependency listeners, removes owned containers an
 network resources, retains persistent data, retires stale foreground and relay
 publications, and releases the graph's dependency reservation before unlocking the
 pool. It does not restart the pool. Pending startup, one-off or dependency
-rebind state is refused. Completion records owner-death evidence independently of
+rebind state is refused. A completed dependency refresh is accepted only for the
+current boot and exact ready receipt generation, with matching terminal services
+and helper markers. After owned absence is independently verified, its journal is
+archived before stale publications are retired. An interrupted archive resumes
+from the committed cleanup proof and exact journal bytes; it never replays refresh.
+Completion records owner-death evidence independently of
 the live relay acknowledgement protocol.
 
 After completion, retained restore can create a fresh owner;

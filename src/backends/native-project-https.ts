@@ -9,7 +9,6 @@ import {
 } from "node:crypto";
 import { closeSync, constants, mkdtempSync, openSync, rmSync } from "node:fs";
 import {
-  chmod,
   link,
   lstat,
   mkdir,
@@ -27,6 +26,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { connect as tlsConnect } from "node:tls";
 import { isRecord } from "../lib/guards.ts";
+import { listenPublishedUnixSocket } from "../lib/unix-socket-publish.ts";
 import { checkNativeHttpsPort } from "./native-https-port.ts";
 import {
   invokeNativeRuntime,
@@ -68,7 +68,11 @@ interface Dependencies {
   readonly spawn: (input: SpawnInput) => HttpsChild;
   readonly permissionPort: () => Promise<number>;
   readonly adminReady: (socket: string) => Promise<boolean>;
-  readonly chmodOwnerSocket: typeof chmod;
+  /**
+   * Test seam: runs after the owner socket is published and before it is
+   * verified. Production does nothing.
+   */
+  readonly afterOwnerSocketPublish: (path: string) => Promise<void>;
 }
 const SAFE_TLS_CODES = new Set([
   "ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR",
@@ -683,7 +687,7 @@ function caDerSha256(pem: Buffer): string {
 }
 async function startOwnerChallenge(
   path: string,
-  setMode: typeof chmod
+  afterPublish: (path: string) => Promise<void>
 ): Promise<{
   readonly server: Server;
   readonly publicKey: string;
@@ -709,23 +713,12 @@ async function startOwnerChallenge(
       }
     });
   });
-  let listening = false;
   let identity: { dev: number; ino: number } | undefined;
   try {
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(path, () => {
-        server.off("error", reject);
-        listening = true;
-        resolve();
-      });
-    });
-    const metadata = await lstat(path);
-    if (!metadata.isSocket() || metadata.uid !== process.getuid?.()) {
-      throw refused();
-    }
-    identity = { dev: metadata.dev, ino: metadata.ino };
-    await setMode(path, 0o600);
+    // Created with mode 0600 and published by link from a staging name: closing
+    // the server never removes a replacement at path, and path is never chmodded.
+    identity = await listenPublishedUnixSocket(server, path);
+    await afterPublish(path);
     const prepared = await lstat(path);
     if (
       !prepared.isSocket() ||
@@ -738,10 +731,9 @@ async function startOwnerChallenge(
     }
     return { server, publicKey, identity };
   } catch {
+    // Without an identity, publication failed and already closed the server.
     if (identity) {
       await stopOwnerChallenge({ path, server, identity });
-    } else if (listening) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
     throw refused();
   }
@@ -1264,7 +1256,7 @@ export async function startNativeProjectHttps(opts: {
     spawn: spawnNativeHttpsChild,
     permissionPort,
     adminReady,
-    chmodOwnerSocket: chmod,
+    afterOwnerSocketPublish: async () => undefined,
     ...opts.dependencies,
   };
   const limit = opts.certificateNameLimit ?? 256;
@@ -1383,7 +1375,10 @@ export async function startNativeProjectHttps(opts: {
       await removeOwnedDirectory(lock, lockIdentity, false);
     })());
   try {
-    owner = await startOwnerChallenge(ownerSocket, deps.chmodOwnerSocket);
+    owner = await startOwnerChallenge(
+      ownerSocket,
+      deps.afterOwnerSocketPublish
+    );
     const before = await inspect();
     if (
       !(

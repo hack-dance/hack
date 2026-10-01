@@ -94,6 +94,44 @@ fn copied_installed_binary_uses_only_explicit_home_and_preserves_reexec_identity
 }
 
 #[test]
+fn quiescent_https_recovery_requires_exact_selectors_without_initializing_state() {
+    let fixture = Fixture::new();
+    let home = fixture.directory("private");
+    let cwd = fixture.directory("cwd");
+    for (owner, pid) in [
+        ("wrong", "999999"),
+        (
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "1",
+        ),
+    ] {
+        let output = invoke(
+            Path::new(env!("CARGO_BIN_EXE_hack-native")),
+            &home,
+            &cwd,
+            &[
+                "runtime",
+                "recover-quiescent-https",
+                "--expect-owner",
+                owner,
+                "--expect-configuration",
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                "--expect-frontend-pid",
+                pid,
+                "--json",
+            ],
+        );
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("https_recovery_refused")
+        );
+        assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+    }
+}
+
+#[test]
 fn installed_entrypoint_refuses_public_missing_relative_and_aliased_homes() {
     let fixture = Fixture::new();
     let home = fixture.directory("private");

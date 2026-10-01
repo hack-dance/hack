@@ -1,3 +1,4 @@
+mod admission_pool;
 pub mod host_filesystem;
 mod interrupted;
 mod prepared_boot;
@@ -268,6 +269,17 @@ fn operation_lease<T>(
     };
     let current = verify()?;
     Ok((lock, current))
+}
+
+/// How long ordinary startup waits for a provider lease that another operation holds, such as
+/// the `graph inspect` behind `hack ps`.
+const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
+
+/// Startup's provider lease. Everything `start_pool` does before taking it is read-only
+/// validation, admission sampling and RAII guards, so waiting for a briefly held lease admits
+/// nothing early, and on expiry it refuses `provider_busy` with nothing admitted.
+fn startup_lease(root: &Path, wait: Duration) -> Result<state::Lock, CandidateError> {
+    operation_lease(root, Some(Instant::now() + wait), || Ok(())).map(|(lock, ())| lock)
 }
 
 /// Read-only observation takes no mutation lease and detects lifecycle changes around each read.
@@ -748,6 +760,15 @@ pub fn up_with_profile(
     up_with_bridge(candidate, profile, None)
 }
 
+/// Resource admission distinguishes a proven running pool from a new VM allocation.
+pub fn probe_with_profile(
+    candidate: &Candidate,
+    profile: super::Profile,
+) -> Result<admission::Admission, CandidateError> {
+    let selected = admission_pool::select(candidate, profile)?;
+    admission_pool::probe(candidate, profile, selected.as_ref())
+}
+
 pub fn up_with_bridge(
     candidate: &Candidate,
     profile: super::Profile,
@@ -1029,19 +1050,26 @@ fn start_pool(
             "Existing capacity belongs to another profile. No resize, replacement or adoption was attempted.",
         ));
     }
-    // Admission before locks, aliases, provider commands, disks or VM effects.
-    let admission = admission::probe_for(&candidate.checkout, profile)?;
+    // Admission before aliases, provider commands, disks or VM effects. Only
+    // independently verified live ownership avoids charging a second VM's disks.
+    let admission_owner = admission_pool::select(candidate, profile)?;
+    let admission = admission_pool::probe(candidate, profile, admission_owner.as_ref())?;
     if !admission.admitted {
         return Err(CandidateError::new(
             "admission_rejected",
             admission.reasons.join(" "),
         ));
     }
-    let samples = admission::sample_for(&candidate.checkout, profile)?;
+    let samples = admission::sample_with(profile, || {
+        admission_pool::probe(candidate, profile, admission_owner.as_ref())
+    })?;
     artifact::verify(candidate)?;
     artifact::verify_engine(candidate)?;
     super::network_tools::verify(candidate)?;
-    let lock = state::Lock::acquire(&root(candidate))?;
+    let lock = startup_lease(&root(candidate), STARTUP_LEASE_WAIT)?;
+    if let Some(selected) = &admission_owner {
+        selected.reverify(candidate)?;
+    }
     #[cfg(target_os = "macos")]
     if let Some(guard) = &retained_guard {
         guard.verify(candidate)?;
@@ -1101,6 +1129,9 @@ fn start_pool(
     super::dependency_socket::verify(candidate, &owner)?;
     state::write(&root(candidate).join("admission.json"), &samples)?;
     if owner.phase == "running" {
+        if let Some(selected) = &admission_owner {
+            selected.reverify(candidate)?;
+        }
         #[cfg(target_os = "macos")]
         if let Some(guard) = &retained_guard {
             guard.verify(candidate)?;
@@ -1108,6 +1139,12 @@ fn start_pool(
         verify_live(candidate, &owner)?;
         audit_boot(candidate, &owner)?;
         return status(candidate);
+    }
+    if admission_owner.is_some() {
+        return Err(CandidateError::new(
+            "admission_owner_changed",
+            "Reserve-qualified ownership no longer names a running pool; no create or boot was admitted.",
+        ));
     }
     if ![
         "initializing",
@@ -1818,8 +1855,25 @@ fn finish_absent(
     finish_absent_locked(candidate, owner, value, record_disks, &vm_lock)
 }
 
-/// Keep this descriptor through alias restoration and the stopped receipt.
-fn lock_absent_disks(candidate: &Candidate, owner: &Owner) -> Result<File, CandidateError> {
+/// Closing alone can leave a flock held by a fork/dup copy until that copy closes.
+/// Explicitly unlock this open-file description when the recovery scope ends.
+struct VmLock(File);
+impl std::ops::Deref for VmLock {
+    type Target = File;
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+impl Drop for VmLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the owned descriptor remains live through this Drop call.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// Keep this guard through alias restoration and the stopped receipt.
+fn lock_absent_disks(candidate: &Candidate, owner: &Owner) -> Result<VmLock, CandidateError> {
     let directory = owner.real_data_dir(candidate)?;
     let vm_lock = OpenOptions::new()
         .read(true)
@@ -1833,13 +1887,14 @@ fn lock_absent_disks(candidate: &Candidate, owner: &Owner) -> Result<File, Candi
         return Err(CandidateError::new("foreign_state", "Unsafe VM lock."));
     }
     use std::os::fd::AsRawFd;
-    // Keep the exclusive VM lock through the stopped receipt; closing the FD releases it.
+    // Keep the exclusive VM lock through the stopped receipt.
     if unsafe { libc::flock(vm_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(CandidateError::new(
             "stop_uncertain",
             "Provider VM lock is still held.",
         ));
     }
+    let vm_lock = VmLock(vm_lock);
     let handles = process::capture(
         process::clean_command(Path::new("/usr/sbin/lsof"))
             .args(["-n", "-P", "-t", "--"])
@@ -2132,6 +2187,48 @@ mod tests {
         assert!(matches!(expired, Err(e) if e.code == "provider_busy"));
         assert!(!called.get());
         assert_eq!(std::fs::read_to_string(&identity).unwrap(), "replacement");
+    }
+
+    #[test]
+    fn startup_lease_waits_out_a_brief_holder_and_refuses_a_lasting_one() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "hkl-startup-lease-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        struct Remove(std::path::PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _remove = Remove(root.clone());
+        state::private_directory(&root).unwrap();
+        // A brief holder, such as the inspection behind `hack ps`: startup waits, then takes it.
+        let held = state::Lock::acquire(&root).unwrap();
+        let started = Instant::now();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(held);
+        });
+        let lock = startup_lease(&root, Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        // The lease stays exclusive: an immediate acquisition is still refused while held.
+        assert!(matches!(state::Lock::acquire(&root), Err(e) if e.code == "provider_busy"));
+        drop(lock);
+        // A holder that outlasts the wait is refused with nothing admitted.
+        let _held = state::Lock::acquire(&root).unwrap();
+        let refused = startup_lease(&root, Duration::from_millis(100));
+        assert!(matches!(
+            &refused,
+            Err(e) if e.code == "provider_busy" && e.message.contains("no operation was admitted")
+        ));
     }
 
     #[test]

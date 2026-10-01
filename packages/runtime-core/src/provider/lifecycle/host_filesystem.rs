@@ -35,7 +35,7 @@ fn refused(detail: &str) -> CandidateError {
 }
 
 #[cfg(target_os = "macos")]
-fn host_boot_micros() -> Result<u64, CandidateError> {
+pub(crate) fn host_boot_micros() -> Result<u64, CandidateError> {
     let mut time = std::mem::MaybeUninit::<libc::timeval>::zeroed();
     let mut length = std::mem::size_of::<libc::timeval>();
     // SAFETY: read-only sysctl writes an exactly sized timeval; no input or retained pointers.
@@ -74,7 +74,7 @@ fn host_boot_micros() -> Result<u64, CandidateError> {
     ))
 }
 
-fn no_auxiliary_update(candidate: &Candidate) -> Result<(), CandidateError> {
+pub(crate) fn no_auxiliary_update(candidate: &Candidate) -> Result<(), CandidateError> {
     crate::provider::network_update::require_complete(candidate)?;
     for name in [
         "owner.pending",

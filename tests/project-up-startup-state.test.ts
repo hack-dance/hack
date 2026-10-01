@@ -19,6 +19,7 @@ import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const psRows: string[] = [];
@@ -182,7 +183,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
-  process.env.HACK_HOME = originalHackHome;
+  restoreEnv("HACK_HOME", originalHackHome);
   if (originalComposeProfiles === undefined) {
     Reflect.deleteProperty(process.env, "COMPOSE_PROFILES");
   } else {
@@ -839,8 +840,8 @@ async function createProject(opts?: {
 test("linked startup combines inherited aliases, local static precedence and same-start hook output", async () => {
   const savedCi = process.env.CI;
   const savedMode = process.env.HACK_EXECUTION_MODE;
-  process.env.CI = undefined;
-  process.env.HACK_EXECUTION_MODE = undefined;
+  Reflect.deleteProperty(process.env, "CI");
+  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
   try {
     const primary = await createProject({
       lifecycleCommand:
@@ -894,8 +895,8 @@ test("linked startup combines inherited aliases, local static precedence and sam
     expect(upComposeContents.at(-1)).toContain("hook.test: 192.0.2.30");
     expect(upComposeContents.at(-1)).not.toContain("192.0.2.10");
   } finally {
-    process.env.CI = savedCi;
-    process.env.HACK_EXECUTION_MODE = savedMode;
+    restoreEnv("CI", savedCi);
+    restoreEnv("HACK_EXECUTION_MODE", savedMode);
   }
 });
 

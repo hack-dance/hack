@@ -4,11 +4,70 @@ use std::{
     fs,
     os::{
         fd::AsRawFd,
-        unix::{fs::MetadataExt, net::UnixListener},
+        unix::{
+            fs::{DirBuilderExt, MetadataExt},
+            net::UnixListener,
+        },
     },
     path::PathBuf,
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
 };
+
+static NEXT_POOL: AtomicU64 = AtomicU64::new(0);
+
+fn pool_directory(timestamp: u128) -> PathBuf {
+    fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!(
+            "hack-home-recovery-{}-{timestamp}-{}",
+            std::process::id(),
+            NEXT_POOL.fetch_add(1, Ordering::Relaxed)
+        ))
+}
+
+fn create_pool_directory(path: &std::path::Path) -> std::io::Result<()> {
+    fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+#[test]
+fn parallel_pool_roots_are_unique_at_the_same_timestamp_and_never_adopt() {
+    let paths: Vec<_> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..16)
+            .map(|_| {
+                scope.spawn(|| {
+                    let path = pool_directory(123);
+                    create_pool_directory(&path).unwrap();
+                    path
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    assert_eq!(
+        paths
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        16
+    );
+    for path in paths {
+        let before = fs::symlink_metadata(&path).unwrap();
+        assert_eq!(before.mode() & 0o777, 0o700);
+        fs::write(path.join("marker"), b"owned fixture").unwrap();
+        assert_eq!(
+            create_pool_directory(&path).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::symlink_metadata(&path).unwrap().ino(), before.ino());
+        assert_eq!(fs::read(path.join("marker")).unwrap(), b"owned fixture");
+        fs::remove_file(path.join("marker")).unwrap();
+        fs::remove_dir(path).unwrap();
+    }
+}
 
 struct Pool {
     candidate: Candidate,
@@ -21,17 +80,13 @@ impl Pool {
         let mut process = identity::observe(child.id() as i32).unwrap();
         child.kill().unwrap();
         child.wait().unwrap();
-        let directory = fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!(
-                "hack-home-recovery-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-        state::private_directory(&directory).unwrap();
+        let directory = pool_directory(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        );
+        create_pool_directory(&directory).unwrap();
         let candidate = Candidate::discover(&directory).unwrap();
         let operation = state::Lock::acquire(&root(&candidate)).unwrap();
         let mut owner = Owner::create(
@@ -262,4 +317,52 @@ fn pending_owner_update_is_preserved_and_refuses_alias_repair() {
     );
     pool.unchanged(&before);
     assert_eq!(fs::read(&pending).unwrap(), b"interrupted update");
+}
+
+#[test]
+fn vm_lock_releases_on_success_and_error_even_with_an_inherited_descriptor() {
+    for fail in [false, true] {
+        let pool = Pool::new();
+        let listener =
+            fail.then(|| UnixListener::bind(pool.owner.data_dir().join("agent.sock")).unwrap());
+        let before = pool.receipt();
+        let guard = lock_absent_disks(&pool.candidate, &pool.owner).unwrap();
+        // A dup shares the open-file description, exactly as an inherited fork FD does.
+        let inherited = guard.try_clone().unwrap();
+        let independent = fs::File::open(pool.data().join("vm.lock")).unwrap();
+        assert_ne!(
+            unsafe { libc::flock(independent.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let mut owner = pool.owner.clone();
+        let result = finish_absent_locked(
+            &pool.candidate,
+            &mut owner,
+            "recovered-unclean",
+            false,
+            &guard,
+        );
+        if fail {
+            assert_eq!(result.unwrap_err().code, "stop_uncertain");
+            assert_eq!(pool.receipt(), before);
+        } else {
+            result.unwrap();
+            assert_eq!(
+                Owner::load(&pool.candidate).unwrap().phase,
+                "recovered-unclean"
+            );
+        }
+        drop(guard);
+        assert!(inherited.metadata().is_ok());
+        assert_eq!(
+            unsafe { libc::flock(independent.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        assert_eq!(
+            unsafe { libc::flock(independent.as_raw_fd(), libc::LOCK_UN) },
+            0
+        );
+        drop(inherited);
+        drop(listener);
+    }
 }

@@ -1,6 +1,39 @@
 use super::*;
 use crate::provider::{NetworkIntent, Profile, ProjectShareIntent};
-use std::{fs::File, os::fd::AsRawFd, path::PathBuf, process::Command};
+use std::{
+    fs::{self, File},
+    io::ErrorKind,
+    os::{fd::AsRawFd, unix::fs::DirBuilderExt},
+    path::PathBuf,
+    process::Command,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+fn private_pool_directory_at(timestamp_nanos: u128, sequence: &AtomicU64) -> PathBuf {
+    let base = fs::canonicalize(std::env::temp_dir()).unwrap();
+    loop {
+        let directory = base.join(format!(
+            "hack-device-recovery-{}-{timestamp_nanos}-{}",
+            std::process::id(),
+            sequence.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => return directory,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("cannot create private host-filesystem fixture: {error}"),
+        }
+    }
+}
+
+fn private_pool_directory() -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let timestamp_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    private_pool_directory_at(timestamp_nanos, &NEXT)
+}
 
 struct Pool {
     candidate: Candidate,
@@ -15,17 +48,7 @@ impl Pool {
         child.kill().unwrap();
         child.wait().unwrap();
         let boot = process.start_micros + 1;
-        let directory = fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!(
-                "hack-device-recovery-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-        state::private_directory(&directory).unwrap();
+        let directory = private_pool_directory();
         let candidate = Candidate::discover(&directory).unwrap();
         let operation = state::Lock::acquire(&root(&candidate)).unwrap();
         let project = directory.join("app");
@@ -91,6 +114,31 @@ impl Pool {
     fn unchanged(&self, before: &[u8]) {
         assert_eq!(self.receipt(), before);
         assert!(self.owner.short_home.symlink_metadata().is_err());
+    }
+}
+
+#[test]
+fn same_timestamp_parallel_roots_preserve_an_existing_directory() {
+    let timestamp_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let sequence = AtomicU64::new(0);
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| private_pool_directory_at(timestamp_nanos, &sequence));
+        let second = scope.spawn(|| private_pool_directory_at(timestamp_nanos, &sequence));
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    assert_ne!(first, second);
+    let sentinel = first.join("sentinel");
+    fs::write(&sentinel, b"untouched").unwrap();
+    let restarted_sequence = AtomicU64::new(0);
+    let third = private_pool_directory_at(timestamp_nanos, &restarted_sequence);
+    assert_ne!(third, first);
+    assert_ne!(third, second);
+    assert_eq!(fs::read(sentinel).unwrap(), b"untouched");
+    for directory in [first, second, third] {
+        fs::remove_dir_all(directory).unwrap();
     }
 }
 impl Drop for Pool {

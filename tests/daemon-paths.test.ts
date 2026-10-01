@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -19,7 +20,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  process.env.HOME = originalHome;
+  restoreEnv("HOME", originalHome);
 });
 
 test("resolveDaemonPaths uses ~/.hack/daemon defaults", () => {

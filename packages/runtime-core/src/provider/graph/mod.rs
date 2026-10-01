@@ -12,14 +12,38 @@ pub use normalized::run_normalized_with_host_dependencies_until;
 pub use normalized::{
     NormalizedInputIdentity, NormalizedRunOptions, compile_normalized_inputs, run_normalized,
 };
+#[cfg(target_os = "macos")]
+mod absent_publication_cleanup;
 mod admission;
 mod cache_provenance;
 mod dependency_hosts;
 #[cfg(target_os = "macos")]
 mod dependency_slots;
 #[cfg(target_os = "macos")]
+mod host_pin_recovery;
+#[cfg(target_os = "macos")]
+pub(crate) mod publication_gate;
+#[cfg(target_os = "macos")]
+pub(crate) mod quiescent_dependency_recovery;
+#[cfg(target_os = "macos")]
+pub use absent_publication_cleanup::{
+    inspect as inspect_absent_publication_cleanup, recover as recover_absent_publication_cleanup,
+};
+#[cfg(target_os = "macos")]
+mod source_device_rebind;
+#[cfg(target_os = "macos")]
 pub use dependency_slots::{
     inspect as dependency_reservations, recover_orphan as recover_dependency_reservation,
+};
+#[cfg(target_os = "macos")]
+pub use host_pin_recovery::{inspect as inspect_host_pin_recovery, recover as recover_host_pins};
+#[cfg(all(test, target_os = "macos"))]
+pub(in crate::provider) use source_device_rebind::fixture_https_witness;
+#[cfg(target_os = "macos")]
+pub(in crate::provider) use source_device_rebind::https_devices;
+#[cfg(target_os = "macos")]
+pub use source_device_rebind::{
+    inspect as inspect_source_device_rebind, recover as recover_source_device_rebind,
 };
 mod initializer_cache;
 mod volume_subpaths;
@@ -36,7 +60,14 @@ mod bridge_recovery;
 mod bridges;
 pub use bridge_recovery::{export_bridge_recovery, inspect_bridge_recovery};
 pub(in crate::provider) use bridges::{initialize_owner_registry, verify_owner_registry};
+#[cfg(target_os = "macos")]
+mod acknowledged_publisher;
 mod cleanup_enrollment;
+#[cfg(target_os = "macos")]
+pub use acknowledged_publisher::{
+    AcknowledgedPublisherSelection, release_dependencies as release_acknowledged_dependencies,
+    retire as retire_acknowledged_publisher,
+};
 #[cfg(target_os = "macos")]
 mod dead_owner_cleanup;
 #[cfg(target_os = "macos")]
@@ -1436,6 +1467,14 @@ pub fn source_compatibility(
     }
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
+    #[cfg(target_os = "macos")]
+    let source_rebind = source_device_rebind::select(&engine, &receipt, &root)?;
+    #[cfg(target_os = "macos")]
+    let source_receipt = source_rebind
+        .as_ref()
+        .map_or(&receipt, |selected| selected.source_receipt());
+    #[cfg(not(target_os = "macos"))]
+    let source_receipt = &receipt;
     if !hex(plan_id, 64)
         || project::identity(plan)? != plan_id
         || !normalized.matches_plan(plan)
@@ -1453,7 +1492,7 @@ pub fn source_compatibility(
         .services
         .values()
         .any(|service| service.active && service.dependency_cache.is_some());
-    let revision = receipt
+    let revision = source_receipt
         .source
         .as_ref()
         .map(|binding| binding.revision.as_str());
@@ -1466,8 +1505,13 @@ pub fn source_compatibility(
     }
     if !unchanged_normalized_review(&receipt, plan_id, normalized) {
         let revision = revision.ok_or_else(refused)?;
-        if hostname_change::prepare(&engine, plan, &receipt, normalized)?.is_none() {
-            source::prepare_shared_changed(&engine, plan, &receipt, cached.then_some(revision))?;
+        if hostname_change::prepare(&engine, plan, source_receipt, normalized)?.is_none() {
+            source::prepare_shared_changed(
+                &engine,
+                plan,
+                source_receipt,
+                cached.then_some(revision),
+            )?;
         }
     }
     Ok(json!({
@@ -1565,9 +1609,26 @@ pub fn cleanup(
 fn cleanup_owned(
     candidate: &Candidate,
     engine: &Engine<'_>,
+    receipt: Receipt,
+    root: &std::path::Path,
+    remove_data: bool,
+) -> Result<Receipt, CandidateError> {
+    cleanup_owned_fenced(candidate, engine, receipt, root, remove_data, false, || {
+        Ok(())
+    })
+}
+
+/// An explicit recovery can recheck its independent host proof immediately
+/// before each destructive graph effect. Ordinary callers use the same engine
+/// lease and state machine without an additional recovery witness.
+fn cleanup_owned_fenced(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
     mut receipt: Receipt,
     root: &std::path::Path,
     remove_data: bool,
+    early_intent: bool,
+    fence: impl Fn() -> Result<(), CandidateError>,
 ) -> Result<Receipt, CandidateError> {
     if root.join("state.pending").exists() || root.join("state.pending").is_symlink() {
         return Err(error(
@@ -1575,11 +1636,35 @@ fn cleanup_owned(
             "Pending graph journal is retained; cleanup is blocked until journal reconciliation.",
         ));
     }
+    fence()?;
+    // Absence recovery must commit the graph cleanup intent before changing a
+    // selected relay/bridge inventory. A crash can then resume from an exact
+    // durable intent even when an early external effect already completed.
+    let environment_slots = if early_intent {
+        let slots = environment::cleanup_slots(candidate, engine, &receipt)?;
+        receipt.phase = "cleanup-intent".into();
+        state::write(&root.join("state.json"), &receipt)?;
+        fence()?;
+        slots
+    } else {
+        Vec::new()
+    };
     startup::cleanup_guest(engine, &receipt, false)?;
+    fence()?;
     bridges::release_run(candidate, engine, &receipt)?;
-    let environment_slots = environment::cleanup_slots(candidate, engine, &receipt)?;
-    receipt.phase = "cleanup-intent".into();
-    state::write(&root.join("state.json"), &receipt)?;
+    #[cfg(test)]
+    if early_intent {
+        fault_pause(root, &receipt.run, "absent-after-bridge-release")?;
+    }
+    let environment_slots = if early_intent {
+        environment_slots
+    } else {
+        let slots = environment::cleanup_slots(candidate, engine, &receipt)?;
+        receipt.phase = "cleanup-intent".into();
+        state::write(&root.join("state.json"), &receipt)?;
+        slots
+    };
+    fence()?;
     shutdown::stop_owned(engine, &receipt, root)?;
     for kind in [Kind::Container, Kind::Network, Kind::Volume] {
         if kind == Kind::Volume && !remove_data {
@@ -1601,12 +1686,14 @@ fn cleanup_owned(
                 state::write(&root.join("state.json"), &receipt)?;
                 continue;
             }
+            fence()?;
             if let Some(value) = inspect_resource(engine, &receipt, &resource)? {
                 let target = if kind == Kind::Volume {
                     resource.name.as_str()
                 } else {
                     value["Id"].as_str().expect("verified id")
                 };
+                fence()?;
                 engine.request(
                     Method::DELETE,
                     &format!(
@@ -1635,12 +1722,15 @@ fn cleanup_owned(
             fault_pause(root, &receipt.run, "cleanup-after-remove")?;
         }
     }
+    fence()?;
     startup::cleanup_guest(engine, &receipt, true)?;
     startup::verify_cleanup(engine, &receipt)?;
     probes::cleanup(engine, &mut receipt)?;
     for slot in environment_slots {
+        fence()?;
         super::environment_recovery::retire(candidate, engine.guest(), &slot, None)?;
     }
+    fence()?;
     receipt.phase = if remove_data {
         "removed"
     } else {
@@ -1648,6 +1738,7 @@ fn cleanup_owned(
     }
     .into();
     state::write(&root.join("state.json"), &receipt)?;
+    fence()?;
     Ok(receipt)
 }
 
@@ -1685,6 +1776,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
     if options.timeout.is_zero() || options.timeout > Duration::from_secs(600) {
         return Err(error("graph_budget", "Invalid graph timeout."));
     }
+    let project_path = options.project.project;
     let inputs = project::inputs::compile(
         candidate,
         options.project,
@@ -1773,6 +1865,9 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
             ));
         }
     }
+    source::verify_cache_scope(source.as_ref(), project_path)?;
+    #[cfg(target_os = "macos")]
+    source_device_rebind::verify_cache_scope_origin(candidate, &receipt)?;
     receipt.phase = "restarting".into();
     for resource in receipt
         .resources

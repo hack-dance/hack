@@ -6,7 +6,7 @@ projects, or install DNS or trust automatically. Its graph commands support a
 bounded subset;
 this bundle is not application parity or release qualification.
 
-Build with the repository's pinned Bun 1.3.9, Rust 1.97.1 and Zig 0.15.2 toolchain, Python 3,
+Build with the repository's pinned Bun 1.4.2, Rust 1.97.1 and Zig 0.15.2 toolchain, Python 3,
 and the Rust `aarch64-unknown-linux-musl` standard library already installed. The
 build refuses missing prerequisites; it does not install toolchains:
 
@@ -93,6 +93,25 @@ still apply. A same-checkout branch namespace does not create an isolated source
 tree. These planning contracts do not qualify multiple independent source roots
 inside one VM pool.
 
+An existing frontend branch mapping may retain a graph admitted before native
+branch namespaces. If its current scoped review differs, the frontend first
+checks native selection against that exact saved run, owner, namespace and plan:
+restore selection for a stopped graph, or authenticated service selection for an
+active graph. A native unbranched review of the same canonical project and unchanged
+original Compose must then return the saved namespace. Only that retained run
+continues with unbranched review and execution arguments and keeps its original
+adapted route labels, before branch hostname rewriting. This preserves legacy
+source contracts that did not enroll hostname changes. The selected generation,
+restore selection and shared-source semantic compatibility are checked again
+before admission; mappings, graph receipts and ownership namespaces are not
+rewritten. Active legacy restart also rechecks its service, container, boot and
+receipt generation after compatibility review, before cleanup eligibility. A
+changed selection refuses before stopping the graph. This preflight check does
+not make cleanup atomic with that generation; existing ownership and frontend
+finalization checks still apply. Fresh and already branch-scoped graphs keep
+their normal branch namespace. This compatibility path does not authorize
+adopting an unrelated branch or project.
+
 ## Manual candidate upgrade and rollback
 
 Candidate bundles are selected by their full path. There is no automatic candidate
@@ -164,6 +183,70 @@ This does not start the VM, restore HOME, retire stale sockets or rewrite histor
 graph receipts. Use ordinary recovery afterward. Historical shared-source graphs
 retain the prior identity and may require verified cleanup plus a new generation;
 successful metadata migration alone does not establish application recovery.
+
+After that explicit provider recovery and one audited VM boot, a retained graph
+from the immediately preceding guest boot can still carry old host device numbers
+in its publisher, relay-control, and dependency-socket receipts. Inspect and select
+one run's host-pin recovery separately:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph inspect-host-pin-recovery --run-id <run-id> --json
+./hack-native --candidate-root /absolute/private/candidate-home graph recover-host-pins --run-id <run-id> --expect-selection <selection_sha256> --accept-legacy-device-rebind --json
+./hack-native --candidate-root /absolute/private/candidate-home graph recover-cleanup --run-id <run-id> --expect-receipt <original_receipt_sha256> --json
+./hack-native --candidate-root /absolute/private/candidate-home graph retire-recovered-publisher --run-id <run-id> --expect-owner <owner> --json
+```
+
+The first command only inspects. The second publishes a private, exact-run
+witness before cleanup; it changes no graph, publisher, control, or dependency
+receipt. It requires the provider's repaired current disks/source, unchanged
+recorded inodes and raw receipts, dead owners whose recorded starts precede the
+current physical host boot, refused socket listeners, and the immediate guest
+boot transition. It also binds retained volume names and actual labels. Cleanup
+and retirement can use the witness only for those selected old pins; ordinary
+reads and later publisher generations remain strict. Missing or foreign pins,
+active listeners, changed resources, pending journals, or further guest boots
+refuse without adopting another run. A completed older cleanup journal is
+retained as history and does not itself block a later selected generation.
+
+Legacy receipts do not identify the original APFS volume. This explicit
+device-number rebind cannot prove pre-reboot volume continuity. Completing these
+commands retains the old run's data and proves cleanup of its dead generation;
+it does not migrate `graph.source.shared`, restore the application, establish
+route readiness, or claim overall v5 acceptance. Same-run source continuity
+requires a separate explicit witness-bound transition after cleanup and
+publisher retirement. If macOS removed the foreground or relay-control
+directory itself during reboot, this command refuses: the old pin receipts no
+longer exist, and absent pathnames cannot stand in for their recorded owner
+identities. That case requires a separate selected absence-recovery procedure.
+
+When a **physical host reboot** removed both the deterministic foreground
+publication root and this run's relay-control root, inspect the distinct
+absence path with the private original provider Owner and its exact
+pre-migration host-filesystem inspection:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph inspect-absent-publication-cleanup --run-id <run-id> --original-owner-file <private-original-owner.json> --host-inspection-file <private-inspection.json> --json
+./hack-native --candidate-root /absolute/private/candidate-home graph recover-absent-publication-cleanup --run-id <run-id> --original-owner-file <private-original-owner.json> --host-inspection-file <private-inspection.json> --expect-selection <selection_sha256> --retain-data --accept-unpinned-post-reboot --json
+```
+
+Inspection does not create a publication root. A failed selected action can
+leave only its private lock reservation; inspection recognizes that exact
+lock-only state. Recovery locks the foreground publication before acquiring
+the VM lease, then durably records the selected absence before any cleanup.
+It retains volumes, verifies the stopped receipt, and records a separate
+absent-publisher retirement. Ordinary publication and cleanup cannot infer
+ownership from missing paths. The old foreground PID and original physical
+volume are not proved by legacy graph receipts; this path requires explicit
+acceptance of that post-reboot limitation and refuses a changed boot, present
+or foreign publication, stale selection, pending state, or changed resources.
+An interrupted recovery can resume only its exact selected intent on the same
+host and immediate guest boot. A later successful restore treats this witness
+as history; it never grants cleanup of the new generation.
+
+This operation does not change historical shared-source device identity.
+Source-mounted projects require the separate selected source-continuity step
+before normal same-run restore. The command's stopped/data-retained result is
+not proof of application startup or routing.
 
 The frontend project-run mapping also records directory device numbers. If native
 inspection succeeds after provider recovery but ordinary project commands refuse
@@ -301,6 +384,12 @@ and route selections.
 Normal foreground `hack restart` performs this selection and retained-data restore.
 It verifies the old containers and networks are absent and the retained volumes
 still have their recorded identities; it does not silently create replacement data.
+When the original Compose file is unchanged, retained startup also selects the
+authenticated container image IDs from that stopped graph. Mutable tags are not
+resolved again for those services. Missing images still refuse native admission;
+this selection never replaces generation, source or resource checks. Changing the
+original Compose file uses normal image resolution and the existing compatibility
+rules, rather than silently adopting an old image for a new declaration.
 For a shared-source graph admitted with a retained compatibility contract, ordinary
 source-content edits may change the reviewed plan ID: restart checks the stable
 execution, exclusion, mount and dependency-cache inputs before cleanup and again
@@ -507,7 +596,16 @@ requires ownership inspection rather than automatic removal. Restart does not
 implicitly migrate a shared pool's network policy or interrupt other projects.
 When an interrupted frontend cannot write that final acknowledgement, an explicit
 `restart --recover-frontend --expect-finalization-attempt <32-hex>` can resume
-the saved, already-cleaned restart intent. New attempts retain their frontend
+the saved, already-cleaned restart intent. It can also preflight an exact graph
+that was stopped before the frontend saved an intent: fresh native observations
+must prove absent containers/networks and present retained volumes, and repeat
+that proof after review before cleanup. The normal intent, retaining down,
+frontend recovery and startup sequence still runs. An active graph keeps its
+authenticated service selection and live-listener checks; uncertain observations
+cannot select the stopped path. Stopped preflight retains the admitted
+image IDs when the original Compose input is unchanged, matching retained startup
+instead of resolving mutable tags again. Changed original input keeps normal
+image resolution and the existing compatibility checks. New attempts retain their frontend
 PID and HTTPS port in the private token. Older v1 attempts additionally require
 `--expect-frontend-pid <previously-observed-pid>`; a guessed PID is not recovery
 evidence. Recovery requires the exact stopped graph receipt with its volumes
@@ -874,6 +972,22 @@ capacity pins, and otherwise keeps the stock templates; `runtime status` records
 with `runtime prepared-base remove --base-id BASE_ID`; a pool never depends on its base after the
 first start.
 
+`scripts/accept-native-frontend.py` checks this path end to end for one owned linked worktree.
+- It builds and verifies a base, then runs ordinary `hack-v5 up` with `require`, so the frontend
+  creates the pool from that base with the worktree as its exact share.
+- It checks healthy HTTPS against the home's private Caddy root and writes a `/data` marker.
+- It runs `down`, edits the served file on the host, and runs `up` again. It then requires the
+  same run in a new container, HTTPS serving exactly the edit, and the marker.
+- Finally it disposes of the pool, base, provider alias and fixture with readbacks.
+
+It prints its plan unless `--run` is given and is a correctness check only. On any failure, or
+when its `--budget` runs out, it issues no further commands and keeps all state for diagnosis.
+The only process it can terminate is one of its own bounded commands, whose direct child
+`subprocess.run` kills when its timeout expires; it never signals a foreground or a VM. Ambient
+`HACK_NATIVE_*` variables are dropped, so only its declared selections reach the candidate. Its
+stand-in controls run with
+`python3 -m unittest discover -s tests/python -p test_native_frontend_acceptance.py`.
+
 ### Optional native HTTPS frontend
 
 For routed foreground startup, explicitly set all three public selections:
@@ -982,8 +1096,15 @@ operation stops verified guest dependency listeners, removes owned containers an
 network resources, retains persistent data, retires stale foreground and relay
 publications, and releases the graph's dependency reservation before unlocking the
 pool. It does not restart the pool. Pending startup, one-off or dependency
-rebind state is refused. Completion records owner-death evidence independently of
+rebind state is refused. A completed dependency refresh is accepted only for the
+current boot and exact ready receipt generation, with matching terminal services
+and helper markers. After owned absence is independently verified, its journal is
+archived before stale publications are retired. An interrupted archive resumes
+from the committed cleanup proof and exact journal bytes; it never replays refresh.
+Completion records owner-death evidence independently of
 the live relay acknowledgement protocol.
+When a restored publisher is admitted, older absence-retirement records remain
+validated history; the exact current cleanup proof supplies retention authority.
 
 After completion, retained restore can create a fresh owner;
 `graph retire-recovered-publisher --run-id RUN --expect-owner OWNER` remains an

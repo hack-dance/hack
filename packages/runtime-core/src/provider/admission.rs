@@ -42,6 +42,7 @@ pub struct Admission {
     pub memory_pressure_normal: bool,
     pub disk_free_bytes: Option<u64>,
     pub minimum_disk_free_bytes: u64,
+    pub disk_budget_basis: &'static str,
     pub one_minute_load: Option<f64>,
     pub load_ceiling: Option<f64>,
     pub thermal_normal: bool,
@@ -167,6 +168,37 @@ pub fn probe(path: &Path) -> Result<Admission, CandidateError> {
 }
 
 pub fn probe_for(path: &Path, profile: Profile) -> Result<Admission, CandidateError> {
+    probe_with_disk_budget(path, profile, false)
+}
+
+/// Only the lifecycle's independently verified live development pool may use this budget.
+pub(super) fn probe_owned_development(path: &Path) -> Result<Admission, CandidateError> {
+    probe_with_disk_budget(path, Profile::Development, true)
+}
+
+fn disk_budget(profile: Profile, owned_live: bool) -> (u64, &'static str) {
+    if profile == Profile::Development && owned_live {
+        (
+            DEVELOPMENT_HOST_DISK_RESERVE_GIB * 1024 * 1024 * 1024,
+            "verified-live-owned-pool-host-reserve",
+        )
+    } else {
+        (
+            disk_floor_bytes(profile),
+            if profile == Profile::Research {
+                "research-floor"
+            } else {
+                "new-pool-storage-overlay-host-reserve"
+            },
+        )
+    }
+}
+
+fn probe_with_disk_budget(
+    path: &Path,
+    profile: Profile,
+    owned_live: bool,
+) -> Result<Admission, CandidateError> {
     let supported = cfg!(all(target_os = "macos", target_arch = "aarch64"));
     let mut result = Admission {
         profile,
@@ -181,7 +213,8 @@ pub fn probe_for(path: &Path, profile: Profile) -> Result<Admission, CandidateEr
         },
         memory_pressure_normal: false,
         disk_free_bytes: None,
-        minimum_disk_free_bytes: disk_floor_bytes(profile),
+        minimum_disk_free_bytes: disk_budget(profile, owned_live).0,
+        disk_budget_basis: disk_budget(profile, owned_live).1,
         one_minute_load: None,
         load_ceiling: None,
         thermal_normal: false,
@@ -272,6 +305,9 @@ pub fn probe_for(path: &Path, profile: Profile) -> Result<Admission, CandidateEr
         result.reasons.push(
             match profile {
                 Profile::Research => "Free disk is below the 100 GiB research floor.",
+                Profile::Development if owned_live => {
+                    "Free disk is below the host reserve for the verified running development pool."
+                }
                 Profile::Development => {
                     "Free disk is below the development VM storage and host reserve budget."
                 }
@@ -301,10 +337,17 @@ pub fn qualification(path: &Path) -> Result<Vec<Admission>, CandidateError> {
 }
 
 pub fn sample_for(path: &Path, profile: Profile) -> Result<Vec<Admission>, CandidateError> {
+    sample_with(profile, || probe_for(path, profile))
+}
+
+pub(super) fn sample_with(
+    profile: Profile,
+    mut observe: impl FnMut() -> Result<Admission, CandidateError>,
+) -> Result<Vec<Admission>, CandidateError> {
     let mut samples: Vec<Admission> = Vec::new();
     for index in 0..3 {
-        let sample = probe_for(path, profile)?;
-        if !sample.admitted {
+        let sample = observe()?;
+        if !sample.admitted || sample.profile != profile {
             return Err(CandidateError::new(
                 "admission_rejected",
                 sample.reasons.join(" "),
@@ -340,6 +383,9 @@ mod tests {
         const GIB: u64 = 1024 * 1024 * 1024;
         assert_eq!(disk_floor_bytes(Profile::Research), 100 * GIB);
         assert_eq!(disk_floor_bytes(Profile::Development), 58 * GIB);
+        assert_eq!(disk_budget(Profile::Development, true).0, 16 * GIB);
+        assert_eq!(disk_budget(Profile::Research, true).0, 100 * GIB);
+        assert_eq!(disk_budget(Profile::Development, false).0, 58 * GIB);
         assert_eq!(load_ceiling(Profile::Research), Some(8.0));
         assert_eq!(load_ceiling(Profile::Development), None);
     }

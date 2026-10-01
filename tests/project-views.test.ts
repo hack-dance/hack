@@ -17,6 +17,7 @@ import type {
   RuntimeProject,
   RuntimeService,
 } from "../src/lib/runtime-projects.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let originalGlobalConfigPath: string | undefined;
@@ -622,7 +623,7 @@ test("buildProjectViews tolerates missing optional mux binaries", async () => {
     });
     expect(views).toEqual([]);
   } finally {
-    process.env.PATH = previousPath;
+    restoreEnv("PATH", previousPath);
     await rm(emptyPathDir, { recursive: true, force: true });
   }
 });

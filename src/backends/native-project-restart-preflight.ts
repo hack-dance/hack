@@ -5,7 +5,6 @@ import { dirname, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
-import { prepareNativeProjectBranch } from "./native-project-branch.ts";
 import {
   discoverNativeHostDependency,
   type NativeHostDependency,
@@ -21,7 +20,13 @@ import {
   verifyNativeSourceCompatibility,
 } from "./native-project-restore.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
-import { withNativeProjectReview } from "./native-project-review.ts";
+import { selectNativeRetainedImages } from "./native-project-retained-images.ts";
+import {
+  prepareNativeReviewBranch,
+  selectNativeProjectReviewIdentity,
+  verifyNativeActiveReview,
+  withNativeProjectReview,
+} from "./native-project-review.ts";
 import {
   type NativeProjectRun,
   type NativeProjectRunScope,
@@ -41,6 +46,8 @@ const DEFAULTS = {
   dependencies: readNativeHostDependencies,
   invoke: invokeNativeRuntime,
   review: withNativeProjectReview,
+  selectReview: selectNativeProjectReviewIdentity,
+  retainedImages: selectNativeRetainedImages,
 };
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const SHA = /^[a-f0-9]{64}$/;
@@ -207,6 +214,88 @@ export function nativeRestartSelection(opts: {
   };
 }
 
+async function inspectRestartGraph(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<unknown> {
+  try {
+    return await inspectNativeProjectGraph({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      run: opts.run.run,
+      invoke: opts.invoke,
+    });
+  } catch {
+    throw new Error(
+      "Native restart cannot confirm the stopped retained graph; no listener discovery or cleanup was requested."
+    );
+  }
+}
+
+async function stoppedRestartMode(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+  readonly cleanedRetry?: boolean;
+  readonly recoverStopped?: boolean;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<boolean> {
+  if (!(opts.cleanedRetry || opts.recoverStopped)) {
+    return false;
+  }
+  const observed = await inspectRestartGraph(opts);
+  const confirmed = confirmedNativeRetainedGraph(observed, opts.run);
+  if (
+    !confirmed &&
+    (opts.cleanedRetry ||
+      (isRecord(observed) &&
+        isRecord(observed.receipt) &&
+        observed.receipt.phase === "stopped-data-retained"))
+  ) {
+    throw new Error(
+      "Native restart cannot confirm the stopped retained graph; no listener discovery or cleanup was requested."
+    );
+  }
+  // Unconfirmed graphs retain active selection and live-listener checks.
+  return confirmed;
+}
+
+async function pinRestartImages(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly specs: Record<string, Record<string, unknown>>;
+  readonly retainedImages: ReadonlyMap<string, string>;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<void> {
+  for (const [name, spec] of Object.entries(opts.specs)) {
+    const retainedImage = opts.retainedImages.get(name);
+    if (retainedImage) {
+      spec.image = retainedImage;
+      continue;
+    }
+    const image = String(spec.image);
+    if (IMAGE.test(image)) {
+      continue;
+    }
+    // Owned cache acquisition grants no authority to stop the current graph.
+    const pinned = await opts.invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: ["runtime", "ensure-image", "--reference", image, "--json"],
+    });
+    if (
+      !isRecord(pinned) ||
+      typeof pinned.image_id !== "string" ||
+      !IMAGE.test(pinned.image_id)
+    ) {
+      throw new Error("Native restart image selection failed before cleanup.");
+    }
+    spec.image = pinned.image_id;
+  }
+}
+
 /** Review the same public graph before stopping anything; never run startup hooks here. */
 export async function preflightNativeRestart(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -214,6 +303,8 @@ export async function preflightNativeRestart(opts: {
   readonly composeFile: string;
   readonly run: NativeProjectRun;
   readonly cleanedRetry?: boolean;
+  /** Explicit frontend recovery may encounter a graph stopped before an intent was saved. */
+  readonly recoverStopped?: boolean;
   readonly adaptationFile?: string;
   readonly dependencyFile?: string;
   readonly allowedHosts?: readonly string[];
@@ -221,26 +312,10 @@ export async function preflightNativeRestart(opts: {
 }) {
   const deps = { ...DEFAULTS, ...opts.dependencies };
   const selected = nativeRestartSelection({ run: opts.run });
-  if (opts.cleanedRetry) {
-    let observed: unknown;
-    try {
-      observed = await inspectNativeProjectGraph({
-        runtime: opts.runtime,
-        projectRoot: opts.scope.projectRoot,
-        run: opts.run.run,
-        invoke: deps.invoke,
-      });
-    } catch {
-      throw new Error(
-        "Native restart cannot confirm the stopped retained graph; no listener discovery or cleanup was requested."
-      );
-    }
-    if (!confirmedNativeRetainedGraph(observed, opts.run)) {
-      throw new Error(
-        "Native restart cannot confirm the stopped retained graph; no listener discovery or cleanup was requested."
-      );
-    }
-  }
+  const stoppedRetry = await stoppedRestartMode({
+    ...opts,
+    invoke: deps.invoke,
+  });
   requireNativeRestartNetwork(
     await deps.invoke({
       runtime: opts.runtime,
@@ -268,11 +343,19 @@ export async function preflightNativeRestart(opts: {
     input,
     path: opts.adaptationFile,
   });
-  input = await prepareNativeProjectBranch({
-    input,
+  const reviewedBranch = await prepareNativeReviewBranch({
+    runtime: opts.runtime,
     scope: opts.scope,
     composeFile: opts.composeFile,
+    profiles: selected.profiles,
+    input,
+    retained: opts.run,
+    retainedMode: stoppedRetry ? "stopped" : "active",
+    invoke: deps.invoke,
+    select: deps.selectReview,
   });
+  input = reviewedBranch.input;
+  const reviewIdentity = reviewedBranch.identity;
   if (selected.aws) {
     input = (await deps.aws({ input, ...selected.aws })).input;
   }
@@ -280,7 +363,7 @@ export async function preflightNativeRestart(opts: {
     input,
     opts.dependencyFile !== undefined
   );
-  const dependencies = opts.cleanedRetry
+  const dependencies = stoppedRetry
     ? await readNativeRestartDependencyIntent({
         path: opts.dependencyFile,
         services: Object.keys(specs),
@@ -298,26 +381,22 @@ export async function preflightNativeRestart(opts: {
           }),
       });
   prepareNativeDependencyServices({ dependencies, services: specs });
-  for (const spec of Object.values(specs)) {
-    const image = String(spec.image);
-    if (IMAGE.test(image)) {
-      continue;
-    }
-    // Image acquisition may populate an owned cache, but cannot stop the current graph.
-    const pinned = await deps.invoke({
-      runtime: opts.runtime,
-      cwd: opts.scope.projectRoot,
-      args: ["runtime", "ensure-image", "--reference", image, "--json"],
-    });
-    if (
-      !isRecord(pinned) ||
-      typeof pinned.image_id !== "string" ||
-      !IMAGE.test(pinned.image_id)
-    ) {
-      throw new Error("Native restart image selection failed before cleanup.");
-    }
-    spec.image = pinned.image_id;
-  }
+  const retainedImages = stoppedRetry
+    ? await deps.retainedImages({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        originalSha256: input.originalSha256,
+        restore: opts.run,
+        invoke: deps.invoke,
+      })
+    : new Map<string, string>();
+  await pinRestartImages({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    specs,
+    retainedImages,
+    invoke: deps.invoke,
+  });
   const compose = JSON.parse(input.normalizedComposeJson);
   compose.services = specs;
   await deps.review({
@@ -326,6 +405,10 @@ export async function preflightNativeRestart(opts: {
     composeFile: opts.composeFile,
     profiles: selected.profiles,
     branch: opts.scope.branch,
+    retained: opts.run,
+    retainedMode: stoppedRetry ? "stopped" : "active",
+    reviewIdentity,
+    invoke: deps.invoke,
     input: { ...input, normalizedComposeJson: JSON.stringify(compose) },
     run: async (review) => {
       if (review.namespace !== opts.run.namespace) {
@@ -348,8 +431,26 @@ export async function preflightNativeRestart(opts: {
         planId: review.planId,
         dependencies,
         invoke: deps.invoke,
-        cleanedRetry: opts.cleanedRetry === true,
+        cleanedRetry: stoppedRetry,
       });
+      await verifyNativeActiveReview({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        retained: opts.run,
+        proof: reviewIdentity?.activeProof,
+        invoke: deps.invoke,
+      });
+      if (stoppedRetry && opts.recoverStopped && !opts.cleanedRetry) {
+        const observed = await inspectRestartGraph({
+          ...opts,
+          invoke: deps.invoke,
+        });
+        if (!confirmedNativeRetainedGraph(observed, opts.run)) {
+          throw new Error(
+            "Native restart stopped recovery changed during review; no cleanup was requested."
+          );
+        }
+      }
     },
   });
 }

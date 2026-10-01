@@ -419,6 +419,77 @@ fn exercise(previous_boot: bool) {
                 deadline,
             );
             assert!(owners[0].wait(deadline).success());
+            let graph_root = graph::directory(&candidate, &runs[0]).unwrap();
+            let stopped_path = graph_root.join("state.json");
+            let stopped_bytes = fs::read(&stopped_path).unwrap();
+            let stopped = snapshot(&candidate, &runs[0], deadline);
+            assert_eq!(stopped.receipt.phase, "stopped-data-retained");
+            let volume = stopped.observations["volume:data"].clone();
+            let mount = volume["Mountpoint"].as_str().unwrap();
+            let sibling_path = graph::directory(&candidate, &runs[1])
+                .unwrap()
+                .join("state.json");
+            let sibling_bytes = fs::read(&sibling_path).unwrap();
+            for _ in 0..2 {
+                let result = checked_cli(
+                    "confirm-ordinary-retirement",
+                    &binary,
+                    &candidate,
+                    &[
+                        "graph",
+                        "retire-recovered-publisher",
+                        "--run-id",
+                        &runs[0],
+                        "--expect-owner",
+                        &stopped.receipt.owner,
+                        "--json",
+                    ],
+                    deadline,
+                );
+                assert_eq!(result["publisher_retired"], true);
+                assert_eq!(result["data_retained"], true);
+                assert_eq!(fs::read(&stopped_path).unwrap(), stopped_bytes);
+                let observed = snapshot(&candidate, &runs[0], deadline);
+                assert_eq!(observed.observations["volume:data"], volume);
+                let engine = graph::Engine::connect_cleanup(&candidate).unwrap();
+                assert_eq!(
+                    engine
+                        .guest()
+                        .execute_cleanup(
+                            "set -eu; test ! -L \"$1\"; test ! -L \"$1/hack-rebind-marker\"; test \"$(cat \"$1/hack-rebind-marker\")\" = retained-dependency-rebind-v1; printf preserved",
+                            &[mount],
+                        )
+                        .unwrap(),
+                    "preserved"
+                );
+                assert!(owners[1].poll().is_none());
+                assert_eq!(fs::read(&sibling_path).unwrap(), sibling_bytes);
+            }
+            let other_owner = if stopped.receipt.owner == "f".repeat(32) {
+                "e".repeat(32)
+            } else {
+                "f".repeat(32)
+            };
+            let mut wrong_owner = Process::start(
+                &binary,
+                &candidate,
+                &[
+                    "graph",
+                    "retire-recovered-publisher",
+                    "--run-id",
+                    &runs[0],
+                    "--expect-owner",
+                    &other_owner,
+                    "--json",
+                ],
+                None,
+            );
+            assert_eq!(wrong_owner.wait(deadline).code(), Some(2));
+            assert!(wrong_owner.out.is_empty());
+            let error: Value = serde_json::from_slice(&wrong_owner.err).unwrap();
+            assert_eq!(error["code"], "graph_acknowledged_publisher");
+            assert_eq!(fs::read(&stopped_path).unwrap(), stopped_bytes);
+            assert_eq!(fs::read(&sibling_path).unwrap(), sibling_bytes);
             let selection = graph::foreground::restore_selection(&candidate, &runs[0]).unwrap();
             owners[0] = start(0, Some(selection["generation"].as_str().unwrap()));
             ready(&mut owners[0], &runs[0], deadline);

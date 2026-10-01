@@ -20,7 +20,6 @@ mod tests;
 pub(in crate::provider::graph) mod transport;
 pub(in crate::provider::graph) use transport::DeadOwner;
 pub(in crate::provider::graph) use transport::retire_recovered_publisher as retire_publisher_path;
-pub(in crate::provider::graph) use transport::verify_recovered_publisher_retired;
 use transport::{Publication, WireRequest};
 fn refused() -> CandidateError {
     CandidateError::new(
@@ -164,10 +163,20 @@ pub fn restore_selection(candidate: &Candidate, run: &str) -> Result<Value, Cand
             return Err(refused());
         }
     }
+    #[cfg(target_os = "macos")]
+    let source_rebind = super::source_device_rebind::select(&engine, &receipt, &root)?;
+    #[cfg(target_os = "macos")]
+    let generation = super::restore::restore_generation_with_source_rebind(
+        &engine,
+        &receipt,
+        source_rebind.as_ref(),
+    )?;
+    #[cfg(not(target_os = "macos"))]
+    let generation = super::restore::restore_generation(&engine, &receipt)?;
     retired.verify()?;
     Ok(
         json!({"run":receipt.run,"owner":receipt.owner,"namespace":receipt.namespace,"plan":receipt.plan_id,
-        "generation":super::restore::restore_generation(&engine,&receipt)?,"normalized_input":receipt.normalized_input}),
+        "generation":generation,"normalized_input":receipt.normalized_input}),
     )
 }
 
@@ -228,6 +237,7 @@ fn serve_input<'a>(
             deadline,
             &mut runtime,
             generation,
+            &|| publication.verify(),
         )
     } else if let Some((compose, _)) = normalized {
         super::run_normalized_with_host_dependencies_until(

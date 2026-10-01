@@ -77,6 +77,49 @@ pub(in crate::provider::graph::startup::runtime) fn after_cleanup(
     cleaned: &Receipt,
     boot: &str,
 ) -> Result<(), CandidateError> {
+    after_cleanup_fenced(root, original, cleaned, boot, &|| Ok(()))
+}
+
+/// A completed prior-boot journal must match the selected original ready
+/// generation before first archival admission. A durable proof alone permits
+/// exact rename recovery after the active journal has already moved.
+#[cfg(any(target_os = "macos", test))]
+pub(in crate::provider::graph::startup::runtime) fn retired_completed(
+    root: &Path,
+    original: &Receipt,
+    cleaned: &Receipt,
+    boot: &str,
+    verify: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    verify()?;
+    let generation = service_exec_generation(original)?;
+    let proof = root.join(format!("dependency-rebind-history-{generation}/proof.json"));
+    let journal_root = if bytes(&root.join(JOURNAL))?.is_some() {
+        root.to_owned()
+    } else {
+        proof.parent().ok_or_else(rejected)?.to_owned()
+    };
+    let journal = existing(&journal_root, original)?.ok_or_else(rejected)?;
+    if journal.phase != "completed"
+        || journal.boot != boot
+        || journal.completed_generation.as_deref() != Some(generation.as_str())
+    {
+        return Err(rejected());
+    }
+    if bytes(&proof)?.is_none() {
+        require_complete(root, original)?;
+    }
+    after_cleanup_fenced(root, original, cleaned, boot, verify)
+}
+
+fn after_cleanup_fenced(
+    root: &Path,
+    original: &Receipt,
+    cleaned: &Receipt,
+    boot: &str,
+    verify: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    verify()?;
     state::check_private_directory(root)?;
     if boot.is_empty()
         || original.run != cleaned.run
@@ -118,6 +161,7 @@ pub(in crate::provider::graph::startup::runtime) fn after_cleanup(
     state::private_directory(&history)?;
     // A partial proof write is preserved before the same exact owned cleanup
     // reconstructs it. It is never interpreted as a capability or state receipt.
+    verify()?;
     crate::provider::graph::journal::retain_file(
         &history,
         "proof.pending",
@@ -160,6 +204,7 @@ pub(in crate::provider::graph::startup::runtime) fn after_cleanup(
             artifacts: active,
             complete: false,
         };
+        verify()?;
         state::write(&proof_path, &proof)?;
         proof
     };
@@ -179,6 +224,10 @@ pub(in crate::provider::graph::startup::runtime) fn after_cleanup(
             if digest(&value) != proof.artifacts[name] {
                 return Err(rejected());
             }
+            verify()?;
+            if bytes(&root.join(name))?.as_deref() != Some(value.as_slice()) {
+                return Err(rejected());
+            }
             fs::rename(root.join(name), history.join(name)).map_err(state::io)?;
             sync(&history)?;
             sync(root)?;
@@ -186,7 +235,8 @@ pub(in crate::provider::graph::startup::runtime) fn after_cleanup(
     }
     if !proof.complete {
         proof.complete = true;
+        verify()?;
         state::write(&proof_path, &proof)?;
     }
-    Ok(())
+    verify()
 }

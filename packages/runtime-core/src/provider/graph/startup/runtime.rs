@@ -695,7 +695,22 @@ impl Driver for HostRelayRuntime {
                     state::write(&root.join("state.json"), receipt)?;
                     return Err(stage_refused("graph_startup_application_failed"));
                 }
-                verify_exited_listener(receipt.readiness.get(name), &observed)?;
+                if let Err(error) = verify_exited_listener(receipt.readiness.get(name), &observed) {
+                    if error.code == "graph_startup_listener_unexpected_exit"
+                        && observation == (Observation::Exited { code: 0 })
+                    {
+                        // A successful process exit can still lose a required
+                        // listener. Keep its identity before cleanup removes it.
+                        return Err(startup_failure::preserve_listener_error(
+                            root,
+                            receipt,
+                            name,
+                            observation,
+                            error,
+                        ));
+                    }
+                    return Err(error);
+                }
             }
         }
         Ok(())
@@ -1045,6 +1060,12 @@ mod route_tests {
         verify_exited_listener(Some(&Condition::Completed), &exited).unwrap();
         assert_eq!(
             verify_exited_listener(Some(&Condition::Started), &exited)
+                .unwrap_err()
+                .code,
+            "graph_startup_listener_unexpected_exit"
+        );
+        assert_eq!(
+            verify_exited_listener(Some(&Condition::Healthy), &exited)
                 .unwrap_err()
                 .code,
             "graph_startup_listener_unexpected_exit"

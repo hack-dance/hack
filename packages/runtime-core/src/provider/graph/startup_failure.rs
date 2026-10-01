@@ -1,7 +1,12 @@
 //! Value-free historical failure evidence, independent of container retention.
 use super::{Kind, Receipt, error, hex};
-use crate::{CandidateError, project::execution::Observation};
+use crate::{
+    CandidateError,
+    project::execution::{Condition, Observation},
+};
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "macos", test))]
+use std::path::Path;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,7 +24,12 @@ impl Failure {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
             && hex(&self.container, 64)
-            && self.observation.failed()
+            && (self.observation.failed()
+                || (self.observation == Observation::Exited { code: 0 }
+                    && matches!(
+                        receipt.readiness.get(&self.service),
+                        Some(Condition::Started | Condition::Healthy)
+                    )))
             && receipt
                 .resources
                 .get(&format!("container:{}", self.service))
@@ -45,6 +55,21 @@ pub(super) fn record(
     }
     receipt.startup_failure = Some(failure);
     Ok(())
+}
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn preserve_listener_error(
+    root: &Path,
+    receipt: &mut Receipt,
+    service: &str,
+    observation: Observation,
+    error: CandidateError,
+) -> CandidateError {
+    match record(receipt, service, observation)
+        .and_then(|()| super::state::write(&root.join("state.json"), receipt))
+    {
+        Ok(()) => error,
+        Err(diagnostic) => error.with_cause_code(diagnostic.code.into()),
+    }
 }
 fn refused() -> CandidateError {
     error(
@@ -85,12 +110,66 @@ mod tests {
     #[test]
     fn only_failed_owned_service_observations_are_recorded() {
         let mut receipt = receipt();
-        for state in [Observation::Created, Observation::Exited { code: 0 }] {
-            assert!(record(&mut receipt, "redis", state).is_err());
-        }
+        assert!(record(&mut receipt, "redis", Observation::Created).is_err());
         assert!(record(&mut receipt, "foreign", Observation::Dead).is_err());
         receipt.resources.get_mut("container:redis").unwrap().id = Some("invalid".into());
         assert!(record(&mut receipt, "redis", Observation::Dead).is_err());
         assert!(receipt.startup_failure.is_none());
+    }
+    #[test]
+    fn required_listener_zero_exit_survives_cleanup() {
+        for condition in [Condition::Started, Condition::Healthy] {
+            let mut receipt = receipt();
+            receipt.readiness.insert("redis".into(), condition);
+            record(&mut receipt, "redis", Observation::Exited { code: 0 }).unwrap();
+            receipt.phase = "stopped-data-retained".into();
+            receipt.resources.get_mut("container:redis").unwrap().id = None;
+            let root = super::super::tests::Fixture::new();
+            crate::provider::state::write(&root.0.join("state.json"), &receipt).unwrap();
+            let (retained, _) =
+                super::super::load_at(root.0.clone(), &receipt.run, &receipt.owner).unwrap();
+            let failure = retained.startup_failure.as_ref().unwrap();
+            assert_eq!(failure.service, "redis");
+            assert_eq!(failure.container, "e".repeat(64));
+            assert_eq!(failure.observation, Observation::Exited { code: 0 });
+        }
+    }
+    #[test]
+    fn successful_completion_is_not_startup_failure_evidence() {
+        let mut receipt = receipt();
+        receipt
+            .readiness
+            .insert("redis".into(), Condition::Completed);
+        assert!(record(&mut receipt, "redis", Observation::Exited { code: 0 }).is_err());
+        receipt.readiness.clear();
+        assert!(record(&mut receipt, "redis", Observation::Exited { code: 0 }).is_err());
+        assert!(receipt.startup_failure.is_none());
+    }
+    #[test]
+    fn failed_evidence_write_preserves_original_error_and_pending_bytes() {
+        let root = super::super::tests::Fixture::new();
+        let pending = root.0.join("state.pending");
+        std::fs::write(&pending, b"retained pending evidence").unwrap();
+        let mut receipt = receipt();
+        let error = preserve_listener_error(
+            &root.0,
+            &mut receipt,
+            "redis",
+            Observation::Exited { code: 0 },
+            CandidateError::new("graph_startup_listener_unexpected_exit", "Startup failed."),
+        );
+        assert_eq!(error.code, "graph_startup_listener_unexpected_exit");
+        assert_eq!(error.cause_code.as_deref(), Some("provider_state"));
+        assert_eq!(error.message, "Startup failed.");
+        assert_eq!(
+            std::fs::read(&pending).unwrap(),
+            b"retained pending evidence"
+        );
+        assert!(!root.0.join("state.json").exists());
+        assert!(
+            !serde_json::to_string(&error)
+                .unwrap()
+                .contains("state.pending")
+        );
     }
 }

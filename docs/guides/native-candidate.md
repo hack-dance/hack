@@ -858,6 +858,13 @@ understand the new completed startup phase.
 Use the current owning bundle for retaining cleanup and journal archival before
 selecting an older bundle; do not substitute an older binary against active state.
 
+If a required startup listener exits with a service declared `started` or
+`healthy`, the stopped receipt preserves the owned service name, container ID and
+exit observation before cleanup, including exit code zero. A successful
+`completed` service is not recorded as a startup failure. This evidence contains
+no command, environment or application log values. Older bundles may refuse the
+new zero-exit evidence; use the owning bundle for diagnosis and retaining cleanup.
+
 Native `hack exec` and `hack run` make this request once with a 180-second frontend
 budget before selecting their command or reading managed environment values.
 `ps` and `logs` remain observations and do not request refresh. Authenticated relay

@@ -16,6 +16,8 @@ use std::{
 };
 mod acknowledged;
 pub(super) use acknowledged::archive_acknowledged;
+#[cfg(test)]
+pub(super) mod fixture_prior_boot;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

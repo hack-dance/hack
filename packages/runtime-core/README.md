@@ -940,6 +940,12 @@ binaries must be built for it, or use relocatable `hack-native` executables with
 a dedicated private root. The test stops and restarts the entire supplied pool,
 so the root must contain only this fixture, with no application or sibling-owner
 resources. Its host listener uses an ephemeral loopback port.
+The prior-host-boot owner and selected dependency reservation are synthetic:
+after proving the exact reservation owner dead and every recorded socket inactive
+and unchanged, test-only setup projects its process timestamp and socket device
+numbers. It preserves the real completed journal, socket inodes, bindings, graph
+receipt and sibling reservations. Production inspection still rejects current-boot
+timestamps, mismatched device/inode evidence and live owners or listeners.
 It uses normal refresh, recovery, cleanup and restore paths, plus an injected
 archive interruption at the owned verifier boundary. A passing test proves
 same-run retained marker and sibling isolation in that fixture; it does not

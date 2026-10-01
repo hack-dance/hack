@@ -298,6 +298,7 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         before.resources["volume:data"].name,
         refreshed.resources["volume:data"].name
     );
+    let prior_process = crate::provider::identity::observe(owner.child.id() as i32).unwrap();
     owner.child.kill().unwrap();
     owner.wait(deadline);
     assert_eq!(lifecycle::down(&candidate).unwrap().phase, "stopped");
@@ -360,6 +361,20 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         .device
         .checked_add(1)
         .unwrap();
+    // The real refresh leaves a current-host-boot reservation. Project its exact
+    // dead process timestamp and socket devices alongside the synthetic VM owner;
+    // retain the real journal, socket inodes, receipt, bindings and sibling claim.
+    graph::dependency_slots::fixture_prior_boot::synthesize(
+        &candidate,
+        &refreshed,
+        &prior_process,
+        crate::provider::host_pin::DeviceRebind {
+            old: old_device,
+            current: current_owner.storage.as_ref().unwrap().device,
+        },
+        host_boot,
+    )
+    .unwrap();
     let mut synthetic = old_owner;
     synthetic.storage.as_mut().unwrap().device = old_device;
     synthetic.overlay.as_mut().unwrap().device = old_device;

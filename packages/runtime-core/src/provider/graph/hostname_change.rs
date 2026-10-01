@@ -213,6 +213,7 @@ pub(super) mod tests {
         };
         let binding = source::SourceBinding {
             shared: None,
+            cache_scope: None,
             shared_contract: Some(
                 project::live_source::Contract::from_plan(&plan.plan, snapshot.receipt()).unwrap(),
             ),

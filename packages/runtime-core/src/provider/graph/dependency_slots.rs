@@ -2,6 +2,7 @@
 //! mapped only under the provider lease. Receipts survive owner death; absence of
 //! a listener is never permission to steal a recorded or foreign transport.
 use super::{Candidate, CandidateError, Engine, Receipt, hex, state};
+use crate::provider::host_pin::DeviceRebind;
 use crate::provider::identity::{self, ProcessIdentity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,6 +14,8 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+mod acknowledged;
+pub(super) use acknowledged::archive_acknowledged;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +50,14 @@ fn absent(path: &Path) -> Result<bool, CandidateError> {
     }
 }
 fn read(path: &Path) -> Result<Record, CandidateError> {
+    read_with_bytes(path).map(|(record, _)| record)
+}
+fn read_with_bytes(path: &Path) -> Result<(Record, Vec<u8>), CandidateError> {
+    read_with_identity(path).map(|(record, bytes, _)| (record, bytes))
+}
+/// Parsed record, original bytes and the no-follow descriptor's file identity.
+type ObservedRecord = (Record, Vec<u8>, (u64, u64));
+fn read_with_identity(path: &Path) -> Result<ObservedRecord, CandidateError> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -70,7 +81,125 @@ fn read(path: &Path) -> Result<Record, CandidateError> {
     if bytes.len() as u64 != m.len() {
         return Err(refused());
     }
-    serde_json::from_slice(&bytes).map_err(|_| refused())
+    let current = fs::symlink_metadata(path).map_err(|_| refused())?;
+    if (current.dev(), current.ino()) != (m.dev(), m.ino()) || current.nlink() != 1 {
+        return Err(refused());
+    }
+    let record = serde_json::from_slice(&bytes).map_err(|_| refused())?;
+    Ok((record, bytes, (m.dev(), m.ino())))
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct LegacyReservation {
+    pub record_sha256: String,
+    pub sockets: BTreeMap<u8, (u64, u64)>,
+    pub process: ProcessIdentity,
+}
+pub(super) fn inspect_legacy(
+    candidate: &Candidate,
+    run: &str,
+    rebind: DeviceRebind,
+    host_boot_micros: u64,
+) -> Result<Option<LegacyReservation>, CandidateError> {
+    let owner = state::Owner::load(candidate)?;
+    let directory = root(candidate);
+    let values = records(
+        &directory,
+        &owner.token,
+        owner.dependency_sockets.map_or(0, |v| v.slots),
+    )?;
+    let Some(record) = values.iter().find(|r| r.run == run) else {
+        return Ok(None);
+    };
+    let (again, bytes) = read_with_bytes(&directory.join(format!("{run}.json")))?;
+    if &again != record || record.sockets.len() != record.slots.len() {
+        return Err(refused());
+    }
+    // SAFETY: geteuid has no arguments or side effects.
+    identity::verify(
+        &record.process,
+        &record.process,
+        &record.process.executable,
+        unsafe { libc::geteuid() },
+    )?;
+    rebind.definitely_dead_before_boot(&record.process, host_boot_micros)?;
+    for slot in record.slots.values() {
+        let expected = record.sockets.get(slot).ok_or_else(refused)?;
+        let path = socket(&owner.short_home, *slot);
+        let metadata = fs::symlink_metadata(&path).map_err(|_| refused())?;
+        if !metadata.file_type().is_socket()
+            || metadata.uid() != record.process.uid
+            || metadata.mode() & 0o7777 != 0o600
+            || metadata.nlink() != 1
+            || !rebind.matches(*expected, (metadata.dev(), metadata.ino()))
+        {
+            return Err(refused());
+        }
+        crate::provider::relay_owner::publication::dead::no_listener(&path)
+            .map_err(|_| refused())?;
+    }
+    Ok(Some(LegacyReservation {
+        record_sha256: format!("{:x}", Sha256::digest(bytes)),
+        sockets: record.sockets.clone(),
+        process: record.process.clone(),
+    }))
+}
+pub(super) fn verify_legacy_remaining(
+    candidate: &Candidate,
+    run: &str,
+    rebind: DeviceRebind,
+    selected: &LegacyReservation,
+    allow_absent_record: bool,
+) -> Result<(), CandidateError> {
+    let owner = state::Owner::load(candidate)?;
+    let path = root(candidate).join(format!("{run}.json"));
+    if absent(&path)? {
+        if !allow_absent_record {
+            return Err(refused());
+        }
+        for slot in selected.sockets.keys() {
+            if !absent(&socket(&owner.short_home, *slot))? {
+                return Err(refused());
+            }
+        }
+        return Ok(());
+    }
+    let values = records(
+        &root(candidate),
+        &owner.token,
+        owner.dependency_sockets.map_or(0, |v| v.slots),
+    )?;
+    let record = values
+        .iter()
+        .find(|record| record.run == run)
+        .ok_or_else(refused)?;
+    let (same, bytes) = read_with_bytes(&path)?;
+    if &same != record
+        || selected.record_sha256 != format!("{:x}", Sha256::digest(bytes))
+        || selected.sockets != record.sockets
+        || selected.process != record.process
+    {
+        return Err(refused());
+    }
+    for slot in record.slots.values() {
+        let path = socket(&owner.short_home, *slot);
+        if absent(&path)? {
+            continue;
+        }
+        let expected = record.sockets.get(slot).ok_or_else(refused)?;
+        let observed = fs::symlink_metadata(&path).map_err(|_| refused())?;
+        if !observed.file_type().is_socket()
+            || observed.uid() != record.process.uid
+            || observed.mode() & 0o7777 != 0o600
+            || observed.nlink() != 1
+            || !rebind.matches(*expected, (observed.dev(), observed.ino()))
+        {
+            return Err(refused());
+        }
+        crate::provider::relay_owner::publication::dead::no_listener(&path)
+            .map_err(|_| refused())?;
+    }
+    Ok(())
 }
 fn valid(record: &Record, owner: &str, capacity: u8) -> bool {
     record.version == 1
@@ -339,7 +468,11 @@ pub fn inspect(candidate: &Candidate) -> Result<serde_json::Value, CandidateErro
     }
     Ok(serde_json::json!({"reservations":output}))
 }
-fn recover_record(candidate: &Candidate, record: &Record) -> Result<(), CandidateError> {
+fn recover_record(
+    candidate: &Candidate,
+    record: &Record,
+    rebind: Option<DeviceRebind>,
+) -> Result<(), CandidateError> {
     if identity::alive(record.process.pid)? {
         return Err(refused());
     }
@@ -347,10 +480,14 @@ fn recover_record(candidate: &Candidate, record: &Record) -> Result<(), Candidat
     if record.owner != owner.token {
         return Err(refused());
     }
-    recover_paths(&owner.short_home, record)?;
+    recover_paths(&owner.short_home, record, rebind)?;
     remove_record(&root(candidate), record)
 }
-fn recover_paths(home: &Path, record: &Record) -> Result<(), CandidateError> {
+fn recover_paths(
+    home: &Path,
+    record: &Record,
+    rebind: Option<DeviceRebind>,
+) -> Result<(), CandidateError> {
     // Validate every selected path before removing any. Unexpected or unrecorded
     // paths are never adopted, even when nobody currently listens on them.
     let mut selected = Vec::new();
@@ -364,7 +501,11 @@ fn recover_paths(home: &Path, record: &Record) -> Result<(), CandidateError> {
             || m.mode() & 0o7777 != 0o600
             || m.uid() != record.process.uid
             || m.nlink() != 1
-            || record.sockets.get(slot) != Some(&(m.dev(), m.ino()))
+            || !record.sockets.get(slot).is_some_and(|expected| {
+                rebind.map_or(*expected == (m.dev(), m.ino()), |v| {
+                    v.matches(*expected, (m.dev(), m.ino()))
+                })
+            })
         {
             return Err(refused());
         }
@@ -402,13 +543,14 @@ pub fn recover_orphan(
     if fingerprint(record)? != expected || !absent(&super::directory(candidate, run)?)? {
         return Err(refused());
     }
-    recover_record(candidate, record)?;
+    recover_record(candidate, record, None)?;
     Ok(serde_json::json!({"run":run,"released":true}))
 }
 /// Caller holds Engine lease and has completed dead-owner cleanup/verification.
 pub(super) fn recover_cleaned(
     candidate: &Candidate,
     receipt: &Receipt,
+    rebind: Option<(DeviceRebind, &LegacyReservation)>,
 ) -> Result<(), CandidateError> {
     let directory = root(candidate);
     if absent(&directory.join(format!("{}.json", receipt.run)))? {
@@ -438,7 +580,17 @@ pub(super) fn recover_cleaned(
     {
         return Err(refused());
     }
-    recover_record(candidate, record)
+    if let Some((_, selected)) = rebind {
+        let (again, bytes) = read_with_bytes(&directory.join(format!("{}.json", receipt.run)))?;
+        if &again != record
+            || selected.record_sha256 != format!("{:x}", Sha256::digest(bytes))
+            || selected.sockets != record.sockets
+            || selected.process != record.process
+        {
+            return Err(refused());
+        }
+    }
+    recover_record(candidate, record, rebind.map(|(value, _)| value))
 }
 
 #[cfg(test)]
@@ -555,14 +707,14 @@ mod tests {
         let mut b = fixture_record('2', 1);
         let a_listener = listener(&fixture.0, &mut a, 0);
         let b_listener = listener(&fixture.0, &mut b, 1);
-        assert!(recover_paths(&fixture.0, &a).is_err());
+        assert!(recover_paths(&fixture.0, &a, None).is_err());
         drop(a_listener);
         let old = a.sockets[&0];
         a.sockets.insert(0, (old.0, old.1 + 1));
-        assert!(recover_paths(&fixture.0, &a).is_err());
+        assert!(recover_paths(&fixture.0, &a, None).is_err());
         assert!(socket(&fixture.0, 0).exists());
         a.sockets.insert(0, old);
-        recover_paths(&fixture.0, &a).unwrap();
+        recover_paths(&fixture.0, &a, None).unwrap();
         assert!(!socket(&fixture.0, 0).exists());
         assert!(UnixStream::connect(socket(&fixture.0, 1)).is_ok());
         drop(b_listener);
@@ -575,10 +727,10 @@ mod tests {
         let first = listener(&fixture.0, &mut a, 0);
         let second = listener(&fixture.0, &mut a, 1);
         drop(first);
-        assert!(recover_paths(&fixture.0, &a).is_err());
+        assert!(recover_paths(&fixture.0, &a, None).is_err());
         assert!(socket(&fixture.0, 0).exists());
         drop(second);
-        recover_paths(&fixture.0, &a).unwrap();
+        recover_paths(&fixture.0, &a, None).unwrap();
         assert!(!socket(&fixture.0, 0).exists());
         assert!(!socket(&fixture.0, 1).exists());
     }

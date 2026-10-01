@@ -259,6 +259,21 @@ state or changed provider identity refuses recovery. VM disks and graph data rem
 This is cooperative same-user recovery for a stopped pool, not adoption of an
 unreceipted active relay or proof of application readiness.
 
+For an already-running VM whose retained graphs are all stopped, the separate
+`hack-local runtime quiescent-dependency-socket-recovery --json` command selects
+legacy unreceipted socket inodes without rebooting. Explicitly apply its selection
+with `hack-local runtime recover-quiescent-dependency-sockets --expect-sha256 <hash> --json`.
+This mode holds a pool publication gate before foreground retirement locks and the
+provider lease. It pins the exact provider receipt, host/guest boot, every retained
+graph receipt and volume identity, and requires absent compute, no foreground
+publisher, no dependency assignment and no untracked guest containers. It rechecks
+that proof before each inode-selected unlink and journals the selection separately
+from stopped-pool recovery so partial retries retain their original scope.
+An incomplete journal, live listener, replacement path or changed proof refuses
+recovery. Owner bytes, source-rebind witnesses, retained data and the running VM
+remain unchanged. This is explicit cooperative legacy cleanup, not proof of the
+original socket creator or a security boundary against another same-user process.
+
 TERM and INT are checked during initial graph startup, including readiness waits
 and before new service effects. Cancellation enters owned cleanup while preserving
 persistent data. Checks occur between bounded operations; an in-flight operation
@@ -803,3 +818,143 @@ before fresh dependency ownership is admitted. This does not enable file-based
 `graph restart`/`restore` or normalized live-owner redelivery, and does not replay
 initializer cache-release effects. Native same-run restoration and cross-boot
 volume continuity require separate runtime qualification.
+
+An explicitly recovered post-reboot graph may retain a stopped shared-source
+receipt whose `source.shared.device` names the prior host filesystem device.
+After **completed** selected absent-publication cleanup and separate publisher
+retirement, inspect that same run with `graph inspect-source-device-rebind
+--run-id RUN --json`. Review the returned original stopped-receipt hash and
+qualification, then commit only that selection with `graph
+recover-source-device-rebind --run-id RUN --expect-selection SHA
+--accept-legacy-device-rebind --json`. This private candidate command changes no
+stopped receipt, cleanup proof, retirement proof or named volume. It writes one
+immutable witness for the current Owner share, requiring the same canonical
+project path, inode, guest path and unfiltered access, with only the host device
+number changed. The current guest's writable virtiofs mount and selected volume
+identities are checked independently. The explicit acceptance records that
+legacy receipts cannot establish original physical volume continuity across the
+host reboot.
+
+An exact completed cleanup and retirement for the current stopped receipt takes
+precedence over older cleanup records. Pending operations, unresolved initializer
+effects and mismatched receipt or retirement identities still refuse recovery;
+historical records cannot authorize a later generation.
+
+Ordinary cleanup can be acknowledged before a later dependency-journal archival
+step fails. If this leaves a dead foreground publication for the current stopped
+graph, use the explicit private `graph retire-acknowledged-publisher --run-id RUN
+--expect-owner OWNER --expect-receipt RECEIPT_SHA --expect-publisher PUBLISHER_SHA
+--json` recovery. The SHA selectors identify the exact stopped receipt and
+foreground owner-record bytes. Admission requires the current guest boot's
+confirmed cleanup acknowledgement, no pending operation, independent absence of
+compute by both immutable ID and reserved name, and all named volumes present.
+Environment, startup, probe and bridge cleanup inventories are rechecked while
+holding the publisher and provider locks, including at each publication effect.
+The existing retirement journal preserves both original publication files and
+resumes an interrupted socket-first rename. Active owners, replacement listeners,
+stale selectors and incomplete acknowledgements refuse without falling back to
+historical recovery. This operation changes no graph receipt, VM, dependency
+journal or retained data; it does not authorize a restore by itself.
+An old completed or cleanup-completed dependency journal is accepted as inert
+evidence only; malformed, incomplete or pending rebind state refuses at each
+effect boundary. Safe archival and the next restore remain separate checks.
+
+If ordinary cleanup closed all dependency sockets but a later archival failure
+left its reservation, first complete that exact publisher retirement. Inspect
+`graph dependency-reservations --json`, then use `graph
+release-acknowledged-dependencies --run-id RUN --expect-owner OWNER
+--expect-receipt RECEIPT_SHA --expect-publisher PUBLISHER_SHA
+--expect-reservation RESERVATION_SHA --json`. The final selector is the inspected
+reservation fingerprint. This requires the current boot's acknowledged cleanup,
+the exact completed publisher retirement, a dead reservation process matching
+that publisher, the same run/Owner/boot and precisely the receipt's dependency
+slots. Every selected socket must already be absent; even a matching stale socket
+refuses. The selected record moves atomically without overwriting into the graph's
+`dependency-reservation-retired-SHA.json` history, preserving bytes and inode.
+Retry verifies that same record and proof. Changed selectors, another publisher,
+pending/foreign records, occupied history and any reappearing socket refuse.
+No socket, VM, graph receipt, dependency journal, data or sibling is removed.
+This explicit recovery frees the claim; normal `up` still performs its own checks.
+
+`restore-selection` then binds the witness's raw hash to the selected generation.
+The source checks use only an in-memory device projection; original retention and
+restore history consume the unchanged stopped receipt. The new receipt receives
+the projected source after history retention, before the first new-attempt write.
+The witness file remains pinned and is rechecked before that write. Once the
+first new generation replaces the stopped receipt, the witness is audit history
+and grants no authority to later ordinary down/up cycles. An incomplete
+`source-device-rebind.pending` file, including an empty or partial write, is
+preserved and refuses both explicit recovery and a new retired-publisher bind;
+there is no automatic prefix-based adoption or deletion. The ignored native
+synthetic-device fixture checks this same-run transition and later retained
+marker reads, but only an actual host-reboot application run can qualify the
+physical continuity claim.
+
+A selected source-device witness also preserves an existing dependency cache's
+namespace when the Git common directory is on that same filesystem. The runtime
+reconstructs the old scope hash from the unchanged common directory path/inode
+and selected prior device number, and requires every retained cache scope to
+match. Only the new attempt receives optional cache-scope continuity metadata;
+the stopped receipt, original cache names/fingerprints, volumes and witness bytes
+stay unchanged. All package inputs, image, command, environment, host mappings
+and volume layouts are still freshly fingerprinted, with strict resource equality.
+This is not a fallback for changed lockfiles or an unrelated repository.
+
+Later ordinary replays verify the immutable witness's raw hash and run/owner/share
+linkage, the current common directory path/device/inode and retained scopes.
+Missing, changed or pending provenance and replaced Git metadata refuse. A second
+device transition requires a separately supported explicit recovery; the runtime
+does not silently extend this projection. Older candidate binaries may refuse the
+new optional source metadata, so a downgrade must be qualified separately.
+
+Completed post-reboot absence recovery also retires the prior boot's completed
+dependency-rebind journal. A retained foreground restore can finish this archival
+for an earlier candidate: it selects the exact original ready receipt and exact
+completed stopped receipt from bounded history, verifies durable retirement,
+unchanged provider/boot and retained volumes, and proves old and current compute
+absent under the held foreground lock and provider lease. The journal's completed
+generation must match the original receipt. Original bytes remain in a digest-bound,
+resumable archive; a later current-boot journal is preserved for its own cleanup.
+Changed evidence, pending state or live compute refuses archival. This does not
+replay old dependencies or relax the fresh graph's endpoint/readiness checks.
+
+An interrupted legacy HTTPS frontend can leave its exact socket, Caddy receipt
+and lock alongside an unpublished shared-owner configuration. Explicit private
+`runtime recover-quiescent-https --expect-owner RECEIPT_SHA
+--expect-configuration CONFIG_SHA --expect-frontend-pid OBSERVED_DEAD_PID --json`
+archives this combined incident without signaling processes or changing CA data.
+It requires the current pool/boot, strict configuration, exact authority path,
+dead recorded processes and configured executables, no shared leases or release
+history for that generation, an inactive Unix socket, and exclusive IPv4/IPv6
+wildcard and loopback listeners held across each move. The legacy receipt and
+unpublished configuration must select the same Caddy path, binary hash and port.
+Receipt/config selectors identify raw file bytes; the CA must retain its original DER fingerprint. A durable journal
+and exclusive renames preserve original inodes and permit exact partial retries;
+foreign targets, changed evidence and live or uncertain effects refuse. A crash
+during initial journal publication may leave an incomplete journal: it refuses
+retry before archival rather than guessing or discarding that evidence. Global
+HTTPS evidence archival does not itself recover a project finalization token or
+prove application readiness: run the explicit frontend recovery and normal
+startup checks afterward.
+
+Legacy receipts may predate a host filesystem device-number change. The strict
+command refuses those records. An explicit additional
+`--accept-legacy-device-rebind RUN:WITNESS_SHA:SOCKET_DEV:SOCKET_INO:LOCK_DEV:LOCK_INO`
+selects the existing graph source-device witness and both current HTTPS identities.
+Both old receipt devices must match its old device; both current devices must match
+its current device, with each respective inode unchanged. Current owner bytes,
+host/guest boot, project share, stopped graph scope and witness bytes are rechecked
+before each effect. Mixed changes refuse. The journal pins the current identities;
+the legacy receipt stays byte-identical. This is explicit legacy migration with
+**original host-volume continuity unproven**, not an automatic identity relaxation.
+
+Development admission distinguishes fresh capacity from a verified running pool.
+A fresh VM retains the 58 GiB disk floor (32 GiB storage, 10 GiB overlay and
+16 GiB host reserve). Reusing the exact owned running pool requires the 16 GiB
+host reserve, with memory-pressure, memory-headroom and thermal checks unchanged.
+`runtime probe --profile development --json` reports `disk_budget_basis`. Reuse
+requires matching profile, creation receipt, native process/PID-file identity,
+machine name and both disks' current identities and declared sizes. Every sample
+and the acquired startup lease recheck the selected owner; changed ownership
+refuses, and a reserve-qualified request cannot enter VM create or boot. Stopped,
+missing or unproved capacity retains fresh-allocation requirements or refuses.

@@ -3,6 +3,7 @@ mod prepared_boot;
 #[cfg(any(target_os = "macos", test))]
 mod private_child;
 mod relay_process;
+mod short_home;
 use super::{
     admission, agent, artifact, identity, process,
     state::{self, Owner, io},
@@ -1823,6 +1824,12 @@ fn finish_absent(
     value: &str,
     record_disks: bool,
 ) -> Result<(), CandidateError> {
+    let vm_lock = lock_absent_disks(candidate, owner)?;
+    finish_absent_locked(candidate, owner, value, record_disks, &vm_lock)
+}
+
+/// Keep this descriptor through alias restoration and the stopped receipt.
+fn lock_absent_disks(candidate: &Candidate, owner: &Owner) -> Result<File, CandidateError> {
     let directory = owner.real_data_dir(candidate)?;
     let vm_lock = OpenOptions::new()
         .read(true)
@@ -1858,6 +1865,16 @@ fn finish_absent(
         ));
     }
     verify_disks(candidate, owner)?;
+    Ok(vm_lock)
+}
+
+fn finish_absent_locked(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    value: &str,
+    record_disks: bool,
+    _vm_lock: &File,
+) -> Result<(), CandidateError> {
     if record_disks && owner.storage.is_none() {
         owner.storage = Some(identity::disk(
             &owner.real_data_dir(candidate)?.join("storage.raw"),
@@ -1907,7 +1924,13 @@ fn finish_absent(
 }
 
 pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
-    let initial = status(candidate)?;
+    let initial = match status(candidate) {
+        Ok(initial) => initial,
+        Err(error) if error.code == "provider_home_missing" => {
+            return short_home::recover(candidate);
+        }
+        Err(error) => return Err(error),
+    };
     if initial.phase == "uninitialized" {
         return Ok(initial);
     }

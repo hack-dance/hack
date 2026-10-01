@@ -10,13 +10,16 @@ interface NativeFailure {
 /** Structured native codes remain safe to inspect without exposing subprocess diagnostics. */
 export class NativeRuntimeRequestError extends Error {
   readonly nativeCode: string | undefined;
+  readonly nativeCauseCode: string | undefined;
 
   constructor(opts: {
     readonly message: string;
     readonly nativeCode?: string;
+    readonly nativeCauseCode?: string;
   }) {
     super(opts.message);
     this.nativeCode = opts.nativeCode;
+    this.nativeCauseCode = opts.nativeCauseCode;
   }
 }
 
@@ -163,6 +166,7 @@ function completionResponse(
         ? "Native runtime request timed out; inspect owned state before retrying."
         : `Native runtime request failed${failure ? ` (${failure.code}${failure.causeCode ? `: ${failure.causeCode}` : ""})` : ""}; inspect owned state before retrying.`,
       nativeCode: timedOut ? undefined : failure?.code,
+      nativeCauseCode: timedOut ? undefined : failure?.causeCode,
     });
   }
   try {
@@ -282,7 +286,9 @@ async function readNativeFailure(
     ) {
       return {
         code: value.code,
-        ...(value.code === "graph_one_off_failed" &&
+        ...(["graph_one_off_failed", "graph_owner_recovery"].includes(
+          value.code
+        ) &&
         typeof value.cause_code === "string" &&
         ERROR_CODE.test(value.cause_code)
           ? { causeCode: value.cause_code }

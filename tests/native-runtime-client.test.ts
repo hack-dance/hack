@@ -26,6 +26,8 @@ if (process.argv.includes("hang")) await Bun.sleep(60_000);
 if (process.argv.includes("structured")) { console.error(JSON.stringify({code:"source_conflict",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("one-off-fail")) { console.error(JSON.stringify({code:"graph_one_off_failed",cause_code:"graph_one_off_cancelled",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("one-off-unsafe")) { console.error(JSON.stringify({code:"graph_one_off_failed",cause_code:"synthetic-secret-diagnostic",message:"synthetic-secret-diagnostic"})); process.exit(23); }
+if (process.argv.includes("owner-fail")) { const {appendFileSync}=await import("node:fs"); appendFileSync("attempts","attempt"); console.error(JSON.stringify({code:"graph_owner_recovery",cause_code:"graph_relay_identity",message:"synthetic-secret-diagnostic"})); process.exit(23); }
+if (process.argv.includes("owner-unsafe")) { console.error(JSON.stringify({code:"graph_owner_recovery",cause_code:"synthetic-secret-diagnostic",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("fail")) { console.error("synthetic-secret-diagnostic"); process.exit(23); }
 if (process.argv.includes("overflow")) { process.stdout.write("x".repeat(17 * 1024 * 1024)); }
 else {
@@ -205,6 +207,35 @@ test("one-off failures expose only a validated owner cause code", async () => {
   ).rejects.toThrow(
     "Native runtime request failed (graph_one_off_failed); inspect owned state before retrying."
   );
+});
+
+test("owner cleanup failures preserve a bounded cause without replay or raw diagnostics", async () => {
+  const runtime = await fixture();
+  const error = await invokeNativeRuntime({
+    runtime,
+    cwd: runtime.home,
+    args: ["owner-fail"],
+  }).catch((failure: unknown) => failure);
+  expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+  expect(error).toMatchObject({
+    nativeCode: "graph_owner_recovery",
+    nativeCauseCode: "graph_relay_identity",
+  });
+  expect(String(error)).toContain("graph_owner_recovery: graph_relay_identity");
+  expect(String(error)).not.toContain("synthetic-secret-diagnostic");
+  expect(await Bun.file(join(runtime.home, "attempts")).text()).toBe("attempt");
+
+  const unsafe = await invokeNativeRuntime({
+    runtime,
+    cwd: runtime.home,
+    args: ["owner-unsafe"],
+  }).catch((failure: unknown) => failure);
+  expect(unsafe).toBeInstanceOf(NativeRuntimeRequestError);
+  expect(unsafe).toMatchObject({
+    nativeCode: "graph_owner_recovery",
+    nativeCauseCode: undefined,
+  });
+  expect(String(unsafe)).not.toContain("synthetic-secret-diagnostic");
 });
 
 test("early structured rejection survives a full private-input pipe without replay", async () => {

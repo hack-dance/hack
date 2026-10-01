@@ -1084,7 +1084,10 @@ checks succeed. Confirmed graph cleanup preserves the original startup error. If
 inspection or cleanup cannot be confirmed, the error instead reports retained-state
 uncertainty alongside the sanitized startup diagnostic. Any published mapping remains
 intact; inspect owned runtime and bridge state before retrying. A native cleanup
-error code is included when available, without its raw output or message.
+error code is included when available, without its raw output or message. When a
+foreground owner refuses cleanup, the CLI also preserves its bounded cause code
+alongside `graph_owner_recovery`; raw owner diagnostics remain omitted. Failed
+cleanup is never automatically replayed.
 
 ### Explicit cleanup after a dead foreground owner
 

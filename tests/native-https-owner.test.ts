@@ -85,7 +85,7 @@ async function fixture(
     frontend,
     `#!${process.execPath}
 import { serveNativeHttpsOwner } from ${JSON.stringify(serverModule)};
-import { appendFile, readFile, unlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, readFile, unlink, writeFile } from "node:fs/promises";
 const home = ${JSON.stringify(home)};
 const fault = ${JSON.stringify(options.afterPublish ?? null)};
 await writeFile(home + "/helper-pid", String(process.pid));
@@ -105,7 +105,8 @@ try {
     afterPublish: async (path) => {
       await writeFile(home + "/published-path", path);
       if (fault === "fail") { throw new Error("injected failure after publication"); }
-      if (fault === "replace") { await unlink(path); await writeFile(path, "foreign replacement", { mode: 0o644 }); }
+      // Set the foreign mode exactly even when the helper inherits a private umask.
+      if (fault === "replace") { await unlink(path); await writeFile(path, "foreign replacement", { mode: 0o644 }); await chmod(path, 0o644); }
     },
     verifyIdle: async () => {
       ${

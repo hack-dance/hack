@@ -26,12 +26,12 @@ fn refused() -> CandidateError {
     )
 }
 
-fn digest<T: Serialize>(value: &T) -> Result<String, CandidateError> {
+pub(super) fn digest<T: Serialize>(value: &T) -> Result<String, CandidateError> {
     let bytes = serde_json::to_vec(value).map_err(|_| refused())?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
-fn hex(value: &str) -> bool {
+pub(super) fn hex(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -40,8 +40,8 @@ fn hex(value: &str) -> bool {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct Socket {
-    slot: u8,
+pub(super) struct Socket {
+    pub(super) slot: u8,
     device: u64,
     inode: u64,
 }
@@ -112,11 +112,11 @@ fn stopped(candidate: &Candidate) -> Result<(Selection, PathBuf), CandidateError
     ))
 }
 
-fn path(directory: &Path, slot: u8) -> PathBuf {
+pub(super) fn path(directory: &Path, slot: u8) -> PathBuf {
     directory.join(format!("dependency-{slot:02}.sock"))
 }
 
-fn observed(directory: &Path, slot: u8) -> Result<Option<Socket>, CandidateError> {
+pub(super) fn observed(directory: &Path, slot: u8) -> Result<Option<Socket>, CandidateError> {
     let target = path(directory, slot);
     let metadata = match fs::symlink_metadata(&target) {
         Ok(metadata) => metadata,

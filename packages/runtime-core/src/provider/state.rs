@@ -57,7 +57,6 @@ impl Lock {
     }
 
     /// Observe existing state without initializing a directory or lock file.
-    #[cfg(target_os = "macos")]
     pub fn acquire_existing(root: &Path) -> Result<Self, CandidateError> {
         check_private_directory(root)?;
         let file = OpenOptions::new()
@@ -177,7 +176,7 @@ impl Default for ReclamationPolicy {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Owner {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,8 +210,34 @@ pub struct Owner {
 }
 impl Owner {
     pub fn load(candidate: &Candidate) -> Result<Self, CandidateError> {
+        Self::load_with_short_home(candidate, false)
+    }
+
+    /// Explicit recovery may inspect a missing temporary alias, never a replaced one.
+    /// Loading here is read-only; the lifecycle boundary still proves provider absence.
+    pub(super) fn load_for_short_home_recovery(
+        candidate: &Candidate,
+    ) -> Result<Self, CandidateError> {
+        Self::load_with_short_home(candidate, true)
+    }
+
+    fn load_with_short_home(
+        candidate: &Candidate,
+        allow_missing: bool,
+    ) -> Result<Self, CandidateError> {
         let root = candidate.state_root.join("run/smolvm");
         reject_aliased_state(&root)?;
+        if allow_missing {
+            match fs::symlink_metadata(root.join("owner.pending")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                _ => {
+                    return Err(CandidateError::new(
+                        "recovery_required",
+                        "Provider owner update is pending or unobservable; HOME alias was not restored.",
+                    ));
+                }
+            }
+        }
         let owner: Self = read(&root.join("owner.json"))?;
         owner.network.validate()?;
         if let Some(share) = &owner.project_share {
@@ -250,20 +275,69 @@ impl Owner {
                 "Provider owner identity does not match this checkout.",
             ));
         }
-        // The only permitted alias is an exact, receipt-bound short HOME for Unix sockets.
-        let alias = fs::symlink_metadata(&owner.short_home).map_err(io)?;
+        owner.check_short_home(candidate, allow_missing)?;
+        check_private_directory(&root.join("home"))?;
+        Ok(owner)
+    }
+    /// The only permitted alias is the exact receipt-bound HOME for Unix sockets.
+    fn check_short_home(
+        &self,
+        candidate: &Candidate,
+        allow_missing: bool,
+    ) -> Result<(), CandidateError> {
+        let alias = match fs::symlink_metadata(&self.short_home) {
+            Ok(alias) => alias,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return if allow_missing {
+                    Ok(())
+                } else {
+                    Err(CandidateError::new(
+                        "provider_home_missing",
+                        "Temporary provider HOME alias is absent. Use runtime recover to verify the stopped pool before restoring it.",
+                    ))
+                };
+            }
+            Err(error) => return Err(io(error)),
+        };
         if !alias.file_type().is_symlink()
             || alias.uid() != unsafe { libc::geteuid() }
-            || fs::read_link(&owner.short_home).map_err(io)? != root.join("home")
+            || fs::read_link(&self.short_home).map_err(io)?
+                != candidate.state_root.join("run/smolvm/home")
         {
             return Err(CandidateError::new(
                 "foreign_state",
                 "Short provider HOME alias was replaced.",
             ));
         }
-        check_private_directory(&root.join("home"))?;
-        Ok(owner)
+        Ok(())
     }
+
+    /// Called only while the lifecycle owns the pool and VM locks and has audited absence.
+    /// Recheck the durable selection, then create exclusively; a concurrent alias is retained.
+    pub(super) fn restore_missing_short_home(
+        &self,
+        candidate: &Candidate,
+    ) -> Result<(), CandidateError> {
+        let observed = Self::load_for_short_home_recovery(candidate)?;
+        if observed != *self {
+            return Err(CandidateError::new(
+                "foreign_state",
+                "Provider owner changed during HOME recovery; no alias was restored.",
+            ));
+        }
+        std::os::unix::fs::symlink(
+            candidate.state_root.join("run/smolvm/home"),
+            &self.short_home,
+        )
+        .map_err(|_| {
+            CandidateError::new(
+                "socket_alias_collision",
+                "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
+            )
+        })?;
+        self.check_short_home(candidate, false)
+    }
+
     #[cfg(all(test, target_os = "macos"))]
     pub fn create(
         candidate: &Candidate,

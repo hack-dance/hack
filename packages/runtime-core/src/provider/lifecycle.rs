@@ -1,8 +1,11 @@
+mod admission_pool;
+pub mod host_filesystem;
 mod interrupted;
 mod prepared_boot;
 #[cfg(any(target_os = "macos", test))]
 mod private_child;
 mod relay_process;
+mod short_home;
 use super::{
     admission, agent, artifact, identity, process,
     state::{self, Owner, io},
@@ -757,6 +760,15 @@ pub fn up_with_profile(
     up_with_bridge(candidate, profile, None)
 }
 
+/// Resource admission distinguishes a proven running pool from a new VM allocation.
+pub fn probe_with_profile(
+    candidate: &Candidate,
+    profile: super::Profile,
+) -> Result<admission::Admission, CandidateError> {
+    let selected = admission_pool::select(candidate, profile)?;
+    admission_pool::probe(candidate, profile, selected.as_ref())
+}
+
 pub fn up_with_bridge(
     candidate: &Candidate,
     profile: super::Profile,
@@ -1038,19 +1050,26 @@ fn start_pool(
             "Existing capacity belongs to another profile. No resize, replacement or adoption was attempted.",
         ));
     }
-    // Admission before locks, aliases, provider commands, disks or VM effects.
-    let admission = admission::probe_for(&candidate.checkout, profile)?;
+    // Admission before aliases, provider commands, disks or VM effects. Only
+    // independently verified live ownership avoids charging a second VM's disks.
+    let admission_owner = admission_pool::select(candidate, profile)?;
+    let admission = admission_pool::probe(candidate, profile, admission_owner.as_ref())?;
     if !admission.admitted {
         return Err(CandidateError::new(
             "admission_rejected",
             admission.reasons.join(" "),
         ));
     }
-    let samples = admission::sample_for(&candidate.checkout, profile)?;
+    let samples = admission::sample_with(profile, || {
+        admission_pool::probe(candidate, profile, admission_owner.as_ref())
+    })?;
     artifact::verify(candidate)?;
     artifact::verify_engine(candidate)?;
     super::network_tools::verify(candidate)?;
     let lock = startup_lease(&root(candidate), STARTUP_LEASE_WAIT)?;
+    if let Some(selected) = &admission_owner {
+        selected.reverify(candidate)?;
+    }
     #[cfg(target_os = "macos")]
     if let Some(guard) = &retained_guard {
         guard.verify(candidate)?;
@@ -1110,6 +1129,9 @@ fn start_pool(
     super::dependency_socket::verify(candidate, &owner)?;
     state::write(&root(candidate).join("admission.json"), &samples)?;
     if owner.phase == "running" {
+        if let Some(selected) = &admission_owner {
+            selected.reverify(candidate)?;
+        }
         #[cfg(target_os = "macos")]
         if let Some(guard) = &retained_guard {
             guard.verify(candidate)?;
@@ -1117,6 +1139,12 @@ fn start_pool(
         verify_live(candidate, &owner)?;
         audit_boot(candidate, &owner)?;
         return status(candidate);
+    }
+    if admission_owner.is_some() {
+        return Err(CandidateError::new(
+            "admission_owner_changed",
+            "Reserve-qualified ownership no longer names a running pool; no create or boot was admitted.",
+        ));
     }
     if ![
         "initializing",
@@ -1823,6 +1851,29 @@ fn finish_absent(
     value: &str,
     record_disks: bool,
 ) -> Result<(), CandidateError> {
+    let vm_lock = lock_absent_disks(candidate, owner)?;
+    finish_absent_locked(candidate, owner, value, record_disks, &vm_lock)
+}
+
+/// Closing alone can leave a flock held by a fork/dup copy until that copy closes.
+/// Explicitly unlock this open-file description when the recovery scope ends.
+struct VmLock(File);
+impl std::ops::Deref for VmLock {
+    type Target = File;
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+impl Drop for VmLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the owned descriptor remains live through this Drop call.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// Keep this guard through alias restoration and the stopped receipt.
+fn lock_absent_disks(candidate: &Candidate, owner: &Owner) -> Result<VmLock, CandidateError> {
     let directory = owner.real_data_dir(candidate)?;
     let vm_lock = OpenOptions::new()
         .read(true)
@@ -1836,13 +1887,14 @@ fn finish_absent(
         return Err(CandidateError::new("foreign_state", "Unsafe VM lock."));
     }
     use std::os::fd::AsRawFd;
-    // Keep the exclusive VM lock through the stopped receipt; closing the FD releases it.
+    // Keep the exclusive VM lock through the stopped receipt.
     if unsafe { libc::flock(vm_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(CandidateError::new(
             "stop_uncertain",
             "Provider VM lock is still held.",
         ));
     }
+    let vm_lock = VmLock(vm_lock);
     let handles = process::capture(
         process::clean_command(Path::new("/usr/sbin/lsof"))
             .args(["-n", "-P", "-t", "--"])
@@ -1858,6 +1910,16 @@ fn finish_absent(
         ));
     }
     verify_disks(candidate, owner)?;
+    Ok(vm_lock)
+}
+
+fn finish_absent_locked(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    value: &str,
+    record_disks: bool,
+    _vm_lock: &File,
+) -> Result<(), CandidateError> {
     if record_disks && owner.storage.is_none() {
         owner.storage = Some(identity::disk(
             &owner.real_data_dir(candidate)?.join("storage.raw"),
@@ -1907,7 +1969,13 @@ fn finish_absent(
 }
 
 pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
-    let initial = status(candidate)?;
+    let initial = match status(candidate) {
+        Ok(initial) => initial,
+        Err(error) if error.code == "provider_home_missing" => {
+            return short_home::recover(candidate);
+        }
+        Err(error) => return Err(error),
+    };
     if initial.phase == "uninitialized" {
         return Ok(initial);
     }

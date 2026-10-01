@@ -9,6 +9,30 @@ import {
 } from "./native-runtime-client.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
+/** Recheck native authority without deriving or translating any ownership identity. */
+export function validateNativeRestoreSelection(opts: {
+  readonly selected: unknown;
+  readonly saved: NativeProjectRun;
+  readonly namespace: string;
+}): { readonly generation: string } {
+  const { selected, saved } = opts;
+  if (
+    !isRecord(selected) ||
+    selected.run !== saved.run ||
+    selected.owner !== saved.owner ||
+    selected.namespace !== opts.namespace ||
+    selected.namespace !== saved.namespace ||
+    selected.plan !== saved.planId ||
+    typeof selected.generation !== "string" ||
+    !SHA.test(selected.generation)
+  ) {
+    throw new Error(
+      "Native restore selection changed; retained data was not adopted."
+    );
+  }
+  return { generation: selected.generation };
+}
+
 /** Eligible routes consult current native provenance even when reverting to the ownership plan. */
 export function nativeReviewNeedsCompatibility(opts: {
   readonly saved: NativeProjectRun;
@@ -94,15 +118,14 @@ export async function selectNativeProjectRestore(opts: {
     cwd: opts.projectRoot,
     args: ["graph", "restore-selection", "--run-id", saved.run, "--json"],
   });
+  const selection = validateNativeRestoreSelection({
+    selected,
+    saved,
+    namespace: opts.review.namespace,
+  });
   if (
-    !isRecord(selected) ||
-    selected.run !== saved.run ||
-    selected.owner !== saved.owner ||
-    selected.namespace !== opts.review.namespace ||
-    selected.namespace !== saved.namespace ||
-    selected.plan !== saved.planId ||
-    typeof selected.generation !== "string" ||
-    !SHA.test(selected.generation)
+    opts.review.retainedGeneration !== undefined &&
+    opts.review.retainedGeneration !== selection.generation
   ) {
     throw new Error(
       "Native restore selection changed; retained data was not adopted."
@@ -122,7 +145,7 @@ export async function selectNativeProjectRestore(opts: {
     : null;
   return {
     run: saved.run,
-    flags: ["--expect-generation", selected.generation],
+    flags: ["--expect-generation", selection.generation],
     restoring: true,
     ...(sourceRevision ? { sourceRevision } : {}),
   };

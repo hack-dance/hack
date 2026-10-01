@@ -173,3 +173,14 @@ test("eligible hostname rollback checks current native provenance even at the ow
     })
   ).rejects.toThrow("route change refused");
 });
+
+test("legacy review refuses a different valid restore generation", async () => {
+  await expect(
+    selectNativeProjectRestore({
+      ...options,
+      restore: saved,
+      review: { ...options.review, retainedGeneration: "1".repeat(64) },
+      invoke: async () => ({ ...selected, generation: "2".repeat(64) }),
+    })
+  ).rejects.toThrow("restore selection changed");
+});

@@ -4,6 +4,7 @@
 use super::*;
 use crate::provider::{identity, lifecycle, state::Owner};
 use sha2::{Digest, Sha256};
+use std::os::unix::fs::MetadataExt;
 const FILE: &str = "dead-owner-cleanup.json";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,7 +38,7 @@ fn selected(receipt: &Receipt) -> Result<String, CandidateError> {
         &serde_json::to_vec_pretty(receipt).map_err(|_| refused())?,
     ))
 }
-fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
+pub(super) fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
     let mut value = serde_json::to_value(receipt).map_err(|_| refused())?;
     value.as_object_mut().ok_or_else(refused)?.remove("phase");
     for group in ["resources", "probes"] {
@@ -322,18 +323,98 @@ pub fn retire_recovered_publisher(
     }
     let bridges = intent.bridges.as_ref().ok_or_else(refused)?;
     bridges::cleanup::verify_recovery_file(&root, bridges, intent.prior_bridges.as_ref())?;
+    let legacy = super::host_pin_recovery::load_witness(candidate, run)?.filter(|witness| {
+        witness.graph_sha256() == intent.original_sha256
+            && witness.publisher_sha256() == intent.owner_sha256
+            && witness.matches_graph(&intent.original)
+    });
     if intent.new_boot.as_deref() == Some(engine.guest().boot_id()) {
-        host_relay::inspect_cleanup(candidate, &engine, &receipt, false, &environment, bridges)?;
-        foreground::retire_publisher_path(candidate, run, &intent.owner_sha256, &complete)?;
+        if let Some(witness) = legacy {
+            if let Some(retired) = foreground::transport::Retired::acquire(candidate, run)? {
+                let control_root = witness.control_root().join("relay-control");
+                let control_lock = state::Lock::acquire_existing(&control_root)?;
+                host_relay::inspect_cleanup_recovery(
+                    candidate,
+                    &engine,
+                    &receipt,
+                    false,
+                    &environment,
+                    bridges,
+                    Some(&witness),
+                )?;
+                let lock_path = fs::symlink_metadata(control_root.join("operation.lock"))
+                    .map_err(|_| refused())?;
+                if (lock_path.dev(), lock_path.ino()) != control_lock.identity()? {
+                    return Err(refused());
+                }
+                retired.verify_recovery_with_rebind(
+                    candidate,
+                    run,
+                    &intent.owner_sha256,
+                    &complete,
+                    Some(witness.rebind()),
+                )?;
+            } else {
+                let foreground_root = foreground::transport::root(candidate, run)?;
+                let foreground_lock = state::Lock::acquire_existing(&foreground_root)?;
+                let guard = super::host_pin_recovery::acquire_for_cleanup(
+                    candidate,
+                    run,
+                    &engine,
+                    super::host_pin_recovery::CleanupProof {
+                        original: &intent.original,
+                        sha256: &intent.original_sha256,
+                        current_is_original: false,
+                        allow_absent_reservation: true,
+                        publisher_may_be_partial: true,
+                    },
+                    witness,
+                )?;
+                host_relay::inspect_cleanup_recovery(
+                    candidate,
+                    &engine,
+                    &receipt,
+                    false,
+                    &environment,
+                    bridges,
+                    Some(guard.witness()),
+                )?;
+                guard.verify_lock()?;
+                let lock_path = fs::symlink_metadata(foreground_root.join("operation.lock"))
+                    .map_err(|_| refused())?;
+                if (lock_path.dev(), lock_path.ino()) != foreground_lock.identity()? {
+                    return Err(refused());
+                }
+                foreground::transport::retire_recovered_publisher_locked(
+                    candidate,
+                    run,
+                    &intent.owner_sha256,
+                    &complete,
+                    Some(guard.witness().rebind()),
+                    &foreground_lock,
+                )?;
+            }
+        } else {
+            host_relay::inspect_cleanup(
+                candidate,
+                &engine,
+                &receipt,
+                false,
+                &environment,
+                bridges,
+            )?;
+            foreground::retire_publisher_path(candidate, run, &intent.owner_sha256, &complete)?;
+        }
     } else {
         // A later VM boot has a new bridge registry generation. Recheck the
         // retained graph and immutable prior proof, then require the publisher
         // to have been fully retired under the original recovery boot.
-        foreground::verify_recovered_publisher_retired(
+        foreground::transport::verify_recovered_publisher_retired_recovery(
             candidate,
             run,
             &intent.owner_sha256,
             &complete,
+            legacy.as_ref().map(|witness| witness.rebind()),
         )?;
     }
     Ok(json!({"run":run,"publisher_retired":true,"data_retained":true}))
@@ -427,7 +508,13 @@ fn fresh_boot(
 }
 fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, CandidateError> {
     let engine = Engine::connect_cleanup_wait(candidate)?;
-    let dead = foreground::DeadOwner::acquire(candidate, run)?;
+    let selected_pin = super::host_pin_recovery::selected_for_old_publisher(candidate, run)?;
+    let dead = foreground::DeadOwner::acquire_recovery(
+        candidate,
+        run,
+        selected_pin.as_ref().map(|pin| pin.rebind()),
+        selected_pin.as_ref().map(|pin| pin.host_boot_micros()),
+    )?;
     let (receipt, root) = load(candidate, &engine, run)?;
     if exists(&root.join("one-off-normalization.json"))? {
         let intent: Intent = state::read(&root.join(FILE))?;
@@ -448,6 +535,36 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         &dead.fingerprint(),
         engine.guest().boot_id(),
     )?;
+    let existing_intent: Option<Intent> = if exists(&root.join(FILE))? {
+        Some(state::read(&root.join(FILE))?)
+    } else {
+        None
+    };
+    let pin_guard = if let Some(witness) = selected_pin {
+        let original = existing_intent
+            .as_ref()
+            .map_or(&receipt, |intent| &intent.original);
+        let original_sha = existing_intent
+            .as_ref()
+            .map_or(expected, |intent| intent.original_sha256.as_str());
+        Some(super::host_pin_recovery::acquire_for_cleanup(
+            candidate,
+            run,
+            &engine,
+            super::host_pin_recovery::CleanupProof {
+                original,
+                sha256: original_sha,
+                current_is_original: existing_intent.is_none(),
+                allow_absent_reservation: existing_intent
+                    .as_ref()
+                    .is_some_and(|intent| intent.complete_sha256.is_some()),
+                publisher_may_be_partial: false,
+            },
+            witness,
+        )?)
+    } else {
+        None
+    };
     let mut intent: Intent = if exists(&root.join(FILE))? {
         state::read(&root.join(FILE))?
     } else {
@@ -479,8 +596,13 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             return Err(refused());
         }
         initializer_cache::require_resolved(&receipt)?;
-        let bridges =
-            bridges::cleanup::capture_previous_boot(candidate, &engine, &receipt, &old_boot)?;
+        let bridges = bridges::cleanup::capture_previous_boot(
+            candidate,
+            &engine,
+            &receipt,
+            &old_boot,
+            pin_guard.as_ref().map(|guard| guard.witness()),
+        )?;
         let prior_bridges = bridges::cleanup::capture_prior_generation(&root, &bridges, &receipt)?;
         if prior_bridges.is_some() && !restore_history::confirms_prior_generation(&root, &receipt)?
         {
@@ -505,6 +627,12 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         intent
     };
     validate(&intent, &receipt, expected, &dead.fingerprint())?;
+    if let Some(guard) = &pin_guard {
+        if guard.witness().publisher_sha256() != dead.fingerprint() {
+            return Err(refused());
+        }
+        guard.verify_lock()?;
+    }
     let owner = Owner::load(candidate)?;
     let boot = engine.guest().boot_id();
     fresh_boot(&intent, owner.previous_guest_boot_id.as_deref(), boot)?;
@@ -525,7 +653,13 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     }
     if let Some(selection) = &intent.bridges {
         if intent.complete_sha256.is_none() {
-            bridges::cleanup::verify_remaining(candidate, &engine, &receipt, selection)?;
+            bridges::cleanup::verify_remaining_recovery(
+                candidate,
+                &engine,
+                &receipt,
+                selection,
+                pin_guard.as_ref().map(|guard| guard.witness()),
+            )?;
         }
     }
     let environment = environment::cleanup_inventory(candidate, &engine, &receipt, &root)?;
@@ -541,6 +675,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
                 &engine,
                 &receipt,
                 &intent.old_boot,
+                pin_guard.as_ref().map(|guard| guard.witness()),
             )?;
             let prior = bridges::cleanup::capture_prior_generation(&root, &selection, &receipt)?;
             if prior.is_some() && !restore_history::confirms_prior_generation(&root, &receipt)? {
@@ -562,7 +697,15 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         if receipt.phase != "stopped-data-retained" || selected(&receipt)? != *hash {
             return Err(refused());
         }
-        host_relay::inspect_cleanup(candidate, &engine, &receipt, false, &environment, &bridges)?;
+        host_relay::inspect_cleanup_recovery(
+            candidate,
+            &engine,
+            &receipt,
+            false,
+            &environment,
+            &bridges,
+            pin_guard.as_ref().map(|guard| guard.witness()),
+        )?;
         dead.verify()?;
         startup::archive_dependency_rebind_after_cleanup(
             &root,
@@ -570,7 +713,16 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             &receipt,
             &intent.old_boot,
         )?;
-        super::dependency_slots::recover_cleaned(candidate, &receipt)?;
+        super::dependency_slots::recover_cleaned(
+            candidate,
+            &receipt,
+            pin_guard.as_ref().and_then(|guard| {
+                guard
+                    .witness()
+                    .reservation()
+                    .map(|reservation| (guard.witness().rebind(), reservation))
+            }),
+        )?;
         if intent.one_off_sha256.is_some() {
             normalize_completed(candidate, &engine, &root, &intent)?;
         }
@@ -585,8 +737,19 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     retain_interrupted_write(&root)?;
     state::write(&root.join(FILE), &intent)?;
     bridges::cleanup::recover_persist(&root, &bridges)?;
+    if let Some(guard) = &pin_guard {
+        guard.verify_lock()?;
+    }
     let cleaned = cleanup_owned(candidate, &engine, receipt, &root, false)?;
-    host_relay::inspect_cleanup(candidate, &engine, &cleaned, false, &environment, &bridges)?;
+    host_relay::inspect_cleanup_recovery(
+        candidate,
+        &engine,
+        &cleaned,
+        false,
+        &environment,
+        &bridges,
+        pin_guard.as_ref().map(|guard| guard.witness()),
+    )?;
     dead.verify()?;
     startup::archive_dependency_rebind_after_cleanup(
         &root,
@@ -597,7 +760,16 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     intent.complete_sha256 = Some(selected(&cleaned)?);
     retain_interrupted_write(&root)?;
     state::write(&root.join(FILE), &intent)?;
-    super::dependency_slots::recover_cleaned(candidate, &cleaned)?;
+    super::dependency_slots::recover_cleaned(
+        candidate,
+        &cleaned,
+        pin_guard.as_ref().and_then(|guard| {
+            guard
+                .witness()
+                .reservation()
+                .map(|reservation| (guard.witness().rebind(), reservation))
+        }),
+    )?;
     if intent.one_off_sha256.is_some() {
         normalize_completed(candidate, &engine, &root, &intent)?;
     }

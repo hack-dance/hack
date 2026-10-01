@@ -773,15 +773,16 @@ fn publisher_refuses_port_conflicts_and_stale_reused_upstream() {
 
 #[test]
 fn publisher_requires_ack_before_forwarding_and_preserves_upstream_socket() {
-    use std::os::unix::net::UnixListener;
+    use std::os::unix::{fs::MetadataExt, net::UnixListener};
     let root = PathBuf::from(format!("/tmp/hkp-ack-{}", std::process::id()));
     fs::create_dir(&root).unwrap();
     let path = root.join("socket");
     let upstream = UnixListener::bind(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let port = free_loopback_port();
-    let mut publication = publisher(&path, token, port);
+    let owned = fs::symlink_metadata(&path).unwrap();
+    // The ack contract is transport-independent; avoid releasing a TCP port before spawn.
+    let mut publication = frontend_publisher(&path, token, 0, None, true);
     let worker = thread::spawn(move || {
         let (mut socket, _) = upstream.accept().unwrap();
         socket
@@ -795,7 +796,7 @@ fn publisher_requires_ack_before_forwarding_and_preserves_upstream_socket() {
         socket.read_to_end(&mut extra).unwrap();
         assert!(extra.is_empty());
     });
-    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut client = publication.connect();
     client
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -808,7 +809,9 @@ fn publisher_requires_ack_before_forwarding_and_preserves_upstream_socket() {
     }
     worker.join().unwrap();
     publication.stop();
-    assert!(path.exists());
+    let retained = fs::symlink_metadata(&path).unwrap();
+    assert_eq!((retained.dev(), retained.ino()), (owned.dev(), owned.ino()));
+    assert_eq!(retained.mode(), owned.mode());
     fs::remove_dir_all(root).unwrap();
 }
 

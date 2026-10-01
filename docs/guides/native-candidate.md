@@ -118,6 +118,53 @@ complete bundle to change the candidate.
    binary refusing newer state is an unsupported downgrade, not a successful rollback.
    Preserve that state; do not rewrite receipts or adopt another home's data.
 
+Host cleanup or a reboot can remove the temporary `/private/tmp/hkl-<owner>` HOME
+alias while the private candidate home and disks remain intact. Normal commands
+report `provider_home_missing`; they do not initialize another pool or recreate the
+alias during observation. Explicit `runtime recover --json` can restore only that
+absent exact alias, after verifying the receipt-bound dead provider, both recorded
+disks, free VM lock, closed disk handles, and no active provider command. Existing
+files, directories, foreign links, a live or reused PID, and uncertain ownership
+refuse without replacement. Recovery rechecks the receipt before exclusive creation,
+then validates socket absence and flushes the disks before recording
+`recovered-unclean`. If those final checks fail, it reports
+`provider_home_restored_recovery_incomplete`, keeps the exact owned alias and retained
+data, and requires inspection before retry. No guest is started by alias recovery.
+Interrupted starts without a recorded process or both identified disks remain
+outside this repair path.
+
+A physical macOS reboot may also renumber the mounted filesystem device. Strict
+disk and source checks still refuse a changed device number; missing-HOME recovery
+does not waive them. For an offline **stock pool**, inspect the separate migration:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime host-filesystem-recovery --json
+./hack-native --candidate-root /absolute/private/candidate-home runtime recover-host-filesystem --expect-sha256 <selection_sha256> --accept-legacy-device-rebind --json
+./hack-native --candidate-root /absolute/private/candidate-home runtime recover --json
+```
+
+Review the inspection before selecting its hash. This explicit legacy migration
+requires an absent recorded provider whose start predates the current host boot,
+no active provider commands, exclusive existing operation/VM locks and closed disk
+handles. Both disk inodes, sizes and ext4 UUIDs, the exact source path/inode and its
+ownership must be unchanged; only one common old-to-new device-number change is
+allowed. The inspection is read-only. Publication atomically changes only the
+owner's disk and source device numbers, retaining its phase and process record.
+Normal commands keep their strict identity checks.
+
+Legacy receipts have no original host boot UUID or filesystem volume UUID. Calendar
+timestamps corroborate a reboot, and matching retained file identities constrain
+the migration, but neither proves original volume continuity. The opt-in explicitly
+accepts that limitation; copied or relocated pools are outside this procedure.
+Prepared-base pools and pending owner/network/activation updates require separate
+recovery and are refused. A torn owner publication preserves `owner.pending` and
+blocks another migration; do not delete or adopt that file manually.
+
+This does not start the VM, restore HOME, retire stale sockets or rewrite historical
+graph receipts. Use ordinary recovery afterward. Historical shared-source graphs
+retain the prior identity and may require verified cleanup plus a new generation;
+successful metadata migration alone does not establish application recovery.
+
 Compatibility is qualified for specific bundle hashes and state formats. The
 displayed version alone does not establish frontend/executor or downgrade
 compatibility. V4 and candidate homes remain separate; this procedure does not

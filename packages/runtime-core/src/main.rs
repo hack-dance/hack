@@ -86,6 +86,8 @@ Usage:
   hack-local runtime up --profile development --internet --json
   hack-local runtime network extend --allow-host <hostname> [--allow-host <hostname>] --json
   hack-local runtime up|status|down|recover [--json]
+  hack-local runtime host-filesystem-recovery [--json]
+  hack-local runtime recover-host-filesystem --expect-sha256 <sha256> --accept-legacy-device-rebind [--json]
   hack-local node serve|status|inspect
   hack-local node request <versioned-json>
   hack-local --version
@@ -855,6 +857,32 @@ fn run() -> Result<(), CandidateError> {
                 Path::new(archive),
                 digest,
                 image,
+            )?)?;
+        }
+        ["runtime", "host-filesystem-recovery"]
+        | ["runtime", "host-filesystem-recovery", "--json"] => {
+            print_json(&hack_runtime_core::provider::host_filesystem::inspect(
+                &discover_candidate(&requested)?,
+            )?)?;
+        }
+        [
+            "runtime",
+            "recover-host-filesystem",
+            "--expect-sha256",
+            hash,
+            "--accept-legacy-device-rebind",
+        ]
+        | [
+            "runtime",
+            "recover-host-filesystem",
+            "--expect-sha256",
+            hash,
+            "--accept-legacy-device-rebind",
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::host_filesystem::recover(
+                &discover_candidate(&requested)?,
+                hash,
             )?)?;
         }
         ["runtime", action] | ["runtime", action, "--json"] => {

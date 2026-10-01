@@ -1079,6 +1079,8 @@ archived before stale publications are retired. An interrupted archive resumes
 from the committed cleanup proof and exact journal bytes; it never replays refresh.
 Completion records owner-death evidence independently of
 the live relay acknowledgement protocol.
+When a restored publisher is admitted, older absence-retirement records remain
+validated history; the exact current cleanup proof supplies retention authority.
 
 After completion, retained restore can create a fresh owner;
 `graph retire-recovered-publisher --run-id RUN --expect-owner OWNER` remains an

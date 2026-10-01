@@ -20,6 +20,19 @@ struct Intent {
     listeners_retired: bool,
     complete_sha256: Option<String>,
 }
+/// Dispatch only an exact completed recovery generation; history is inert.
+pub(super) fn current_completion(
+    root: &std::path::Path,
+    receipt: &Receipt,
+) -> Result<bool, CandidateError> {
+    if !exists(&root.join(FILE))? {
+        return Ok(false);
+    }
+    let intent: Intent = state::read(&root.join(FILE))?;
+    let complete = digest(receipt)?;
+    Ok(intent.complete_sha256.as_deref() == Some(complete.as_str()))
+}
+
 fn refused() -> CandidateError {
     error(
         "graph_live_owner_recovery",
@@ -380,8 +393,42 @@ fn finish_retirement(
         &intent.foreground_sha256,
         &digest(receipt)?,
     )?;
-    dependency_slots::recover_cleaned(candidate, receipt)?;
+    dependency_slots::recover_cleaned(candidate, receipt, None)?;
     engine.guest().verify()
+}
+
+/// A committed older cleanup is diagnostic history only after its exact stopped
+/// generation and listener retirement are independently confirmed.
+pub(super) fn require_historical_recovery(
+    root: &Path,
+    current: &Receipt,
+) -> Result<(), CandidateError> {
+    if exists(&root.join("live-owner-cleanup.pending"))? {
+        return Err(refused());
+    }
+    if !exists(&root.join(FILE))? {
+        return Ok(());
+    }
+    let prior: Intent = state::read(&root.join(FILE))?;
+    let complete = prior.complete_sha256.as_deref().ok_or_else(refused)?;
+    let stopped =
+        restore_history::completed_for_recovery(root, current, complete)?.ok_or_else(refused)?;
+    validate(&prior, &stopped, &prior.original_sha256, &prior.boot)?;
+    if !prior.listeners_retired
+        || !stopped.resources.iter().any(|(key, old)| {
+            old.kind == Kind::Container
+                && old.id.as_ref().is_some_and(|id| {
+                    current
+                        .resources
+                        .get(key)
+                        .and_then(|now| now.id.as_ref())
+                        .is_some_and(|current_id| current_id != id)
+                })
+        })
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 pub(super) fn retained(root: &Path, receipt: &Receipt) -> Result<bool, CandidateError> {
@@ -460,6 +507,26 @@ mod tests {
     fn receipt() -> Receipt {
         serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"ready-observed","readiness":{},"resources":{},"relay_startup":{"control_only":true,"guest_root":null,"control_root":"/private/owned","artifact":"e".repeat(64),"services":{}}})).unwrap()
     }
+    #[test]
+    fn current_recovery_dispatch_does_not_select_historical_completion() {
+        let fixture = super::super::tests::Fixture::new();
+        let mut receipt = receipt();
+        receipt.phase = "stopped-data-retained".into();
+        assert!(!current_completion(&fixture.0, &receipt).unwrap());
+        let mut proof = completed(receipt.clone());
+        proof.complete_sha256 = Some(digest(&receipt).unwrap());
+        let path = fixture.0.join(FILE);
+        state::write(&path, &proof).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(current_completion(&fixture.0, &receipt).unwrap());
+        receipt.owner = "9".repeat(32);
+        assert!(!current_completion(&fixture.0, &receipt).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::write(&path, b"unconfirmed").unwrap();
+        assert!(current_completion(&fixture.0, &receipt).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"unconfirmed");
+    }
+
     #[test]
     fn only_fully_ready_receipts_are_admitted() {
         let mut value = receipt();

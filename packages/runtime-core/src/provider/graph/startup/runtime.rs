@@ -28,6 +28,25 @@ pub(super) fn archive_dependency_rebind_after_cleanup(
 ) -> Result<(), CandidateError> {
     rebind::archive_after_cleanup(root, original, cleaned, boot)
 }
+
+#[cfg(target_os = "macos")]
+pub(super) fn dependency_rebind_boot(
+    root: &Path,
+    receipt: &Receipt,
+) -> Result<Option<String>, CandidateError> {
+    rebind::boot(root, receipt)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn archive_retired_dependency_rebind(
+    root: &Path,
+    original: &Receipt,
+    cleaned: &Receipt,
+    boot: &str,
+    verify: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    rebind::archive::retired_completed(root, original, cleaned, boot, verify)
+}
 use sha2::{Digest, Sha256};
 use std::{
     io::Read,

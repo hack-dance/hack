@@ -27,6 +27,14 @@ Usage:
   hack-local graph recover-cleanup --run-id <32-hex> --expect-receipt <sha256> [--json]
   hack-local graph recover-live-owner --run-id <32-hex> --expect-receipt <sha256> [--json]
   hack-local graph retire-recovered-publisher --run-id <32-hex> --expect-owner <32-hex> [--json]
+  hack-local graph retire-acknowledged-publisher --run-id <32-hex> --expect-owner <32-hex> --expect-receipt <64-hex> --expect-publisher <64-hex> [--json]
+  hack-local graph release-acknowledged-dependencies --run-id <32-hex> --expect-owner <32-hex> --expect-receipt <64-hex> --expect-publisher <64-hex> --expect-reservation <64-hex> [--json]
+  hack-local graph inspect-host-pin-recovery --run-id <32-hex> [--json]
+  hack-local graph recover-host-pins --run-id <32-hex> --expect-selection <64-hex> --accept-legacy-device-rebind [--json]
+  hack-local graph inspect-absent-publication-cleanup --run-id <32-hex> --original-owner-file <private-json> --host-inspection-file <private-json> [--json]
+  hack-local graph recover-absent-publication-cleanup --run-id <32-hex> --original-owner-file <private-json> --host-inspection-file <private-json> --expect-selection <64-hex> --retain-data --accept-unpinned-post-reboot [--json]
+  hack-local graph inspect-source-device-rebind --run-id <32-hex> [--json]
+  hack-local graph recover-source-device-rebind --run-id <32-hex> --expect-selection <64-hex> --accept-legacy-device-rebind [--json]
   hack-local graph logs --run-id <32-hex> --service <name> [--tail <1..1000>] [--json]
   hack-local graph exec --run-id <32-hex> --service <name> [--workdir /path] [--timeout-seconds <1..120>] [--json] -- <program> [args...]
   hack-local graph dependency-plan --dependencies <reviewed.json> [--json]
@@ -42,6 +50,8 @@ Usage:
   hack-local runtime hostname-authority --socket <path> [--json]
   hack-local runtime recover-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
   hack-local runtime managed-hostname-authority [--json]
+  hack-local runtime recover-quiescent-https --expect-owner <64-hex> --expect-configuration <64-hex> --expect-frontend-pid <pid> --json
+  hack-local runtime recover-quiescent-https --expect-owner <64-hex> --expect-configuration <64-hex> --expect-frontend-pid <pid> --accept-legacy-device-rebind <run:witness-sha:socket-dev:socket-ino:lock-dev:lock-ino> --json
   hack-local runtime inspect-host-listener --pid <pid> --port <loopback-port> --executable <absolute-path> [--peer-port <open-client-port>] [--json]
   hack-local runtime serve-managed-hostnames [--certificate-name-limit <1..4096>] (owner pipe on stdin)
   hack-local runtime certificate-admission [--json]
@@ -53,6 +63,8 @@ Usage:
   hack-local runtime publication-recovery [--json]
   hack-local runtime recover-publications --expect-sha256 <sha256> [--json]
   hack-local runtime dependency-socket-recovery [--json]
+  hack-local runtime quiescent-dependency-socket-recovery [--json]
+  hack-local runtime recover-quiescent-dependency-sockets --expect-sha256 <hash> [--json]
   hack-local runtime recover-dependency-sockets --expect-sha256 <sha256> [--json]
   hack-local runtime bridge-recovery [--json]
   hack-local runtime export-bridge-recovery --slot <1..8> --expect-sha256 <sha256> [--json]
@@ -86,6 +98,8 @@ Usage:
   hack-local runtime up --profile development --internet --json
   hack-local runtime network extend --allow-host <hostname> [--allow-host <hostname>] --json
   hack-local runtime up|status|down|recover [--json]
+  hack-local runtime host-filesystem-recovery [--json]
+  hack-local runtime recover-host-filesystem --expect-sha256 <sha256> --accept-legacy-device-rebind [--json]
   hack-local node serve|status|inspect
   hack-local node request <versioned-json>
   hack-local --version
@@ -454,10 +468,7 @@ fn run() -> Result<(), CandidateError> {
             };
             let candidate = discover_candidate(&requested)?;
             if *action == "probe" {
-                print_json(&provider::admission::probe_for(
-                    &candidate.checkout,
-                    profile,
-                )?)?;
+                print_json(&provider::probe_with_profile(&candidate, profile)?)?;
             } else {
                 print_json(&provider::up_with_profile(&candidate, profile)?)?;
             }
@@ -499,6 +510,54 @@ fn run() -> Result<(), CandidateError> {
                     &discover_candidate(&requested)?,
                     std::path::Path::new(socket),
                     hash,
+                )?,
+            )?;
+        }
+        [
+            "runtime",
+            "recover-quiescent-https",
+            "--expect-owner",
+            owner,
+            "--expect-configuration",
+            configuration,
+            "--expect-frontend-pid",
+            pid,
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::https_recovery::recover(
+                &discover_candidate(&requested)?,
+                owner,
+                configuration,
+                pid.parse().map_err(|_| {
+                    CandidateError::new("invalid_arguments", "Expected a positive frontend PID.")
+                })?,
+            )?)?;
+        }
+        [
+            "runtime",
+            "recover-quiescent-https",
+            "--expect-owner",
+            owner,
+            "--expect-configuration",
+            configuration,
+            "--expect-frontend-pid",
+            pid,
+            "--accept-legacy-device-rebind",
+            selection,
+            "--json",
+        ] => {
+            print_json(
+                &hack_runtime_core::provider::https_recovery::recover_legacy_device_rebind(
+                    &discover_candidate(&requested)?,
+                    owner,
+                    configuration,
+                    pid.parse().map_err(|_| {
+                        CandidateError::new(
+                            "invalid_arguments",
+                            "Expected a positive frontend PID.",
+                        )
+                    })?,
+                    selection,
                 )?,
             )?;
         }
@@ -669,6 +728,34 @@ fn run() -> Result<(), CandidateError> {
             print_json(
                 &hack_runtime_core::provider::dependency_socket_recovery::inspect(
                     &discover_candidate(&requested)?,
+                )?,
+            )?;
+        }
+        ["runtime", "quiescent-dependency-socket-recovery"]
+        | ["runtime", "quiescent-dependency-socket-recovery", "--json"] => {
+            print_json(
+                &hack_runtime_core::provider::quiescent_dependency_socket_recovery::inspect(
+                    &discover_candidate(&requested)?,
+                )?,
+            )?;
+        }
+        [
+            "runtime",
+            "recover-quiescent-dependency-sockets",
+            "--expect-sha256",
+            hash,
+        ]
+        | [
+            "runtime",
+            "recover-quiescent-dependency-sockets",
+            "--expect-sha256",
+            hash,
+            "--json",
+        ] => {
+            print_json(
+                &hack_runtime_core::provider::quiescent_dependency_socket_recovery::recover(
+                    &discover_candidate(&requested)?,
+                    hash,
                 )?,
             )?;
         }
@@ -855,6 +942,32 @@ fn run() -> Result<(), CandidateError> {
                 Path::new(archive),
                 digest,
                 image,
+            )?)?;
+        }
+        ["runtime", "host-filesystem-recovery"]
+        | ["runtime", "host-filesystem-recovery", "--json"] => {
+            print_json(&hack_runtime_core::provider::host_filesystem::inspect(
+                &discover_candidate(&requested)?,
+            )?)?;
+        }
+        [
+            "runtime",
+            "recover-host-filesystem",
+            "--expect-sha256",
+            hash,
+            "--accept-legacy-device-rebind",
+        ]
+        | [
+            "runtime",
+            "recover-host-filesystem",
+            "--expect-sha256",
+            hash,
+            "--accept-legacy-device-rebind",
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::host_filesystem::recover(
+                &discover_candidate(&requested)?,
+                hash,
             )?)?;
         }
         ["runtime", action] | ["runtime", action, "--json"] => {

@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod quiescent_recovery;
 pub mod recovery;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

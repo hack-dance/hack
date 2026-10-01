@@ -9,6 +9,10 @@ import {
   checkLegacyUserAgentArtifacts,
 } from "../agents/legacy-artifacts.ts";
 import {
+  parseNativeRunMappingRecoveryOptions,
+  runNativeProjectMappingCommand,
+} from "../backends/native-project-mapping-command.ts";
+import {
   type NativeRuntimeSelection,
   resolveNativeRuntimeSelection,
 } from "../backends/native-runtime-client.ts";
@@ -19,7 +23,7 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
-import { optJson, optPath } from "../cli/options.ts";
+import { optBranch, optJson, optPath } from "../cli/options.ts";
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_HOST_DNS_IP,
@@ -208,6 +212,29 @@ const doctorOptions = [
   optJson,
   optBrowserUrl,
   optBrowserResult,
+  optBranch,
+  defineOption({
+    name: "nativeRunMapping",
+    type: "string",
+    long: "--native-run-mapping",
+    valueHint: "inspect|repair",
+    description:
+      "Inspect or explicitly repair a native run mapping after filesystem device renumbering",
+  } as const),
+  defineOption({
+    name: "expectSelection",
+    type: "string",
+    long: "--expect-selection",
+    valueHint: "<64-hex>",
+    description: "Require the exact run-mapping recovery inspection selection",
+  } as const),
+  defineOption({
+    name: "acceptLegacyDeviceRebind",
+    type: "boolean",
+    long: "--accept-legacy-device-rebind",
+    description:
+      "Explicitly accept legacy migration without proof of original filesystem volume continuity",
+  } as const),
 ] as const;
 const doctorPositionals = [] as const;
 
@@ -332,9 +359,49 @@ async function maybeRunDomainMigration(
   return null;
 }
 
+async function maybeRunNativeMappingRecovery(
+  args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
+): Promise<number | null> {
+  const mapping = parseNativeRunMappingRecoveryOptions({
+    action: args.options.nativeRunMapping,
+    expectSelection: args.options.expectSelection,
+    acceptLegacyDeviceRebind: args.options.acceptLegacyDeviceRebind,
+    branch: args.options.branch,
+    otherOptions: Boolean(
+      args.options.fix ||
+        args.options.migrateEnvConfig ||
+        args.options.domainMigration ||
+        args.options.browserUrl ||
+        args.options.browserResult
+    ),
+  });
+  if (mapping) {
+    const runtime = resolveNativeRuntimeSelection();
+    if (!runtime) {
+      throw new CliUsageError(
+        "Native run-mapping recovery requires an explicitly selected native runtime."
+      );
+    }
+    return await runNativeProjectMappingCommand({
+      selection: mapping,
+      runtime,
+      startDir: args.options.path
+        ? resolve(process.cwd(), args.options.path)
+        : process.cwd(),
+      branch: args.options.branch,
+      json: args.options.json === true,
+    });
+  }
+  return null;
+}
+
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
+  const mappingResult = await maybeRunNativeMappingRecovery(args);
+  if (mappingResult !== null) {
+    return mappingResult;
+  }
   const domainResult = await maybeRunDomainMigration(args);
   if (domainResult !== null) {
     return domainResult;

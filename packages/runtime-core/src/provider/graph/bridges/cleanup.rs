@@ -11,11 +11,20 @@ pub(crate) struct Selection {
     previous_boot: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     predecessor_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    predecessor_absence: Option<AbsentPredecessor>,
     run: String,
     plan: String,
     capacity: u8,
     serial: u64,
     selected: BTreeMap<u8, Selected>,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AbsentPredecessor {
+    selection_sha256: String,
+    previous_boot: String,
+    control_root: PathBuf,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +56,23 @@ fn validate_selection(
     receipt: &Receipt,
     selection: &Selection,
 ) -> Result<(), CandidateError> {
+    validate_selection_recovery(engine, receipt, selection, None)
+}
+fn validate_selection_recovery(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    selection: &Selection,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
+) -> Result<(), CandidateError> {
+    validate_selection_with_absence(engine, receipt, selection, host_pin, None)
+}
+fn validate_selection_with_absence(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    selection: &Selection,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
+    absence: Option<&super::super::absent_publication_cleanup::Selection>,
+) -> Result<(), CandidateError> {
     let capacity = engine.guest().bridge_intent().map_or(0, |v| v.slots);
     if selection.version != 1
         || selection.owner != engine.guest().incarnation()
@@ -67,10 +93,29 @@ fn validate_selection(
         if predecessor_owner(
             receipt,
             selection.previous_boot.as_deref().ok_or_else(invalid)?,
+            host_pin,
         )? != *expected
         {
             return Err(invalid());
         }
+    }
+    match (&selection.predecessor_absence, absence) {
+        (None, None) => {}
+        (None, Some(witness))
+            if !selection.selected.is_empty()
+                && selection.predecessor_owner.is_none()
+                && selection.previous_boot.as_deref() == Some(witness.previous_boot())
+                && witness.matches_graph(receipt) => {}
+        (Some(recorded), Some(witness))
+            if recorded.selection_sha256 == witness.digest()?
+                && recorded.previous_boot == witness.previous_boot()
+                && selection.previous_boot.as_deref() == Some(witness.previous_boot())
+                && recorded.control_root == witness.control_root()
+                && witness.matches_graph(receipt)
+                && selection.selected.is_empty()
+                && selection.predecessor_owner.is_none()
+                && pinned_predecessor_eligible(receipt) => {}
+        _ => return Err(invalid()),
     }
     Ok(())
 }
@@ -83,7 +128,9 @@ fn validate_bindings(
     if let Some(previous) = &selection.previous_boot {
         if previous == &selection.boot
             || previous_boot != Some(previous.as_str())
-            || (selection.selected.is_empty() && selection.predecessor_owner.is_none())
+            || (selection.selected.is_empty()
+                && selection.predecessor_owner.is_none()
+                && selection.predecessor_absence.is_none())
         {
             return Err(invalid());
         }
@@ -94,6 +141,23 @@ fn validate_bindings(
             || !selection.selected.is_empty()
             || !pinned_predecessor_eligible(receipt)
     }) {
+        return Err(invalid());
+    }
+    if selection
+        .predecessor_absence
+        .as_ref()
+        .is_some_and(|absence| {
+            !hex(&absence.selection_sha256, 64)
+                || absence.previous_boot != selection.previous_boot.as_deref().unwrap_or_default()
+                || receipt
+                    .relay_startup
+                    .as_ref()
+                    .is_none_or(|startup| startup.control_root != absence.control_root)
+                || selection.predecessor_owner.is_some()
+                || !selection.selected.is_empty()
+                || !pinned_predecessor_eligible(receipt)
+        })
+    {
         return Err(invalid());
     }
     let store = Store {
@@ -144,6 +208,7 @@ pub(crate) fn capture(
         boot: engine.guest().boot_id().into(),
         previous_boot: None,
         predecessor_owner: None,
+        predecessor_absence: None,
         run: receipt.run.clone(),
         plan: receipt.plan_id.clone(),
         capacity: engine.guest().bridge_intent().map_or(0, |v| v.slots),
@@ -183,17 +248,39 @@ fn pinned_predecessor_eligible(receipt: &Receipt) -> bool {
     })
 }
 
-fn predecessor_owner(receipt: &Receipt, previous: &str) -> Result<String, CandidateError> {
+fn predecessor_owner(
+    receipt: &Receipt,
+    previous: &str,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
+) -> Result<String, CandidateError> {
     let startup = receipt
         .relay_startup
         .as_ref()
         .filter(|_| pinned_predecessor_eligible(receipt))
         .ok_or_else(invalid)?;
-    let pin = crate::provider::relay_owner::publication::PinnedEndpoint::load(
-        &startup.control_root,
-        super::super::host_relay::context(&receipt.owner, previous)?,
-    )?;
-    pin.verify_dead()?;
+    let context = super::super::host_relay::context(&receipt.owner, previous)?;
+    let pin = if let Some(selected) = host_pin {
+        if !selected.matches_graph(receipt) || selected.control_root() != startup.control_root {
+            return Err(invalid());
+        }
+        let pin = crate::provider::relay_owner::publication::PinnedEndpoint::load_legacy_recovery(
+            &startup.control_root,
+            context,
+            selected.rebind(),
+            selected.host_boot_micros(),
+        )?;
+        if &pin.legacy_summary() != selected.control() {
+            return Err(invalid());
+        }
+        pin
+    } else {
+        let pin = crate::provider::relay_owner::publication::PinnedEndpoint::load(
+            &startup.control_root,
+            context,
+        )?;
+        pin.verify_dead()?;
+        pin
+    };
     Ok(pin
         .fingerprint()
         .iter()
@@ -208,6 +295,7 @@ pub(crate) fn capture_previous_boot(
     engine: &Engine<'_>,
     receipt: &Receipt,
     previous: &str,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
 ) -> Result<Selection, CandidateError> {
     let store = strict_store(candidate, engine)?;
     let mut selection = Selection {
@@ -216,6 +304,7 @@ pub(crate) fn capture_previous_boot(
         boot: engine.guest().boot_id().into(),
         previous_boot: Some(previous.into()),
         predecessor_owner: None,
+        predecessor_absence: None,
         run: receipt.run.clone(),
         plan: receipt.plan_id.clone(),
         capacity: engine.guest().bridge_intent().map_or(0, |v| v.slots),
@@ -248,6 +337,7 @@ pub(crate) fn capture_previous_boot(
                 || prior.boot != previous
                 || prior.previous_boot.is_some()
                 || prior.predecessor_owner.is_some()
+                || prior.predecessor_absence.is_some()
                 || prior.run != selection.run
                 || prior.plan != selection.plan
                 || prior.capacity != selection.capacity
@@ -271,22 +361,123 @@ pub(crate) fn capture_previous_boot(
                 })
                 .collect();
         } else {
-            selection.predecessor_owner = Some(predecessor_owner(receipt, previous)?);
+            selection.predecessor_owner = Some(predecessor_owner(receipt, previous, host_pin)?);
         }
     }
-    validate_selection(engine, receipt, &selection)?;
+    validate_selection_recovery(engine, receipt, &selection, host_pin)?;
     Ok(selection)
 }
 
-/// Pending recovery may resume only the exact remaining reservations. Released
-/// slots may be absent; a replacement or new reservation is never adopted.
-pub(crate) fn verify_remaining(
+/// A missing relay-control root has no Pin fingerprint. Select a distinct,
+/// witness-bound predecessor only with the exact current bridge registry.
+pub(crate) fn capture_previous_boot_absence(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    witness: &super::super::absent_publication_cleanup::Selection,
+) -> Result<Selection, CandidateError> {
+    let store = strict_store(candidate, engine)?;
+    let mut selection = Selection {
+        version: 1,
+        owner: engine.guest().incarnation().into(),
+        boot: engine.guest().boot_id().into(),
+        previous_boot: Some(witness.previous_boot().into()),
+        predecessor_owner: None,
+        predecessor_absence: None,
+        run: receipt.run.clone(),
+        plan: receipt.plan_id.clone(),
+        capacity: engine
+            .guest()
+            .bridge_intent()
+            .map_or(0, |value| value.slots),
+        serial: store.next_launch_serial,
+        selected: store
+            .slots
+            .into_iter()
+            .filter(|(_, assignment)| assignment.run == receipt.run)
+            .map(|(slot, assignment)| {
+                (
+                    slot,
+                    Selected {
+                        assignment,
+                        helper: None,
+                    },
+                )
+            })
+            .collect(),
+    };
+    if selection.selected.is_empty() {
+        selection.predecessor_absence = Some(AbsentPredecessor {
+            selection_sha256: witness.digest()?,
+            previous_boot: witness.previous_boot().into(),
+            control_root: witness.control_root().to_path_buf(),
+        });
+    }
+    validate_selection_with_absence(engine, receipt, &selection, None, Some(witness))?;
+    Ok(selection)
+}
+
+/// Selection binds only this run's assignments. Independent sibling
+/// allocations may advance the global serial without changing its authority.
+pub(crate) fn scoped_absence_projection(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    previous_boot: &str,
+) -> Result<Value, CandidateError> {
+    let store = strict_store(candidate, engine)?;
+    let selected = store
+        .slots
+        .iter()
+        .filter(|(_, assignment)| assignment.run == receipt.run)
+        .collect::<BTreeMap<_, _>>();
+    Ok(json!({
+        "owner": engine.guest().incarnation(),
+        "current_boot": engine.guest().boot_id(),
+        "previous_boot": previous_boot,
+        "run": receipt.run,
+        "plan": receipt.plan_id,
+        "capacity": engine.guest().bridge_intent().map_or(0, |value| value.slots),
+        "selected": selected,
+    }))
+}
+
+pub(crate) fn selection_absence_projection(selection: &Selection) -> Result<Value, CandidateError> {
+    Ok(json!({
+        "owner": selection.owner,
+        "current_boot": selection.boot,
+        "previous_boot": selection.previous_boot,
+        "run": selection.run,
+        "plan": selection.plan,
+        "capacity": selection.capacity,
+        "selected": selection.selected.iter()
+            .map(|(slot, selected)| (slot, &selected.assignment))
+            .collect::<BTreeMap<_, _>>(),
+    }))
+}
+
+pub(crate) fn verify_remaining_absence(
     candidate: &Candidate,
     engine: &Engine<'_>,
     receipt: &Receipt,
     selection: &Selection,
+    witness: &super::super::absent_publication_cleanup::Selection,
 ) -> Result<(), CandidateError> {
-    validate_selection(engine, receipt, selection)?;
+    validate_selection_with_absence(engine, receipt, selection, None, Some(witness))?;
+    let store = strict_store(candidate, engine)?;
+    remaining_matches(&store, receipt, selection)
+}
+
+/// Pending recovery may resume only the exact remaining reservations. Released
+/// slots may be absent; a replacement or new reservation is never adopted.
+pub(crate) fn verify_remaining_recovery(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    selection: &Selection,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
+) -> Result<(), CandidateError> {
+    validate_selection_recovery(engine, receipt, selection, host_pin)?;
     if selection.previous_boot.is_none() {
         return Ok(());
     }
@@ -311,6 +502,7 @@ pub(crate) fn verify_live_remaining(
 fn live_remaining_matches(store: &Store, selection: &Selection) -> Result<(), CandidateError> {
     if selection.previous_boot.is_some()
         || selection.predecessor_owner.is_some()
+        || selection.predecessor_absence.is_some()
         || store.owner != selection.owner
         || store.next_launch_serial < selection.serial
     {
@@ -381,6 +573,7 @@ fn prior_generation(
         && prior.boot == current.previous_boot.as_deref().unwrap_or_default()
         && prior.previous_boot.is_none()
         && prior.predecessor_owner.is_none()
+        && prior.predecessor_absence.is_none()
         && prior.run == current.run
         && prior.plan == current.plan
         && prior.capacity == current.capacity
@@ -403,6 +596,7 @@ fn prior_generation(
         && prior.boot == current.previous_boot.as_deref().unwrap_or_default()
         && prior.previous_boot.is_none()
         && prior.predecessor_owner.is_none()
+        && prior.predecessor_absence.is_none()
         && prior.run == current.run
         && prior.plan == current.plan
         && prior.capacity == current.capacity
@@ -530,18 +724,37 @@ pub(crate) fn read(
     receipt: &Receipt,
     root: &std::path::Path,
 ) -> Result<Selection, CandidateError> {
+    read_recovery(engine, receipt, root, None)
+}
+pub(crate) fn read_recovery(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    root: &std::path::Path,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
+) -> Result<Selection, CandidateError> {
     let selection = state::read_bounded(&selection_path(root)?, 65536)?;
-    validate_selection(engine, receipt, &selection)?;
+    validate_selection_recovery(engine, receipt, &selection, host_pin)?;
+    Ok(selection)
+}
+pub(crate) fn read_recovery_absence(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    root: &std::path::Path,
+    witness: &super::super::absent_publication_cleanup::Selection,
+) -> Result<Selection, CandidateError> {
+    let selection = state::read_bounded(&selection_path(root)?, 65536)?;
+    validate_selection_with_absence(engine, receipt, &selection, None, Some(witness))?;
     Ok(selection)
 }
 
-pub(crate) fn verify(
+pub(crate) fn verify_recovery(
     candidate: &Candidate,
     engine: &Engine<'_>,
     receipt: &Receipt,
     selection: &Selection,
+    host_pin: Option<&super::super::host_pin_recovery::Witness>,
 ) -> Result<(), CandidateError> {
-    validate_selection(engine, receipt, selection)?;
+    validate_selection_recovery(engine, receipt, selection, host_pin)?;
     let store = strict_store(candidate, engine)?;
     if store.next_launch_serial < selection.serial
         || store.slots.values().any(|a| a.run == receipt.run)
@@ -555,6 +768,40 @@ pub(crate) fn verify(
     }
     engine.guest().verify()?;
     Ok(())
+}
+pub(crate) fn verify_recovery_absence(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    selection: &Selection,
+    witness: &super::super::absent_publication_cleanup::Selection,
+) -> Result<(), CandidateError> {
+    validate_selection_with_absence(engine, receipt, selection, None, Some(witness))?;
+    let store = strict_store(candidate, engine)?;
+    if store.next_launch_serial < selection.serial
+        || store
+            .slots
+            .values()
+            .any(|assignment| assignment.run == receipt.run)
+    {
+        return Err(invalid());
+    }
+    for (slot, selected) in &selection.selected {
+        if let Some(helper) = &selected.helper {
+            relay::verify_cleanup(engine, *slot, &selected.assignment, helper)?;
+        }
+    }
+    engine.guest().verify()
+}
+
+#[cfg(test)]
+pub(crate) fn verify(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    selection: &Selection,
+) -> Result<(), CandidateError> {
+    verify_recovery(candidate, engine, receipt, selection, None)
 }
 
 #[cfg(test)]
@@ -570,6 +817,7 @@ mod tests {
             boot: "boot".into(),
             previous_boot: None,
             predecessor_owner: None,
+            predecessor_absence: None,
             run: "b".repeat(32),
             plan: "c".repeat(64),
             capacity: 0,

@@ -1167,6 +1167,11 @@ after its exact stopped receipt has been evicted. It preserves the original proo
 bytes and inode by renaming it; it does not reconstruct an evicted receipt or use
 historical evidence as current cleanup authority. Pending or incomplete proofs,
 changed graph identities and an unchanged container generation still refuse.
+Retention and recovered-publisher retirement prefer a completed previous-boot
+proof that matches the exact current stopped receipt. An older same-boot proof
+must still pass historical validation; its presence cannot redirect these
+operations away from the current proof. Pending, incomplete, malformed or
+conflicting same-boot records continue to refuse both operations.
 An already completed prior-boot dependency archive is likewise historical
 metadata. Restore may leave it untouched after validating its original generation,
 boot, journal and exact artifact hashes, with no active or pending journal and an

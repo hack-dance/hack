@@ -300,6 +300,20 @@ pub fn recover_cleanup(
     execute(candidate, run, expected)
 }
 
+/// A current completed dead-owner cleanup outranks only a *validated historical*
+/// live-owner sidecar for retention or publisher retirement. This selection
+/// does not replace either operation's exact receipt and inventory checks.
+pub(super) fn current_completed_precedence(
+    root: &std::path::Path,
+    receipt: &Receipt,
+) -> Result<bool, CandidateError> {
+    if !current_completion(root, receipt)? {
+        return Ok(false);
+    }
+    super::live_owner_cleanup::require_historical_recovery(root, receipt)?;
+    Ok(true)
+}
+
 /// The completed dead-owner cleanup receipt, not missing endpoint names, grants
 /// a separate explicit publisher retirement. This never removes graph volumes.
 pub fn retire_recovered_publisher(
@@ -315,11 +329,23 @@ pub fn retire_recovered_publisher(
     {
         return Ok(result);
     }
-    if let Some(result) = super::live_owner_cleanup::retire(candidate, run, expected_owner)? {
-        return Ok(result);
+    let dead_owner_current = {
+        let engine = Engine::connect_cleanup_wait(candidate)?;
+        let (receipt, root) = load(candidate, &engine, run)?;
+        current_completed_precedence(&root, &receipt)?
+    };
+    if !dead_owner_current {
+        if let Some(result) = super::live_owner_cleanup::retire(candidate, run, expected_owner)? {
+            return Ok(result);
+        }
     }
     let engine = Engine::connect_cleanup_wait(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
+    // Dispatch crossed a cleanup lease boundary. Revalidate the current proof
+    // and historical sidecar under the lease that protects retirement effects.
+    if dead_owner_current && !current_completed_precedence(&root, &receipt)? {
+        return Err(refused());
+    }
     no_pending(&root)?;
     if receipt.phase != "stopped-data-retained"
         || receipt.owner != expected_owner
@@ -1593,6 +1619,126 @@ mod tests {
         }
         current.resources.get_mut("container:init").unwrap().id = Some(format!("{:064x}", 13));
         (fixture, current, stopped, proof)
+    }
+
+    fn retirement_precedence_fixture() -> (super::super::tests::Fixture, Receipt, Value) {
+        let fixture = super::super::tests::Fixture::new();
+        let root = &fixture.0;
+        let mut original = partial();
+        original.phase = "ready-observed".into();
+        original.resources.get_mut("container:init").unwrap().id = Some(format!("{:064x}", 1));
+        let mut prior_stopped = original.clone();
+        prior_stopped.phase = "stopped-data-retained".into();
+        for resource in prior_stopped.resources.values_mut() {
+            if resource.kind != Kind::Volume {
+                resource.phase = "absent".into();
+            }
+        }
+        let live = json!({
+            "version":1,"boot":"historical-boot","original":original,
+            "original_sha256":selected(&original).unwrap(),
+            "foreground_sha256":"f".repeat(64),
+            "relay":{"bytes":[],"record_id":[1,1]},
+            "environment":[],
+            "bridges":{"version":1,"owner":original.owner,"boot":"historical-boot",
+                "run":original.run,"plan":original.plan_id,"capacity":0,"serial":0,
+                "selected":{}},
+            "prior_bridges":null,"listeners_retired":true,
+            "complete_sha256":selected(&prior_stopped).unwrap()
+        });
+        state::write(&root.join("live-owner-cleanup.json"), &live).unwrap();
+        for generation in 1..=12 {
+            let mut stopped = prior_stopped.clone();
+            stopped.resources.get_mut("container:init").unwrap().id =
+                Some(format!("{generation:064x}"));
+            restore_history::retain(root, &stopped).unwrap();
+        }
+        let mut current = prior_stopped;
+        current.resources.get_mut("container:init").unwrap().id = Some(format!("{:064x}", 13));
+        let mut dead = intent(&current);
+        dead.complete_sha256 = Some(selected(&current).unwrap());
+        state::write(&root.join(FILE), &dead).unwrap();
+        state::write(&root.join("state.json"), &current).unwrap();
+        (fixture, current, live)
+    }
+
+    #[test]
+    fn current_dead_owner_retirement_precedes_only_valid_historical_live_proof() {
+        let (fixture, current, _live) = retirement_precedence_fixture();
+        let root = &fixture.0;
+        let live_before = fs::read(root.join("live-owner-cleanup.json")).unwrap();
+        let dead_before = fs::read(root.join(FILE)).unwrap();
+        assert!(current_completed_precedence(root, &current).unwrap());
+        super::super::cleanup_enrollment::retention(root, &current).unwrap();
+        assert_eq!(
+            fs::read(root.join("live-owner-cleanup.json")).unwrap(),
+            live_before
+        );
+        assert_eq!(fs::read(root.join(FILE)).unwrap(), dead_before);
+
+        let mut stale_dead: Intent = state::read(&root.join(FILE)).unwrap();
+        stale_dead.complete_sha256 = Some("8".repeat(64));
+        state::write(&root.join(FILE), &stale_dead).unwrap();
+        assert!(!current_completed_precedence(root, &current).unwrap());
+        assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
+        state::write(&root.join(FILE), &intent(&current)).unwrap();
+        assert!(!current_completed_precedence(root, &current).unwrap());
+        assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
+    }
+
+    #[test]
+    fn current_dead_owner_retirement_refuses_pending_incomplete_or_foreign_live_proof() {
+        for fault in [
+            "pending",
+            "incomplete",
+            "foreign-owner",
+            "current-live",
+            "malformed",
+        ] {
+            let (fixture, current, mut live) = retirement_precedence_fixture();
+            let root = &fixture.0;
+            match fault {
+                "pending" => {
+                    fs::write(root.join("live-owner-cleanup.pending"), b"partial proof").unwrap();
+                }
+                "incomplete" => live["complete_sha256"] = Value::Null,
+                "foreign-owner" => {
+                    live["original"]["owner"] = json!("e".repeat(32));
+                    let changed: Receipt =
+                        serde_json::from_value(live["original"].clone()).unwrap();
+                    live["original_sha256"] = json!(selected(&changed).unwrap());
+                }
+                "current-live" => {
+                    let mut same = current.clone();
+                    same.phase = "ready-observed".into();
+                    live["original"] = serde_json::to_value(&same).unwrap();
+                    live["original_sha256"] = json!(selected(&same).unwrap());
+                    live["complete_sha256"] = json!(selected(&current).unwrap());
+                }
+                "malformed" => {
+                    fs::write(root.join("live-owner-cleanup.json"), b"invalid proof").unwrap();
+                }
+                _ => unreachable!(),
+            }
+            if !matches!(fault, "pending" | "malformed") {
+                state::write(&root.join("live-owner-cleanup.json"), &live).unwrap();
+            }
+            let live_before = fs::read(root.join("live-owner-cleanup.json")).unwrap();
+            let dead_before = fs::read(root.join(FILE)).unwrap();
+            assert!(
+                current_completed_precedence(root, &current).is_err(),
+                "{fault}"
+            );
+            assert!(
+                super::super::cleanup_enrollment::retention(root, &current).is_err(),
+                "{fault}"
+            );
+            assert_eq!(
+                fs::read(root.join("live-owner-cleanup.json")).unwrap(),
+                live_before
+            );
+            assert_eq!(fs::read(root.join(FILE)).unwrap(), dead_before);
+        }
     }
 
     #[test]

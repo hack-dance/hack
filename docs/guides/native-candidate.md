@@ -23,6 +23,10 @@ interpreter or shared-library requirements before publishing the bundle. It cont
 state, project data, or credentials. It can be copied outside the source checkout;
 Rust, Zig, Bun and the checkout are not needed to run the resulting executable.
 Host system utilities and the pinned provider remain runtime prerequisites.
+For versioned candidate packages, channel rules and publishing gates are described
+in the [prerelease guide](https://github.com/hack-dance/hack/blob/next/docs/guides/prereleases.md),
+and the separate `hack-next` installation path is described in the
+[candidate installer guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md).
 The build re-signs the final compiled frontend with a local ad-hoc signature and
 strictly verifies both macOS executables before generating checksums. This checks
 code integrity; an ad-hoc signature does not establish a publisher identity or
@@ -63,9 +67,10 @@ or symlink only the script). It selects the adjacent executor even if inherited
 backend variables select another binary. It preserves arguments, exit codes and
 signals through `exec`, and never replaces the installed `hack`. Project-specific
 native adaptation, dependency and routing selections remain explicit; this entrypoint
-does not prepare a provider or migrate existing projects. The embedded frontend
-currently reports the repository package version; `hack-v5` identifies the opt-in
-candidate channel, not a published v5 release. Unsupported native workflows still
+does not prepare a provider or migrate existing projects. An unversioned local
+build reports the repository package version. A versioned prerelease build reports
+its explicit candidate version and includes source provenance. The `hack-v5`
+entrypoint alone does not identify a published release. Unsupported native workflows still
 report their existing refusal rather than falling back to Docker.
 
 Native `up` accepts an explicit branch or the branch inferred from a linked Git
@@ -95,8 +100,9 @@ inside one VM pool.
 
 ## Manual candidate upgrade and rollback
 
-Candidate bundles are selected by their full path. There is no automatic candidate
-updater or state migration manager. `hack-v5 update` refuses before discovering an
+Manual candidate bundles are selected by their full path. The separate
+[prerelease installer](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md) manages verified versioned selections
+with independent homes; it does not migrate runtime data. `hack-v5 update` refuses before discovering an
 installed binary or contacting a release server; install a separately reviewed,
 complete bundle to change the candidate.
 

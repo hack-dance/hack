@@ -47,9 +47,15 @@ type PackageJsonType = {
 } & Record<string, unknown>;
 const packageJson = pkg as unknown as PackageJsonType;
 
+/** Set only by the native prerelease compiler; ordinary builds use package.json. */
+declare const __HACK_BUILD_VERSION__: string | undefined;
+
 export const CLI_SPEC = defineCli({
   name: "hack",
-  version: packageJson.version,
+  version:
+    typeof __HACK_BUILD_VERSION__ === "string"
+      ? __HACK_BUILD_VERSION__
+      : packageJson.version,
   summary: "Local development without the port-collision tax",
   highlights: [
     "Run multiple repos or branches at the same time without port conflicts.",

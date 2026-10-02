@@ -294,6 +294,59 @@ test("historical HTTPS release revalidates across a new bundle generation withou
   ).toEqual(f.current);
 });
 
+test("explicit prior-boot frontend recovery selects the exact native archive contract", async () => {
+  const f = await fixture();
+  const old = await ensureNativeHttpsOwner({
+    binding: f.binding,
+    spawnOwner: async () => {},
+  });
+  const identity = nativeHttpsLeaseIdentity(old, lease("b"));
+  const selectedBinary = join(f.home, "selected-native");
+  const callsPath = join(f.home, "native-calls");
+  const script = (bootId: string) => `#!/bin/sh
+printf '%s\\n' "$*" >> '${callsPath}'
+case "$4" in
+  status) printf '%s\\n' '${JSON.stringify({ phase: "running", process_alive: true, guest_boot_id: bootId })}' ;;
+  archive-previous-boot-shared-https) printf '%s\\n' '${JSON.stringify({ archived: true, run: identity.run, owner_generation: identity.ownerGeneration, lease_id: identity.leaseId, data_retained: true, processes_signaled: 0 })}' ;;
+  *) exit 1 ;;
+esac
+`;
+  await writeFile(selectedBinary, script(f.binding.pool.bootId), {
+    mode: 0o700,
+  });
+  const runtime = { home: f.home, binary: selectedBinary };
+  await expect(
+    recoverNativeHttpsLease({ runtime, identity })
+  ).rejects.toThrow();
+  await expect(
+    recoverNativeHttpsLease({ runtime, identity, archivePreviousBoot: true })
+  ).rejects.toThrow();
+  expect((await readFile(callsPath, "utf8")).trim().split("\n")).toHaveLength(
+    1
+  );
+
+  await writeFile(
+    selectedBinary,
+    script("22222222-2222-2222-2222-222222222222")
+  );
+  await recoverNativeHttpsLease({
+    runtime,
+    identity,
+    archivePreviousBoot: true,
+  });
+  const calls = (await readFile(callsPath, "utf8")).trim().split("\n");
+  expect(calls).toHaveLength(3);
+  expect(calls.at(-1)).toContain(`--run-id ${identity.run}`);
+  expect(calls.at(-1)).toContain(
+    `--expect-owner-generation ${identity.ownerGeneration}`
+  );
+  expect(calls.at(-1)).toContain(`--expect-lease-id ${identity.leaseId}`);
+  expect(calls.at(-1)).toContain(`--expect-attempt ${identity.attempt}`);
+  expect(calls.at(-1)).toContain(`--expect-owner ${identity.owner}`);
+  expect(calls.at(-1)).toContain(`--expect-namespace ${identity.namespace}`);
+  expect(calls.at(-1)).toContain(`--expect-plan ${identity.planId}`);
+});
+
 test("historical HTTPS release refuses a same-generation runtime mismatch before graph verification", async () => {
   const f = await historicalReleaseFixture(true);
   const before = await f.snapshot();

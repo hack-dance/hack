@@ -92,7 +92,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "previous-boot-shared-https",
     module: "ArchiveHttps",
-    states: 81,
+    states: 92,
     invariant: "NoPrematurePublication",
     action: "Publish",
     fields: [

@@ -39,7 +39,7 @@ ArchiveOwner == /\ admission = "recovery" /\ recovery /\ engine /\ intent
                      selected, version, eligible, complete, finalized,
                      published, unsafePublication>>
 ArchiveSocket == /\ admission = "recovery" /\ recovery /\ engine /\ intent
-                 /\ "owner" \in archived /\ "socket" \in originals
+                 /\ "socket" \in originals
                  /\ (selected = version \/ ~CheckSelection)
                  /\ originals' = originals \ {"socket"}
                  /\ archived' = archived \cup {"socket"}

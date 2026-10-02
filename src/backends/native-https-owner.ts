@@ -41,7 +41,10 @@ import {
   verifyActiveNativeHttpsConnection,
   verifyNativeHttpsHostname,
 } from "./native-project-https.ts";
-import type { NativeRuntimeSelection } from "./native-runtime-client.ts";
+import {
+  invokeNativeRuntime,
+  type NativeRuntimeSelection,
+} from "./native-runtime-client.ts";
 
 export type NativeHttpsLeaseIdentity = LeaseIdentity;
 export function isNativeHttpsLeaseIdentity(
@@ -519,11 +522,86 @@ async function hasActiveNativeHttpsLease(
   }
 }
 
+async function archivePreviousBootSharedHttps(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly identity: NativeHttpsLeaseIdentity;
+}): Promise<boolean> {
+  let configuration: NativeHttpsOwnerConfiguration | undefined;
+  try {
+    configuration = await readNativeHttpsOwnerConfigurationAtHome(
+      opts.runtime.home
+    );
+  } catch (error) {
+    if (!isRecord(error) || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  const status = await invokeNativeRuntime({
+    runtime: opts.runtime,
+    cwd: opts.runtime.home,
+    args: ["runtime", "status", "--json"],
+    timeoutMs: 30_000,
+  });
+  if (
+    !isRecord(status) ||
+    status.phase !== "running" ||
+    status.process_alive !== true ||
+    typeof status.guest_boot_id !== "string"
+  ) {
+    throw nativeHttpsOwnerRefused();
+  }
+  if (
+    !configuration ||
+    (configuration.ownerGeneration === opts.identity.ownerGeneration &&
+      configuration.binding.pool.bootId !== status.guest_boot_id)
+  ) {
+    const archived = await invokeNativeRuntime({
+      runtime: opts.runtime,
+      cwd: opts.runtime.home,
+      args: [
+        "runtime",
+        "archive-previous-boot-shared-https",
+        "--run-id",
+        opts.identity.run,
+        "--expect-owner-generation",
+        opts.identity.ownerGeneration,
+        "--expect-lease-id",
+        opts.identity.leaseId,
+        "--expect-attempt",
+        opts.identity.attempt,
+        "--expect-owner",
+        opts.identity.owner,
+        "--expect-namespace",
+        opts.identity.namespace,
+        "--expect-plan",
+        opts.identity.planId,
+        "--json",
+      ],
+      timeoutMs: 60_000,
+    });
+    if (
+      !isRecord(archived) ||
+      archived.archived !== true ||
+      archived.run !== opts.identity.run ||
+      archived.owner_generation !== opts.identity.ownerGeneration ||
+      archived.lease_id !== opts.identity.leaseId ||
+      archived.data_retained !== true ||
+      archived.processes_signaled !== 0
+    ) {
+      throw nativeHttpsOwnerRefused();
+    }
+    return true;
+  }
+  return false;
+}
+
 /** Recovery never treats absent/dead helper state as permission to adopt its children. */
 export async function recoverNativeHttpsLease(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly identity: NativeHttpsLeaseIdentity;
   readonly verifyReleased?: typeof verifyNativeHttpsLeaseGraph;
+  /** Only an explicit v3 dead-frontend recovery may select prior-boot archival. */
+  readonly archivePreviousBoot?: true;
 }): Promise<void> {
   if (!isNativeHttpsLeaseIdentity(opts.identity)) {
     throw nativeHttpsOwnerRefused();
@@ -577,6 +655,12 @@ export async function recoverNativeHttpsLease(opts: {
     if (!isRecord(error) || error.code !== "ENOENT") {
       throw error;
     }
+  }
+  if (
+    opts.archivePreviousBoot === true &&
+    (await archivePreviousBootSharedHttps(opts))
+  ) {
+    return;
   }
   const configuration = await readNativeHttpsOwnerConfiguration(opts.runtime);
   if (

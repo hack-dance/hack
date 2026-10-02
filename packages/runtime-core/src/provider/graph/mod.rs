@@ -73,6 +73,8 @@ mod dead_owner_cleanup;
 #[cfg(target_os = "macos")]
 mod live_owner_cleanup;
 #[cfg(target_os = "macos")]
+pub(in crate::provider) use dead_owner_cleanup::HttpsArchiveGuard;
+#[cfg(target_os = "macos")]
 pub use dead_owner_cleanup::recover_cleanup;
 #[cfg(target_os = "macos")]
 pub use dead_owner_cleanup::retire_recovered_publisher;

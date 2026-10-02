@@ -511,6 +511,16 @@ pub fn inspect_claims(c: &Candidate) -> Result<serde_json::Value, CandidateError
     Ok(serde_json::json!({"scope":"durable-ownership-only","claims":claims}))
 }
 
+/// Caller holds the provider operation lease. A prior-boot HTTPS archive may
+/// proceed only when no graph (including a sibling) retains publication.
+#[cfg(target_os = "macos")]
+pub(crate) fn require_no_claims_locked(c: &Candidate, owner: &str) -> Result<(), CandidateError> {
+    if !load(c, owner)?.is_empty() {
+        return Err(error());
+    }
+    Ok(())
+}
+
 fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
     let observed = identity::observe(e.process.pid)?;
     identity::verify(&e.process, &observed, &e.process.executable, unsafe {

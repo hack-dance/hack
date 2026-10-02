@@ -46,6 +46,8 @@ pub mod relay_loop;
 #[cfg(target_os = "macos")]
 pub mod relay_owner;
 pub mod resources;
+#[cfg(target_os = "macos")]
+pub mod shared_https_recovery;
 pub mod storage_usage;
 pub use image_load::load as load_image;
 mod lifecycle;

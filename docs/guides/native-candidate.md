@@ -770,6 +770,45 @@ for inspection. Older binaries do not honor that lock and must remain quiescent
 during this explicit recovery. Changed, active or ambiguous state refuses; this
 is neither automatic recovery nor a public CLI command.
 
+A nonempty shared HTTPS owner from the immediately preceding guest boot requires
+a separate retaining recovery. The selected graph must already have an exact
+current completed dead-owner cleanup proof, a retired publisher, retained volumes
+and no compute, bridge, publication or hostname authority. Stop other uses of the
+recorded frontend, runtime and Caddy executables first; legacy binaries do not
+honor the new admission lock. Recovery refuses a live or uncertain process using
+any of these executable paths, including Caddy serving another candidate home.
+
+Explicit `restart --recover-frontend --expect-finalization-attempt ATTEMPT` can
+select this transition for its exact v3 finalization lease. The internal native
+operation binds every lease field:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime archive-previous-boot-shared-https \
+  --run-id RUN --expect-owner-generation GENERATION --expect-lease-id LEASE \
+  --expect-attempt ATTEMPT --expect-owner OWNER --expect-namespace NAMESPACE \
+  --expect-plan PLAN --json
+```
+
+The operation holds shared HTTPS admission, retired-publisher protection and the
+provider cleanup lease while checking the immediate boot transition, original
+executable hashes, owner/lease files, CA and exclusive port availability. It
+archives original owner and lease files by same-filesystem rename and signals no
+process. A present control socket and parent must match their selected identities
+and be inactive; the socket is renamed within its unchanged parent. If both
+socket and parent are absent,
+that absence must remain true throughout archival, alongside the independent
+process, port and graph proofs. A partial or replaced socket path refuses.
+
+An interrupted archive retains its journal and admission barrier. Only the exact
+selection with a verified dead recovery process can resume; do not remove lock
+files or synthesize missing ownership records. Completion preserves Caddy data,
+volumes and original lease evidence. Explicit frontend recovery consumes that
+completion as a distinct recovery proof, never as an ordinary live-owner lease
+release. Keep other shared HTTPS startup quiescent until frontend finalization
+completes. A newer active owner blocks completed-archive replay; this recovery
+does not adopt or stop it. Archival alone does not start the application or
+establish browser access.
+
 Normal foreground startup also selects `--auto-dependency-slots`. Each graph's
 logical dependency groups receive distinct physical pool slots under the provider
 lock. The complete assignment is recorded before listeners bind, so concurrent

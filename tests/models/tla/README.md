@@ -92,12 +92,14 @@ required before claiming complete concurrent application support.
 
 `previous-boot-shared-https/ArchiveHttps.tla` checks one explicit recovery racing
 another application's owner startup. It models the owner directory and control
-socket as separate atomic renames. The admission barrier survives one recovery
+socket as separate atomic renames in either order. Native archival moves the
+socket first; the owner-first interleaving is an additional barrier control.
+The admission barrier survives one recovery
 crash while the provider cleanup lease does not; resume reacquires that lease and
 rechecks the exact selection before another move. Startup can observe an absent
 owner directory between the two moves, so retaining admission is essential.
 
-The positive configuration explores 81 distinct states from two initial inputs
+The positive configuration explores 92 distinct states from two initial inputs
 (eligible or refused), with one crash/resume and one input-generation change.
 Original artifacts remain in exactly one original or archived location. Completed
 archival and explicit frontend finalization are separate facts. Another
@@ -126,7 +128,16 @@ eligibility flag and input version. Admission identity and recovery-process deat
 are assumed validated before resume. Cooperating provider writers cannot change
 the selection under the provider lease; legacy startup must separately remain
 quiescent. Atomic renames and durable intent/completion writes are abstractions,
-not fsync proofs. This model does not establish executable absence, PID reuse,
+not fsync proofs. The native implementation is in
+`packages/runtime-core/src/provider/shared_https_recovery.rs`; explicit v3
+frontend selection is in `src/backends/native-project-recovery.ts` and
+`src/backends/native-https-owner.ts`. This model covers the present-socket path
+with two moves. The both-absent socket/parent variant has one owner move and
+requires separate concrete absence, process and port regression controls.
+The implementation also refuses completed replay while a newer shared owner is
+active; the model's post-commit startup interleaving is a safety bound, not proof
+that this interrupted frontend can finish without first restoring quiescence.
+This model does not establish executable absence, PID reuse,
 socket/FD identity, permissions, hash integrity, physical reboot, retained volume
 continuity, multiple-lease recovery, browser readiness or performance. Concrete
 refusal, interrupted-archive, process/socket and native application checks remain

@@ -1,6 +1,8 @@
 //! MacOS wildcard and loopback claims held across HTTPS recovery effects.
 use super::{CandidateError, refused};
-pub(super) fn port_absent(port: u16) -> Result<Vec<std::os::fd::OwnedFd>, CandidateError> {
+pub(in crate::provider) fn port_absent(
+    port: u16,
+) -> Result<Vec<std::os::fd::OwnedFd>, CandidateError> {
     let mut guards = Vec::from(bind_pair(port, true)?);
     // macOS permits a later SO_REUSEADDR loopback bind beside a wildcard listener.
     // Reserve the actual local HTTPS path too; neither guard enables SO_REUSEPORT.

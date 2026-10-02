@@ -314,6 +314,138 @@ pub(super) fn current_completed_precedence(
     Ok(true)
 }
 
+/// Holds the retired publisher and provider cleanup leases while an exact
+/// previous-boot shared HTTPS owner is archived. Neither pathname absence nor
+/// a merely stopped graph grants this authority.
+pub(in crate::provider) struct HttpsArchiveGuard<'a> {
+    retired: foreground::transport::Retired,
+    engine: Engine<'a>,
+    run: String,
+    owner: String,
+    namespace: String,
+    plan: String,
+    old_boot: String,
+}
+
+impl<'a> HttpsArchiveGuard<'a> {
+    pub(in crate::provider) fn acquire(
+        candidate: &'a Candidate,
+        run: &str,
+        owner: &str,
+        namespace: &str,
+        plan: &str,
+        old_boot: &str,
+    ) -> Result<Self, CandidateError> {
+        // Admission is held by the caller. The publisher lock precedes the
+        // provider lease, matching the existing retained-data recovery order.
+        let retired =
+            foreground::transport::Retired::acquire(candidate, run)?.ok_or_else(refused)?;
+        let engine = Engine::connect_cleanup_wait(candidate)?;
+        let guard = Self {
+            retired,
+            engine,
+            run: run.into(),
+            owner: owner.into(),
+            namespace: namespace.into(),
+            plan: plan.into(),
+            old_boot: old_boot.into(),
+        };
+        guard.verify(candidate)?;
+        Ok(guard)
+    }
+
+    pub(in crate::provider) fn current_boot(&self) -> &str {
+        self.engine.guest().boot_id()
+    }
+
+    /// Recheck under both held leases immediately before each archive effect.
+    pub(in crate::provider) fn verify(&self, candidate: &Candidate) -> Result<(), CandidateError> {
+        self.retired.verify()?;
+        let (receipt, root) = load(candidate, &self.engine, &self.run)?;
+        no_pending(&root)?;
+        if receipt.phase != "stopped-data-retained"
+            || receipt.owner != self.owner
+            || receipt.namespace != self.namespace
+            || receipt.plan_id != self.plan
+            || !current_completed_precedence(&root, &receipt)?
+            || !retained(&root, &receipt)?
+        {
+            return Err(refused());
+        }
+        initializer_cache::require_resolved(&receipt)?;
+        let intent: Intent = state::read(&root.join(FILE))?;
+        let complete = selected(&receipt)?;
+        validate(
+            &intent,
+            &receipt,
+            &intent.original_sha256,
+            &intent.owner_sha256,
+        )?;
+        let pool = Owner::load(candidate)?;
+        if intent.complete_sha256.as_deref() != Some(complete.as_str())
+            || intent.old_boot != self.old_boot
+            || intent.new_boot.as_deref() != Some(self.engine.guest().boot_id())
+            || pool.previous_guest_boot_id.as_deref() != Some(self.old_boot.as_str())
+            || pool.guest_boot_id.as_deref() != Some(self.engine.guest().boot_id())
+            || pool.token != receipt.owner
+            || intent.one_off_sha256.is_some()
+        {
+            return Err(refused());
+        }
+        let witness = super::host_pin_recovery::load_witness(candidate, &self.run)?.filter(|w| {
+            w.graph_sha256() == intent.original_sha256
+                && w.publisher_sha256() == intent.owner_sha256
+                && w.matches_graph(&intent.original)
+        });
+        self.retired.verify_recovery_with_rebind(
+            candidate,
+            &self.run,
+            &intent.owner_sha256,
+            &complete,
+            witness.as_ref().map(|w| w.rebind()),
+        )?;
+        for resource in receipt.resources.values() {
+            let observed = inspect_resource(&self.engine, &receipt, resource)?;
+            if (resource.kind == Kind::Volume && observed.is_none())
+                || (resource.kind != Kind::Volume
+                    && (resource.phase != "absent" || observed.is_some()))
+            {
+                return Err(refused());
+            }
+        }
+        let environment = environment::cleanup_inventory(candidate, &self.engine, &receipt, &root)?;
+        if intent.environment.as_ref()
+            != Some(&serde_json::to_value(&environment).map_err(|_| refused())?)
+        {
+            return Err(refused());
+        }
+        let bridges = intent.bridges.as_ref().ok_or_else(refused)?;
+        bridges::cleanup::verify_recovery_file(&root, bridges, intent.prior_bridges.as_ref())?;
+        let active = bridges::inspect_bridges_using(candidate, &self.engine, &self.run)?;
+        if active["slots"]
+            .as_object()
+            .is_none_or(|slots| !slots.is_empty())
+        {
+            return Err(refused());
+        }
+        host_relay::inspect_cleanup_recovery(
+            candidate,
+            &self.engine,
+            &receipt,
+            false,
+            &environment,
+            bridges,
+            witness.as_ref(),
+        )?;
+        super::super::publication::require_no_claims_locked(candidate, &receipt.owner)?;
+        let authority = super::super::hostname_authority::managed::inspect(candidate)?;
+        if authority["authority"]["present"] != false {
+            return Err(refused());
+        }
+        self.engine.guest().verify()
+    }
+}
+
 /// The completed dead-owner cleanup receipt, not missing endpoint names, grants
 /// a separate explicit publisher retirement. This never removes graph volumes.
 pub fn retire_recovered_publisher(

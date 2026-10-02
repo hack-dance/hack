@@ -4,7 +4,7 @@ use super::{hostname_authority, identity, state};
 use crate::{Candidate, CandidateError};
 use base64::Engine as _;
 mod ports;
-use ports::port_absent;
+pub(in crate::provider) use ports::port_absent;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "macos")]
@@ -476,7 +476,7 @@ fn ca_hash(path: &Path) -> Result<String, CandidateError> {
     Ok(digest(&der))
 }
 
-fn executable_hash(binary: &Path) -> Result<String, CandidateError> {
+pub(in crate::provider) fn executable_hash(binary: &Path) -> Result<String, CandidateError> {
     if fs::canonicalize(binary).map_err(|_| refused())? != binary {
         return Err(refused());
     }

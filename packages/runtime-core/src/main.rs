@@ -51,6 +51,7 @@ Usage:
   hack-local runtime recover-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
   hack-local runtime managed-hostname-authority [--json]
   hack-local runtime recover-quiescent-https --expect-owner <64-hex> --expect-configuration <64-hex> --expect-frontend-pid <pid> --json
+  hack-local runtime archive-previous-boot-shared-https --run-id <32-hex> --expect-owner-generation <32-hex> --expect-lease-id <32-hex> --expect-attempt <32-hex> --expect-owner <32-hex> --expect-namespace <64-hex> --expect-plan <64-hex> --json
   hack-local runtime recover-quiescent-https --expect-owner <64-hex> --expect-configuration <64-hex> --expect-frontend-pid <pid> --accept-legacy-device-rebind <run:witness-sha:socket-dev:socket-ino:lock-dev:lock-ino> --json
   hack-local runtime inspect-host-listener --pid <pid> --port <loopback-port> --executable <absolute-path> [--peer-port <open-client-port>] [--json]
   hack-local runtime serve-managed-hostnames [--certificate-name-limit <1..4096>] (owner pipe on stdin)
@@ -510,6 +511,41 @@ fn run() -> Result<(), CandidateError> {
                     &discover_candidate(&requested)?,
                     std::path::Path::new(socket),
                     hash,
+                )?,
+            )?;
+        }
+        #[cfg(target_os = "macos")]
+        [
+            "runtime",
+            "archive-previous-boot-shared-https",
+            "--run-id",
+            run,
+            "--expect-owner-generation",
+            generation,
+            "--expect-lease-id",
+            lease,
+            "--expect-attempt",
+            attempt,
+            "--expect-owner",
+            owner,
+            "--expect-namespace",
+            namespace,
+            "--expect-plan",
+            plan,
+            "--json",
+        ] => {
+            print_json(
+                &hack_runtime_core::provider::shared_https_recovery::archive(
+                    &discover_candidate(&requested)?,
+                    hack_runtime_core::provider::shared_https_recovery::ArchiveSelection {
+                        run,
+                        owner_generation: generation,
+                        lease_id: lease,
+                        attempt,
+                        owner,
+                        namespace,
+                        plan,
+                    },
                 )?,
             )?;
         }

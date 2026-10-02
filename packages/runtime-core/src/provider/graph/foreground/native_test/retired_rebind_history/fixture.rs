@@ -84,10 +84,185 @@ pub(super) fn ready_at(
     eprintln!("retired-rebind stage={stage} ready");
 }
 
+/// Only the second legacy owner uses graceful retirement. Its registered
+/// foreground signal handler must unwind the real managed transport owner even
+/// when historical journal archival still refuses; PID death alone is not proof
+/// that a reservation or socket may be released.
+pub(super) fn graceful_stop(
+    files: &Files,
+    owner: &mut Process,
+    process: &crate::provider::identity::ProcessIdentity,
+    deadline: Instant,
+) -> ExitStatus {
+    let stage = "second-legacy-stop";
+    write_new(&files.private.join(format!("{stage}.waiting")), b"").unwrap();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        assert!(
+            owner.poll().is_none(),
+            "selected legacy owner already exited"
+        );
+        assert_eq!(
+            crate::provider::identity::observe(owner.child.id() as i32).unwrap(),
+            *process,
+            "selected legacy process changed"
+        );
+        // SAFETY: the retained, unreaped Child owns this exact PID; it cannot be
+        // recycled. SIGTERM is handled by foreground::signals::Events.
+        assert_eq!(unsafe { libc::kill(process.pid, libc::SIGTERM) }, 0);
+        let status = owner.wait(deadline.min(Instant::now() + Duration::from_secs(20)));
+        assert!(
+            status.code().is_some(),
+            "legacy signal handler did not exit normally"
+        );
+        assert!(!crate::provider::identity::alive(process.pid).unwrap());
+        status
+    }));
+    for (suffix, bytes) in [("stdout", &owner.out), ("stderr", &owner.err)] {
+        write_new(&files.private.join(format!("{stage}.{suffix}")), bytes).unwrap();
+    }
+    let status = match result {
+        Ok(status) => status,
+        Err(panic) => resume_unwind(panic),
+    };
+    write_new(&files.private.join(format!("{stage}.stopped")), b"").unwrap();
+    status
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use crate::provider::relay_owner::{
+        Context,
+        managed::{ManagedOwner, ManagedSlot},
+    };
+    use std::os::unix::{
+        fs::PermissionsExt,
+        net::{UnixListener, UnixStream},
+    };
+
+    #[test]
+    fn graceful_stop_uses_foreground_signals_and_real_owner_without_stealing_replacements() {
+        const CHILD_ROOT: &str = "HACK_RETIRED_REBIND_STOP_TEST_ROOT";
+        const CHILD_PRIVATE: &str = "HACK_RETIRED_REBIND_STOP_TEST_PRIVATE";
+        const CHILD_SOCKET_HOME: &str = "HACK_RETIRED_REBIND_STOP_TEST_SOCKET_HOME";
+        const CHILD_RUN: &str = "HACK_RETIRED_REBIND_STOP_TEST_RUN";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let candidate = Candidate::discover(Path::new(&root)).unwrap();
+            let private = PathBuf::from(std::env::var_os(CHILD_PRIVATE).unwrap());
+            let socket_home = PathBuf::from(std::env::var_os(CHILD_SOCKET_HOME).unwrap());
+            let run = std::env::var(CHILD_RUN).unwrap();
+            let mut publication = transport::Publication::bind(&candidate, &run).unwrap();
+            let events = super::super::super::super::signals::Events::new(&publication).unwrap();
+            let control = socket_home.join("owner-control");
+            state::private_directory(&control).unwrap();
+            let managed = ManagedOwner::start(
+                Context {
+                    runtime: [1; 16],
+                    boot: [2; 16],
+                },
+                &control,
+                vec![ManagedSlot {
+                    slot: 0,
+                    path: socket_home.join("dependency-00.sock"),
+                    canonical_parent: socket_home.clone(),
+                }],
+            )
+            .unwrap();
+            managed.verify_alive().unwrap();
+            write_new(&private.join("owner-ready"), b"").unwrap();
+            // wait reports EVFILT_SIGNAL directly; the process-wide pending
+            // flag is an independent fast path, not a required postcondition.
+            assert!(events.wait().unwrap());
+            // Exercise the same production Drop that a legacy archival refusal
+            // reaches after its foreground SIGTERM handler returns.
+            drop(managed);
+            publication.finish().unwrap();
+            return;
+        }
+        for replacement in [false, true] {
+            let parent = graph::tests::Fixture::new();
+            let candidate = Candidate::discover(&parent.0).unwrap();
+            let files = Files::new(&candidate.checkout);
+            let run = graph::probes::token().unwrap();
+            // Use an owned short control directory, as the real managed owner
+            // does; macOS Unix addresses cannot hold the host's full TMPDIR.
+            let socket_home = PathBuf::from(format!("/private/tmp/hkrr-{}", &run[..16]));
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&socket_home)
+                .unwrap();
+            let sibling = socket_home.join("sibling.sock");
+            let sibling_listener = UnixListener::bind(&sibling).unwrap();
+            let sibling_inode = fs::symlink_metadata(&sibling).unwrap().ino();
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "provider::graph::foreground::native_test::retired_rebind_history::fixture::tests::graceful_stop_uses_foreground_signals_and_real_owner_without_stealing_replacements",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_ROOT, &candidate.checkout)
+                .env(CHILD_PRIVATE, &files.private)
+                .env(CHILD_SOCKET_HOME, &socket_home)
+                .env(CHILD_RUN, &run)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn().unwrap();
+            let mut owner = Process {
+                child,
+                out: Vec::new(),
+                err: Vec::new(),
+            };
+            nonblocking(owner.child.stdout.as_ref().unwrap().as_raw_fd());
+            nonblocking(owner.child.stderr.as_ref().unwrap().as_raw_fd());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !files.private.join("owner-ready").exists() {
+                assert!(
+                    owner.poll().is_none(),
+                    "owned signal test exited: {}",
+                    String::from_utf8_lossy(&owner.err)
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "owned signal test readiness deadline"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let process = crate::provider::identity::observe(owner.child.id() as i32).unwrap();
+            let socket = socket_home.join("dependency-00.sock");
+            let replacement_listener = replacement.then(|| {
+                fs::rename(&socket, socket_home.join("displaced-owned.sock")).unwrap();
+                UnixListener::bind(&socket).unwrap()
+            });
+            let inode = fs::symlink_metadata(&socket).unwrap().ino();
+            assert!(
+                graceful_stop(&files, &mut owner, &process, deadline).success(),
+                "{}",
+                String::from_utf8_lossy(&owner.err)
+            );
+            if replacement {
+                assert_eq!(fs::symlink_metadata(&socket).unwrap().ino(), inode);
+                assert!(UnixStream::connect(&socket).is_ok());
+                assert!(socket_home.join("displaced-owned.sock").exists());
+            } else {
+                assert_eq!(
+                    fs::symlink_metadata(&socket).unwrap_err().kind(),
+                    io::ErrorKind::NotFound
+                );
+            }
+            assert_eq!(fs::symlink_metadata(&sibling).unwrap().ino(), sibling_inode);
+            assert!(UnixStream::connect(&sibling).is_ok());
+            assert!(files.private.join("second-legacy-stop.stopped").exists());
+            drop(replacement_listener);
+            drop(sibling_listener);
+            // The child's Publication::finish already removed its endpoint names.
+            // Dispose only this test's now-empty publication directory/lock.
+            fs::remove_dir_all(transport::root(&candidate, &run).unwrap()).unwrap();
+            fs::remove_dir_all(socket_home).unwrap();
+            files.dispose().unwrap();
+        }
+    }
 
     fn inputs(files: &Files) -> Vec<(PathBuf, Vec<u8>, u64)> {
         [

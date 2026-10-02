@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::MetadataExt;
 
 mod fixture;
-use fixture::{Files, ready_at};
+use fixture::{Files, graceful_stop, ready_at};
 
 fn file_hash(path: &Path) -> String {
     let mut file = fs::File::open(path).unwrap();
@@ -508,8 +508,72 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
     let cleanup_error: Value = serde_json::from_slice(&first_cleanup.err).unwrap();
     assert_eq!(cleanup_error["code"], "graph_owner_recovery");
     assert!(first_owner.poll().is_none(), "failed cleanup retired owner");
-    first_owner.child.kill().unwrap();
-    assert!(first_owner.wait(deadline).code().is_none());
+    let reservation_path = candidate
+        .state_root
+        .join(format!("run/dependency-assignments/{run}.json"));
+    let reservation_bytes = fs::read(&reservation_path).unwrap();
+    let reservation_metadata = fs::symlink_metadata(&reservation_path).unwrap();
+    let reservation: Value = serde_json::from_slice(&reservation_bytes).unwrap();
+    let second_process = crate::provider::identity::observe(first_owner.child.id() as i32).unwrap();
+    assert_eq!(reservation["process"], json!(second_process));
+    assert_eq!(reservation["run"], run);
+    let pool_owner = Owner::load(&candidate).unwrap();
+    assert_eq!(reservation["owner"], pool_owner.token);
+    assert_eq!(
+        reservation["boot"],
+        pool_owner.guest_boot_id.clone().unwrap()
+    );
+    let slots = first_ready
+        .receipt
+        .relay_startup
+        .as_ref()
+        .unwrap()
+        .services
+        .values()
+        .flat_map(|service| service.bindings.values().map(|binding| binding.slot))
+        .collect::<std::collections::BTreeSet<_>>();
+    let recorded_slots = reservation["slots"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|slot| u8::try_from(slot.as_u64().unwrap()).unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(recorded_slots, slots);
+    for slot in &slots {
+        let socket = pool_owner
+            .short_home
+            .join(format!("dependency-{slot:02}.sock"));
+        let metadata = fs::symlink_metadata(socket).unwrap();
+        assert_eq!(
+            reservation["sockets"][slot.to_string()],
+            json!([metadata.dev(), metadata.ino()])
+        );
+    }
+    // The original crash and legacy archival-error controls stay intact. Only
+    // this later owner retires through its installed signal handler so its
+    // ManagedOwner closes exact sockets before supported claim retirement.
+    assert_eq!(
+        graceful_stop(&files, &mut first_owner, &second_process, deadline).code(),
+        Some(2)
+    );
+    let stop_error: Value = serde_json::from_slice(&first_owner.err).unwrap();
+    assert_eq!(stop_error["code"], "graph_dependency_refresh_refused");
+    for slot in &slots {
+        let socket = pool_owner
+            .short_home
+            .join(format!("dependency-{slot:02}.sock"));
+        assert_eq!(
+            fs::symlink_metadata(socket).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound,
+            "graceful legacy teardown retained a selected socket"
+        );
+    }
+    assert_eq!(fs::read(&reservation_path).unwrap(), reservation_bytes);
+    let retained_metadata = fs::symlink_metadata(&reservation_path).unwrap();
+    assert_eq!(
+        (retained_metadata.dev(), retained_metadata.ino()),
+        (reservation_metadata.dev(), reservation_metadata.ino())
+    );
     let newer_stopped = snapshot(&candidate, &run, deadline).receipt;
     assert_eq!(newer_stopped.phase, "stopped-data-retained");
     let stopped_sha = file_hash(&graph_root.join("state.json"));
@@ -552,6 +616,85 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
     assert_eq!(retired_publisher["acknowledged_cleanup"], true);
     assert!(!foreground_root.join("owner.json").exists());
     assert!(!foreground_root.join("control.sock").exists());
+    let inspected_reservations = checked_cli(
+        "select-acknowledged-dependency-reservation",
+        &binary,
+        &candidate,
+        &["graph", "dependency-reservations", "--json"],
+        deadline,
+    );
+    let selected_claims = inspected_reservations["reservations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|claim| claim["run"] == run)
+        .collect::<Vec<_>>();
+    assert_eq!(selected_claims.len(), 1);
+    assert_eq!(selected_claims[0]["owner_alive"], false);
+    assert_eq!(selected_claims[0]["slots"], reservation["slots"]);
+    let reservation_sha = selected_claims[0]["reservation"].as_str().unwrap();
+    let released = checked_cli(
+        "release-acknowledged-dependencies",
+        &binary,
+        &candidate,
+        &[
+            "graph",
+            "release-acknowledged-dependencies",
+            "--run-id",
+            &run,
+            "--expect-owner",
+            &newer_stopped.owner,
+            "--expect-receipt",
+            &stopped_sha,
+            "--expect-publisher",
+            &publisher_sha,
+            "--expect-reservation",
+            reservation_sha,
+            "--json",
+        ],
+        deadline,
+    );
+    assert_eq!(released["reservation_released"], true);
+    assert_eq!(released["record_retained"], true);
+    assert_eq!(released["data_retained"], true);
+    assert_eq!(released["same_boot"], true);
+    assert_eq!(
+        fs::symlink_metadata(&reservation_path).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    let archived_reservation = graph_root.join(format!(
+        "dependency-reservation-retired-{reservation_sha}.json"
+    ));
+    assert_eq!(fs::read(&archived_reservation).unwrap(), reservation_bytes);
+    let archived_metadata = fs::symlink_metadata(archived_reservation).unwrap();
+    assert_eq!(
+        (archived_metadata.dev(), archived_metadata.ino()),
+        (reservation_metadata.dev(), reservation_metadata.ino())
+    );
+    assert_eq!(file_hash(&graph_root.join("state.json")), stopped_sha);
+    let remaining_claims = checked_cli(
+        "verify-acknowledged-dependency-release",
+        &binary,
+        &candidate,
+        &["graph", "dependency-reservations", "--json"],
+        deadline,
+    );
+    assert_eq!(
+        remaining_claims["reservations"],
+        json!(
+            inspected_reservations["reservations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|claim| claim["run"] != run)
+                .collect::<Vec<_>>()
+        )
+    );
+    assert_eq!(
+        serde_json::to_value(snapshot(&candidate, &sibling_run, deadline).receipt).unwrap(),
+        serde_json::to_value(&sibling_before).unwrap()
+    );
+    assert!(sibling_owner.poll().is_none());
     let history_path = graph_root.join(format!(
         "dependency-rebind-history-{}",
         graph::service_exec_generation(&refreshed).unwrap()

@@ -933,7 +933,9 @@ The ignored native regression
 `foreground::native_test::retired_rebind_history::completed_prior_boot_rebind_archives_after_newer_stopped_generation`
 uses an isolated capacity-two candidate, a pinned pre-archive native executable
 (`7dc0811cd0179f40340e48c540699933dc099cf7`) and a current executable with
-`retire-acknowledged-publisher`. Supply `HACK_LOCAL_TEST_ROOT`,
+`retire-acknowledged-publisher` and `release-acknowledged-dependencies`.
+The candidate must already be prepared and running with the pinned image loaded.
+Supply `HACK_LOCAL_TEST_ROOT`,
 `HACK_LOCAL_TEST_BINARY`, `HACK_LOCAL_TEST_LEGACY_BINARY`,
 `HACK_LOCAL_TEST_LEGACY_SHA256`, `HACK_LOCAL_TEST_IMAGE`,
 `HACK_GRAPH_RELAY_ARTIFACT` and `HACK_GRAPH_RELAY_SHA256`. The pinned image must
@@ -956,7 +958,13 @@ numbers. It preserves the real completed journal, socket inodes, bindings, graph
 receipt and sibling reservations. Production inspection still rejects current-boot
 timestamps, mismatched device/inode evidence and live owners or listeners.
 It uses normal refresh, recovery, cleanup and restore paths, plus an injected
-archive interruption at the owned verifier boundary. A passing test proves
+archive interruption at the owned verifier boundary. The original owner crash and
+legacy archival refusal remain controls. Only the later legacy foreground owner
+receives graceful SIGTERM: the test requires normal handler exit, process death
+and exact dependency socket absence before independently retiring its publisher
+and reservation through acknowledged cleanup. Reservation history must preserve
+the original bytes and inode, with the selected active claim absent and sibling
+state unchanged. A passing test proves
 same-run retained marker and sibling isolation in that fixture; it does not
 establish application or physical host-reboot acceptance.
 

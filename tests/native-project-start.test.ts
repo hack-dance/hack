@@ -10,7 +10,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { acquireNativeHttpsLease } from "../src/backends/native-https-owner.ts";
-import { beginNativeProjectFinalization } from "../src/backends/native-project-finalization.ts";
+import {
+  beginNativeProjectFinalization,
+  captureNativeProjectFinalization,
+  waitNativeProjectFinalization,
+} from "../src/backends/native-project-finalization.ts";
 import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
 import { preflightNativeRestart } from "../src/backends/native-project-restart-preflight.ts";
 import { selectNativeRetainedImages } from "../src/backends/native-project-retained-images.ts";
@@ -200,6 +204,53 @@ function retainedPreflight(run: NativeProjectRun, phase = "running") {
     selection: "7".repeat(64),
     live_resources_verified: false,
   };
+}
+async function acknowledgeRetainedFrontend(
+  scope: Awaited<ReturnType<typeof fixture>>["opts"]["scope"],
+  run: NativeProjectRun
+) {
+  const lifetime = await beginNativeProjectFinalization({ scope, run });
+  await lifetime.complete();
+  return lifetime;
+}
+async function retainedFinalizationFixture() {
+  const { opts, events } = await fixture(false);
+  const saved: NativeProjectRun = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+  };
+  opts.dependencies.load = async () => saved;
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "retained-preflight") {
+      events.push("graph retained-preflight");
+      return retainedPreflight(saved);
+    }
+    if (
+      request.args[1] === "inspect" &&
+      !events.includes("graph dependency-plan")
+    ) {
+      events.push("graph inspect");
+      return stoppedGraph(saved);
+    }
+    return request.args[1] === "restore-selection"
+      ? { ...saved, plan: saved.planId, generation: "2".repeat(64) }
+      : await invoke(request);
+  };
+  opts.dependencies.prepareStorage = async () => {
+    events.push("storage");
+  };
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    events.push("prepare");
+    return await prepare(request);
+  };
+  return { opts, events, saved };
 }
 test("source pool mismatch refuses before hooks and storage preparation", async () => {
   const { opts, events } = await fixture();
@@ -1420,6 +1471,101 @@ test("invalid profile selection refuses before lifecycle or runtime effects", as
   ).rejects.toThrow("profiles");
 });
 
+test("retained startup refuses missing, unacknowledged or changed finalization before effects", async () => {
+  for (const fault of [
+    "missing",
+    "unacknowledged",
+    "stale-completion",
+    "changed",
+  ] as const) {
+    const { opts, events, saved } = await retainedFinalizationFixture();
+    if (fault === "unacknowledged") {
+      await beginNativeProjectFinalization({ scope: opts.scope, run: saved });
+    } else if (fault !== "missing") {
+      await acknowledgeRetainedFrontend(opts.scope, saved);
+      if (fault === "stale-completion") {
+        await beginNativeProjectFinalization({ scope: opts.scope, run: saved });
+      } else {
+        opts.dependencies.captureFinalization = async (selection) => {
+          const original = await captureNativeProjectFinalization(selection);
+          await acknowledgeRetainedFrontend(opts.scope, saved);
+          return original;
+        };
+      }
+    }
+    opts.dependencies.https = async () => {
+      throw new Error("unexpected HTTPS owner effect");
+    };
+    const attempt = startNativeProject({
+      ...opts,
+      https: httpsSelection,
+      adaptationFile: join(opts.scope.projectRoot, "unread-adaptation.json"),
+    });
+    await expect(attempt).rejects.toThrow(
+      "frontend finalization is unconfirmed"
+    );
+    try {
+      await attempt;
+    } catch (error) {
+      expect(String(error)).not.toContain(opts.scope.nativeHome);
+    }
+    expect(events).toEqual(["graph retained-preflight", "graph inspect"]);
+  }
+});
+
+test("retained startup admits only the acknowledged original frontend before effects", async () => {
+  const { opts, events, saved } = await retainedFinalizationFixture();
+  const lifetime = await acknowledgeRetainedFrontend(opts.scope, saved);
+  opts.dependencies.waitFinalization = async (selection) => {
+    expect(selection.token).toEqual(lifetime.token);
+    expect(selection.run).toEqual(saved);
+    expect(selection.timeoutMs).toBe(1);
+    await waitNativeProjectFinalization(selection);
+    events.push("frontend-acknowledged");
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(events.indexOf("frontend-acknowledged")).toBeLessThan(
+    events.indexOf("storage")
+  );
+  expect(events.indexOf("frontend-acknowledged")).toBeLessThan(
+    events.indexOf("prepare")
+  );
+  expect(events.indexOf("frontend-acknowledged")).toBeLessThan(
+    events.indexOf("before")
+  );
+  expect(events.indexOf("frontend-acknowledged")).toBeLessThan(
+    events.indexOf("runtime up")
+  );
+  expect(events).toContain("save");
+});
+
+test("retained acknowledgement cannot authorize a newer or concurrently changed mapping", async () => {
+  for (const fault of ["newer-run", "changed-mapping"] as const) {
+    const { opts, events, saved } = await retainedFinalizationFixture();
+    await acknowledgeRetainedFrontend(opts.scope, saved);
+    const newer = { ...saved, run: "2".repeat(32) };
+    let loaded = 0;
+    opts.dependencies.load = async () => {
+      loaded++;
+      return fault === "newer-run" || loaded > 1 ? newer : saved;
+    };
+    if (fault === "newer-run") {
+      opts.dependencies.invoke = async (request) => {
+        events.push(request.args.slice(0, 2).join(" "));
+        return request.args[1] === "retained-preflight"
+          ? retainedPreflight(newer)
+          : stoppedGraph(newer);
+      };
+    }
+    await expect(startNativeProject(opts)).rejects.toThrow(
+      fault === "newer-run"
+        ? "frontend finalization is unconfirmed"
+        : "mapping changed"
+    );
+    expect(events).toEqual(["graph retained-preflight", "graph inspect"]);
+  }
+});
+
 test("ordinary up reuses a stopped owned run and publishes its mapping by comparison", async () => {
   const { opts, events } = await fixture();
   const saved: NativeProjectRun = {
@@ -1431,6 +1577,7 @@ test("ordinary up reuses a stopped owned run and publishes its mapping by compar
     profiles: [],
     aws: null,
   };
+  await acknowledgeRetainedFrontend(opts.scope, saved);
   opts.dependencies.load = async () => saved;
   const invoke = opts.dependencies.invoke!;
   opts.dependencies.invoke = async (request) => {
@@ -1534,6 +1681,7 @@ test("ordinary up resumes a stopped owned VM once and requires live proof before
       profiles: [],
       aws: null,
     };
+    await acknowledgeRetainedFrontend(opts.scope, saved);
     const controller = new AbortController();
     let up = 0,
       served = 0,

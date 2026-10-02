@@ -1,9 +1,15 @@
 import { basename } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { isRecord } from "../lib/guards.ts";
 import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import {
+  captureNativeProjectFinalization,
+  type NativeProjectFinalizationToken,
+  waitNativeProjectFinalization,
+} from "./native-project-finalization.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import {
   loadNativeProjectRun,
@@ -19,6 +25,21 @@ function refused(): Error {
   return new Error(
     "Native down cleanup is unconfirmed; retained mapping and runtime state require inspection. No cleanup was replayed."
   );
+}
+function finalizationRefused(): Error {
+  return new Error(
+    "Native down frontend finalization is unconfirmed or its ownership changed; retained mapping and runtime state require inspection. No cleanup was replayed."
+  );
+}
+async function captureFinalization(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+}): Promise<NativeProjectFinalizationToken> {
+  try {
+    return await captureNativeProjectFinalization(opts);
+  } catch {
+    throw finalizationRefused();
+  }
 }
 function verify(value: unknown, run: NativeProjectRun, stopped: boolean): void {
   if (
@@ -57,8 +78,8 @@ function verify(value: unknown, run: NativeProjectRun, stopped: boolean): void {
     }
   }
 }
-/** Retaining cleanup only. Retire owned host processes after confirmed compute
- * absence, including a previously recovered stop; user hooks are not replayed.
+/** Retaining cleanup only. Success follows confirmed compute absence and the
+ * original frontend's finalizers, including a previously recovered stop.
  */
 export async function nativeProjectDown(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -67,6 +88,9 @@ export async function nativeProjectDown(opts: {
   readonly retireHostProcesses?: (run: NativeProjectRun) => Promise<void>;
   readonly after?: (run: NativeProjectRun) => Promise<void>;
   readonly invoke?: typeof invokeNativeRuntime;
+  /** Only the restart coordinator may defer to its already captured exact wait/recovery. */
+  readonly deferFinalization?: boolean;
+  readonly finalizationTimeoutMs?: number;
 }) {
   const run = await loadNativeProjectRun(opts.scope);
   if (!run) {
@@ -86,6 +110,24 @@ export async function nativeProjectDown(opts: {
     });
   const initial = await inspect();
   verify(initial, run, false);
+  const finalization = opts.deferFinalization
+    ? undefined
+    : await captureFinalization({ scope: opts.scope, run });
+  const wait = async () => {
+    if (finalization === undefined) {
+      return;
+    }
+    try {
+      await waitNativeProjectFinalization({
+        scope: opts.scope,
+        run,
+        token: finalization,
+        timeoutMs: opts.finalizationTimeoutMs,
+      });
+    } catch {
+      throw finalizationRefused();
+    }
+  };
   if (
     isRecord(initial) &&
     isRecord(initial.receipt) &&
@@ -94,6 +136,7 @@ export async function nativeProjectDown(opts: {
     // Recovery already stopped compute. User hooks and guest cleanup must not replay.
     verify(initial, run, true);
     await opts.retireHostProcesses?.(run);
+    await wait();
     return {
       backend: "native",
       status: "stopped",
@@ -104,6 +147,15 @@ export async function nativeProjectDown(opts: {
   await opts.before?.(run);
   // Recheck after hooks, which may run arbitrary user-authorized commands.
   verify(await inspect(), run, false);
+  if (
+    finalization !== undefined &&
+    !isDeepStrictEqual(
+      finalization,
+      await captureFinalization({ scope: opts.scope, run })
+    )
+  ) {
+    throw finalizationRefused();
+  }
   await invoke({
     runtime: opts.runtime,
     cwd: opts.scope.projectRoot,
@@ -113,6 +165,7 @@ export async function nativeProjectDown(opts: {
   verify(await inspect(), run, true);
   await opts.retireHostProcesses?.(run);
   await opts.after?.(run);
+  await wait();
   return {
     backend: "native",
     status: "stopped",

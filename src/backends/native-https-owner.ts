@@ -4,6 +4,7 @@ import { lstat, mkdir, realpath } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
+import { acquireNativeHttpsOwnerAdmission } from "./native-https-owner-admission.ts";
 import {
   decodeNativeHttpsOwnerFrame,
   encodeNativeHttpsOwnerFrame,
@@ -136,24 +137,35 @@ function sameBinding(
 export async function readNativeHttpsOwnerConfiguration(
   runtime: NativeRuntimeSelection
 ): Promise<NativeHttpsOwnerConfiguration> {
-  if ((await realpath(runtime.home)) !== runtime.home) {
+  const configuration = await readNativeHttpsOwnerConfigurationAtHome(
+    runtime.home
+  );
+  if (configuration.binding.runtime.binary !== runtime.binary) {
+    throw nativeHttpsOwnerRefused();
+  }
+  return configuration;
+}
+
+async function readNativeHttpsOwnerConfigurationAtHome(
+  home: string
+): Promise<NativeHttpsOwnerConfiguration> {
+  if ((await realpath(home)) !== home) {
     throw nativeHttpsOwnerRefused();
   }
   for (const directory of [
-    runtime.home,
-    join(runtime.home, "native-https"),
-    nativeHttpsOwnerRoot(runtime.home),
+    home,
+    join(home, "native-https"),
+    nativeHttpsOwnerRoot(home),
   ]) {
     await nativeHttpsPrivateDirectory(directory);
   }
   const { bytes } = await nativeHttpsReadFile(
-    join(nativeHttpsOwnerRoot(runtime.home), "configuration.json")
+    join(nativeHttpsOwnerRoot(home), "configuration.json")
   );
   const configuration: unknown = JSON.parse(bytes.toString("utf8"));
   if (
     !isNativeHttpsOwnerConfiguration(configuration) ||
-    configuration.binding.runtime.home !== runtime.home ||
-    configuration.binding.runtime.binary !== runtime.binary
+    configuration.binding.runtime.home !== home
   ) {
     throw nativeHttpsOwnerRefused();
   }
@@ -177,43 +189,53 @@ export async function ensureNativeHttpsOwner(opts: {
   }
   await nativeHttpsPrivateDirectory(binding.runtime.home);
   await nativeHttpsPrivateDirectory(dirname(root), true);
-  let created = false;
+  const admission = await acquireNativeHttpsOwnerAdmission({
+    home: binding.runtime.home,
+    waitMs: 15_000,
+  });
   try {
-    await mkdir(root, { mode: 0o700 });
-    created = true;
-  } catch (error) {
-    if (!isRecord(error) || error.code !== "EEXIST") {
-      throw nativeHttpsOwnerRefused();
-    }
-  }
-  if (created) {
-    await mkdir(join(root, "leases"), { mode: 0o700 });
-    const configurationPath = join(root, "configuration.json");
-    await nativeHttpsWriteNew(configurationPath, configuration);
-    await (opts.spawnOwner ?? spawnNativeHttpsOwner)({
-      frontend: binding.frontend,
-      home: binding.runtime.home,
-      configurationPath,
-    });
-    return configuration;
-  }
-  // Only startup publication can be retried; no acquire/release request is replayed.
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
+    let created = false;
     try {
-      const existing = await readNativeHttpsOwnerConfiguration(binding.runtime);
-      if (!sameBinding(existing.binding, binding)) {
+      await mkdir(root, { mode: 0o700 });
+      created = true;
+    } catch (error) {
+      if (!isRecord(error) || error.code !== "EEXIST") {
         throw nativeHttpsOwnerRefused();
       }
-      return existing;
-    } catch (error) {
-      if (!isRecord(error) || error.code !== "ENOENT") {
-        throw error;
-      }
-      await Bun.sleep(25);
     }
+    if (created) {
+      await mkdir(join(root, "leases"), { mode: 0o700 });
+      const configurationPath = join(root, "configuration.json");
+      await nativeHttpsWriteNew(configurationPath, configuration);
+      await (opts.spawnOwner ?? spawnNativeHttpsOwner)({
+        frontend: binding.frontend,
+        home: binding.runtime.home,
+        configurationPath,
+      });
+      return configuration;
+    }
+    // Only startup publication can be retried; no acquire/release request is replayed.
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      try {
+        const existing = await readNativeHttpsOwnerConfiguration(
+          binding.runtime
+        );
+        if (!sameBinding(existing.binding, binding)) {
+          throw nativeHttpsOwnerRefused();
+        }
+        return existing;
+      } catch (error) {
+        if (!isRecord(error) || error.code !== "ENOENT") {
+          throw error;
+        }
+        await Bun.sleep(25);
+      }
+    }
+    throw nativeHttpsOwnerRefused();
+  } finally {
+    await admission.release();
   }
-  throw nativeHttpsOwnerRefused();
 }
 
 async function endpointFor(
@@ -470,9 +492,16 @@ async function hasActiveNativeHttpsLease(
   identity: NativeHttpsLeaseIdentity
 ): Promise<boolean> {
   try {
-    const configuration = await readNativeHttpsOwnerConfiguration(runtime);
+    // A newer owner may pin a different bundle. Its validated generation can
+    // exclude this historical lease without authorizing access to that owner.
+    const configuration = await readNativeHttpsOwnerConfigurationAtHome(
+      runtime.home
+    );
     if (configuration.ownerGeneration !== identity.ownerGeneration) {
       return false;
+    }
+    if (configuration.binding.runtime.binary !== runtime.binary) {
+      throw nativeHttpsOwnerRefused();
     }
     await lstat(
       join(

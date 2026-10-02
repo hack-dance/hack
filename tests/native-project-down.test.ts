@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +8,12 @@ import {
   nativeProjectDown,
 } from "../src/backends/native-project-down.ts";
 import {
+  beginNativeProjectFinalization,
+  captureNativeProjectFinalization,
+} from "../src/backends/native-project-finalization.ts";
+import {
   loadNativeProjectRun,
+  type NativeProjectRunScope,
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
@@ -25,12 +31,12 @@ const run = {
   planId: "d".repeat(64),
 };
 const id = "e".repeat(64);
-function snapshot() {
+function snapshot(stopped = false) {
   return {
     receipt: {
       ...run,
       plan_id: run.planId,
-      phase: "ready-observed",
+      phase: stopped ? "stopped-data-retained" : "ready-observed",
       resources: {
         "container:web": {
           kind: "container",
@@ -41,7 +47,12 @@ function snapshot() {
       },
     },
     journal_incomplete: false,
-    observations: { "container:web": { state: "running", health: "healthy" } },
+    observations: {
+      "container:web": {
+        state: stopped ? "absent" : "running",
+        health: "healthy",
+      },
+    },
   };
 }
 async function fixture(saved = true) {
@@ -52,13 +63,264 @@ async function fixture(saved = true) {
   const projectDir = join(projectRoot, ".hack"),
     nativeHome = join(projectRoot, "candidate");
   await mkdir(projectDir);
-  await mkdir(nativeHome);
+  await mkdir(nativeHome, { mode: 0o700 });
   const scope = { projectRoot, projectDir, nativeHome, branch: null };
   if (saved) {
     await saveNativeProjectRun({ ...scope, run });
   }
+  const finalization = await beginNativeProjectFinalization({ scope, run });
+  await finalization.complete();
   return { scope, runtime: { binary: "/not-invoked", home: nativeHome } };
 }
+
+function finalizationRoot(scope: NativeProjectRunScope): string {
+  const hash = createHash("sha256")
+    .update(
+      JSON.stringify({
+        home: scope.nativeHome,
+        projectRoot: scope.projectRoot,
+        projectDir: scope.projectDir,
+        branch: scope.branch,
+      })
+    )
+    .digest("hex");
+  return join(
+    scope.nativeHome,
+    ".hack-local",
+    "frontend-finalization",
+    hash,
+    run.run
+  );
+}
+
+test("down waits for the captured frontend after cleanup and lifecycle retirement", async () => {
+  const opts = await fixture();
+  const lifetime = await beginNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+  });
+  const hooksFinished = Promise.withResolvers<void>();
+  const calls: string[] = [];
+  let cleaned = false;
+  let stopped = false;
+  const result = nativeProjectDown({
+    ...opts,
+    retireHostProcesses: async () => {
+      calls.push("retire-host");
+    },
+    after: async () => {
+      calls.push("after");
+      hooksFinished.resolve();
+    },
+    invoke: async (request) => {
+      calls.push(request.args[1]!);
+      if (request.args[1] === "cleanup") {
+        cleaned = true;
+        return {};
+      }
+      return snapshot(cleaned);
+    },
+  }).then((value) => {
+    stopped = true;
+    return value;
+  });
+  await hooksFinished.promise;
+  await Bun.sleep(20);
+  expect(stopped).toBe(false);
+  expect(calls).toEqual([
+    "inspect",
+    "inspect",
+    "cleanup",
+    "inspect",
+    "retire-host",
+    "after",
+  ]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+  await lifetime.complete();
+  expect((await result).status).toBe("stopped");
+  expect(stopped).toBe(true);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("missing frontend identity refuses before hooks or cleanup without leaking paths", async () => {
+  const opts = await fixture();
+  await rm(finalizationRoot(opts.scope), { recursive: true });
+  const calls: string[] = [];
+  const result = nativeProjectDown({
+    ...opts,
+    before: async () => {
+      calls.push("before");
+    },
+    invoke: async (request) => {
+      calls.push(request.args[1]!);
+      return snapshot();
+    },
+  });
+  await expect(result).rejects.toThrow("frontend finalization is unconfirmed");
+  try {
+    await result;
+  } catch (error) {
+    expect(String(error)).not.toContain(opts.scope.nativeHome);
+  }
+  expect(calls).toEqual(["inspect"]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("frontend identity changed by a before hook refuses before compute cleanup", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  await expect(
+    nativeProjectDown({
+      ...opts,
+      before: async () => {
+        await beginNativeProjectFinalization({ scope: opts.scope, run });
+        calls.push("before");
+      },
+      invoke: async (request) => {
+        calls.push(request.args[1]!);
+        return snapshot();
+      },
+    })
+  ).rejects.toThrow("ownership changed");
+  expect(calls).toEqual(["inspect", "before", "inspect"]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("stopped compute cannot borrow a wrong or missing frontend completion", async () => {
+  for (const fault of [
+    "changed",
+    "missing-active",
+    "missing-completion",
+  ] as const) {
+    const opts = await fixture();
+    const root = finalizationRoot(opts.scope);
+    const calls: string[] = [];
+    let cleaned = false;
+    await expect(
+      nativeProjectDown({
+        ...opts,
+        finalizationTimeoutMs: 1,
+        invoke: async (request) => {
+          calls.push(request.args[1]!);
+          if (request.args[1] === "cleanup") {
+            cleaned = true;
+            if (fault === "changed") {
+              const replacement = await beginNativeProjectFinalization({
+                scope: opts.scope,
+                run,
+              });
+              await replacement.complete();
+            } else {
+              await rm(
+                join(
+                  root,
+                  fault === "missing-active" ? "active.json" : "completed.json"
+                )
+              );
+            }
+            return {};
+          }
+          return snapshot(cleaned);
+        },
+      })
+    ).rejects.toThrow("frontend finalization is unconfirmed");
+    expect(calls).toEqual(["inspect", "inspect", "cleanup", "inspect"]);
+    expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+  }
+});
+
+test("already-stopped down waits for finalization without guest cleanup or hooks", async () => {
+  const opts = await fixture();
+  const lifetime = await beginNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+  });
+  const retired = Promise.withResolvers<void>();
+  const calls: string[] = [];
+  let stopped = false;
+  const result = nativeProjectDown({
+    ...opts,
+    before: async () => {
+      throw new Error("replayed before");
+    },
+    after: async () => {
+      throw new Error("replayed after");
+    },
+    retireHostProcesses: async () => {
+      calls.push("retire-host");
+      retired.resolve();
+    },
+    invoke: async (request) => {
+      calls.push(request.args[1]!);
+      return snapshot(true);
+    },
+  }).then((value) => {
+    stopped = true;
+    return value;
+  });
+  await retired.promise;
+  await Bun.sleep(20);
+  expect(stopped).toBe(false);
+  await lifetime.complete();
+  expect((await result).status).toBe("stopped");
+  expect(calls).toEqual(["inspect", "retire-host"]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("already-stopped unacknowledged frontend refuses without replaying compute", async () => {
+  const opts = await fixture();
+  const root = finalizationRoot(opts.scope);
+  const token = await captureNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+  });
+  await writeFile(
+    join(root, "active.json"),
+    JSON.stringify({ ...token, pid: 2_147_483_647 })
+  );
+  await rm(join(root, "completed.json"));
+  const calls: string[] = [];
+  await expect(
+    nativeProjectDown({
+      ...opts,
+      finalizationTimeoutMs: 1,
+      invoke: async (request) => {
+        calls.push(request.args[1]!);
+        return snapshot(true);
+      },
+    })
+  ).rejects.toThrow("frontend finalization is unconfirmed");
+  expect(calls).toEqual(["inspect"]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("restart alone may defer its finalization barrier until explicit recovery", async () => {
+  const opts = await fixture();
+  const lifetime = await beginNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+  });
+  expect(
+    await captureNativeProjectFinalization({ scope: opts.scope, run })
+  ).toEqual(lifetime.token);
+  let cleaned = false;
+  const calls: string[] = [];
+  const result = await nativeProjectDown({
+    ...opts,
+    deferFinalization: true,
+    invoke: async (request) => {
+      calls.push(request.args[1]!);
+      if (request.args[1] === "cleanup") {
+        cleaned = true;
+        return {};
+      }
+      return snapshot(cleaned);
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(calls).toEqual(["inspect", "inspect", "cleanup", "inspect"]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
 
 test("down invokes cleanup once and retains the stopped mapping for later up", async () => {
   const opts = await fixture();

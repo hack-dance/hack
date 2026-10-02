@@ -23,7 +23,11 @@ import {
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
-import { beginNativeProjectFinalization } from "./native-project-finalization.ts";
+import {
+  beginNativeProjectFinalization,
+  captureNativeProjectFinalization,
+  waitNativeProjectFinalization,
+} from "./native-project-finalization.ts";
 import { isNativeHttpsProbePath } from "./native-project-https.ts";
 import {
   type NativeProjectInput,
@@ -226,6 +230,8 @@ type Dependencies = {
   save: typeof saveNativeProjectRun;
   remove: typeof removeNativeProjectRun;
   finalization: typeof beginNativeProjectFinalization;
+  captureFinalization: typeof captureNativeProjectFinalization;
+  waitFinalization: typeof waitNativeProjectFinalization;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
@@ -243,6 +249,8 @@ const DEFAULTS: Dependencies = {
   save: saveNativeProjectRun,
   remove: removeNativeProjectRun,
   finalization: beginNativeProjectFinalization,
+  captureFinalization: captureNativeProjectFinalization,
+  waitFinalization: waitNativeProjectFinalization,
 };
 function refused(): Error {
   return new Error(
@@ -709,6 +717,26 @@ async function acknowledgeFinalization(
     await finalization?.complete();
   }
 }
+async function requireAcknowledgedRetainedFinalization(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+  readonly capture: typeof captureNativeProjectFinalization;
+  readonly wait: typeof waitNativeProjectFinalization;
+}): Promise<void> {
+  try {
+    const token = await opts.capture({ scope: opts.scope, run: opts.run });
+    await opts.wait({
+      scope: opts.scope,
+      run: opts.run,
+      token,
+      timeoutMs: 1,
+    });
+  } catch {
+    throw new Error(
+      "Native retained frontend finalization is unconfirmed or its ownership changed; no hooks, runtime start or HTTPS owner were requested."
+    );
+  }
+}
 /** Explicit unfiltered project sharing; foreground only. Native refusal never falls back to Compose. */
 export async function startNativeProject(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -754,6 +782,20 @@ export async function startNativeProject(opts: {
       signal: opts.signal,
     });
   requireActiveStartup(opts.signal);
+  if (retained) {
+    await requireAcknowledgedRetainedFinalization({
+      scope: opts.scope,
+      run: retained,
+      capture: deps.captureFinalization,
+      wait: deps.waitFinalization,
+    });
+    await verifyNativeRetainedMapping({
+      scope: opts.scope,
+      run: retained,
+      load: deps.load,
+    });
+    requireActiveStartup(opts.signal);
+  }
   const profiles = selection.profiles;
   await preflightNativeProjectSource({
     runtime: opts.runtime,

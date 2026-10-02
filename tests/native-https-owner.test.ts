@@ -7,6 +7,7 @@ import {
   realpath,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import type { Socket } from "node:net";
@@ -27,6 +28,7 @@ import {
 import { verifyNativeHttpsLeaseGraph } from "../src/backends/native-https-owner-server.ts";
 import {
   nativeHttpsExecutableSha256,
+  nativeHttpsLeaseReleasePath,
   nativeHttpsOwnerRoot,
   nativeHttpsReadRelease,
   nativeHttpsRecordRelease,
@@ -217,6 +219,165 @@ try {
     });
   return { home, binding, sockets, start, acquire, clean, release };
 }
+
+/** Historical recovery exercises only private files; neither owner is spawned. */
+async function historicalReleaseFixture(sameGeneration = false) {
+  const f = await fixture();
+  const current = await ensureNativeHttpsOwner({
+    binding: {
+      ...f.binding,
+      runtime: { ...f.binding.runtime, binary: join(f.home, "new-runtime") },
+      frontend: {
+        binary: join(f.home, "new-frontend"),
+        sha256: "3".repeat(64),
+      },
+      runtimeSha256: "4".repeat(64),
+    },
+    spawnOwner: async () => {},
+  });
+  const historical = {
+    ...current,
+    ownerGeneration: sameGeneration ? current.ownerGeneration : "5".repeat(32),
+    binding: f.binding,
+  };
+  const identity = nativeHttpsLeaseIdentity(historical, lease("b"));
+  await nativeHttpsRecordRelease({
+    version: 1,
+    identity,
+    binding: f.binding,
+    finalOwner: true,
+  });
+  const configurationPath = join(
+    nativeHttpsOwnerRoot(f.home),
+    "configuration.json"
+  );
+  const releasePath = nativeHttpsLeaseReleasePath(f.home, identity);
+  const siblingPath = join(
+    nativeHttpsOwnerRoot(f.home),
+    "leases",
+    "sibling.json"
+  );
+  await writeFile(siblingPath, "new owner's retained evidence", {
+    mode: 0o600,
+  });
+  const snapshot = () =>
+    Promise.all(
+      [configurationPath, releasePath, siblingPath].map((path) =>
+        readFile(path)
+      )
+    );
+  return { ...f, current, identity, configurationPath, snapshot };
+}
+
+test("historical HTTPS release revalidates across a new bundle generation without changing its owner", async () => {
+  const f = await historicalReleaseFixture();
+  const before = await f.snapshot();
+  let verified = 0;
+  await recoverNativeHttpsLease({
+    runtime: f.binding.runtime,
+    identity: f.identity,
+    verifyReleased: async (binding, identity, phase) => {
+      expect(binding).toEqual(f.binding);
+      expect(identity).toEqual(f.identity);
+      expect(phase).toBe("release");
+      verified += 1;
+    },
+  });
+  expect(verified).toBe(1);
+  expect(await f.snapshot()).toEqual(before);
+  // Public owner access still requires the current exact executable binding.
+  await expect(
+    readNativeHttpsOwnerConfiguration(f.binding.runtime)
+  ).rejects.toThrow();
+  expect(
+    await readNativeHttpsOwnerConfiguration(f.current.binding.runtime)
+  ).toEqual(f.current);
+});
+
+test("historical HTTPS release refuses a same-generation runtime mismatch before graph verification", async () => {
+  const f = await historicalReleaseFixture(true);
+  const before = await f.snapshot();
+  let verified = false;
+  await expect(
+    recoverNativeHttpsLease({
+      runtime: f.binding.runtime,
+      identity: f.identity,
+      verifyReleased: async () => {
+        verified = true;
+      },
+    })
+  ).rejects.toThrow();
+  expect(verified).toBe(false);
+  expect(await f.snapshot()).toEqual(before);
+});
+
+test.each([
+  "malformed",
+  "symlink",
+  "foreign-home",
+] as const)("historical HTTPS release refuses %s current configuration before graph verification", async (fault) => {
+  const f = await historicalReleaseFixture();
+  if (fault === "symlink") {
+    const target = join(f.home, "configuration-target.json");
+    await rename(f.configurationPath, target);
+    await symlink(target, f.configurationPath);
+  } else {
+    await writeFile(
+      f.configurationPath,
+      JSON.stringify(
+        fault === "malformed"
+          ? {
+              ownerGeneration: f.current.ownerGeneration,
+            }
+          : {
+              ...f.current,
+              binding: {
+                ...f.current.binding,
+                runtime: {
+                  ...f.current.binding.runtime,
+                  home: join(f.home, "foreign"),
+                },
+              },
+            }
+      )
+    );
+  }
+  const before = await f.snapshot();
+  let verified = false;
+  await expect(
+    recoverNativeHttpsLease({
+      runtime: f.binding.runtime,
+      identity: f.identity,
+      verifyReleased: async () => {
+        verified = true;
+      },
+    })
+  ).rejects.toThrow();
+  expect(verified).toBe(false);
+  expect(await f.snapshot()).toEqual(before);
+  expect((await lstat(f.configurationPath)).isSymbolicLink()).toBe(
+    fault === "symlink"
+  );
+});
+
+test("historical HTTPS release still refuses a dirty graph after a bundle generation change", async () => {
+  const f = await historicalReleaseFixture();
+  const before = await f.snapshot();
+  let verified = false;
+  await expect(
+    recoverNativeHttpsLease({
+      runtime: f.binding.runtime,
+      identity: f.identity,
+      verifyReleased: async (binding) => {
+        expect(binding).toEqual(f.binding);
+        verified = true;
+        throw new Error("graph restarted");
+      },
+    })
+  ).rejects.toThrow("graph restarted");
+  expect(verified).toBe(true);
+  expect(await f.snapshot()).toEqual(before);
+});
 
 test("detached helper outlives its spawning CLI and first release preserves the second lease", async () => {
   const f = await fixture();

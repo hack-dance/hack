@@ -976,6 +976,7 @@ test("persisted retaining cleanup keeps its mapping and retry captures listeners
           await nativeProjectDown({
             runtime,
             scope: retainedScope,
+            deferFinalization: true,
             invoke: listener.options.dependencies?.invoke,
             before: async () => {
               throw new Error("down hooks must not replay");

@@ -6058,6 +6058,7 @@ async function handleNativeUp({
     down: async () => {
       const code = await handleDown({
         ctx,
+        deferFinalization: true,
         args: {
           options: {
             path: args.options.path,
@@ -6610,9 +6611,11 @@ function writeDownNotice(opts: {
 async function handleDown({
   ctx,
   args,
+  deferFinalization,
 }: {
   readonly ctx: CliContext;
   readonly args: DownArgs;
+  readonly deferFinalization?: boolean;
 }): Promise<number> {
   const native = resolveNativeRuntimeSelection();
   if (native) {
@@ -6685,6 +6688,7 @@ async function handleDown({
     const result = await nativeProjectDown({
       runtime: native,
       scope,
+      deferFinalization,
       retireHostProcesses: async () => {
         await stopLifecycleProcesses({
           project,

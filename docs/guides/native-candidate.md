@@ -547,12 +547,20 @@ absence while keeping the exact run mapping. It then retires that branch's owned
 lifecycle processes before running after hooks. A previously recovered stopped graph
 also retires remaining owned host processes without replaying hooks or guest cleanup;
 uncertain ownership refuses retirement and leaves the retained mapping intact.
+Successful `down` also requires acknowledgement of the exact frontend attempt
+captured before cleanup. Missing, changed or unacknowledged finalization refuses
+success even when compute is already stopped; the run mapping and volumes remain
+available for explicit recovery. Restart retains its own captured finalization
+barrier so its selected dead-frontend recovery can run before replacement startup.
 If the foreground owner concurrently retires its tmux session, cleanup accepts a
 fresh explicit absence proof. Missing ownership metadata or an unsuccessful query
 alone does not prove absence, and retirement preserves any replacement owner's state.
 The next ordinary `up` verifies that
 stopped receipt and restores the same run and volumes, including when its clean owned
-VM has been stopped. Offline `graph retained-preflight` returns durable eligibility
+VM has been stopped. It requires the retained frontend's exact finalization to be
+acknowledged before hooks, storage preparation, VM startup or shared HTTPS admission.
+This observation never recovers an interrupted frontend automatically, and the later
+startup ownership check still refuses a concurrent replacement. Offline `graph retained-preflight` returns durable eligibility
 only; it never fabricates volume observations or a restore generation. Startup checks
 the saved environment, profiles and AWS selector before hooks and binds the exact
 owner and receipt selection to `runtime up` with paired `--expect-retained-run` and
@@ -744,6 +752,17 @@ with `--route-slot SERVICE=N`; a busy slot is refused rather than reassigned.
 Retained starts resolve automatic selections again against current ownership.
 This allocation does not resize a pool or enable multi-worktree source sharing.
 Shared HTTPS lifetime uses separate graph leases.
+
+An empty shared HTTPS configuration left by failed startup is not a released
+lease. The experimental source API `archiveEmptyNativeHttpsOwner` can archive
+only the explicitly selected generation and configuration digest after proving
+the original observed spawner exited, the selected endpoint/port/authority and
+publications are absent, and the same pool incarnation remains running. It
+preserves configuration bytes/inodes and Caddy data. Current startup and archival
+share a short admission lock; uncertain intent publication retains its barriers
+for inspection. Older binaries do not honor that lock and must remain quiescent
+during this explicit recovery. Changed, active or ambiguous state refuses; this
+is neither automatic recovery nor a public CLI command.
 
 Normal foreground startup also selects `--auto-dependency-slots`. Each graph's
 logical dependency groups receive distinct physical pool slots under the provider

@@ -104,8 +104,8 @@ fn retain_interrupted_write(root: &std::path::Path) -> Result<(), CandidateError
     Ok(())
 }
 
-/// Supersede only a completed prior recovery whose exact stopped receipt is in
-/// bounded history and whose containers were replaced. An atomic rename keeps
+/// Supersede only a completed prior recovery whose historical generation is
+/// independently validated against bounded history. An atomic rename keeps
 /// the old value-free proof if selection or publication is interrupted.
 fn archive_completed_prior(
     root: &std::path::Path,
@@ -146,21 +146,25 @@ fn archive_completed_prior(
         return Err(refused());
     }
     let complete = prior.complete_sha256.as_deref().ok_or_else(refused)?;
-    let stopped =
-        restore_history::completed_for_recovery(root, current, complete)?.ok_or_else(refused)?;
-    validate(
-        &prior,
-        &stopped,
-        &prior.original_sha256,
-        &prior.owner_sha256,
-    )?;
-    if !stopped.resources.iter().any(|(key, resource)| {
-        resource.kind == Kind::Container
-            && resource.id.as_deref().is_some_and(|old| {
-                current.resources.get(key).and_then(|now| now.id.as_deref()) != Some(old)
-            })
-    }) {
-        return Err(refused());
+    if let Some(stopped) = restore_history::completed_for_recovery(root, current, complete)? {
+        validate(
+            &prior,
+            &stopped,
+            &prior.original_sha256,
+            &prior.owner_sha256,
+        )?;
+        if !stopped.resources.iter().any(|(key, resource)| {
+            resource.kind == Kind::Container
+                && resource.id.as_deref().is_some_and(|old| {
+                    current.resources.get(key).and_then(|now| now.id.as_deref()) != Some(old)
+                })
+        }) {
+            return Err(refused());
+        }
+    } else {
+        // Bounded history may evict the exact completion. Its existing strict
+        // truncated-history proof must still establish a superseded generation.
+        require_historical_recovery(root, current)?;
     }
     let mut archived = 0;
     for entry in fs::read_dir(root).map_err(state::io)? {
@@ -1589,6 +1593,115 @@ mod tests {
         }
         current.resources.get_mut("container:init").unwrap().id = Some(format!("{:064x}", 13));
         (fixture, current, stopped, proof)
+    }
+
+    #[test]
+    fn repeated_recovery_archives_evicted_completion_without_rewriting_prior_proof() {
+        let (fixture, current, _, proof) = evicted_historical_fixture();
+        let root = &fixture.0;
+        let source = root.join(FILE);
+        let before = fs::read(&source).unwrap();
+        let metadata = fs::metadata(&source).unwrap();
+        let history = fs::read(root.join("restore-history.json")).unwrap();
+        let complete = proof.complete_sha256.as_deref().unwrap();
+        assert!(
+            restore_history::completed_for_recovery(root, &current, complete)
+                .unwrap()
+                .is_none()
+        );
+
+        archive_completed_prior(
+            root,
+            &current,
+            &selected(&current).unwrap(),
+            &"2".repeat(64),
+            "current-boot",
+        )
+        .unwrap();
+
+        let archived = root.join(format!("dead-owner-cleanup-retired-{complete}.json"));
+        let archived_metadata = fs::metadata(&archived).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(archived).unwrap(), before);
+        assert_eq!(archived_metadata.dev(), metadata.dev());
+        assert_eq!(archived_metadata.ino(), metadata.ino());
+        assert_eq!(
+            fs::read(root.join("restore-history.json")).unwrap(),
+            history
+        );
+    }
+
+    #[test]
+    fn repeated_recovery_refuses_evicted_proof_with_changed_identity_or_generation() {
+        for fault in [
+            "owner",
+            "run",
+            "plan_id",
+            "unchanged-generation",
+            "pending",
+            "incomplete",
+            "mutated-resource-id",
+        ] {
+            let (fixture, mut current, _, mut proof) = evicted_historical_fixture();
+            let root = &fixture.0;
+            match fault {
+                "owner" | "run" | "plan_id" => {
+                    let mut original = serde_json::to_value(&proof.original).unwrap();
+                    original[fault] = json!("e".repeat(if fault == "plan_id" { 64 } else { 32 }));
+                    proof.original = serde_json::from_value(original).unwrap();
+                    proof.original_sha256 = selected(&proof.original).unwrap();
+                    state::write(&root.join(FILE), &proof).unwrap();
+                }
+                "unchanged-generation" => {
+                    current.resources.get_mut("container:init").unwrap().id =
+                        proof.original.resources["container:init"].id.clone();
+                }
+                "pending" => {
+                    fs::write(root.join("dead-owner-cleanup.pending"), b"partial proof").unwrap();
+                }
+                "incomplete" => {
+                    proof.complete_sha256 = None;
+                    state::write(&root.join(FILE), &proof).unwrap();
+                }
+                "mutated-resource-id" => {
+                    proof
+                        .original
+                        .resources
+                        .get_mut("container:init")
+                        .unwrap()
+                        .id = Some("7".repeat(64));
+                    state::write(&root.join(FILE), &proof).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let before = fs::read(root.join(FILE)).unwrap();
+            let history = fs::read(root.join("restore-history.json")).unwrap();
+            assert!(
+                archive_completed_prior(
+                    root,
+                    &current,
+                    &selected(&current).unwrap(),
+                    &"2".repeat(64),
+                    "current-boot",
+                )
+                .is_err(),
+                "{fault}"
+            );
+            assert_eq!(fs::read(root.join(FILE)).unwrap(), before, "{fault}");
+            assert_eq!(
+                fs::read(root.join("restore-history.json")).unwrap(),
+                history
+            );
+            assert!(
+                !root
+                    .join(format!(
+                        "dead-owner-cleanup-retired-{}.json",
+                        proof.complete_sha256.as_deref().unwrap_or("missing")
+                    ))
+                    .exists(),
+                "{fault}"
+            );
+        }
     }
 
     #[test]

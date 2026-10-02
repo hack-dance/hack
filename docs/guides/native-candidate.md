@@ -1162,6 +1162,11 @@ authority. Same-boot history also requires validated listener retirement.
 Incomplete, foreign, one-off, conflicting or missing-history records
 refuse without modification. Current owner, boot, process, receipt and resource
 checks still authorize cleanup independently, including on retries.
+A later previous-boot recovery may archive that validated older completion even
+after its exact stopped receipt has been evicted. It preserves the original proof
+bytes and inode by renaming it; it does not reconstruct an evicted receipt or use
+historical evidence as current cleanup authority. Pending or incomplete proofs,
+changed graph identities and an unchanged container generation still refuse.
 An already completed prior-boot dependency archive is likewise historical
 metadata. Restore may leave it untouched after validating its original generation,
 boot, journal and exact artifact hashes, with no active or pending journal and an

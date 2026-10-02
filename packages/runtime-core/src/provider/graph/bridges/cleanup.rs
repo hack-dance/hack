@@ -244,6 +244,97 @@ pub(crate) fn capture(
     Ok(selection)
 }
 
+// A completed guest relay has no live process/socket identity to capture. Retire
+// only that exact current-boot reservation through the ordinary per-slot stop
+// path before enrolling graph cleanup; surviving relays still require capture.
+// A partial stop remains in the registry and can be resumed on the next call,
+// but a missing allocation is sufficient only after the host committed stopped.
+pub(crate) fn retire_exited_for_cleanup(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    let mut store = strict_store(candidate, engine)?;
+    let selected = retirement_targets(&store, receipt, engine.guest().boot_id(), |slot, a| {
+        if a.phase != "running" {
+            match relay::retirement_absence(engine, slot, a)? {
+                "absent" => return Ok("absent".into()),
+                "present" => {}
+                _ => return Err(invalid()),
+            }
+        }
+        relay::operate(engine, slot, a, "inspect-retirement", None)
+    })?;
+    for (slot, expected) in selected {
+        require_exact_retirement_target(&store, slot, &expected)?;
+        stop_slot(candidate, engine, &mut store, slot)?;
+        store.slots.remove(&slot);
+        save(candidate, &store)?;
+    }
+    Ok(())
+}
+
+fn require_exact_retirement_target(
+    store: &Store,
+    slot: u8,
+    expected: &Assignment,
+) -> Result<(), CandidateError> {
+    if store.slots.get(&slot) == Some(expected) {
+        Ok(())
+    } else {
+        Err(error(
+            "bridge_reservation_changed",
+            "The selected reservation changed before cleanup; nothing was released.",
+        ))
+    }
+}
+
+fn retirement_targets(
+    store: &Store,
+    receipt: &Receipt,
+    boot: &str,
+    mut observe: impl FnMut(u8, &Assignment) -> Result<String, CandidateError>,
+) -> Result<Vec<(u8, Assignment)>, CandidateError> {
+    let mut selected = Vec::new();
+    for (slot, a) in store.slots.iter().filter(|(_, a)| a.run == receipt.run) {
+        if !matches!(a.phase.as_str(), "running" | "stopping" | "stopped") {
+            continue;
+        }
+        // Legacy raw relays retain their existing live-capture path. This
+        // recovery applies only to launch-fenced reservations.
+        if a.relay
+            .as_ref()
+            .is_none_or(|relay| relay.transport != relay::Transport::ReservationV1)
+        {
+            continue;
+        }
+        if a.boot_id != boot
+            || !receipt
+                .resources
+                .get(&format!("container:{}", a.service))
+                .is_some_and(|r| {
+                    r.kind == Kind::Container
+                        && r.key == a.service
+                        && r.id.as_deref() == Some(a.container_id.as_str())
+                })
+            || !receipt
+                .resources
+                .values()
+                .any(|r| r.kind == Kind::Network && r.id.as_deref() == Some(a.network_id.as_str()))
+        {
+            return Err(invalid());
+        }
+        match (a.phase.as_str(), observe(*slot, a)?.as_str()) {
+            (_, "exited") | ("stopped", "absent") => {
+                selected.push((*slot, a.clone()));
+            }
+            ("running", "running") => {}
+            _ => return Err(invalid()),
+        }
+    }
+    Ok(selected)
+}
+
 // An empty ingress registry does not imply an empty host-dependency graph.
 // Completed dependency startup may use the same exact dead-publication proof;
 // pending startup never obtains cleanup authority from an empty registry.
@@ -880,6 +971,169 @@ mod tests {
             slots: BTreeMap::from([(0, assignment)]),
         };
         (selected, store)
+    }
+
+    fn receipt_for_assignment(selected: &Selection, assignment: &Assignment) -> Receipt {
+        serde_json::from_value(json!({
+            "version":1,
+            "run":selected.run,
+            "owner":selected.owner,
+            "namespace":"3".repeat(64),
+            "plan_id":selected.plan,
+            "phase":"ready-observed",
+            "readiness":{"web":"healthy"},
+            "resources":{
+                "container:web":{
+                    "kind":"container","key":"web","name":"owned",
+                    "id":assignment.container_id,"image":null,"phase":"started"
+                },
+                "network:default":{
+                    "kind":"network","key":"default","name":"owned",
+                    "id":assignment.network_id,"image":null,"phase":"created"
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn exited_current_run_relay_is_selected_before_live_bridge_capture() {
+        let (selected, mut store) = live_selection();
+        let assignment = store.slots[&0].clone();
+        let receipt = receipt_for_assignment(&selected, &assignment);
+        let mut foreign = assignment.clone();
+        foreign.run = "9".repeat(32);
+        foreign.service = "foreign".into();
+        foreign.reservation = "8".repeat(32);
+        foreign.relay.as_mut().unwrap().launch_serial = 2;
+        store.next_launch_serial = 2;
+        store.slots.insert(1, foreign.clone());
+        let mut seen = Vec::new();
+        let targets = retirement_targets(&store, &receipt, &selected.boot, |slot, _| {
+            seen.push(slot);
+            Ok("exited".into())
+        })
+        .unwrap();
+        assert_eq!(seen, vec![0]);
+        assert_eq!(targets, vec![(0, assignment.clone())]);
+        assert_eq!(store.slots[&1], foreign);
+        assert!(
+            retirement_targets(&store, &receipt, &selected.boot, |_, _| {
+                Ok("running".into())
+            })
+            .unwrap()
+            .is_empty()
+        );
+        // An interrupted exact stop still needs fresh exit or fenced absence.
+        store.slots.get_mut(&0).unwrap().phase = "stopping".into();
+        assert_eq!(
+            retirement_targets(&store, &receipt, &selected.boot, |_, _| {
+                Ok("exited".into())
+            })
+            .unwrap()[0]
+                .0,
+            0
+        );
+        store.slots.get_mut(&0).unwrap().phase = "stopped".into();
+        assert_eq!(
+            retirement_targets(&store, &receipt, &selected.boot, |_, _| {
+                Ok("absent".into())
+            })
+            .unwrap()[0]
+                .0,
+            0
+        );
+        store.slots.get_mut(&0).unwrap().phase = "stopping".into();
+        assert!(
+            retirement_targets(&store, &receipt, &selected.boot, |_, _| {
+                Ok("absent".into())
+            })
+            .is_err()
+        );
+        for phase in ["stopping", "stopped"] {
+            store.slots.get_mut(&0).unwrap().phase = phase.into();
+            assert!(
+                retirement_targets(&store, &receipt, &selected.boot, |_, _| {
+                    Ok("running".into())
+                })
+                .is_err()
+            );
+            assert!(
+                retirement_targets(&store, &receipt, &selected.boot, |_, _| { Err(invalid()) })
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn exited_relay_retirement_refuses_changed_identity_and_uncertain_observation() {
+        for mutation in 0..4 {
+            let (selected, mut store) = live_selection();
+            let receipt = receipt_for_assignment(&selected, &store.slots[&0]);
+            let assignment = store.slots.get_mut(&0).unwrap();
+            match mutation {
+                0 => assignment.boot_id = "22222222-2222-2222-2222-222222222222".into(),
+                1 => assignment.container_id = "8".repeat(64),
+                2 => assignment.network_id = "8".repeat(64),
+                3 => assignment.service = "replaced".into(),
+                _ => unreachable!(),
+            }
+            assert!(
+                retirement_targets(&store, &receipt, &selected.boot, |_, _| {
+                    Ok("exited".into())
+                })
+                .is_err(),
+                "mutation {mutation}"
+            );
+        }
+        let (selected, store) = live_selection();
+        let receipt = receipt_for_assignment(&selected, &store.slots[&0]);
+        let (_, mut legacy) = live_selection();
+        legacy
+            .slots
+            .get_mut(&0)
+            .unwrap()
+            .relay
+            .as_mut()
+            .unwrap()
+            .transport = relay::Transport::Raw;
+        assert!(
+            retirement_targets(&legacy, &receipt, &selected.boot, |_, _| {
+                panic!("raw relay remains on its existing cleanup path")
+            })
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            retirement_targets(&store, &receipt, &selected.boot, |_, _| { Err(invalid()) })
+                .is_err()
+        );
+        assert!(
+            retirement_targets(&store, &receipt, &selected.boot, |_, _| {
+                Ok("unknown".into())
+            })
+            .is_err()
+        );
+        let expected = &store.slots[&0];
+        assert!(require_exact_retirement_target(&store, 0, expected).is_ok());
+        for mutation in 0..4 {
+            let (_, mut replaced) = live_selection();
+            let current = replaced.slots.get_mut(&0).unwrap();
+            match mutation {
+                0 => current.reservation = "8".repeat(32),
+                1 => current.run = "8".repeat(32),
+                2 => current.generation = "8".repeat(64),
+                3 => current.relay.as_mut().unwrap().launch_serial += 1,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                require_exact_retirement_target(&replaced, 0, expected)
+                    .unwrap_err()
+                    .code,
+                "bridge_reservation_changed",
+                "mutation {mutation}"
+            );
+        }
     }
 
     #[test]

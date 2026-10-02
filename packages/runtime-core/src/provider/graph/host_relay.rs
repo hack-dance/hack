@@ -89,6 +89,7 @@ pub(super) fn cleanup_with_relay_expected(
     }
     let scope = graph_scope(context(&receipt.owner, engine.guest().boot_id())?, run)?;
     let environment = environment::cleanup_inventory(candidate, &engine, &receipt, &root)?;
+    bridges::cleanup::retire_exited_for_cleanup(candidate, &engine, &receipt)?;
     let bridge_selection = bridges::cleanup::capture(candidate, &engine, &receipt)?;
     let effect = cleanup_effect(
         &receipt,

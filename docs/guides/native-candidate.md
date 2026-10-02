@@ -547,6 +547,12 @@ absence while keeping the exact run mapping. It then retires that branch's owned
 lifecycle processes before running after hooks. A previously recovered stopped graph
 also retires remaining owned host processes without replaying hooks or guest cleanup;
 uncertain ownership refuses retirement and leaves the retained mapping intact.
+Before capturing live bridge helpers for cleanup, the owner retires an exited
+helper only after confirming its current guest boot, run, container, network and
+reservation. An interrupted retirement requires a fresh exit observation or an
+exact stopped slot fence with the allocation and socket absent. A live, replaced
+or unconfirmed helper remains a refusal; named volumes and sibling runs retain
+their existing ownership protections.
 Successful `down` also requires acknowledgement of the exact frontend attempt
 captured before cleanup. Missing, changed or unacknowledged finalization refuses
 success even when compute is already stopped; the run mapping and volumes remain

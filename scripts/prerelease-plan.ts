@@ -430,15 +430,20 @@ export async function packagePrerelease({
     );
   }
   await mkdir(output, { mode: 0o700 });
-  await run([
-    "tar",
-    "-czf",
-    join(output, plan.archive),
-    "-C",
-    bundle,
-    ...PRERELEASE_PAYLOAD,
-    "SHA256SUMS",
-  ]);
+  // macOS tar otherwise adds AppleDouble members for source extended attributes.
+  // GNU tar ignores COPYFILE_DISABLE, so the fixed payload remains portable.
+  await run(
+    [
+      "tar",
+      "-czf",
+      join(output, plan.archive),
+      "-C",
+      bundle,
+      ...PRERELEASE_PAYLOAD,
+      "SHA256SUMS",
+    ],
+    { env: { ...process.env, COPYFILE_DISABLE: "1" } }
+  );
   await Bun.write(
     join(output, "prerelease.json"),
     `${JSON.stringify(metadata, null, 2)}\n`
@@ -519,8 +524,15 @@ function array(value: unknown): unknown[] {
   return value;
 }
 
-async function run(cmd: string[]) {
-  const child = Bun.spawn(cmd, { stdout: "inherit", stderr: "inherit" });
+async function run(
+  cmd: string[],
+  options: { readonly env?: NodeJS.ProcessEnv } = {}
+) {
+  const child = Bun.spawn(cmd, {
+    ...options,
+    stdout: "inherit",
+    stderr: "inherit",
+  });
   if ((await child.exited) !== 0) {
     throw new Error(`Command failed: ${cmd[0]}`);
   }

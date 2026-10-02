@@ -352,6 +352,27 @@ async function fixture(root: string) {
   return bundle;
 }
 
+/** Python exposes AppleDouble entries that macOS tar's own listing hides. */
+async function archiveMembers(archive: string) {
+  const listing = Bun.spawn(
+    [
+      "python3",
+      "-c",
+      "import json, sys, tarfile\nwith tarfile.open(sys.argv[1], 'r:gz') as archive:\n print(json.dumps([{'name': member.name, 'file': member.isfile()} for member in archive.getmembers()]))",
+      archive,
+    ],
+    { stdout: "pipe", stderr: "pipe" }
+  );
+  const [exitCode, stdout, stderr] = await Promise.all([
+    listing.exited,
+    new Response(listing.stdout).text(),
+    new Response(listing.stderr).text(),
+  ]);
+  expect(exitCode).toBe(0);
+  expect(stderr).toBe("");
+  return JSON.parse(stdout) as Array<{ name: string; file: boolean }>;
+}
+
 test("packages complete metadata-bound archive and refuses replacement, tampering and symlinks", async () => {
   const root = await mkdtemp(join(tmpdir(), "hack-prerelease-"));
   try {
@@ -359,13 +380,11 @@ test("packages complete metadata-bound archive and refuses replacement, tamperin
     const output = join(root, "assets");
     await packagePrerelease({ plan, bundle, output });
     await verifyReleaseAssets({ plan, output });
-    const listing = Bun.spawn(["tar", "-tzf", join(output, plan.archive)], {
-      stdout: "pipe",
-    });
-    expect(
-      (await new Response(listing.stdout).text()).trim().split("\n").sort()
-    ).toEqual([...PRERELEASE_PAYLOAD, "SHA256SUMS"].sort());
-    expect(await listing.exited).toBe(0);
+    const members = await archiveMembers(join(output, plan.archive));
+    expect(members.map((member) => member.name).sort()).toEqual(
+      [...PRERELEASE_PAYLOAD, "SHA256SUMS"].sort()
+    );
+    expect(members.every((member) => member.file)).toBe(true);
     await expect(packagePrerelease({ plan, bundle, output })).rejects.toThrow();
     await Bun.write(join(output, plan.archive), "tampered");
     await expect(verifyReleaseAssets({ plan, output })).rejects.toThrow(
@@ -397,6 +416,66 @@ test("packages complete metadata-bound archive and refuses replacement, tamperin
     await expect(
       packagePrerelease({ plan, bundle, output: join(root, "hardlink") })
     ).rejects.toThrow("regular file");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("packages exactly eight native payload members despite macOS source extended attributes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-prerelease-xattr-"));
+  try {
+    const bundle = await fixture(root);
+    const names = [...PRERELEASE_PAYLOAD, "SHA256SUMS"];
+    if (process.platform === "darwin") {
+      const attribute = Bun.spawn(
+        [
+          "/usr/bin/xattr",
+          "-w",
+          "com.hack.prerelease-fixture",
+          "inventory-regression",
+          ...names.map((name) => join(bundle, name)),
+        ],
+        { stdout: "pipe", stderr: "pipe" }
+      );
+      expect(await new Response(attribute.stderr).text()).toBe("");
+      expect(await attribute.exited).toBe(0);
+      const controlPath = join(root, "with-metadata.tar.gz");
+      const { COPYFILE_DISABLE: _copyfileDisabled, ...controlEnv } =
+        process.env;
+      const control = Bun.spawn(
+        ["tar", "-czf", controlPath, "-C", bundle, ...names],
+        { env: controlEnv, stdout: "pipe", stderr: "pipe" }
+      );
+      expect(await new Response(control.stderr).text()).toBe("");
+      expect(await control.exited).toBe(0);
+      const controlMembers = await archiveMembers(controlPath);
+      expect(controlMembers.map((member) => member.name)).toContain(
+        "._hack-native"
+      );
+      expect(controlMembers).toHaveLength(16);
+    }
+    const output = join(root, "assets");
+    await packagePrerelease({ plan, bundle, output });
+    await verifyReleaseAssets({ plan, output });
+    const members = await archiveMembers(join(output, plan.archive));
+    expect(members.map((member) => member.name).sort()).toEqual(names.sort());
+    expect(members).toHaveLength(8);
+    expect(members.every((member) => member.file)).toBe(true);
+    if (process.platform === "darwin") {
+      const preserved = Bun.spawn(
+        [
+          "/usr/bin/xattr",
+          "-p",
+          "com.hack.prerelease-fixture",
+          join(bundle, "hack-native"),
+        ],
+        { stdout: "pipe", stderr: "pipe" }
+      );
+      expect(await new Response(preserved.stdout).text()).toBe(
+        "inventory-regression\n"
+      );
+      expect(await preserved.exited).toBe(0);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

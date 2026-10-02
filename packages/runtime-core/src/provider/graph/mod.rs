@@ -22,6 +22,8 @@ mod dependency_slots;
 #[cfg(target_os = "macos")]
 mod host_pin_recovery;
 #[cfg(target_os = "macos")]
+mod interrupted_start_cleanup;
+#[cfg(target_os = "macos")]
 pub(crate) mod publication_gate;
 #[cfg(target_os = "macos")]
 pub(crate) mod quiescent_dependency_recovery;
@@ -37,6 +39,10 @@ pub use dependency_slots::{
 };
 #[cfg(target_os = "macos")]
 pub use host_pin_recovery::{inspect as inspect_host_pin_recovery, recover as recover_host_pins};
+#[cfg(target_os = "macos")]
+pub use interrupted_start_cleanup::{
+    inspect as inspect_interrupted_start_cleanup, recover as recover_interrupted_start_cleanup,
+};
 #[cfg(all(test, target_os = "macos"))]
 pub(in crate::provider) use source_device_rebind::fixture_https_witness;
 #[cfg(target_os = "macos")]
@@ -250,6 +256,8 @@ pub struct Receipt {
 pub struct Snapshot {
     pub receipt: Receipt,
     pub journal_incomplete: bool,
+    #[cfg(target_os = "macos")]
+    pub interrupted_start_cleanup_incomplete: bool,
     pub observations: BTreeMap<String, Value>,
     pub guest_endpoints: BTreeMap<String, GuestEndpoint>,
     pub storage_references: Value,
@@ -1535,6 +1543,8 @@ fn inspect_using(
     let journal_incomplete = root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()
         || startup::require_dependency_rebind_complete(&root, &receipt).is_err();
+    #[cfg(target_os = "macos")]
+    let interrupted_start_cleanup_incomplete = interrupted_start_cleanup::incomplete(&root, run)?;
     let mut networks = BTreeMap::new();
     for (key, resource) in receipt
         .resources
@@ -1589,6 +1599,8 @@ fn inspect_using(
     Ok(Snapshot {
         receipt,
         journal_incomplete,
+        #[cfg(target_os = "macos")]
+        interrupted_start_cleanup_incomplete,
         observations,
         guest_endpoints,
         storage_references,

@@ -11,6 +11,7 @@ import {
   waitNativeProjectFinalization,
 } from "./native-project-finalization.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
+import { recoverNativeInterruptedStartupCleanup } from "./native-project-interrupted-cleanup.ts";
 import {
   loadNativeProjectRun,
   type NativeProjectRun,
@@ -128,6 +129,24 @@ export async function nativeProjectDown(opts: {
       throw finalizationRefused();
     }
   };
+  const recovered = await recoverNativeInterruptedStartupCleanup({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    run,
+    snapshot: initial,
+    invoke,
+  });
+  if (recovered !== null) {
+    verify(recovered, run, true);
+    await opts.retireHostProcesses?.(run);
+    await wait();
+    return {
+      backend: "native",
+      status: "stopped",
+      run: run.run,
+      dataPreserved: true,
+    } as const;
+  }
   if (
     isRecord(initial) &&
     isRecord(initial.receipt) &&

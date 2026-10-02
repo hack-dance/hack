@@ -25,6 +25,50 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let Some((action, args)) = args.split_first() else {
         return Err(invalid());
     };
+    if *action == "inspect-interrupted-start-cleanup" {
+        let run = match *args {
+            ["--run-id", run] | ["--run-id", run, "--json"] => run,
+            _ => return Err(invalid()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            return graph::inspect_interrupted_start_cleanup(candidate, run);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = run;
+            return Err(invalid());
+        }
+    }
+    if *action == "recover-interrupted-start-cleanup" {
+        let (run, expected) = match *args {
+            [
+                "--run-id",
+                run,
+                "--expect-selection",
+                expected,
+                "--retain-data",
+            ]
+            | [
+                "--run-id",
+                run,
+                "--expect-selection",
+                expected,
+                "--retain-data",
+                "--json",
+            ] => (run, expected),
+            _ => return Err(invalid()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            return graph::recover_interrupted_start_cleanup(candidate, run, expected);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (run, expected);
+            return Err(invalid());
+        }
+    }
     if *action == "release-acknowledged-dependencies" {
         let (run, owner, receipt, publisher, reservation) = match *args {
             [

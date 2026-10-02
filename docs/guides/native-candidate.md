@@ -929,6 +929,45 @@ exit observation before cleanup, including exit code zero. A successful
 no command, environment or application log values. Older bundles may refuse the
 new zero-exit evidence; use the owning bundle for diagnosis and retaining cleanup.
 
+A Docker container can remain `created` with a nonzero error when its first start
+fails before a process runs. Retaining shutdown accepts this state only with
+verified ownership, no running PID, no pause/restart/dead state and no OOM flag.
+The original exit code remains failure evidence; it does not become a successful
+application exit or a claim that Hack sent a stop request.
+
+If that failure interrupted enrolled cleanup, the candidate frontend can inspect
+and select a separate retaining recovery after the exact native foreground has
+exited. The private controls are `graph inspect-interrupted-start-cleanup
+--run-id RUN --json` and `graph recover-interrupted-start-cleanup --run-id RUN
+--expect-selection SHA256 --retain-data --json`. They require the same guest
+boot, exact dead foreground and relay owner, matching pending coordinator
+operation, and unchanged selected resources and retained volumes. This is not a
+general retry of a coordinator effect. Its own journal records each cleanup step;
+an uncertain stop is never sent again merely because the container still appears
+running. A crash between stop intent and request can therefore require later
+terminal evidence before recovery can advance.
+Likewise, a pending guest helper, probe or environment deletion advances only
+after complete absence is independently verified. An interruption partway through
+a guest cleanup script can remain fenced; this control does not replay that
+script or guarantee automatic recovery from every internal deletion boundary.
+
+Successful recovery requires independent compute, helper, probe and environment
+absence, then current cleanup acknowledgement, exact publisher retirement and
+dependency reservation release. The frontend rechecks retained data and completes
+its existing finalization contract. It still reports the original startup failure.
+If retirement is interrupted after acknowledgement, a bounded native journal hint
+prompts fresh inspection of the exact original selection before finishing only
+the remaining publisher and reservation transitions. The hint grants no effect
+authority, and a stopped graph alone does not establish complete retirement.
+Completed recovery journals remain as evidence. A later interrupted startup on
+the same retained run cannot reuse that earlier generation's selection: native
+recovery reports `graph_interrupted_start_cleanup_stale`. Archiving a completed
+journal at the verified restore boundary is a separate follow-up; never remove
+the journal manually to enable another recovery.
+A component acknowledgement is not application readiness, and this recovery does
+not diagnose or fix an upstream engine panic. Changed or incomplete evidence
+remains available for inspection; do not remove journals or ownership pins to retry.
+
 Native `hack exec` and `hack run` make this request once with a 180-second frontend
 budget before selecting their command or reading managed environment values.
 `ps` and `logs` remain observations and do not request refresh. Authenticated relay

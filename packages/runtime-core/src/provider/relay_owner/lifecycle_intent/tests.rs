@@ -809,6 +809,98 @@ fn enrolled_confirmation_requires_caller_acknowledgement_before_any_rollover() {
         .prepare_graph(&server.endpoint, Duration::from_secs(2))
         .unwrap();
     coordinator.execute(EFFECT, || Ok(())).unwrap();
+    let selected_effect = selection(&coordinator);
+    let selected_owner = server.endpoint.incarnation();
+    let selected_process = server.endpoint.process().clone();
+    let selected_publication = server.endpoint.fingerprint();
+    let selected_identity = coordinator.snapshot.record.recovery_fingerprint().unwrap();
+    coordinator
+        .verify_selected_effect(
+            &selected_effect,
+            scope,
+            selected_owner,
+            &selected_process,
+            selected_publication,
+            &selected_identity,
+        )
+        .unwrap();
+    assert!(
+        coordinator
+            .verify_selected_effect(
+                &selected_effect,
+                GraphScope::new(context(), [7; 32]).unwrap(),
+                selected_owner,
+                &selected_process,
+                selected_publication,
+                &selected_identity
+            )
+            .is_err()
+    );
+    assert!(
+        coordinator
+            .verify_selected_effect(
+                &Selection {
+                    effect: [8; 32],
+                    ..selected_effect
+                },
+                scope,
+                selected_owner,
+                &selected_process,
+                selected_publication,
+                &selected_identity
+            )
+            .is_err()
+    );
+    assert!(
+        coordinator
+            .verify_selected_effect(
+                &selection(&coordinator),
+                scope,
+                [3; 16],
+                &selected_process,
+                selected_publication,
+                &selected_identity
+            )
+            .is_err()
+    );
+    let mut other_process = selected_process.clone();
+    other_process.pid += 1;
+    assert!(
+        coordinator
+            .verify_selected_effect(
+                &selection(&coordinator),
+                scope,
+                selected_owner,
+                &other_process,
+                selected_publication,
+                &selected_identity
+            )
+            .is_err()
+    );
+    assert!(
+        coordinator
+            .verify_selected_effect(
+                &selection(&coordinator),
+                scope,
+                selected_owner,
+                &selected_process,
+                [4; 32],
+                &selected_identity
+            )
+            .is_err()
+    );
+    assert!(
+        coordinator
+            .verify_selected_effect(
+                &selection(&coordinator),
+                scope,
+                selected_owner,
+                &selected_process,
+                selected_publication,
+                &"0".repeat(64)
+            )
+            .is_err()
+    );
     assert!(coordinator.acknowledge().is_err());
     coordinator.confirm(EFFECT, || Ok([7; 32])).unwrap();
     assert!(coordinator.acknowledgement_pending());
@@ -817,6 +909,7 @@ fn enrolled_confirmation_requires_caller_acknowledgement_before_any_rollover() {
     let inspection = Inspection::load(&root.0, context()).unwrap();
     assert_eq!(inspection.phase, Phase::Confirmed);
     assert!(inspection.acknowledgement_pending);
+    assert_eq!(inspection.recovery_fingerprint, selected_identity);
     assert!(
         registration(&root.0).is_ok(),
         "ordinary registration keeps its existing contract"
@@ -834,8 +927,20 @@ fn enrolled_confirmation_requires_caller_acknowledgement_before_any_rollover() {
         .is_err()
     );
     let mut recovered = Coordinator::resume(&root.0, selected).unwrap();
+    recovered
+        .verify_recovery_identity(&selection(&recovered), scope, &selected_identity)
+        .unwrap();
     recovered.acknowledge().unwrap();
     assert!(!recovered.acknowledgement_pending());
+    assert_eq!(
+        recovered.snapshot.record.recovery_fingerprint().unwrap(),
+        selected_identity
+    );
+    assert!(
+        recovered
+            .verify_recovery_identity(&selection(&recovered), scope, &selected_identity)
+            .is_err()
+    );
     let identity = recovered.snapshot.identity;
     recovered.acknowledge().unwrap();
     assert_eq!(
@@ -860,6 +965,41 @@ fn enrolled_confirmation_requires_caller_acknowledgement_before_any_rollover() {
         .is_err()
     );
     assert!(Coordinator::begin(&server.endpoint, server.mutation()).is_ok());
+}
+
+#[test]
+fn selected_effect_refuses_same_effect_replaced_coordinator_record() {
+    let root = Root::new();
+    let server = Server::scoped(&root, Some(GraphScope::new(context(), [8; 32]).unwrap()));
+    let scope = GraphScope::new(context(), [9; 32]).unwrap();
+    let mut coordinator =
+        Coordinator::begin_graph_enrolled(&server.endpoint, scope, EFFECT, Some([6; 16]), |_| {
+            Ok(())
+        })
+        .unwrap();
+    coordinator
+        .prepare_graph(&server.endpoint, Duration::from_secs(2))
+        .unwrap();
+    coordinator.execute(EFFECT, || Ok(())).unwrap();
+    let selected = selection(&coordinator);
+    let identity = coordinator.snapshot.record.recovery_fingerprint().unwrap();
+    let mut replacement = coordinator.snapshot.record.clone();
+    replacement.owner = [7; 16];
+    assert_eq!(replacement.effect, coordinator.snapshot.record.effect);
+    assert_ne!(replacement.recovery_fingerprint().unwrap(), identity);
+    state::write(&root.0.join("relay-lifecycle/state.json"), &replacement).unwrap();
+    assert!(
+        coordinator
+            .verify_selected_effect(
+                &selected,
+                scope,
+                server.endpoint.incarnation(),
+                server.endpoint.process(),
+                server.endpoint.fingerprint(),
+                &identity,
+            )
+            .is_err()
+    );
 }
 
 #[test]

@@ -702,6 +702,67 @@ test("recovered stopped graph retires host processes without replaying hooks or 
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
+test("down recovers a selected interrupted startup without replaying hooks or ordinary cleanup", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  let recovered = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    before: () => {
+      throw new Error("unexpected before-hook replay");
+    },
+    after: () => {
+      throw new Error("unexpected after-hook replay");
+    },
+    retireHostProcesses: async () => {
+      calls.push("retire-host");
+    },
+    invoke: async ({ args }) => {
+      calls.push(args[1]!);
+      if (args[1] === "inspect-interrupted-start-cleanup") {
+        return {
+          run: run.run,
+          phase: "cleanup-intent",
+          eligible: true,
+          same_boot: true,
+          data_retained: true,
+          selection_sha256: "f".repeat(64),
+        };
+      }
+      if (args[1] === "recover-interrupted-start-cleanup") {
+        recovered = true;
+        return {
+          run: run.run,
+          phase: "stopped-data-retained",
+          recovered: true,
+          data_retained: true,
+          same_boot: true,
+          publisher_retired: true,
+          reservation_released: true,
+        };
+      }
+      const value = snapshot(recovered);
+      if (!recovered) {
+        value.receipt.phase = "cleanup-intent";
+        return {
+          ...value,
+          receipt: { ...value.receipt, relay_cleanup: { phase: "pending" } },
+        };
+      }
+      return value;
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(calls).toEqual([
+    "inspect",
+    "inspect-interrupted-start-cleanup",
+    "recover-interrupted-start-cleanup",
+    "inspect",
+    "retire-host",
+  ]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
 test("stopped receipt with a remaining container preserves mapping", async () => {
   const opts = await fixture();
   await expect(

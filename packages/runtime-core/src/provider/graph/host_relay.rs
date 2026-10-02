@@ -220,6 +220,35 @@ pub fn confirm_relay_cleanup(
     control_root: &std::path::Path,
     selection: crate::provider::relay_owner::lifecycle_intent::Selection,
 ) -> Result<Receipt, CandidateError> {
+    confirm_relay_cleanup_fenced(candidate, run, remove_data, control_root, selection, None)
+}
+
+pub(super) fn confirm_relay_cleanup_selected(
+    candidate: &Candidate,
+    run: &str,
+    remove_data: bool,
+    control_root: &std::path::Path,
+    selection: crate::provider::relay_owner::lifecycle_intent::Selection,
+    expected_identity: &str,
+) -> Result<Receipt, CandidateError> {
+    confirm_relay_cleanup_fenced(
+        candidate,
+        run,
+        remove_data,
+        control_root,
+        selection,
+        Some(expected_identity),
+    )
+}
+
+fn confirm_relay_cleanup_fenced(
+    candidate: &Candidate,
+    run: &str,
+    remove_data: bool,
+    control_root: &std::path::Path,
+    selection: crate::provider::relay_owner::lifecycle_intent::Selection,
+    expected_identity: Option<&str>,
+) -> Result<Receipt, CandidateError> {
     use crate::provider::relay_owner::lifecycle_intent::{Coordinator, Phase};
     let engine = Engine::connect_cleanup(candidate)?;
     let (mut receipt, root) = archive::load_confirmation(candidate, &engine, run)?;
@@ -245,6 +274,13 @@ pub fn confirm_relay_cleanup(
         return Err(refused());
     }
     let mut coordinator = Coordinator::resume(control_root, selection)?;
+    if let Some(identity) = expected_identity {
+        coordinator.verify_recovery_identity(
+            &marker.selection(),
+            graph_scope(expected, run)?,
+            identity,
+        )?;
+    }
     let inspect = || {
         inspect_cleanup(
             candidate,
@@ -261,6 +297,13 @@ pub fn confirm_relay_cleanup(
             inspect()?;
         }
         _ => return Err(refused()),
+    }
+    if let Some(identity) = expected_identity {
+        coordinator.verify_recovery_identity(
+            &marker.selection(),
+            graph_scope(expected, run)?,
+            identity,
+        )?;
     }
     finish_confirmation(&mut coordinator, &mut receipt, &root)?;
     Ok(receipt)

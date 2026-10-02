@@ -34,6 +34,7 @@ import {
   prepareNativeProjectInput,
 } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
+import { recoverNativeInterruptedStartupCleanup } from "./native-project-interrupted-cleanup.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import { serveNativeProjectGraph } from "./native-project-process.ts";
 import { selectNativeProjectRestore } from "./native-project-restore.ts";
@@ -564,6 +565,39 @@ function requireConfirmedCleanup(
     throw cleanupUnconfirmed(startupFailure, nativeCode);
   }
 }
+
+async function confirmForegroundCleanup(opts: {
+  readonly final: unknown;
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: string;
+  readonly namespace: string;
+  readonly planId: string;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly startupFailure: unknown;
+  readonly nativeCode: string | undefined;
+}): Promise<{ final: unknown; owned: NativeProjectRun }> {
+  let final = opts.final;
+  let owned = authoritative(final, opts.run, opts.namespace, opts.planId);
+  try {
+    const recovered = await recoverNativeInterruptedStartupCleanup({
+      runtime: opts.runtime,
+      projectRoot: opts.projectRoot,
+      run: owned,
+      snapshot: final,
+      invoke: opts.invoke,
+    });
+    if (recovered !== null) {
+      final = recovered;
+      owned = authoritative(final, opts.run, opts.namespace, opts.planId);
+    }
+  } catch {
+    throw cleanupUnconfirmed(opts.startupFailure, opts.nativeCode);
+  }
+  requireConfirmedCleanup(final, opts.startupFailure, opts.nativeCode);
+  return { final, owned };
+}
+
 async function refusePendingFreshStart(
   restore: NativeProjectRun | undefined,
   scope: NativeProjectRunScope,
@@ -1196,18 +1230,23 @@ export async function startNativeProject(opts: {
               nativeExitCode
             );
           }
-          const owned = authoritative(
+          const confirmed = await confirmForegroundCleanup({
             final,
+            runtime: opts.runtime,
+            projectRoot: opts.scope.projectRoot,
             run,
-            review.namespace,
-            restore?.planId ?? review.planId
-          );
-          requireConfirmedCleanup(final, serveFailure, nativeExitCode);
+            namespace: review.namespace,
+            planId: restore?.planId ?? review.planId,
+            invoke: deps.invoke,
+            startupFailure: serveFailure,
+            nativeCode: nativeExitCode,
+          });
+          final = confirmed.final;
           graphCleanupConfirmed = true;
           await retireRemovedMapping({
             final,
             mapping,
-            owned,
+            owned: confirmed.owned,
             scope: opts.scope,
             remove: deps.remove,
           });

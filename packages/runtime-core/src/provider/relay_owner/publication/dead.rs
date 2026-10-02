@@ -72,6 +72,12 @@ impl Witness {
             record_id: self.pin.receipt_id,
         }
     }
+    pub(crate) fn owner(&self) -> [u8; 16] {
+        self.pin.incarnation()
+    }
+    pub(crate) fn publication(&self) -> [u8; 32] {
+        self.pin.fingerprint()
+    }
     pub(crate) fn verify(&self) -> Result<(), CandidateError> {
         let m = fs::symlink_metadata(self.pin.paths.directory.join("operation.lock"))
             .map_err(|_| refused())?;

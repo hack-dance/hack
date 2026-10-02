@@ -311,6 +311,77 @@ test("uncertain foreground failure retains published mapping and cleans lifecycl
   expect(process.listenerCount("SIGINT")).toBe(int);
   expect(process.listenerCount("SIGTERM")).toBe(term);
 });
+
+test("failed startup recovers exact pending cleanup and still reports the startup failure", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  let selectedRun = "";
+  let recovered = false;
+  const requests: string[] = [];
+  opts.dependencies.serve = async (request) => {
+    selectedRun = request.run;
+    throw new Error(
+      "Native graph startup failed (engine_rejected); inspect owned state before retrying."
+    );
+  };
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "inspect-interrupted-start-cleanup") {
+      requests.push(request.args[1]);
+      return {
+        run: selectedRun,
+        phase: "cleanup-intent",
+        eligible: true,
+        same_boot: true,
+        data_retained: true,
+        selection_sha256: "1".repeat(64),
+      };
+    }
+    if (request.args[1] === "recover-interrupted-start-cleanup") {
+      requests.push(request.args[1]);
+      recovered = true;
+      return {
+        run: selectedRun,
+        phase: "stopped-data-retained",
+        recovered: true,
+        data_retained: true,
+        same_boot: true,
+        publisher_retired: true,
+        reservation_released: true,
+      };
+    }
+    if (request.args[1] === "inspect") {
+      requests.push(request.args[1]);
+      const value = stoppedGraph({
+        run: selectedRun,
+        owner: "c".repeat(32),
+        namespace: "b".repeat(64),
+        planId: "a".repeat(64),
+      });
+      if (!recovered) {
+        value.receipt.phase = "cleanup-intent";
+        value.observations["container:web"].state = "present";
+        return {
+          ...value,
+          receipt: { ...value.receipt, relay_cleanup: { phase: "pending" } },
+        };
+      }
+      return value;
+    }
+    return invoke(request);
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "Native graph startup failed (engine_rejected)"
+  );
+  expect(requests).toEqual([
+    "inspect",
+    "inspect-interrupted-start-cleanup",
+    "recover-interrupted-start-cleanup",
+    "inspect",
+  ]);
+  expect(events).not.toContain("ready");
+  expect(events).not.toContain("save");
+  expect(events.at(-1)).toBe("cleanup");
+});
 test("source opt-in and occupied mapping refuse before lifecycle or runtime effects", async () => {
   const { opts, events } = await fixture();
   await expect(

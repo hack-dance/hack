@@ -318,6 +318,12 @@ impl GraphInventory {
     pub(super) fn is_empty(&self) -> bool {
         self.intents.is_empty()
     }
+    pub(super) fn slots(&self) -> Vec<String> {
+        self.intents
+            .iter()
+            .map(|intent| intent.slot.clone())
+            .collect()
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -398,6 +404,28 @@ pub(super) fn verify_graph_retired(
     }
     guest.verify()?;
     Ok(())
+}
+
+/// Verify one selected allocation after an interrupted cleanup effect. Other
+/// allocations in the same graph may still be present at this journal step.
+#[cfg(target_os = "macos")]
+pub(super) fn verify_graph_slot_retired(
+    guest: &OwnedGuest<'_>,
+    inventory: &GraphInventory,
+    slot: &str,
+) -> Result<(), CandidateError> {
+    if inventory.incarnation != guest.incarnation() {
+        return Err(error());
+    }
+    let intent = inventory
+        .intents
+        .iter()
+        .find(|intent| intent.slot == slot)
+        .ok_or_else(error)?;
+    let binding = intent.graph.as_ref().ok_or_else(error)?;
+    super::engine::require_container_absent(guest, &binding.container)?;
+    retention::absent(guest, slot)?;
+    guest.verify()
 }
 
 /// Move retired, value-free intents into a removed graph's retained evidence. The graph ID

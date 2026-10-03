@@ -205,9 +205,9 @@ fn fence(
     coordinator.verify_selected_effect(
         &marker.selection(),
         graph,
-        proof.relay.owner(),
+        proof.relay_owner,
         proof.owner.process(),
-        proof.relay.publication(),
+        proof.relay_publication,
         &proof.selected.coordinator_identity_sha256,
     )?;
     if digest(&host_pin_recovery::read_raw(
@@ -456,7 +456,7 @@ fn validate_finished<'a>(
     candidate: &'a Candidate,
     run: &str,
     record: &Journal,
-) -> Result<(Engine<'a>, Receipt, PathBuf, bool), CandidateError> {
+) -> Result<(Engine<'a>, Receipt, PathBuf, bool, dead::CleanupWitness), CandidateError> {
     record.validate_basic(run, &record.selection_sha256)?;
     if !record.graph_complete {
         return Err(refused());
@@ -517,11 +517,20 @@ fn validate_finished<'a>(
     }
     let context = host_relay::context(&selection.owner, &selection.boot)?;
     let inspected = Inspection::load(&marker.control_root, context)?;
+    let relay = dead::CleanupWitness::acquire(&marker.control_root, context, &inspected.process)?;
     if inspected.graph != Some(host_relay::graph_scope(context, run)?)
         || inspected.selection.context != marker.selection().context
         || inspected.selection.operation != marker.operation
         || inspected.selection.effect != marker.effect
         || inspected.recovery_fingerprint != selection.coordinator_identity_sha256
+        || inspected.owner == [0; 16]
+        || inspected.publication == [0; 32]
+        || relay.selection_sha256()? != selection.relay_sha256
+        || relay
+            .present_identity()
+            .is_some_and(|(relay_owner, relay_publication)| {
+                inspected.owner != relay_owner || inspected.publication != relay_publication
+            })
         || digest(&host_pin_recovery::read_raw(
             &root.join("relay-cleanup-bridges.json"),
             65536,
@@ -549,7 +558,13 @@ fn validate_finished<'a>(
     }
     let bridges = bridges::cleanup::read(&engine, &receipt, &root)?;
     host_relay::inspect_cleanup(candidate, &engine, &receipt, false, &inventory, &bridges)?;
-    Ok((engine, receipt, root, status == Acknowledgement::Confirm))
+    Ok((
+        engine,
+        receipt,
+        root,
+        status == Acknowledgement::Confirm,
+        relay,
+    ))
 }
 
 pub(super) fn inspect_completed(
@@ -557,7 +572,7 @@ pub(super) fn inspect_completed(
     run: &str,
     record: &Journal,
 ) -> Result<Value, CandidateError> {
-    let (_engine, _receipt, _root, _needs_confirmation) =
+    let (_engine, _receipt, _root, _needs_confirmation, _relay) =
         validate_finished(candidate, run, record)?;
     Ok(
         json!({"run":run,"phase":"stopped-data-retained","eligible":true,
@@ -566,13 +581,15 @@ pub(super) fn inspect_completed(
 }
 
 fn finish(candidate: &Candidate, run: &str, record: &Journal) -> Result<Value, CandidateError> {
-    let (engine, mut receipt, root, needs_confirmation) =
+    let (engine, mut receipt, root, needs_confirmation, relay) =
         validate_finished(candidate, run, record)?;
     let selection = &record.selection;
     if needs_confirmation {
         let marker = receipt.relay_cleanup.as_ref().ok_or_else(refused)?;
         let control_root = marker.control_root.clone();
         let selected = marker.selection();
+        relay.verify()?;
+        drop(relay);
         drop(engine);
         receipt = host_relay::confirm_relay_cleanup_selected(
             candidate,
@@ -581,6 +598,7 @@ fn finish(candidate: &Candidate, run: &str, record: &Journal) -> Result<Value, C
             &control_root,
             selected,
             &selection.coordinator_identity_sha256,
+            &selection.relay_sha256,
         )?;
     } else {
         if receipt.relay_cleanup.as_ref().ok_or_else(refused)?.phase
@@ -588,6 +606,7 @@ fn finish(candidate: &Candidate, run: &str, record: &Journal) -> Result<Value, C
         {
             return Err(refused());
         }
+        drop(relay);
         drop(engine);
     }
     let engine = Engine::connect_cleanup_wait(candidate)?;

@@ -97,6 +97,8 @@ fn private_named_endpoint_retires_and_cleans_only_owned_publication() {
     assert!(absent(&paths(&root).socket).unwrap());
     assert!(absent(&paths(&root).receipt).unwrap());
     assert!(paths(&root).directory.join("operation.lock").is_file());
+    #[cfg(target_os = "macos")]
+    assert!(dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).is_err());
     pin.recover().unwrap();
 }
 #[test]
@@ -252,7 +254,7 @@ fn publication_child() {
         return;
     }
     let mut byte = [0];
-    std::io::stdin().read_exact(&mut byte).unwrap();
+    let _ = std::io::stdin().read(&mut byte).unwrap();
 }
 fn spawn_child(root: &Root, backlog: bool) -> OwnedChild {
     OwnedChild(
@@ -405,4 +407,65 @@ fn dead_witness_rejects_replacement_listener_and_changed_lock() {
     fs::set_permissions(&pin.paths.socket, fs::Permissions::from_mode(0o600)).unwrap();
     assert!(dead::Witness::acquire(&root.0, context(), &pin.receipt.process).is_err());
     drop(replacement);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn normal_owner_exit_leaves_an_exact_absent_pair_under_its_operation_lock() {
+    let root = Root::new();
+    let mut child = spawn_child(&root, false);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let pin = loop {
+        if let Ok(pin) = PinnedEndpoint::load(&root.0, context()) {
+            break pin;
+        }
+        assert!(Instant::now() < deadline);
+        assert!(child.0.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).is_err());
+    drop(child.0.stdin.take());
+    assert!(child.0.wait().unwrap().success());
+    assert!(absent(&pin.paths.receipt).unwrap());
+    assert!(absent(&pin.paths.socket).unwrap());
+    assert!(pin.paths.directory.join("operation.lock").is_file());
+
+    let witness = dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).unwrap();
+    assert!(matches!(&witness, dead::CleanupWitness::Absent(_)));
+    let selected = witness.selection_sha256().unwrap();
+    assert!(witness.verify().is_ok());
+    let mut wrong_process = pin.receipt.process.clone();
+    wrong_process.start_micros += 1;
+    drop(witness);
+    let changed = dead::CleanupWitness::acquire(&root.0, context(), &wrong_process).unwrap();
+    assert_ne!(changed.selection_sha256().unwrap(), selected);
+    drop(changed);
+
+    fs::write(&pin.paths.receipt, b"foreign").unwrap();
+    assert!(dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).is_err());
+    fs::remove_file(&pin.paths.receipt).unwrap();
+    let witness = dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).unwrap();
+    fs::write(&pin.paths.socket, b"foreign").unwrap();
+    assert!(witness.verify().is_err());
+    drop(witness);
+    fs::remove_file(&pin.paths.socket).unwrap();
+
+    let witness = dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).unwrap();
+    let lock = pin.paths.directory.join("operation.lock");
+    let linked = root.0.join("linked.lock");
+    fs::hard_link(&lock, &linked).unwrap();
+    assert!(witness.verify().is_err());
+    fs::remove_file(&linked).unwrap();
+    assert!(witness.verify().is_ok());
+    fs::rename(&lock, pin.paths.directory.join("old.lock")).unwrap();
+    let replacement = state::Lock::acquire(&pin.paths.directory).unwrap();
+    assert!(witness.verify().is_err());
+    drop(replacement);
+    drop(witness);
+
+    let witness = dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).unwrap();
+    fs::rename(&pin.paths.directory, root.0.join("old-control")).unwrap();
+    state::private_directory(&pin.paths.directory).unwrap();
+    let _replacement = state::Lock::acquire(&pin.paths.directory).unwrap();
+    assert!(witness.verify().is_err());
 }

@@ -940,8 +940,12 @@ and select a separate retaining recovery after the exact native foreground has
 exited. The private controls are `graph inspect-interrupted-start-cleanup
 --run-id RUN --json` and `graph recover-interrupted-start-cleanup --run-id RUN
 --expect-selection SHA256 --retain-data --json`. They require the same guest
-boot, exact dead foreground and relay owner, matching pending coordinator
-operation, and unchanged selected resources and retained volumes. This is not a
+boot, exact dead foreground, matching pending coordinator operation, and unchanged
+selected resources and retained volumes. The relay publication must either match
+its original pinned owner or have both owner and socket absent after foreground
+exit. The absent pair is bound to the existing operation lock, unchanged parent
+identity and exact selected coordinator owner, process, publication and attempt;
+a mixed pair, live process or replaced lock refuses recovery. This is not a
 general retry of a coordinator effect. Its own journal records each cleanup step;
 an uncertain stop is never sent again merely because the container still appears
 running. A crash between stop intent and request can therefore require later

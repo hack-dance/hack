@@ -2,6 +2,28 @@ use super::recovery::{
     Acknowledgement, Journal, Step, StopDecision, acknowledgement, steps, stop_decision,
 };
 use super::*;
+use crate::provider::{identity, relay_owner::Context};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+struct ShortRoot(PathBuf);
+impl ShortRoot {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = fs::canonicalize("/tmp").unwrap().join(format!(
+            "hgack-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        state::private_directory(&root).unwrap();
+        Self(root)
+    }
+}
+impl Drop for ShortRoot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 fn original() -> Receipt {
     serde_json::from_value(json!({
@@ -197,4 +219,38 @@ fn incomplete_hint_tracks_publication_and_reservation_without_overwriting_histor
     record.publisher_retired = false;
     state::write(&fixture.0.join(JOURNAL), &record).unwrap();
     assert!(incomplete(&fixture.0, &"a".repeat(32)).is_err());
+}
+
+#[test]
+fn ack_boundary_rechecks_absent_publication_after_confirmed_receipt_write() {
+    let fixture = ShortRoot::new();
+    let control = fixture.0.join("relay-control");
+    state::private_directory(&control).unwrap();
+    drop(state::Lock::acquire(&control).unwrap());
+    let mut child = Command::new("/bin/cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let process = identity::observe(child.id() as i32).unwrap();
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+    assert!(state::check_private_directory(&fixture.0).is_ok());
+    assert!(state::Lock::acquire_existing(&control).is_ok());
+    assert!(identity::verify(&process, &process, &process.executable, process.uid).is_ok());
+    assert!(!identity::alive(process.pid).unwrap());
+    let witness = dead::CleanupWitness::acquire(
+        &fixture.0,
+        Context {
+            runtime: [1; 16],
+            boot: [2; 16],
+        },
+        &process,
+    )
+    .unwrap();
+    state::write(&fixture.0.join("state.json"), &json!({"phase":"confirmed"})).unwrap();
+    assert!(host_relay::verify_selected_relay(Some(&witness)).is_ok());
+    fs::write(control.join("control.sock"), b"replacement").unwrap();
+    assert!(host_relay::verify_selected_relay(Some(&witness)).is_err());
 }

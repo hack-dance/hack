@@ -87,7 +87,9 @@ struct Proof<'a> {
     candidate: &'a Candidate,
     owner: foreground::transport::DeadOwner,
     engine: Engine<'a>,
-    relay: dead::Witness,
+    relay: dead::CleanupWitness,
+    relay_owner: [u8; 16],
+    relay_publication: [u8; 32],
     root: PathBuf,
     current: Receipt,
     original: Receipt,
@@ -99,6 +101,9 @@ impl Proof<'_> {
     fn verify(&self) -> Result<(), CandidateError> {
         self.owner.verify_retirement_ready()?;
         self.relay.verify()?;
+        if self.relay.selection_sha256()? != self.selected.relay_sha256 {
+            return Err(refused());
+        }
         self.engine.guest().verify()?;
         no_pending(&self.root)?;
         let (current, root) = load(self.candidate, &self.engine, &self.selected.run)?;
@@ -351,10 +356,10 @@ fn select<'a>(candidate: &'a Candidate, run: &str) -> Result<Proof<'a>, Candidat
     }
     let marker = current.relay_cleanup.as_ref().ok_or_else(refused)?;
     let context = host_relay::context(&current.owner, engine.guest().boot_id())?;
-    let relay = dead::Witness::acquire(&marker.control_root, context, owner.process())?;
-    let selected_relay = relay.selection();
-    let relay_sha256 = digest(&serde_json::to_vec(&selected_relay).map_err(|_| refused())?);
+    let relay = dead::CleanupWitness::acquire(&marker.control_root, context, owner.process())?;
+    let relay_sha256 = relay.selection_sha256()?;
     let inspected = Inspection::load(&marker.control_root, context)?;
+    let present_identity = relay.present_identity();
     if inspected.phase != Phase::EffectStarted
         || !inspected.acknowledgement_pending
         || !inspected.selection_observed
@@ -362,9 +367,12 @@ fn select<'a>(candidate: &'a Candidate, run: &str) -> Result<Proof<'a>, Candidat
         || inspected.selection.operation != marker.operation
         || inspected.selection.effect != marker.effect
         || inspected.selection.context != context
-        || inspected.owner != relay.owner()
+        || inspected.owner == [0; 16]
         || &inspected.process != owner.process()
-        || inspected.publication != relay.publication()
+        || inspected.publication == [0; 32]
+        || present_identity.is_some_and(|(relay_owner, relay_publication)| {
+            inspected.owner != relay_owner || inspected.publication != relay_publication
+        })
     {
         return Err(refused());
     }
@@ -424,6 +432,8 @@ fn select<'a>(candidate: &'a Candidate, run: &str) -> Result<Proof<'a>, Candidat
         owner,
         engine,
         relay,
+        relay_owner: inspected.owner,
+        relay_publication: inspected.publication,
         root,
         current,
         original,

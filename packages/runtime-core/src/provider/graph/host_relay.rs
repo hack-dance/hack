@@ -2,7 +2,7 @@
 use super::*;
 use crate::provider::{
     host_endpoint::HostEndpoint,
-    relay_owner::{Context, Grant, GraphScope, RelayOwner},
+    relay_owner::{Context, Grant, GraphScope, RelayOwner, publication::dead},
 };
 use sha2::{Digest, Sha256};
 
@@ -133,7 +133,7 @@ pub(super) fn cleanup_with_relay_expected(
             &bridge_selection,
         )
     })?;
-    finish_confirmation(&mut coordinator, &mut cleaned, &root)?;
+    finish_confirmation(&mut coordinator, &mut cleaned, &root, None)?;
     Ok(cleaned)
 }
 
@@ -206,7 +206,7 @@ pub fn resume_relay_cleanup(
             &bridge_selection,
         )
     })?;
-    finish_confirmation(&mut coordinator, &mut cleaned, &root)?;
+    finish_confirmation(&mut coordinator, &mut cleaned, &root, None)?;
     Ok(cleaned)
 }
 
@@ -220,7 +220,15 @@ pub fn confirm_relay_cleanup(
     control_root: &std::path::Path,
     selection: crate::provider::relay_owner::lifecycle_intent::Selection,
 ) -> Result<Receipt, CandidateError> {
-    confirm_relay_cleanup_fenced(candidate, run, remove_data, control_root, selection, None)
+    confirm_relay_cleanup_fenced(
+        candidate,
+        run,
+        remove_data,
+        control_root,
+        selection,
+        None,
+        None,
+    )
 }
 
 pub(super) fn confirm_relay_cleanup_selected(
@@ -230,6 +238,7 @@ pub(super) fn confirm_relay_cleanup_selected(
     control_root: &std::path::Path,
     selection: crate::provider::relay_owner::lifecycle_intent::Selection,
     expected_identity: &str,
+    relay_selection_sha256: &str,
 ) -> Result<Receipt, CandidateError> {
     confirm_relay_cleanup_fenced(
         candidate,
@@ -238,6 +247,7 @@ pub(super) fn confirm_relay_cleanup_selected(
         control_root,
         selection,
         Some(expected_identity),
+        Some(relay_selection_sha256),
     )
 }
 
@@ -248,6 +258,7 @@ fn confirm_relay_cleanup_fenced(
     control_root: &std::path::Path,
     selection: crate::provider::relay_owner::lifecycle_intent::Selection,
     expected_identity: Option<&str>,
+    relay_selection_sha256: Option<&str>,
 ) -> Result<Receipt, CandidateError> {
     use crate::provider::relay_owner::lifecycle_intent::{Coordinator, Phase};
     let engine = Engine::connect_cleanup(candidate)?;
@@ -273,6 +284,29 @@ fn confirm_relay_cleanup_fenced(
     {
         return Err(refused());
     }
+    let relay = match (expected_identity, relay_selection_sha256) {
+        (Some(identity), Some(sha256)) => {
+            use crate::provider::relay_owner::{lifecycle_intent::Inspection, publication::dead};
+            let inspected = Inspection::load(control_root, expected)?;
+            let witness =
+                dead::CleanupWitness::acquire(control_root, expected, &inspected.process)?;
+            if inspected.recovery_fingerprint != identity
+                || inspected.owner == [0; 16]
+                || inspected.publication == [0; 32]
+                || witness.selection_sha256()? != sha256
+                || witness
+                    .present_identity()
+                    .is_some_and(|(owner, publication)| {
+                        inspected.owner != owner || inspected.publication != publication
+                    })
+            {
+                return Err(refused());
+            }
+            Some(witness)
+        }
+        (None, None) => None,
+        _ => return Err(refused()),
+    };
     let mut coordinator = Coordinator::resume(control_root, selection)?;
     if let Some(identity) = expected_identity {
         coordinator.verify_recovery_identity(
@@ -282,15 +316,18 @@ fn confirm_relay_cleanup_fenced(
         )?;
     }
     let inspect = || {
-        inspect_cleanup(
+        let observed = inspect_cleanup(
             candidate,
             &engine,
             &receipt,
             remove_data,
             &environment,
             &bridge_selection,
-        )
+        )?;
+        verify_selected_relay(relay.as_ref())?;
+        Ok(observed)
     };
+    verify_selected_relay(relay.as_ref())?;
     match coordinator.phase() {
         Phase::EffectStarted => coordinator.confirm(effect, inspect)?,
         Phase::Confirmed if coordinator.acknowledgement_pending() => {
@@ -305,14 +342,26 @@ fn confirm_relay_cleanup_fenced(
             identity,
         )?;
     }
-    finish_confirmation(&mut coordinator, &mut receipt, &root)?;
+    verify_selected_relay(relay.as_ref())?;
+    finish_confirmation(&mut coordinator, &mut receipt, &root, relay.as_ref())?;
+    verify_selected_relay(relay.as_ref())?;
     Ok(receipt)
+}
+
+pub(super) fn verify_selected_relay(
+    relay: Option<&dead::CleanupWitness>,
+) -> Result<(), CandidateError> {
+    if let Some(witness) = relay {
+        witness.verify()?;
+    }
+    Ok(())
 }
 
 fn finish_confirmation(
     coordinator: &mut crate::provider::relay_owner::lifecycle_intent::Coordinator,
     receipt: &mut Receipt,
     root: &std::path::Path,
+    relay: Option<&dead::CleanupWitness>,
 ) -> Result<(), CandidateError> {
     use crate::provider::relay_owner::lifecycle_intent::Phase;
     if coordinator.phase() != Phase::Confirmed || !coordinator.acknowledgement_pending() {
@@ -324,10 +373,12 @@ fn finish_confirmation(
     if marker.operation != coordinator.operation() {
         return Err(refused());
     }
+    verify_selected_relay(relay)?;
     marker.phase = cleanup_enrollment::Phase::Confirmed;
     state::write(&root.join("state.json"), receipt)?;
     #[cfg(test)]
     fault_pause(root, &receipt.run, "relay-before-ack")?;
+    verify_selected_relay(relay)?;
     coordinator.acknowledge()
 }
 

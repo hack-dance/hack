@@ -270,7 +270,11 @@ export async function verifyPublishGate({
     field: "jobs",
   });
   requireExactHeadCi({ run, jobs, sourceRevision: plan.source_revision });
-  await requireBranchChecks({ api, sourceRevision: plan.source_revision });
+  await requireBranchChecks({
+    api,
+    sourceRevision: plan.source_revision,
+    branch,
+  });
   if (
     (await api(`git/ref/tags/${plan.tag}`, true)) !== null ||
     (await api(`releases/tags/${plan.tag}`, true)) !== null
@@ -291,31 +295,28 @@ export async function verifyPublishGate({
 async function requireBranchChecks({
   api,
   sourceRevision,
+  branch,
 }: {
   readonly api: Api;
   readonly sourceRevision: string;
+  readonly branch: Record<string, unknown>;
 }) {
-  const rules = array(await api("rules/branches/next")).map(object);
-  const classic = await api(
-    "branches/next/protection/required_status_checks",
-    true
-  );
+  const rules = (await pages({ api, path: "rules/branches/next" })).map(object);
+  // Get-branch includes classic check policy with Contents:read. The dedicated
+  // protection endpoint requires Administration:read, unavailable to GITHUB_TOKEN.
+  // Missing metadata refuses; a permission error is not absent protection.
+  const classic = object(object(branch.protection).required_status_checks);
   const requirements = rules
     .filter((rule) => rule.type === "required_status_checks")
     .flatMap((rule) => array(object(rule.parameters).required_status_checks))
     .map(object);
-  if (classic !== null) {
-    const policy = object(classic);
-    requirements.push(
-      ...array(policy.checks).map((value) => {
-        const check = object(value);
-        return { context: check.context, integration_id: check.app_id };
-      })
-    );
-    requirements.push(
-      ...array(policy.contexts).map((context) => ({ context }))
-    );
-  }
+  requirements.push(
+    ...array(classic.checks).map((value) => {
+      const check = object(value);
+      return { context: check.context, integration_id: check.app_id };
+    }),
+    ...array(classic.contexts).map((context) => ({ context }))
+  );
   if (requirements.length === 0) {
     throw new Error("next must require status checks");
   }

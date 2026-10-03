@@ -68,15 +68,22 @@ const jobs = jobNames.map((name) => ({
   status: "completed",
   conclusion: "success",
 }));
+const branch = {
+  protected: true,
+  commit: { sha },
+  protection: {
+    required_status_checks: { checks: [], contexts: [] },
+  },
+};
 
 function gateApi(overrides: Record<string, unknown> = {}) {
   const data: Record<string, unknown> = {
-    "branches/next": { protected: true, commit: { sha } },
+    "branches/next": branch,
     "environments/v5-prerelease": environment,
     [`actions/workflows/ci.yml/runs?branch=next&event=push&head_sha=${sha}&per_page=1`]:
       { workflow_runs: [ciRun] },
     "actions/runs/77/jobs?per_page=100&page=1": { jobs },
-    "rules/branches/next": [
+    "rules/branches/next?per_page=100&page=1": [
       {
         type: "required_status_checks",
         parameters: {
@@ -84,7 +91,6 @@ function gateApi(overrides: Record<string, unknown> = {}) {
         },
       },
     ],
-    "branches/next/protection/required_status_checks": null,
     [`commits/${sha}/check-runs?filter=latest&per_page=100&page=1`]: {
       check_runs: [
         {
@@ -332,6 +338,139 @@ describe("prerelease decision boundary", () => {
         approved: true,
       })
     ).rejects.toThrow("API unavailable");
+  });
+
+  test("uses content-readable classic policy alongside rulesets without an administration endpoint", async () => {
+    const classicBranch = {
+      ...branch,
+      protection: {
+        required_status_checks: {
+          checks: [{ context: "classic-check", app_id: 123 }],
+          contexts: ["classic-check"],
+        },
+      },
+    };
+    const checkPath = `commits/${sha}/check-runs?filter=latest&per_page=100&page=1`;
+    const classicCheck = {
+      name: "classic-check",
+      head_sha: sha,
+      app: { id: 123 },
+      status: "completed",
+      conclusion: "success",
+    };
+    const overrides = {
+      "branches/next": classicBranch,
+      [checkPath]: {
+        check_runs: [
+          { ...classicCheck, name: "test", app: { id: 15_368 } },
+          classicCheck,
+        ],
+      },
+    };
+    await verifyPublishGate({
+      plan,
+      api: gateApi(overrides),
+      runId: "99",
+      approved: true,
+    });
+    for (const check of [
+      { ...classicCheck, app: { id: 999 } },
+      { ...classicCheck, head_sha: "b".repeat(40) },
+      { ...classicCheck, conclusion: "failure" },
+    ]) {
+      await expect(
+        verifyPublishGate({
+          plan,
+          api: gateApi({
+            ...overrides,
+            [checkPath]: {
+              check_runs: [
+                { ...classicCheck, name: "test", app: { id: 15_368 } },
+                check,
+              ],
+            },
+          }),
+          runId: "99",
+          approved: true,
+        })
+      ).rejects.toThrow("classic-check");
+    }
+    for (const protection of [
+      undefined,
+      { required_status_checks: { contexts: [] } },
+      { required_status_checks: { checks: [], contexts: null } },
+    ]) {
+      await expect(
+        verifyPublishGate({
+          plan,
+          api: gateApi({ "branches/next": { ...branch, protection } }),
+          runId: "99",
+          approved: true,
+        })
+      ).rejects.toThrow();
+    }
+    await expect(
+      verifyPublishGate({
+        plan,
+        api: gateApi({ "rules/branches/next?per_page=100&page=1": [] }),
+        runId: "99",
+        approved: true,
+      })
+    ).rejects.toThrow("next must require status checks");
+    await verifyPublishGate({
+      plan,
+      api: gateApi({
+        ...overrides,
+        "rules/branches/next?per_page=100&page=1": [],
+      }),
+      runId: "99",
+      approved: true,
+    });
+  });
+
+  test("requires checks on later effective-rule pages", async () => {
+    const laterRequirement = {
+      type: "required_status_checks",
+      parameters: {
+        required_status_checks: [
+          { context: "later-check", integration_id: 15_368 },
+        ],
+      },
+    };
+    const overrides = {
+      "rules/branches/next?per_page=100&page=1": Array.from(
+        { length: 100 },
+        () => ({ type: "deletion" })
+      ),
+      "rules/branches/next?per_page=100&page=2": [laterRequirement],
+    };
+    await expect(
+      verifyPublishGate({
+        plan,
+        api: gateApi(overrides),
+        runId: "99",
+        approved: true,
+      })
+    ).rejects.toThrow("later-check");
+    await verifyPublishGate({
+      plan,
+      api: gateApi({
+        ...overrides,
+        [`commits/${sha}/check-runs?filter=latest&per_page=100&page=1`]: {
+          check_runs: [
+            {
+              name: "later-check",
+              head_sha: sha,
+              app: { id: 15_368 },
+              status: "completed",
+              conclusion: "success",
+            },
+          ],
+        },
+      }),
+      runId: "99",
+      approved: true,
+    });
   });
 });
 

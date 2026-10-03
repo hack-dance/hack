@@ -63,10 +63,11 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
-    env:
-      HACK_PRERELEASE_BUNDLE: ${{ runner.temp }}/native-candidate
-      HACK_PRERELEASE_OUTPUT: ${{ runner.temp }}/prerelease-assets
     steps:
+      - name: Select isolated build directories
+        run: |
+          printf 'HACK_PRERELEASE_BUNDLE=%s/native-candidate\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'HACK_PRERELEASE_OUTPUT=%s/prerelease-assets\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.plan.outputs.source_revision }}
@@ -111,9 +112,10 @@ jobs:
       statuses: read
       deployments: read
     env:
-      HACK_PRERELEASE_OUTPUT: ${{ runner.temp }}/prerelease-assets
       GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Select isolated publication directory
+        run: printf 'HACK_PRERELEASE_OUTPUT=%s/prerelease-assets\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.plan.outputs.source_revision }}

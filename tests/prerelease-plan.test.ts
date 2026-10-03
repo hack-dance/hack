@@ -543,7 +543,7 @@ test("registered Release routes explicit prerelease to the same-commit reusable 
   expect(release.on.workflow_dispatch.inputs.publish_prerelease?.default).toBe(
     false
   );
-  expect(release.on.push.tags).toEqual(["v*", "!v*-*", "!v*+*"]);
+  expect(release.on.push.tags).toEqual(["v*", "!v*-*", "!v*\\+*"]);
   expect(release.jobs.prerelease?.uses).toBe(
     "./.github/workflows/prerelease.yml"
   );
@@ -584,6 +584,24 @@ test("registered Release routes explicit prerelease to the same-commit reusable 
     }
   }
   expect(JSON.stringify(prerelease)).not.toContain("RELEASE_PAT");
+});
+
+test("CI admits next branch pushes while excluding release tags", async () => {
+  const ci = Bun.YAML.parse(
+    await Bun.file(".github/workflows/ci.yml").text()
+  ) as {
+    on: { push: { branches?: string[]; "tags-ignore": string[] } };
+  };
+  expect(
+    (ci.on.push.branches ?? []).some((pattern) =>
+      new Bun.Glob(pattern).match("next")
+    )
+  ).toBe(true);
+  expect(
+    ci.on.push["tags-ignore"].some((pattern) =>
+      new Bun.Glob(pattern).match("v5.0.0-next.1")
+    )
+  ).toBe(true);
 });
 
 test("compiled CLI reports the embedded candidate version and ordinary source retains package version", async () => {

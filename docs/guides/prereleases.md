@@ -75,6 +75,11 @@ absence again before publication. Only the first attempt of a workflow run can
 publish. If publication fails after creating a tag, preserve it for inspection
 and use a new version; do not force-push or overwrite it.
 
+The verifier reads classic check requirements from the branch's protection
+summary and combines them with effective ruleset requirements. These reads use
+the workflow's existing repository read permissions. Missing policy metadata or
+failed API reads refuse publication; no administrative token is required.
+
 Candidate releases are marked as GitHub prereleases and excluded from “latest.”
 They never update the stable Homebrew formula. The stable release workflow rejects
 prerelease tags; stable semantic releases continue to use `main`.

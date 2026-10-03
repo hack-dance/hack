@@ -68,6 +68,71 @@ fn sync(root: &Path) -> Result<(), CandidateError> {
         .map_err(state::io)
 }
 
+/// A fully moved archive is inert metadata. Validate its completed journal and
+/// every retained artifact without needing the evictable old stopped receipt.
+/// The caller independently verifies current cleanup authority and holds its lease.
+#[cfg(any(target_os = "macos", test))]
+pub(in crate::provider::graph::startup::runtime) fn retired_archive_complete(
+    root: &Path,
+    original: &Receipt,
+    boot: &str,
+) -> Result<bool, CandidateError> {
+    state::check_private_directory(root)?;
+    for name in [JOURNAL, "dependency-rebind.pending"] {
+        if bytes(&root.join(name))?.is_some() {
+            return Ok(false);
+        }
+    }
+    let generation = service_exec_generation(original)?;
+    let history = root.join(format!("dependency-rebind-history-{generation}"));
+    crate::reject_aliased_state(&history)?;
+    if !history.try_exists().map_err(state::io)? {
+        return Ok(false);
+    }
+    state::check_private_directory(&history)?;
+    if bytes(&history.join("proof.pending"))?.is_some() {
+        return Ok(false);
+    }
+    let Some(value) = bytes(&history.join("proof.json"))? else {
+        return Ok(false);
+    };
+    let proof: Proof = serde_json::from_slice(&value).map_err(|_| rejected())?;
+    if !proof.complete {
+        return Ok(false);
+    }
+    let names = [JOURNAL, "dependency-rebind.pending"];
+    if boot.is_empty()
+        || proof.version != 1
+        || proof.run != original.run
+        || proof.owner != original.owner
+        || proof.boot != boot
+        || proof.original_generation != generation
+        || !hex(&proof.cleaned_generation, 64)
+        || !proof.artifacts.contains_key(JOURNAL)
+        || proof.artifacts.len() > names.len()
+        || proof
+            .artifacts
+            .iter()
+            .any(|(name, hash)| !names.contains(&name.as_str()) || !hex(hash, 64))
+    {
+        return Err(rejected());
+    }
+    let journal = existing(&history, original)?.ok_or_else(rejected)?;
+    if journal.phase != "completed"
+        || journal.boot != boot
+        || journal.completed_generation.as_deref() != Some(generation.as_str())
+    {
+        return Err(rejected());
+    }
+    for (name, expected) in &proof.artifacts {
+        let value = bytes(&history.join(name))?.ok_or_else(rejected)?;
+        if digest(&value) != *expected {
+            return Err(rejected());
+        }
+    }
+    Ok(true)
+}
+
 /// Caller retains the provider/dead-owner lease and has verified exactly owned
 /// container/helper absence. Neither a phase label nor this proof removes a VM
 /// resource or authorizes future endpoint selection.
@@ -77,6 +142,49 @@ pub(in crate::provider::graph::startup::runtime) fn after_cleanup(
     cleaned: &Receipt,
     boot: &str,
 ) -> Result<(), CandidateError> {
+    after_cleanup_fenced(root, original, cleaned, boot, &|| Ok(()))
+}
+
+/// A completed prior-boot journal must match the selected original ready
+/// generation before first archival admission. A durable proof alone permits
+/// exact rename recovery after the active journal has already moved.
+#[cfg(any(target_os = "macos", test))]
+pub(in crate::provider::graph::startup::runtime) fn retired_completed(
+    root: &Path,
+    original: &Receipt,
+    cleaned: &Receipt,
+    boot: &str,
+    verify: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    verify()?;
+    let generation = service_exec_generation(original)?;
+    let proof = root.join(format!("dependency-rebind-history-{generation}/proof.json"));
+    let journal_root = if bytes(&root.join(JOURNAL))?.is_some() {
+        root.to_owned()
+    } else {
+        proof.parent().ok_or_else(rejected)?.to_owned()
+    };
+    let journal = existing(&journal_root, original)?.ok_or_else(rejected)?;
+    if journal.phase != "completed"
+        || journal.boot != boot
+        || journal.completed_generation.as_deref() != Some(generation.as_str())
+    {
+        return Err(rejected());
+    }
+    if bytes(&proof)?.is_none() {
+        require_complete(root, original)?;
+    }
+    after_cleanup_fenced(root, original, cleaned, boot, verify)
+}
+
+fn after_cleanup_fenced(
+    root: &Path,
+    original: &Receipt,
+    cleaned: &Receipt,
+    boot: &str,
+    verify: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    verify()?;
     state::check_private_directory(root)?;
     if boot.is_empty()
         || original.run != cleaned.run
@@ -118,6 +226,7 @@ pub(in crate::provider::graph::startup::runtime) fn after_cleanup(
     state::private_directory(&history)?;
     // A partial proof write is preserved before the same exact owned cleanup
     // reconstructs it. It is never interpreted as a capability or state receipt.
+    verify()?;
     crate::provider::graph::journal::retain_file(
         &history,
         "proof.pending",
@@ -160,6 +269,7 @@ pub(in crate::provider::graph::startup::runtime) fn after_cleanup(
             artifacts: active,
             complete: false,
         };
+        verify()?;
         state::write(&proof_path, &proof)?;
         proof
     };
@@ -179,6 +289,10 @@ pub(in crate::provider::graph::startup::runtime) fn after_cleanup(
             if digest(&value) != proof.artifacts[name] {
                 return Err(rejected());
             }
+            verify()?;
+            if bytes(&root.join(name))?.as_deref() != Some(value.as_slice()) {
+                return Err(rejected());
+            }
             fs::rename(root.join(name), history.join(name)).map_err(state::io)?;
             sync(&history)?;
             sync(root)?;
@@ -186,7 +300,8 @@ pub(in crate::provider::graph::startup::runtime) fn after_cleanup(
     }
     if !proof.complete {
         proof.complete = true;
+        verify()?;
         state::write(&proof_path, &proof)?;
     }
-    Ok(())
+    verify()
 }

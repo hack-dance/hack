@@ -4,6 +4,7 @@
 use super::*;
 use crate::provider::{identity, lifecycle, state::Owner};
 use sha2::{Digest, Sha256};
+use std::os::unix::fs::MetadataExt;
 const FILE: &str = "dead-owner-cleanup.json";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +23,19 @@ struct Intent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     one_off_sha256: Option<String>,
 }
+/// Dispatch only an exact completed recovery generation; history is inert.
+pub(super) fn current_completion(
+    root: &std::path::Path,
+    receipt: &Receipt,
+) -> Result<bool, CandidateError> {
+    if !exists(&root.join(FILE))? {
+        return Ok(false);
+    }
+    let intent: Intent = state::read(&root.join(FILE))?;
+    let complete = selected(receipt)?;
+    Ok(intent.complete_sha256.as_deref() == Some(complete.as_str()))
+}
+
 fn refused() -> CandidateError {
     error(
         "graph_dead_owner_recovery",
@@ -37,7 +51,7 @@ fn selected(receipt: &Receipt) -> Result<String, CandidateError> {
         &serde_json::to_vec_pretty(receipt).map_err(|_| refused())?,
     ))
 }
-fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
+pub(super) fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
     let mut value = serde_json::to_value(receipt).map_err(|_| refused())?;
     value.as_object_mut().ok_or_else(refused)?.remove("phase");
     for group in ["resources", "probes"] {
@@ -90,8 +104,8 @@ fn retain_interrupted_write(root: &std::path::Path) -> Result<(), CandidateError
     Ok(())
 }
 
-/// Supersede only a completed prior recovery whose exact stopped receipt is in
-/// bounded history and whose containers were replaced. An atomic rename keeps
+/// Supersede only a completed prior recovery whose historical generation is
+/// independently validated against bounded history. An atomic rename keeps
 /// the old value-free proof if selection or publication is interrupted.
 fn archive_completed_prior(
     root: &std::path::Path,
@@ -132,21 +146,25 @@ fn archive_completed_prior(
         return Err(refused());
     }
     let complete = prior.complete_sha256.as_deref().ok_or_else(refused)?;
-    let stopped =
-        restore_history::completed_for_recovery(root, current, complete)?.ok_or_else(refused)?;
-    validate(
-        &prior,
-        &stopped,
-        &prior.original_sha256,
-        &prior.owner_sha256,
-    )?;
-    if !stopped.resources.iter().any(|(key, resource)| {
-        resource.kind == Kind::Container
-            && resource.id.as_deref().is_some_and(|old| {
-                current.resources.get(key).and_then(|now| now.id.as_deref()) != Some(old)
-            })
-    }) {
-        return Err(refused());
+    if let Some(stopped) = restore_history::completed_for_recovery(root, current, complete)? {
+        validate(
+            &prior,
+            &stopped,
+            &prior.original_sha256,
+            &prior.owner_sha256,
+        )?;
+        if !stopped.resources.iter().any(|(key, resource)| {
+            resource.kind == Kind::Container
+                && resource.id.as_deref().is_some_and(|old| {
+                    current.resources.get(key).and_then(|now| now.id.as_deref()) != Some(old)
+                })
+        }) {
+            return Err(refused());
+        }
+    } else {
+        // Bounded history may evict the exact completion. Its existing strict
+        // truncated-history proof must still establish a superseded generation.
+        require_historical_recovery(root, current)?;
     }
     let mut archived = 0;
     for entry in fs::read_dir(root).map_err(state::io)? {
@@ -172,8 +190,9 @@ fn archive_completed_prior(
 }
 
 /// A completed recovery from an older container generation is diagnostic history,
-/// not a pending operation. Require its exact stopped receipt in restore history;
-/// this never supplies authority to retire current resources or mutates old proof.
+/// not a pending operation. Prefer its exact stopped receipt; after history
+/// truncation, validate the superseded original and a newer stopped generation.
+/// Neither path supplies current cleanup authority or mutates the old proof.
 pub(super) fn require_historical_recovery(
     root: &std::path::Path,
     current: &Receipt,
@@ -195,15 +214,29 @@ pub(super) fn require_historical_recovery(
     {
         return Err(refused());
     }
-    let stopped =
-        restore_history::completed_for_recovery(root, current, complete)?.ok_or_else(refused)?;
+    let stopped = restore_history::completed_for_recovery(root, current, complete)?;
+    let historical = stopped.as_ref().unwrap_or(&prior.original);
     validate(
         &prior,
-        &stopped,
+        historical,
         &prior.original_sha256,
         &prior.owner_sha256,
     )?;
-    if !stopped.resources.iter().any(|(key, old)| {
+    if stopped.is_none()
+        && (prior.original.version != current.version
+            || prior.original.run != current.run
+            || prior.original.owner != current.owner
+            || prior.original.namespace != current.namespace
+            || prior.original.plan_id != current.plan_id
+            || !restore_history::confirms_truncated_newer_generation(
+                root,
+                current,
+                &prior.original,
+            )?)
+    {
+        return Err(refused());
+    }
+    if !historical.resources.iter().any(|(key, old)| {
         old.kind == Kind::Container
             && old.id.as_ref().is_some_and(|id| {
                 current
@@ -267,6 +300,152 @@ pub fn recover_cleanup(
     execute(candidate, run, expected)
 }
 
+/// A current completed dead-owner cleanup outranks only a *validated historical*
+/// live-owner sidecar for retention or publisher retirement. This selection
+/// does not replace either operation's exact receipt and inventory checks.
+pub(super) fn current_completed_precedence(
+    root: &std::path::Path,
+    receipt: &Receipt,
+) -> Result<bool, CandidateError> {
+    if !current_completion(root, receipt)? {
+        return Ok(false);
+    }
+    super::live_owner_cleanup::require_historical_recovery(root, receipt)?;
+    Ok(true)
+}
+
+/// Holds the retired publisher and provider cleanup leases while an exact
+/// previous-boot shared HTTPS owner is archived. Neither pathname absence nor
+/// a merely stopped graph grants this authority.
+pub(in crate::provider) struct HttpsArchiveGuard<'a> {
+    retired: foreground::transport::Retired,
+    engine: Engine<'a>,
+    run: String,
+    owner: String,
+    namespace: String,
+    plan: String,
+    old_boot: String,
+}
+
+impl<'a> HttpsArchiveGuard<'a> {
+    pub(in crate::provider) fn acquire(
+        candidate: &'a Candidate,
+        run: &str,
+        owner: &str,
+        namespace: &str,
+        plan: &str,
+        old_boot: &str,
+    ) -> Result<Self, CandidateError> {
+        // Admission is held by the caller. The publisher lock precedes the
+        // provider lease, matching the existing retained-data recovery order.
+        let retired =
+            foreground::transport::Retired::acquire(candidate, run)?.ok_or_else(refused)?;
+        let engine = Engine::connect_cleanup_wait(candidate)?;
+        let guard = Self {
+            retired,
+            engine,
+            run: run.into(),
+            owner: owner.into(),
+            namespace: namespace.into(),
+            plan: plan.into(),
+            old_boot: old_boot.into(),
+        };
+        guard.verify(candidate)?;
+        Ok(guard)
+    }
+
+    pub(in crate::provider) fn current_boot(&self) -> &str {
+        self.engine.guest().boot_id()
+    }
+
+    /// Recheck under both held leases immediately before each archive effect.
+    pub(in crate::provider) fn verify(&self, candidate: &Candidate) -> Result<(), CandidateError> {
+        self.retired.verify()?;
+        let (receipt, root) = load(candidate, &self.engine, &self.run)?;
+        no_pending(&root)?;
+        if receipt.phase != "stopped-data-retained"
+            || receipt.owner != self.owner
+            || receipt.namespace != self.namespace
+            || receipt.plan_id != self.plan
+            || !current_completed_precedence(&root, &receipt)?
+            || !retained(&root, &receipt)?
+        {
+            return Err(refused());
+        }
+        initializer_cache::require_resolved(&receipt)?;
+        let intent: Intent = state::read(&root.join(FILE))?;
+        let complete = selected(&receipt)?;
+        validate(
+            &intent,
+            &receipt,
+            &intent.original_sha256,
+            &intent.owner_sha256,
+        )?;
+        let pool = Owner::load(candidate)?;
+        if intent.complete_sha256.as_deref() != Some(complete.as_str())
+            || intent.old_boot != self.old_boot
+            || intent.new_boot.as_deref() != Some(self.engine.guest().boot_id())
+            || pool.previous_guest_boot_id.as_deref() != Some(self.old_boot.as_str())
+            || pool.guest_boot_id.as_deref() != Some(self.engine.guest().boot_id())
+            || pool.token != receipt.owner
+            || intent.one_off_sha256.is_some()
+        {
+            return Err(refused());
+        }
+        let witness = super::host_pin_recovery::load_witness(candidate, &self.run)?.filter(|w| {
+            w.graph_sha256() == intent.original_sha256
+                && w.publisher_sha256() == intent.owner_sha256
+                && w.matches_graph(&intent.original)
+        });
+        self.retired.verify_recovery_with_rebind(
+            candidate,
+            &self.run,
+            &intent.owner_sha256,
+            &complete,
+            witness.as_ref().map(|w| w.rebind()),
+        )?;
+        for resource in receipt.resources.values() {
+            let observed = inspect_resource(&self.engine, &receipt, resource)?;
+            if (resource.kind == Kind::Volume && observed.is_none())
+                || (resource.kind != Kind::Volume
+                    && (resource.phase != "absent" || observed.is_some()))
+            {
+                return Err(refused());
+            }
+        }
+        let environment = environment::cleanup_inventory(candidate, &self.engine, &receipt, &root)?;
+        if intent.environment.as_ref()
+            != Some(&serde_json::to_value(&environment).map_err(|_| refused())?)
+        {
+            return Err(refused());
+        }
+        let bridges = intent.bridges.as_ref().ok_or_else(refused)?;
+        bridges::cleanup::verify_recovery_file(&root, bridges, intent.prior_bridges.as_ref())?;
+        let active = bridges::inspect_bridges_using(candidate, &self.engine, &self.run)?;
+        if active["slots"]
+            .as_object()
+            .is_none_or(|slots| !slots.is_empty())
+        {
+            return Err(refused());
+        }
+        host_relay::inspect_cleanup_recovery(
+            candidate,
+            &self.engine,
+            &receipt,
+            false,
+            &environment,
+            bridges,
+            witness.as_ref(),
+        )?;
+        super::super::publication::require_no_claims_locked(candidate, &receipt.owner)?;
+        let authority = super::super::hostname_authority::managed::inspect(candidate)?;
+        if authority["authority"]["present"] != false {
+            return Err(refused());
+        }
+        self.engine.guest().verify()
+    }
+}
+
 /// The completed dead-owner cleanup receipt, not missing endpoint names, grants
 /// a separate explicit publisher retirement. This never removes graph volumes.
 pub fn retire_recovered_publisher(
@@ -277,11 +456,28 @@ pub fn retire_recovered_publisher(
     if !hex(expected_owner, 32) {
         return Err(refused());
     }
-    if let Some(result) = super::live_owner_cleanup::retire(candidate, run, expected_owner)? {
+    if let Some(result) =
+        super::acknowledged_publisher::confirm_retired(candidate, run, expected_owner)?
+    {
         return Ok(result);
+    }
+    let dead_owner_current = {
+        let engine = Engine::connect_cleanup_wait(candidate)?;
+        let (receipt, root) = load(candidate, &engine, run)?;
+        current_completed_precedence(&root, &receipt)?
+    };
+    if !dead_owner_current {
+        if let Some(result) = super::live_owner_cleanup::retire(candidate, run, expected_owner)? {
+            return Ok(result);
+        }
     }
     let engine = Engine::connect_cleanup_wait(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
+    // Dispatch crossed a cleanup lease boundary. Revalidate the current proof
+    // and historical sidecar under the lease that protects retirement effects.
+    if dead_owner_current && !current_completed_precedence(&root, &receipt)? {
+        return Err(refused());
+    }
     no_pending(&root)?;
     if receipt.phase != "stopped-data-retained"
         || receipt.owner != expected_owner
@@ -322,18 +518,98 @@ pub fn retire_recovered_publisher(
     }
     let bridges = intent.bridges.as_ref().ok_or_else(refused)?;
     bridges::cleanup::verify_recovery_file(&root, bridges, intent.prior_bridges.as_ref())?;
+    let legacy = super::host_pin_recovery::load_witness(candidate, run)?.filter(|witness| {
+        witness.graph_sha256() == intent.original_sha256
+            && witness.publisher_sha256() == intent.owner_sha256
+            && witness.matches_graph(&intent.original)
+    });
     if intent.new_boot.as_deref() == Some(engine.guest().boot_id()) {
-        host_relay::inspect_cleanup(candidate, &engine, &receipt, false, &environment, bridges)?;
-        foreground::retire_publisher_path(candidate, run, &intent.owner_sha256, &complete)?;
+        if let Some(witness) = legacy {
+            if let Some(retired) = foreground::transport::Retired::acquire(candidate, run)? {
+                let control_root = witness.control_root().join("relay-control");
+                let control_lock = state::Lock::acquire_existing(&control_root)?;
+                host_relay::inspect_cleanup_recovery(
+                    candidate,
+                    &engine,
+                    &receipt,
+                    false,
+                    &environment,
+                    bridges,
+                    Some(&witness),
+                )?;
+                let lock_path = fs::symlink_metadata(control_root.join("operation.lock"))
+                    .map_err(|_| refused())?;
+                if (lock_path.dev(), lock_path.ino()) != control_lock.identity()? {
+                    return Err(refused());
+                }
+                retired.verify_recovery_with_rebind(
+                    candidate,
+                    run,
+                    &intent.owner_sha256,
+                    &complete,
+                    Some(witness.rebind()),
+                )?;
+            } else {
+                let foreground_root = foreground::transport::root(candidate, run)?;
+                let foreground_lock = state::Lock::acquire_existing(&foreground_root)?;
+                let guard = super::host_pin_recovery::acquire_for_cleanup(
+                    candidate,
+                    run,
+                    &engine,
+                    super::host_pin_recovery::CleanupProof {
+                        original: &intent.original,
+                        sha256: &intent.original_sha256,
+                        current_is_original: false,
+                        allow_absent_reservation: true,
+                        publisher_may_be_partial: true,
+                    },
+                    witness,
+                )?;
+                host_relay::inspect_cleanup_recovery(
+                    candidate,
+                    &engine,
+                    &receipt,
+                    false,
+                    &environment,
+                    bridges,
+                    Some(guard.witness()),
+                )?;
+                guard.verify_lock()?;
+                let lock_path = fs::symlink_metadata(foreground_root.join("operation.lock"))
+                    .map_err(|_| refused())?;
+                if (lock_path.dev(), lock_path.ino()) != foreground_lock.identity()? {
+                    return Err(refused());
+                }
+                foreground::transport::retire_recovered_publisher_locked(
+                    candidate,
+                    run,
+                    &intent.owner_sha256,
+                    &complete,
+                    Some(guard.witness().rebind()),
+                    &foreground_lock,
+                )?;
+            }
+        } else {
+            host_relay::inspect_cleanup(
+                candidate,
+                &engine,
+                &receipt,
+                false,
+                &environment,
+                bridges,
+            )?;
+            foreground::retire_publisher_path(candidate, run, &intent.owner_sha256, &complete)?;
+        }
     } else {
         // A later VM boot has a new bridge registry generation. Recheck the
         // retained graph and immutable prior proof, then require the publisher
         // to have been fully retired under the original recovery boot.
-        foreground::verify_recovered_publisher_retired(
+        foreground::transport::verify_recovered_publisher_retired_recovery(
             candidate,
             run,
             &intent.owner_sha256,
             &complete,
+            legacy.as_ref().map(|witness| witness.rebind()),
         )?;
     }
     Ok(json!({"run":run,"publisher_retired":true,"data_retained":true}))
@@ -427,7 +703,13 @@ fn fresh_boot(
 }
 fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, CandidateError> {
     let engine = Engine::connect_cleanup_wait(candidate)?;
-    let dead = foreground::DeadOwner::acquire(candidate, run)?;
+    let selected_pin = super::host_pin_recovery::selected_for_old_publisher(candidate, run)?;
+    let dead = foreground::DeadOwner::acquire_recovery(
+        candidate,
+        run,
+        selected_pin.as_ref().map(|pin| pin.rebind()),
+        selected_pin.as_ref().map(|pin| pin.host_boot_micros()),
+    )?;
     let (receipt, root) = load(candidate, &engine, run)?;
     if exists(&root.join("one-off-normalization.json"))? {
         let intent: Intent = state::read(&root.join(FILE))?;
@@ -448,6 +730,36 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         &dead.fingerprint(),
         engine.guest().boot_id(),
     )?;
+    let existing_intent: Option<Intent> = if exists(&root.join(FILE))? {
+        Some(state::read(&root.join(FILE))?)
+    } else {
+        None
+    };
+    let pin_guard = if let Some(witness) = selected_pin {
+        let original = existing_intent
+            .as_ref()
+            .map_or(&receipt, |intent| &intent.original);
+        let original_sha = existing_intent
+            .as_ref()
+            .map_or(expected, |intent| intent.original_sha256.as_str());
+        Some(super::host_pin_recovery::acquire_for_cleanup(
+            candidate,
+            run,
+            &engine,
+            super::host_pin_recovery::CleanupProof {
+                original,
+                sha256: original_sha,
+                current_is_original: existing_intent.is_none(),
+                allow_absent_reservation: existing_intent
+                    .as_ref()
+                    .is_some_and(|intent| intent.complete_sha256.is_some()),
+                publisher_may_be_partial: false,
+            },
+            witness,
+        )?)
+    } else {
+        None
+    };
     let mut intent: Intent = if exists(&root.join(FILE))? {
         state::read(&root.join(FILE))?
     } else {
@@ -479,8 +791,13 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             return Err(refused());
         }
         initializer_cache::require_resolved(&receipt)?;
-        let bridges =
-            bridges::cleanup::capture_previous_boot(candidate, &engine, &receipt, &old_boot)?;
+        let bridges = bridges::cleanup::capture_previous_boot(
+            candidate,
+            &engine,
+            &receipt,
+            &old_boot,
+            pin_guard.as_ref().map(|guard| guard.witness()),
+        )?;
         let prior_bridges = bridges::cleanup::capture_prior_generation(&root, &bridges, &receipt)?;
         if prior_bridges.is_some() && !restore_history::confirms_prior_generation(&root, &receipt)?
         {
@@ -505,6 +822,12 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         intent
     };
     validate(&intent, &receipt, expected, &dead.fingerprint())?;
+    if let Some(guard) = &pin_guard {
+        if guard.witness().publisher_sha256() != dead.fingerprint() {
+            return Err(refused());
+        }
+        guard.verify_lock()?;
+    }
     let owner = Owner::load(candidate)?;
     let boot = engine.guest().boot_id();
     fresh_boot(&intent, owner.previous_guest_boot_id.as_deref(), boot)?;
@@ -525,7 +848,13 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     }
     if let Some(selection) = &intent.bridges {
         if intent.complete_sha256.is_none() {
-            bridges::cleanup::verify_remaining(candidate, &engine, &receipt, selection)?;
+            bridges::cleanup::verify_remaining_recovery(
+                candidate,
+                &engine,
+                &receipt,
+                selection,
+                pin_guard.as_ref().map(|guard| guard.witness()),
+            )?;
         }
     }
     let environment = environment::cleanup_inventory(candidate, &engine, &receipt, &root)?;
@@ -541,6 +870,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
                 &engine,
                 &receipt,
                 &intent.old_boot,
+                pin_guard.as_ref().map(|guard| guard.witness()),
             )?;
             let prior = bridges::cleanup::capture_prior_generation(&root, &selection, &receipt)?;
             if prior.is_some() && !restore_history::confirms_prior_generation(&root, &receipt)? {
@@ -562,7 +892,15 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         if receipt.phase != "stopped-data-retained" || selected(&receipt)? != *hash {
             return Err(refused());
         }
-        host_relay::inspect_cleanup(candidate, &engine, &receipt, false, &environment, &bridges)?;
+        host_relay::inspect_cleanup_recovery(
+            candidate,
+            &engine,
+            &receipt,
+            false,
+            &environment,
+            &bridges,
+            pin_guard.as_ref().map(|guard| guard.witness()),
+        )?;
         dead.verify()?;
         startup::archive_dependency_rebind_after_cleanup(
             &root,
@@ -570,7 +908,16 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             &receipt,
             &intent.old_boot,
         )?;
-        super::dependency_slots::recover_cleaned(candidate, &receipt)?;
+        super::dependency_slots::recover_cleaned(
+            candidate,
+            &receipt,
+            pin_guard.as_ref().and_then(|guard| {
+                guard
+                    .witness()
+                    .reservation()
+                    .map(|reservation| (guard.witness().rebind(), reservation))
+            }),
+        )?;
         if intent.one_off_sha256.is_some() {
             normalize_completed(candidate, &engine, &root, &intent)?;
         }
@@ -585,8 +932,19 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     retain_interrupted_write(&root)?;
     state::write(&root.join(FILE), &intent)?;
     bridges::cleanup::recover_persist(&root, &bridges)?;
+    if let Some(guard) = &pin_guard {
+        guard.verify_lock()?;
+    }
     let cleaned = cleanup_owned(candidate, &engine, receipt, &root, false)?;
-    host_relay::inspect_cleanup(candidate, &engine, &cleaned, false, &environment, &bridges)?;
+    host_relay::inspect_cleanup_recovery(
+        candidate,
+        &engine,
+        &cleaned,
+        false,
+        &environment,
+        &bridges,
+        pin_guard.as_ref().map(|guard| guard.witness()),
+    )?;
     dead.verify()?;
     startup::archive_dependency_rebind_after_cleanup(
         &root,
@@ -597,7 +955,16 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     intent.complete_sha256 = Some(selected(&cleaned)?);
     retain_interrupted_write(&root)?;
     state::write(&root.join(FILE), &intent)?;
-    super::dependency_slots::recover_cleaned(candidate, &cleaned)?;
+    super::dependency_slots::recover_cleaned(
+        candidate,
+        &cleaned,
+        pin_guard.as_ref().and_then(|guard| {
+            guard
+                .witness()
+                .reservation()
+                .map(|reservation| (guard.witness().rebind(), reservation))
+        }),
+    )?;
     if intent.one_off_sha256.is_some() {
         normalize_completed(candidate, &engine, &root, &intent)?;
     }
@@ -881,6 +1248,26 @@ mod tests {
             one_off_sha256: None,
         }
     }
+    #[test]
+    fn current_recovery_dispatch_does_not_select_historical_completion() {
+        let fixture = super::super::tests::Fixture::new();
+        let mut receipt = partial();
+        receipt.phase = "stopped-data-retained".into();
+        assert!(!current_completion(&fixture.0, &receipt).unwrap());
+        let mut proof = intent(&receipt);
+        proof.complete_sha256 = Some(selected(&receipt).unwrap());
+        let path = fixture.0.join(FILE);
+        state::write(&path, &proof).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(current_completion(&fixture.0, &receipt).unwrap());
+        receipt.owner = "9".repeat(32);
+        assert!(!current_completion(&fixture.0, &receipt).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::write(&path, b"unconfirmed").unwrap();
+        assert!(current_completion(&fixture.0, &receipt).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"unconfirmed");
+    }
+
     #[test]
     fn archived_bridge_proof_requires_exact_stopped_receipt_and_selection() {
         let fixture = super::super::tests::Fixture::new();
@@ -1352,6 +1739,383 @@ mod tests {
         current.phase = "ready-observed".into();
         current.resources.get_mut("container:init").unwrap().id = Some("9".repeat(64));
         (fixture, current, stopped, proof)
+    }
+
+    fn evicted_historical_fixture() -> (super::super::tests::Fixture, Receipt, Receipt, Intent) {
+        let (fixture, mut current, stopped, proof) = historical_fixture();
+        for generation in 1..=12 {
+            let mut newer = stopped.clone();
+            newer.resources.get_mut("container:init").unwrap().id =
+                Some(format!("{generation:064x}"));
+            restore_history::retain(&fixture.0, &newer).unwrap();
+        }
+        current.resources.get_mut("container:init").unwrap().id = Some(format!("{:064x}", 13));
+        (fixture, current, stopped, proof)
+    }
+
+    fn retirement_precedence_fixture() -> (super::super::tests::Fixture, Receipt, Value) {
+        let fixture = super::super::tests::Fixture::new();
+        let root = &fixture.0;
+        let mut original = partial();
+        original.phase = "ready-observed".into();
+        original.resources.get_mut("container:init").unwrap().id = Some(format!("{:064x}", 1));
+        let mut prior_stopped = original.clone();
+        prior_stopped.phase = "stopped-data-retained".into();
+        for resource in prior_stopped.resources.values_mut() {
+            if resource.kind != Kind::Volume {
+                resource.phase = "absent".into();
+            }
+        }
+        let live = json!({
+            "version":1,"boot":"historical-boot","original":original,
+            "original_sha256":selected(&original).unwrap(),
+            "foreground_sha256":"f".repeat(64),
+            "relay":{"bytes":[],"record_id":[1,1]},
+            "environment":[],
+            "bridges":{"version":1,"owner":original.owner,"boot":"historical-boot",
+                "run":original.run,"plan":original.plan_id,"capacity":0,"serial":0,
+                "selected":{}},
+            "prior_bridges":null,"listeners_retired":true,
+            "complete_sha256":selected(&prior_stopped).unwrap()
+        });
+        state::write(&root.join("live-owner-cleanup.json"), &live).unwrap();
+        for generation in 1..=12 {
+            let mut stopped = prior_stopped.clone();
+            stopped.resources.get_mut("container:init").unwrap().id =
+                Some(format!("{generation:064x}"));
+            restore_history::retain(root, &stopped).unwrap();
+        }
+        let mut current = prior_stopped;
+        current.resources.get_mut("container:init").unwrap().id = Some(format!("{:064x}", 13));
+        let mut dead = intent(&current);
+        dead.complete_sha256 = Some(selected(&current).unwrap());
+        state::write(&root.join(FILE), &dead).unwrap();
+        state::write(&root.join("state.json"), &current).unwrap();
+        (fixture, current, live)
+    }
+
+    #[test]
+    fn current_dead_owner_retirement_precedes_only_valid_historical_live_proof() {
+        let (fixture, current, _live) = retirement_precedence_fixture();
+        let root = &fixture.0;
+        let live_before = fs::read(root.join("live-owner-cleanup.json")).unwrap();
+        let dead_before = fs::read(root.join(FILE)).unwrap();
+        assert!(current_completed_precedence(root, &current).unwrap());
+        super::super::cleanup_enrollment::retention(root, &current).unwrap();
+        assert_eq!(
+            fs::read(root.join("live-owner-cleanup.json")).unwrap(),
+            live_before
+        );
+        assert_eq!(fs::read(root.join(FILE)).unwrap(), dead_before);
+
+        let mut stale_dead: Intent = state::read(&root.join(FILE)).unwrap();
+        stale_dead.complete_sha256 = Some("8".repeat(64));
+        state::write(&root.join(FILE), &stale_dead).unwrap();
+        assert!(!current_completed_precedence(root, &current).unwrap());
+        assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
+        state::write(&root.join(FILE), &intent(&current)).unwrap();
+        assert!(!current_completed_precedence(root, &current).unwrap());
+        assert!(super::super::cleanup_enrollment::retention(root, &current).is_err());
+    }
+
+    #[test]
+    fn current_dead_owner_retirement_refuses_pending_incomplete_or_foreign_live_proof() {
+        for fault in [
+            "pending",
+            "incomplete",
+            "foreign-owner",
+            "current-live",
+            "malformed",
+        ] {
+            let (fixture, current, mut live) = retirement_precedence_fixture();
+            let root = &fixture.0;
+            match fault {
+                "pending" => {
+                    fs::write(root.join("live-owner-cleanup.pending"), b"partial proof").unwrap();
+                }
+                "incomplete" => live["complete_sha256"] = Value::Null,
+                "foreign-owner" => {
+                    live["original"]["owner"] = json!("e".repeat(32));
+                    let changed: Receipt =
+                        serde_json::from_value(live["original"].clone()).unwrap();
+                    live["original_sha256"] = json!(selected(&changed).unwrap());
+                }
+                "current-live" => {
+                    let mut same = current.clone();
+                    same.phase = "ready-observed".into();
+                    live["original"] = serde_json::to_value(&same).unwrap();
+                    live["original_sha256"] = json!(selected(&same).unwrap());
+                    live["complete_sha256"] = json!(selected(&current).unwrap());
+                }
+                "malformed" => {
+                    fs::write(root.join("live-owner-cleanup.json"), b"invalid proof").unwrap();
+                }
+                _ => unreachable!(),
+            }
+            if !matches!(fault, "pending" | "malformed") {
+                state::write(&root.join("live-owner-cleanup.json"), &live).unwrap();
+            }
+            let live_before = fs::read(root.join("live-owner-cleanup.json")).unwrap();
+            let dead_before = fs::read(root.join(FILE)).unwrap();
+            assert!(
+                current_completed_precedence(root, &current).is_err(),
+                "{fault}"
+            );
+            assert!(
+                super::super::cleanup_enrollment::retention(root, &current).is_err(),
+                "{fault}"
+            );
+            assert_eq!(
+                fs::read(root.join("live-owner-cleanup.json")).unwrap(),
+                live_before
+            );
+            assert_eq!(fs::read(root.join(FILE)).unwrap(), dead_before);
+        }
+    }
+
+    #[test]
+    fn repeated_recovery_archives_evicted_completion_without_rewriting_prior_proof() {
+        let (fixture, current, _, proof) = evicted_historical_fixture();
+        let root = &fixture.0;
+        let source = root.join(FILE);
+        let before = fs::read(&source).unwrap();
+        let metadata = fs::metadata(&source).unwrap();
+        let history = fs::read(root.join("restore-history.json")).unwrap();
+        let complete = proof.complete_sha256.as_deref().unwrap();
+        assert!(
+            restore_history::completed_for_recovery(root, &current, complete)
+                .unwrap()
+                .is_none()
+        );
+
+        archive_completed_prior(
+            root,
+            &current,
+            &selected(&current).unwrap(),
+            &"2".repeat(64),
+            "current-boot",
+        )
+        .unwrap();
+
+        let archived = root.join(format!("dead-owner-cleanup-retired-{complete}.json"));
+        let archived_metadata = fs::metadata(&archived).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(archived).unwrap(), before);
+        assert_eq!(archived_metadata.dev(), metadata.dev());
+        assert_eq!(archived_metadata.ino(), metadata.ino());
+        assert_eq!(
+            fs::read(root.join("restore-history.json")).unwrap(),
+            history
+        );
+    }
+
+    #[test]
+    fn repeated_recovery_refuses_evicted_proof_with_changed_identity_or_generation() {
+        for fault in [
+            "owner",
+            "run",
+            "plan_id",
+            "unchanged-generation",
+            "pending",
+            "incomplete",
+            "mutated-resource-id",
+        ] {
+            let (fixture, mut current, _, mut proof) = evicted_historical_fixture();
+            let root = &fixture.0;
+            match fault {
+                "owner" | "run" | "plan_id" => {
+                    let mut original = serde_json::to_value(&proof.original).unwrap();
+                    original[fault] = json!("e".repeat(if fault == "plan_id" { 64 } else { 32 }));
+                    proof.original = serde_json::from_value(original).unwrap();
+                    proof.original_sha256 = selected(&proof.original).unwrap();
+                    state::write(&root.join(FILE), &proof).unwrap();
+                }
+                "unchanged-generation" => {
+                    current.resources.get_mut("container:init").unwrap().id =
+                        proof.original.resources["container:init"].id.clone();
+                }
+                "pending" => {
+                    fs::write(root.join("dead-owner-cleanup.pending"), b"partial proof").unwrap();
+                }
+                "incomplete" => {
+                    proof.complete_sha256 = None;
+                    state::write(&root.join(FILE), &proof).unwrap();
+                }
+                "mutated-resource-id" => {
+                    proof
+                        .original
+                        .resources
+                        .get_mut("container:init")
+                        .unwrap()
+                        .id = Some("7".repeat(64));
+                    state::write(&root.join(FILE), &proof).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let before = fs::read(root.join(FILE)).unwrap();
+            let history = fs::read(root.join("restore-history.json")).unwrap();
+            assert!(
+                archive_completed_prior(
+                    root,
+                    &current,
+                    &selected(&current).unwrap(),
+                    &"2".repeat(64),
+                    "current-boot",
+                )
+                .is_err(),
+                "{fault}"
+            );
+            assert_eq!(fs::read(root.join(FILE)).unwrap(), before, "{fault}");
+            assert_eq!(
+                fs::read(root.join("restore-history.json")).unwrap(),
+                history
+            );
+            assert!(
+                !root
+                    .join(format!(
+                        "dead-owner-cleanup-retired-{}.json",
+                        proof.complete_sha256.as_deref().unwrap_or("missing")
+                    ))
+                    .exists(),
+                "{fault}"
+            );
+        }
+    }
+
+    #[test]
+    fn evicted_previous_boot_completion_is_read_only_superseded_history() {
+        let (fixture, current, _, proof) = evicted_historical_fixture();
+        let before = fs::read(fixture.0.join(FILE)).unwrap();
+        let history_before = fs::read(fixture.0.join("restore-history.json")).unwrap();
+        assert!(
+            restore_history::completed_for_recovery(
+                &fixture.0,
+                &current,
+                proof.complete_sha256.as_deref().unwrap()
+            )
+            .unwrap()
+            .is_none()
+        );
+        require_historical_recovery(&fixture.0, &current).unwrap();
+        assert!(!current_completion(&fixture.0, &current).unwrap());
+        assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), before);
+        assert_eq!(
+            fs::read(fixture.0.join("restore-history.json")).unwrap(),
+            history_before
+        );
+    }
+
+    #[test]
+    fn truncated_history_does_not_admit_invalid_or_current_recovery_proof() {
+        for (field, value) in [
+            ("version", json!(9)),
+            ("complete_sha256", Value::Null),
+            ("complete_sha256", json!("invalid")),
+            ("original_sha256", json!("8".repeat(64))),
+            ("owner_sha256", json!("invalid")),
+            ("new_boot", Value::Null),
+            ("new_boot", json!("")),
+            ("old_boot", json!("")),
+            ("old_boot", json!("successor-boot")),
+            ("one_off_sha256", json!("8".repeat(64))),
+        ] {
+            let (fixture, current, _, proof) = evicted_historical_fixture();
+            let mut changed = serde_json::to_value(proof).unwrap();
+            changed[field] = value;
+            state::write(&fixture.0.join(FILE), &changed).unwrap();
+            let bytes = fs::read(fixture.0.join(FILE)).unwrap();
+            let history = fs::read(fixture.0.join("restore-history.json")).unwrap();
+            assert!(
+                require_historical_recovery(&fixture.0, &current).is_err(),
+                "{field}"
+            );
+            assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), bytes);
+            assert_eq!(
+                fs::read(fixture.0.join("restore-history.json")).unwrap(),
+                history
+            );
+        }
+        for field in ["version", "owner", "run", "namespace", "plan_id"] {
+            let (fixture, current, _, mut proof) = evicted_historical_fixture();
+            let mut changed = serde_json::to_value(&proof.original).unwrap();
+            changed[field] = if field == "version" {
+                json!(9)
+            } else {
+                json!("e".repeat(64))
+            };
+            proof.original = serde_json::from_value(changed).unwrap();
+            proof.original_sha256 = selected(&proof.original).unwrap();
+            state::write(&fixture.0.join(FILE), &proof).unwrap();
+            let bytes = fs::read(fixture.0.join(FILE)).unwrap();
+            assert!(
+                require_historical_recovery(&fixture.0, &current).is_err(),
+                "{field}"
+            );
+            assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), bytes);
+        }
+        let (fixture, mut current, _, proof) = evicted_historical_fixture();
+        current.resources = proof.original.resources;
+        let bytes = fs::read(fixture.0.join(FILE)).unwrap();
+        assert!(require_historical_recovery(&fixture.0, &current).is_err());
+        assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn evicted_completion_requires_verified_truncation_and_newer_stopped_evidence() {
+        for fault in [
+            "missing",
+            "untruncated",
+            "same-generation",
+            "foreign",
+            "malformed",
+            "pending",
+        ] {
+            let (fixture, current, stopped, _) = evicted_historical_fixture();
+            let path = fixture.0.join("restore-history.json");
+            let mut history: Value = state::read(&path).unwrap();
+            match fault {
+                "missing" => fs::remove_file(&path).unwrap(),
+                "pending" => fs::write(
+                    fixture.0.join("dead-owner-cleanup.pending"),
+                    b"partial evidence",
+                )
+                .unwrap(),
+                _ => {
+                    match fault {
+                        "untruncated" => history["truncated"] = json!(false),
+                        "same-generation" => {
+                            let mut same_generation = stopped;
+                            same_generation
+                                .readiness
+                                .insert("init".into(), project::execution::Condition::Started);
+                            *history["entries"]
+                                .as_array_mut()
+                                .unwrap()
+                                .last_mut()
+                                .unwrap() = serde_json::to_value(&same_generation).unwrap()
+                        }
+                        "foreign" => history["entries"][0]["owner"] = json!("e".repeat(32)),
+                        "malformed" => history["version"] = json!(9),
+                        _ => unreachable!(),
+                    }
+                    state::write(&path, &history).unwrap();
+                }
+            }
+            let bytes = fs::read(fixture.0.join(FILE)).unwrap();
+            let history = fs::read(&path).ok();
+            assert!(
+                require_historical_recovery(&fixture.0, &current).is_err(),
+                "{fault}"
+            );
+            assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), bytes);
+            assert_eq!(fs::read(&path).ok(), history);
+            if fault == "pending" {
+                assert_eq!(
+                    fs::read(fixture.0.join("dead-owner-cleanup.pending")).unwrap(),
+                    b"partial evidence"
+                );
+            }
+        }
     }
 
     #[test]

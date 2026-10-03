@@ -7,6 +7,7 @@ import {
   realpath,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import type { Socket } from "node:net";
@@ -27,6 +28,7 @@ import {
 import { verifyNativeHttpsLeaseGraph } from "../src/backends/native-https-owner-server.ts";
 import {
   nativeHttpsExecutableSha256,
+  nativeHttpsLeaseReleasePath,
   nativeHttpsOwnerRoot,
   nativeHttpsReadRelease,
   nativeHttpsRecordRelease,
@@ -85,7 +87,7 @@ async function fixture(
     frontend,
     `#!${process.execPath}
 import { serveNativeHttpsOwner } from ${JSON.stringify(serverModule)};
-import { appendFile, readFile, unlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, readFile, unlink, writeFile } from "node:fs/promises";
 const home = ${JSON.stringify(home)};
 const fault = ${JSON.stringify(options.afterPublish ?? null)};
 await writeFile(home + "/helper-pid", String(process.pid));
@@ -105,7 +107,8 @@ try {
     afterPublish: async (path) => {
       await writeFile(home + "/published-path", path);
       if (fault === "fail") { throw new Error("injected failure after publication"); }
-      if (fault === "replace") { await unlink(path); await writeFile(path, "foreign replacement", { mode: 0o644 }); }
+      // Set the foreign mode exactly even when the helper inherits a private umask.
+      if (fault === "replace") { await unlink(path); await writeFile(path, "foreign replacement", { mode: 0o644 }); await chmod(path, 0o644); }
     },
     verifyIdle: async () => {
       ${
@@ -216,6 +219,218 @@ try {
     });
   return { home, binding, sockets, start, acquire, clean, release };
 }
+
+/** Historical recovery exercises only private files; neither owner is spawned. */
+async function historicalReleaseFixture(sameGeneration = false) {
+  const f = await fixture();
+  const current = await ensureNativeHttpsOwner({
+    binding: {
+      ...f.binding,
+      runtime: { ...f.binding.runtime, binary: join(f.home, "new-runtime") },
+      frontend: {
+        binary: join(f.home, "new-frontend"),
+        sha256: "3".repeat(64),
+      },
+      runtimeSha256: "4".repeat(64),
+    },
+    spawnOwner: async () => {},
+  });
+  const historical = {
+    ...current,
+    ownerGeneration: sameGeneration ? current.ownerGeneration : "5".repeat(32),
+    binding: f.binding,
+  };
+  const identity = nativeHttpsLeaseIdentity(historical, lease("b"));
+  await nativeHttpsRecordRelease({
+    version: 1,
+    identity,
+    binding: f.binding,
+    finalOwner: true,
+  });
+  const configurationPath = join(
+    nativeHttpsOwnerRoot(f.home),
+    "configuration.json"
+  );
+  const releasePath = nativeHttpsLeaseReleasePath(f.home, identity);
+  const siblingPath = join(
+    nativeHttpsOwnerRoot(f.home),
+    "leases",
+    "sibling.json"
+  );
+  await writeFile(siblingPath, "new owner's retained evidence", {
+    mode: 0o600,
+  });
+  const snapshot = () =>
+    Promise.all(
+      [configurationPath, releasePath, siblingPath].map((path) =>
+        readFile(path)
+      )
+    );
+  return { ...f, current, identity, configurationPath, snapshot };
+}
+
+test("historical HTTPS release revalidates across a new bundle generation without changing its owner", async () => {
+  const f = await historicalReleaseFixture();
+  const before = await f.snapshot();
+  let verified = 0;
+  await recoverNativeHttpsLease({
+    runtime: f.binding.runtime,
+    identity: f.identity,
+    verifyReleased: async (binding, identity, phase) => {
+      expect(binding).toEqual(f.binding);
+      expect(identity).toEqual(f.identity);
+      expect(phase).toBe("release");
+      verified += 1;
+    },
+  });
+  expect(verified).toBe(1);
+  expect(await f.snapshot()).toEqual(before);
+  // Public owner access still requires the current exact executable binding.
+  await expect(
+    readNativeHttpsOwnerConfiguration(f.binding.runtime)
+  ).rejects.toThrow();
+  expect(
+    await readNativeHttpsOwnerConfiguration(f.current.binding.runtime)
+  ).toEqual(f.current);
+});
+
+test("explicit prior-boot frontend recovery selects the exact native archive contract", async () => {
+  const f = await fixture();
+  const old = await ensureNativeHttpsOwner({
+    binding: f.binding,
+    spawnOwner: async () => {},
+  });
+  const identity = nativeHttpsLeaseIdentity(old, lease("b"));
+  const selectedBinary = join(f.home, "selected-native");
+  const callsPath = join(f.home, "native-calls");
+  const script = (bootId: string) => `#!/bin/sh
+printf '%s\\n' "$*" >> '${callsPath}'
+case "$4" in
+  status) printf '%s\\n' '${JSON.stringify({ phase: "running", process_alive: true, guest_boot_id: bootId })}' ;;
+  archive-previous-boot-shared-https) printf '%s\\n' '${JSON.stringify({ archived: true, run: identity.run, owner_generation: identity.ownerGeneration, lease_id: identity.leaseId, data_retained: true, processes_signaled: 0 })}' ;;
+  *) exit 1 ;;
+esac
+`;
+  await writeFile(selectedBinary, script(f.binding.pool.bootId), {
+    mode: 0o700,
+  });
+  const runtime = { home: f.home, binary: selectedBinary };
+  await expect(
+    recoverNativeHttpsLease({ runtime, identity })
+  ).rejects.toThrow();
+  await expect(
+    recoverNativeHttpsLease({ runtime, identity, archivePreviousBoot: true })
+  ).rejects.toThrow();
+  expect((await readFile(callsPath, "utf8")).trim().split("\n")).toHaveLength(
+    1
+  );
+
+  await writeFile(
+    selectedBinary,
+    script("22222222-2222-2222-2222-222222222222")
+  );
+  await recoverNativeHttpsLease({
+    runtime,
+    identity,
+    archivePreviousBoot: true,
+  });
+  const calls = (await readFile(callsPath, "utf8")).trim().split("\n");
+  expect(calls).toHaveLength(3);
+  expect(calls.at(-1)).toContain(`--run-id ${identity.run}`);
+  expect(calls.at(-1)).toContain(
+    `--expect-owner-generation ${identity.ownerGeneration}`
+  );
+  expect(calls.at(-1)).toContain(`--expect-lease-id ${identity.leaseId}`);
+  expect(calls.at(-1)).toContain(`--expect-attempt ${identity.attempt}`);
+  expect(calls.at(-1)).toContain(`--expect-owner ${identity.owner}`);
+  expect(calls.at(-1)).toContain(`--expect-namespace ${identity.namespace}`);
+  expect(calls.at(-1)).toContain(`--expect-plan ${identity.planId}`);
+});
+
+test("historical HTTPS release refuses a same-generation runtime mismatch before graph verification", async () => {
+  const f = await historicalReleaseFixture(true);
+  const before = await f.snapshot();
+  let verified = false;
+  await expect(
+    recoverNativeHttpsLease({
+      runtime: f.binding.runtime,
+      identity: f.identity,
+      verifyReleased: async () => {
+        verified = true;
+      },
+    })
+  ).rejects.toThrow();
+  expect(verified).toBe(false);
+  expect(await f.snapshot()).toEqual(before);
+});
+
+test.each([
+  "malformed",
+  "symlink",
+  "foreign-home",
+] as const)("historical HTTPS release refuses %s current configuration before graph verification", async (fault) => {
+  const f = await historicalReleaseFixture();
+  if (fault === "symlink") {
+    const target = join(f.home, "configuration-target.json");
+    await rename(f.configurationPath, target);
+    await symlink(target, f.configurationPath);
+  } else {
+    await writeFile(
+      f.configurationPath,
+      JSON.stringify(
+        fault === "malformed"
+          ? {
+              ownerGeneration: f.current.ownerGeneration,
+            }
+          : {
+              ...f.current,
+              binding: {
+                ...f.current.binding,
+                runtime: {
+                  ...f.current.binding.runtime,
+                  home: join(f.home, "foreign"),
+                },
+              },
+            }
+      )
+    );
+  }
+  const before = await f.snapshot();
+  let verified = false;
+  await expect(
+    recoverNativeHttpsLease({
+      runtime: f.binding.runtime,
+      identity: f.identity,
+      verifyReleased: async () => {
+        verified = true;
+      },
+    })
+  ).rejects.toThrow();
+  expect(verified).toBe(false);
+  expect(await f.snapshot()).toEqual(before);
+  expect((await lstat(f.configurationPath)).isSymbolicLink()).toBe(
+    fault === "symlink"
+  );
+});
+
+test("historical HTTPS release still refuses a dirty graph after a bundle generation change", async () => {
+  const f = await historicalReleaseFixture();
+  const before = await f.snapshot();
+  let verified = false;
+  await expect(
+    recoverNativeHttpsLease({
+      runtime: f.binding.runtime,
+      identity: f.identity,
+      verifyReleased: async (binding) => {
+        expect(binding).toEqual(f.binding);
+        verified = true;
+        throw new Error("graph restarted");
+      },
+    })
+  ).rejects.toThrow("graph restarted");
+  expect(verified).toBe(true);
+  expect(await f.snapshot()).toEqual(before);
+});
 
 test("detached helper outlives its spawning CLI and first release preserves the second lease", async () => {
   const f = await fixture();

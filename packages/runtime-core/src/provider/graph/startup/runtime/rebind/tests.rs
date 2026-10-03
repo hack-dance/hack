@@ -461,6 +461,24 @@ fn incomplete_journal_blocks_ready_operations_and_is_never_replayed() {
     journal.completed_generation = Some(service_exec_generation(&receipt).unwrap());
     state::write(&root.join(JOURNAL), &journal).unwrap();
     require_complete(&root, &receipt).unwrap();
+    let evidence = fs::read(root.join(JOURNAL)).unwrap();
+    require_recovery_complete(&root, &receipt, "fixture-boot").unwrap();
+    for boot in ["", "other-boot"] {
+        assert!(require_recovery_complete(&root, &receipt, boot).is_err());
+        assert_eq!(fs::read(root.join(JOURNAL)).unwrap(), evidence);
+    }
+    // The ordinary readiness validator can accept a newer receipt, but recovery
+    // must select exactly the generation that committed this refresh.
+    let mut newer = receipt.clone();
+    newer.plan_id = "9".repeat(64);
+    require_complete(&root, &newer).unwrap();
+    assert!(require_recovery_complete(&root, &newer, "fixture-boot").is_err());
+    let mut incomplete = serde_json::to_value(&journal).unwrap();
+    incomplete["phase"] = json!("provisioning");
+    state::write(&root.join(JOURNAL), &incomplete).unwrap();
+    assert!(require_recovery_complete(&root, &receipt, "fixture-boot").is_err());
+    state::write(&root.join(JOURNAL), &journal).unwrap();
+    assert_eq!(fs::read(root.join(JOURNAL)).unwrap(), evidence);
     let mut changed = receipt.clone();
     changed
         .relay_startup
@@ -670,6 +688,124 @@ fn terminal_refresh_proofs_do_not_pin_old_helpers_across_owned_restore() {
     archive_after_cleanup(&root, &original, &cleaned, "old-boot").unwrap();
     require_complete(&root, &restored).unwrap();
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn retired_completed_rebind_requires_exact_generation_and_resumes_from_proof() {
+    let fixture = crate::provider::graph::tests::Fixture::new();
+    let root = &fixture.0;
+    let mut original = receipt();
+    original
+        .readiness
+        .insert("init".into(), Condition::Completed);
+    original.relay_startup = Some(startup(&"6".repeat(64), &["web", "init"]));
+    let init = original
+        .relay_startup
+        .as_mut()
+        .unwrap()
+        .services
+        .get_mut("init")
+        .unwrap();
+    init.phase = Phase::Completed;
+    init.bindings.get_mut("content").unwrap().process = None;
+    let process = original.relay_startup.as_ref().unwrap().services["web"].bindings["content"]
+        .process
+        .unwrap();
+    original.resources.insert(
+        "container:web".into(),
+        serde_json::from_value(json!({
+            "kind":"container","key":"web","name":"owned-web","id":"7".repeat(64),
+            "image":"sha256:".to_string()+&"8".repeat(64),"phase":"present"
+        }))
+        .unwrap(),
+    );
+    let mut cleaned = original.clone();
+    cleaned.phase = "stopped-data-retained".into();
+    cleaned.resources.get_mut("container:web").unwrap().phase = "absent".into();
+    let generation = service_exec_generation(&original).unwrap();
+    let mut journal = RebindJournal {
+        version: 1,
+        operation: "4".repeat(32),
+        run: original.run.clone(),
+        owner: original.owner.clone(),
+        boot: "old-boot".into(),
+        expected_generation: "5".repeat(64),
+        phase: "completed".into(),
+        slots: BTreeMap::from([(
+            0,
+            JournalSlot {
+                before: "5".repeat(64),
+                after: "6".repeat(64),
+                bindings: vec![
+                    ("web".into(), "content".into()),
+                    ("init".into(), "content".into()),
+                ],
+                terminal_only: false,
+            },
+        )]),
+        processes: BTreeMap::from([("web".into(), BTreeMap::from([("content".into(), process)]))]),
+        completed_services: BTreeSet::from(["init".into()]),
+        completed_generation: Some(generation.clone()),
+    };
+    state::write(&root.join(JOURNAL), &journal).unwrap();
+    let original_bytes = fs::read(root.join(JOURNAL)).unwrap();
+    for wrong_boot in ["current-boot", ""] {
+        assert!(
+            archive::retired_completed(root, &original, &cleaned, wrong_boot, &|| Ok(())).is_err()
+        );
+        assert_eq!(fs::read(root.join(JOURNAL)).unwrap(), original_bytes);
+    }
+    journal.completed_generation = Some("9".repeat(64));
+    state::write(&root.join(JOURNAL), &journal).unwrap();
+    assert!(archive::retired_completed(root, &original, &cleaned, "old-boot", &|| Ok(())).is_err());
+    journal.completed_generation = Some(generation.clone());
+    state::write(&root.join(JOURNAL), &journal).unwrap();
+    let history = root.join(format!("dependency-rebind-history-{generation}"));
+    // Lost foreground ownership before the first write leaves evidence intact.
+    assert!(
+        archive::retired_completed(root, &original, &cleaned, "old-boot", &|| Err(rejected()))
+            .is_err()
+    );
+    assert!(!history.exists());
+    let verify = || {
+        if history.join("proof.json").exists() && root.join(JOURNAL).exists() {
+            Err(rejected())
+        } else {
+            Ok(())
+        }
+    };
+    assert!(archive::retired_completed(root, &original, &cleaned, "old-boot", &verify).is_err());
+    assert_eq!(fs::read(root.join(JOURNAL)).unwrap(), original_bytes);
+    assert_eq!(
+        state::read::<Value>(&history.join("proof.json")).unwrap()["complete"],
+        false
+    );
+    // Simulate the owned archive's first successful rename followed by a crash.
+    fs::rename(root.join(JOURNAL), history.join(JOURNAL)).unwrap();
+    assert!(require_complete(root, &original).is_err());
+    crate::provider::graph::startup::archive_retired_dependency_rebind(
+        root,
+        &original,
+        &cleaned,
+        "old-boot",
+        &|| Ok(()),
+    )
+    .unwrap();
+    archive::retired_completed(root, &original, &cleaned, "old-boot", &|| Ok(())).unwrap();
+    assert_eq!(fs::read(history.join(JOURNAL)).unwrap(), original_bytes);
+    assert_eq!(
+        state::read::<Value>(&history.join("proof.json")).unwrap()["complete"],
+        true
+    );
+    require_complete(root, &cleaned).unwrap();
+    let mut changed = cleaned.clone();
+    changed.resources.get_mut("container:web").unwrap().id = Some("a".repeat(64));
+    assert!(archive::retired_completed(root, &original, &changed, "old-boot", &|| Ok(())).is_err());
+    let mut proof: Value = state::read(&history.join("proof.json")).unwrap();
+    proof["boot"] = json!("substituted-boot");
+    state::write(&history.join("proof.json"), &proof).unwrap();
+    assert!(archive::retired_completed(root, &original, &cleaned, "old-boot", &|| Ok(())).is_err());
+    assert_eq!(fs::read(history.join(JOURNAL)).unwrap(), original_bytes);
 }
 
 #[test]

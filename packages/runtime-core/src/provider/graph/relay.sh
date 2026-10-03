@@ -115,13 +115,17 @@ if test "$action" = remove; then
 fi
 check_binary
 read_process
+if test "$action" = inspect-retirement && test -e "/proc/$pid/stat"; then
+ # A reused PID is not proof that the recorded helper exited safely.
+ test "$(start_ticks "$pid")" = "$born"
+fi
 if alive; then
  test "$(stat -Lc %d:%i /proc/$pid/exe)" = "$(stat -c %d:%i "$root/relay")"
- if test "$action" = inspect; then check_socket; printf 'running\n'; exit; fi
+ if test "$action" = inspect || test "$action" = inspect-retirement; then check_socket; printf 'running\n'; exit; fi
  test "$action" = stop
  "$root/relay" --stop "$pid" "$born"
  ! alive
-elif test "$action" = inspect; then
+elif test "$action" = inspect || test "$action" = inspect-retirement; then
  printf 'exited\n'; exit
 fi
 test "$action" = stop

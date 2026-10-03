@@ -88,9 +88,10 @@ fn validate(intent: &Intent, slot: &str) -> Result<(), CandidateError> {
     Ok(())
 }
 const MAX_INTENT_ENTRIES: usize = 4096;
-// A graph can retain several generations of immutable service lease evidence.
-// Keep this below the global bound while permitting repeated normal restarts.
-const MAX_GRAPH_INTENT_ENTRIES: usize = 256;
+// Cleanup must cover every allocation admitted by the global history budget.
+// A smaller per-graph bound can strand a valid graph after repeated restores.
+// Active and archived entries share this bound; none are discarded to fit it.
+const MAX_GRAPH_INTENT_ENTRIES: usize = MAX_INTENT_ENTRIES;
 
 /// Retired and uncertain entries still reserve history capacity. This never removes evidence.
 pub(super) fn preflight_records(
@@ -317,6 +318,12 @@ impl GraphInventory {
     pub(super) fn is_empty(&self) -> bool {
         self.intents.is_empty()
     }
+    pub(super) fn slots(&self) -> Vec<String> {
+        self.intents
+            .iter()
+            .map(|intent| intent.slot.clone())
+            .collect()
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -397,6 +404,28 @@ pub(super) fn verify_graph_retired(
     }
     guest.verify()?;
     Ok(())
+}
+
+/// Verify one selected allocation after an interrupted cleanup effect. Other
+/// allocations in the same graph may still be present at this journal step.
+#[cfg(target_os = "macos")]
+pub(super) fn verify_graph_slot_retired(
+    guest: &OwnedGuest<'_>,
+    inventory: &GraphInventory,
+    slot: &str,
+) -> Result<(), CandidateError> {
+    if inventory.incarnation != guest.incarnation() {
+        return Err(error());
+    }
+    let intent = inventory
+        .intents
+        .iter()
+        .find(|intent| intent.slot == slot)
+        .ok_or_else(error)?;
+    let binding = intent.graph.as_ref().ok_or_else(error)?;
+    super::engine::require_container_absent(guest, &binding.container)?;
+    retention::absent(guest, slot)?;
+    guest.verify()
 }
 
 /// Move retired, value-free intents into a removed graph's retained evidence. The graph ID
@@ -867,7 +896,10 @@ mod tests {
             run: run.clone(),
             container: container.clone(),
         });
-        for index in 0..84 {
+        // Nineteen normal starts of a fourteen-service graph exceeded the old
+        // cleanup-only ceiling, despite remaining within allocation admission.
+        let retained_count = 19 * 14;
+        for index in 0..retained_count {
             intent.slot = format!("hack-env-lease-{}-{index:032x}", intent.boot);
             state::write(
                 &root(&fixture.0).join(format!("{}.json", intent.slot)),
@@ -875,6 +907,7 @@ mod tests {
             )
             .unwrap();
         }
+        assert!(preflight_records(&fixture.0, 14).is_ok());
         let inventory = graph_inventory(
             &fixture.0,
             &intent.incarnation,
@@ -883,7 +916,8 @@ mod tests {
             &fixture.0.state_root.join("graph-environment-archive"),
         )
         .unwrap();
-        assert_eq!(inventory.intents.len(), 84);
+        assert_eq!(inventory.intents.len(), retained_count);
+        assert_eq!(recorded_slots(&fixture.0).unwrap().len(), retained_count);
     }
 
     #[test]

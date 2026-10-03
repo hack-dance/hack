@@ -20,6 +20,14 @@ pub(super) fn require_dependency_rebind_complete(
     rebind::require_complete(root, receipt)
 }
 
+pub(super) fn require_dependency_rebind_recovery_complete(
+    root: &Path,
+    receipt: &Receipt,
+    boot: &str,
+) -> Result<(), CandidateError> {
+    rebind::require_recovery_complete(root, receipt, boot)
+}
+
 pub(super) fn archive_dependency_rebind_after_cleanup(
     root: &Path,
     original: &Receipt,
@@ -27,6 +35,34 @@ pub(super) fn archive_dependency_rebind_after_cleanup(
     boot: &str,
 ) -> Result<(), CandidateError> {
     rebind::archive_after_cleanup(root, original, cleaned, boot)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn dependency_rebind_boot(
+    root: &Path,
+    receipt: &Receipt,
+) -> Result<Option<String>, CandidateError> {
+    rebind::boot(root, receipt)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn archive_retired_dependency_rebind(
+    root: &Path,
+    original: &Receipt,
+    cleaned: &Receipt,
+    boot: &str,
+    verify: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    rebind::archive::retired_completed(root, original, cleaned, boot, verify)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn retired_dependency_rebind_archive_complete(
+    root: &Path,
+    original: &Receipt,
+    boot: &str,
+) -> Result<bool, CandidateError> {
+    rebind::archive::retired_archive_complete(root, original, boot)
 }
 use sha2::{Digest, Sha256};
 use std::{
@@ -659,7 +695,22 @@ impl Driver for HostRelayRuntime {
                     state::write(&root.join("state.json"), receipt)?;
                     return Err(stage_refused("graph_startup_application_failed"));
                 }
-                verify_exited_listener(receipt.readiness.get(name), &observed)?;
+                if let Err(error) = verify_exited_listener(receipt.readiness.get(name), &observed) {
+                    if error.code == "graph_startup_listener_unexpected_exit"
+                        && observation == (Observation::Exited { code: 0 })
+                    {
+                        // A successful process exit can still lose a required
+                        // listener. Keep its identity before cleanup removes it.
+                        return Err(startup_failure::preserve_listener_error(
+                            root,
+                            receipt,
+                            name,
+                            observation,
+                            error,
+                        ));
+                    }
+                    return Err(error);
+                }
             }
         }
         Ok(())
@@ -1009,6 +1060,12 @@ mod route_tests {
         verify_exited_listener(Some(&Condition::Completed), &exited).unwrap();
         assert_eq!(
             verify_exited_listener(Some(&Condition::Started), &exited)
+                .unwrap_err()
+                .code,
+            "graph_startup_listener_unexpected_exit"
+        );
+        assert_eq!(
+            verify_exited_listener(Some(&Condition::Healthy), &exited)
                 .unwrap_err()
                 .code,
             "graph_startup_listener_unexpected_exit"

@@ -53,7 +53,7 @@ untracked candidate additions. Keep private artifacts excluded from the index.
 | Rust state/recovery | `packages/runtime-core/tests/` plus module tests; malformed/stale ownership, crash window, resume and data preservation |
 | TLA models | `test:models`, [model mappings](../../../tests/models/tla/README.md), [runner](../../../scripts/check-tla-models.ts) and expected positive/negative controls |
 | Consumer instructions | [ownership](../../../docs/agent-guidance.md), `bun run generate:agent-plugins`, affected examples and source/render tests |
-| Native VM/routing/reclamation | candidate guide (local `_docs/docs/plans/v5/development.md`), relevant ledger gate and isolated host fixture; Linux checks cannot qualify macOS effects |
+| Native VM/routing/reclamation | [candidate guide](../../../docs/guides/native-candidate.md), relevant acceptance gate and isolated host fixture; Linux checks cannot qualify macOS effects |
 | Resource/performance claims | [performance skill](../hack-repo-performance/SKILL.md), matched workload and measured boundaries |
 
 Read [CI](../../../.github/workflows/ci.yml) for current hosted gates. A local pass
@@ -63,6 +63,14 @@ not default local-product requirements; use them only for explicitly scoped work
 ## Verify the verifier
 
 Treat unavailable prerequisites, ignored tests, cached results and timeouts explicitly.
+Before an ignored native graph fixture, read its prerequisites in the
+[runtime README](../../../packages/runtime-core/README.md). Some fixtures require
+a caller-prepared pool: use the managed provider, engine and network-tool setup,
+start the required socket capacity, load the pinned image, and verify runtime
+status before invoking the test. Record the current-source test executable and
+candidate bundle separately. An unprepared-pool failure does not exercise the
+scenario; preserve its evidence and fix setup before rerunning.
+
 TLC must explore the intended states; its negative control must fail the named
 invariant with the expected trace, not merely return nonzero. A small abstract model
 needs source mapping and implementation regression evidence; use

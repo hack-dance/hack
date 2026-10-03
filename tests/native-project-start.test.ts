@@ -1,11 +1,23 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { acquireNativeHttpsLease } from "../src/backends/native-https-owner.ts";
-import { beginNativeProjectFinalization } from "../src/backends/native-project-finalization.ts";
+import {
+  beginNativeProjectFinalization,
+  captureNativeProjectFinalization,
+  waitNativeProjectFinalization,
+} from "../src/backends/native-project-finalization.ts";
 import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
 import { preflightNativeRestart } from "../src/backends/native-project-restart-preflight.ts";
+import { selectNativeRetainedImages } from "../src/backends/native-project-retained-images.ts";
 import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
 import {
   parseNativeHttpsSelection,
@@ -43,6 +55,7 @@ async function fixture(withEnvironment = true) {
     Parameters<typeof startNativeProject>[0]["dependencies"]
   > = {
     prepareStorage: async () => {},
+    retainedImages: async () => new Map(),
     load: async () => null,
     loadRestart: async () => null,
     save: async () => {
@@ -192,6 +205,53 @@ function retainedPreflight(run: NativeProjectRun, phase = "running") {
     live_resources_verified: false,
   };
 }
+async function acknowledgeRetainedFrontend(
+  scope: Awaited<ReturnType<typeof fixture>>["opts"]["scope"],
+  run: NativeProjectRun
+) {
+  const lifetime = await beginNativeProjectFinalization({ scope, run });
+  await lifetime.complete();
+  return lifetime;
+}
+async function retainedFinalizationFixture() {
+  const { opts, events } = await fixture(false);
+  const saved: NativeProjectRun = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+  };
+  opts.dependencies.load = async () => saved;
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "retained-preflight") {
+      events.push("graph retained-preflight");
+      return retainedPreflight(saved);
+    }
+    if (
+      request.args[1] === "inspect" &&
+      !events.includes("graph dependency-plan")
+    ) {
+      events.push("graph inspect");
+      return stoppedGraph(saved);
+    }
+    return request.args[1] === "restore-selection"
+      ? { ...saved, plan: saved.planId, generation: "2".repeat(64) }
+      : await invoke(request);
+  };
+  opts.dependencies.prepareStorage = async () => {
+    events.push("storage");
+  };
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    events.push("prepare");
+    return await prepare(request);
+  };
+  return { opts, events, saved };
+}
 test("source pool mismatch refuses before hooks and storage preparation", async () => {
   const { opts, events } = await fixture();
   opts.dependencies.prepareStorage = async () => {
@@ -250,6 +310,77 @@ test("uncertain foreground failure retains published mapping and cleans lifecycl
   expect(events.at(-1)).toBe("cleanup");
   expect(process.listenerCount("SIGINT")).toBe(int);
   expect(process.listenerCount("SIGTERM")).toBe(term);
+});
+
+test("failed startup recovers exact pending cleanup and still reports the startup failure", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  let selectedRun = "";
+  let recovered = false;
+  const requests: string[] = [];
+  opts.dependencies.serve = async (request) => {
+    selectedRun = request.run;
+    throw new Error(
+      "Native graph startup failed (engine_rejected); inspect owned state before retrying."
+    );
+  };
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "inspect-interrupted-start-cleanup") {
+      requests.push(request.args[1]);
+      return {
+        run: selectedRun,
+        phase: "cleanup-intent",
+        eligible: true,
+        same_boot: true,
+        data_retained: true,
+        selection_sha256: "1".repeat(64),
+      };
+    }
+    if (request.args[1] === "recover-interrupted-start-cleanup") {
+      requests.push(request.args[1]);
+      recovered = true;
+      return {
+        run: selectedRun,
+        phase: "stopped-data-retained",
+        recovered: true,
+        data_retained: true,
+        same_boot: true,
+        publisher_retired: true,
+        reservation_released: true,
+      };
+    }
+    if (request.args[1] === "inspect") {
+      requests.push(request.args[1]);
+      const value = stoppedGraph({
+        run: selectedRun,
+        owner: "c".repeat(32),
+        namespace: "b".repeat(64),
+        planId: "a".repeat(64),
+      });
+      if (!recovered) {
+        value.receipt.phase = "cleanup-intent";
+        value.observations["container:web"].state = "present";
+        return {
+          ...value,
+          receipt: { ...value.receipt, relay_cleanup: { phase: "pending" } },
+        };
+      }
+      return value;
+    }
+    return invoke(request);
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "Native graph startup failed (engine_rejected)"
+  );
+  expect(requests).toEqual([
+    "inspect",
+    "inspect-interrupted-start-cleanup",
+    "recover-interrupted-start-cleanup",
+    "inspect",
+  ]);
+  expect(events).not.toContain("ready");
+  expect(events).not.toContain("save");
+  expect(events.at(-1)).toBe("cleanup");
 });
 test("source opt-in and occupied mapping refuse before lifecycle or runtime effects", async () => {
   const { opts, events } = await fixture();
@@ -1411,6 +1542,101 @@ test("invalid profile selection refuses before lifecycle or runtime effects", as
   ).rejects.toThrow("profiles");
 });
 
+test("retained startup refuses missing, unacknowledged or changed finalization before effects", async () => {
+  for (const fault of [
+    "missing",
+    "unacknowledged",
+    "stale-completion",
+    "changed",
+  ] as const) {
+    const { opts, events, saved } = await retainedFinalizationFixture();
+    if (fault === "unacknowledged") {
+      await beginNativeProjectFinalization({ scope: opts.scope, run: saved });
+    } else if (fault !== "missing") {
+      await acknowledgeRetainedFrontend(opts.scope, saved);
+      if (fault === "stale-completion") {
+        await beginNativeProjectFinalization({ scope: opts.scope, run: saved });
+      } else {
+        opts.dependencies.captureFinalization = async (selection) => {
+          const original = await captureNativeProjectFinalization(selection);
+          await acknowledgeRetainedFrontend(opts.scope, saved);
+          return original;
+        };
+      }
+    }
+    opts.dependencies.https = async () => {
+      throw new Error("unexpected HTTPS owner effect");
+    };
+    const attempt = startNativeProject({
+      ...opts,
+      https: httpsSelection,
+      adaptationFile: join(opts.scope.projectRoot, "unread-adaptation.json"),
+    });
+    await expect(attempt).rejects.toThrow(
+      "frontend finalization is unconfirmed"
+    );
+    try {
+      await attempt;
+    } catch (error) {
+      expect(String(error)).not.toContain(opts.scope.nativeHome);
+    }
+    expect(events).toEqual(["graph retained-preflight", "graph inspect"]);
+  }
+});
+
+test("retained startup admits only the acknowledged original frontend before effects", async () => {
+  const { opts, events, saved } = await retainedFinalizationFixture();
+  const lifetime = await acknowledgeRetainedFrontend(opts.scope, saved);
+  opts.dependencies.waitFinalization = async (selection) => {
+    expect(selection.token).toEqual(lifetime.token);
+    expect(selection.run).toEqual(saved);
+    expect(selection.timeoutMs).toBe(1);
+    await waitNativeProjectFinalization(selection);
+    events.push("frontend-acknowledged");
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(events.indexOf("frontend-acknowledged")).toBeLessThan(
+    events.indexOf("storage")
+  );
+  expect(events.indexOf("frontend-acknowledged")).toBeLessThan(
+    events.indexOf("prepare")
+  );
+  expect(events.indexOf("frontend-acknowledged")).toBeLessThan(
+    events.indexOf("before")
+  );
+  expect(events.indexOf("frontend-acknowledged")).toBeLessThan(
+    events.indexOf("runtime up")
+  );
+  expect(events).toContain("save");
+});
+
+test("retained acknowledgement cannot authorize a newer or concurrently changed mapping", async () => {
+  for (const fault of ["newer-run", "changed-mapping"] as const) {
+    const { opts, events, saved } = await retainedFinalizationFixture();
+    await acknowledgeRetainedFrontend(opts.scope, saved);
+    const newer = { ...saved, run: "2".repeat(32) };
+    let loaded = 0;
+    opts.dependencies.load = async () => {
+      loaded++;
+      return fault === "newer-run" || loaded > 1 ? newer : saved;
+    };
+    if (fault === "newer-run") {
+      opts.dependencies.invoke = async (request) => {
+        events.push(request.args.slice(0, 2).join(" "));
+        return request.args[1] === "retained-preflight"
+          ? retainedPreflight(newer)
+          : stoppedGraph(newer);
+      };
+    }
+    await expect(startNativeProject(opts)).rejects.toThrow(
+      fault === "newer-run"
+        ? "frontend finalization is unconfirmed"
+        : "mapping changed"
+    );
+    expect(events).toEqual(["graph retained-preflight", "graph inspect"]);
+  }
+});
+
 test("ordinary up reuses a stopped owned run and publishes its mapping by comparison", async () => {
   const { opts, events } = await fixture();
   const saved: NativeProjectRun = {
@@ -1422,6 +1648,7 @@ test("ordinary up reuses a stopped owned run and publishes its mapping by compar
     profiles: [],
     aws: null,
   };
+  await acknowledgeRetainedFrontend(opts.scope, saved);
   opts.dependencies.load = async () => saved;
   const invoke = opts.dependencies.invoke!;
   opts.dependencies.invoke = async (request) => {
@@ -1485,6 +1712,11 @@ test("restore startup passes the retained run and selected generation to its own
     namespace: "b".repeat(64),
     planId: "a".repeat(64),
   };
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) => {
+    expect(request.retained).toEqual(saved);
+    return await review(request);
+  };
   const invoke = opts.dependencies.invoke!;
   const serve = opts.dependencies.serve!;
   opts.dependencies.invoke = async (request) =>
@@ -1520,6 +1752,7 @@ test("ordinary up resumes a stopped owned VM once and requires live proof before
       profiles: [],
       aws: null,
     };
+    await acknowledgeRetainedFrontend(opts.scope, saved);
     const controller = new AbortController();
     let up = 0,
       served = 0,
@@ -1937,13 +2170,21 @@ test("startup and restart review use identical branch routes after adaptation", 
     };
     return { ...input, normalizedComposeJson: JSON.stringify(compose) };
   };
+  const before = async (input: NativeProjectInput) => {
+    expect(
+      JSON.parse(input.normalizedComposeJson).services.web.labels.caddy
+    ).toBe("feature-a.app.hack.local, feature-a.app.hack.gy");
+    return await opts.before();
+  };
   const observed: NativeProjectInput[] = [];
   opts.dependencies.review = async (request) => {
     expect(request.branch).toBe("feature-a");
     observed.push(request.input);
     return await review(request);
   };
-  expect(await startNativeProject({ ...opts, scope, adaptationFile })).toBe(0);
+  expect(
+    await startNativeProject({ ...opts, scope, adaptationFile, before })
+  ).toBe(0);
   await preflightNativeRestart({
     runtime: opts.runtime,
     scope,
@@ -1963,6 +2204,12 @@ test("startup and restart review use identical branch routes after adaptation", 
       review: opts.dependencies.review,
       dependencies: async () => [],
       invoke: async ({ args }) => {
+        if (args[0] === "project") {
+          expect(args).toContain("--branch");
+          return {
+            plan: { namespace: "b".repeat(64), compose_sha256: "d".repeat(64) },
+          };
+        }
         if (args[1] === "status") {
           return { network: "internet" };
         }
@@ -1981,4 +2228,140 @@ test("startup and restart review use identical branch routes after adaptation", 
     JSON.parse(observed[0]?.normalizedComposeJson ?? "{}").services.web.labels
       .caddy
   ).toBe("feature-a.app.hack.local, feature-a.app.hack.gy");
+});
+
+test("retained startup selects legacy labels only after runtime admission and before review", async () => {
+  for (const changed of [false, true]) {
+    const { opts } = await fixture(false);
+    const saved = {
+      run: "1".repeat(32),
+      owner: "c".repeat(32),
+      namespace: "b".repeat(64),
+      planId: "a".repeat(64),
+    };
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => {
+      const input = await prepare(request);
+      const compose = JSON.parse(input.normalizedComposeJson);
+      compose.services.web.labels = {
+        caddy: "app.hack.local",
+        "caddy.tls": "internal",
+        "caddy.reverse_proxy": "{{upstreams 3000}}",
+      };
+      return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+    };
+    const invoke = opts.dependencies.invoke!;
+    let admitted = false;
+    let reviewed = false;
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[0] === "runtime" && request.args[1] === "up") {
+        admitted = true;
+      }
+      if (request.args[0] === "project") {
+        expect(admitted).toBe(true);
+        return {
+          plan: {
+            namespace: request.args.includes("--branch")
+              ? "d".repeat(64)
+              : saved.namespace,
+            compose_sha256: "d".repeat(64),
+            source: await realpath(opts.scope.projectRoot),
+          },
+        };
+      }
+      if (request.args[1] === "restore-selection") {
+        expect(admitted).toBe(true);
+        return {
+          ...saved,
+          owner: changed ? "0".repeat(32) : saved.owner,
+          plan: saved.planId,
+          generation: "2".repeat(64),
+        };
+      }
+      return await invoke(request);
+    };
+    const review = opts.dependencies.review!;
+    opts.dependencies.review = async (request) => {
+      reviewed = true;
+      expect(request.reviewIdentity?.branch).toBeNull();
+      expect(
+        JSON.parse(request.input.normalizedComposeJson).services.web.labels
+          .caddy
+      ).toBe("app.hack.local");
+      return await review(request);
+    };
+    const running = startNativeProject({
+      ...opts,
+      scope: { ...opts.scope, branch: "feature-a" },
+      restore: saved,
+    });
+    if (changed) {
+      await expect(running).rejects.toThrow("restore selection changed");
+      expect(reviewed).toBe(false);
+    } else {
+      expect(await running).toBe(0);
+      expect(reviewed).toBe(true);
+    }
+  }
+});
+
+test("retained startup reviews the saved content ID instead of a newly resolved mutable tag", async () => {
+  const { opts, events } = await fixture(false);
+  const saved = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+  };
+  const image = `sha256:${"e".repeat(64)}`;
+  const stopped = stoppedGraph(saved);
+  const observed = {
+    ...stopped,
+    receipt: {
+      ...stopped.receipt,
+      normalized_input: {
+        namespace: saved.namespace,
+        original_compose_sha256: "d".repeat(64),
+        normalized_compose_sha256: "f".repeat(64),
+      },
+      resources: {
+        "container:web": {
+          ...stopped.receipt.resources["container:web"],
+          image,
+        },
+      },
+    },
+  };
+  opts.dependencies.retainedImages = selectNativeRetainedImages;
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: { web: { image: "redis:latest" } },
+    }),
+  });
+  const invoke = opts.dependencies.invoke!;
+  let beforeReview = true;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-image") {
+      throw new Error("mutable tag was unexpectedly resolved");
+    }
+    if (request.args[1] === "inspect" && beforeReview) {
+      expect(events).toContain("runtime up");
+      return observed;
+    }
+    if (request.args[1] === "restore-selection") {
+      return { ...saved, plan: saved.planId, generation: "2".repeat(64) };
+    }
+    return await invoke(request);
+  };
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) => {
+    beforeReview = false;
+    expect(
+      JSON.parse(request.input.normalizedComposeJson).services.web.image
+    ).toBe(image);
+    return await review(request);
+  };
+  expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
 });

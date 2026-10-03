@@ -16,6 +16,47 @@ pinned artifact. Each check has a 120-second timeout, 512 MiB Java heap, two wor
 and bounded output; temporary TLC metadata is removed after success or failure.
 No credentials or running VM are needed.
 
+## Missing post-reboot publications
+
+`absent-publication-recovery/Absent.tla` checks one explicitly selected cleanup
+racing one foreground publisher. The positive configuration explores 247 distinct
+states, including one recovery-process crash, two non-volume cleanup effects and
+one input-version change. Both participants acquire the foreground lock before the
+Engine lease. Ordinary publication occurs under the foreground lock before Engine
+admission, matching the implementation. The durable absence intent survives a
+crash; a restart cannot publish until cleanup and separate absence retirement are
+confirmed. A changed selection
+cannot resume cleanup. Completion and retirement are separate steps, so a crash
+between them remains visible.
+
+Four guard-removal controls require TLC exit 12 and a named same-state witness:
+
+| Control | Required failure |
+| --- | --- |
+| `negative` | `NoPrematurePublication` in `Publish`, with a durable intent, incomplete cleanup, no retirement and a newly published owner |
+| `unwitnessed-cleanup` | `NoUnwitnessedCleanup` in `CleanupOne`, with both locks held but no intent |
+| `stale-selection` | `NoUnwitnessedCleanup` in `CleanupOne`, with a durable intent but selected version 1 and current version 2 |
+| `unconfirmed-retirement` | `NoUnconfirmedRetirement` in `RetireAbsentPublisher`, before cleanup or intent |
+
+| Model action | Implementation boundary under `packages/runtime-core/src/provider/` |
+| --- | --- |
+| `AcquireRecoveryForeground` / `AcquireRecoveryEngine` | `graph/absent_publication_cleanup.rs`: deterministic lock-only reservation before the Engine lease; matches foreground startup's lock order |
+| `WriteIntent` | Private durable run-scoped absence intent before any cleanup effects |
+| `CleanupOne` / `CommitCleanup` | Exact selected, data-retaining `cleanup_owned(..., false)` and stopped receipt confirmation; tagged absent bridge authority remains distinct from pinned predecessors |
+| `RetireAbsentPublisher` | Separate durable absent-publication retirement proof tied to completed cleanup |
+| `AcquirePublisherForeground` / `AcquirePublisherEngine` / `Publish` | `graph/foreground/transport.rs` admission barrier plus `graph/foreground.rs` Engine acquisition; explicit retired binding needs completed proof |
+| `CrashRecovery` / `ChangeInputs` | Retained intent and exact retry; reinspection refuses changed host/guest boot, input bytes or resources |
+
+The model assumes validated legacy inputs, absent roots and resource observations
+are summarized by one version. It represents cooperating writers under two kernel
+locks and durable writes as atomic commits. It does not prove filesystem fsync,
+FD/path identity, raw hashes, PID reuse, private permissions, actual guest or
+physical host reboot, bridge cleanup, volume preservation, source-device migration,
+later restore generations, browser readiness or performance. Concrete refusal,
+interruption and data-marker tests remain required. The recorded old Owner is
+legacy corroboration, never a reconstructed foreground Pin or proof of original
+physical-volume continuity. No fairness or eventual recovery claim is made.
+
 ## Shared HTTPS lifetime
 
 `shared-https-lifetime/SharedHttps.tla` checks the last-lease release racing
@@ -46,6 +87,61 @@ does not establish eventual recovery or resource/performance improvements. The
 shared-owner process tests and startup/finalization/recovery regressions provide
 separate implementation evidence; native multi-application acceptance remains
 required before claiming complete concurrent application support.
+
+## Previous-boot shared HTTPS archival
+
+`previous-boot-shared-https/ArchiveHttps.tla` checks one explicit recovery racing
+another application's owner startup. It models the owner directory and control
+socket as separate atomic renames in either order. Native archival moves the
+socket first; the owner-first interleaving is an additional barrier control.
+The admission barrier survives one recovery
+crash while the provider cleanup lease does not; resume reacquires that lease and
+rechecks the exact selection before another move. Startup can observe an absent
+owner directory between the two moves, so retaining admission is essential.
+
+The positive configuration explores 92 distinct states from two initial inputs
+(eligible or refused), with one crash/resume and one input-generation change.
+Original artifacts remain in exactly one original or archived location. Completed
+archival and explicit frontend finalization are separate facts. Another
+application may create the next owner after archival commits; the selected
+application must still finish its own exact frontend recovery.
+
+Three guard-removal controls require TLC exit 12 and the named same-state witness:
+
+| Control | Required failure |
+| --- | --- |
+| `negative` | `NoPrematurePublication` in `Publish`, after an owner-only move and recovery crash, before socket archival or completion |
+| `stale-selection` | `NoUnprovedArchive` in `ArchiveOwner`, with selected generation 1 and current generation 2 after reacquiring the provider lease |
+| `unproved-archive` | `NoUnprovedArchive` in `ArchiveOwner`, with an ineligible selection despite held locks and a recorded intent |
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `AcquireAdmission` / `AcquireEngine` | Explicit previous-boot shared-owner recovery takes shared HTTPS admission before native provider/graph cleanup exclusion |
+| `Prepare` / `eligible` / `selected` | Exact current completed dead-owner cleanup, retired publisher, immediate boot succession and unchanged owner/lease/socket/executable/data observations |
+| `ArchiveOwner` / `ArchiveSocket` | Journaled no-signal, same-filesystem moves preserve selected owner/lease and socket inodes; each effect rechecks the selected state |
+| `Crash` / `Resume` / `ChangeInputs` | Durable admission barrier and intent survive interruption; exact dead recovery ownership and unchanged inputs are required to resume |
+| `Commit` / `Finalize` | Completed archive proof remains distinct from ordinary lease-release acknowledgement; explicit v3 frontend recovery consumes only its exact selected proof |
+| `AcquireStartup` / `Publish` | Normal shared-owner admission prevents a new owner during incomplete archival |
+
+Validated graph, process, filesystem and boot observations are summarized by one
+eligibility flag and input version. Admission identity and recovery-process death
+are assumed validated before resume. Cooperating provider writers cannot change
+the selection under the provider lease; legacy startup must separately remain
+quiescent. Atomic renames and durable intent/completion writes are abstractions,
+not fsync proofs. The native implementation is in
+`packages/runtime-core/src/provider/shared_https_recovery.rs`; explicit v3
+frontend selection is in `src/backends/native-project-recovery.ts` and
+`src/backends/native-https-owner.ts`. This model covers the present-socket path
+with two moves. The both-absent socket/parent variant has one owner move and
+requires separate concrete absence, process and port regression controls.
+The implementation also refuses completed replay while a newer shared owner is
+active; the model's post-commit startup interleaving is a safety bound, not proof
+that this interrupted frontend can finish without first restoring quiescence.
+This model does not establish executable absence, PID reuse,
+socket/FD identity, permissions, hash integrity, physical reboot, retained volume
+continuity, multiple-lease recovery, browser readiness or performance. Concrete
+refusal, interrupted-archive, process/socket and native application checks remain
+required. No fairness or eventual recovery claim is made.
 
 ## Active dependency rebinding
 

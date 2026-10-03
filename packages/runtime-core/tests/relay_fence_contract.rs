@@ -28,7 +28,7 @@ fn interrupted_fence_publication_requires_canonical_valid_transition() {
         ("closing", "stopped"),
         ("stopped", "closing"),
     ] {
-        for action in ["stop", "remove", "start", "inspect"] {
+        for action in ["stop", "remove", "start", "inspect", "inspect-retirement"] {
             let before = format!("7 {allocation} {phase}\n");
             let pending = format!("7 {allocation} {next}\n");
             fs::write(root.join("state"), &before).unwrap();
@@ -85,7 +85,7 @@ fn interrupted_fence_publication_requires_canonical_valid_transition() {
         "closing",
     ] {
         for next in ["preparing", "cancelled", "launching", "stopped"] {
-            for action in ["stop", "remove", "start", "inspect"] {
+            for action in ["stop", "remove", "start", "inspect", "inspect-retirement"] {
                 let before = format!("6 {allocation} {phase}\n");
                 let pending = format!("7 {allocation} {next}\n");
                 fs::write(root.join("state"), &before).unwrap();

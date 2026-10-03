@@ -197,6 +197,34 @@ pub(super) fn completed_for_recovery(
         .transpose()
 }
 
+/// Truncated diagnostic history may outlive a superseded recovery's exact
+/// completion. Its latest stopped generation must still prove replacement of
+/// that original container; this never supplies current cleanup authority.
+#[cfg(target_os = "macos")]
+pub(super) fn confirms_truncated_newer_generation(
+    root: &Path,
+    current: &Receipt,
+    original: &Receipt,
+) -> Result<bool, CandidateError> {
+    let Some(history) = verified_for_recovery(root, current)? else {
+        return Ok(false);
+    };
+    Ok(history.truncated
+        && history.entries.last().is_some_and(|stopped| {
+            original.resources.iter().any(|(key, resource)| {
+                resource.kind == Kind::Container
+                    && resource.id.as_deref().is_some_and(|old| {
+                        stopped
+                            .resources
+                            .get(key)
+                            .filter(|new| new.kind == Kind::Container)
+                            .and_then(|new| new.id.as_deref())
+                            .is_some_and(|new| new != old)
+                    })
+            })
+        }))
+}
+
 /// A superseded bridge sidecar must bind to the most recent fully stopped
 /// generation, not merely to some older container in the bounded history.
 #[cfg(target_os = "macos")]

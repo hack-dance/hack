@@ -2,7 +2,7 @@
 use super::*;
 use crate::provider::{
     host_endpoint::HostEndpoint,
-    relay_owner::{Context, Grant, GraphScope, RelayOwner},
+    relay_owner::{Context, Grant, GraphScope, RelayOwner, publication::dead},
 };
 use sha2::{Digest, Sha256};
 
@@ -89,6 +89,7 @@ pub(super) fn cleanup_with_relay_expected(
     }
     let scope = graph_scope(context(&receipt.owner, engine.guest().boot_id())?, run)?;
     let environment = environment::cleanup_inventory(candidate, &engine, &receipt, &root)?;
+    bridges::cleanup::retire_exited_for_cleanup(candidate, &engine, &receipt)?;
     let bridge_selection = bridges::cleanup::capture(candidate, &engine, &receipt)?;
     let effect = cleanup_effect(
         &receipt,
@@ -132,7 +133,7 @@ pub(super) fn cleanup_with_relay_expected(
             &bridge_selection,
         )
     })?;
-    finish_confirmation(&mut coordinator, &mut cleaned, &root)?;
+    finish_confirmation(&mut coordinator, &mut cleaned, &root, None, None)?;
     Ok(cleaned)
 }
 
@@ -205,7 +206,7 @@ pub fn resume_relay_cleanup(
             &bridge_selection,
         )
     })?;
-    finish_confirmation(&mut coordinator, &mut cleaned, &root)?;
+    finish_confirmation(&mut coordinator, &mut cleaned, &root, None, None)?;
     Ok(cleaned)
 }
 
@@ -218,6 +219,46 @@ pub fn confirm_relay_cleanup(
     remove_data: bool,
     control_root: &std::path::Path,
     selection: crate::provider::relay_owner::lifecycle_intent::Selection,
+) -> Result<Receipt, CandidateError> {
+    confirm_relay_cleanup_fenced(
+        candidate,
+        run,
+        remove_data,
+        control_root,
+        selection,
+        None,
+        None,
+    )
+}
+
+pub(super) fn confirm_relay_cleanup_selected(
+    candidate: &Candidate,
+    run: &str,
+    remove_data: bool,
+    control_root: &std::path::Path,
+    selection: crate::provider::relay_owner::lifecycle_intent::Selection,
+    expected_identity: &str,
+    relay_selection_sha256: &str,
+) -> Result<Receipt, CandidateError> {
+    confirm_relay_cleanup_fenced(
+        candidate,
+        run,
+        remove_data,
+        control_root,
+        selection,
+        Some(expected_identity),
+        Some(relay_selection_sha256),
+    )
+}
+
+fn confirm_relay_cleanup_fenced(
+    candidate: &Candidate,
+    run: &str,
+    remove_data: bool,
+    control_root: &std::path::Path,
+    selection: crate::provider::relay_owner::lifecycle_intent::Selection,
+    expected_identity: Option<&str>,
+    relay_selection_sha256: Option<&str>,
 ) -> Result<Receipt, CandidateError> {
     use crate::provider::relay_owner::lifecycle_intent::{Coordinator, Phase};
     let engine = Engine::connect_cleanup(candidate)?;
@@ -243,17 +284,53 @@ pub fn confirm_relay_cleanup(
     {
         return Err(refused());
     }
+    let relay = match (expected_identity, relay_selection_sha256) {
+        (Some(identity), Some(sha256)) => {
+            use crate::provider::relay_owner::{lifecycle_intent::Inspection, publication::dead};
+            let inspected = Inspection::load(control_root, expected)?;
+            let witness =
+                dead::CleanupWitness::acquire(control_root, expected, &inspected.process)?;
+            if inspected.recovery_fingerprint != identity
+                || inspected.owner == [0; 16]
+                || inspected.publication == [0; 32]
+                || witness.selection_sha256()? != sha256
+                || witness
+                    .present_identity()
+                    .is_some_and(|(owner, publication)| {
+                        inspected.owner != owner || inspected.publication != publication
+                    })
+            {
+                return Err(refused());
+            }
+            Some(witness)
+        }
+        (None, None) => None,
+        _ => return Err(refused()),
+    };
     let mut coordinator = Coordinator::resume(control_root, selection)?;
+    if let Some(identity) = expected_identity {
+        coordinator.verify_recovery_identity(
+            &marker.selection(),
+            graph_scope(expected, run)?,
+            identity,
+        )?;
+    }
     let inspect = || {
-        inspect_cleanup(
+        let observed = inspect_cleanup(
             candidate,
             &engine,
             &receipt,
             remove_data,
             &environment,
             &bridge_selection,
-        )
+        )?;
+        if expected_identity.is_some() {
+            interrupted_start_cleanup::verify_retained_volumes(&engine, &receipt)?;
+        }
+        verify_selected_relay(relay.as_ref())?;
+        Ok(observed)
     };
+    verify_selected_relay(relay.as_ref())?;
     match coordinator.phase() {
         Phase::EffectStarted => coordinator.confirm(effect, inspect)?,
         Phase::Confirmed if coordinator.acknowledgement_pending() => {
@@ -261,14 +338,40 @@ pub fn confirm_relay_cleanup(
         }
         _ => return Err(refused()),
     }
-    finish_confirmation(&mut coordinator, &mut receipt, &root)?;
+    if let Some(identity) = expected_identity {
+        coordinator.verify_recovery_identity(
+            &marker.selection(),
+            graph_scope(expected, run)?,
+            identity,
+        )?;
+    }
+    verify_selected_relay(relay.as_ref())?;
+    finish_confirmation(
+        &mut coordinator,
+        &mut receipt,
+        &root,
+        relay.as_ref(),
+        expected_identity.map(|_| &engine),
+    )?;
+    verify_selected_relay(relay.as_ref())?;
     Ok(receipt)
+}
+
+pub(super) fn verify_selected_relay(
+    relay: Option<&dead::CleanupWitness>,
+) -> Result<(), CandidateError> {
+    if let Some(witness) = relay {
+        witness.verify()?;
+    }
+    Ok(())
 }
 
 fn finish_confirmation(
     coordinator: &mut crate::provider::relay_owner::lifecycle_intent::Coordinator,
     receipt: &mut Receipt,
     root: &std::path::Path,
+    relay: Option<&dead::CleanupWitness>,
+    retained_engine: Option<&Engine<'_>>,
 ) -> Result<(), CandidateError> {
     use crate::provider::relay_owner::lifecycle_intent::Phase;
     if coordinator.phase() != Phase::Confirmed || !coordinator.acknowledgement_pending() {
@@ -276,14 +379,28 @@ fn finish_confirmation(
     }
     #[cfg(test)]
     fault_pause(root, &receipt.run, "relay-before-confirmed-receipt")?;
-    let marker = receipt.relay_cleanup.as_mut().ok_or_else(refused)?;
-    if marker.operation != coordinator.operation() {
+    if receipt
+        .relay_cleanup
+        .as_ref()
+        .ok_or_else(refused)?
+        .operation
+        != coordinator.operation()
+    {
         return Err(refused());
     }
-    marker.phase = cleanup_enrollment::Phase::Confirmed;
+    if let Some(engine) = retained_engine {
+        interrupted_start_cleanup::verify_retained_volumes(engine, receipt)?;
+    }
+    verify_selected_relay(relay)?;
+    receipt.relay_cleanup.as_mut().ok_or_else(refused)?.phase =
+        cleanup_enrollment::Phase::Confirmed;
     state::write(&root.join("state.json"), receipt)?;
     #[cfg(test)]
     fault_pause(root, &receipt.run, "relay-before-ack")?;
+    if let Some(engine) = retained_engine {
+        interrupted_start_cleanup::verify_retained_volumes(engine, receipt)?;
+    }
+    verify_selected_relay(relay)?;
     coordinator.acknowledge()
 }
 
@@ -490,6 +607,66 @@ pub(super) fn inspect_cleanup(
     environment: &super::super::environment_recovery::GraphInventory,
     bridge_selection: &bridges::cleanup::Selection,
 ) -> Result<[u8; 32], CandidateError> {
+    inspect_cleanup_recovery(
+        candidate,
+        engine,
+        expected,
+        remove_data,
+        environment,
+        bridge_selection,
+        None,
+    )
+}
+pub(super) fn inspect_cleanup_recovery(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    expected: &Receipt,
+    remove_data: bool,
+    environment: &super::super::environment_recovery::GraphInventory,
+    bridge_selection: &bridges::cleanup::Selection,
+    host_pin: Option<&super::host_pin_recovery::Witness>,
+) -> Result<[u8; 32], CandidateError> {
+    inspect_cleanup_selected(
+        candidate,
+        engine,
+        expected,
+        remove_data,
+        environment,
+        bridge_selection,
+        SelectedCleanupProof::Existing(host_pin),
+    )
+}
+pub(super) fn inspect_cleanup_absence(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    expected: &Receipt,
+    environment: &super::super::environment_recovery::GraphInventory,
+    bridge_selection: &bridges::cleanup::Selection,
+    witness: &super::absent_publication_cleanup::Selection,
+) -> Result<[u8; 32], CandidateError> {
+    inspect_cleanup_selected(
+        candidate,
+        engine,
+        expected,
+        false,
+        environment,
+        bridge_selection,
+        SelectedCleanupProof::Absence(witness),
+    )
+}
+enum SelectedCleanupProof<'a> {
+    Existing(Option<&'a super::host_pin_recovery::Witness>),
+    Absence(&'a super::absent_publication_cleanup::Selection),
+}
+fn inspect_cleanup_selected(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    expected: &Receipt,
+    remove_data: bool,
+    environment: &super::super::environment_recovery::GraphInventory,
+    bridge_selection: &bridges::cleanup::Selection,
+    proof: SelectedCleanupProof<'_>,
+) -> Result<[u8; 32], CandidateError> {
     let (receipt, root) = archive::load_confirmation(candidate, engine, &expected.run)?;
     match fs::symlink_metadata(root.join("state.pending")) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -533,10 +710,33 @@ pub(super) fn inspect_cleanup(
         require_retained_volume(resource, value.is_some(), remove_data)?;
         observations.insert(key, value);
     }
-    if &bridges::cleanup::read(engine, &receipt, &root)? != bridge_selection {
+    let recorded = match proof {
+        SelectedCleanupProof::Absence(witness) => {
+            bridges::cleanup::read_recovery_absence(engine, &receipt, &root, witness)?
+        }
+        SelectedCleanupProof::Existing(host_pin) => {
+            bridges::cleanup::read_recovery(engine, &receipt, &root, host_pin)?
+        }
+    };
+    if &recorded != bridge_selection {
         return Err(refused());
     }
-    bridges::cleanup::verify(candidate, engine, &receipt, bridge_selection)?;
+    match proof {
+        SelectedCleanupProof::Absence(witness) => bridges::cleanup::verify_recovery_absence(
+            candidate,
+            engine,
+            &receipt,
+            bridge_selection,
+            witness,
+        )?,
+        SelectedCleanupProof::Existing(host_pin) => bridges::cleanup::verify_recovery(
+            candidate,
+            engine,
+            &receipt,
+            bridge_selection,
+            host_pin,
+        )?,
+    }
     environment::verify_cleanup(candidate, engine, &receipt, &root, environment)?;
     probes::verify_cleanup(engine, &receipt)?;
     startup::verify_cleanup(engine, &receipt)?;

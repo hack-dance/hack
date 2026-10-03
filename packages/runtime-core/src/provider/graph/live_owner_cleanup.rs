@@ -20,6 +20,19 @@ struct Intent {
     listeners_retired: bool,
     complete_sha256: Option<String>,
 }
+/// Dispatch only an exact completed recovery generation; history is inert.
+pub(super) fn current_completion(
+    root: &std::path::Path,
+    receipt: &Receipt,
+) -> Result<bool, CandidateError> {
+    if !exists(&root.join(FILE))? {
+        return Ok(false);
+    }
+    let intent: Intent = state::read(&root.join(FILE))?;
+    let complete = digest(receipt)?;
+    Ok(intent.complete_sha256.as_deref() == Some(complete.as_str()))
+}
+
 fn refused() -> CandidateError {
     error(
         "graph_live_owner_recovery",
@@ -45,7 +58,6 @@ fn no_pending(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
         "one-off.json",
         "one-off.pending",
         "one-off-normalization.json",
-        "dependency-rebind.json",
         "dependency-rebind.pending",
         "dead-owner-cleanup.pending",
         "relay-cleanup-bridges.pending",
@@ -54,6 +66,7 @@ fn no_pending(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
             return Err(refused());
         }
     }
+    startup::require_dependency_rebind_complete(root, receipt)?;
     dead_owner_cleanup::require_historical_recovery(root, receipt)
 }
 fn ready(receipt: &Receipt) -> Result<(), CandidateError> {
@@ -294,6 +307,7 @@ pub fn recover_live_owner(
     if intent.foreground_sha256 != foreground.fingerprint() || intent.relay != relay.selection() {
         return Err(refused());
     }
+    startup::require_dependency_rebind_recovery_complete(&root, &intent.original, &intent.boot)?;
     foreground.verify_retirement_ready()?;
     relay.verify()?;
     host_relay::cleanup_preflight(&engine, &receipt, &root, false)?;
@@ -325,6 +339,8 @@ pub fn recover_live_owner(
     relay.verify()?;
     intent.complete_sha256 = Some(digest(&cleaned)?);
     save(&root, &intent)?;
+    // Commit independently verified owned absence before archival. A crash during
+    // a rename resumes through the completed intent, never through host adoption.
     drop(relay);
     drop(foreground);
     finish_retirement(candidate, &engine, &cleaned, &root, &intent)?;
@@ -368,6 +384,9 @@ fn finish_retirement(
     }
     startup::verify_cleanup(engine, receipt)?;
     probes::verify_cleanup(engine, receipt)?;
+    archive_completed_refresh(root, &intent.original, receipt, &intent.boot, &|| {
+        engine.guest().verify()
+    })?;
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
     dead::retire(
         &startup.control_root,
@@ -380,8 +399,77 @@ fn finish_retirement(
         &intent.foreground_sha256,
         &digest(receipt)?,
     )?;
-    dependency_slots::recover_cleaned(candidate, receipt)?;
+    dependency_slots::recover_cleaned(candidate, receipt, None)?;
     engine.guest().verify()
+}
+
+/// Completed cleanup grants archival, not refresh replay. The same exact ready
+/// generation is checked again on retry, including a journal already moved by
+/// an interrupted owned rename.
+fn archive_completed_refresh(
+    root: &Path,
+    original: &Receipt,
+    cleaned: &Receipt,
+    boot: &str,
+    verify: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    let generation = service_exec_generation(original)?;
+    if exists(&root.join("dependency-rebind.json"))?
+        || exists(&root.join(format!("dependency-rebind-history-{generation}")))?
+    {
+        startup::archive_retired_dependency_rebind(root, original, cleaned, boot, verify)
+    } else {
+        startup::require_dependency_rebind_recovery_complete(root, original, boot)
+    }
+}
+
+/// A superseded cleanup is inert history. Prefer its exact stopped generation;
+/// verified truncation may establish replacement of a validated original after
+/// that completion is evicted. Neither path supplies current cleanup authority.
+pub(super) fn require_historical_recovery(
+    root: &Path,
+    current: &Receipt,
+) -> Result<(), CandidateError> {
+    if exists(&root.join("live-owner-cleanup.pending"))? {
+        return Err(refused());
+    }
+    if !exists(&root.join(FILE))? {
+        return Ok(());
+    }
+    let prior: Intent = state::read(&root.join(FILE))?;
+    let complete = prior.complete_sha256.as_deref().ok_or_else(refused)?;
+    let stopped = restore_history::completed_for_recovery(root, current, complete)?;
+    let historical = stopped.as_ref().unwrap_or(&prior.original);
+    validate(&prior, historical, &prior.original_sha256, &prior.boot)?;
+    if stopped.is_none()
+        && (prior.original.version != current.version
+            || prior.original.run != current.run
+            || prior.original.owner != current.owner
+            || prior.original.namespace != current.namespace
+            || prior.original.plan_id != current.plan_id
+            || !restore_history::confirms_truncated_newer_generation(
+                root,
+                current,
+                &prior.original,
+            )?)
+    {
+        return Err(refused());
+    }
+    if !prior.listeners_retired
+        || !historical.resources.iter().any(|(key, old)| {
+            old.kind == Kind::Container
+                && old.id.as_ref().is_some_and(|id| {
+                    current
+                        .resources
+                        .get(key)
+                        .and_then(|now| now.id.as_ref())
+                        .is_some_and(|current_id| current_id != id)
+                })
+        })
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 pub(super) fn retained(root: &Path, receipt: &Receipt) -> Result<bool, CandidateError> {
@@ -461,6 +549,26 @@ mod tests {
         serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"ready-observed","readiness":{},"resources":{},"relay_startup":{"control_only":true,"guest_root":null,"control_root":"/private/owned","artifact":"e".repeat(64),"services":{}}})).unwrap()
     }
     #[test]
+    fn current_recovery_dispatch_does_not_select_historical_completion() {
+        let fixture = super::super::tests::Fixture::new();
+        let mut receipt = receipt();
+        receipt.phase = "stopped-data-retained".into();
+        assert!(!current_completion(&fixture.0, &receipt).unwrap());
+        let mut proof = completed(receipt.clone());
+        proof.complete_sha256 = Some(digest(&receipt).unwrap());
+        let path = fixture.0.join(FILE);
+        state::write(&path, &proof).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(current_completion(&fixture.0, &receipt).unwrap());
+        receipt.owner = "9".repeat(32);
+        assert!(!current_completion(&fixture.0, &receipt).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::write(&path, b"unconfirmed").unwrap();
+        assert!(current_completion(&fixture.0, &receipt).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"unconfirmed");
+    }
+
+    #[test]
     fn only_fully_ready_receipts_are_admitted() {
         let mut value = receipt();
         ready(&value).unwrap();
@@ -495,6 +603,80 @@ mod tests {
             assert_eq!(fs::read(&path).unwrap(), b"retained");
             fs::remove_file(path).unwrap();
         }
+    }
+    #[test]
+    fn completed_terminal_refresh_is_not_a_pending_mutation() {
+        let fixture = super::super::tests::Fixture::new();
+        let mut receipt = receipt();
+        receipt
+            .readiness
+            .insert("init".into(), Condition::Completed);
+        receipt.relay_startup.as_mut().unwrap().services.insert(
+            "init".into(),
+            serde_json::from_value(json!({"generation":"f".repeat(32),
+                "phase":"completed","started_at":null,"bindings":{}}))
+            .unwrap(),
+        );
+        let journal = json!({"version":1,"operation":"e".repeat(32),
+            "run":receipt.run,"owner":receipt.owner,"boot":"fixture-boot",
+            "expected_generation":"a".repeat(64),"phase":"completed",
+            "slots":{},"processes":{},"completed_services":["init"],
+            "completed_generation":service_exec_generation(&receipt).unwrap()});
+        let path = fixture.0.join("dependency-rebind.json");
+        state::write(&path, &journal).unwrap();
+        let before = fs::read(&path).unwrap();
+        no_pending(&fixture.0, &receipt).unwrap();
+        startup::require_dependency_rebind_recovery_complete(&fixture.0, &receipt, "fixture-boot")
+            .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let mut partial = journal.clone();
+        partial["phase"] = json!("provisioning");
+        state::write(&path, &partial).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(no_pending(&fixture.0, &receipt).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let mut cleaned = receipt.clone();
+        cleaned.phase = "stopped-data-retained".into();
+        let generation = service_exec_generation(&receipt).unwrap();
+        let history = fixture
+            .0
+            .join(format!("dependency-rebind-history-{generation}"));
+        let mut replaced = journal.clone();
+        replaced["completed_generation"] = json!("9".repeat(64));
+        state::write(&path, &replaced).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(
+            archive_completed_refresh(&fixture.0, &receipt, &cleaned, "fixture-boot", &|| Ok(()),)
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!history.exists());
+        state::write(&path, &journal).unwrap();
+        let before = fs::read(&path).unwrap();
+        let interrupted = || {
+            if history.join("proof.json").exists() && path.exists() {
+                Err(refused())
+            } else {
+                Ok(())
+            }
+        };
+        assert!(archive_completed_refresh(
+            &fixture.0, &receipt, &cleaned, "fixture-boot", &interrupted,
+        ).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::rename(&path, history.join("dependency-rebind.json")).unwrap();
+        for _ in 0..2 {
+            archive_completed_refresh(&fixture.0, &receipt, &cleaned, "fixture-boot", &|| Ok(()))
+                .unwrap();
+        }
+        assert_eq!(
+            fs::read(history.join("dependency-rebind.json")).unwrap(),
+            before
+        );
+        assert_eq!(
+            state::read::<Value>(&history.join("proof.json")).unwrap()["complete"],
+            true
+        );
     }
     #[test]
     fn immutable_selection_allows_cleanup_progress_but_not_resource_replacement() {
@@ -536,6 +718,71 @@ mod tests {
             bridges: serde_json::from_value(json!({"version":1,"owner":original.owner,"boot":"boot","run":original.run,"plan":original.plan_id,"capacity":0,"serial":0,"selected":{}})).unwrap(),
             prior_bridges: None, listeners_retired: true, complete_sha256: Some(digest(&stopped).unwrap()), original,
         }
+    }
+    #[test]
+    fn historical_recovery_survives_eviction_without_lending_current_authority() {
+        let fixture = super::super::tests::Fixture::new();
+        let prior = completed(generation(1, "ready-observed"));
+        state::write(&fixture.0.join(FILE), &prior).unwrap();
+        for number in 1..=12 {
+            restore_history::retain(&fixture.0, &generation(number, "stopped-data-retained"))
+                .unwrap();
+        }
+        let current = generation(13, "ready-observed");
+        assert!(
+            restore_history::completed_for_recovery(
+                &fixture.0,
+                &current,
+                prior.complete_sha256.as_deref().unwrap(),
+            )
+            .unwrap()
+            .is_none()
+        );
+        let before = fs::read(fixture.0.join(FILE)).unwrap();
+        require_historical_recovery(&fixture.0, &current).unwrap();
+        assert!(!current_completion(&fixture.0, &current).unwrap());
+        assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), before);
+        let stopped = generation(13, "stopped-data-retained");
+        state::write(&fixture.0.join("state.json"), &stopped).unwrap();
+        assert!(retained(&fixture.0, &stopped).is_err());
+        assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), before);
+    }
+    #[test]
+    fn evicted_historical_recovery_requires_valid_retired_original_and_newer_history() {
+        let fixture = super::super::tests::Fixture::new();
+        let prior = completed(generation(1, "ready-observed"));
+        let current = generation(13, "ready-observed");
+        state::write(&fixture.0.join(FILE), &prior).unwrap();
+        assert!(require_historical_recovery(&fixture.0, &current).is_err());
+        restore_history::retain(&fixture.0, &generation(2, "stopped-data-retained")).unwrap();
+        assert!(require_historical_recovery(&fixture.0, &current).is_err());
+        for number in 3..=12 {
+            restore_history::retain(&fixture.0, &generation(number, "stopped-data-retained"))
+                .unwrap();
+        }
+        for case in 0..7 {
+            let mut bad = completed(generation(1, "ready-observed"));
+            match case {
+                0 => bad.complete_sha256 = None,
+                1 => bad.complete_sha256 = Some("invalid".into()),
+                2 => bad.listeners_retired = false,
+                3 => bad.original_sha256 = "0".repeat(64),
+                4 => {
+                    bad.original.owner = "0".repeat(32);
+                    bad.original_sha256 = digest(&bad.original).unwrap();
+                }
+                5 => bad.boot.clear(),
+                6 => bad = completed(current.clone()),
+                _ => unreachable!(),
+            }
+            state::write(&fixture.0.join(FILE), &bad).unwrap();
+            let before = fs::read(fixture.0.join(FILE)).unwrap();
+            assert!(require_historical_recovery(&fixture.0, &current).is_err());
+            assert_eq!(fs::read(fixture.0.join(FILE)).unwrap(), before);
+        }
+        state::write(&fixture.0.join(FILE), &prior).unwrap();
+        state::write(&fixture.0.join("live-owner-cleanup.pending"), &json!({})).unwrap();
+        assert!(require_historical_recovery(&fixture.0, &current).is_err());
     }
     #[test]
     fn repeated_recovery_does_not_depend_on_evicted_restore_history_or_grow_archives() {

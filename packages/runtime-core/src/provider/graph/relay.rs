@@ -117,7 +117,7 @@ pub(super) fn operate(
     };
     let confirmed = match action {
         "start" => result == "running\n",
-        "inspect" => ["running\n", "exited\n"].contains(&result.as_str()),
+        "inspect" | "inspect-retirement" => ["running\n", "exited\n"].contains(&result.as_str()),
         "stop" => result == "stopped\n",
         "remove" => result == "removed\n",
         _ => false,
@@ -129,6 +129,40 @@ pub(super) fn operate(
         ));
     }
     Ok(result.trim().to_owned())
+}
+
+/// Read-only proof for a partially removed reservation. An absent allocation
+/// is accepted only with the exact slot's stopped fence in this guest boot.
+#[cfg(target_os = "macos")]
+pub(super) fn retirement_absence(
+    engine: &Engine<'_>,
+    slot: u8,
+    assignment: &bridges::Assignment,
+) -> Result<&'static str, CandidateError> {
+    let relay = assignment.relay.as_ref().ok_or_else(|| {
+        error(
+            "graph_bridge_observation",
+            "Missing relay intent during cleanup.",
+        )
+    })?;
+    let slot_arg = slot.to_string();
+    let serial_arg = relay.launch_serial.to_string();
+    let args = [
+        assignment.reservation.as_str(),
+        slot_arg.as_str(),
+        serial_arg.as_str(),
+    ];
+    let result = engine
+        .guest()
+        .execute_cleanup(include_str!("relay-retired-absence.sh"), &args)?;
+    match result.as_str() {
+        "absent\n" => Ok("absent"),
+        "present\n" => Ok("present"),
+        _ => Err(error(
+            "graph_bridge_observation",
+            "Unconfirmed retired relay allocation; cleanup made no change.",
+        )),
+    }
 }
 
 /// Actual relay-child and listener identity captured before their guest receipts
@@ -322,6 +356,123 @@ pub(super) fn verify_cleanup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn retirement_inspection_refuses_reused_pid_before_live_classification() {
+        use std::process::Command;
+        let fixture = super::super::tests::Fixture::new();
+        let process = fixture.0.join("recorded-process-stat");
+        std::fs::write(&process, "present").unwrap();
+        let source = include_str!("relay.sh");
+        let begin = source
+            .find("if test \"$action\" = inspect-retirement && test -e")
+            .unwrap();
+        let end = begin + source[begin..].find("if alive; then").unwrap();
+        let guard = source[begin..end].replace("/proc/$pid/stat", "$1/recorded-process-stat");
+        let program = format!(
+            "set -efu\naction=$2; current=$3; pid=42; born=100\nstart_ticks() {{ printf '%s\\n' \"$current\"; }}\n{guard}printf 'accepted\\n'\n"
+        );
+        let run = |action: &str, current: &str| {
+            Command::new("/bin/sh")
+                .args(["-c", &program, "retirement-pid-test"])
+                .arg(&fixture.0)
+                .args([action, current])
+                .output()
+                .unwrap()
+        };
+        assert!(!run("inspect-retirement", "101").status.success());
+        assert_eq!(run("inspect-retirement", "100").stdout, b"accepted\n");
+        assert_eq!(run("inspect", "101").stdout, b"accepted\n");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn retired_absence_requires_exact_stopped_fence_and_no_replaced_paths() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+        use std::process::Command;
+
+        let fixture = super::super::tests::Fixture::new();
+        let base = fixture.0.join("guest-relay-absence");
+        let controls = base.join("relay-slots/slot-0");
+        std::fs::create_dir_all(base.join("graph-relays")).unwrap();
+        std::fs::create_dir_all(&controls).unwrap();
+        for dir in [
+            &base,
+            &base.join("graph-relays"),
+            &base.join("relay-slots"),
+            &controls,
+        ] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let state = controls.join("state");
+        let pending = controls.join("pending");
+        let lock = controls.join("lock");
+        let allocation = "a".repeat(32);
+        std::fs::write(&lock, "").unwrap();
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let owner = base.metadata().unwrap();
+        let script = include_str!("relay-retired-absence.sh")
+            .replace(
+                "test \"$(findmnt -n -o FSTYPE --target /run/hack-local)\" = tmpfs",
+                ":",
+            )
+            .replace("/run/hack-local", base.to_str().unwrap())
+            // Translate GNU guest stat formats to macOS stat while preserving
+            // the real permission, link-count and size checks in this fixture.
+            .replace("stat -c %u:%g:%a:%h", "/usr/bin/stat -f %u:%g:%Lp:%l")
+            .replace("stat -c %u:%g:%a", "/usr/bin/stat -f %u:%g:%Lp")
+            .replace("stat -c %s", "/usr/bin/stat -f %z")
+            .replace("0:0", &format!("{}:{}", owner.uid(), owner.gid()))
+            .replace("flock -w 7 9", ":");
+        let run = |allocation: &str, serial: &str| {
+            Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    &script,
+                    "retired-absence-test",
+                    allocation,
+                    "0",
+                    serial,
+                ])
+                .output()
+                .unwrap()
+        };
+        let write_state = |value: String| {
+            std::fs::write(&state, value).unwrap();
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        write_state(format!("7 {allocation} stopped\n"));
+        let valid = run(&allocation, "7");
+        assert!(valid.status.success(), "{:?}", valid.stderr);
+        assert_eq!(valid.stdout, b"absent\n");
+        assert!(!run(&"b".repeat(32), "7").status.success());
+        assert!(!run(&allocation, "8").status.success());
+        for phase in [
+            "launching",
+            "closing",
+            "preparing",
+            "discarded",
+            "cancelled",
+        ] {
+            write_state(format!("7 {allocation} {phase}\n"));
+            assert!(!run(&allocation, "7").status.success(), "{phase}");
+        }
+        write_state(format!("7 {allocation} stopped\n"));
+        std::fs::write(&pending, format!("7 {allocation} stopped\n")).unwrap();
+        assert!(!run(&allocation, "7").status.success());
+        std::fs::remove_file(&pending).unwrap();
+        let socket = base.join("bridge-00.sock");
+        symlink("replaced", &socket).unwrap();
+        assert!(!run(&allocation, "7").status.success());
+        std::fs::remove_file(&socket).unwrap();
+        let allocation_root = base.join("graph-relays").join(&allocation);
+        symlink("replaced", &allocation_root).unwrap();
+        assert!(!run(&allocation, "7").status.success());
+        std::fs::remove_file(&allocation_root).unwrap();
+        std::fs::create_dir(&allocation_root).unwrap();
+        assert_eq!(run(&allocation, "7").stdout, b"present\n");
+    }
     #[test]
     fn observer_descriptor_loop_expands_only_its_controlled_glob() {
         use std::os::unix::fs::symlink;

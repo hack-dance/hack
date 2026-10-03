@@ -222,7 +222,9 @@ pub(super) fn prepare(resource: &Resource, inspected: &Value) -> Result<Prepared
     match (running, state["Status"].as_str(), pid) {
         (true, Some("running"), 1..) => {}
         (false, Some("exited"), 0) => {}
-        (false, Some("created"), 0) if state["ExitCode"] == 0 && state["OOMKilled"] == false => {}
+        // Docker may assign a nonzero exit code when startup fails before the
+        // container ever runs. Preserve that failure without requesting a stop.
+        (false, Some("created"), 0) if state["OOMKilled"] == false => {}
         _ => return Err(refused()),
     }
     Ok(Prepared {
@@ -399,11 +401,81 @@ mod tests {
         value["State"]["Running"] = json!(false);
         value["State"]["Status"] = json!("created");
         value["State"]["Pid"] = json!(0);
-        assert!(!prepare(&resource, &value).unwrap().running);
-        assert_eq!(terminal(&resource, &value, false).unwrap().exit_code, 0);
-        assert!(terminal(&resource, &value, true).is_err());
+        for code in [0, 126, 127, 128, 255] {
+            value["State"]["ExitCode"] = json!(code);
+            assert!(!prepare(&resource, &value).unwrap().running);
+            let evidence = terminal(&resource, &value, false).unwrap();
+            assert_eq!(evidence.exit_code, code);
+            assert!(!evidence.stop_requested && !evidence.oom_killed);
+            assert!(terminal(&resource, &value, true).is_err());
+        }
         value["State"]["Pid"] = json!(42);
         assert!(terminal(&resource, &value, false).is_err());
+    }
+
+    #[test]
+    fn created_start_failure_does_not_strand_running_siblings_or_lose_failure_evidence() {
+        let (resource, mut value) = fixture();
+        value["State"]["Running"] = json!(false);
+        value["State"]["Status"] = json!("created");
+        value["State"]["Pid"] = json!(0);
+        value["State"]["ExitCode"] = json!(128);
+        value["State"]["Error"] = json!("synthetic private startup details");
+        let failed = prepare(&resource, &value).unwrap();
+        let mut selected = vec![failed.clone()];
+        for index in 1..=9 {
+            let (mut sibling, mut observed) = fixture();
+            sibling.id = Some(format!("{index:064x}"));
+            observed["Id"] = json!(sibling.id);
+            selected.push(prepare(&sibling, &observed).unwrap());
+        }
+        let stop_ids = selected
+            .iter()
+            .filter(|prepared| prepared.running)
+            .map(|prepared| &prepared.id)
+            .collect::<Vec<_>>();
+        assert_eq!(stop_ids.len(), 9);
+        assert!(!stop_ids.contains(&&failed.id));
+        let evidence = terminal(&resource, &value, failed.running).unwrap();
+        assert_eq!(evidence.exit_code, 128);
+        assert!(!evidence.stop_requested && !evidence.oom_killed);
+        let encoded = serde_json::to_string(&evidence).unwrap();
+        assert!(!encoded.contains("synthetic private startup details"));
+        assert_eq!(
+            serde_json::from_str::<Terminal>(&encoded).unwrap(),
+            evidence
+        );
+    }
+
+    #[test]
+    fn created_failure_still_refuses_uncertain_or_contradictory_state() {
+        let (resource, mut value) = fixture();
+        value["State"]["Running"] = json!(false);
+        value["State"]["Status"] = json!("created");
+        value["State"]["Pid"] = json!(0);
+        value["State"]["ExitCode"] = json!(128);
+        for (field, invalid) in [
+            ("Running", json!(true)),
+            ("Running", json!(null)),
+            ("Pid", json!(1)),
+            ("Pid", json!(-1)),
+            ("Paused", json!(true)),
+            ("Restarting", json!(true)),
+            ("Dead", json!(true)),
+            ("OOMKilled", json!(true)),
+            ("OOMKilled", json!(null)),
+            ("ExitCode", json!(-1)),
+            ("ExitCode", json!(256)),
+            ("ExitCode", json!(1.5)),
+            ("ExitCode", json!("128")),
+            ("ExitCode", json!(null)),
+        ] {
+            let mut changed = value.clone();
+            changed["State"][field] = invalid;
+            assert!(prepare(&resource, &changed).is_err(), "{field}");
+            assert!(terminal(&resource, &changed, false).is_err(), "{field}");
+        }
+        assert!(terminal(&resource, &value, true).is_err());
     }
 
     #[test]

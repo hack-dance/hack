@@ -12,6 +12,7 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -70,6 +71,26 @@ struct Record {
     ack_required: bool,
 }
 impl Record {
+    fn recovery_fingerprint(&self) -> Result<String, CandidateError> {
+        let bytes = serde_json::to_vec(&(
+            "hack-relay-lifecycle-recovery-v1",
+            self.version,
+            self.parent,
+            self.runtime,
+            self.boot,
+            self.owner,
+            &self.process,
+            self.publication,
+            self.operation,
+            self.effect,
+            &self.targets,
+            self.graph,
+            self.selected,
+            self.attempt,
+        ))
+        .map_err(|_| refused())?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
     fn validate(&self, parent: (u64, u64)) -> Result<(), CandidateError> {
         if ![1, 2].contains(&self.version)
             || self.owner == [0; 16]
@@ -314,6 +335,10 @@ pub struct Inspection {
     pub graph: Option<GraphScope>,
     pub selection_observed: bool,
     pub acknowledgement_pending: bool,
+    pub owner: [u8; 16],
+    pub process: ProcessIdentity,
+    pub publication: [u8; 32],
+    pub recovery_fingerprint: String,
 }
 impl Inspection {
     /// Requires an existing journal and lock; never initializes absent runtime state.
@@ -339,6 +364,10 @@ impl Inspection {
                 .transpose()?,
             selection_observed: record.selected.is_some(),
             acknowledgement_pending: record.ack_required,
+            owner: record.owner,
+            process: record.process.clone(),
+            publication: record.publication,
+            recovery_fingerprint: record.recovery_fingerprint()?,
         })
     }
 }
@@ -491,6 +520,64 @@ impl Coordinator {
     }
     pub fn acknowledgement_pending(&self) -> bool {
         self.snapshot.record.ack_required
+    }
+    /// A separate selected recovery may inspect an interrupted graph effect while
+    /// holding this coordinator lock. This grants no replay of `execute`.
+    pub fn verify_selected_effect(
+        &self,
+        selection: &Selection,
+        graph: GraphScope,
+        owner: [u8; 16],
+        process: &ProcessIdentity,
+        publication: [u8; 32],
+        recovery_fingerprint: &str,
+    ) -> Result<(), CandidateError> {
+        self.verify_recovery_identity(selection, graph, recovery_fingerprint)?;
+        self.store.verify(&self.snapshot)?;
+        let record = &self.snapshot.record;
+        if record.phase != Phase::EffectStarted
+            || !record.ack_required
+            || record.selected.is_none()
+            || record.owner != owner
+            || &record.process != process
+            || record.publication != publication
+            || record.recovery_fingerprint()? != recovery_fingerprint
+            || record.runtime != selection.context.runtime
+            || record.boot != selection.context.boot
+            || record.operation != selection.operation
+            || record.effect != selection.effect
+            || record.graph != Some(graph.id)
+            || selection.context != graph.context
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    /// Exact selected identity across EffectStarted -> Confirmed -> caller ACK.
+    /// The fingerprint binds owner/process/publication/attempt and targets while
+    /// phase, observation and ACK bit may change only under this held store lock.
+    pub fn verify_recovery_identity(
+        &self,
+        selection: &Selection,
+        graph: GraphScope,
+        expected_fingerprint: &str,
+    ) -> Result<(), CandidateError> {
+        self.store.verify(&self.snapshot)?;
+        let record = &self.snapshot.record;
+        if !matches!(record.phase, Phase::EffectStarted | Phase::Confirmed)
+            || !record.ack_required
+            || record.selected.is_none()
+            || record.runtime != selection.context.runtime
+            || record.boot != selection.context.boot
+            || record.operation != selection.operation
+            || record.effect != selection.effect
+            || record.graph != Some(graph.id)
+            || selection.context != graph.context
+            || record.recovery_fingerprint()? != expected_fingerprint
+        {
+            return Err(refused());
+        }
+        Ok(())
     }
     /// Acknowledge durable caller confirmation before allowing the single coordinator
     /// record to roll over. This does not inspect caller metadata; the caller must

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
 const JOURNAL: &str = "dependency-rebind.json";
-mod archive;
+pub(super) mod archive;
 #[cfg(test)]
 mod nested_tests;
 pub(super) use archive::after_cleanup as archive_after_cleanup;
@@ -330,6 +330,30 @@ fn existing(root: &Path, receipt: &Receipt) -> Result<Option<RebindJournal>, Can
             Ok(Some(journal))
         }
     }
+}
+#[cfg(target_os = "macos")]
+pub(super) fn boot(root: &Path, receipt: &Receipt) -> Result<Option<String>, CandidateError> {
+    Ok(existing(root, receipt)?.map(|journal| journal.boot))
+}
+/// A completed refresh is evidence for this exact ready generation only. It
+/// grants no host endpoint adoption or cleanup authority by itself.
+pub(super) fn require_recovery_complete(
+    root: &Path,
+    receipt: &Receipt,
+    boot: &str,
+) -> Result<(), CandidateError> {
+    require_complete(root, receipt)?;
+    if let Some(journal) = existing(root, receipt)? {
+        if receipt.phase != "ready-observed"
+            || boot.is_empty()
+            || journal.boot != boot
+            || journal.completed_generation.as_deref()
+                != Some(service_exec_generation(receipt)?.as_str())
+        {
+            return Err(stage_refused("graph_dependency_rebind_incomplete"));
+        }
+    }
+    Ok(())
 }
 pub(super) fn require_complete(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
     if pending_journal(root)? {

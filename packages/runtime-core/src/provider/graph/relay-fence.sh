@@ -93,7 +93,7 @@ if test "$serial" -ne 0; then
   test "$serial" -eq "$seen"
   case "$phase" in cancelled|stopped|discarded) :;; *) exit 1;; esac
   ;;
- inspect)
+ inspect|inspect-retirement)
   test "$serial" -eq "$seen"
   case "$phase" in preparing|discarding|discarded)
    check_staging; printf 'exited\n'; exit;;

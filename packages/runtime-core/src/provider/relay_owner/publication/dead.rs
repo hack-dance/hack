@@ -41,6 +41,7 @@ impl Selection {
             receipt,
             receipt_id: self.record_id,
             bytes: self.bytes.clone(),
+            device_rebind: None,
         })
     }
 }
@@ -48,6 +49,115 @@ impl Selection {
 pub(crate) struct Witness {
     pin: PinnedEndpoint,
     lock: state::Lock,
+}
+/// A clean managed owner exit unlinks both publication paths while leaving the
+/// operation lock. Absence is only a current endpoint fact: callers must bind
+/// the original owner/process/publication to a selected coordinator record.
+pub(crate) enum CleanupWitness {
+    Present(Witness),
+    Absent(AbsentWitness),
+}
+
+pub(crate) struct AbsentWitness {
+    paths: Paths,
+    lock: state::Lock,
+    parent: FileId,
+    process: ProcessIdentity,
+}
+
+#[derive(Serialize)]
+struct AbsentSelection<'a> {
+    kind: &'static str,
+    parent: FileId,
+    lock: FileId,
+    process: &'a ProcessIdentity,
+}
+
+impl CleanupWitness {
+    pub(crate) fn acquire(
+        root: &Path,
+        context: Context,
+        process: &ProcessIdentity,
+    ) -> Result<Self, CandidateError> {
+        let paths = Paths::new(root)?;
+        let lock = state::Lock::acquire_existing(&paths.directory)?;
+        match (absent(&paths.receipt)?, absent(&paths.socket)?) {
+            (false, false) => {
+                let pin = PinnedEndpoint::read(paths, context)?;
+                if &pin.receipt.process != process {
+                    return Err(refused());
+                }
+                let witness = Witness { pin, lock };
+                witness.verify()?;
+                Ok(Self::Present(witness))
+            }
+            (true, true) if context.runtime != [0; 16] && context.boot != [0; 16] => {
+                // SAFETY: geteuid takes no arguments.
+                identity::verify(process, process, &process.executable, unsafe {
+                    libc::geteuid()
+                })?;
+                let parent = paths.parent()?;
+                let witness = AbsentWitness {
+                    paths,
+                    lock,
+                    parent,
+                    process: process.clone(),
+                };
+                witness.verify()?;
+                Ok(Self::Absent(witness))
+            }
+            _ => Err(refused()),
+        }
+    }
+
+    pub(crate) fn selection_sha256(&self) -> Result<String, CandidateError> {
+        let bytes = match self {
+            Self::Present(witness) => {
+                serde_json::to_vec(&witness.selection()).map_err(|_| refused())?
+            }
+            Self::Absent(witness) => serde_json::to_vec(&AbsentSelection {
+                kind: "absent",
+                parent: witness.parent,
+                lock: witness.lock.identity()?,
+                process: &witness.process,
+            })
+            .map_err(|_| refused())?,
+        };
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
+    pub(crate) fn present_identity(&self) -> Option<([u8; 16], [u8; 32])> {
+        match self {
+            Self::Present(witness) => Some((witness.owner(), witness.publication())),
+            Self::Absent(_) => None,
+        }
+    }
+
+    pub(crate) fn verify(&self) -> Result<(), CandidateError> {
+        match self {
+            Self::Present(witness) => witness.verify(),
+            Self::Absent(witness) => witness.verify(),
+        }
+    }
+}
+
+impl AbsentWitness {
+    fn verify(&self) -> Result<(), CandidateError> {
+        let lock = fs::symlink_metadata(self.paths.directory.join("operation.lock"))
+            .map_err(|_| refused())?;
+        if self.paths.parent()? != self.parent
+            || !lock.is_file()
+            || lock.nlink() != 1
+            || !private(&lock)
+            || id(&lock) != self.lock.identity()?
+            || !absent(&self.paths.receipt)?
+            || !absent(&self.paths.socket)?
+            || identity::alive(self.process.pid)?
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
 }
 impl Witness {
     pub(crate) fn acquire(
@@ -70,6 +180,12 @@ impl Witness {
             bytes: self.pin.bytes.clone(),
             record_id: self.pin.receipt_id,
         }
+    }
+    pub(crate) fn owner(&self) -> [u8; 16] {
+        self.pin.incarnation()
+    }
+    pub(crate) fn publication(&self) -> [u8; 32] {
+        self.pin.fingerprint()
     }
     pub(crate) fn verify(&self) -> Result<(), CandidateError> {
         let m = fs::symlink_metadata(self.pin.paths.directory.join("operation.lock"))

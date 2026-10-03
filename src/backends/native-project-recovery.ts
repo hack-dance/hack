@@ -216,6 +216,7 @@ export async function verifyNativeFrontendRecovery(
     await (opts.recoverLease ?? recoverNativeHttpsLease)({
       runtime: opts.runtime,
       identity: opts.httpsLease,
+      archivePreviousBoot: true,
     });
     await opts.cleanupLifecycle?.();
     await noLifecycleEntries(opts.scope.projectDir);

@@ -301,7 +301,7 @@ async function requireBranchChecks({
   readonly sourceRevision: string;
   readonly branch: Record<string, unknown>;
 }) {
-  const rules = array(await api("rules/branches/next")).map(object);
+  const rules = (await pages({ api, path: "rules/branches/next" })).map(object);
   // Get-branch includes classic check policy with Contents:read. The dedicated
   // protection endpoint requires Administration:read, unavailable to GITHUB_TOKEN.
   // Missing metadata refuses; a permission error is not absent protection.

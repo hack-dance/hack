@@ -1,0 +1,129 @@
+name: V5 prerelease candidate
+
+# Called through the existing Release entry dispatched on next. Preparing never publishes.
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      source_revision:
+        type: string
+        required: true
+      publish:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v5-prerelease-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_CHANNEL: prerelease
+  HACK_PRERELEASE_VERSION: ${{ inputs.version }}
+  HACK_PRERELEASE_SOURCE_REVISION: ${{ inputs.source_revision }}
+  HACK_PRERELEASE_PUBLISH: ${{ inputs.publish }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      statuses: read
+      deployments: read
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      source_revision: ${{ steps.plan.outputs.source_revision }}
+      archive: ${{ steps.plan.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.2"
+      - name: Validate immutable plan
+        id: plan
+        run: bun scripts/prerelease-plan.ts plan
+      - name: Verify publication prerequisites before scheduling approval
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/prerelease-plan.ts verify
+
+  build:
+    needs: plan
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      HACK_PRERELEASE_BUNDLE: ${{ runner.temp }}/native-candidate
+      HACK_PRERELEASE_OUTPUT: ${{ runner.temp }}/prerelease-assets
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.source_revision }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.2"
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-unknown-linux-musl
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: "2026.9.12"
+          install_args: zig
+          add_shims_to_path: false
+          cache: false
+          env: false
+      - run: bun install --frozen-lockfile
+      - name: Build and verify complete native bundle
+        run: mise exec zig -- scripts/build-native-candidate.sh "$HACK_PRERELEASE_BUNDLE" "--version=$HACK_PRERELEASE_VERSION"
+      - name: Package verified payload and outer checksum
+        run: bun scripts/prerelease-plan.ts package
+      - name: Retain reviewable artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: v5-prerelease-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/prerelease-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: ${{ inputs.publish }}
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The plan checks that this already exists with real required-reviewer protection.
+    environment: v5-prerelease
+    permissions:
+      contents: write
+      actions: read
+      checks: read
+      statuses: read
+      deployments: read
+    env:
+      HACK_PRERELEASE_OUTPUT: ${{ runner.temp }}/prerelease-assets
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.source_revision }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.2"
+      - uses: actions/download-artifact@v4
+        with:
+          name: v5-prerelease-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/prerelease-assets
+      - name: Recheck exact head, CI, human approval and tag absence; publish once
+        run: bun scripts/prerelease-plan.ts publish

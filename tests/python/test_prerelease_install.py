@@ -1,0 +1,527 @@
+"""Isolated channel controls. Subprocess stand-ins never execute candidate software."""
+
+import contextlib
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import tarfile
+import tempfile
+import unittest
+from unittest import mock
+
+
+SOURCE = Path(__file__).resolve().parents[2] / "scripts/install-prerelease.py"
+SPEC = importlib.util.spec_from_file_location("install_prerelease", SOURCE)
+installer = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(installer)
+
+
+def sha(contents):
+    return hashlib.sha256(contents).hexdigest()
+
+
+class ChannelTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="hack-prerelease-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.old_umask = os.umask(0o077)
+        self.addCleanup(os.umask, self.old_umask)
+        self.stable_home = self.root / "stable-home"
+        (self.stable_home / ".hack").mkdir(parents=True, mode=0o700)
+        (self.stable_home / ".hack/data").write_bytes(b"stable app data\x00unchanged")
+        self.brew = self.root / "homebrew"
+        self.brew.mkdir(mode=0o700)
+        (self.brew / "hack-4.2.1").write_bytes(b"stable executable unchanged")
+        (self.brew / "hack").symlink_to("hack-4.2.1")
+        self.stable_before = self.stable_snapshot()
+        self.addCleanup(self.assert_stable_unchanged)
+        self.calls = []
+        self.runtime_responses = []
+        self.run_patch = mock.patch.object(installer.subprocess, "run", side_effect=self.process)
+        self.run_patch.start()
+        self.addCleanup(self.run_patch.stop)
+        self.env_patch = mock.patch.dict(os.environ, {
+            "HOME": str(self.stable_home), "HACK_HOME": str(self.stable_home / ".hack"),
+            "HACK_GLOBAL_CONFIG_PATH": str(self.stable_home / ".hack/config.json"),
+            "HACK_NATIVE_HOME": str(self.stable_home / "foreign-native"),
+            "HACK_NATIVE_BINARY": str(self.brew / "hack"), "HACK_RUNTIME_BACKEND": "docker",
+            "HACK_NATIVE_ADAPTATION": "/private/project/adaptation.json",
+            "HACK_NATIVE_DEPENDENCIES": "/private/project/dependencies.json",
+            "HACK_NATIVE_AWS_PROFILE": "fixture-qa",
+            "HACK_NATIVE_HTTPS_PORT": "443", "HACK_NATIVE_SHARED_SOURCE": "1"})
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.channel = installer.Channel(self.root / "channel")
+        self.channel.initialize()
+
+    def stable_snapshot(self):
+        return {(str(path.relative_to(self.root)), "symlink" if path.is_symlink() else "file"):
+                os.readlink(path) if path.is_symlink() else sha(path.read_bytes())
+                for directory in (self.stable_home, self.brew)
+                for path in directory.rglob("*") if path.is_file() or path.is_symlink()}
+
+    def assert_stable_unchanged(self):
+        self.assertEqual(self.stable_snapshot(), self.stable_before)
+
+    def process(self, arguments, **options):
+        self.calls.append((arguments, options))
+        if arguments[0] == "/usr/bin/codesign":
+            return subprocess.CompletedProcess(arguments, 0)
+        self.assertEqual(arguments[1], "--candidate-root")
+        home = Path(arguments[2])
+        self.assertTrue(home.is_relative_to(self.channel.root / "versions"))
+        self.assertEqual(arguments[3], "runtime")
+        self.assertIn(arguments[4], ("status", "down"))
+        self.assertEqual(arguments[5], "--json")
+        self.assertEqual(options["env"]["HACK_NATIVE_HOME"], str(home))
+        self.assertEqual(options["env"]["HACK_HOME"], str(home.parent / "cli-home"))
+        self.assertNotIn("HACK_GLOBAL_CONFIG_PATH", options["env"])
+        response = self.runtime_responses.pop(0) if self.runtime_responses else {
+            "phase": "stopped" if list(home.iterdir()) else "uninitialized", "process_alive": False}
+        if isinstance(response, Exception):
+            raise response
+        if isinstance(response, tuple):
+            return subprocess.CompletedProcess(arguments, response[0], response[1])
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(response).encode())
+
+    def archive(self, version="5.0.0-next.1", mutate=None):
+        identity = {"schema": "hack.prerelease/v1", "version": version, "tag": "v" + version,
+                    "source_revision": "a" * 40, "platform": "darwin-arm64"}
+        files = {"hack-native": b"reviewed native fixture", "hack-cli": b"reviewed CLI fixture",
+                 "hack-relay-guest": b"reviewed guest fixture", "hack-v5": b"reviewed launcher fixture",
+                 "provider-pins.json": b"{}\n", "README.md": b"candidate documentation\n",
+                 "prerelease.json": json.dumps(identity).encode()}
+        files["SHA256SUMS"] = "".join(sha(value) + "  " + name + "\n"
+                                      for name, value in sorted(files.items())).encode()
+        entries = [(name, value, tarfile.REGTYPE) for name, value in files.items()]
+        if mutate:
+            entries = mutate(entries)
+        archive = self.root / ("archive-" + str(len(list(self.root.glob("archive-*")))) + ".tar.gz")
+        with tarfile.open(archive, "w:gz") as target:
+            for name, value, kind in entries:
+                entry = tarfile.TarInfo(name)
+                entry.type = kind
+                entry.mode = 0o777
+                entry.size = len(value) if kind == tarfile.REGTYPE else 0
+                if kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                    entry.linkname = str(self.brew / "hack")
+                target.addfile(entry, io.BytesIO(value) if kind == tarfile.REGTYPE else None)
+        return archive, installer.digest(archive)
+
+    def install(self, version="5.0.0-next.1", upgrade=False):
+        archive, checksum = self.archive(version)
+        with self.channel.lock():
+            self.channel.install(version, archive, checksum, upgrade)
+        return archive, checksum
+
+    def selection(self):
+        return installer.private_json(self.channel.root / ".selection.json")
+
+    def rejects_install(self, mutate, message):
+        if not self.selection()["installed"]:
+            self.install()
+        before = (self.channel.root / ".selection.json").read_bytes()
+        archive, checksum = self.archive("5.0.0-next.2", mutate)
+        with self.channel.lock():
+            with self.assertRaisesRegex(installer.Refusal, message):
+                self.channel.install("5.0.0-next.2", archive, checksum, True)
+        self.assertEqual((self.channel.root / ".selection.json").read_bytes(), before)
+        with self.channel.lock():
+            self.assertEqual(self.channel.state["selected"], "5.0.0-next.1")
+
+    def test_install_upgrade_rollback_and_stable_preserve_prior_homes(self):
+        self.install()
+        first_home = self.channel.root / "versions/5.0.0-next.1/native-home"
+        (first_home / "saved-application-data").write_bytes(b"first-version-marker")
+        self.install("5.0.0-next.2", True)
+        second_home = self.channel.root / "versions/5.0.0-next.2/native-home"
+        self.assertEqual(list(second_home.iterdir()), [])
+        (second_home / "saved-application-data").write_bytes(b"second-version-marker")
+        self.assertEqual(self.selection()["selected"], "5.0.0-next.2")
+        self.assertEqual(self.selection()["previous"], "5.0.0-next.1")
+        with self.channel.lock():
+            self.channel.select("5.0.0-next.1")
+        self.assertEqual(first_home.joinpath("saved-application-data").read_bytes(), b"first-version-marker")
+        self.assertEqual(second_home.joinpath("saved-application-data").read_bytes(), b"second-version-marker")
+        with self.channel.lock():
+            self.channel.select(None)
+        self.assertIsNone(self.selection()["selected"])
+        self.assertEqual(self.selection()["previous"], "5.0.0-next.1")
+        self.assertEqual(len(self.selection()["installed"]), 2)
+        actions = [arguments[4] for arguments, _ in self.calls if arguments[0] != "/usr/bin/codesign"]
+        self.assertEqual(actions, ["status", "down", "status"] * 5)
+
+    def test_idempotent_install_revalidates_without_mutating_selection(self):
+        archive, checksum = self.install()
+        before = (self.channel.root / ".selection.json").read_bytes()
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.1", archive, checksum)
+        self.assertEqual(before, (self.channel.root / ".selection.json").read_bytes())
+        (self.channel.root / "versions/5.0.0-next.1/bundle/hack-cli").write_bytes(b"changed")
+        with self.assertRaisesRegex(installer.Refusal, "checksum mismatch"):
+            with self.channel.lock():
+                self.fail("Changed installation was accepted")
+
+    def test_active_unknown_failed_and_timed_out_status_never_trigger_down(self):
+        self.install()
+        cases = [{"phase": "running", "process_alive": True},
+                 {"phase": "process-exited", "process_alive": False},
+                 {"phase": "stopped", "process_alive": None},
+                 {"phase": "stopped", "process_alive": 0},
+                 {"phase": "initializing", "process_alive": False},
+                 (1, b""), (0, b"not json"),
+                 subprocess.TimeoutExpired(["status"], 30)]
+        for response in cases:
+            with self.subTest(response=response):
+                before = (self.channel.root / ".selection.json").read_bytes()
+                self.calls = []
+                self.runtime_responses = [response]
+                with self.channel.lock():
+                    with self.assertRaises(installer.Refusal):
+                        self.channel.select(None)
+                actions = [args[4] for args, _ in self.calls if args[0] != "/usr/bin/codesign"]
+                self.assertEqual(actions, ["status"])
+                self.assertEqual((self.channel.root / ".selection.json").read_bytes(), before)
+
+    def test_down_failure_and_post_down_running_refuse_switch(self):
+        self.install()
+        stopped = {"phase": "stopped", "process_alive": False}
+        for responses in ([stopped, (1, b"failure")],
+                          [stopped, stopped, {"phase": "running", "process_alive": True}]):
+            with self.subTest(responses=responses):
+                self.runtime_responses = list(responses)
+                with self.channel.lock():
+                    with self.assertRaises(installer.Refusal):
+                        self.channel.select(None)
+                self.assertEqual(self.selection()["selected"], "5.0.0-next.1")
+
+    def test_uninitialized_home_with_leftover_state_is_ambiguous(self):
+        self.install()
+        native_home = self.channel.root / "versions/5.0.0-next.1/native-home"
+        (native_home / ".hack-local").mkdir(mode=0o700)
+        (native_home / ".hack-local/leftover-owner.json").write_text("{}")
+        self.runtime_responses = [{"phase": "uninitialized", "process_alive": False}]
+        with self.channel.lock():
+            with self.assertRaisesRegex(installer.Refusal, "contains state"):
+                self.channel.select(None)
+        self.assertEqual(self.selection()["selected"], "5.0.0-next.1")
+
+    def test_receipt_changed_during_runtime_probe_is_rejected(self):
+        self.install()
+        original = self.process
+        def changed(arguments, **options):
+            result = original(arguments, **options)
+            if arguments[0] != "/usr/bin/codesign":
+                path = self.channel.root / "versions/5.0.0-next.1/.receipt.json"
+                path.write_bytes(path.read_bytes() + b" ")
+            return result
+        with mock.patch.object(installer.subprocess, "run", side_effect=changed):
+            with self.channel.lock():
+                with self.assertRaisesRegex(installer.Refusal, "receipt changed"):
+                    self.channel.select(None)
+        self.assertEqual(self.selection()["selected"], "5.0.0-next.1")
+
+    def test_bad_archive_checksum_preserves_previous_selected_bundle(self):
+        self.install()
+        archive, _ = self.archive("5.0.0-next.2")
+        with self.channel.lock():
+            with self.assertRaisesRegex(installer.Refusal, "Archive checksum"):
+                self.channel.install("5.0.0-next.2", archive, "0" * 64, True)
+        self.assertEqual(self.selection()["selected"], "5.0.0-next.1")
+        with self.channel.lock():
+            pass
+
+    def test_duplicate_and_traversing_archive_entries_are_rejected(self):
+        mutations = [lambda entries: [*entries[:-1], entries[0]],
+                     lambda entries: [("../stable-home/.hack/data", *entries[0][1:]), *entries[1:]],
+                     lambda entries: [("/tmp/hack", *entries[0][1:]), *entries[1:]],
+                     lambda entries: [("bundle/hack-native", *entries[0][1:]), *entries[1:]]]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                self.rejects_install(mutate, "archive entry|archive entries")
+
+    def test_symlink_hardlink_and_nonregular_archive_entries_are_rejected(self):
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE, tarfile.DIRTYPE):
+            with self.subTest(kind=kind):
+                self.rejects_install(lambda entries: [(entries[0][0], b"", kind), *entries[1:]],
+                                     "regular archive files")
+
+    def test_manifest_and_metadata_are_verified_before_activation(self):
+        def replace(entries, name, content):
+            return [(key, content if key == name else value, kind) for key, value, kind in entries]
+        mutations = [lambda entries: replace(entries, "hack-cli", b"tampered"),
+                     lambda entries: replace(entries, "SHA256SUMS", b"not checksums"),
+                     lambda entries: replace(entries, "SHA256SUMS", b"0" * 64 + b"  foreign\n")]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                self.rejects_install(mutate, "checksum|SHA256SUMS")
+
+    def test_wrong_version_revision_platform_and_duplicate_json_fields_refuse(self):
+        for field, value in (("version", "5.0.0-next.99"), ("source_revision", "short"),
+                             ("platform", "linux-arm64"), ("schema", "hack.prerelease/v2")):
+            with self.subTest(field=field):
+                identity = {"schema": "hack.prerelease/v1", "version": "5.0.0-next.2",
+                            "tag": "v5.0.0-next.2", "source_revision": "a" * 40, "platform": "darwin-arm64"}
+                identity[field] = value
+                with self.assertRaises(installer.Refusal):
+                    installer.metadata(json.dumps(identity), "5.0.0-next.2")
+        with self.assertRaisesRegex(installer.Refusal, "Duplicate JSON"):
+            installer.parse_json('{"selected":null,"selected":"foreign"}')
+        for version in ("5.0.0-next.0", "5.0.0-next.01", "5.0.0-next.-1", "4.2.1", "5.0.0-next.1/../x"):
+            with self.assertRaises(installer.Refusal):
+                installer.version_number(version)
+
+    def test_checksummed_malformed_metadata_is_rejected_before_extraction(self):
+        def malformed(entries):
+            payload = {name: value for name, value, _kind in entries if name != "SHA256SUMS"}
+            identity = json.loads(payload["prerelease.json"])
+            identity["source_revision"] = "short"
+            payload["prerelease.json"] = json.dumps(identity).encode()
+            payload["SHA256SUMS"] = "".join(sha(value) + "  " + name + "\n"
+                                               for name, value in sorted(payload.items())).encode()
+            return [(name, value, tarfile.REGTYPE) for name, value in payload.items()]
+        archive, checksum = self.archive(mutate=malformed)
+        destination = self.root / "must-not-be-extracted"
+        with self.assertRaisesRegex(installer.Refusal, "identity mismatch"):
+            installer.extract_archive(archive, checksum, destination, "5.0.0-next.1")
+        self.assertFalse(destination.exists())
+
+    def test_failed_signature_verification_preserves_previous_version(self):
+        self.install()
+        archive, checksum = self.archive("5.0.0-next.2")
+        original = self.process
+        def fail_signature(arguments, **options):
+            if arguments[0] == "/usr/bin/codesign" and ".stage-" in arguments[-1]:
+                return subprocess.CompletedProcess(arguments, 1)
+            return original(arguments, **options)
+        with mock.patch.object(installer.subprocess, "run", side_effect=fail_signature):
+            with self.channel.lock():
+                with self.assertRaisesRegex(installer.Refusal, "signature failed"):
+                    self.channel.install("5.0.0-next.2", archive, checksum, True)
+        self.assertEqual(self.selection()["selected"], "5.0.0-next.1")
+
+    def test_interrupted_pointer_commit_keeps_old_selection_usable(self):
+        self.install()
+        before = (self.channel.root / ".selection.json").read_bytes()
+        archive, checksum = self.archive("5.0.0-next.2")
+        with mock.patch.object(installer.os, "replace", side_effect=OSError("interrupted switch")):
+            with self.channel.lock():
+                with self.assertRaisesRegex(OSError, "interrupted switch"):
+                    self.channel.install("5.0.0-next.2", archive, checksum, True)
+        self.assertEqual((self.channel.root / ".selection.json").read_bytes(), before)
+        self.assertTrue((self.channel.root / "versions/5.0.0-next.2/.receipt.json").is_file())
+        with self.channel.lock():
+            self.assertEqual(self.channel.state["selected"], "5.0.0-next.1")
+        with self.channel.lock():
+            with self.assertRaisesRegex(installer.Refusal, "overwrite"):
+                self.channel.install("5.0.0-next.2", archive, checksum, True)
+
+    def test_partial_extraction_keeps_old_selection_usable(self):
+        self.install()
+        archive, checksum = self.archive("5.0.0-next.2")
+        with mock.patch.object(installer, "extract_archive", side_effect=OSError("partial extraction")):
+            with self.channel.lock():
+                with self.assertRaisesRegex(OSError, "partial extraction"):
+                    self.channel.install("5.0.0-next.2", archive, checksum, True)
+        with self.channel.lock():
+            self.assertEqual(self.channel.state["selected"], "5.0.0-next.1")
+
+    def test_changed_home_symlink_and_malformed_receipts_are_refused(self):
+        self.install()
+        home = self.channel.root / "versions/5.0.0-next.1/native-home"
+        retained = home.with_name("saved-native-home")
+        home.rename(retained)
+        home.symlink_to(retained)
+        with self.assertRaises(installer.Refusal):
+            with self.channel.lock():
+                self.fail("Aliased home accepted")
+        home.unlink()
+        retained.rename(home)
+        receipt = self.channel.root / "versions/5.0.0-next.1/.receipt.json"
+        receipt.write_text("{}")
+        with self.assertRaisesRegex(installer.Refusal, "receipt changed"):
+            with self.channel.lock():
+                self.fail("Malformed receipt accepted")
+
+    def test_foreign_root_alias_and_hardlinked_payload_are_refused(self):
+        foreign = self.root / "foreign"
+        foreign.mkdir(mode=0o700)
+        (foreign / "data").write_bytes(b"do not replace")
+        with self.assertRaisesRegex(installer.Refusal, "nonempty"):
+            installer.Channel(foreign).initialize()
+        alias = self.root / "alias"
+        alias.symlink_to(self.channel.root)
+        with self.assertRaisesRegex(installer.Refusal, "canonical"):
+            installer.Channel(alias)
+        self.install()
+        binary = self.channel.root / "versions/5.0.0-next.1/bundle/hack-cli"
+        os.link(binary, self.root / "hardlink")
+        with self.assertRaisesRegex(installer.Refusal, "Hard-linked"):
+            with self.channel.lock():
+                self.fail("Hard-linked payload accepted")
+
+    def test_manager_and_selected_receipt_changes_refuse_status(self):
+        self.install()
+        manager = self.channel.root / "manager.py"
+        before = manager.read_bytes()
+        manager.write_bytes(before + b"# changed\n")
+        with self.assertRaisesRegex(installer.Refusal, "manager or launcher changed"):
+            with self.channel.lock():
+                self.fail("Changed manager accepted")
+        manager.write_bytes(before)
+        selection = self.selection()
+        selection["selected"] = "5.0.0-next.999"
+        (self.channel.root / ".selection.json").write_bytes(installer.json_bytes(selection))
+        with self.assertRaisesRegex(installer.Refusal, "Unknown selected"):
+            with self.channel.lock():
+                self.fail("Unknown selection accepted")
+
+    def test_launcher_pins_private_homes_arguments_exit_code_and_allows_peer_launchers(self):
+        self.install()
+        child = mock.Mock()
+        child.wait.return_value = 23
+        with self.channel.lock(shared=True):
+            with self.channel.lock(shared=True):
+                with mock.patch.object(installer.subprocess, "Popen", return_value=child) as spawn:
+                    self.assertEqual(self.channel.run(["ps", "--path", "a path"]), 23)
+                command = spawn.call_args.args[0]
+                self.assertEqual(command[1:], ["ps", "--path", "a path"])
+                environment = spawn.call_args.kwargs["env"]
+                self.assertEqual(environment["HACK_HOME"], str(self.channel.root / "versions/5.0.0-next.1/cli-home"))
+                self.assertEqual(environment["HACK_NATIVE_HOME"], str(self.channel.root / "versions/5.0.0-next.1/native-home"))
+                self.assertEqual(environment["HACK_NATIVE_BINARY"], str(self.channel.root / "versions/5.0.0-next.1/bundle/hack-native"))
+                self.assertEqual(environment["HACK_RUNTIME_BACKEND"], "native")
+                for name in ("HACK_NATIVE_ADAPTATION", "HACK_NATIVE_DEPENDENCIES", "HACK_NATIVE_AWS_PROFILE",
+                             "HACK_NATIVE_HTTPS_PORT", "HACK_NATIVE_SHARED_SOURCE"):
+                    self.assertEqual(environment[name], os.environ[name])
+                self.assertNotIn("HACK_GLOBAL_CONFIG_PATH", environment)
+            with self.assertRaisesRegex(installer.Refusal, "active"):
+                with self.channel.lock():
+                    self.fail("Selection switch raced active launcher")
+        child.wait.return_value = -15
+        with self.channel.lock(shared=True), mock.patch.object(installer.subprocess, "Popen", return_value=child):
+            self.assertEqual(self.channel.run(["ps"]), 143)
+
+    def test_host_and_local_archive_cli_contract(self):
+        for system, machine in (("Linux", "aarch64"), ("Darwin", "x86_64")):
+            with mock.patch.object(installer.platform, "system", return_value=system), \
+                 mock.patch.object(installer.platform, "machine", return_value=machine):
+                with self.assertRaisesRegex(installer.Refusal, "Apple Silicon"):
+                    installer.main(["--root", str(self.root / "not-created"), "install", "--version", "5.0.0-next.1"])
+                self.assertFalse((self.root / "not-created").exists())
+        with mock.patch.object(installer.platform, "system", return_value="Darwin"), \
+             mock.patch.object(installer.platform, "machine", return_value="arm64"):
+            with self.assertRaisesRegex(installer.Refusal, "supplied together"):
+                installer.main(["--root", str(self.root / "not-created"), "install", "--version", "5.0.0-next.1",
+                                "--archive", str(self.root / "archive")])
+
+    def test_only_pinned_official_github_prerelease_assets_are_downloaded(self):
+        version = "5.0.0-next.2"
+        tag = "v" + version
+        archive_name = "hack-" + version + "-darwin-arm64-native.tar.gz"
+        archive, checksum = self.archive(version)
+        identity = {"schema": "hack.prerelease/v1", "version": version, "tag": tag,
+                    "source_revision": "a" * 40, "platform": "darwin-arm64"}
+        base = "https://github.com/hack-dance/hack/releases/download/" + tag + "/"
+        release = {"tag_name": tag, "prerelease": True, "draft": False,
+                   "assets": [{"name": name, "browser_download_url": base + name}
+                              for name in (archive_name, "prerelease.json", "SHA256SUMS")]}
+        downloaded = []
+        def fetch(url, path, limit):
+            downloaded.append(url)
+            if "/git/ref/tags/" in url:
+                content = json.dumps({"ref": "refs/tags/" + tag,
+                                      "object": {"type": "commit", "sha": identity["source_revision"]}}).encode()
+            elif "api.github.com" in url:
+                content = json.dumps(release).encode()
+            elif url.endswith("prerelease.json"):
+                content = json.dumps(identity).encode()
+            elif url.endswith("SHA256SUMS"):
+                content = (checksum + "  " + archive_name + "\n").encode()
+            else:
+                content = archive.read_bytes()
+            installer.write_file(path, content)
+        with mock.patch.object(installer, "download", side_effect=fetch):
+            with self.channel.lock():
+                self.channel.install(version)
+        self.assertEqual(downloaded[0], "https://api.github.com/repos/hack-dance/hack/releases/tags/" + tag)
+        self.assertIn("https://api.github.com/repos/hack-dance/hack/git/ref/tags/" + tag, downloaded)
+        self.assertEqual(self.selection()["selected"], version)
+        self.assertEqual(len(downloaded), 5)
+        for url in ("http://github.com/hack-dance/hack/x", "https://example.com/x",
+                    "https://github.com.evil.test/x", "https://user@github.com/x", "file:///tmp/x"):
+            with self.assertRaises(installer.Refusal):
+                installer.secure_url(url)
+
+    def test_moved_annotated_foreign_and_malformed_tags_never_activate(self):
+        self.install()
+        version = "5.0.0-next.2"
+        tag = "v" + version
+        archive_name = "hack-" + version + "-darwin-arm64-native.tar.gz"
+        identity = {"schema": "hack.prerelease/v1", "version": version, "tag": tag,
+                    "source_revision": "a" * 40, "platform": "darwin-arm64"}
+        base = "https://github.com/hack-dance/hack/releases/download/" + tag + "/"
+        release = {"tag_name": tag, "prerelease": True, "draft": False,
+                   "assets": [{"name": name, "browser_download_url": base + name}
+                              for name in (archive_name, "prerelease.json", "SHA256SUMS")]}
+        valid = {"ref": "refs/tags/" + tag, "object": {"type": "commit", "sha": "a" * 40}}
+        references = [dict(valid, object={"type": "commit", "sha": "b" * 40}),
+                      dict(valid, ref="refs/tags/v5.0.0-next.99"),
+                      dict(valid, object={"type": "tag", "sha": "a" * 40}),
+                      dict(valid, object={"type": "commit", "sha": "short"}),
+                      dict(valid, object={"sha": "a" * 40}), dict(valid, object=None),
+                      {"ref": "refs/tags/" + tag}, {}]
+        before = (self.channel.root / ".selection.json").read_bytes()
+        for reference in references:
+            with self.subTest(reference=reference):
+                downloaded = []
+                def fetch(url, path, _limit):
+                    downloaded.append(url)
+                    if "/git/ref/tags/" in url:
+                        content = reference
+                    elif "api.github.com" in url:
+                        content = release
+                    elif url.endswith("prerelease.json"):
+                        content = identity
+                    else:
+                        self.fail("Artifact download started before tag provenance passed")
+                    installer.write_file(path, json.dumps(content).encode())
+                with mock.patch.object(installer, "download", side_effect=fetch):
+                    with self.channel.lock():
+                        with self.assertRaisesRegex(installer.Refusal, "tag does not match"):
+                            self.channel.install(version, upgrade=True)
+                self.assertEqual(len(downloaded), 3)
+                self.assertFalse((self.channel.root / "versions" / version).exists())
+                self.assertEqual((self.channel.root / ".selection.json").read_bytes(), before)
+
+    def test_draft_stable_missing_duplicate_and_foreign_release_assets_refuse(self):
+        version = "5.0.0-next.1"
+        tag = "v" + version
+        names = ("hack-" + version + "-darwin-arm64-native.tar.gz", "prerelease.json", "SHA256SUMS")
+        base = "https://github.com/hack-dance/hack/releases/download/" + tag + "/"
+        valid = {"tag_name": tag, "prerelease": True, "draft": False,
+                 "assets": [{"name": name, "browser_download_url": base + name} for name in names]}
+        cases = [dict(valid, draft=True), dict(valid, prerelease=False), dict(valid, tag_name="latest"),
+                 dict(valid, assets=valid["assets"][:-1]),
+                 dict(valid, assets=valid["assets"] + [valid["assets"][0]]),
+                 dict(valid, assets=[dict(valid["assets"][0], browser_download_url="https://example.com/a"),
+                                     *valid["assets"][1:]])]
+        for index, release in enumerate(cases):
+            with self.subTest(index=index):
+                stage = self.root / ("download-" + str(index))
+                stage.mkdir(mode=0o700)
+                def fetch(_url, path, _limit):
+                    installer.write_file(path, json.dumps(release).encode())
+                with mock.patch.object(installer, "download", side_effect=fetch) as download:
+                    with self.assertRaises(installer.Refusal):
+                        installer.official_archive(stage, version)
+                self.assertEqual(download.call_count, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

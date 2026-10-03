@@ -3,9 +3,20 @@
 set -eu
 umask 077
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-if [ "$#" -ne 1 ]; then
-  echo "Usage: scripts/build-native-candidate.sh /absolute/new/bundle-directory" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  echo "Usage: scripts/build-native-candidate.sh /absolute/new/bundle-directory [--version=5.0.0-next.N]" >&2
   exit 64
+fi
+version=
+metadata=
+if [ "$#" -eq 2 ]; then
+  case "$2" in --version=*) version=${2#--version=} ;; *) echo "Unknown build option" >&2; exit 64 ;; esac
+  source_revision=$(git -C "$repo" rev-parse HEAD)
+  metadata=$(HACK_PRERELEASE_VERSION="$version" HACK_PRERELEASE_SOURCE_REVISION="$source_revision" bun "$repo/scripts/prerelease-plan.ts" metadata)
+  if [ -n "$(git -C "$repo" status --porcelain --untracked-files=normal)" ]; then
+    echo "Versioned prereleases require a clean source checkout" >&2
+    exit 73
+  fi
 fi
 case "$1" in /*) ;; *) echo "Output must be an absolute new directory" >&2; exit 64 ;; esac
 if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
@@ -62,7 +73,11 @@ cp "$guest" "$out/hack-relay-guest"
 chmod 755 "$out/hack-native" "$out/hack-relay-guest"
 python3 scripts/verify-native-relay.py "$out/hack-relay-guest"
 cp packages/runtime-core/provider-pins.json "$out/provider-pins.json"
-bun build index.ts --compile --outfile "$out/hack-cli"
+if [ -n "$version" ]; then
+  bun build index.ts --compile --define "__HACK_BUILD_VERSION__=\"$version\"" --outfile "$out/hack-cli"
+else
+  bun build index.ts --compile --outfile "$out/hack-cli"
+fi
 # Bun appends the compiled program to its runtime. Re-sign those final bytes;
 # preserve runtime metadata rather than trusting the embedded runtime's signature.
 /usr/bin/codesign --force --sign - --preserve-metadata=entitlements,flags,runtime "$out/hack-cli"
@@ -71,9 +86,20 @@ bun build index.ts --compile --outfile "$out/hack-cli"
 cp scripts/hack-v5.sh "$out/hack-v5"
 chmod 755 "$out/hack-cli" "$out/hack-v5"
 cp docs/guides/native-candidate.md "$out/README.md"
+if [ -n "$version" ]; then
+  printf '%s\n' "$metadata" > "$out/prerelease.json"
+  if [ "$("$out/hack-cli" --version)" != "hack v$version" ]; then
+    echo "Compiled CLI did not report the prerelease version" >&2
+    exit 65
+  fi
+fi
 (
   cd "$out"
-  shasum -a 256 hack-native hack-relay-guest hack-cli hack-v5 provider-pins.json README.md > SHA256SUMS
+  if [ -n "$version" ]; then
+    shasum -a 256 hack-native hack-relay-guest hack-cli hack-v5 provider-pins.json README.md prerelease.json > SHA256SUMS
+  else
+    shasum -a 256 hack-native hack-relay-guest hack-cli hack-v5 provider-pins.json README.md > SHA256SUMS
+  fi
 )
 echo "Candidate bundle: $out"
 echo "Verify SHA256SUMS before copying. Create a separate mode-0700 candidate home."

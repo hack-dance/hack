@@ -133,7 +133,7 @@ pub(super) fn cleanup_with_relay_expected(
             &bridge_selection,
         )
     })?;
-    finish_confirmation(&mut coordinator, &mut cleaned, &root, None)?;
+    finish_confirmation(&mut coordinator, &mut cleaned, &root, None, None)?;
     Ok(cleaned)
 }
 
@@ -206,7 +206,7 @@ pub fn resume_relay_cleanup(
             &bridge_selection,
         )
     })?;
-    finish_confirmation(&mut coordinator, &mut cleaned, &root, None)?;
+    finish_confirmation(&mut coordinator, &mut cleaned, &root, None, None)?;
     Ok(cleaned)
 }
 
@@ -324,6 +324,9 @@ fn confirm_relay_cleanup_fenced(
             &environment,
             &bridge_selection,
         )?;
+        if expected_identity.is_some() {
+            interrupted_start_cleanup::verify_retained_volumes(&engine, &receipt)?;
+        }
         verify_selected_relay(relay.as_ref())?;
         Ok(observed)
     };
@@ -343,7 +346,13 @@ fn confirm_relay_cleanup_fenced(
         )?;
     }
     verify_selected_relay(relay.as_ref())?;
-    finish_confirmation(&mut coordinator, &mut receipt, &root, relay.as_ref())?;
+    finish_confirmation(
+        &mut coordinator,
+        &mut receipt,
+        &root,
+        relay.as_ref(),
+        expected_identity.map(|_| &engine),
+    )?;
     verify_selected_relay(relay.as_ref())?;
     Ok(receipt)
 }
@@ -362,6 +371,7 @@ fn finish_confirmation(
     receipt: &mut Receipt,
     root: &std::path::Path,
     relay: Option<&dead::CleanupWitness>,
+    retained_engine: Option<&Engine<'_>>,
 ) -> Result<(), CandidateError> {
     use crate::provider::relay_owner::lifecycle_intent::Phase;
     if coordinator.phase() != Phase::Confirmed || !coordinator.acknowledgement_pending() {
@@ -369,15 +379,27 @@ fn finish_confirmation(
     }
     #[cfg(test)]
     fault_pause(root, &receipt.run, "relay-before-confirmed-receipt")?;
-    let marker = receipt.relay_cleanup.as_mut().ok_or_else(refused)?;
-    if marker.operation != coordinator.operation() {
+    if receipt
+        .relay_cleanup
+        .as_ref()
+        .ok_or_else(refused)?
+        .operation
+        != coordinator.operation()
+    {
         return Err(refused());
     }
+    if let Some(engine) = retained_engine {
+        interrupted_start_cleanup::verify_retained_volumes(engine, receipt)?;
+    }
     verify_selected_relay(relay)?;
-    marker.phase = cleanup_enrollment::Phase::Confirmed;
+    receipt.relay_cleanup.as_mut().ok_or_else(refused)?.phase =
+        cleanup_enrollment::Phase::Confirmed;
     state::write(&root.join("state.json"), receipt)?;
     #[cfg(test)]
     fault_pause(root, &receipt.run, "relay-before-ack")?;
+    if let Some(engine) = retained_engine {
+        interrupted_start_cleanup::verify_retained_volumes(engine, receipt)?;
+    }
     verify_selected_relay(relay)?;
     coordinator.acknowledge()
 }

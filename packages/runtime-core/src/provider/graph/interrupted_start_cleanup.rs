@@ -170,18 +170,7 @@ impl Proof<'_> {
             &self.bridges,
             None,
         )?;
-        for resource in current
-            .resources
-            .values()
-            .filter(|resource| resource.kind == Kind::Volume)
-        {
-            if resource.cache.is_some()
-                || resource.phase != "created"
-                || inspect_resource(&self.engine, &current, resource)?.is_none()
-            {
-                return Err(refused());
-            }
-        }
+        verify_retained_volumes(&self.engine, &current)?;
         let failed = current
             .resources
             .get(&self.selected.failed_key)
@@ -191,6 +180,55 @@ impl Proof<'_> {
         }
         Ok(())
     }
+}
+
+fn retained_volume_observation(
+    receipt: &Receipt,
+    resource: &Resource,
+    observed: Option<&Value>,
+) -> Result<(), CandidateError> {
+    let value = observed.ok_or_else(refused)?;
+    if resource.kind != Kind::Volume
+        || resource.phase != "created"
+        || value["CreatedAt"].as_str().is_none_or(str::is_empty)
+    {
+        return Err(refused());
+    }
+    match (&resource.cache, &resource.cache_provenance) {
+        (None, None) => Ok(()),
+        (Some(cache), Some(provenance))
+            if cache.valid()
+                && resource.name == cache.name()
+                && provenance.valid(receipt, resource) =>
+        {
+            Ok(())
+        }
+        _ => Err(refused()),
+    }
+}
+
+fn verify_retained_volume(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    resource: &Resource,
+) -> Result<(), CandidateError> {
+    let observed = inspect_resource(engine, receipt, resource)?;
+    retained_volume_observation(receipt, resource, observed.as_ref())?;
+    cache_provenance::verify(engine, receipt, resource)
+}
+
+pub(super) fn verify_retained_volumes(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    for resource in receipt
+        .resources
+        .values()
+        .filter(|resource| resource.kind == Kind::Volume)
+    {
+        verify_retained_volume(engine, receipt, resource)?;
+    }
+    Ok(())
 }
 
 fn failed_created(resource: &Resource, value: &Value) -> Result<(), CandidateError> {

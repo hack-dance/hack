@@ -63,6 +63,72 @@ fn selected(original: &Receipt) -> Selection {
 }
 
 #[test]
+fn retained_plain_volume_requires_created_receipt_and_present_inspection() {
+    let receipt = original();
+    let volume = &receipt.resources["volume:data"];
+    let observed = json!({"CreatedAt":"2026-09-18T00:00:00Z"});
+    assert!(retained_volume_observation(&receipt, volume, Some(&observed)).is_ok());
+    assert!(retained_volume_observation(&receipt, volume, None).is_err());
+    assert!(retained_volume_observation(&receipt, volume, Some(&json!({}))).is_err());
+    let mut changed = volume.clone();
+    changed.phase = "absent".into();
+    assert!(retained_volume_observation(&receipt, &changed, Some(&observed)).is_err());
+}
+
+#[test]
+fn retained_cache_requires_exact_binding_and_provenance() {
+    let mut receipt = original();
+    let mut volume = receipt.resources["volume:data"].clone();
+    let cache = dependency_cache::CacheBinding {
+        scope: "a".repeat(64),
+        fingerprint: "b".repeat(64),
+        image: format!("sha256:{}", "c".repeat(64)),
+    };
+    volume.name = cache.name();
+    volume.cache = Some(cache);
+    volume.cache_provenance = Some(
+        serde_json::from_value(json!({
+            "version":1,
+            "origin":"adopted",
+            "boot":"prior-boot",
+            "identity":{"created_at":"2026-09-18T00:00:00Z","directory":"1:2"},
+            "initializers":[],
+            "completed":{}
+        }))
+        .unwrap(),
+    );
+    receipt
+        .resources
+        .insert("volume:data".into(), volume.clone());
+    let observed = json!({"CreatedAt":"2026-09-18T00:00:00Z"});
+    assert!(retained_volume_observation(&receipt, &volume, Some(&observed)).is_ok());
+    assert!(retained_volume_observation(&receipt, &volume, None).is_err());
+
+    let mut missing_provenance = volume.clone();
+    missing_provenance.cache_provenance = None;
+    assert!(retained_volume_observation(&receipt, &missing_provenance, Some(&observed)).is_err());
+    let mut stale_name = volume.clone();
+    stale_name.name = "replacement".into();
+    assert!(retained_volume_observation(&receipt, &stale_name, Some(&observed)).is_err());
+    let mut stale_binding = volume.clone();
+    stale_binding.cache.as_mut().unwrap().fingerprint = "d".repeat(64);
+    assert!(retained_volume_observation(&receipt, &stale_binding, Some(&observed)).is_err());
+    let mut malformed_provenance = volume;
+    malformed_provenance.cache_provenance = Some(
+        serde_json::from_value(json!({
+            "version":1,
+            "origin":"adopted",
+            "boot":"prior-boot",
+            "identity":{"created_at":"2026-09-18T00:00:00Z","directory":"missing"},
+            "initializers":[],
+            "completed":{}
+        }))
+        .unwrap(),
+    );
+    assert!(retained_volume_observation(&receipt, &malformed_provenance, Some(&observed)).is_err());
+}
+
+#[test]
 fn step_plan_never_deletes_retained_volume_and_keeps_reserved_name_check() {
     let planned = steps(&original(), &["slot-one".into()]).unwrap();
     assert_eq!(

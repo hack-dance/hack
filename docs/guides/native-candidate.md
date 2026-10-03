@@ -946,8 +946,10 @@ its original pinned owner or have both owner and socket absent after foreground
 exit. The absent pair is bound to the existing operation lock, unchanged parent
 identity and exact selected coordinator owner, process, publication and attempt;
 a mixed pair, live process or replaced lock refuses recovery. This is not a
-general retry of a coordinator effect. Its own journal records each cleanup step;
-an uncertain stop is never sent again merely because the container still appears
+general retry of a coordinator effect. Its own journal records each cleanup step.
+Shared dependency caches stay retained, with their original cache bindings and
+volume provenance rechecked at effect and completion boundaries.
+An uncertain stop is never sent again merely because the container still appears
 running. A crash between stop intent and request can therefore require later
 terminal evidence before recovery can advance.
 Likewise, a pending guest helper, probe or environment deletion advances only

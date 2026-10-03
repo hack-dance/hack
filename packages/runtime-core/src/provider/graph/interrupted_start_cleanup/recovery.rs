@@ -358,9 +358,6 @@ fn complete_graph(proof: &Proof<'_>, journal: &mut Journal) -> Result<(), Candid
     for resource in cleaned.resources.values_mut() {
         match resource.kind {
             Kind::Volume => {
-                if resource.cache.is_some() {
-                    return Err(refused());
-                }
                 if resource.phase != "created" {
                     return Err(refused());
                 }
@@ -391,6 +388,7 @@ fn complete_graph(proof: &Proof<'_>, journal: &mut Journal) -> Result<(), Candid
         &proof.root,
         &proof.environment,
     )?;
+    verify_retained_volumes(&proof.engine, &proof.current)?;
     state::write(&proof.root.join("state.json"), &cleaned)?;
     host_relay::inspect_cleanup(
         proof.candidate,
@@ -497,6 +495,7 @@ fn validate_finished<'a>(
     {
         return Err(refused());
     }
+    verify_retained_volumes(&engine, &receipt)?;
     let inventory = environment::cleanup_inventory(candidate, &engine, &receipt, &root)?;
     if record.steps != steps(&record.original, &inventory.slots())?
         || digest(&serde_json::to_vec(&inventory).map_err(|_| refused())?)

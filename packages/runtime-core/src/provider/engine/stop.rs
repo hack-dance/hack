@@ -117,6 +117,9 @@ impl Engine<'_> {
     /// The caller has inspected ownership under this engine's retained mutation lease.
     /// This grants stop only, including on cleanup connections without allocation admission.
     /// All workers are joined before returning, even after a partial failure.
+    // Only macOS one-off and interrupted-start recovery use the plain wrapper.
+    // Graph shutdown uses the diagnosed batch on every supported host.
+    #[cfg(target_os = "macos")]
     pub(in crate::provider) fn stop_containers(
         &self,
         stops: &[(String, u64)],

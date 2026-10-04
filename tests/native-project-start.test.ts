@@ -2216,6 +2216,39 @@ test("startup and restart review use identical branch routes after adaptation", 
         if (args[1] === "probe") {
           return { admitted: true };
         }
+        if (args[1] === "inspect") {
+          return {
+            journal_incomplete: false,
+            receipt: {
+              run: "1".repeat(32),
+              owner: "c".repeat(32),
+              namespace: "b".repeat(64),
+              plan_id: "a".repeat(64),
+              phase: "ready-observed",
+              resources: {
+                "container:web": {
+                  kind: "container",
+                  key: "web",
+                  id: "f".repeat(64),
+                },
+              },
+            },
+          };
+        }
+        if (args[1] === "run-selection") {
+          expect(args[args.indexOf("--service") + 1]).toBe("web");
+          return {
+            ok: true,
+            run: "1".repeat(32),
+            owner: "c".repeat(32),
+            namespace: "b".repeat(64),
+            plan: "a".repeat(64),
+            service: "web",
+            container: "f".repeat(64),
+            boot: "owned-boot",
+            generation: "e".repeat(64),
+          };
+        }
         throw new Error("unexpected preflight effect");
       },
     },

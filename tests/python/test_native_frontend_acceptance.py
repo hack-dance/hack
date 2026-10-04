@@ -22,7 +22,7 @@ spec.loader.exec_module(driver)
 # One stand-in serves as both hack-native and hack-v5 (by file name) over a shared state file.
 # `up` refuses unless a prepared base is required, then stays in the foreground until `down`.
 FAKE = r'''#!PYTHON
-import fcntl, json, os, pathlib, secrets, sys, time
+import fcntl, json, os, pathlib, secrets, subprocess, sys, time
 here = pathlib.Path(__file__).parent
 name = pathlib.Path(__file__).name
 path = here / "state.json"
@@ -55,6 +55,11 @@ state["calls"].append([name, *argv])
 save(state)
 if name == "hack-native":
     argv = argv[2:]
+    if argv[:2] == ["graph", "inspect"]:
+        volume = "wrong" if fault == "replace-volume" and state["container"] > 2 else "data-volume"
+        reply({"receipt": {"run": state["run"], "owner": "owner", "plan_id": "plan", "phase": "ready-observed",
+               "resources": {"volume:data": {"kind": "volume", "name": volume},
+                             "container:web": {"kind": "container", "routing": {"hostnames": state["routes"]}}}}})
     if argv[:2] == ["runtime", "status"]:
         alive = state.get("alive", False)
         share = state.get("share") if fault != "wrong-share" else "/elsewhere"
@@ -82,12 +87,20 @@ if name == "hack-native":
         reply({})
     reply({})
 option = lambda key: argv[argv.index(key) + 1]
-if argv[0] == "up":
+if argv[0] in ("up", "restart"):
     if os.environ.get("HACK_NATIVE_PREPARED_BASE") != "require" or not os.environ.get("HACK_NATIVE_PREPARED_BASE_STORE"):
         reply("prepared base not requested", 2)
     token = secrets.token_hex(4)
     state = load()
+    project = pathlib.Path(option("--path"))
+    branch = subprocess.check_output(["git", "-C", str(project), "branch", "--show-current"], text=True).strip()
+    compose = (project / ".hack/docker-compose.yml").read_text()
+    hosts = next(line.strip()[7:] for line in compose.splitlines() if line.strip().startswith("caddy: ")).split(", ")
+    routes = [host.replace("frontend-accept.", branch + ".frontend-accept.") for host in hosts]
+    if fault == "missing-alias" and state.get("container", 0) >= 2:
+        routes = [host for host in routes if not host.endswith("hack.gy")]
     state.update(foreground=token, alive=True, share=option("--path"), container=state.get("container", 0) + 1,
+                 routes=routes,
                  up_env={k: v for k, v in os.environ.items() if k.startswith("HACK_NATIVE_")})
     state.setdefault("run", "r" + secrets.token_hex(8))
     save(state)
@@ -98,6 +111,29 @@ if argv[0] == "up":
         if load().get("foreground") != token:
             sys.exit(0)
     sys.exit(3)
+if argv[0] == "doctor":
+    project = pathlib.Path.cwd()
+    config = project / ".hack/hack.config.json"
+    compose = project / ".hack/docker-compose.yml"
+    action = option("--domain-migration")
+    if action == "preview":
+        reply({"status": "preview"})
+    if action == "apply":
+        state["original"] = [config.read_text(), compose.read_text()]
+        value = json.loads(config.read_text())
+        value["dev_host"] = "frontend-accept.hack.local"
+        config.write_text(json.dumps(value))
+        contents = compose.read_text().replace("      caddy: ", "      caddy: frontend-accept.hack.local, api.frontend-accept.hack.local, ")
+        compose.write_text(contents)
+        state["migrated"] = [config.read_text(), compose.read_text()]
+        save(state)
+        reply({"status": "applied", "toHost": "frontend-accept.hack.local"})
+    if action == "rollback":
+        if [config.read_text(), compose.read_text()] != state["migrated"] and fault != "overwrite-drift":
+            reply("Project domain migration refused: independent drift", 1)
+        config.write_text(state["original"][0])
+        compose.write_text(state["original"][1] + ("\n# wrong rollback\n" if fault == "wrong-rollback" else ""))
+        reply({"status": "restored"})
 if argv[0] == "ps":
     if fault == "ps-hang":
         fcntl.flock(lock, fcntl.LOCK_UN)
@@ -143,11 +179,16 @@ class Acceptance(unittest.TestCase):
 
         def fetch():
             # The stand-in serves the live worktree, or keeps serving the first content it saw.
+            if acceptance.domain_migration:
+                state = json.loads((self.bundle / "state.json").read_text())
+                if acceptance.host not in state["routes"]:
+                    return None
             body = (acceptance.project / "index.txt").read_text()
             first.append(body)
             return first[0] if stale else body
 
         acceptance.fetch = fetch
+        acceptance.removed_route = lambda host: host not in json.loads((self.bundle / "state.json").read_text())["routes"]
         acceptance.https_wait = 1
         with contextlib.redirect_stdout(io.StringIO()):
             code = acceptance.run()
@@ -288,6 +329,61 @@ class Acceptance(unittest.TestCase):
         self.assertEqual(json.loads(out.getvalue())["preview"]["https_port"], 41443)
         self.assertFalse((self.bundle / "state.json").exists())
         self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_domain_alias_migration_and_rollback_use_inferred_branch_and_preserve_data(self):
+        self.args.domain_migration = True
+        code, acceptance = self.accept()
+        self.assertEqual(code, 0, self.failure() if code else "")
+        proof = json.loads((self.root / "evidence/domain-roundtrip.json").read_text())
+        self.assertTrue(proof["original_files_restored"])
+        self.assertTrue(proof["primary_unchanged"])
+        self.assertFalse(proof["browser_verified"])
+        self.assertFalse(proof["dns_verified"])
+        self.assertEqual(proof["removed_routes"],
+                         sorted([f"api.{acceptance.branch}.frontend-accept.hack.local",
+                                 f"{acceptance.branch}.frontend-accept.hack.local"]))
+        restarts = [c for c in self.calls() if c[:2] == ["hack-v5", "restart"]]
+        self.assertEqual(restarts, [["hack-v5", "restart", "--path", str(acceptance.project)]] * 2)
+        result = json.loads((self.root / "evidence/acceptance.json").read_text())
+        self.assertEqual(result["containers"], ["c1", "c4"])
+
+    def test_domain_mode_refuses_a_replaced_volume_even_with_the_marker(self):
+        self.args.domain_migration = True
+        code, _ = self.accept(fault="replace-volume")
+        self.assertEqual(code, 1)
+        self.assertIn("retains run, ownership and exact volume bindings", self.failure())
+        self.assert_preserved()
+
+    def test_domain_mode_refuses_lost_oauth_aliases(self):
+        self.args.domain_migration = True
+        code, _ = self.accept(fault="missing-alias")
+        self.assertEqual(code, 1)
+        self.assertIn("publishes exactly the expected branch routes", self.failure())
+
+    def test_domain_mode_does_not_accept_rollback_that_overwrites_user_edits(self):
+        self.args.domain_migration = True
+        code, _ = self.accept(fault="overwrite-drift")
+        self.assertEqual(code, 1)
+        self.assertIn("rollback refuses independent file drift", self.failure())
+
+    def test_domain_mode_requires_exact_original_file_restoration(self):
+        self.args.domain_migration = True
+        code, _ = self.accept(fault="wrong-rollback")
+        self.assertEqual(code, 1)
+        self.assertIn("restores exact original bytes and modes", self.failure())
+
+    def test_removed_route_requires_route_rejection_not_transport_failure(self):
+        acceptance = driver.Acceptance(self.args)
+        root = acceptance.home / "native-https/root.crt"
+        root.parent.mkdir(parents=True)
+        root.write_text("test root")
+        acceptance.deadline = driver.time.monotonic() + 60
+        for code, status, expected in [(35, "000", True), (0, "404", True), (0, "421", True),
+                                       (0, "200", False), (7, "000", False), (28, "000", False),
+                                       (60, "000", False)]:
+            with self.subTest(code=code, status=status), mock.patch.object(driver.subprocess, "run") as run:
+                run.return_value = subprocess.CompletedProcess([], code, ("body\n" + status).encode(), b"")
+                self.assertEqual(acceptance.removed_route("removed.example"), expected)
 
 
 if __name__ == "__main__":

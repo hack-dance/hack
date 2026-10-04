@@ -1117,6 +1117,23 @@ The only process it can terminate is one of its own bounded commands, whose dire
 stand-in controls run with
 `python3 -m unittest discover -s tests/python -p test_native_frontend_acceptance.py`.
 
+Add `--domain-migration` to qualify domain changes in that same linked worktree.
+This opt-in starts with legacy `.hack` and OAuth `.hack.gy` project/service aliases,
+runs the real Doctor preview and application, then performs a retaining restart
+and requires every old/new `.hack.local` route to serve the exact source. Another
+restart after Doctor rollback must restore the original route set and stop serving
+the removed aliases. Both transitions retain the run, owner, plan, volume bindings
+and exact data marker. Commands infer the branch from the linked checkout. The
+driver also checks exact original file bytes/modes, unchanged primary checkout,
+preview without effects, and refusal to roll back over an independent file edit.
+
+The resulting `evidence/domain-roundtrip.json` records this narrower proof separately.
+It does not qualify a simultaneously running sibling graph, system DNS, certificate
+trust or a browser session: HTTPS uses the fixture's private root and `--resolve`.
+Complete any normal-origin browser check separately before marking that acceptance
+criterion complete. The driver never installs trust or DNS and still disposes its
+owned fixture after success; there is no indefinite browser handoff or global change.
+
 ### Optional native HTTPS frontend
 
 For routed foreground startup, explicitly set all three public selections:

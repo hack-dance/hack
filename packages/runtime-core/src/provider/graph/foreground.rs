@@ -1,8 +1,11 @@
 //! Explicit foreground lifetime; discovery is not authority to recover a dead owner.
-use super::{Candidate, CandidateError, Engine, HostRelayRuntime, Receipt, RunOptions, startup};
+use super::{
+    Candidate, CandidateError, Engine, HostRelayRuntime, Kind, Receipt, RunOptions, startup,
+};
+use crate::error::StopFailuresDiagnostic;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::Write,
     time::{Duration, Instant},
 };
@@ -433,11 +436,11 @@ fn serve_input<'a>(
                         return Ok(cleaned);
                     }
                     Err(error) => {
-                        let _ = transport::write(
-                            &mut stream,
-                            &json!({"ok":false,"run":receipt.run,"code":error.code}),
-                            Duration::from_secs(5),
-                        );
+                        let mut reply = json!({"ok":false,"run":receipt.run,"code":error.code});
+                        if let Some(detail) = error.stop_failures {
+                            reply["stop_failures"] = json!(detail);
+                        }
+                        let _ = transport::write(&mut stream, &reply, Duration::from_secs(5));
                         continue;
                     }
                 }
@@ -510,6 +513,9 @@ pub fn request(
     remove_data: Option<bool>,
 ) -> Result<Value, CandidateError> {
     let pin = transport::Pin::load(candidate, run)?;
+    // A cleanup diagnostic may name only services in this pinned run's receipt.
+    // Retain its identity before the effect and compare again after the reply.
+    let selected = remove_data.and_then(|_| admitted_services(candidate, run));
     let mut stream = pin.connect()?;
     transport::write(
         &mut stream,
@@ -524,10 +530,97 @@ pub fn request(
         Duration::from_secs(5),
     )?;
     let response: Value = transport::read(&mut stream, Duration::from_secs(570), 256 * 1024)?;
-    validate_owner_response(response, run)
+    let current = response
+        .get("stop_failures")
+        .and_then(|_| admitted_services(candidate, run));
+    let allowed = selected
+        .as_ref()
+        .filter(|before| current.as_ref() == Some(before));
+    validate_owner_response_with_services(response, run, allowed.map(|proof| &proof.services))
+}
+
+#[derive(PartialEq, Eq)]
+struct AdmittedServices {
+    owner: String,
+    namespace: String,
+    plan: String,
+    services: BTreeSet<String>,
+    containers: BTreeMap<String, ContainerGeneration>,
+}
+
+#[derive(PartialEq, Eq)]
+struct ContainerGeneration {
+    key: String,
+    name: String,
+    id: Option<String>,
+    image: Option<String>,
+}
+
+fn admitted_services(candidate: &Candidate, run: &str) -> Option<AdmittedServices> {
+    let root = super::directory(candidate, run).ok()?;
+    super::state::check_private_directory(&root).ok()?;
+    let selected: Receipt = super::state::read(&root.join("state.json")).ok()?;
+    if !super::hex(&selected.owner, 32) {
+        return None;
+    }
+    let (receipt, _) = super::load_at(root, run, &selected.owner).ok()?;
+    if !super::hex(&receipt.namespace, 64)
+        || !super::hex(&receipt.plan_id, 64)
+        || receipt.readiness.len() > super::MAX_SERVICES
+        || receipt.readiness.len()
+            != receipt
+                .resources
+                .values()
+                .filter(|resource| resource.kind == Kind::Container)
+                .count()
+        || receipt.readiness.keys().any(|name| {
+            !receipt
+                .resources
+                .get(&format!("container:{name}"))
+                .is_some_and(|resource| resource.kind == Kind::Container && resource.key == *name)
+        })
+    {
+        return None;
+    }
+    // Cleanup may change phases, but diagnostics cannot cross container generations.
+    // These private identities are compared locally and never sent in the reply.
+    let containers = receipt
+        .resources
+        .iter()
+        .filter(|(_, resource)| resource.kind == Kind::Container)
+        .map(|(key, resource)| {
+            (
+                key.clone(),
+                ContainerGeneration {
+                    key: resource.key.clone(),
+                    name: resource.name.clone(),
+                    id: resource.id.clone(),
+                    image: resource.image.clone(),
+                },
+            )
+        })
+        .collect();
+    Some(AdmittedServices {
+        owner: receipt.owner,
+        namespace: receipt.namespace,
+        plan: receipt.plan_id,
+        services: receipt.readiness.into_keys().collect(),
+        containers,
+    })
 }
 
 fn validate_owner_response(response: Value, run: &str) -> Result<Value, CandidateError> {
+    validate_owner_response_with_services(response, run, None)
+}
+
+fn validate_owner_response_with_services(
+    response: Value,
+    run: &str,
+    allowed_services: Option<&BTreeSet<String>>,
+) -> Result<Value, CandidateError> {
+    if response.get("ok") == Some(&Value::Bool(true)) && response.get("stop_failures").is_some() {
+        return Err(refused());
+    }
     if response.get("ok") != Some(&Value::Bool(true))
         || response.get("run").and_then(Value::as_str) != Some(run)
     {
@@ -550,10 +643,38 @@ fn validate_owner_response(response: Value, run: &str) -> Result<Value, Candidat
                         .and_then(Value::as_str)
                         .is_none_or(|actual| actual == run)
             });
-        return Err(match cause {
-            Some(code) => refused().with_cause_code(code.to_owned()),
-            None => refused(),
-        });
+        let Some(code) = cause else {
+            return Err(refused());
+        };
+        let mut error = refused().with_cause_code(code.to_owned());
+        if let Some(raw) = response.get("stop_failures") {
+            // The pinned owner may report only an exact-run stop failure. Reject
+            // extra or malformed detail rather than forwarding untrusted wire data.
+            if response.get("run").and_then(Value::as_str) != Some(run)
+                || !matches!(
+                    code,
+                    "engine_protocol" | "engine_rejected" | "engine_not_found"
+                )
+            {
+                return Err(refused());
+            }
+            let Ok(detail) = serde_json::from_value::<StopFailuresDiagnostic>(raw.clone()) else {
+                return Err(refused());
+            };
+            if !detail.valid() {
+                return Err(refused());
+            }
+            if !allowed_services.is_some_and(|allowed| {
+                detail
+                    .failures
+                    .iter()
+                    .all(|failure| allowed.contains(&failure.service))
+            }) {
+                return Err(refused());
+            }
+            error = error.with_stop_failures(detail);
+        }
+        return Err(error);
     }
     Ok(response)
 }

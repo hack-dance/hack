@@ -238,6 +238,119 @@ test("owner cleanup failures preserve a bounded cause without replay or raw diag
   expect(String(unsafe)).not.toContain("synthetic-secret-diagnostic");
 });
 
+test("stop diagnostics identify admitted services and fixed stages without replaying requests", async () => {
+  const runtime = await fixture();
+  await Bun.write(
+    runtime.binary,
+    `#!${process.execPath}
+import {appendFileSync} from "node:fs";
+appendFileSync("attempts", "attempt");
+console.error(await Bun.file("diagnostic.json").text());
+process.exit(23);
+`
+  );
+  const diagnostic = {
+    code: "graph_owner_recovery",
+    cause_code: "engine_protocol",
+    message: "synthetic-secret-diagnostic",
+    stop_failures: {
+      version: 1,
+      failures: [
+        { service: "web", stage: "timeout" },
+        { service: "ws", stage: "connect_timeout" },
+      ],
+    },
+  };
+  await Bun.write(
+    join(runtime.home, "diagnostic.json"),
+    JSON.stringify(diagnostic)
+  );
+  const error = await invokeNativeRuntime({
+    runtime,
+    cwd: runtime.home,
+    args: ["graph", "cleanup"],
+  }).catch((failure: unknown) => failure);
+  expect(error).toMatchObject({
+    nativeCode: "graph_owner_recovery",
+    nativeCauseCode: "engine_protocol",
+    nativeStopFailures: diagnostic.stop_failures.failures,
+  });
+  expect(String(error)).toContain("web (timeout), ws (connect_timeout)");
+  expect(String(error)).not.toContain("synthetic-secret-diagnostic");
+  expect(await Bun.file(join(runtime.home, "attempts")).text()).toBe("attempt");
+
+  for (const stop_failures of [
+    { ...diagnostic.stop_failures, version: 2 },
+    ...["\n", "\r", "\u2028", "\u2029"].map((ending) => ({
+      version: 1,
+      failures: [{ service: `web${ending}`, stage: "timeout" }],
+    })),
+    { ...diagnostic.stop_failures, extra: "synthetic-secret-diagnostic" },
+    {
+      version: 1,
+      failures: [
+        { service: "/private/synthetic-secret-diagnostic", stage: "timeout" },
+      ],
+    },
+    {
+      version: 1,
+      failures: [{ service: "web", stage: "synthetic-secret-diagnostic" }],
+    },
+    {
+      version: 1,
+      failures: [
+        {
+          service: "web",
+          stage: "timeout",
+          message: "synthetic-secret-diagnostic",
+        },
+      ],
+    },
+    {
+      version: 1,
+      failures: [
+        { service: "web", stage: "timeout" },
+        { service: "web", stage: "connect" },
+      ],
+    },
+    {
+      version: 1,
+      failures: Array.from({ length: 33 }, (_, i) => ({
+        service: `web${i}`,
+        stage: "timeout",
+      })),
+    },
+  ]) {
+    await Bun.write(
+      join(runtime.home, "diagnostic.json"),
+      JSON.stringify({ ...diagnostic, stop_failures })
+    );
+    const invalid = await invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args: ["graph", "cleanup"],
+    }).catch((failure: unknown) => failure);
+    expect(invalid).toMatchObject({
+      nativeCode: "graph_owner_recovery",
+      nativeStopFailures: undefined,
+    });
+    expect(Bun.inspect(invalid)).not.toContain("synthetic-secret-diagnostic");
+  }
+  await Bun.write(
+    join(runtime.home, "diagnostic.json"),
+    JSON.stringify({ ...diagnostic, code: "source_conflict" })
+  );
+  const unrelated = await invokeNativeRuntime({
+    runtime,
+    cwd: runtime.home,
+    args: ["graph", "cleanup"],
+  }).catch((failure: unknown) => failure);
+  expect(unrelated).toMatchObject({
+    nativeCode: "source_conflict",
+    nativeStopFailures: undefined,
+  });
+});
+
 test("early structured rejection survives a full private-input pipe without replay", async () => {
   const runtime = await fixture();
   const marker = join(runtime.home, "attempts");

@@ -16,6 +16,11 @@ use zeroize::Zeroizing;
 const FIRST: &str = "synthetic-owner-restore-first";
 const SECOND: &str = "synthetic-owner-restore-second";
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod partial_stop;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod stop14;
+
 struct Process {
     child: Child,
     out: Vec<u8>,

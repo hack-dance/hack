@@ -391,6 +391,17 @@ fn predecessor_owner(
         .collect())
 }
 
+fn pending_interrupted(receipt: &Receipt, previous: &str) -> bool {
+    receipt.phase == "cleanup-intent"
+        && receipt.relay_cleanup.as_ref().is_some_and(|marker| {
+            marker.valid()
+                && marker.phase == super::super::cleanup_enrollment::Phase::Pending
+                && super::super::host_relay::context(&receipt.owner, previous).is_ok_and(
+                    |context| marker.runtime == context.runtime && marker.boot == context.boot,
+                )
+        })
+}
+
 /// Explicit dead-owner recovery only: guest helper absence follows the audited
 /// immediate boot transition, never a fabricated live-helper observation.
 pub(crate) fn capture_previous_boot(
@@ -428,10 +439,7 @@ pub(crate) fn capture_previous_boot(
             .collect(),
     };
     if selection.selected.is_empty() {
-        let interrupted = receipt.phase == "cleanup-intent"
-            && receipt.relay_cleanup.as_ref().is_some_and(|marker| {
-                marker.valid() && marker.phase == super::super::cleanup_enrollment::Phase::Pending
-            });
+        let interrupted = pending_interrupted(receipt, previous);
         if interrupted {
             let root = super::super::directory(candidate, &receipt.run)?;
             let prior: Selection = state::read_bounded(&selection_path(&root)?, 65536)?;
@@ -444,25 +452,31 @@ pub(crate) fn capture_previous_boot(
                 || prior.run != selection.run
                 || prior.plan != selection.plan
                 || prior.capacity != selection.capacity
-                || prior.selected.is_empty()
                 || prior.serial > selection.serial
                 || validate_bindings(receipt, &prior, None).is_err()
             {
                 return Err(invalid());
             }
-            selection.selected = prior
-                .selected
-                .into_iter()
-                .map(|(slot, selected)| {
-                    (
-                        slot,
-                        Selected {
-                            assignment: selected.assignment,
-                            helper: None,
-                        },
-                    )
-                })
-                .collect();
+            if prior.selected.is_empty() {
+                // Zero ingress is still an enrolled graph cleanup. The prior
+                // empty sidecar alone cannot authorize it: require the exact
+                // dead pinned predecessor from the immediate old boot.
+                selection.predecessor_owner = Some(predecessor_owner(receipt, previous, host_pin)?);
+            } else {
+                selection.selected = prior
+                    .selected
+                    .into_iter()
+                    .map(|(slot, selected)| {
+                        (
+                            slot,
+                            Selected {
+                                assignment: selected.assignment,
+                                helper: None,
+                            },
+                        )
+                    })
+                    .collect();
+            }
         } else {
             selection.predecessor_owner = Some(predecessor_owner(receipt, previous, host_pin)?);
         }
@@ -660,6 +674,52 @@ fn selection_path(root: &std::path::Path) -> Result<PathBuf, CandidateError> {
     }
 }
 
+/// Same-generation interrupted cleanup, before its pre-effect sidecar is
+/// replaced by the successor-boot selection. The caller must first validate
+/// `current` with `capture_previous_boot`; this pure comparison cannot itself
+/// prove the recorded predecessor fingerprint is a dead pinned endpoint.
+pub(crate) fn interrupted_release(
+    prior: &Selection,
+    current: &Selection,
+    receipt: &Receipt,
+) -> bool {
+    let exact_routes = if prior.selected.is_empty() {
+        current.selected.is_empty()
+            && current
+                .predecessor_owner
+                .as_ref()
+                .is_some_and(|hash| hex(hash, 64))
+            && pinned_predecessor_eligible(receipt)
+    } else {
+        current.predecessor_owner.is_none()
+            && prior.selected.len() == current.selected.len()
+            && prior.selected.iter().all(|(slot, selected)| {
+                current.selected.get(slot).is_some_and(|now| {
+                    now.assignment == selected.assignment && now.helper.is_none()
+                })
+            })
+    };
+    pending_interrupted(receipt, &prior.boot)
+        && prior.version == 1
+        && current.version == 1
+        && prior.owner == current.owner
+        && current.owner == receipt.owner
+        && prior.boot == current.previous_boot.as_deref().unwrap_or_default()
+        && prior.previous_boot.is_none()
+        && prior.predecessor_owner.is_none()
+        && prior.predecessor_absence.is_none()
+        && current.predecessor_absence.is_none()
+        && prior.run == current.run
+        && current.run == receipt.run
+        && prior.plan == current.plan
+        && current.plan == receipt.plan_id
+        && prior.capacity == current.capacity
+        && prior.serial <= current.serial
+        && exact_routes
+        && validate_bindings(receipt, prior, None).is_ok()
+        && validate_bindings(receipt, current, Some(&prior.boot)).is_ok()
+}
+
 fn prior_generation(
     root: &std::path::Path,
     prior: &Selection,
@@ -667,31 +727,7 @@ fn prior_generation(
     stopped: Option<&Receipt>,
     receipt: &Receipt,
 ) -> bool {
-    let interrupted_release = receipt.phase == "cleanup-intent"
-        && receipt.relay_cleanup.as_ref().is_some_and(|marker| {
-            marker.valid() && marker.phase == super::super::cleanup_enrollment::Phase::Pending
-        })
-        && prior.version == 1
-        && prior.owner == current.owner
-        && prior.boot == current.previous_boot.as_deref().unwrap_or_default()
-        && prior.previous_boot.is_none()
-        && prior.predecessor_owner.is_none()
-        && prior.predecessor_absence.is_none()
-        && prior.run == current.run
-        && prior.plan == current.plan
-        && prior.capacity == current.capacity
-        && prior.serial <= current.serial
-        && !prior.selected.is_empty()
-        && prior.selected.len() == current.selected.len()
-        && prior.selected.iter().all(|(slot, selected)| {
-            current
-                .selected
-                .get(slot)
-                .is_some_and(|now| now.assignment == selected.assignment && now.helper.is_none())
-        })
-        && validate_bindings(receipt, prior, None).is_ok()
-        && validate_bindings(receipt, current, Some(&prior.boot)).is_ok();
-    if interrupted_release {
+    if interrupted_release(prior, current, receipt) {
         return true;
     }
     prior.version == 1
@@ -1563,6 +1599,10 @@ mod tests {
                 "control_root":"/private/owned","phase":"pending"}
         }))
         .unwrap();
+        let context = super::super::host_relay::context(&receipt.owner, old_boot).unwrap();
+        let marker = receipt.relay_cleanup.as_mut().unwrap();
+        marker.runtime = context.runtime;
+        marker.boot = context.boot;
         assert!(prior_generation(
             &fixture.0, &prior, &current, None, &receipt
         ));
@@ -1580,6 +1620,66 @@ mod tests {
         assert!(!prior_generation(
             &fixture.0, &prior, &current, None, &receipt
         ));
+    }
+    #[test]
+    fn empty_interrupted_selection_requires_exact_receipt_and_pinned_predecessor() {
+        let fixture = Fixture::new();
+        let old_boot = "11111111-1111-1111-1111-111111111111";
+        let mut prior = selection(7);
+        prior.boot = old_boot.into();
+        let mut current = selection(7);
+        current.boot = "22222222-2222-2222-2222-222222222222".into();
+        current.previous_boot = Some(old_boot.into());
+        // A real capture fills this from predecessor_owner after verifying the
+        // exact dead pinned endpoint; this comparison only checks its shape.
+        current.predecessor_owner = Some("f".repeat(64));
+        let context = super::super::host_relay::context(&current.owner, old_boot).unwrap();
+        let receipt: Receipt = serde_json::from_value(json!({
+            "version":1,"run":current.run,"owner":current.owner,
+            "namespace":"d".repeat(64),"plan_id":current.plan,
+            "phase":"cleanup-intent","readiness":{},"resources":{},
+            "relay_startup":{"control_only":true,"guest_root":null,
+                "control_root":"/private/owned","artifact":"e".repeat(64),"services":{}},
+            "relay_cleanup":{"version":1,"runtime":context.runtime,"boot":context.boot,
+                "operation":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "effect":vec![1;32],"control_root":"/private/owned","phase":"pending"}
+        }))
+        .unwrap();
+        state::write(&fixture.0.join("relay-cleanup-bridges.json"), &prior).unwrap();
+        assert!(interrupted_release(&prior, &current, &receipt));
+        assert!(
+            capture_prior_generation(&fixture.0, &current, &receipt)
+                .unwrap()
+                .is_some()
+        );
+        let mut changed = current.clone();
+        changed.predecessor_owner = None;
+        assert!(!interrupted_release(&prior, &changed, &receipt));
+        changed = current.clone();
+        changed.owner = "9".repeat(32);
+        assert!(!interrupted_release(&prior, &changed, &receipt));
+        changed = current.clone();
+        changed.run = "9".repeat(32);
+        assert!(!interrupted_release(&prior, &changed, &receipt));
+        changed = current.clone();
+        changed.plan = "9".repeat(64);
+        assert!(!interrupted_release(&prior, &changed, &receipt));
+        changed = current.clone();
+        changed.previous_boot = Some("foreign".into());
+        assert!(!interrupted_release(&prior, &changed, &receipt));
+        let mut changed_receipt = receipt.clone();
+        changed_receipt.phase = "ready-observed".into();
+        assert!(!interrupted_release(&prior, &current, &changed_receipt));
+        changed_receipt = receipt.clone();
+        changed_receipt.relay_cleanup.as_mut().unwrap().boot = [2; 16];
+        assert!(!interrupted_release(&prior, &current, &changed_receipt));
+        changed_receipt = receipt.clone();
+        changed_receipt.relay_startup.as_mut().unwrap().control_only = false;
+        assert!(!interrupted_release(&prior, &current, &changed_receipt));
+        prior.serial = 8;
+        assert!(!interrupted_release(&prior, &current, &receipt));
+        state::write(&fixture.0.join("relay-cleanup-bridges.json"), &prior).unwrap();
+        assert!(capture_prior_generation(&fixture.0, &current, &receipt).is_err());
     }
     fn pending(root: &std::path::Path, bytes: &[u8]) -> PathBuf {
         let path = root.join("relay-cleanup-bridges.pending");

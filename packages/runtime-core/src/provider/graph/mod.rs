@@ -68,6 +68,7 @@ pub use bridge_recovery::{export_bridge_recovery, inspect_bridge_recovery};
 pub(in crate::provider) use bridges::{initialize_owner_registry, verify_owner_registry};
 #[cfg(target_os = "macos")]
 mod acknowledged_publisher;
+mod cleanup_diagnostics;
 mod cleanup_enrollment;
 #[cfg(target_os = "macos")]
 pub use acknowledged_publisher::{
@@ -256,6 +257,9 @@ pub struct Receipt {
 pub struct Snapshot {
     pub receipt: Receipt,
     pub journal_incomplete: bool,
+    /// Presentation only; native recovery selection still validates all evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_cleanup: Option<cleanup_diagnostics::PendingCleanup>,
     #[cfg(target_os = "macos")]
     pub interrupted_start_cleanup_incomplete: bool,
     pub observations: BTreeMap<String, Value>,
@@ -1596,9 +1600,11 @@ fn inspect_using(
         observations.insert(key.clone(), value);
     }
     let storage_references = storage::references(&receipt, journal_incomplete, &observations);
+    let pending_cleanup = cleanup_diagnostics::pending(&receipt, &observations, journal_incomplete);
     Ok(Snapshot {
         receipt,
         journal_incomplete,
+        pending_cleanup,
         #[cfg(target_os = "macos")]
         interrupted_start_cleanup_incomplete,
         observations,

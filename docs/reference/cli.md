@@ -1264,6 +1264,7 @@ hack doctor [options]
 | `--browser-url https://app.hack` | HTTPS origin manually tested in the browser (no path or credentials) |
 | `--browser-result unknown|works|fails|permission-denied` | Your manual browser observation for --browser-url (default: unknown) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--native-cleanup inspect` | Inspect one mapped native graph's pending cleanup without recovery or stop replay |
 | `--native-run-mapping inspect|repair` | Inspect or explicitly repair a native run mapping after filesystem device renumbering |
 | `--expect-selection <64-hex>` | Require the exact run-mapping recovery inspection selection |
 | `--accept-legacy-device-rebind` | Explicitly accept legacy migration without proof of original filesystem volume continuity |

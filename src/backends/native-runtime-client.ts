@@ -1,25 +1,34 @@
 import { isAbsolute } from "node:path";
 import { isRecord } from "../lib/guards.ts";
+import {
+  type NativeStopFailure,
+  nativeStopFailureSummary,
+  readNativeStopFailures,
+} from "./native-stop-diagnostics.ts";
 
 const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 interface NativeFailure {
   readonly code: string;
   readonly causeCode?: string;
+  readonly stopFailures?: readonly NativeStopFailure[];
 }
 
 /** Structured native codes remain safe to inspect without exposing subprocess diagnostics. */
 export class NativeRuntimeRequestError extends Error {
   readonly nativeCode: string | undefined;
   readonly nativeCauseCode: string | undefined;
+  readonly nativeStopFailures: readonly NativeStopFailure[] | undefined;
 
   constructor(opts: {
     readonly message: string;
     readonly nativeCode?: string;
     readonly nativeCauseCode?: string;
+    readonly nativeStopFailures?: readonly NativeStopFailure[];
   }) {
     super(opts.message);
     this.nativeCode = opts.nativeCode;
     this.nativeCauseCode = opts.nativeCauseCode;
+    this.nativeStopFailures = opts.nativeStopFailures;
   }
 }
 
@@ -150,6 +159,13 @@ export async function invokeNativeRuntime(opts: {
   }
 }
 
+function nativeFailureMessage(failure: NativeFailure | undefined): string {
+  const code = failure
+    ? ` (${failure.code}${failure.causeCode ? `: ${failure.causeCode}` : ""})`
+    : "";
+  return `Native runtime request failed${code}; inspect owned state before retrying.${nativeStopFailureSummary(failure?.stopFailures)}`;
+}
+
 function completionResponse(
   bytes: Uint8Array,
   code: number,
@@ -164,9 +180,10 @@ function completionResponse(
     throw new NativeRuntimeRequestError({
       message: timedOut
         ? "Native runtime request timed out; inspect owned state before retrying."
-        : `Native runtime request failed${failure ? ` (${failure.code}${failure.causeCode ? `: ${failure.causeCode}` : ""})` : ""}; inspect owned state before retrying.`,
+        : nativeFailureMessage(failure),
       nativeCode: timedOut ? undefined : failure?.code,
       nativeCauseCode: timedOut ? undefined : failure?.causeCode,
+      nativeStopFailures: timedOut ? undefined : failure?.stopFailures,
     });
   }
   try {
@@ -292,6 +309,14 @@ async function readNativeFailure(
         typeof value.cause_code === "string" &&
         ERROR_CODE.test(value.cause_code)
           ? { causeCode: value.cause_code }
+          : {}),
+        ...(["engine_protocol", "engine_rejected", "engine_not_found"].includes(
+          value.code === "graph_owner_recovery" &&
+            typeof value.cause_code === "string"
+            ? value.cause_code
+            : value.code
+        )
+          ? { stopFailures: readNativeStopFailures(value.stop_failures) }
           : {}),
       };
     }

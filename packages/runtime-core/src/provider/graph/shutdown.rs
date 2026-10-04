@@ -4,6 +4,10 @@
 //! after stopping. These helpers never infer guest death from transport success,
 //! delete resources, retry a stop, or convert a missing observation into success.
 use super::{CandidateError, Engine, Kind, Receipt, Resource, error, hex, inspect_resource, state};
+use crate::{
+    error::{StopFailureDiagnostic, StopFailuresDiagnostic},
+    provider::engine::StopBatchFailure,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
@@ -89,7 +93,16 @@ pub(super) fn stop_owned(
         .filter(|(_, p)| p.running)
         .map(|(_, p)| (p.id.clone(), u64::from(p.grace_seconds)))
         .collect::<Vec<_>>();
-    engine.stop_containers(&stops)?;
+    engine
+        .stop_containers_diagnosed(&stops)
+        .map_err(|failure| {
+            let admitted = selected
+                .iter()
+                .filter(|(_, prepared)| prepared.running)
+                .map(|(resource, prepared)| (prepared.id.as_str(), resource.key.as_str()))
+                .collect::<BTreeMap<_, _>>();
+            stop_error(failure, &admitted)
+        })?;
     // No container deletion is authorized until every selected instance has a
     // fresh matching terminal observation and that evidence is durable.
     for (resource, prepared) in selected {
@@ -105,6 +118,31 @@ pub(super) fn stop_owned(
         );
     }
     state::write(&path, &evidence)
+}
+
+fn stop_error(failure: StopBatchFailure, admitted: &BTreeMap<&str, &str>) -> CandidateError {
+    let StopBatchFailure { error, failures } = failure;
+    if failures.is_empty() {
+        return error;
+    }
+    let detail = failures
+        .into_iter()
+        .map(|failure| {
+            admitted
+                .get(failure.id.as_str())
+                .map(|service| StopFailureDiagnostic {
+                    service: (*service).to_owned(),
+                    stage: failure.stage,
+                })
+        })
+        .collect::<Option<Vec<_>>>();
+    match detail {
+        Some(failures) => error.with_stop_failures(StopFailuresDiagnostic {
+            version: 1,
+            failures,
+        }),
+        None => error,
+    }
 }
 
 // Preserve a committed stop observation across cleanup retries, but never carry
@@ -262,7 +300,41 @@ pub(super) fn terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{error::StopFailureStage, provider::engine::StopFailure};
     use serde_json::json;
+
+    #[test]
+    fn stop_detail_uses_only_admitted_service_names_and_omits_foreign_ids() {
+        let id = "a".repeat(64);
+        let secret_id = "b".repeat(64);
+        let error = stop_error(
+            StopBatchFailure {
+                error: CandidateError::new("engine_protocol", "Value-free stop refusal."),
+                failures: vec![StopFailure {
+                    id: id.clone(),
+                    stage: StopFailureStage::Timeout,
+                }],
+            },
+            &BTreeMap::from([(id.as_str(), "web")]),
+        );
+        let encoded = serde_json::to_string(&error).unwrap();
+        assert!(encoded.contains("\"service\":\"web\""));
+        assert!(encoded.contains("\"stage\":\"timeout\""));
+        assert!(!encoded.contains(&id));
+        let foreign = stop_error(
+            StopBatchFailure {
+                error: CandidateError::new("engine_protocol", "Value-free stop refusal."),
+                failures: vec![StopFailure {
+                    id: secret_id.clone(),
+                    stage: StopFailureStage::Timeout,
+                }],
+            },
+            &BTreeMap::from([(id.as_str(), "web")]),
+        );
+        let encoded = serde_json::to_string(&foreign).unwrap();
+        assert!(!encoded.contains("stop_failures"));
+        assert!(!encoded.contains(&secret_id));
+    }
 
     #[test]
     fn interrupted_evidence_is_retained_and_retry_preserves_only_matching_stop_identity() {

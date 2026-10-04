@@ -382,6 +382,52 @@ test("failed startup recovers exact pending cleanup and still reports the startu
   expect(events).not.toContain("save");
   expect(events.at(-1)).toBe("cleanup");
 });
+test("foreground partial shutdown is reported without selecting failed-start recovery", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  let selectedRun = "";
+  let partial = false;
+  const requests: string[] = [];
+  opts.dependencies.serve = async (request) => {
+    selectedRun = request.run;
+    await request.onReady();
+    partial = true;
+    throw new Error("synthetic-private-canary");
+  };
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] !== "inspect") {
+      return invoke(request);
+    }
+    requests.push(request.args[1]);
+    const value = stoppedGraph({
+      run: selectedRun,
+      owner: "c".repeat(32),
+      namespace: "b".repeat(64),
+      planId: "a".repeat(64),
+    });
+    value.receipt.phase = partial ? "cleanup-intent" : "ready-observed";
+    value.observations["container:web"].state = "running";
+    if (!partial) {
+      return value;
+    }
+    return {
+      ...value,
+      receipt: { ...value.receipt, relay_cleanup: { phase: "pending" } },
+      pending_cleanup: { version: 1, kind: "partial_shutdown" },
+      interrupted_start_cleanup_incomplete: false,
+    };
+  };
+  const failure = await startNativeProject(opts).catch(
+    (error: unknown) => error
+  );
+  expect(String(failure)).toContain("Native retaining shutdown is incomplete");
+  expect(Bun.inspect(failure)).not.toContain("synthetic-private-canary");
+  expect(requests).toEqual(["inspect", "inspect"]);
+  expect(events).toContain("ready");
+  expect(events).toContain("save");
+  expect(events).not.toContain("remove");
+});
+
 test("source opt-in and occupied mapping refuse before lifecycle or runtime effects", async () => {
   const { opts, events } = await fixture();
   await expect(

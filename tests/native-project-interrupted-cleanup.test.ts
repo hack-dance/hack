@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { recoverNativeInterruptedStartupCleanup } from "../src/backends/native-project-interrupted-cleanup.ts";
+import {
+  NativePartialShutdownError,
+  recoverNativeInterruptedStartupCleanup,
+} from "../src/backends/native-project-interrupted-cleanup.ts";
 import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
 
 const run = {
@@ -127,6 +130,66 @@ test("ordinary, completed and unenrolled graph states do not request recovery", 
       })
     ).toBeNull();
   }
+});
+
+test("a native partial-shutdown hint preserves the fence without selecting startup recovery", async () => {
+  let calls = 0;
+  const result = await recoverNativeInterruptedStartupCleanup({
+    runtime,
+    projectRoot: "/not-used",
+    run,
+    snapshot: {
+      ...snapshot(),
+      pending_cleanup: { version: 1, kind: "partial_shutdown" },
+    },
+    invoke: () => {
+      calls++;
+      throw new Error("unexpected startup recovery");
+    },
+  }).catch((error: unknown) => error);
+  expect(result).toBeInstanceOf(NativePartialShutdownError);
+  expect(String(result)).toContain("No uncertain stop was replayed");
+  expect(calls).toBe(0);
+});
+
+test("presentation cannot bypass foreign selection or an unfinished startup journal", async () => {
+  const foreign = snapshot();
+  foreign.receipt.owner = "changed";
+  let calls = 0;
+  await expect(
+    recoverNativeInterruptedStartupCleanup({
+      runtime,
+      projectRoot: "/not-used",
+      run,
+      snapshot: {
+        ...foreign,
+        pending_cleanup: { version: 1, kind: "partial_shutdown" },
+      },
+      invoke: () => {
+        calls++;
+        throw new Error("unexpected recovery");
+      },
+    })
+  ).rejects.toThrow("startup cleanup is unconfirmed");
+  expect(calls).toBe(0);
+  const partial = snapshot();
+  partial.interrupted_start_cleanup_incomplete = true;
+  await expect(
+    recoverNativeInterruptedStartupCleanup({
+      runtime,
+      projectRoot: "/not-used",
+      run,
+      snapshot: {
+        ...partial,
+        pending_cleanup: { version: 1, kind: "partial_shutdown" },
+      },
+      invoke: () => {
+        calls++;
+        throw new Error("synthetic-private-canary");
+      },
+    })
+  ).rejects.toThrow("startup cleanup is unconfirmed");
+  expect(calls).toBe(1);
 });
 
 test("a post-ACK journal hint revalidates selection and finishes exact retirement", async () => {

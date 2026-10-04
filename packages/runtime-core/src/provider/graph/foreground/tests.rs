@@ -155,6 +155,97 @@ fn owner_cleanup_refusal_exposes_only_bounded_code() {
         );
     }
 }
+
+#[test]
+fn owner_stop_detail_requires_exact_run_closed_stages_and_bounded_services() {
+    let run = "a".repeat(32);
+    let admitted = BTreeSet::from(["web".to_owned()]);
+    let valid = json!({"ok":false,"run":run,"code":"engine_protocol","stop_failures":{"version":1,"failures":[{"service":"web","stage":"timeout"}]}});
+    let error =
+        validate_owner_response_with_services(valid.clone(), &run, Some(&admitted)).unwrap_err();
+    assert_eq!(error.cause_code.as_deref(), Some("engine_protocol"));
+    assert_eq!(error.stop_failures.unwrap().failures[0].service, "web");
+    for changed in [
+        json!({"ok":false,"code":"engine_protocol","stop_failures":valid["stop_failures"]}),
+        json!({"ok":false,"run":run,"code":"graph_relay_identity","stop_failures":valid["stop_failures"]}),
+        json!({"ok":false,"run":run,"code":"engine_protocol","stop_failures":{"version":1,"failures":[{"service":"web","stage":"private_path"}]}}),
+        json!({"ok":false,"run":run,"code":"engine_protocol","stop_failures":{"version":1,"failures":[{"service":"web/private","stage":"timeout"}]}}),
+        json!({"ok":false,"run":run,"code":"engine_protocol","stop_failures":{"version":1,"failures":[{"service":"web","stage":"timeout","secret":"value"}]}}),
+        json!({"ok":false,"run":run,"code":"engine_protocol","stop_failures":{"version":1,"failures":[{"service":"foreign","stage":"timeout"}]}}),
+        json!({"ok":true,"run":run,"stop_failures":valid["stop_failures"]}),
+    ] {
+        let error =
+            validate_owner_response_with_services(changed, &run, Some(&admitted)).unwrap_err();
+        assert!(error.stop_failures.is_none());
+        assert!(error.cause_code.is_none());
+    }
+}
+
+#[test]
+fn stop_detail_membership_comes_from_private_exact_run_receipt() {
+    use std::os::unix::fs::DirBuilderExt;
+    let (_fixture, candidate, run) = fixture();
+    let root = super::super::directory(&candidate, &run).unwrap();
+    super::super::state::private_directory(root.parent().unwrap()).unwrap();
+    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    let receipt = json!({
+        "version":1,"run":run,"owner":"a".repeat(32),"namespace":"b".repeat(64),
+        "plan_id":"c".repeat(64),"phase":"cleanup-intent",
+        "readiness":{"web":"started"},
+        "resources":{"container:web":{"kind":"container","key":"web","name":format!("hkg-{run}-container-1"),"id":"e".repeat(64),"image":format!("sha256:{}", "d".repeat(64)),"phase":"started"}}
+    });
+    super::super::state::write(&root.join("state.json"), &receipt).unwrap();
+    let admitted = admitted_services(&candidate, &run).unwrap();
+    let (loaded, _) = super::super::load_at(root.clone(), &run, &"a".repeat(32)).unwrap();
+    assert_eq!(admitted.services, loaded.readiness.into_keys().collect());
+    for (field, value) in [
+        ("key", json!("foreign")),
+        ("name", json!("foreign-container-name")),
+        ("id", json!("mutable-container-id")),
+        ("image", json!("mutable-image-tag")),
+        ("phase", json!("unknown-phase")),
+    ] {
+        let mut changed = receipt.clone();
+        changed["resources"]["container:web"][field] = value;
+        super::super::state::write(&root.join("state.json"), &changed).unwrap();
+        assert!(admitted_services(&candidate, &run).is_none());
+    }
+    let mut changed = receipt.clone();
+    changed["phase"] = json!("unknown-phase");
+    super::super::state::write(&root.join("state.json"), &changed).unwrap();
+    assert!(admitted_services(&candidate, &run).is_none());
+
+    for (field, value) in [
+        ("name", json!(format!("hkg-{run}-container-2"))),
+        ("id", json!("f".repeat(64))),
+        ("id", Value::Null),
+        ("image", json!(format!("sha256:{}", "f".repeat(64)))),
+    ] {
+        let mut changed = receipt.clone();
+        changed["resources"]["container:web"][field] = value;
+        super::super::state::write(&root.join("state.json"), &changed).unwrap();
+        assert!(admitted_services(&candidate, &run).is_some_and(|current| current != admitted));
+    }
+    let mut changed = receipt.clone();
+    changed["readiness"] = json!({"other":"started"});
+    let mut resource = changed["resources"]["container:web"].clone();
+    resource["key"] = json!("other");
+    changed["resources"] = json!({"container:other":resource});
+    super::super::state::write(&root.join("state.json"), &changed).unwrap();
+    assert!(admitted_services(&candidate, &run).is_some_and(|current| current != admitted));
+
+    for (phase, resource_phase) in [
+        ("cleanup-intent", "started"),
+        ("cleanup-intent", "absent"),
+        ("stopped-data-retained", "absent"),
+    ] {
+        let mut changed = receipt.clone();
+        changed["phase"] = json!(phase);
+        changed["resources"]["container:web"]["phase"] = json!(resource_phase);
+        super::super::state::write(&root.join("state.json"), &changed).unwrap();
+        assert!(admitted_services(&candidate, &run).is_some_and(|current| current == admitted));
+    }
+}
 #[test]
 fn abandoned_client_does_not_stop_owner() {
     const CHILD_PATH: &str = "HACK_FOREGROUND_TEST_ABANDONED";

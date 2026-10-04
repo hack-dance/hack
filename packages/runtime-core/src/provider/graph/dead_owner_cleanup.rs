@@ -701,6 +701,29 @@ fn fresh_boot(
     }
     Ok(())
 }
+/// `current` must come from the leased previous-boot capture, which verifies the
+/// predecessor publication. The interrupted operation's own pre-effect sidecar
+/// needs no restore history; superseding a historical generation still does.
+fn require_prior_bridge_history(
+    root: &std::path::Path,
+    current: &bridges::cleanup::Selection,
+    receipt: &Receipt,
+    prior: Option<&Value>,
+) -> Result<(), CandidateError> {
+    let Some(prior) = prior else {
+        return Ok(());
+    };
+    let prior: bridges::cleanup::Selection =
+        serde_json::from_value(prior.clone()).map_err(|_| refused())?;
+    if bridges::cleanup::interrupted_release(&prior, current, receipt)
+        || restore_history::confirms_prior_generation(root, receipt)?
+    {
+        Ok(())
+    } else {
+        Err(refused())
+    }
+}
+
 fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, CandidateError> {
     let engine = Engine::connect_cleanup_wait(candidate)?;
     let selected_pin = super::host_pin_recovery::selected_for_old_publisher(candidate, run)?;
@@ -799,10 +822,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             pin_guard.as_ref().map(|guard| guard.witness()),
         )?;
         let prior_bridges = bridges::cleanup::capture_prior_generation(&root, &bridges, &receipt)?;
-        if prior_bridges.is_some() && !restore_history::confirms_prior_generation(&root, &receipt)?
-        {
-            return Err(refused());
-        }
+        require_prior_bridge_history(&root, &bridges, &receipt, prior_bridges.as_ref())?;
         let intent = Intent {
             version: 1,
             original_sha256: expected.into(),
@@ -873,9 +893,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
                 pin_guard.as_ref().map(|guard| guard.witness()),
             )?;
             let prior = bridges::cleanup::capture_prior_generation(&root, &selection, &receipt)?;
-            if prior.is_some() && !restore_history::confirms_prior_generation(&root, &receipt)? {
-                return Err(refused());
-            }
+            require_prior_bridge_history(&root, &selection, &receipt, prior.as_ref())?;
             intent.prior_bridges = prior;
             selection
         }
@@ -1247,6 +1265,81 @@ mod tests {
             complete_sha256: None,
             one_off_sha256: None,
         }
+    }
+    #[test]
+    fn interrupted_bridge_selection_does_not_require_a_restored_generation() {
+        let fixture = super::super::tests::Fixture::new();
+        let mut receipt = partial();
+        receipt.phase = "cleanup-intent".into();
+        let context = host_relay::context(&receipt.owner, "old-boot").unwrap();
+        receipt.relay_cleanup = Some(cleanup_enrollment::RelayCleanup {
+            version: 1,
+            runtime: context.runtime,
+            boot: context.boot,
+            operation: [1; 16],
+            effect: [1; 32],
+            control_root: "/private/owned".into(),
+            phase: cleanup_enrollment::Phase::Pending,
+        });
+        let prior = json!({
+            "version":1,"owner":receipt.owner,"boot":"old-boot",
+            "run":receipt.run,"plan":receipt.plan_id,"capacity":2,
+            "serial":1,"selected":{}
+        });
+        let mut current = prior.clone();
+        current["boot"] = json!("new-boot");
+        current["previous_boot"] = json!("old-boot");
+        current["predecessor_owner"] = json!("1".repeat(64));
+        let selection = serde_json::from_value(current.clone()).unwrap();
+        assert!(!restore_history::confirms_prior_generation(&fixture.0, &receipt).unwrap());
+        assert!(
+            require_prior_bridge_history(&fixture.0, &selection, &receipt, Some(&prior)).is_ok()
+        );
+        assert!(require_prior_bridge_history(&fixture.0, &selection, &receipt, None).is_ok());
+
+        for field in [
+            "owner",
+            "run",
+            "plan",
+            "capacity",
+            "serial",
+            "previous_boot",
+            "predecessor_owner",
+        ] {
+            let mut changed = current.clone();
+            changed[field] = match field {
+                "capacity" => json!(3),
+                "serial" => json!(0),
+                "predecessor_owner" => Value::Null,
+                "owner" | "run" => json!("9".repeat(32)),
+                "plan" => json!("9".repeat(64)),
+                _ => json!("foreign-boot"),
+            };
+            let changed = serde_json::from_value(changed).unwrap();
+            assert!(
+                require_prior_bridge_history(&fixture.0, &changed, &receipt, Some(&prior)).is_err(),
+                "{field}"
+            );
+        }
+        let mut ready = receipt.clone();
+        ready.phase = "ready-observed".into();
+        assert!(
+            require_prior_bridge_history(&fixture.0, &selection, &ready, Some(&prior)).is_err()
+        );
+        receipt.relay_cleanup.as_mut().unwrap().phase = cleanup_enrollment::Phase::Confirmed;
+        assert!(
+            require_prior_bridge_history(&fixture.0, &selection, &receipt, Some(&prior)).is_err()
+        );
+        assert!(
+            require_prior_bridge_history(
+                &fixture.0,
+                &selection,
+                &receipt,
+                Some(&json!({"foreign":true}))
+            )
+            .is_err()
+        );
+        assert!(!fixture.0.join("dead-owner-cleanup.json").exists());
     }
     #[test]
     fn current_recovery_dispatch_does_not_select_historical_completion() {

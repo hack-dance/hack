@@ -5,14 +5,54 @@ import {
 } from "./native-project-run.ts";
 import {
   invokeNativeRuntime,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
 const GENERATION = /^[a-f0-9]{64}$/;
+// Only audited, value-free runtime identifiers may cross this error boundary.
+// Unknown future codes retain the generic refusal until explicitly reviewed here.
+const REFRESH_DIAGNOSTIC_CODES = new Set([
+  "engine_protocol",
+  "foreign_state",
+  "graph_cancelled",
+  "graph_dependency_completed_identity",
+  "graph_dependency_endpoint_changed",
+  "graph_dependency_rebind_cancelled",
+  "graph_dependency_rebind_cleanup",
+  "graph_dependency_rebind_incomplete",
+  "graph_dependency_rebind_launch",
+  "graph_dependency_rebind_readiness",
+  "graph_dependency_rebind_stop",
+  "graph_dependency_refresh_refused",
+  "graph_owner_recovery",
+  "graph_publisher_retirement",
+  "graph_startup",
+  "host_endpoint_identity",
+  "invalid_receipt",
+  "provider_acquisition_cancelled",
+  "provider_busy",
+  "provider_home_missing",
+  "provider_state",
+  "recovery_required",
+]);
 
-function refused(): Error {
+function refused(cause?: unknown): Error {
+  let diagnostic = "";
+  if (
+    cause instanceof NativeRuntimeRequestError &&
+    cause.nativeCode &&
+    REFRESH_DIAGNOSTIC_CODES.has(cause.nativeCode)
+  ) {
+    const nested =
+      cause.nativeCauseCode &&
+      REFRESH_DIAGNOSTIC_CODES.has(cause.nativeCauseCode)
+        ? `: ${cause.nativeCauseCode}`
+        : "";
+    diagnostic = ` Native diagnostic: ${cause.nativeCode}${nested}.`;
+  }
   return new Error(
-    "Native dependency refresh identity or outcome is unconfirmed; inspect the owned graph before retrying. No request or command was replayed."
+    `Native dependency refresh identity or outcome is unconfirmed; inspect the owned graph before retrying. No request or command was replayed.${diagnostic}`
   );
 }
 
@@ -76,7 +116,7 @@ export async function refreshNativeProjectDependencies(opts: {
       generation: response.generation,
       changedSlots: response.changed_slots,
     };
-  } catch {
-    throw refused();
+  } catch (cause) {
+    throw refused(cause);
   }
 }

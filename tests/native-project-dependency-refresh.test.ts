@@ -8,6 +8,7 @@ import {
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -168,6 +169,91 @@ test("lost refresh reply omits subprocess diagnostics and never replays", async 
   expect(calls).toBe(1);
   expect(String(failure)).toContain("No request or command was replayed");
   expect(String(failure)).not.toContain("synthetic-private");
+});
+
+test("refresh preserves only allowlisted native codes without replay or raw diagnostics", async () => {
+  const opts = await fixture();
+  for (const [nativeCode, nativeCauseCode, diagnostic] of [
+    ["provider_busy", undefined, "Native diagnostic: provider_busy."],
+    [
+      "graph_owner_recovery",
+      "graph_dependency_rebind_incomplete",
+      "Native diagnostic: graph_owner_recovery: graph_dependency_rebind_incomplete.",
+    ],
+  ] as const) {
+    let calls = 0;
+    let failure: unknown;
+    try {
+      await refreshNativeProjectDependencies({
+        ...opts,
+        invoke: async () => {
+          calls++;
+          throw new NativeRuntimeRequestError({
+            message: "private stderr /private/fixture token=secret-input",
+            nativeCode,
+            nativeCauseCode,
+          });
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(calls).toBe(1);
+    expect(String(failure)).toContain(diagnostic);
+    expect(String(failure)).toContain("No request or command was replayed");
+    expect(String(failure)).not.toContain("private stderr");
+    expect(String(failure)).not.toContain("/private/fixture");
+    expect(String(failure)).not.toContain("secret-input");
+    expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+  }
+});
+
+test("refresh omits unknown, malformed and forged diagnostic identifiers", async () => {
+  const opts = await fixture();
+  const privateValues = [
+    "synthetic_private_value",
+    "provider_busy\nsecret-input",
+    "/private/fixture",
+    "p".repeat(4096),
+  ];
+  for (const value of privateValues) {
+    for (const nativeCode of ["provider_busy", value]) {
+      let calls = 0;
+      let failure: unknown;
+      try {
+        await refreshNativeProjectDependencies({
+          ...opts,
+          invoke: async () => {
+            calls++;
+            throw new NativeRuntimeRequestError({
+              message: "private raw diagnostic",
+              nativeCode,
+              nativeCauseCode: value,
+            });
+          },
+        });
+      } catch (error) {
+        failure = error;
+      }
+      expect(calls).toBe(1);
+      expect(String(failure)).not.toContain(value);
+      expect(String(failure)).not.toContain("private raw diagnostic");
+      expect(String(failure).includes("Native diagnostic:")).toBe(
+        nativeCode === "provider_busy"
+      );
+    }
+  }
+  await expect(
+    refreshNativeProjectDependencies({
+      ...opts,
+      invoke: async () => {
+        throw Object.assign(new Error("private forged diagnostic"), {
+          nativeCode: "provider_busy",
+          nativeCauseCode: "provider_state",
+        });
+      },
+    })
+  ).rejects.not.toThrow("Native diagnostic:");
 });
 
 test("mapping removal, replacement or selector drift during refresh cannot authorize traffic", async () => {

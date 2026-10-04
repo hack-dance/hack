@@ -1126,6 +1126,11 @@ the removed aliases. Both transitions retain the run, owner, plan, volume bindin
 and exact data marker. Commands infer the branch from the linked checkout. The
 driver also checks exact original file bytes/modes, unchanged primary checkout,
 preview without effects, and refusal to roll back over an independent file edit.
+Only audited `graph inspect` and `runtime status` observations may repeat an exact
+structured `provider_busy` refusal, within a 15-second observation budget and the
+overall run budget. Every attempt retains its output and result. Other errors,
+malformed replies and timeouts stop the run; mutations, refresh and exec never
+use this re-observation path.
 
 The resulting `evidence/domain-roundtrip.json` records this narrower proof separately.
 It does not qualify a simultaneously running sibling graph, system DNS, certificate

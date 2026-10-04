@@ -70,6 +70,16 @@ class Failure(RuntimeError):
     pass
 
 
+def unique_json_object(pairs):
+    """Duplicate fields are ambiguous control responses, never retry evidence."""
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON field")
+        value[key] = item
+    return value
+
+
 def sha256(path):
     digest = hashlib.sha256()
     with open(path, "rb") as file:
@@ -144,6 +154,7 @@ class Acceptance:
         self.deadline = None
         # How long a route may take to serve the expected source.
         self.https_wait = 60
+        self.observation_wait = 15
         self.foregrounds = []
         self.checks = []
         self.declared = {
@@ -184,6 +195,49 @@ class Acceptance:
 
     def runtime(self, label, *argv, timeout=120):
         return self.command(label, [str(self.native), "--candidate-root", str(self.home), *argv], timeout)
+
+    def observe(self, label, *argv):
+        """Only audited read-only observations may retry an exact provider-busy refusal."""
+        status = argv == ("runtime", "status", "--json")
+        inspect = (len(argv) == 5 and argv[:3] == ("graph", "inspect", "--run-id") and argv[4] == "--json"
+                   and isinstance(argv[3], str) and len(argv[3]) == 32
+                   and all(char in "0123456789abcdef" for char in argv[3]))
+        if not (status or inspect):
+            raise Failure("observation retry is restricted to runtime status and exact graph inspect")
+        deadline = time.monotonic() + self.remaining(self.observation_wait)
+        attempt = 0
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise Failure(f"{label}: provider_busy observation deadline")
+            attempt += 1
+            try:
+                result = subprocess.run([str(self.native), "--candidate-root", str(self.home), *argv],
+                                        env=self.env, cwd=self.root, capture_output=True, timeout=self.remaining(left))
+            except subprocess.TimeoutExpired as error:
+                (self.evidence / f"{label}.attempt-{attempt}.stdout").write_bytes(error.stdout or b"")
+                (self.evidence / f"{label}.attempt-{attempt}.stderr").write_bytes(error.stderr or b"")
+                (self.evidence / f"{label}.attempt-{attempt}.json").write_text(json.dumps({"timed_out": True}))
+                raise
+            for suffix, value in (("stdout", result.stdout), ("stderr", result.stderr)):
+                (self.evidence / f"{label}.attempt-{attempt}.{suffix}").write_bytes(value)
+                (self.evidence / f"{label}.{suffix}").write_bytes(value)
+            (self.evidence / f"{label}.attempt-{attempt}.json").write_text(json.dumps({"exit_code": result.returncode}))
+            if result.returncode == 0:
+                value = json.loads(result.stdout, object_pairs_hook=unique_json_object)
+                if not isinstance(value, dict):
+                    raise Failure(f"{label}: malformed observation response; evidence retained")
+                return value
+            failure = None
+            if result.returncode == 2 and not result.stdout and len(result.stderr) <= 8192:
+                try:
+                    failure = json.loads(result.stderr, object_pairs_hook=unique_json_object)
+                except (ValueError, UnicodeDecodeError):
+                    pass
+            if not (isinstance(failure, dict) and set(failure) == {"code", "message"}
+                    and failure["code"] == "provider_busy" and isinstance(failure["message"], str)):
+                raise Failure(f"{label}: non-retryable observation exit {result.returncode}; evidence retained")
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
 
     def cli(self, label, *argv, timeout=60):
         return self.command(label, [str(self.frontend), *argv], timeout, cwd=self.project)
@@ -283,7 +337,7 @@ class Acceptance:
                 for name in (".hack/hack.config.json", ".hack/docker-compose.yml")}
 
     def graph_bindings(self, label, run):
-        receipt = self.runtime(label, "graph", "inspect", "--run-id", run, "--json")["receipt"]
+        receipt = self.observe(label, "graph", "inspect", "--run-id", run, "--json")["receipt"]
         self.check(f"{label} inspects the selected ready run",
                    receipt["run"] == run and receipt["phase"] == "ready-observed")
         volumes = {key: value for key, value in receipt["resources"].items() if value["kind"] == "volume"}
@@ -384,7 +438,7 @@ class Acceptance:
         self.prepare()
         committed = (self.project / "index.txt").read_text()
         first, ps1 = self.up("up-first")
-        status = self.runtime("pool-status", "runtime", "status", "--json")
+        status = self.observe("pool-status", "runtime", "status", "--json")
         selection = (status.get("prepared_base") or {}).get("selection") or {}
         self.check("the frontend created the pool from the verified base",
                    selection.get("source") == "prepared" and selection.get("base_id") == self.base
@@ -416,7 +470,7 @@ class Acceptance:
     def dispose(self):
         """Owned disposal with readbacks. Any refusal keeps the remaining state."""
         self.runtime("dispose-down", "runtime", "down", "--json", timeout=180)
-        status = self.runtime("dispose-status", "runtime", "status", "--json")
+        status = self.observe("dispose-status", "runtime", "status", "--json")
         if status.get("process_alive") is not False:
             raise Failure(f"pool not confirmed stopped: {json.dumps(status)[:300]}")
         owner = self.home / ".hack-local/run/smolvm/owner.json"

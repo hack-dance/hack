@@ -102,7 +102,7 @@ if argv[0] in ("up", "restart"):
     state.update(foreground=token, alive=True, share=option("--path"), container=state.get("container", 0) + 1,
                  routes=routes,
                  up_env={k: v for k, v in os.environ.items() if k.startswith("HACK_NATIVE_")})
-    state.setdefault("run", "r" + secrets.token_hex(8))
+    state.setdefault("run", secrets.token_hex(16))
     save(state)
     fcntl.flock(lock, fcntl.LOCK_UN)
     deadline = time.time() + 30
@@ -384,6 +384,81 @@ class Acceptance(unittest.TestCase):
             with self.subTest(code=code, status=status), mock.patch.object(driver.subprocess, "run") as run:
                 run.return_value = subprocess.CompletedProcess([], code, ("body\n" + status).encode(), b"")
                 self.assertEqual(acceptance.removed_route("removed.example"), expected)
+
+    def observation(self):
+        acceptance = driver.Acceptance(self.args)
+        acceptance.evidence.mkdir()
+        acceptance.deadline = driver.time.monotonic() + 5
+        acceptance.observation_wait = 0.25
+        return acceptance
+
+    def test_provider_busy_observation_retries_once_and_preserves_both_attempts(self):
+        acceptance = self.observation()
+        busy = subprocess.CompletedProcess([], 2, b"", b'{"code":"provider_busy","message":"held"}')
+        ready = subprocess.CompletedProcess([], 0, b'{"phase":"ready-observed"}', b"")
+        with mock.patch.object(driver.subprocess, "run", side_effect=[busy, ready]) as run:
+            result = acceptance.observe("inspect", "graph", "inspect", "--run-id", "a" * 32, "--json")
+        self.assertEqual(result, {"phase": "ready-observed"})
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual((acceptance.evidence / "inspect.attempt-1.stderr").read_bytes(), busy.stderr)
+        self.assertEqual((acceptance.evidence / "inspect.attempt-2.stdout").read_bytes(), ready.stdout)
+        self.assertEqual((acceptance.evidence / "inspect.attempt-1.json").read_text(), '{"exit_code": 2}')
+        self.assertEqual((acceptance.evidence / "inspect.stdout").read_bytes(), ready.stdout)
+
+    def test_observation_does_not_retry_unstructured_other_or_malformed_errors(self):
+        acceptance = self.observation()
+        failures = [
+            subprocess.CompletedProcess([], 2, b"", b'{"code":"engine_protocol","message":"failed"}'),
+            subprocess.CompletedProcess([], 2, b"", b'provider_busy'),
+            subprocess.CompletedProcess([], 2, b"", b'{"code":"provider_busy"}'),
+            subprocess.CompletedProcess([], 2, b"", b'{"code":"provider_busy","message":7}'),
+            subprocess.CompletedProcess([], 2, b"", b'{"code":"engine_protocol","code":"provider_busy","message":"held"}'),
+            subprocess.CompletedProcess([], 2, b"unexpected", b'{"code":"provider_busy","message":"held"}'),
+            subprocess.CompletedProcess([], 1, b"", b'{"code":"provider_busy","message":"held"}'),
+            subprocess.CompletedProcess([], 2, b"", b"x" * 8193),
+        ]
+        for failure in failures:
+            with self.subTest(failure=failure), mock.patch.object(driver.subprocess, "run", return_value=failure) as run:
+                with self.assertRaisesRegex(driver.Failure, "non-retryable observation"):
+                    acceptance.observe("status", "runtime", "status", "--json")
+                self.assertEqual(run.call_count, 1)
+
+    def test_busy_observation_stops_at_its_budget(self):
+        acceptance = self.observation()
+        busy = subprocess.CompletedProcess([], 2, b"", b'{"code":"provider_busy","message":"held"}')
+        with mock.patch.object(driver.subprocess, "run", return_value=busy) as run:
+            with self.assertRaisesRegex(driver.Failure, "provider_busy observation deadline"):
+                acceptance.observe("status", "runtime", "status", "--json")
+        self.assertGreater(run.call_count, 1)
+        self.assertLessEqual(run.call_count, 4)
+        self.assertTrue((acceptance.evidence / "status.attempt-2.json").exists())
+
+    def test_malformed_successful_observation_is_not_retried(self):
+        acceptance = self.observation()
+        for output in [b'[]', b'{', b'', b'{"phase":"stopped","phase":"ready-observed"}']:
+            with self.subTest(output=output), mock.patch.object(driver.subprocess, "run") as run:
+                run.return_value = subprocess.CompletedProcess([], 0, output, b"")
+                with self.assertRaises((driver.Failure, ValueError)):
+                    acceptance.observe("status", "runtime", "status", "--json")
+                self.assertEqual(run.call_count, 1)
+
+    def test_mutations_exec_and_refresh_never_enter_observation_retry(self):
+        acceptance = self.observation()
+        for argv in [("runtime", "down", "--json"), ("graph", "exec", "--run-id", "a" * 32, "--json"),
+                     ("graph", "refresh-dependencies", "--run-id", "a" * 32, "--json"),
+                     ("graph", "inspect", "--run-id", "../foreign", "--json")]:
+            with self.subTest(argv=argv), mock.patch.object(driver.subprocess, "run") as run:
+                with self.assertRaisesRegex(driver.Failure, "restricted to"):
+                    acceptance.observe("refused", *argv)
+                run.assert_not_called()
+
+    def test_observation_timeout_is_not_retried(self):
+        acceptance = self.observation()
+        with mock.patch.object(driver.subprocess, "run", side_effect=subprocess.TimeoutExpired([], 1)) as run:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                acceptance.observe("status", "runtime", "status", "--json")
+            self.assertEqual(run.call_count, 1)
+        self.assertEqual(json.loads((acceptance.evidence / "status.attempt-1.json").read_text()), {"timed_out": True})
 
 
 if __name__ == "__main__":

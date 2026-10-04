@@ -1133,6 +1133,11 @@ trust or a browser session: HTTPS uses the fixture's private root and `--resolve
 Complete any normal-origin browser check separately before marking that acceptance
 criterion complete. The driver never installs trust or DNS and still disposes its
 owned fixture after success; there is no indefinite browser handoff or global change.
+For a manual browser check, request a fresh phase-specific query (for example,
+`/index.txt?phase=<unique-run-and-phase>`) and require the current fixture marker.
+A new tab can still display cached content from an earlier certificate or route;
+it does not prove a new TLS connection. Use an uncached request for both positive
+checks and expected certificate-rejection controls, without bypassing warnings.
 
 ### Optional native HTTPS frontend
 

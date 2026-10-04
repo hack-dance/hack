@@ -52,6 +52,42 @@ const scope = {
   nativeHome: "/candidate",
   branch: null,
 };
+function activeImageFixture() {
+  return {
+    images: new Map<string, string>(),
+    proof: {
+      ...run,
+      plan: run.planId,
+      service: "app",
+      container: "2".repeat(64),
+      boot: "owned-boot",
+      generation: "3".repeat(64),
+    },
+  };
+}
+function activeImageObservation(image: string) {
+  return {
+    journal_incomplete: false,
+    receipt: {
+      ...run,
+      plan_id: run.planId,
+      phase: "ready-observed",
+      normalized_input: {
+        namespace: run.namespace,
+        original_compose_sha256: "1".repeat(64),
+        normalized_compose_sha256: "3".repeat(64),
+      },
+      resources: {
+        "container:app": {
+          kind: "container",
+          key: "app",
+          id: "2".repeat(64),
+          image,
+        },
+      },
+    },
+  };
+}
 function fixture(pending: NativeRestartIntent | null = null) {
   const events: string[] = [];
   const state = { pending };
@@ -283,6 +319,7 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
     composeFile: "/fixture/.hack/docker-compose.yml",
     run,
     dependencies: {
+      activeImages: async () => activeImageFixture(),
       prepare: async ({ envName }) => {
         expect(envName).toBe("qa");
         return input;
@@ -370,6 +407,7 @@ test("preflight refuses a stale host listener before restart cleanup", async () 
         run,
         dependencyFile: "/private/selection.json",
         dependencies: {
+          activeImages: async () => activeImageFixture(),
           prepare: async () => input,
           adapt: async ({ input: prepared }) => prepared,
           dependencies: async () => [
@@ -1309,6 +1347,9 @@ test("active legacy restart preserves adapted labels and rechecks authenticated 
                     generation: "3".repeat(64),
                   };
                 }
+                if (args[1] === "inspect") {
+                  return activeImageObservation(`sha256:${"a".repeat(64)}`);
+                }
                 if (args[1] === "source-compatibility") {
                   compatible = true;
                   return {
@@ -1334,12 +1375,129 @@ test("active legacy restart preserves adapted labels and rechecks authenticated 
       }
       expect(calls.at(-1)).toBe("run-selection");
       expect(calls.filter((action) => action === "run-selection")).toHaveLength(
-        3
+        drift ? 4 : 5
       );
       expect(calls).not.toContain("restore-selection");
       expect(calls).not.toContain("run-service");
     }
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("active restart preserves admitted images despite moved tags and refuses changed input or generation before cleanup", async () => {
+  const oldImage = `sha256:${"7".repeat(64)}`;
+  const newImage = `sha256:${"8".repeat(64)}`;
+  for (const scenario of ["unchanged", "edited", "generation-drift"] as const) {
+    const f = fixture();
+    const effects: string[] = [];
+    let reviewed = false;
+    const result = restartNativeProject({
+      ...f.options,
+      preflight: async () =>
+        await preflightNativeRestart({
+          runtime: { binary: "/unused", home: "/candidate" },
+          scope,
+          composeFile: "/fixture/.hack/docker-compose.yml",
+          run,
+          dependencies: {
+            prepare: async () => ({
+              originalSha256: (scenario === "edited" ? "2" : "1").repeat(64),
+              environmentFiles: [],
+              serviceNames: ["app", "redis"],
+              normalizedComposeJson: JSON.stringify({
+                services: {
+                  app: { image: "app:latest" },
+                  redis: { image: "redis:latest" },
+                },
+              }),
+              managedEnvironment: {},
+              lifecycleHostEnvironment: {},
+              effectiveEnvName: "qa",
+            }),
+            adapt: async ({ input }) => input,
+            dependencies: async () => [],
+            invoke: async ({ args }) => {
+              effects.push(args[1] ?? "unknown");
+              switch (args[1]) {
+                case "status":
+                  return { network: "internet" };
+                case "probe":
+                  return { admitted: true };
+                case "inspect": {
+                  const observed = activeImageObservation(oldImage);
+                  return {
+                    ...observed,
+                    receipt: {
+                      ...observed.receipt,
+                      resources: {
+                        ...observed.receipt.resources,
+                        "container:redis": {
+                          kind: "container",
+                          key: "redis",
+                          id: "4".repeat(64),
+                          image: oldImage,
+                        },
+                      },
+                    },
+                  };
+                }
+                case "run-selection":
+                  return {
+                    ok: true,
+                    ...activeImageFixture().proof,
+                    generation:
+                      reviewed && scenario === "generation-drift"
+                        ? "4".repeat(64)
+                        : "3".repeat(64),
+                  };
+                case "ensure-image":
+                  return { image_id: newImage };
+                case "source-compatibility":
+                  throw new Error("changed declarations refused");
+                default:
+                  throw new Error("Unexpected effect");
+              }
+            },
+            review: async (options) => {
+              const services = JSON.parse(
+                options.input.normalizedComposeJson
+              ).services;
+              expect(services.app.image).toBe(
+                scenario === "edited" ? newImage : oldImage
+              );
+              expect(services.redis.image).toBe(
+                scenario === "edited" ? newImage : oldImage
+              );
+              reviewed = true;
+              return await options.run({
+                planId: scenario === "edited" ? "9".repeat(64) : run.planId,
+                namespace: run.namespace,
+                report: {},
+                projectArgs: [],
+              });
+            },
+          },
+        }),
+    });
+    if (scenario === "unchanged") {
+      expect(await result).toBe(0);
+      expect(f.events).toContain("down");
+      expect(effects).not.toContain("ensure-image");
+      expect(
+        effects.filter((effect) => effect === "run-selection")
+      ).toHaveLength(2);
+    } else {
+      await expect(result).rejects.toThrow(
+        scenario === "edited"
+          ? "changed declarations refused"
+          : "active review identity changed"
+      );
+      expect(f.events).toEqual([]);
+      expect(f.state.pending).toBeNull();
+      expect(
+        effects.filter((effect) => effect === "ensure-image")
+      ).toHaveLength(scenario === "edited" ? 2 : 0);
+    }
   }
 });

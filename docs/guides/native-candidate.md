@@ -596,7 +596,14 @@ compatibility, not support for rolling back binaries over new state.
 Whole-project foreground `restart` retains the recorded environment, AWS selector,
 profiles, run identity and data volumes. It checks development runtime admission
 (including disk headroom), reviews the normalized plan, and verifies each selected
-host dependency listener before cleanup. Executable selections rediscover the
+host dependency listener before cleanup. For unchanged original Compose input,
+active preflight reuses the admitted immutable image IDs, matching retained startup
+even if a registry tag has moved. It authenticates the complete live graph through
+native service selection and rechecks the same receipt generation, container and
+boot after review. Completed initializer services remain eligible. Edited original
+input uses ordinary image resolution and compatibility review; image reuse grants
+no authority to bypass native source, resource or ownership checks.
+Executable selections rediscover the
 current listener; fixed-PID selections require a deliberate update when their
 listener changes. Preflight remains immediate and does not adopt an unverified
 process at the same port.

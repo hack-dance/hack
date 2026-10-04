@@ -43,7 +43,8 @@ export interface NativeActiveReviewProof {
   readonly generation: string;
 }
 
-async function selectActiveReview(opts: {
+/** Obtain native authority for the complete active graph through one admitted service. */
+export async function selectNativeActiveReview(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly retained: NativeProjectRun;
@@ -126,7 +127,7 @@ export async function verifyNativeActiveReview(opts: {
   if (!opts.proof) {
     return;
   }
-  const current = await selectActiveReview({
+  const current = await selectNativeActiveReview({
     ...opts,
     service: opts.proof.service,
     invoke: opts.invoke ?? invokeNativeRuntime,
@@ -198,7 +199,7 @@ export async function selectNativeProjectReviewIdentity(opts: {
   let activeProof: NativeActiveReviewProof | undefined;
   if (opts.branch && opts.retained && namespace !== opts.retained.namespace) {
     if (opts.retainedMode === "active") {
-      activeProof = await selectActiveReview({
+      activeProof = await selectNativeActiveReview({
         runtime: opts.runtime,
         projectRoot: opts.projectRoot,
         retained: opts.retained,

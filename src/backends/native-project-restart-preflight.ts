@@ -20,7 +20,10 @@ import {
   verifyNativeSourceCompatibility,
 } from "./native-project-restore.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
-import { selectNativeRetainedImages } from "./native-project-retained-images.ts";
+import {
+  selectNativeActiveImages,
+  selectNativeRetainedImages,
+} from "./native-project-retained-images.ts";
 import {
   prepareNativeReviewBranch,
   selectNativeProjectReviewIdentity,
@@ -48,6 +51,7 @@ const DEFAULTS = {
   review: withNativeProjectReview,
   selectReview: selectNativeProjectReviewIdentity,
   retainedImages: selectNativeRetainedImages,
+  activeImages: selectNativeActiveImages,
 };
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const SHA = /^[a-f0-9]{64}$/;
@@ -381,6 +385,15 @@ export async function preflightNativeRestart(opts: {
           }),
       });
   prepareNativeDependencyServices({ dependencies, services: specs });
+  const activeImages = stoppedRetry
+    ? undefined
+    : await deps.activeImages({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        originalSha256: input.originalSha256,
+        restore: opts.run,
+        invoke: deps.invoke,
+      });
   const retainedImages = stoppedRetry
     ? await deps.retainedImages({
         runtime: opts.runtime,
@@ -389,7 +402,7 @@ export async function preflightNativeRestart(opts: {
         restore: opts.run,
         invoke: deps.invoke,
       })
-    : new Map<string, string>();
+    : (activeImages?.images ?? new Map<string, string>());
   await pinRestartImages({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
@@ -432,6 +445,13 @@ export async function preflightNativeRestart(opts: {
         dependencies,
         invoke: deps.invoke,
         cleanedRetry: stoppedRetry,
+      });
+      await verifyNativeActiveReview({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        retained: opts.run,
+        proof: activeImages?.proof,
+        invoke: deps.invoke,
       });
       await verifyNativeActiveReview({
         runtime: opts.runtime,

@@ -989,6 +989,10 @@ remains available for inspection; do not remove journals or ownership pins to re
 
 Native `hack exec` and `hack run` make this request once with a 180-second frontend
 budget before selecting their command or reading managed environment values.
+If refresh refuses, the frontend preserves only reviewed native error identifiers
+such as `provider_busy` or `graph_owner_recovery: graph_dependency_rebind_incomplete`.
+Subprocess text and unknown codes remain omitted. These diagnostics do not confirm
+whether refresh effects occurred or authorize replay; the command is not dispatched.
 `ps` and `logs` remain observations and do not request refresh. Authenticated relay
 traffic reports a stale endpoint to the foreground owner, which attempts bounded
 refresh without idle polling. The affected application request can fail; it is
@@ -1413,3 +1417,14 @@ Legacy mappings without explicit selectors and services with older launcher moun
 refuse before execution; restart with the matching candidate to adopt this path.
 Services without managed values use ordinary exec. The native live qualification
 of this fresh-delivery path remains separate from its unit and transport tests.
+
+
+A detached HTTPS helper that fails during startup may retain a generation-bound
+`startup-failure.json` beside its owner configuration. The CLI reports only the
+reviewed startup stage and an allowlisted native error code; child output, paths
+and application values are omitted. If lease cleanup also fails, the original
+acquisition diagnostic remains visible alongside the unconfirmed cleanup status.
+This record is diagnostic evidence only: it does not acknowledge retirement or
+permit a replacement owner. A missing record (including a helper crash before
+publication) leaves the cause unknown. Preserve the retained owner and finalization
+records for inspection; do not delete them to force another startup.

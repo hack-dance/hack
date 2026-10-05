@@ -4,6 +4,18 @@ import {
   runtimeModels,
 } from "../scripts/lib/tla-runtime-models.ts";
 
+function tlaWitness({
+  invariant,
+  action,
+  fields,
+}: {
+  invariant: string;
+  action: string;
+  fields: readonly string[];
+}): string {
+  return `Error: Invariant ${invariant} is violated.\nState 2: <${action} line 1>\n${fields.map((field) => `/\\ ${field}`).join("\n")}`;
+}
+
 const contracts = runtimeModels.flatMap((model) => [
   model,
   ...("additionalControls" in model
@@ -82,6 +94,135 @@ test("registry ownership control requires live successor deletion in the same Re
   ]) {
     expect(
       model?.verify({ negative: true, exitCode: 12, output: invalid })
+    ).toBe(false);
+  }
+});
+
+test("previous-boot HTTPS publisher witness accepts only the two owner-archived stages", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "previous-boot-shared-https"
+  );
+  expect(model).toBeDefined();
+  const common = [
+    "intent = TRUE",
+    "complete = FALSE",
+    "crashed = TRUE",
+    "published = TRUE",
+    "unsafePublication = TRUE",
+  ];
+  const witness = (archived: string) =>
+    tlaWitness({
+      invariant: "NoPrematurePublication",
+      action: "Publish",
+      fields: [...common, `archived = ${archived}`],
+    });
+  for (const archived of ['{"owner"}', '{"owner", "socket"}']) {
+    expect(
+      model?.verify({ negative: true, exitCode: 12, output: witness(archived) })
+    ).toBe(true);
+  }
+  for (const archived of ["{}", '{"socket"}']) {
+    expect(
+      model?.verify({ negative: true, exitCode: 12, output: witness(archived) })
+    ).toBe(false);
+  }
+  const valid = witness('{"owner", "socket"}');
+  for (const invalid of [
+    valid.replace("<Publish ", "<ArchiveOwner "),
+    valid.replace("complete = FALSE", "complete = TRUE"),
+    valid.replace("Invariant NoPrematurePublication", "Invariant Other"),
+    `${valid}\nError: unrelated checker failure`,
+    `Parse error\n${valid}`,
+    `Model checking completed. No error has been found.\n${valid}`,
+    valid.replace(
+      '/\\ archived = {"owner", "socket"}',
+      'State 3: <Other line 2>\n/\\ archived = {"owner", "socket"}'
+    ),
+  ]) {
+    expect(
+      model?.verify({ negative: true, exitCode: 12, output: invalid })
+    ).toBe(false);
+  }
+});
+
+test("previous-boot HTTPS archive controls accept only model-derived move witnesses", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "previous-boot-shared-https"
+  );
+  for (const [name, invariantFields] of [
+    [
+      "stale-selection",
+      [
+        "intent = TRUE",
+        "selected = 1",
+        "version = 2",
+        "engine = TRUE",
+        'admission = "recovery"',
+        "unsafeArchive = TRUE",
+      ],
+    ],
+    [
+      "unproved-archive",
+      [
+        "intent = TRUE",
+        "eligible = FALSE",
+        "engine = TRUE",
+        'admission = "recovery"',
+        "unsafeArchive = TRUE",
+      ],
+    ],
+  ] as const) {
+    const control = model?.additionalControls.find(
+      (entry) => entry.name === name
+    );
+    expect(control).toBeDefined();
+    const witness = (action: string, archived: string) =>
+      tlaWitness({
+        invariant: "NoUnprovedArchive",
+        action,
+        fields: [...invariantFields, `archived = ${archived}`],
+      });
+    for (const action of ["ArchiveOwner", "ArchiveSocket"]) {
+      const own = action === "ArchiveOwner" ? "owner" : "socket";
+      for (const archived of [`{"${own}"}`, '{"owner", "socket"}']) {
+        expect(
+          control?.verify({
+            negative: true,
+            exitCode: 12,
+            output: witness(action, archived),
+          })
+        ).toBe(true);
+      }
+      for (const archived of [
+        "{}",
+        action === "ArchiveOwner" ? '{"socket"}' : '{"owner"}',
+      ]) {
+        expect(
+          control?.verify({
+            negative: true,
+            exitCode: 12,
+            output: witness(action, archived),
+          })
+        ).toBe(false);
+      }
+    }
+    const valid = witness("ArchiveSocket", '{"owner", "socket"}');
+    expect(
+      control?.verify({
+        negative: true,
+        exitCode: 12,
+        output: valid.replace(
+          '/\\ archived = {"owner", "socket"}',
+          'State 3: <Other line 2>\n/\\ archived = {"owner", "socket"}'
+        ),
+      })
+    ).toBe(false);
+    expect(
+      control?.verify({
+        negative: true,
+        exitCode: 12,
+        output: valid.replace("unsafeArchive = TRUE", "unsafeArchive = FALSE"),
+      })
     ).toBe(false);
   }
 });

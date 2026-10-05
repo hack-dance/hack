@@ -18,6 +18,7 @@ import {
   normalizeProjectName,
 } from "../lib/project-name.ts";
 import {
+  AmbiguousProjectIdError,
   readProjectsRegistry,
   resolveRegisteredProjectByName,
 } from "../lib/projects-registry.ts";
@@ -919,7 +920,10 @@ async function resolveProjectNameArgs(opts: {
     }
     return { ok: true, args: ["--project", name] };
   } catch (error) {
-    if (error instanceof AmbiguousProjectNameError) {
+    if (
+      error instanceof AmbiguousProjectNameError ||
+      error instanceof AmbiguousProjectIdError
+    ) {
       return { ok: false, message: error.message };
     }
     throw error;

@@ -722,8 +722,8 @@ test("a duplicate ID introduced after the hint cannot authorize a primary refres
   await boundary(touch, "before-fallback-git");
   expect(await readFile(registryPath, "utf8")).toBe(bytes);
   expect(await readdir(registryDir)).toEqual(["projects.json"]);
-  // The existing full upsert does not validate duplicate IDs. Stop at its late
-  // admission boundary, after proving that the new primary path refused to write.
+  // Hold a competing owner at late admission after the primary proof refused.
+  // The identity suite separately checks full-upsert duplicate-ID refusal.
   const owner = child("hold");
   await boundary(owner, "held");
   const receipt = await readFile(lockPath, "utf8");
@@ -898,21 +898,16 @@ for (const lastSeenAt of ["invalid", "2026-01-01T00:03:00Z", undefined]) {
       registryPath,
       JSON.stringify({ version: 1, projects: [{ ...entry, lastSeenAt }] })
     );
-    const bytes = await readFile(registryPath, "utf8");
-    // Preserve full-upsert behavior: its existing comparison ignores newly added
-    // fields, so an absent timestamp falls back but does not itself cause a write.
     expect(await report(child("touch"))).toMatchObject({
-      result: { status: lastSeenAt === undefined ? "noop" : "updated" },
+      result: { status: "updated" },
       error: null,
       gitLaunches: 1,
       ownerOpens: 1,
       publications: 1,
-      registryWrites: lastSeenAt === undefined ? 0 : 1,
+      registryWrites: 1,
       registryReads: 2,
     });
-    if (lastSeenAt === undefined) {
-      expect(await readFile(registryPath, "utf8")).toBe(bytes);
-    }
+    expect((await primaryEntry()).lastSeenAt).toBe("2026-01-01T00:02:00Z");
     expect(await readdir(registryDir)).toEqual(["projects.json"]);
   });
 }

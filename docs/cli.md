@@ -52,6 +52,15 @@ Prune also refuses colliding aliases without a project filter, and checks runtim
 working directories against registered checkout/worktree paths before treating a
 runtime name as an alias. Inspect the conflicting entries before retrying cleanup.
 
+Lookup, registration updates and removal also refuse a selected project ID that
+belongs to multiple entries, even if one checkout is missing. Removal checks every
+requested ID under the registry lock before deleting any entry; an ambiguous ID
+leaves the entire batch unchanged. Creating a registration also refuses an ID
+collision. Unrelated duplicate IDs remain visible and do not block operations on
+unique IDs. Optional registration touches defer on ambiguity so they do not break
+read commands. Updates persist newly observed last-seen or configured host
+metadata even when no existing field changes.
+
 Project resolution for `exec`, `run`, `ps`, `logs`, `open` and host env commands
 does not refresh the global project registry. A held registration lock therefore
 does not block their resolution or require a retry just to update last-seen metadata.

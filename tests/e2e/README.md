@@ -77,6 +77,14 @@ supported command-approval flow. Do not loosen permissions to turn a failed
 capability check into a pass, and verify that the saved startup guidance is
 available to the restored task.
 
+The fixture sets both `NO_PROXY` and `no_proxy` to
+`app,db,localhost,127.0.0.1` inside its services. Cloud-injected proxy settings can
+otherwise send an internal service request through an external proxy even when
+service DNS and direct HTTP work. These exceptions apply only to this disposable
+fixture; host and provider proxy settings remain unchanged. In a real project,
+add its internal service names to the existing proxy exceptions rather than
+discarding the project's other entries.
+
 ## Domain migration routing qualification
 
 The local `domain-migration-files` scenario checks the real CLI with both default

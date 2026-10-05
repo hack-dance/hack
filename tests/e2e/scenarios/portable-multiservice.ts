@@ -6,6 +6,7 @@ const OWNER = "hack.e2e.portable-multiservice-owner";
 const PROJECT = "com.docker.compose.project";
 const TIMEOUT = 180_000;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
+const INTERNAL_SERVICE_NO_PROXY = "app,db,localhost,127.0.0.1";
 const APP = [
   'import { SQL } from "bun";',
   'const sql = new SQL("postgres://postgres@db:5432/portable", { max: 1 });',
@@ -100,7 +101,12 @@ export const portableMultiserviceScenario: Scenario = {
             labels,
             // Compose must pass SQL interpolation to Bun without expanding it.
             command: ["bun", "-e", APP.replaceAll("$", () => "$$")],
-            environment: { PORTABLE_OWNER: name },
+            environment: {
+              PORTABLE_OWNER: name,
+              // Cloud-injected proxies must not route private service requests.
+              NO_PROXY: INTERNAL_SERVICE_NO_PROXY,
+              no_proxy: INTERNAL_SERVICE_NO_PROXY,
+            },
             depends_on: { db: { condition: "service_healthy" } },
             healthcheck: {
               test: [
@@ -121,6 +127,8 @@ export const portableMultiserviceScenario: Scenario = {
             environment: {
               POSTGRES_DB: "portable",
               POSTGRES_HOST_AUTH_METHOD: "trust",
+              NO_PROXY: INTERNAL_SERVICE_NO_PROXY,
+              no_proxy: INTERNAL_SERVICE_NO_PROXY,
             },
             volumes: ["data:/var/lib/postgresql/data"],
             healthcheck: {

@@ -24,6 +24,24 @@ def sha(contents):
     return hashlib.sha256(contents).hexdigest()
 
 
+def with_mcp(entries, change=None):
+    payload = {name: value for name, value, _ in entries if name != "SHA256SUMS"}
+    assets = {role: ("synthetic " + role).encode() for role in installer.MCP_FILES}
+    files = {role: {"sha256": sha(value), "bytes": len(value)} for role, value in assets.items()}
+    body = {"schemaVersion": 1, "startupProtocol": 2, "wireProtocol": 1,
+            "platform": "darwin", "architecture": "arm64", "files": files}
+    identity = sha(json.dumps(body, separators=(",", ":")).encode())
+    prefix = "mcp/" + identity + "/"
+    for role, name in installer.MCP_FILES.items():
+        payload[prefix + name] = assets[role]
+    payload[prefix + "manifest.json"] = json.dumps(dict(body, bundleId=identity)).encode()
+    if change:
+        change(payload, prefix)
+    payload["SHA256SUMS"] = "".join(sha(value) + "  " + name + "\n"
+                                    for name, value in sorted(payload.items())).encode()
+    return [(name, value, tarfile.REGTYPE) for name, value in payload.items()]
+
+
 class ChannelTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="hack-prerelease-")
@@ -166,6 +184,65 @@ class ChannelTests(unittest.TestCase):
         with self.assertRaisesRegex(installer.Refusal, "checksum mismatch"):
             with self.channel.lock():
                 self.fail("Changed installation was accepted")
+
+    def test_optional_mcp_upgrade_keeps_modes_and_legacy_rollback(self):
+        self.install()
+        archive, checksum = self.archive("5.0.0-next.2", with_mcp)
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.2", archive, checksum, True)
+        bundle = self.channel.root / "versions/5.0.0-next.2/bundle"
+        _identity, manifest = installer.verify_bundle(bundle, "5.0.0-next.2")
+        nested = set(manifest) - installer.PAYLOAD
+        self.assertEqual(len(nested), 4)
+        for name in nested:
+            self.assertEqual((bundle / name).stat().st_mode & 0o777,
+                             0o400 if name.endswith("manifest.json") else 0o500)
+        signed = {Path(arguments[-1]).name for arguments, _ in self.calls
+                  if arguments[0] == "/usr/bin/codesign"}
+        self.assertTrue(set(installer.MCP_FILES.values()) <= signed)
+        with self.channel.lock():
+            self.channel.select("5.0.0-next.1")
+        self.assertEqual(self.selection()["selected"], "5.0.0-next.1")
+        with self.channel.lock():
+            self.channel.select("5.0.0-next.2")
+        self.assertEqual(self.selection()["selected"], "5.0.0-next.2")
+        before = (self.channel.root / ".selection.json").read_bytes()
+        directory = next((bundle / "mcp").iterdir())
+        moved = self.root / "saved-mcp"
+        directory.rename(moved)
+        directory.symlink_to(moved, target_is_directory=True)
+        with self.assertRaises(installer.Refusal):
+            with self.channel.lock():
+                self.fail("Aliased MCP bundle accepted")
+        self.assertEqual((self.channel.root / ".selection.json").read_bytes(), before)
+
+    def test_mcp_corruption_and_nested_inventory_preserve_previous_selection(self):
+        def manifest_change(payload, prefix, field, value):
+            path = prefix + "manifest.json"
+            manifest = json.loads(payload[path])
+            manifest[field] = value
+            payload[path] = json.dumps(manifest).encode()
+        changes = [
+            lambda data, prefix: data.pop(prefix + "hack-mcp-owner"),
+            lambda data, prefix: data.update({prefix + "foreign": b"foreign"}),
+            lambda data, prefix: data.update({prefix + "../hack-cli": b"traversal"}),
+            lambda data, prefix: data.update({prefix + "hack-mcp-backend": b"changed"}),
+            lambda data, prefix: manifest_change(data, prefix, "startupProtocol", 1),
+            lambda data, prefix: manifest_change(data, prefix, "schemaVersion", True),
+            lambda data, prefix: manifest_change(data, prefix, "architecture", "x64"),
+            lambda data, prefix: manifest_change(data, prefix, "bundleId", "0" * 64),
+            lambda data, prefix: data.update({"mcp/" + "0" * 64 + "/hack-mcp-owner": b"second"}),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                self.rejects_install(lambda entries: with_mcp(entries, change),
+                                     "MCP|archive entr")
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.DIRTYPE):
+            with self.subTest(kind=kind):
+                def link(entries):
+                    return [(name, value, kind if name.endswith("hack-mcp-owner") else original)
+                            for name, value, original in with_mcp(entries)]
+                self.rejects_install(link, "regular archive files")
 
     def test_active_unknown_failed_and_timed_out_status_never_trigger_down(self):
         self.install()

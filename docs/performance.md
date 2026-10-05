@@ -288,7 +288,8 @@ An old v1 runner likewise refuses a v2 owner. The adapter's existing launch argu
 and explicit unsupervised backend mode are unchanged. A foreground owner receiving
 early EOF reports that startup was refused and recommends matching artifacts.
 This capability marker is not a build fingerprint. Candidate bundle assembly below
-adds exact asset identity; release integration and default client wiring remain open.
+adds exact asset identity. Native candidate packaging includes these opt-in assets;
+default client wiring remains separate.
 
 ### Candidate MCP bundles
 
@@ -304,6 +305,12 @@ bun scripts/package-mcp-bundle.ts \
   --backend .hack-local/mcp-bundle-backend
 bun scripts/verify-mcp-bundle.ts BUNDLE_DIRECTORY
 ```
+
+`scripts/build-native-candidate.sh` performs this assembly automatically and includes
+one `mcp/BUNDLE_ID` selection in the complete native candidate. Prerelease archives
+and the side-by-side installer preserve its read-only files and validate the exact
+nested payload; older bundles without MCP remain supported. This does not install
+any client configuration. Use the explicit `--bundle` and `--cli` selection below.
 
 Assembly queries each executable's `--mcp-artifact-info` using a private home and
 cleared environment. Reports must identify the expected role, current host OS and
@@ -324,7 +331,7 @@ mutation by another process with the same user privileges.
 The assembly scripts do not install a client configuration or change the installed Hack.
 Keep adapters as native per-client processes; a resident Bun launch wrapper would
 undo their memory savings. Hashing and capability probes belong to assembly and
-activation, not every MCP request. Release signing, crash
+activation, not every MCP request. Publisher signing/notarization, crash
 durability and retention of old bundles remain separate work. A killed assembler may
 leave a staging directory; this unit does not authorize broad deletion of artifacts.
 

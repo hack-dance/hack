@@ -16,7 +16,9 @@ mise exec -- scripts/build-native-candidate.sh /absolute/new/hack-native-bundle
 
 The destination must not exist. The bundle contains `hack-native`, the static Linux
 ARM64 `hack-relay-guest`, compiled normal CLI `hack-cli`, the `hack-v5` entrypoint,
-provider pins, this guide, and `SHA256SUMS`. The relay uses
+provider pins, this guide, `SHA256SUMS`, and one content-addressed shared MCP bundle
+under `mcp/BUNDLE_ID/`. Its manifest and native adapter, owner, and compiled backend
+are included in the outer checksums. The relay uses
 the committed guest Cargo lockfile and Zig linker wrapper, with a separate build
 target directory. Packaging verifies its ELF architecture and absence of an
 interpreter or shared-library requirements before publishing the bundle. It contains no provider installation, runtime
@@ -27,14 +29,30 @@ For versioned candidate packages, channel rules and publishing gates are describ
 in the [prerelease guide](https://github.com/hack-dance/hack/blob/next/docs/guides/prereleases.md),
 and the separate `hack-next` installation path is described in the
 [candidate installer guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md).
-The build re-signs the final compiled frontend with a local ad-hoc signature and
-strictly verifies both macOS executables before generating checksums. This checks
+The build re-signs the final compiled frontend and MCP backend with local ad-hoc signatures and
+strictly verifies all macOS executables before generating checksums. This checks
 code integrity; an ad-hoc signature does not establish a publisher identity or
 provide Apple notarization. Verify `SHA256SUMS` after copying the complete bundle.
 `hack-relay-guest` runs inside the Linux guest, not on macOS. For graph dependency
 selections, set `artifact` to this bundled file's absolute path and
 `artifact_sha256` to its entry in `SHA256SUMS`; the runtime verifies it again before
 delivery. The `native-stream-relay` feature does not replace this dependency relay.
+
+Shared MCP remains opt-in. Select the verified nested bundle with the existing
+installer; substitute `--cursor` or `--codex` as needed:
+
+```sh
+/absolute/bundle/hack-cli mcp install --claude --scope user \
+  --bundle /absolute/bundle/mcp/BUNDLE_ID --cli /absolute/bundle/hack-cli
+```
+
+This selects the normal CLI for tool calls. It does not activate a native project
+runtime or change other clients. Keep the complete bundle while clients reference
+it. To return to standard stdio, remove the selected client's Hack entry and
+reinstall it without bundle options. Channel rollback does not rewrite those client
+entries. Older prereleases without MCP assets remain installable. The candidate
+installer verifies the complete nested inventory, identity, checksums, modes and
+code signatures before selection; it never auto-enrolls clients.
 
 Verify the copied bundle, create a dedicated home, and explicitly select it:
 

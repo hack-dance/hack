@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::io::Read;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(any(all(target_os = "macos", feature = "environment-launcher"), test))]
 mod private_service_exec;
@@ -33,6 +33,8 @@ const MAX_BODY: u64 = 4 * 1024 * 1024;
 
 struct Transport {
     client: Client,
+    timeout: Duration,
+    admission_deadline: Option<Instant>,
 }
 
 impl Transport {
@@ -46,7 +48,11 @@ impl Transport {
             .connect_timeout(Duration::from_secs(3))
             .build()
             .map_err(|_| failure("Cannot initialize the private engine transport."))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            timeout,
+            admission_deadline: None,
+        })
     }
 
     fn request(
@@ -76,6 +82,7 @@ impl Transport {
         {
             return Err(failure("Invalid private engine request path."));
         }
+        let requires_admission = ![Method::GET, Method::HEAD, Method::DELETE].contains(&method);
         let mut request = self
             .client
             .request(method, format!("http://hack-local{path}"));
@@ -88,6 +95,14 @@ impl Transport {
             request = request
                 .header("Content-Type", "application/json")
                 .body(encoded);
+        }
+        // This runs after guest/admission verification and encoding, immediately
+        // before dispatch. A connection wait cannot extend the original budget.
+        // Cleanup observations and deletion remain possible after expiry; owned
+        // stop has its separate cleanup-only batch transport and deadline.
+        if requires_admission && let Some(deadline) = self.admission_deadline {
+            let remaining = super::managed_environment::remaining_until(deadline)?;
+            request = request.timeout(remaining.min(self.timeout));
         }
         let response = request.send().map_err(|_| failure("Engine request failed or timed out; its effect may be uncertain. No request was replayed."))?;
         response_bytes(response)
@@ -396,6 +411,14 @@ impl<'a> Engine<'a> {
         Ok(engine)
     }
 
+    /// Carry the private request's original admission deadline to dispatch. This
+    /// is independent of environment mounts, including requests with no values.
+    #[cfg(target_os = "macos")]
+    pub(in crate::provider) fn with_admission_deadline(mut self, deadline: Instant) -> Self {
+        self.transport.admission_deadline = Some(deadline);
+        self
+    }
+
     pub(super) fn request(
         &self,
         method: Method,
@@ -681,3 +704,6 @@ mod tests {
         assert!(exchange(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n{\"x\":").is_err());
     }
 }
+
+#[cfg(all(test, feature = "environment-launcher"))]
+mod admission_tests;

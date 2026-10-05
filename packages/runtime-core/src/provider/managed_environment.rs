@@ -40,6 +40,12 @@ fn refused() -> CandidateError {
         "Private graph environment input is invalid, expired, or unavailable; values omitted.",
     )
 }
+pub(super) fn remaining_until(deadline: Instant) -> Result<Duration, CandidateError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero())
+        .ok_or_else(refused)
+}
 fn erase(values: &mut BTreeMap<String, String>) {
     for value in values.values_mut() {
         value.zeroize();
@@ -62,10 +68,7 @@ impl Managed {
         self.deadline
     }
     pub fn remaining(&self) -> Result<Duration, CandidateError> {
-        self.deadline
-            .checked_duration_since(Instant::now())
-            .filter(|left| !left.is_zero())
-            .ok_or_else(refused)
+        remaining_until(self.deadline)
     }
 }
 impl Drop for Managed {

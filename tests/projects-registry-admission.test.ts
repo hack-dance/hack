@@ -722,8 +722,8 @@ test("a duplicate ID introduced after the hint cannot authorize a primary refres
   await boundary(touch, "before-fallback-git");
   expect(await readFile(registryPath, "utf8")).toBe(bytes);
   expect(await readdir(registryDir)).toEqual(["projects.json"]);
-  // The existing full upsert does not validate duplicate IDs. Stop at its late
-  // admission boundary, after proving that the new primary path refused to write.
+  // Hold a competing owner at late admission after the primary proof refused.
+  // The identity suite separately checks full-upsert duplicate-ID refusal.
   const owner = child("hold");
   await boundary(owner, "held");
   const receipt = await readFile(lockPath, "utf8");

@@ -183,6 +183,30 @@ test("MCP selectors survive real CLI forwarding and reject aliases with multiple
   expect(await readFile(fixture.registryPath, "utf8")).toBe(before);
 }, 15_000);
 
+for (const reversed of [false, true]) {
+  test(`MCP returns the structured refusal for duplicate project IDs (reverse=${reversed})`, async () => {
+    const client = await connectMcp();
+    const contender = await fixture.createProject("other", "other");
+    const entries = [target.entry, { ...contender.entry, id: target.entry.id }];
+    await fixture.writeRegistry(reversed ? entries.reverse() : entries);
+    const before = await readFile(fixture.registryPath, "utf8");
+    for (const projectName of ["my_app", "my-app", "other"]) {
+      const result = await client.callTool({
+        name: "hack.project.open",
+        arguments: { projectName },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: expect.stringContaining("Ambiguous project ID"),
+      });
+    }
+    expect(await readFile(fixture.registryPath, "utf8")).toBe(before);
+  });
+}
+
 async function stubDocker(
   runtime: readonly { name: string; directory: string | null }[]
 ) {

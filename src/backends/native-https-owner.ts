@@ -36,6 +36,7 @@ import {
   nativeHttpsReadRetiredOwner,
   nativeHttpsWriteNew,
 } from "./native-https-owner-storage.ts";
+import { nativeHttpsReleaseReplyError } from "./native-https-release-failure.ts";
 import {
   NativeHttpsStartupError,
   readNativeHttpsStartupFailure,
@@ -377,7 +378,16 @@ export async function requestNativeHttpsOwner(
         return;
       }
       try {
-        finish(undefined, decodeNativeHttpsOwnerFrame(bytes));
+        const reply = decodeNativeHttpsOwnerFrame(bytes);
+        if (
+          isRecord(value) &&
+          value.operation === "release" &&
+          isNativeHttpsLeaseIdentity(value.identity)
+        ) {
+          finish(nativeHttpsReleaseReplyError(reply, value.identity), reply);
+          return;
+        }
+        finish(undefined, reply);
       } catch {
         finish(nativeHttpsOwnerRefused());
       }

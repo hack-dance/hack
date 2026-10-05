@@ -1414,3 +1414,12 @@ output leaves the cause unknown. The `authority-ready` diagnostic now covers onl
 readiness; later socket-identity, permission-port and Caddyfile failures have
 separate stages. These classifications do not acknowledge cleanup or permit an
 owner to be adopted or replaced.
+
+When an HTTPS owner refuses an exact lease release, it now attempts a bounded
+failure response containing only the release stage and a reviewed native error
+code. The client verifies the complete lease identity and rejects extra or
+noncanonical protocol data. This response is not a release acknowledgement and
+never triggers a retry: transport loss still leaves the outcome unconfirmed.
+For example, an observed `graph-verification: provider_busy` would locate the
+refusal without exposing native stderr; it would not prove cleanup completed or
+permit another owner to start. Preserve the original records while investigating.

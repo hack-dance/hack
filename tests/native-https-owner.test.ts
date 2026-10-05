@@ -76,6 +76,7 @@ async function fixture(
     readonly startFailure?: boolean;
     readonly hardExit?: boolean;
     readonly holdRetirement?: boolean;
+    readonly releaseFault?: "graph-verification" | "idle-verification";
     /** Fault injected between control-socket publication and its first observation. */
     readonly afterPublish?: "fail" | "replace";
   } = {}
@@ -93,6 +94,8 @@ import { appendFile, chmod, readFile, unlink, writeFile } from "node:fs/promises
 import { NativeRuntimeRequestError } from ${JSON.stringify(resolve(import.meta.dir, "../src/backends/native-runtime-client.ts"))};
 const home = ${JSON.stringify(home)};
 const fault = ${JSON.stringify(options.afterPublish ?? null)};
+const releaseFault = ${JSON.stringify(options.releaseFault ?? null)};
+const failRelease = (stage) => { if (releaseFault === stage) throw new NativeRuntimeRequestError({ message: "/private/fixture/secret-CANARY", nativeCode: "provider_busy" }); };
 await writeFile(home + "/helper-pid", String(process.pid));
 ${options.hardExit ? "process.exit(7);" : ""}
 const never = ${options.immediateExit ? 'Promise.resolve({component:"fixture",code:1})' : "new Promise(() => {})"};
@@ -107,6 +110,7 @@ try {
       };
     },
     verify: async (_binding, lease, phase) => {
+      if (phase === "release") { await appendFile(home + "/release-verifies", "verify\\n"); failRelease("graph-verification"); }
       if (phase === "release" && await readFile(home + "/clean-" + lease.run, "utf8") !== "clean") { throw new Error("unproven"); }
     },
     afterPublish: async (path) => {
@@ -116,6 +120,7 @@ try {
       if (fault === "replace") { await unlink(path); await writeFile(path, "foreign replacement", { mode: 0o644 }); await chmod(path, 0o644); }
     },
     verifyIdle: async () => {
+      failRelease("idle-verification");
       ${
         options.holdRetirement
           ? `await writeFile(home + "/retire-entered", "yes");
@@ -936,3 +941,88 @@ test("helper exit without a failure receipt remains unknown and cannot authorize
     readFile(join(nativeHttpsOwnerRoot(f.home), "startup-failure.json"))
   ).rejects.toThrow();
 }, 25_000);
+test.each([
+  "graph-verification",
+  "idle-verification",
+] as const)("release %s failure preserves evidence and reports a safe code without acknowledgement", async (stage) => {
+  const f = await fixture({ releaseFault: stage });
+  const started = await f.start();
+  const identity = await f.acquire(
+    started.socket,
+    started.configuration.ownerGeneration,
+    "b"
+  );
+  await f.clean("b");
+  const root = nativeHttpsOwnerRoot(f.home);
+  const paths = [
+    join(root, "configuration.json"),
+    join(root, "endpoint.json"),
+    join(root, "leases", `${identity.leaseId}.json`),
+  ];
+  const before = await Promise.all(paths.map((path) => readFile(path)));
+  await expect(f.release(started.socket, identity)).rejects.toThrow(
+    `${stage}: provider_busy`
+  );
+  expect(await Promise.all(paths.map((path) => readFile(path)))).toEqual(
+    before
+  );
+  expect(await readFile(join(f.home, "events"), "utf8")).toBe("start\n");
+  expect(await readFile(join(f.home, "release-verifies"), "utf8")).toBe(
+    "verify\n"
+  );
+  expect(
+    await Bun.file(nativeHttpsLeaseReleasePath(f.home, identity)).exists()
+  ).toBe(false);
+});
+
+test("foreign release identity is refused before verification and leaves the exact lease intact", async () => {
+  const f = await fixture();
+  const started = await f.start();
+  const identity = await f.acquire(
+    started.socket,
+    started.configuration.ownerGeneration,
+    "b"
+  );
+  const leasePath = join(
+    nativeHttpsOwnerRoot(f.home),
+    "leases",
+    `${identity.leaseId}.json`
+  );
+  const before = await readFile(leasePath);
+  await expect(
+    f.release(started.socket, { ...identity, attempt: "c".repeat(32) })
+  ).rejects.toThrow("lease-validation");
+  expect(await readFile(leasePath)).toEqual(before);
+  expect(await Bun.file(join(f.home, "release-verifies")).exists()).toBe(false);
+  expect(
+    await Bun.file(nativeHttpsLeaseReleasePath(f.home, identity)).exists()
+  ).toBe(false);
+  expect(await readFile(join(f.home, "events"), "utf8")).toBe("start\n");
+});
+
+test("extra release request data is refused without verification or changing the lease", async () => {
+  const f = await fixture();
+  const started = await f.start();
+  const identity = await f.acquire(
+    started.socket,
+    started.configuration.ownerGeneration,
+    "b"
+  );
+  const path = join(
+    nativeHttpsOwnerRoot(f.home),
+    "leases",
+    `${identity.leaseId}.json`
+  );
+  const before = await readFile(path);
+  await expect(
+    requestNativeHttpsOwner(started.socket, {
+      version: 1,
+      operation: "release",
+      identity,
+      extra: "secret-CANARY",
+    })
+  ).rejects.toThrow("ownership is unavailable or unconfirmed");
+  expect(await readFile(path)).toEqual(before);
+  expect(await Bun.file(join(f.home, "release-verifies")).exists()).toBe(false);
+  expect(await readFile(join(f.home, "events"), "utf8")).toBe("start\n");
+});

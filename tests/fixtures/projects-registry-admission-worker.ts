@@ -21,6 +21,8 @@ let ownerOpens = 0;
 let publications = 0;
 let registryWrites = 0;
 let realpaths = 0;
+let projectRootResolutions = 0;
+let projectDirResolutions = 0;
 let observations = 0;
 const real = {
   lstat: fs.lstat,
@@ -43,6 +45,9 @@ function hasCode(error: unknown, code: string): boolean {
 function isConfigFile(path: unknown): boolean {
   return typeof path === "string" && path === configFile;
 }
+function isRegistryFile(path: unknown): boolean {
+  return typeof path === "string" && path === registryPath;
+}
 async function pauseObservation(
   observed: { ok: true } | { ok: false; error: unknown }
 ) {
@@ -62,7 +67,10 @@ mock.module("node:fs/promises", () => ({
     if (path === lockPath) {
       observations++;
       if (
-        (operation === "pause-early" && observations === 1) ||
+        (["pause-early", "pause-early-repeat", "pause-optional"].includes(
+          operation
+        ) &&
+          observations === 1) ||
         (operation === "pause-late" && observations === 2)
       ) {
         await pauseObservation(observed);
@@ -75,6 +83,12 @@ mock.module("node:fs/promises", () => ({
   },
   realpath: async (path: string) => {
     realpaths++;
+    if (path === projectRoot) {
+      projectRootResolutions++;
+    }
+    if (path === projectDir) {
+      projectDirResolutions++;
+    }
     return await real.realpath(path);
   },
   mkdir: async (
@@ -136,6 +150,7 @@ const project = {
   envFile: join(projectDir, ".env"),
 };
 let result: unknown = null;
+let firstResult: unknown;
 let error: string | null = null;
 if (operation === "aborted") {
   controller.abort(new Error("cancelled before registry admission"));
@@ -144,7 +159,8 @@ try {
   result =
     operation === "optional" ||
     operation === "required" ||
-    operation === "aborted"
+    operation === "aborted" ||
+    operation === "pause-optional"
       ? await upsertProjectRegistration({
           project,
           nowIso,
@@ -152,6 +168,13 @@ try {
           signal: controller.signal,
         })
       : await touchProjectRegistration({ project, nowIso });
+  if (operation === "pause-early-repeat") {
+    firstResult = result;
+    result = await touchProjectRegistration({
+      project,
+      nowIso: new Date(Date.parse(nowIso) + 1000).toISOString(),
+    });
+  }
 } catch (failure) {
   error = failure instanceof Error ? failure.message : "unexpected failure";
 }
@@ -159,5 +182,5 @@ const gitLaunches = launches.mock.calls.filter(
   ([argv]) => Array.isArray(argv) && basename(String(argv[0])) === "git"
 ).length;
 process.stdout.write(
-  `${JSON.stringify({ result, error, gitLaunches, subprocesses: launches.mock.calls.length, configReads: files.mock.calls.filter(([path]) => isConfigFile(path)).length, bunWrites: writes.mock.calls.length, realpaths, observations, ownerOpens, publications, registryWrites, mutations })}\n`
+  `${JSON.stringify({ result, firstResult, error, gitLaunches, subprocesses: launches.mock.calls.length, configReads: files.mock.calls.filter(([path]) => isConfigFile(path)).length, registryReads: files.mock.calls.filter(([path]) => isRegistryFile(path)).length, bunWrites: writes.mock.calls.length, realpaths, projectRootResolutions, projectDirResolutions, observations, ownerOpens, publications, registryWrites, mutations })}\n`
 );

@@ -273,9 +273,11 @@ test("direct optional admission refuses before config, realpath, mkdir or Git; r
   const required = await report(child("required"));
   expect(required.gitLaunches).toBe(1);
   expect(required.realpaths).toBeGreaterThan(0);
-  expect(required.configReads).toBeGreaterThan(0);
   expect(required).toMatchObject({
     result: null,
+    configReads: 1,
+    projectRootResolutions: 1,
+    projectDirResolutions: 1,
     ownerOpens: 1,
     publications: 1,
     registryWrites: 0,
@@ -314,6 +316,10 @@ test("uncontended stale touch uses real Git and persists renamed configuration w
     registryWrites: 1,
     ownerOpens: 1,
     publications: 1,
+    configReads: 1,
+    projectRootResolutions: 1,
+    projectDirResolutions: 1,
+    registryReads: 2,
   });
   expect(refreshed.gitLaunches).toBe(1);
   await writeFile(
@@ -326,6 +332,9 @@ test("uncontended stale touch uses real Git and persists renamed configuration w
     result: { status: "updated" },
     error: null,
     registryWrites: 1,
+    configReads: 1,
+    projectRootResolutions: 1,
+    projectDirResolutions: 1,
   });
   expect((await readProjectsRegistry({ registryPath })).projects).toEqual([
     expect.objectContaining({
@@ -335,6 +344,150 @@ test("uncontended stale touch uses real Git and persists renamed configuration w
       lastSeenAt: "2026-01-01T00:02:01Z",
     }),
   ]);
+  expect(await readdir(registryDir)).toEqual(["projects.json"]);
+});
+
+test("unborn stale touch reuses one observation and keeps two Git calls", async () => {
+  await git(primary, ["symbolic-ref", "HEAD", "refs/heads/unborn"]);
+  expect(await report(child("touch"))).toMatchObject({
+    result: { status: "updated" },
+    error: null,
+    gitLaunches: 2,
+    configReads: 1,
+    projectRootResolutions: 1,
+    projectDirResolutions: 1,
+    registryReads: 2,
+    registryWrites: 1,
+  });
+  expect((await readProjectsRegistry({ registryPath })).projects).toEqual([
+    expect.objectContaining({
+      id: "retained-fixture-id",
+      lastSeenAt: "2026-01-01T00:02:00Z",
+    }),
+  ]);
+  expect(await readdir(registryDir)).toEqual(["projects.json"]);
+});
+
+test("a config change after touch observation is read by the next touch in the same process", async () => {
+  const touch = child("pause-early-repeat");
+  await boundary(touch, "observed-absent");
+  await writeFile(
+    join(primary, ".hack", "hack.config.json"),
+    JSON.stringify({
+      name: "changed_during_touch",
+      dev_host: "changed.hack.local",
+    })
+  );
+  touch.stdin.end();
+  expect(await report(touch)).toMatchObject({
+    firstResult: {
+      status: "updated",
+      project: {
+        id: "retained-fixture-id",
+        name: "admission",
+        devHost: "admission.hack.local",
+      },
+    },
+    result: {
+      status: "updated",
+      project: {
+        id: "retained-fixture-id",
+        name: "changed-during-touch",
+        devHost: "changed.hack.local",
+      },
+    },
+    error: null,
+    gitLaunches: 2,
+    configReads: 2,
+    projectRootResolutions: 2,
+    projectDirResolutions: 2,
+    registryReads: 4,
+    registryWrites: 2,
+  });
+  expect((await readProjectsRegistry({ registryPath })).projects).toEqual([
+    expect.objectContaining({
+      id: "retained-fixture-id",
+      name: "changed-during-touch",
+      devHost: "changed.hack.local",
+      lastSeenAt: "2026-01-01T00:02:01.000Z",
+    }),
+  ]);
+  expect(await readdir(registryDir)).toEqual(["projects.json"]);
+});
+
+test("public upsert observes config independently after its early admission check", async () => {
+  const upsert = child("pause-optional");
+  await boundary(upsert, "observed-absent");
+  await writeFile(
+    join(primary, ".hack", "hack.config.json"),
+    JSON.stringify({ name: "public_update", dev_host: "public.hack.local" })
+  );
+  upsert.stdin.end();
+  expect(await report(upsert)).toMatchObject({
+    result: {
+      status: "updated",
+      project: {
+        id: "retained-fixture-id",
+        name: "public-update",
+        devHost: "public.hack.local",
+      },
+    },
+    error: null,
+    configReads: 1,
+    projectRootResolutions: 1,
+    projectDirResolutions: 1,
+    registryReads: 1,
+    registryWrites: 1,
+  });
+  expect((await readProjectsRegistry({ registryPath })).projects).toEqual([
+    expect.objectContaining({
+      id: "retained-fixture-id",
+      name: "public-update",
+      devHost: "public.hack.local",
+    }),
+  ]);
+});
+
+test("touch rereads the locked registry and preserves an intervening real registration", async () => {
+  const secondary = join(fixture, "secondary");
+  await mkdir(join(secondary, ".hack"), { recursive: true });
+  await writeFile(
+    join(secondary, ".hack", "hack.config.json"),
+    JSON.stringify({ name: "secondary" })
+  );
+  await writeFile(
+    join(secondary, ".hack", "docker-compose.yml"),
+    "services: {}\n"
+  );
+  await git(secondary, ["init", "-b", "main"]);
+
+  const touch = child("pause-early");
+  await boundary(touch, "observed-absent");
+  expect(await report(child("optional", secondary))).toMatchObject({
+    result: { status: "created" },
+    error: null,
+  });
+  const registered = (
+    await readProjectsRegistry({ registryPath })
+  ).projects.find((project) => project.name === "secondary");
+  expect(registered).toBeDefined();
+  touch.stdin.end();
+  expect(await report(touch)).toMatchObject({
+    result: { status: "updated" },
+    error: null,
+    registryReads: 2,
+    configReads: 1,
+    projectRootResolutions: 1,
+    projectDirResolutions: 1,
+  });
+  const projects = (await readProjectsRegistry({ registryPath })).projects;
+  expect(projects).toHaveLength(2);
+  expect(projects.find((project) => project.name === "secondary")).toEqual(
+    registered
+  );
+  expect(
+    projects.find((project) => project.id === "retained-fixture-id")?.lastSeenAt
+  ).toBe("2026-01-01T00:02:00Z");
   expect(await readdir(registryDir)).toEqual(["projects.json"]);
 });
 

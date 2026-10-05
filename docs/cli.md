@@ -63,6 +63,10 @@ upserts check before Git and configuration discovery, then again before staging
 an owner, so an observed busy lock avoids work that would be discarded. These
 observations never grant ownership: an apparently absent lock still requires
 atomic acquisition. New or changed checkouts are recorded when the lock is available.
+A registry touch reuses its configuration and canonical checkout paths for
+freshness and any update. A later configuration change is picked up by the next
+invocation, even within the one-minute freshness interval. Updates still reread
+the registry under the lock so they preserve concurrent registrations.
 Registration combines repository identity and branch discovery in one Git call for
 ordinary committed checkouts; repositories without commits and unusual ref output
 retain separate branch discovery. Linked worktrees still verify their shared

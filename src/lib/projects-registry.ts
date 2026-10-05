@@ -90,13 +90,50 @@ export async function readProjectsRegistry(opts?: {
   return out ?? { version: REGISTRY_VERSION, projects: [] };
 }
 
-export async function upsertProjectRegistration(opts: {
+type RegistrationUpsertOptions = {
   readonly project: ProjectContext;
   readonly nowIso?: string;
   /** Optional maintenance may abandon a busy lock without waiting or reclaiming it. */
   readonly waitForLock?: boolean;
   readonly signal?: AbortSignal;
+};
+
+type RegistrationObservation = {
+  readonly name: string;
+  readonly devHost: string | undefined;
+  readonly repoRoot: string;
+  readonly projectDir: string;
+  readonly projectDirName: ProjectDirName;
+};
+
+export async function upsertProjectRegistration(
+  opts: RegistrationUpsertOptions
+): Promise<RegisterOutcome> {
+  return await upsertObservedRegistration({ options: opts });
+}
+
+async function readRegistrationObservation(
+  project: ProjectContext
+): Promise<RegistrationObservation> {
+  const [cfg, repoRoot, projectDir] = await Promise.all([
+    readProjectConfig(project),
+    tryRealpath(project.projectRoot),
+    tryRealpath(project.projectDir),
+  ]);
+  return {
+    name: requireProjectName(cfg.name ?? defaultProjectSlugFromPath(repoRoot)),
+    devHost: cfg.devHost?.trim(),
+    repoRoot,
+    projectDir,
+    projectDirName: project.projectDirName,
+  };
+}
+
+async function upsertObservedRegistration(input: {
+  readonly options: RegistrationUpsertOptions;
+  readonly observation?: RegistrationObservation;
 }): Promise<RegisterOutcome> {
+  const opts = input.options;
   const nowIso = opts.nowIso ?? new Date().toISOString();
   const registryPath = getRegistryPath();
   const registryDir = dirname(registryPath);
@@ -110,18 +147,13 @@ export async function upsertProjectRegistration(opts: {
   }
   await ensureDir(registryDir);
 
-  const [repoRootReal, projectDirReal] = await Promise.all([
-    tryRealpath(opts.project.projectRoot),
-    tryRealpath(opts.project.projectDir),
-  ]);
+  // A touch can reuse only its own observation. Public upserts always observe
+  // independently after admission; registry mutation still rereads under lock.
+  const observation =
+    input.observation ?? (await readRegistrationObservation(opts.project));
   const { repoIdentity, gitBranch } = await resolveGitRegistrationMetadata({
-    repoRoot: repoRootReal,
+    repoRoot: observation.repoRoot,
   });
-
-  const cfg = await readProjectConfig(opts.project);
-  const derivedName = defaultProjectSlugFromPath(repoRootReal);
-  const name = requireProjectName(cfg.name ?? derivedName);
-  const devHost = cfg.devHost?.trim();
 
   return await withRegistryLock(
     async () => {
@@ -130,13 +162,9 @@ export async function upsertProjectRegistration(opts: {
         current,
         nowIso,
         incoming: {
-          name,
-          devHost,
-          repoRoot: repoRootReal,
+          ...observation,
           repoIdentity,
           gitBranch,
-          projectDirName: opts.project.projectDirName,
-          projectDir: projectDirReal,
         },
       });
 
@@ -177,6 +205,8 @@ export async function upsertProjectRegistration(opts: {
  *
  * Coalesces unchanged observations for one minute. New or changed checkouts
  * use the normal serialized upsert, but never wait for or reclaim a busy lock.
+ * Configuration and canonical paths are observed once per invocation; a later
+ * invocation reads them again even when the registration is still fresh.
  * Registry maintenance must not delay or break a read command.
  *
  * @returns The registration outcome, or null when the touch failed.
@@ -187,17 +217,21 @@ export async function touchProjectRegistration(opts: {
 }): Promise<RegisterOutcome | null> {
   try {
     const nowIso = opts.nowIso ?? new Date().toISOString();
+    const [registry, observation] = await Promise.all([
+      readProjectsRegistry(),
+      readRegistrationObservation(opts.project),
+    ]);
     const fresh = await readFreshRegistration({
-      project: opts.project,
+      registry,
+      observation,
       nowIso,
     });
     if (fresh) {
       return { status: "noop", project: fresh };
     }
-    return await upsertProjectRegistration({
-      project: opts.project,
-      nowIso,
-      waitForLock: false,
+    return await upsertObservedRegistration({
+      options: { project: opts.project, nowIso, waitForLock: false },
+      observation,
     });
   } catch {
     return null;
@@ -206,27 +240,21 @@ export async function touchProjectRegistration(opts: {
 
 /** A read-only freshness optimization; mutation decisions still run under the lock. */
 async function readFreshRegistration(opts: {
-  readonly project: ProjectContext;
+  readonly registry: ProjectsRegistry;
+  readonly observation: RegistrationObservation;
   readonly nowIso: string;
 }): Promise<RegisteredProject | null> {
-  const [registry, cfg, projectDir, repoRoot] = await Promise.all([
-    readProjectsRegistry(),
-    readProjectConfig(opts.project),
-    tryRealpath(opts.project.projectDir),
-    tryRealpath(opts.project.projectRoot),
-  ]);
-  const name = requireProjectName(
-    cfg.name ?? defaultProjectSlugFromPath(repoRoot)
-  );
-  const matches = matchingNames(registry.projects, name);
+  const { name, devHost, projectDirName, projectDir, repoRoot } =
+    opts.observation;
+  const matches = matchingNames(opts.registry.projects, name);
   if (matches.length !== 1) {
     return null;
   }
   for (const entry of matches) {
     if (
       entry.name !== name ||
-      entry.devHost !== cfg.devHost?.trim() ||
-      entry.projectDirName !== opts.project.projectDirName
+      entry.devHost !== devHost ||
+      entry.projectDirName !== projectDirName
     ) {
       continue;
     }

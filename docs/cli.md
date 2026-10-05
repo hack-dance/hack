@@ -58,10 +58,25 @@ does not block their resolution or require a retry just to update last-seen meta
 Use a checkout/path directly, or an existing registry entry with `--project`;
 `hack init`, project lifecycle registration and `hack projects` discovery maintain
 registrations. Optional `hack projects` discovery coalesces unchanged observations
-for one minute and defers refresh when the registry lock is busy. New or changed
-checkouts are recorded when the lock is available. Explicit registry mutations
-wait up to ten seconds with jittered retries, reread the registry under the lock,
-and publish complete updates by atomic rename. A slow live writer is never evicted
+for one minute and defers refresh when the registry lock is busy. Stale optional
+upserts check before Git and configuration discovery, then again before staging
+an owner, so an observed busy lock avoids work that would be discarded. These
+observations never grant ownership: an apparently absent lock still requires
+atomic acquisition. New or changed checkouts are recorded when the lock is available.
+A registry touch reuses its configuration and canonical checkout paths for
+freshness and any update. A later configuration change is picked up by the next
+invocation, even within the one-minute freshness interval. Updates still reread
+the registry under the lock so they preserve concurrent registrations. An unchanged
+primary checkout refresh skips Git discovery only after that locked reread confirms
+its paths, configuration, and unique registration. It still removes missing sibling
+records; changed or ambiguous registrations use the normal Git checks.
+Registration combines repository identity and branch discovery in one Git call for
+ordinary committed checkouts; repositories without commits and unusual ref output
+retain separate branch discovery. Linked worktrees still verify their shared
+repository identity before joining an existing registration.
+Explicit registry mutations wait up to ten seconds with jittered retries, reread
+the registry under the lock, and publish complete updates by atomic rename.
+A slow live writer is never evicted
 because its lock is old. A confirmed dead owner can be recovered; an occupied or
 reused PID is treated as live, and uncertain ownership is preserved.
 

@@ -41,6 +41,9 @@ export async function withProjectsRegistryLock<T>(opts: {
   readonly timeoutMs?: number;
 }): Promise<T> {
   opts.signal?.throwIfAborted();
+  if (opts.waitForLock === false) {
+    await deferIfProjectsRegistryBusy(opts);
+  }
   const candidate = `${opts.lockPath}.${randomUUID()}.owner`;
   const file = await open(candidate, "wx", 0o600);
   try {
@@ -60,6 +63,36 @@ export async function withProjectsRegistryLock<T>(opts: {
   } finally {
     await file.close();
     await removeAbsentOkay(candidate);
+  }
+}
+
+/**
+ * Optional maintenance may defer before expensive preparation or owner staging.
+ * This observation grants no ownership; absence still requires atomic acquisition.
+ */
+export async function deferIfProjectsRegistryBusy(opts: {
+  readonly lockPath: string;
+  readonly signal?: AbortSignal;
+}): Promise<void> {
+  opts.signal?.throwIfAborted();
+  const occupied = await lockPathOccupied(opts.lockPath);
+  opts.signal?.throwIfAborted();
+  if (occupied) {
+    throw new Error("Projects registry is busy; optional touch deferred");
+  }
+}
+
+async function lockPathOccupied(path: string): Promise<boolean> {
+  try {
+    // Include dangling symlinks and malformed receipts; optional maintenance
+    // never follows, interprets, or reclaims an occupied path.
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) {
+      return false;
+    }
+    throw error;
   }
 }
 

@@ -271,7 +271,7 @@ test("direct optional admission refuses before config, realpath, mkdir or Git; r
     error: "Projects registry is busy; optional touch deferred",
   });
   const required = await report(child("required"));
-  expect(required.gitLaunches).toBeGreaterThan(0);
+  expect(required.gitLaunches).toBe(1);
   expect(required.realpaths).toBeGreaterThan(0);
   expect(required.configReads).toBeGreaterThan(0);
   expect(required).toMatchObject({
@@ -315,7 +315,7 @@ test("uncontended stale touch uses real Git and persists renamed configuration w
     ownerOpens: 1,
     publications: 1,
   });
-  expect(refreshed.gitLaunches).toBeGreaterThan(0);
+  expect(refreshed.gitLaunches).toBe(1);
   await writeFile(
     join(primary, ".hack", "hack.config.json"),
     JSON.stringify({ name: "renamed_project", dev_host: "renamed.hack.local" })

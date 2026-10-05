@@ -11,6 +11,7 @@ import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, pathExists, readTextFile } from "./fs.ts";
 import {
   resolveGitCurrentBranch,
+  resolveGitRegistrationMetadata,
   resolveGitRepositoryIdentity,
 } from "./git-worktree.ts";
 import { getString, isRecord } from "./guards.ts";
@@ -113,7 +114,7 @@ export async function upsertProjectRegistration(opts: {
     tryRealpath(opts.project.projectRoot),
     tryRealpath(opts.project.projectDir),
   ]);
-  const repoIdentity = await resolveGitRepositoryIdentity({
+  const { repoIdentity, gitBranch } = await resolveGitRegistrationMetadata({
     repoRoot: repoRootReal,
   });
 
@@ -121,7 +122,6 @@ export async function upsertProjectRegistration(opts: {
   const derivedName = defaultProjectSlugFromPath(repoRootReal);
   const name = requireProjectName(cfg.name ?? derivedName);
   const devHost = cfg.devHost?.trim();
-  const gitBranch = await resolveGitCurrentBranch({ repoRoot: repoRootReal });
 
   return await withRegistryLock(
     async () => {

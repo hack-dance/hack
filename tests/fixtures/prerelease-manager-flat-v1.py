@@ -32,9 +32,6 @@ PAYLOAD = frozenset(("hack-native", "hack-relay-guest", "hack-cli", "hack-v5",
                      "provider-pins.json", "README.md", "prerelease.json"))
 EXECUTABLES = frozenset(("hack-native", "hack-relay-guest", "hack-cli", "hack-v5"))
 BUNDLE_FILES = PAYLOAD | {"SHA256SUMS"}
-MCP_FILES = {"adapter": "hack-mcp-adapter", "owner": "hack-mcp-owner",
-             "backend": "hack-mcp-backend"}
-MCP_MEMBER = re.compile(r"mcp/([0-9a-f]{64})/(manifest\.json|hack-mcp-adapter|hack-mcp-owner|hack-mcp-backend)\Z")
 MAX_ARCHIVE = 512 * 1024 * 1024
 METADATA_KEYS = {"schema", "version", "tag", "source_revision", "platform"}
 REPOSITORY = "hack-dance/hack"
@@ -153,7 +150,7 @@ def checksums(raw, expected):
         raise Refusal("Malformed SHA256SUMS.") from error
     result = {}
     for line in lines:
-        match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9./-]+)", line)
+        match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9.-]+)", line)
         require(match is not None, "Malformed SHA256SUMS entry.")
         checksum, name = match.groups()
         require(name in expected and name not in result, "Duplicate or foreign checksum entry.")
@@ -162,97 +159,24 @@ def checksums(raw, expected):
     return result
 
 
-def payload_inventory(names):
-    """Accept the original flat payload or one complete content-addressed MCP bundle."""
-    names = set(names)
-    require(BUNDLE_FILES <= names, "Incomplete candidate bundle.")
-    extra = names - BUNDLE_FILES
-    if extra:
-        matches = [MCP_MEMBER.fullmatch(name) for name in extra]
-        require(all(matches), "Foreign candidate MCP payload.")
-        identities = {match.group(1) for match in matches}
-        require(len(identities) == 1, "Candidate requires one MCP bundle identity.")
-        prefix = "mcp/" + next(iter(identities)) + "/"
-        require(extra == {prefix + name for name in (*MCP_FILES.values(), "manifest.json")},
-                "Incomplete candidate MCP payload.")
-    return names - {"SHA256SUMS"}
-
-
-def bundle_inventory(bundle):
-    names = {entry.name for entry in bundle.iterdir()}
-    if "mcp" in names:
-        owned(bundle / "mcp", directory=True, mode=0o700)
-        identities = list((bundle / "mcp").iterdir())
-        require(len(identities) == 1 and SHA256.fullmatch(identities[0].name),
-                "Candidate requires one MCP bundle identity.")
-        directory = identities[0]
-        owned(directory, directory=True, mode=0o700)
-        names.remove("mcp")
-        names.update("mcp/" + directory.name + "/" + entry.name for entry in directory.iterdir())
-    return payload_inventory(names)
-
-
-def payload_mode(name):
-    if MCP_MEMBER.fullmatch(name):
-        return 0o400 if name.endswith("/manifest.json") else 0o500
-    return 0o755 if name in EXECUTABLES else 0o600
-
-
-def verify_mcp_bundle(bundle, payload):
-    nested = sorted(set(payload) - PAYLOAD)
-    if not nested:
-        return
-    prefix = str(Path(nested[0]).parent)
-    path = bundle / prefix / "manifest.json"
-    require(path.stat().st_size <= 8192, "Oversized MCP manifest.")
-    manifest = parse_json(path.read_bytes())
-    require(set(manifest) == {"schemaVersion", "startupProtocol", "wireProtocol", "platform",
-                              "architecture", "files", "bundleId"}, "Invalid MCP manifest fields.")
-    require(all(type(manifest[field]) in (int, float)
-                for field in ("schemaVersion", "startupProtocol", "wireProtocol"))
-            and manifest["schemaVersion"] == 1 and manifest["startupProtocol"] == 2
-            and manifest["wireProtocol"] == 1 and manifest["platform"] == "darwin"
-            and manifest["architecture"] == "arm64", "Incompatible MCP protocol or host.")
-    files = manifest["files"]
-    require(isinstance(files, dict) and set(files) == set(MCP_FILES), "Invalid MCP asset inventory.")
-    canonical_files = {}
-    for role, name in MCP_FILES.items():
-        entry = files[role]
-        require(isinstance(entry, dict) and set(entry) == {"sha256", "bytes"}
-                and isinstance(entry["sha256"], str) and SHA256.fullmatch(entry["sha256"])
-                and type(entry["bytes"]) is int and 0 < entry["bytes"] <= 256 * 1024 * 1024,
-                "Invalid MCP asset fingerprint.")
-        asset = bundle / prefix / name
-        require(asset.stat().st_size == entry["bytes"] and digest(asset) == entry["sha256"],
-                "MCP asset fingerprint mismatch.")
-        canonical_files[role] = {"sha256": entry["sha256"], "bytes": entry["bytes"]}
-    body = {"schemaVersion": 1, "startupProtocol": 2, "wireProtocol": 1,
-            "platform": "darwin", "architecture": "arm64", "files": canonical_files}
-    identity = hashlib.sha256(json.dumps(body, separators=(",", ":")).encode()).hexdigest()
-    require(manifest["bundleId"] == identity and Path(prefix).name == identity,
-            "MCP bundle identity mismatch.")
-
-
 def verify_bundle(bundle, version):
     owned(bundle, directory=True, mode=0o700)
-    payload = bundle_inventory(bundle)
-    for name in payload | {"SHA256SUMS"}:
-        owned(bundle / name, mode=payload_mode(name))
+    require({entry.name for entry in bundle.iterdir()} == BUNDLE_FILES,
+            "Incomplete or foreign candidate bundle.")
+    for name in BUNDLE_FILES:
+        owned(bundle / name, mode=0o755 if name in EXECUTABLES else 0o600)
     require((bundle / "SHA256SUMS").stat().st_size <= 64 * 1024
             and (bundle / "prerelease.json").stat().st_size <= 64 * 1024,
             "Oversized bundle metadata or checksum manifest.")
-    manifest = checksums((bundle / "SHA256SUMS").read_bytes(), payload)
+    manifest = checksums((bundle / "SHA256SUMS").read_bytes(), PAYLOAD)
     for name, checksum in manifest.items():
         require(digest(bundle / name) == checksum, "Candidate checksum mismatch: " + name)
     identity = metadata((bundle / "prerelease.json").read_bytes(), version)
-    verify_mcp_bundle(bundle, payload)
     return identity, manifest
 
 
 def verify_signatures(bundle):
-    names = ["hack-native", "hack-cli"]
-    names.extend(name for name in bundle_inventory(bundle) - PAYLOAD if not name.endswith("/manifest.json"))
-    for name in names:
+    for name in ("hack-native", "hack-cli"):
         try:
             result = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(bundle / name)],
                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -273,8 +197,8 @@ def extract_archive(archive, checksum, destination, version, release_metadata=No
             seen = set()
             total = 0
             for entry in source:
-                require(len(entries) < len(BUNDLE_FILES) + 4, "Incomplete or duplicate archive entries.")
-                require((entry.name in BUNDLE_FILES or MCP_MEMBER.fullmatch(entry.name)) and entry.name not in seen,
+                require(len(entries) < len(BUNDLE_FILES), "Incomplete or duplicate archive entries.")
+                require(entry.name in BUNDLE_FILES and entry.name not in seen,
                         "Foreign, duplicate or traversing archive entry.")
                 require(entry.isfile() and not entry.issparse() and entry.size > 0
                         and entry.size <= MAX_ARCHIVE, "Only bounded regular archive files are accepted.")
@@ -282,7 +206,7 @@ def extract_archive(archive, checksum, destination, version, release_metadata=No
                 total += entry.size
                 require(total <= MAX_ARCHIVE, "Oversized archive.")
                 entries.append(entry)
-            payload = payload_inventory(seen)
+            require(seen == BUNDLE_FILES, "Incomplete archive.")
             by_name = {entry.name: entry for entry in entries}
             require(by_name["prerelease.json"].size <= 64 * 1024
                     and by_name["SHA256SUMS"].size <= 64 * 1024,
@@ -292,12 +216,12 @@ def extract_archive(archive, checksum, destination, version, release_metadata=No
             require(release_metadata is None or identity == release_metadata,
                     "Archive metadata differs from the pinned release.")
             with source.extractfile(by_name["SHA256SUMS"]) as incoming:
-                manifest = checksums(incoming.read(), payload)
+                manifest = checksums(incoming.read(), PAYLOAD)
             # Preflight hashes before writing any payload. Revalidation after
             # copying also catches a source changed between these two passes.
             for entry in entries:
                 name = entry.name
-                if name not in payload:
+                if name not in PAYLOAD:
                     continue
                 value = hashlib.sha256()
                 with source.extractfile(entry) as incoming:
@@ -305,20 +229,15 @@ def extract_archive(archive, checksum, destination, version, release_metadata=No
                         value.update(chunk)
                 require(value.hexdigest() == manifest[name], "Candidate checksum mismatch: " + name)
             destination.mkdir(mode=0o700)
-            nested = payload - PAYLOAD
-            if nested:
-                prefix = Path(next(iter(nested))).parent
-                (destination / "mcp").mkdir(mode=0o700)
-                (destination / prefix).mkdir(mode=0o700)
             for entry in entries:
                 incoming = source.extractfile(entry)
                 require(incoming is not None, "Unreadable archive payload.")
                 with incoming:
                     descriptor = os.open(str(destination / entry.name),
                                          os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                                         payload_mode(entry.name))
+                                         0o755 if entry.name in EXECUTABLES else 0o600)
                     with os.fdopen(descriptor, "wb") as target:
-                        os.fchmod(target.fileno(), payload_mode(entry.name))
+                        os.fchmod(target.fileno(), 0o755 if entry.name in EXECUTABLES else 0o600)
                         remaining = entry.size
                         while remaining:
                             chunk = incoming.read(min(1024 * 1024, remaining))
@@ -610,14 +529,6 @@ class Channel:
         installation.mkdir(mode=0o700)
         identity, manifest = extract_archive(archive, checksum, installation / "bundle", version,
                                              release_metadata)
-        # The retained launcher always executes its recorded manager. Never select
-        # a new layout that an older manager cannot subsequently validate/rollback.
-        # Automatic manager replacement needs a separate atomic migration protocol.
-        require(set(manifest) <= PAYLOAD
-                or digest(self.root / "manager.py") == digest(Path(__file__)),
-                "Shared MCP requires this channel's retained manager to match the installer. "
-                "Use the retained manager.py, or install with this installer into a fresh --root; "
-                "the existing channel and its selection are unchanged.")
         homes = {}
         for name in ("native-home", "cli-home"):
             (installation / name).mkdir(mode=0o700)

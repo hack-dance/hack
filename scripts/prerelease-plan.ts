@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { appendFile, lstat, mkdir, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { nativeCandidateMcpPayload } from "../src/mcp/candidate-payload.ts";
 
 export const PRERELEASE_ENVIRONMENT = "v5-prerelease";
 export const PRERELEASE_PAYLOAD = [
@@ -395,7 +396,13 @@ export async function packagePrerelease({
   if (!(await lstat(bundle)).isDirectory()) {
     throw new Error("Native bundle root must be a directory, not an alias");
   }
-  const expected = [...PRERELEASE_PAYLOAD, "SHA256SUMS"].sort();
+  const mcpPayload = await nativeCandidateMcpPayload(bundle);
+  const payload = [...PRERELEASE_PAYLOAD, ...mcpPayload];
+  const expected = [
+    ...PRERELEASE_PAYLOAD,
+    "SHA256SUMS",
+    ...(mcpPayload.length ? ["mcp"] : []),
+  ].sort();
   if (
     JSON.stringify((await readdir(bundle)).sort()) !== JSON.stringify(expected)
   ) {
@@ -403,7 +410,7 @@ export async function packagePrerelease({
       "Native prerelease bundle must contain exactly the complete payload and checksums"
     );
   }
-  for (const name of expected) {
+  for (const name of [...payload, "SHA256SUMS"]) {
     const entry = await lstat(join(bundle, name));
     if (!entry.isFile() || entry.nlink !== 1) {
       throw new Error(`Native bundle payload must be a regular file: ${name}`);
@@ -423,7 +430,7 @@ export async function packagePrerelease({
   }
   const checksums = await renderChecksums({
     root: bundle,
-    names: PRERELEASE_PAYLOAD,
+    names: payload,
   });
   if ((await Bun.file(join(bundle, "SHA256SUMS")).text()) !== checksums) {
     throw new Error(
@@ -440,7 +447,7 @@ export async function packagePrerelease({
       join(output, plan.archive),
       "-C",
       bundle,
-      ...PRERELEASE_PAYLOAD,
+      ...payload,
       "SHA256SUMS",
     ],
     { env: { ...process.env, COPYFILE_DISABLE: "1" } }

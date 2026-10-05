@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { chmod, link, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import {
+  chmod,
+  link,
+  mkdir,
+  mkdtemp,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,6 +24,8 @@ import {
   verifyPublishGate,
   verifyReleaseAssets,
 } from "../scripts/prerelease-plan.ts";
+import { packageMcpBundle } from "../src/mcp/bundle.ts";
+import { nativeCandidateMcpPayload } from "../src/mcp/candidate-payload.ts";
 
 const sha = "a".repeat(40);
 const input = {
@@ -615,6 +626,73 @@ test("packages exactly eight native payload members despite macOS source extende
       );
       expect(await preserved.exited).toBe(0);
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("packages a verified MCP selection with exact nested checksums and inventory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-prerelease-mcp-"));
+  try {
+    const bundle = await fixture(root);
+    const inputs = {
+      adapter: join(root, "adapter"),
+      owner: join(root, "owner"),
+      backend: join(root, "backend"),
+    };
+    for (const role of ["adapter", "owner", "backend"] as const) {
+      const info = {
+        schemaVersion: 1,
+        role,
+        startupProtocol: 2,
+        wireProtocol: 1,
+        platform: process.platform,
+        architecture: process.arch,
+      };
+      await writeFile(
+        inputs[role],
+        `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(info)}'\n`,
+        { mode: 0o700 }
+      );
+    }
+    const mcp = await packageMcpBundle({
+      outputRoot: join(bundle, "mcp"),
+      inputs,
+    });
+    const nested = await nativeCandidateMcpPayload(bundle);
+    expect(nested).toHaveLength(4);
+    const names = [...PRERELEASE_PAYLOAD, ...nested];
+    await Bun.write(
+      join(bundle, "SHA256SUMS"),
+      await renderChecksums({ root: bundle, names })
+    );
+    const output = join(root, "assets");
+    await packagePrerelease({ plan, bundle, output });
+    expect(
+      (await archiveMembers(join(output, plan.archive)))
+        .map((entry) => entry.name)
+        .sort()
+    ).toEqual([...names, "SHA256SUMS"].sort());
+    await verifyReleaseAssets({ plan, output });
+    await writeFile(join(mcp.directory, "extra"), "foreign");
+    await expect(
+      packagePrerelease({ plan, bundle, output: join(root, "extra") })
+    ).rejects.toThrow("unexpected files");
+    await rm(join(mcp.directory, "extra"));
+    const foreign = join(bundle, "mcp", "0".repeat(64));
+    await rename(mcp.directory, foreign);
+    await expect(nativeCandidateMcpPayload(bundle)).rejects.toThrow("identity");
+    await rename(foreign, mcp.directory);
+    await chmod(mcp.executables.backend, 0o700);
+    await writeFile(mcp.executables.backend, "changed");
+    await chmod(mcp.executables.backend, 0o500);
+    await Bun.write(
+      join(bundle, "SHA256SUMS"),
+      await renderChecksums({ root: bundle, names })
+    );
+    await expect(
+      packagePrerelease({ plan, bundle, output: join(root, "corrupt") })
+    ).rejects.toThrow("integrity");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

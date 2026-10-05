@@ -46,15 +46,15 @@ if [ ! -f "$1" ]; then
   echo "Install the pinned Rust toolchain's aarch64-unknown-linux-musl standard library before building" >&2
   exit 69
 fi
-for path in .hack-local .hack-local/native-candidate-target .hack-local/native-candidate-target/release .hack-local/native-candidate-target/release/hack-native .hack-local/native-guest-target .hack-local/native-guest-target/aarch64-unknown-linux-musl .hack-local/native-guest-target/aarch64-unknown-linux-musl/release .hack-local/native-guest-target/aarch64-unknown-linux-musl/release/hack-relay-guest; do
+for path in .hack-local .hack-local/native-candidate-target .hack-local/native-candidate-target/release .hack-local/native-candidate-target/release/hack-native .hack-local/native-candidate-target/release/hack-mcp-adapter .hack-local/native-candidate-target/release/hack-mcp-owner .hack-local/native-candidate-target/release/hack-mcp-backend .hack-local/native-guest-target .hack-local/native-guest-target/aarch64-unknown-linux-musl .hack-local/native-guest-target/aarch64-unknown-linux-musl/release .hack-local/native-guest-target/aarch64-unknown-linux-musl/release/hack-relay-guest; do
   if [ -L "$path" ]; then
     echo "Refusing aliased candidate build directories" >&2
     exit 73
   fi
 done
 # The isolated target directory also keeps the checkout-bound development build intact.
-cargo build --locked --release --jobs 2 --bin hack-native \
-  --features installed-candidate,native-http-probe,native-stream-relay,environment-launcher \
+cargo build --locked --release --jobs 2 --bin hack-native --bin hack-mcp-adapter --bin hack-mcp-owner \
+  --features installed-candidate,native-http-probe,native-stream-relay,environment-launcher,shared-mcp \
   --manifest-path packages/runtime-core/Cargo.toml \
   --target-dir .hack-local/native-candidate-target
 CARGO_INCREMENTAL=0 \
@@ -83,6 +83,15 @@ fi
 /usr/bin/codesign --force --sign - --preserve-metadata=entitlements,flags,runtime "$out/hack-cli"
 /usr/bin/codesign --verify --strict "$out/hack-cli"
 /usr/bin/codesign --verify --strict "$out/hack-native"
+bun build scripts/run-mcp-socket-backend.ts --compile --outfile .hack-local/native-candidate-target/release/hack-mcp-backend
+/usr/bin/codesign --force --sign - --preserve-metadata=entitlements,flags,runtime .hack-local/native-candidate-target/release/hack-mcp-backend
+for artifact in hack-mcp-adapter hack-mcp-owner hack-mcp-backend; do
+  /usr/bin/codesign --verify --strict ".hack-local/native-candidate-target/release/$artifact"
+done
+bun scripts/package-mcp-bundle.ts --output "$out/mcp" \
+  --adapter .hack-local/native-candidate-target/release/hack-mcp-adapter \
+  --owner .hack-local/native-candidate-target/release/hack-mcp-owner \
+  --backend .hack-local/native-candidate-target/release/hack-mcp-backend >/dev/null
 cp scripts/hack-v5.sh "$out/hack-v5"
 chmod 755 "$out/hack-cli" "$out/hack-v5"
 cp docs/guides/native-candidate.md "$out/README.md"
@@ -100,6 +109,7 @@ fi
   else
     shasum -a 256 hack-native hack-relay-guest hack-cli hack-v5 provider-pins.json README.md > SHA256SUMS
   fi
+  shasum -a 256 mcp/*/manifest.json mcp/*/hack-mcp-adapter mcp/*/hack-mcp-owner mcp/*/hack-mcp-backend >> SHA256SUMS
 )
 echo "Candidate bundle: $out"
 echo "Verify SHA256SUMS before copying. Create a separate mode-0700 candidate home."

@@ -39,12 +39,26 @@ import {
   nativeHttpsWriteNew,
 } from "./native-https-owner-storage.ts";
 import {
+  type NativeHttpsReleaseStage,
+  nativeHttpsReleaseFailureFrame,
+  sendNativeHttpsReleaseFailure,
+} from "./native-https-release-failure.ts";
+import {
   NativeHttpsStartupError,
   recordNativeHttpsStartupFailure,
 } from "./native-https-startup-failure.ts";
 import { startNativeProjectHttps } from "./native-project-https.ts";
 import { invokeNativeRuntime } from "./native-runtime-client.ts";
 
+type ReleaseProgress = { stage: NativeHttpsReleaseStage };
+function markReleaseStage(
+  progress: ReleaseProgress | undefined,
+  stage: NativeHttpsReleaseStage
+): void {
+  if (progress) {
+    progress.stage = stage;
+  }
+}
 type Frontend = Awaited<ReturnType<typeof startNativeProjectHttps>>;
 export interface NativeHttpsOwnerServerDependencies {
   readonly start: (binding: NativeHttpsOwnerBinding) => Promise<Frontend>;
@@ -322,13 +336,19 @@ export async function serveNativeHttpsOwner(opts: {
     socket: Socket;
     identity: NativeHttpsLeaseIdentity;
     file?: NativeHttpsFileIdentity;
+    progress: ReleaseProgress;
   }) => {
+    markReleaseStage(released?.progress, "owner-validation");
     await checkPaths();
+    markReleaseStage(released?.progress, "idle-verification");
     await opts.dependencies.verifyIdle(binding);
     state = "closing";
+    markReleaseStage(released?.progress, "frontend-close");
     await frontend?.close();
+    markReleaseStage(released?.progress, "owner-retirement");
     await checkPaths();
     if (released) {
+      released.progress.stage = "release-publication";
       await nativeHttpsRecordRelease({
         version: 1,
         identity: released.identity,
@@ -343,6 +363,7 @@ export async function serveNativeHttpsOwner(opts: {
       }
       leases.delete(released.identity.leaseId);
     }
+    markReleaseStage(released?.progress, "owner-retirement");
     if (leases.size !== 0 || (await readdir(leaseRoot)).length !== 0) {
       throw nativeHttpsOwnerRefused();
     }
@@ -435,8 +456,10 @@ export async function serveNativeHttpsOwner(opts: {
   };
   const releaseUnadmittedLease = async (
     socket: Socket,
-    identity: NativeHttpsLeaseIdentity
+    identity: NativeHttpsLeaseIdentity,
+    progress: ReleaseProgress
   ) => {
+    progress.stage = "lease-validation";
     if (
       !sameNativeHttpsLease(
         nativeHttpsLeaseIdentity(configuration, identity),
@@ -445,7 +468,9 @@ export async function serveNativeHttpsOwner(opts: {
     ) {
       throw nativeHttpsOwnerRefused();
     }
+    progress.stage = "graph-verification";
     await opts.dependencies.verify(binding, identity, "release");
+    progress.stage = "lease-validation";
     try {
       await lstat(join(leaseRoot, `${identity.leaseId}.json`));
       throw nativeHttpsOwnerRefused();
@@ -455,9 +480,10 @@ export async function serveNativeHttpsOwner(opts: {
       }
     }
     if (leases.size === 0) {
-      await retire({ socket, identity });
+      await retire({ socket, identity, progress });
       return;
     }
+    progress.stage = "release-publication";
     // A persisted acquire intent may never have been delivered. Only this
     // generation's live serialized owner can certify it was never admitted.
     try {
@@ -482,7 +508,11 @@ export async function serveNativeHttpsOwner(opts: {
     );
     return;
   };
-  const handle = async (socket: Socket, request: NativeHttpsOwnerRequest) => {
+  const handle = async (
+    socket: Socket,
+    request: NativeHttpsOwnerRequest,
+    progress: ReleaseProgress
+  ) => {
     if (state !== "running" || frontendFailed) {
       throw nativeHttpsOwnerRefused();
     }
@@ -490,18 +520,26 @@ export async function serveNativeHttpsOwner(opts: {
     if (request.operation === "acquire") {
       return acquireLease(socket, request);
     }
+    progress.stage = "lease-validation";
     const entry = leases.get(request.identity.leaseId);
     if (!entry) {
-      return releaseUnadmittedLease(socket, request.identity);
+      return releaseUnadmittedLease(socket, request.identity, progress);
     }
     if (!sameNativeHttpsLease(entry.identity, request.identity)) {
       throw nativeHttpsOwnerRefused();
     }
+    progress.stage = "graph-verification";
     await opts.dependencies.verify(binding, entry.identity, "release");
     if (leases.size === 1) {
-      await retire({ socket, identity: entry.identity, file: entry.file });
+      await retire({
+        socket,
+        identity: entry.identity,
+        file: entry.file,
+        progress,
+      });
       return;
     }
+    progress.stage = "release-publication";
     await nativeHttpsRecordRelease({
       version: 1,
       identity: entry.identity,
@@ -567,8 +605,23 @@ export async function serveNativeHttpsOwner(opts: {
       bytes = Buffer.alloc(0);
       busy = true;
       socket.setTimeout(0);
-      void serialize(() => handle(socket, request))
-        .catch(() => {
+      const progress: ReleaseProgress = { stage: "owner-validation" };
+      void serialize(() => handle(socket, request, progress))
+        .catch(async (error: unknown) => {
+          if (request.operation === "release") {
+            try {
+              await sendNativeHttpsReleaseFailure(
+                socket,
+                nativeHttpsReleaseFailureFrame({
+                  identity: request.identity,
+                  stage: progress.stage,
+                  error,
+                })
+              );
+            } catch {
+              // Diagnostic delivery never grants authority or prevents the existing refusal.
+            }
+          }
           socket.destroy();
           // If retirement began, never accept another lease in a half-closed state.
           if (state === "closing") {

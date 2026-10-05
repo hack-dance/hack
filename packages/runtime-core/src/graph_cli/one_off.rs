@@ -139,10 +139,11 @@ pub(super) fn command(
             return Err(invalid());
         }
         // SAFETY: validated one-shot command transfers checked stdin ownership to the bounded receiver.
-        let managed = hack_runtime_core::provider::managed_environment::receive(
+        let managed = hack_runtime_core::provider::managed_environment::receive_for_one_off(
             unsafe { OwnedFd::from_raw_fd(0) },
             options.plan.ok_or_else(invalid)?,
             options.run,
+            options.service,
         )?;
         jobs::command(
             candidate,

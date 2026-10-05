@@ -140,6 +140,44 @@ test("stale selection and missing project never request a job", async () => {
     })
   ).rejects.toThrow("started project");
 });
+
+test("one-off explicitly delivers an empty environment and wipes it after completion", async () => {
+  const opts = await fixture();
+  let payload: Uint8Array | undefined;
+  const calls: string[] = [];
+  const result = await nativeProjectOneOff({
+    ...opts,
+    argv: ["/bin/cat", "/data/marker"],
+    environment: async () => ({}),
+    invoke: async (request) => {
+      calls.push(String(request.args[1]));
+      if (request.args[1] === "refresh-dependencies") {
+        return refreshed();
+      }
+      if (request.args[1] === "run-selection") {
+        return selection;
+      }
+      expect(request.args[1]).toBe("run-service");
+      expect(request.args).toContain("--environment-stdin");
+      payload = request.privateInput;
+      expect(JSON.parse(new TextDecoder().decode(payload))).toEqual({
+        version: 1,
+        plan: run.planId,
+        run: run.run,
+        lifetime_seconds: 300,
+        services: {},
+      });
+      return { ...completion, exit_code: 0 };
+    },
+  });
+  expect(calls).toEqual([
+    "refresh-dependencies",
+    "run-selection",
+    "run-service",
+  ]);
+  expect(result.exitCode).toBe(0);
+  expect(payload?.every((byte) => byte === 0)).toBe(true);
+});
 test("unconfirmed cleanup or transport failure never replays and wipes delivery", async () => {
   for (const failure of ["cleanup", "transport", "base64", "mapping"]) {
     const opts = await fixture();

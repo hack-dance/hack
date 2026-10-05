@@ -58,8 +58,10 @@ does not block their resolution or require a retry just to update last-seen meta
 Use a checkout/path directly, or an existing registry entry with `--project`;
 `hack init`, project lifecycle registration and `hack projects` discovery maintain
 registrations. Optional `hack projects` discovery coalesces unchanged observations
-for one minute and defers refresh when the registry lock is busy. New or changed
-checkouts are recorded when the lock is available. Explicit registry mutations
+for one minute and defers refresh when the registry lock is busy, without creating
+an ownership file when the occupied path is already visible. This observation
+never grants ownership: an apparently absent lock still requires atomic acquisition.
+New or changed checkouts are recorded when the lock is available. Explicit registry mutations
 wait up to ten seconds with jittered retries, reread the registry under the lock,
 and publish complete updates by atomic rename. A slow live writer is never evicted
 because its lock is old. A confirmed dead owner can be recovered; an occupied or

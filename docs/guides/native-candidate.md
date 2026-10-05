@@ -657,6 +657,11 @@ It does not publish service ports or aliases. Commands are noninteractive and
 bounded to 300 seconds; omitted arguments retain the service's default command.
 The CLI returns command output and exit status only after owned job cleanup is
 confirmed. There is no automatic command replay or fallback to Compose.
+Services with no managed environment values also support `run`; they keep the
+admitted image's environment without creating a private environment mount or
+launcher. The one-off request still carries an explicit empty, identity-bound
+envelope. Missing or malformed delivery refuses, as do values for another service;
+ordinary graph startup environment delivery retains its nonempty requirement.
 
 The running-project noninteractive path has a live Event Agent smoke check:
 `hack run www -- bun --version` completed after a same-run restart, and a command

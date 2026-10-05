@@ -115,6 +115,7 @@ export async function nativeProjectOneOff(opts: {
       plan: mapping.planId,
       run: mapping.run,
       lifetime_seconds: 300,
+      // An empty map is explicit no-managed-values input, never an absent pipe.
       services: Object.keys(values).length ? { [opts.service]: values } : {},
     })
   );

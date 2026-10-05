@@ -19,11 +19,32 @@ use zeroize::{Zeroize, Zeroizing};
 pub(crate) const MAX_INPUT_BYTES: usize = 256 * 1024;
 
 type Values = BTreeMap<String, BTreeMap<String, String>>;
+#[derive(Clone, Copy)]
+enum Scope<'a> {
+    Application,
+    OneOff(&'a str),
+}
+impl Scope<'_> {
+    fn accepts(self, services: &Services) -> bool {
+        match self {
+            Self::Application => !services.0.is_empty(),
+            Self::OneOff(service) => {
+                super::environment::name(service) && services.0.keys().all(|name| name == service)
+            }
+        }
+    }
+}
 fn refused() -> CandidateError {
     CandidateError::new(
         "graph_environment_input",
         "Private graph environment input is invalid, expired, or unavailable; values omitted.",
     )
+}
+pub(super) fn remaining_until(deadline: Instant) -> Result<Duration, CandidateError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero())
+        .ok_or_else(refused)
 }
 fn erase(values: &mut BTreeMap<String, String>) {
     for value in values.values_mut() {
@@ -47,10 +68,7 @@ impl Managed {
         self.deadline
     }
     pub fn remaining(&self) -> Result<Duration, CandidateError> {
-        self.deadline
-            .checked_duration_since(Instant::now())
-            .filter(|left| !left.is_zero())
-            .ok_or_else(refused)
+        remaining_until(self.deadline)
     }
 }
 impl Drop for Managed {
@@ -152,11 +170,12 @@ fn hex(value: &str, length: usize) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn parse(
+fn parse_scoped(
     bytes: &[u8],
     expected_plan: &str,
     run: &str,
     started: Instant,
+    scope: Scope<'_>,
 ) -> Result<Managed, CandidateError> {
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(refused());
@@ -168,7 +187,7 @@ fn parse(
         || !hex(&envelope.run, 32)
         || envelope.run != run
         || !(1..=300).contains(&envelope.lifetime_seconds)
-        || envelope.services.0.is_empty()
+        || !scope.accepts(&envelope.services)
     {
         return Err(refused());
     }
@@ -263,6 +282,25 @@ pub fn receive_forwarded(
     expected_plan: &str,
     run: &str,
 ) -> Result<Managed, CandidateError> {
+    receive_forwarded_scoped(bytes, expected_plan, run, Scope::Application)
+}
+/// One-off transport may explicitly carry no managed values. Nonempty input must
+/// name only the selected service; ordinary graph delivery remains nonempty.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn receive_forwarded_for_one_off(
+    bytes: &[u8],
+    expected_plan: &str,
+    run: &str,
+    service: &str,
+) -> Result<Managed, CandidateError> {
+    receive_forwarded_scoped(bytes, expected_plan, run, Scope::OneOff(service))
+}
+fn receive_forwarded_scoped(
+    bytes: &[u8],
+    expected_plan: &str,
+    run: &str,
+    scope: Scope<'_>,
+) -> Result<Managed, CandidateError> {
     if !cfg!(feature = "environment-launcher") || bytes.len() > MAX_INPUT_BYTES {
         return Err(refused());
     }
@@ -272,7 +310,7 @@ pub fn receive_forwarded(
         || envelope.plan != expected_plan
         || !hex(&envelope.run, 32)
         || envelope.run != run
-        || envelope.services.0.is_empty()
+        || !scope.accepts(&envelope.services)
     {
         return Err(refused());
     }
@@ -283,13 +321,31 @@ pub fn receive_forwarded(
 }
 
 pub fn receive(fd: OwnedFd, expected_plan: &str, run: &str) -> Result<Managed, CandidateError> {
+    receive_scoped(fd, expected_plan, run, Scope::Application)
+}
+/// Receive an explicit, bounded one-off envelope, including `services: {}`.
+/// Missing input, missing fields and empty per-service maps remain invalid.
+pub fn receive_for_one_off(
+    fd: OwnedFd,
+    expected_plan: &str,
+    run: &str,
+    service: &str,
+) -> Result<Managed, CandidateError> {
+    receive_scoped(fd, expected_plan, run, Scope::OneOff(service))
+}
+fn receive_scoped(
+    fd: OwnedFd,
+    expected_plan: &str,
+    run: &str,
+    scope: Scope<'_>,
+) -> Result<Managed, CandidateError> {
     if !cfg!(feature = "environment-launcher") {
         return Err(refused());
     }
     let started = Instant::now();
     let bytes = super::private_input::receive(fd, Duration::from_secs(5), MAX_INPUT_BYTES)
         .map_err(|_| refused())?;
-    parse(&bytes, expected_plan, run, started)
+    parse_scoped(&bytes, expected_plan, run, started, scope)
 }
 
 #[cfg(test)]
@@ -300,12 +356,189 @@ mod tests {
         json!({"version":1,"plan":"a".repeat(64),"run":"b".repeat(32),"lifetime_seconds":120,"services":{"web":{"TOKEN":"synthetic-private-canary"}}})
     }
     fn decode(bytes: &[u8], started: Instant) -> Result<Managed, CandidateError> {
-        parse(bytes, &"a".repeat(64), &"b".repeat(32), started)
+        parse_scoped(
+            bytes,
+            &"a".repeat(64),
+            &"b".repeat(32),
+            started,
+            Scope::Application,
+        )
     }
     fn rejected(bytes: &[u8]) {
         let error = decode(bytes, Instant::now()).err().unwrap();
         assert_eq!(error.code, "graph_environment_input");
         assert!(!error.message.contains("synthetic-private-canary"));
+    }
+    #[test]
+    #[cfg(feature = "environment-launcher")]
+    fn explicit_empty_one_off_crosses_private_input_and_forwarding() {
+        use std::{io::Write, os::unix::net::UnixStream};
+        let mut input = document();
+        input["services"] = json!({});
+        let bytes = serde_json::to_vec(&input).unwrap();
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(&bytes).unwrap();
+        drop(writer);
+        let managed =
+            receive_for_one_off(reader.into(), &"a".repeat(64), &"b".repeat(32), "web").unwrap();
+        assert!(managed.values().is_empty());
+        let forwarded = managed.forward(&"a".repeat(64), &"b".repeat(32)).unwrap();
+        let received =
+            receive_forwarded_for_one_off(&forwarded, &"a".repeat(64), &"b".repeat(32), "web")
+                .unwrap();
+        assert!(received.values().is_empty());
+        assert!(received.deadline() <= managed.deadline());
+        rejected(&bytes);
+        assert!(receive_forwarded(&forwarded, &"a".repeat(64), &"b".repeat(32)).is_err());
+    }
+    fn decode_one_off(bytes: &[u8], service: &str) -> Result<Managed, CandidateError> {
+        parse_scoped(
+            bytes,
+            &"a".repeat(64),
+            &"b".repeat(32),
+            Instant::now(),
+            Scope::OneOff(service),
+        )
+    }
+
+    #[test]
+    fn one_off_scope_preserves_selected_values_and_refuses_missing_or_other_services() {
+        let bytes = serde_json::to_vec(&document()).unwrap();
+        let managed = decode_one_off(&bytes, "web").unwrap();
+        assert_eq!(managed.values()["web"]["TOKEN"], "synthetic-private-canary");
+        assert!(decode_one_off(&bytes, "other").is_err());
+        let mut empty = document();
+        empty["services"] = json!({});
+        assert!(decode_one_off(&serde_json::to_vec(&empty).unwrap(), "").is_err());
+        let mut missing = document();
+        missing.as_object_mut().unwrap().remove("services");
+        assert!(decode_one_off(&serde_json::to_vec(&missing).unwrap(), "web").is_err());
+        for services in [
+            json!({"web": {}}),
+            json!({"unknown": {"TOKEN": "synthetic-private-canary"}}),
+            json!({"web": {"TOKEN": "synthetic-private-canary"}, "other": {"TOKEN": "value"}}),
+        ] {
+            let mut invalid = document();
+            invalid["services"] = services;
+            let error = decode_one_off(&serde_json::to_vec(&invalid).unwrap(), "web")
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "graph_environment_input");
+            assert!(!error.message.contains("synthetic-private-canary"));
+        }
+    }
+
+    #[test]
+    fn empty_one_off_keeps_identity_deadline_and_encoding_refusals() {
+        let mut input = document();
+        input["services"] = json!({});
+        for (key, value) in [
+            ("version", json!(2)),
+            ("plan", json!("c".repeat(64))),
+            ("run", json!("c".repeat(32))),
+            ("lifetime_seconds", json!(0)),
+            ("lifetime_seconds", json!(301)),
+            ("unknown", json!("synthetic-private-canary")),
+        ] {
+            let mut invalid = input.clone();
+            invalid[key] = value;
+            assert!(decode_one_off(&serde_json::to_vec(&invalid).unwrap(), "web").is_err());
+        }
+        let bytes = serde_json::to_vec(&input).unwrap();
+        assert!(
+            parse_scoped(
+                &bytes,
+                &"a".repeat(64),
+                &"b".repeat(32),
+                Instant::now() - Duration::from_secs(121),
+                Scope::OneOff("web")
+            )
+            .is_err()
+        );
+        let duplicate = serde_json::to_string(&input).unwrap().replacen(
+            "\"services\":{}",
+            "\"services\":{},\"services\":{}",
+            1,
+        );
+        for invalid in [
+            b"".to_vec(),
+            b"{".to_vec(),
+            vec![b' '; MAX_INPUT_BYTES + 1],
+            duplicate.into_bytes(),
+        ] {
+            assert!(decode_one_off(&invalid, "web").is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "environment-launcher")]
+    fn one_off_forwarding_keeps_populated_scope_binding_and_deadline_checks() {
+        let plan = "a".repeat(64);
+        let run = "b".repeat(32);
+        for services in [
+            json!({}),
+            json!({"web": {"TOKEN": "synthetic-private-canary"}}),
+        ] {
+            let mut input = document();
+            input["services"] = services;
+            let managed = decode_one_off(&serde_json::to_vec(&input).unwrap(), "web").unwrap();
+            let bytes = managed.forward(&plan, &run).unwrap();
+            let received = receive_forwarded_for_one_off(&bytes, &plan, &run, "web").unwrap();
+            assert_eq!(received.values(), managed.values());
+            assert!(received.deadline() <= managed.deadline());
+            assert!(receive_forwarded_for_one_off(&bytes, &"c".repeat(64), &run, "web").is_err());
+            assert!(receive_forwarded_for_one_off(&bytes, &plan, &"c".repeat(32), "web").is_err());
+            let mut forwarded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            for (key, value) in [
+                ("deadline_nanos", json!(0)),
+                ("deadline_nanos", json!(u64::MAX)),
+                ("services", json!({"other":{"TOKEN":"synthetic"}})),
+            ] {
+                let mut invalid = forwarded.clone();
+                invalid[key] = value;
+                assert!(
+                    receive_forwarded_for_one_off(
+                        &serde_json::to_vec(&invalid).unwrap(),
+                        &plan,
+                        &run,
+                        "web"
+                    )
+                    .is_err()
+                );
+            }
+            forwarded.as_object_mut().unwrap().remove("services");
+            assert!(
+                receive_forwarded_for_one_off(
+                    &serde_json::to_vec(&forwarded).unwrap(),
+                    &plan,
+                    &run,
+                    "web"
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "environment-launcher")]
+    fn one_off_private_input_requires_nonempty_bytes_and_eof() {
+        use std::{io::Write, os::unix::net::UnixStream};
+        let (reader, writer) = UnixStream::pair().unwrap();
+        drop(writer);
+        assert!(
+            receive_for_one_off(reader.into(), &"a".repeat(64), &"b".repeat(32), "web").is_err()
+        );
+        let mut input = document();
+        input["services"] = json!({});
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer
+            .write_all(&serde_json::to_vec(&input).unwrap())
+            .unwrap();
+        // Holding the writer open must time out, not admit a complete-looking prefix.
+        assert!(
+            receive_for_one_off(reader.into(), &"a".repeat(64), &"b".repeat(32), "web").is_err()
+        );
+        drop(writer);
     }
     #[test]
     fn multi_service_application_envelope_exceeds_old_limit_without_leaking_values() {
@@ -426,9 +659,36 @@ mod tests {
     #[test]
     #[cfg(not(feature = "environment-launcher"))]
     fn forwarded_delivery_stays_feature_gated() {
+        use std::{io::Write, os::unix::net::UnixStream};
         let managed = decode(&serde_json::to_vec(&document()).unwrap(), Instant::now()).unwrap();
         assert!(managed.forward(&"a".repeat(64), &"b".repeat(32)).is_err());
         assert!(receive_forwarded(b"{}", &"a".repeat(64), &"b".repeat(32)).is_err());
+        let mut input = document();
+        input["services"] = json!({});
+        let bytes = serde_json::to_vec(&input).unwrap();
+        let managed = decode_one_off(&bytes, "web").unwrap();
+        let forwarded = json!({
+            "version": 1,
+            "plan": "a".repeat(64),
+            "run": "b".repeat(32),
+            "deadline_nanos": Deadline::from_instant(managed.deadline()).unwrap().nanos(),
+            "services": {},
+        });
+        assert!(
+            receive_forwarded_for_one_off(
+                &serde_json::to_vec(&forwarded).unwrap(),
+                &"a".repeat(64),
+                &"b".repeat(32),
+                "web"
+            )
+            .is_err()
+        );
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(&bytes).unwrap();
+        drop(writer);
+        assert!(
+            receive_for_one_off(reader.into(), &"a".repeat(64), &"b".repeat(32), "web").is_err()
+        );
     }
     #[test]
     fn private_values_keep_original_deadline_and_exact_service_scope() {

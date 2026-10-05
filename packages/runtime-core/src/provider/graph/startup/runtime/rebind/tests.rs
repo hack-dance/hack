@@ -943,6 +943,65 @@ fn completed_journal_requires_explicit_terminal_state_and_never_fabricates_helpe
 
 #[test]
 fn mixed_completed_binding_retains_metadata_across_noop_and_second_rotation() {
+    // Keep the listener and descriptor table separate from unrelated parallel
+    // tests and their pre-exec forks; discovery inspects every matching process.
+    use std::{
+        io::Read,
+        process::{Child, Command, Stdio},
+        time::{Duration, Instant},
+    };
+    const CHILD: &str =
+        "provider::graph::startup::runtime::rebind::tests::mixed_completed_rotation_child";
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = OwnedChild(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", CHILD, "--test-threads=1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    // Match the complete nested-rebind fixture lifetime, rather than the shorter
+    // single-observation budget: this child performs both rotations and cleanup.
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "mixed completed rotation fixture exceeded its watchdog"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let mut output = String::new();
+    child
+        .0
+        .stdout
+        .take()
+        .unwrap()
+        .take(4097)
+        .read_to_string(&mut output)
+        .unwrap();
+    assert!(output.len() <= 4096);
+    assert!(status.success(), "owned rotation fixture failed: {output}");
+    assert!(
+        output.contains(&format!("test {CHILD} ... ok"))
+            && output.contains("test result: ok. 1 passed"),
+        "isolated rotation assertions did not run: {output}"
+    );
+}
+
+#[test]
+#[ignore = "isolated listener rotation fixture launched by mixed_completed_binding_retains_metadata_across_noop_and_second_rotation"]
+fn mixed_completed_rotation_child() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let endpoint = HostEndpoint::capture(std::process::id() as i32, address.port()).unwrap();

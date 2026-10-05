@@ -153,13 +153,20 @@ archival and explicit frontend finalization are separate facts. Another
 application may create the next owner after archival commits; the selected
 application must still finish its own exact frontend recovery.
 
-Three guard-removal controls require TLC exit 12 and the named same-state witness:
+Three guard-removal controls require TLC exit 12, the named invariant, and one
+complete same-state witness. Each accepted archive set follows the model action;
+the oracle rejects fields split across states.
 
 | Control | Required failure |
 | --- | --- |
-| `negative` | `NoPrematurePublication` in `Publish`, after an owner-only move and recovery crash, before socket archival or completion |
-| `stale-selection` | `NoUnprovedArchive` in `ArchiveOwner`, with selected generation 1 and current generation 2 after reacquiring the provider lease |
-| `unproved-archive` | `NoUnprovedArchive` in `ArchiveOwner`, with an ineligible selection despite held locks and a recorded intent |
+| `negative` | `NoPrematurePublication` in `Publish`, after recovery crashes with incomplete archival and owner already archived; socket may still be original or also archived |
+| `stale-selection` | `NoUnprovedArchive` in `ArchiveOwner` or `ArchiveSocket`, with selected generation 1 and current generation 2; the action's artifact must be archived |
+| `unproved-archive` | `NoUnprovedArchive` in `ArchiveOwner` or `ArchiveSocket`, with an ineligible selection despite held locks and a recorded intent; the action's artifact must be archived |
+
+`Publish` never accepts an empty or socket-only archive set. The archive controls
+accept only the action's artifact alone or both artifacts, preserving the exact
+selected-proof and unsafe-effect fields. These are scheduling alternatives in the
+unchanged model, not weaker invariants.
 
 | Model action | Implementation boundary |
 | --- | --- |

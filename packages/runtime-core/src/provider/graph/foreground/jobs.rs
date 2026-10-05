@@ -140,8 +140,12 @@ pub(super) fn handle(
     {
         return Err(refused());
     }
-    let managed =
-        managed_environment::receive_forwarded(command.environment.as_bytes(), &command.plan, run)?;
+    let managed = managed_environment::receive_forwarded_for_one_off(
+        command.environment.as_bytes(),
+        &command.plan,
+        run,
+        &request.service,
+    )?;
     let watch = transport::ClientWatch::new(stream)?;
     let deadline = Instant::now() + Duration::from_secs(command.timeout_seconds);
     runtime.set_startup_cancellation(Some(signals::startup_pending));

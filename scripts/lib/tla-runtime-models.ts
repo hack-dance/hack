@@ -5,6 +5,10 @@ type ModelResult = {
   readonly exitCode: number | null;
   readonly output: string;
 };
+type ModelWitness = {
+  readonly action: string;
+  readonly fields: readonly string[];
+};
 type ModelContract = {
   readonly name: string;
   readonly module: string;
@@ -13,6 +17,7 @@ type ModelContract = {
   readonly invariant: string;
   readonly action: string;
   readonly fields: readonly string[];
+  readonly alternativeWitnesses?: readonly ModelWitness[];
   readonly additionalControls?: readonly {
     readonly name: string;
     readonly module?: "TerminalReuse";
@@ -21,6 +26,7 @@ type ModelContract = {
     readonly invariant?: string;
     readonly action?: string;
     readonly fields?: readonly string[];
+    readonly alternativeWitnesses?: readonly ModelWitness[];
   }[];
 };
 
@@ -179,6 +185,19 @@ const contracts: readonly ModelContract[] = [
       "published = TRUE",
       "unsafePublication = TRUE",
     ],
+    alternativeWitnesses: [
+      {
+        action: "Publish",
+        fields: [
+          "intent = TRUE",
+          "complete = FALSE",
+          'archived = {"owner", "socket"}',
+          "crashed = TRUE",
+          "published = TRUE",
+          "unsafePublication = TRUE",
+        ],
+      },
+    ],
     additionalControls: [
       {
         name: "stale-selection",
@@ -191,7 +210,46 @@ const contracts: readonly ModelContract[] = [
           "version = 2",
           "engine = TRUE",
           'admission = "recovery"',
+          'archived = {"owner"}',
           "unsafeArchive = TRUE",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "ArchiveOwner",
+            fields: [
+              "intent = TRUE",
+              "selected = 1",
+              "version = 2",
+              "engine = TRUE",
+              'admission = "recovery"',
+              'archived = {"owner", "socket"}',
+              "unsafeArchive = TRUE",
+            ],
+          },
+          {
+            action: "ArchiveSocket",
+            fields: [
+              "intent = TRUE",
+              "selected = 1",
+              "version = 2",
+              "engine = TRUE",
+              'admission = "recovery"',
+              'archived = {"socket"}',
+              "unsafeArchive = TRUE",
+            ],
+          },
+          {
+            action: "ArchiveSocket",
+            fields: [
+              "intent = TRUE",
+              "selected = 1",
+              "version = 2",
+              "engine = TRUE",
+              'admission = "recovery"',
+              'archived = {"owner", "socket"}',
+              "unsafeArchive = TRUE",
+            ],
+          },
         ],
       },
       {
@@ -203,7 +261,44 @@ const contracts: readonly ModelContract[] = [
           "intent = TRUE",
           "eligible = FALSE",
           "engine = TRUE",
+          'admission = "recovery"',
+          'archived = {"owner"}',
           "unsafeArchive = TRUE",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "ArchiveOwner",
+            fields: [
+              "intent = TRUE",
+              "eligible = FALSE",
+              "engine = TRUE",
+              'admission = "recovery"',
+              'archived = {"owner", "socket"}',
+              "unsafeArchive = TRUE",
+            ],
+          },
+          {
+            action: "ArchiveSocket",
+            fields: [
+              "intent = TRUE",
+              "eligible = FALSE",
+              "engine = TRUE",
+              'admission = "recovery"',
+              'archived = {"socket"}',
+              "unsafeArchive = TRUE",
+            ],
+          },
+          {
+            action: "ArchiveSocket",
+            fields: [
+              "intent = TRUE",
+              "eligible = FALSE",
+              "engine = TRUE",
+              'admission = "recovery"',
+              'archived = {"owner", "socket"}',
+              "unsafeArchive = TRUE",
+            ],
+          },
         ],
       },
     ],

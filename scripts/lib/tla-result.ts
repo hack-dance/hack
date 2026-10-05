@@ -95,6 +95,10 @@ export function verifyFiniteModelResult(opts: {
   readonly invariant: string;
   readonly action: string;
   readonly fields: readonly string[];
+  readonly alternativeWitnesses?: readonly {
+    readonly action: string;
+    readonly fields: readonly string[];
+  }[];
 }): boolean {
   if (!opts.negative) {
     return (
@@ -103,15 +107,37 @@ export function verifyFiniteModelResult(opts: {
       Number(DISTINCT_STATES.exec(opts.output)?.[1]) === opts.states
     );
   }
+  const expectedError = `Error: Invariant ${opts.invariant} is violated.`;
+  if (
+    opts.output.includes("Parse error") ||
+    opts.output.includes("Semantic errors") ||
+    COMPLETED.test(opts.output) ||
+    opts.output
+      .split(/\r?\n/)
+      .some(
+        (line) =>
+          line.startsWith("Error: ") &&
+          line !== expectedError &&
+          line !== "Error: The behavior up to this point is:"
+      )
+  ) {
+    return false;
+  }
   return (
     opts.exitCode === 12 &&
     opts.output.includes(`Invariant ${opts.invariant} is violated.`) &&
     opts.output.split(TRACE_STATES).some((state) => {
       const lines = state.split(/\r?\n/);
-      return (
-        /^State \d+: </.test(lines[0] ?? "") &&
-        lines[0]?.includes(`<${opts.action} `) &&
-        opts.fields.every((field) => lines.includes(`/\\ ${field}`))
+      if (!/^State \d+: </.test(lines[0] ?? "")) {
+        return false;
+      }
+      return [
+        { action: opts.action, fields: opts.fields },
+        ...(opts.alternativeWitnesses ?? []),
+      ].some(
+        (witness) =>
+          lines[0]?.includes(`<${witness.action} `) &&
+          witness.fields.every((field) => lines.includes(`/\\ ${field}`))
       );
     })
   );

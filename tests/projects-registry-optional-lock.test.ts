@@ -103,7 +103,9 @@ async function remainingOutput(stream: ReadableStream<Uint8Array>) {
     reader.releaseLock();
   }
 }
-async function report(child: ReturnType<typeof spawn>) {
+async function report(
+  child: ReturnType<typeof spawn>
+): Promise<Record<string, unknown> & { calls: string[] }> {
   const parsed: unknown = JSON.parse(await finish(child));
   if (
     !(

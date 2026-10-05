@@ -1,0 +1,37 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "hack",
+  "version": "4.2.1",
+  "description": "Operate and onboard Hack-managed local development environments.",
+  "author": {
+    "name": "Hack Dance LLC",
+    "url": "https://github.com/hack-dance"
+  },
+  "homepage": "https://github.com/hack-dance/hack",
+  "repository": "https://github.com/hack-dance/hack",
+  "license": "MIT",
+  "keywords": ["local-development", "docker", "developer-tools", "agents"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Hack",
+        "shortDescription": "Run projects with Hack",
+        "longDescription": "Operate Hack-managed services, logs, environments, workspaces, and agent-assisted project onboarding from Codex.",
+        "developerName": "Hack Dance LLC",
+        "category": "Developer Tools",
+        "capabilities": [
+          "Local development",
+          "Project onboarding",
+          "MCP tools"
+        ],
+        "websiteURL": "https://github.com/hack-dance/hack",
+        "defaultPrompt": [
+          "Start this Hack project and verify its services.",
+          "Set this repository up to run with Hack.",
+          "Diagnose this Hack project's local runtime."
+        ],
+        "brandColor": "#FF5C35"
+      }
+    }
+  }
+}

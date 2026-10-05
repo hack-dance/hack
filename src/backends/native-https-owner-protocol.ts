@@ -272,7 +272,13 @@ export function decodeNativeHttpsOwnerFrame(bytes: Buffer): unknown {
     throw nativeHttpsOwnerRefused();
   }
   try {
-    return JSON.parse(bytes.toString("utf8"));
+    const value: unknown = JSON.parse(bytes.toString("utf8"));
+    // This private protocol is emitted by encodeNativeHttpsOwnerFrame. Require
+    // its exact encoding so duplicate keys cannot turn a refusal into an ack.
+    if (!bytes.equals(encodeNativeHttpsOwnerFrame(value))) {
+      throw nativeHttpsOwnerRefused();
+    }
+    return value;
   } catch {
     throw nativeHttpsOwnerRefused();
   }

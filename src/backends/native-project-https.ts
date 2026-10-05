@@ -31,7 +31,9 @@ import { checkNativeHttpsPort } from "./native-https-port.ts";
 import { NativeHttpsStartupError } from "./native-https-startup-failure.ts";
 import {
   invokeNativeRuntime,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
+  readNativeFailureCode,
 } from "./native-runtime-client.ts";
 
 const PROBE_PATH_BYTES = /^[\x21-\x7e]+$/;
@@ -55,6 +57,8 @@ function isValidPort(value: unknown): value is number {
 export interface HttpsChild {
   readonly pid: number;
   readonly exited: Promise<number>;
+  /** Only structured native codes; arbitrary child output never leaves the spawn boundary. */
+  readonly failure?: Promise<NativeRuntimeRequestError | undefined>;
   kill(signal: "SIGTERM" | "SIGKILL"): void;
   endInput(): void;
 }
@@ -62,6 +66,7 @@ interface SpawnInput {
   readonly argv: readonly string[];
   readonly env: Record<string, string>;
   readonly pipe: boolean;
+  readonly nativeDiagnostics?: boolean;
 }
 interface Dependencies {
   readonly checkPort: typeof checkNativeHttpsPort;
@@ -168,8 +173,15 @@ export function spawnNativeHttpsChild(input: SpawnInput): HttpsChild {
       env: input.env,
       stdin: "ignore",
       stdout: "ignore",
-      stderr: "ignore",
+      stderr: input.nativeDiagnostics ? "pipe" : "ignore",
     });
+    const failure =
+      input.nativeDiagnostics && child.stderr
+        ? captureNativeHttpsChildFailure({
+            exited: child.exited,
+            stderr: child.stderr,
+          })
+        : undefined;
     // Open only after spawn: native children must never inherit the owner writer.
     if (directory) {
       writer = openSync(join(directory, "stdin"), constants.O_WRONLY);
@@ -181,6 +193,7 @@ export function spawnNativeHttpsChild(input: SpawnInput): HttpsChild {
     return {
       pid: child.pid,
       exited: child.exited.finally(cleanup),
+      ...(failure ? { failure } : {}),
       kill: (signal) => {
         if (child.exitCode === null) {
           child.kill(signal);
@@ -191,6 +204,28 @@ export function spawnNativeHttpsChild(input: SpawnInput): HttpsChild {
   } catch (error) {
     cleanup();
     throw error;
+  }
+}
+/** Drain only bounded native error codes; inherited stderr cannot extend child-exit classification. */
+export async function captureNativeHttpsChildFailure(opts: {
+  readonly exited: Promise<number>;
+  readonly stderr: ReadableStream<Uint8Array>;
+}): Promise<NativeRuntimeRequestError | undefined> {
+  const abort = new AbortController();
+  const nativeCode = readNativeFailureCode(opts.stderr, abort.signal);
+  const code = await opts.exited;
+  const timer = setTimeout(() => abort.abort(), 100);
+  try {
+    const native = await nativeCode;
+    return code === 0
+      ? undefined
+      : new NativeRuntimeRequestError({
+          message:
+            "Native HTTPS authority exited before readiness; values omitted.",
+          nativeCode: native,
+        });
+  } finally {
+    clearTimeout(timer);
   }
 }
 async function permissionPort(): Promise<number> {
@@ -1221,7 +1256,8 @@ export async function verifyNativeHttpsHostname(
 async function waitReady<T>(
   deadline: number,
   dead: () => boolean,
-  check: () => Promise<T>
+  check: () => Promise<T>,
+  failure?: () => Promise<NativeRuntimeRequestError | undefined> | undefined
 ): Promise<T> {
   while (Date.now() < deadline && !dead()) {
     try {
@@ -1234,7 +1270,7 @@ async function waitReady<T>(
     }
     await Bun.sleep(50);
   }
-  throw refused();
+  throw (dead() && (await failure?.())) || refused();
 }
 /** Owns only newly spawned children; preserves CA data and never installs host trust. */
 export async function startNativeProjectHttps(opts: {
@@ -1411,27 +1447,32 @@ export async function startNativeProjectHttps(opts: {
       ],
       env,
       pipe: true,
+      nativeDiagnostics: true,
     });
     let dead = false;
-    void authority.exited.then(() => {
+    const startedAuthority = authority;
+    void startedAuthority.exited.then(() => {
       dead = true;
     });
     const deadline = Date.now() + 10_000;
-    const startedAuthority = authority;
     startupStage = "authority-ready";
     ownedAuthority = await waitReady(
       deadline,
       () => dead,
-      async () => authorityIdentity(await inspect(), startedAuthority.pid)
+      async () => authorityIdentity(await inspect(), startedAuthority.pid),
+      () => startedAuthority.failure
     );
+    startupStage = "authority-identity";
     const socket = ownedAuthority.socket;
     if (socket !== before.socket) {
       throw refused();
     }
+    startupStage = "permission-port";
     const permission = await deps.permissionPort();
     if (permission === opts.httpsPort) {
       throw refused();
     }
+    startupStage = "caddy-configuration";
     const admin = join(session, "admin.sock");
     const filename = join(session, "Caddyfile");
     await writeFile(

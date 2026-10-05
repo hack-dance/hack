@@ -1473,6 +1473,19 @@ Services without managed values use ordinary exec. The native live qualification
 of this fresh-delivery path remains separate from its unit and transport tests.
 
 
+Managed HTTPS authority startup uses the same five-second provider-lock admission
+budget as ordinary pool startup. This lets a brief concurrent graph inspection
+finish before admission. Pool identity, socket ownership and certificate admission
+are checked only after the lock is acquired; expiry refuses with `provider_busy`
+and no authority is published. Serving and cleanup are never replayed.
+
+An authority child that exits before readiness can supply a bounded structured
+native error code without exposing its stderr. Malformed, oversized or missing
+output leaves the cause unknown. The `authority-ready` diagnostic now covers only
+readiness; later socket-identity, permission-port and Caddyfile failures have
+separate stages. These classifications do not acknowledge cleanup or permit an
+owner to be adopted or replaced.
+
 A detached HTTPS helper that fails during startup may retain a generation-bound
 `startup-failure.json` beside its owner configuration. The CLI reports only the
 reviewed startup stage and an allowlisted native error code; child output, paths

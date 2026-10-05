@@ -55,6 +55,14 @@ export interface ProjectsRegistry {
   readonly projects: readonly RegisteredProject[];
 }
 
+export class AmbiguousProjectIdError extends Error {
+  constructor(id: string) {
+    super(
+      `Ambiguous project ID "${id}". Multiple registrations share this ID; inspect 'hack projects' before updating or removing an entry.`
+    );
+  }
+}
+
 export type RegisterOutcome =
   | { readonly status: "created"; readonly project: RegisteredProject }
   | { readonly status: "updated"; readonly project: RegisteredProject }
@@ -324,6 +332,10 @@ async function readFreshRegistration(opts: {
     return null;
   }
   for (const entry of matches) {
+    selectRegisteredProjectById({
+      projects: opts.registry.projects,
+      id: entry.id,
+    });
     if (
       entry.name !== name ||
       entry.devHost !== devHost ||
@@ -412,6 +424,21 @@ export function selectRegisteredProjectByName(opts: {
   if (matches.length > 1) {
     throw new AmbiguousProjectNameError(name);
   }
+  const match = matches[0];
+  return match
+    ? selectRegisteredProjectById({ projects: opts.projects, id: match.id })
+    : null;
+}
+
+/** Refuse the selected identity before liveness checks can hide a contender. */
+function selectRegisteredProjectById(opts: {
+  readonly projects: readonly RegisteredProject[];
+  readonly id: string;
+}): RegisteredProject | null {
+  const matches = opts.projects.filter((project) => project.id === opts.id);
+  if (matches.length > 1) {
+    throw new AmbiguousProjectIdError(opts.id);
+  }
   return matches[0] ?? null;
 }
 
@@ -422,7 +449,10 @@ export async function resolveRegisteredProjectById(opts: {
   readonly registration: RegisteredProject;
 } | null> {
   const registry = await readProjectsRegistry();
-  const match = registry.projects.find((p) => p.id === opts.id) ?? null;
+  const match = selectRegisteredProjectById({
+    projects: registry.projects,
+    id: opts.id,
+  });
   if (!match) {
     return null;
   }
@@ -452,6 +482,7 @@ export async function resolveRegisteredProjectById(opts: {
   };
 }
 
+/** Validate every requested ID under ownership before removing any entry. */
 export async function removeProjectsById(opts: {
   readonly ids: readonly string[];
   readonly signal?: AbortSignal;
@@ -463,6 +494,9 @@ export async function removeProjectsById(opts: {
   return await withRegistryLock(
     async () => {
       const current = await readProjectsRegistry();
+      for (const id of removeIds) {
+        selectRegisteredProjectById({ projects: current.projects, id });
+      }
       const removed = current.projects.filter((p) => removeIds.has(p.id));
       if (removed.length === 0) {
         return { removed: [] };
@@ -741,6 +775,13 @@ async function upsertInMemory(opts: {
   }
   const existingByDir = byDir[0] ?? null;
   const existingByName = byName[0] ?? null;
+  const existingTarget = existingByDir ?? existingByName;
+  if (existingTarget) {
+    selectRegisteredProjectById({
+      projects: current,
+      id: existingTarget.id,
+    });
+  }
 
   // 1) Same directory already registered → update name/devHost/lastSeen.
   if (existingByDir) {
@@ -835,6 +876,11 @@ async function upsertInMemory(opts: {
     createdAt: opts.nowIso,
     lastSeenAt: opts.nowIso,
   };
+  if (current.some((entry) => entry.id === created.id)) {
+    throw new Error(
+      `Project ID collision "${created.id}". Refusing to create a registration with an existing ID; inspect 'hack projects'.`
+    );
+  }
 
   return {
     project: created,
@@ -942,8 +988,11 @@ function replaceById(
 
 function shallowEqual(a: RegisteredProject, b: RegisteredProject): boolean {
   const keys = Object.keys(a) as Array<keyof RegisteredProject>;
+  if (keys.length !== Object.keys(b).length) {
+    return false;
+  }
   for (const k of keys) {
-    if (a[k] !== b[k]) {
+    if (!Object.hasOwn(b, k) || a[k] !== b[k]) {
       return false;
     }
   }

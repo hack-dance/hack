@@ -196,3 +196,41 @@ test("prune dry-run leaves a missing registration intact", async () => {
     (await readProjectsRegistry()).projects.map((project) => project.id)
   ).toEqual([dead.id]);
 });
+
+test("project-scoped prune accepts one legacy alias and refuses competing registry or runtime identities", () => {
+  const legacy = buildRegistration({
+    id: "legacy",
+    name: "my_app",
+    repoRoot: "/missing/legacy",
+  });
+  const other = buildRegistration({
+    id: "other",
+    name: "my-app",
+    repoRoot: "/missing/other",
+  });
+  expect(
+    __testOnlyProjectsCommand.filterPruneRegistryProjects({
+      projects: [legacy],
+      filter: "my-app",
+    })
+  ).toEqual([legacy]);
+  expect(() =>
+    __testOnlyProjectsCommand.filterPruneRegistryProjects({
+      projects: [legacy, other],
+      filter: "my-app",
+    })
+  ).toThrow("Ambiguous project name");
+  const runtime = [runtimeProject("my_app"), runtimeProject("my_app--feature")];
+  expect(
+    __testOnlyProjectsCommand.filterPruneRuntimeProjects({
+      runtime,
+      filter: "my-app",
+    })
+  ).toEqual(runtime);
+  expect(() =>
+    __testOnlyProjectsCommand.filterPruneRuntimeProjects({
+      runtime: [...runtime, runtimeProject("my-app--other")],
+      filter: "my-app",
+    })
+  ).toThrow("Ambiguous project name");
+});

@@ -2,7 +2,6 @@ import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { confirm, isCancel, password, select, text } from "@clack/prompts";
 import { YAML } from "bun";
-
 import type { CliContext, CommandHandlerFor } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -70,6 +69,7 @@ import {
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../lib/project-env-config.ts";
+import { normalizeProjectName } from "../lib/project-name.ts";
 import { resolveRegisteredProjectByName } from "../lib/projects-registry.ts";
 import {
   formatSecretStoreDescriptor,
@@ -593,12 +593,12 @@ async function resolveProjectForEnv(opts: {
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
 }): Promise<ProjectContext> {
-  if (opts.pathOpt && opts.projectOpt) {
+  if (opts.pathOpt && opts.projectOpt !== undefined) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
 
-  if (opts.projectOpt) {
-    const name = sanitizeProjectSlug(opts.projectOpt);
+  if (opts.projectOpt !== undefined) {
+    const name = normalizeProjectName(opts.projectOpt);
     if (!name) {
       throw new CliUsageError("Invalid --project value.");
     }

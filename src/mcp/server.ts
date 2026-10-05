@@ -14,6 +14,10 @@ import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { findProjectContext } from "../lib/project.ts";
 import {
+  AmbiguousProjectNameError,
+  normalizeProjectName,
+} from "../lib/project-name.ts";
+import {
   readProjectsRegistry,
   resolveRegisteredProjectByName,
 } from "../lib/projects-registry.ts";
@@ -831,7 +835,7 @@ async function resolveProjectArgs(opts: {
     selection.projectName,
     selection.repoRoot,
     selection.path,
-  ].filter(Boolean);
+  ].filter((value) => value !== undefined);
   if (picked.length > 1) {
     return {
       ok: false,
@@ -839,18 +843,11 @@ async function resolveProjectArgs(opts: {
     };
   }
 
-  if (selection.projectName) {
-    const project = await resolveRegisteredProjectByName({
-      name: selection.projectName,
+  if (selection.projectName !== undefined) {
+    return await resolveProjectNameArgs({
+      projectName: selection.projectName,
       registryPath: opts.registryPath,
     });
-    if (!project) {
-      return {
-        ok: false,
-        message: `Unknown project "${selection.projectName}". Run 'hack init' or 'hack projects' first.`,
-      };
-    }
-    return { ok: true, args: ["--project", selection.projectName] };
   }
 
   const pathLike = selection.repoRoot ?? selection.path;
@@ -893,6 +890,40 @@ async function resolveProjectArgs(opts: {
   }
 
   return { ok: true, args: ["--path", opts.cwd] };
+}
+
+async function resolveProjectNameArgs(opts: {
+  readonly projectName: string;
+  readonly registryPath: string;
+}): Promise<
+  | { readonly ok: true; readonly args: string[] }
+  | { readonly ok: false; readonly message: string }
+> {
+  const name = normalizeProjectName(opts.projectName);
+  if (!name) {
+    return {
+      ok: false,
+      message: "Invalid projectName: use a name containing letters or digits.",
+    };
+  }
+  try {
+    const project = await resolveRegisteredProjectByName({
+      name,
+      registryPath: opts.registryPath,
+    });
+    if (!project) {
+      return {
+        ok: false,
+        message: `Unknown project "${opts.projectName}". Run 'hack init' or 'hack projects' first.`,
+      };
+    }
+    return { ok: true, args: ["--project", name] };
+  } catch (error) {
+    if (error instanceof AmbiguousProjectNameError) {
+      return { ok: false, message: error.message };
+    }
+    throw error;
+  }
 }
 
 async function isPathAllowed(opts: {

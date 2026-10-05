@@ -18,10 +18,12 @@ import {
   type ProjectOwnershipConfig,
   readProjectConfig,
 } from "./project.ts";
+import { normalizeProjectName } from "./project-name.ts";
 import type {
   RegisteredProject,
   RegisteredProjectWorktree,
 } from "./projects-registry.ts";
+import { selectRegisteredProjectByName } from "./projects-registry.ts";
 import {
   countRunningServices,
   type RuntimeProject,
@@ -143,6 +145,12 @@ export async function buildProjectViews(
     opts.registryProjects.map((project) => canonicalPath(project.projectDir))
   );
 
+  if (opts.filter) {
+    selectRegisteredProjectByName({
+      projects: opts.registryProjects,
+      name: opts.filter,
+    });
+  }
   const names = new Set<string>();
   for (const p of opts.registryProjects) {
     names.add(p.name);
@@ -166,7 +174,10 @@ export async function buildProjectViews(
 
   const out: ProjectView[] = [];
   for (const name of [...names].sort((a, b) => a.localeCompare(b))) {
-    if (opts.filter && name !== opts.filter) {
+    if (
+      opts.filter &&
+      normalizeProjectName(name) !== normalizeProjectName(opts.filter)
+    ) {
       continue;
     }
 

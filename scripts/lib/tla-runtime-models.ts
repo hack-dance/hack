@@ -31,6 +31,14 @@ type ModelContract = {
 };
 
 // Bounds and witnesses are reviewed contracts, not learned from each run.
+const laterIncompleteMissingLockStages = [
+  "temp",
+  "linked",
+  "final",
+  "journal",
+  "socket",
+  "owner",
+] as const;
 const contracts: readonly ModelContract[] = [
   {
     name: "registry-writer",
@@ -148,7 +156,21 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NoUncoordinatedLegacy",
         action: "OldHolderPublish",
-        fields: ['stage = "intent"', "gate = TRUE", "legacyPublished = TRUE"],
+        fields: [
+          'stage = "intent"',
+          'repair = "active"',
+          "gate = TRUE",
+          "legacyPublished = TRUE",
+        ],
+        alternativeWitnesses: laterIncompleteMissingLockStages.map((stage) => ({
+          action: "OldHolderPublish",
+          fields: [
+            `stage = "${stage}"`,
+            'repair = "active"',
+            "gate = TRUE",
+            "legacyPublished = TRUE",
+          ],
+        })),
       },
       {
         name: "completion-reachable",

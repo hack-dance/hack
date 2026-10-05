@@ -16,7 +16,8 @@ python3 hack-next-install.py install --version 5.0.0-next.1
 The installer needs Python 3.9 or newer and macOS `codesign`; it does not need Bun,
 Rust, Zig, or a source checkout at runtime. The bundle includes the compiled normal
 CLI, native executor, Linux guest relay, launcher, provider pins, documentation,
-version metadata, and checksums. A reviewed source checkout can instead use
+version metadata, and checksums. Newer bundles also include an optional shared MCP
+adapter, owner, backend and content-addressed manifest. A reviewed source checkout can instead use
 `python3 scripts/install-prerelease.py install --version 5.0.0-next.1`. There is no
 latest-version lookup or automatic updater.
 
@@ -49,6 +50,15 @@ using the selected bundle and its `native-home`. Candidate `hack-next update`
 retains the existing refusal; use the channel manager's explicit upgrade command.
 
 ## Upgrade and return to a retained candidate
+
+Shared MCP packages need the matching retained installation manager. Older channels
+keep their original `manager.py`; running a newer installer against that root does
+not update it. The newer installer refuses an MCP upgrade when its own bytes differ
+from the retained manager, before publishing a version or changing selection. Use
+the retained manager when it supports that package, or install with the new reviewed
+installer into a fresh root, such as `--root "$HOME/.hack-next-mcp"`. The old channel
+and its rollback remain intact. Automatic manager migration is not implemented.
+New channels support both old flat bundles and new MCP bundles.
 
 Stop each candidate graph with its ordinary retained-data shutdown, then stop that
 version's owned runtime through the native executor. For the default installation
@@ -119,7 +129,7 @@ are required, including redirects. Metadata binds the version, tag, full source
 revision, and platform before extraction. The official tag reference must point
 directly to that exact commit; moved, annotated, or malformed references refuse
 installation before downloading the archive. The archive digest, every inner file
-digest, exact payload inventory, and both macOS executable signatures are verified
+digest, exact payload inventory, and all macOS executable signatures are verified
 before activation. An ad-hoc signature checks code integrity; it is not Apple
 notarization or publisher authentication. The official pinned release and its
 checksums remain the source identity boundary.

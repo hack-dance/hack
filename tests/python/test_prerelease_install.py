@@ -244,6 +244,38 @@ class ChannelTests(unittest.TestCase):
                             for name, value, original in with_mcp(entries)]
                 self.rejects_install(link, "regular archive files")
 
+    def test_actual_legacy_manager_refuses_new_layout_without_losing_status_or_rollback(self):
+        # Unmodified flat-payload manager from next09032e13. Only its native
+        # subprocess boundary is replaced, as in the other channel fixtures.
+        source = SOURCE.parent.parent / "tests/fixtures/prerelease-manager-flat-v1.py"
+        self.assertEqual(installer.digest(source),
+                         "b7c49e3fec6b06790e833db1d2dcb441d2223c283b792713be46826aa2eef877")
+        spec = importlib.util.spec_from_file_location("legacy_prerelease_manager", source)
+        legacy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(legacy)
+        self.channel = legacy.Channel(self.root / "legacy-channel")
+        self.channel.initialize()
+        self.install()
+        self.install("5.0.0-next.2", True)
+        paths = (".selection.json", ".channel.json", "manager.py", "bin/hack-next")
+        before = {name: (self.channel.root / name).read_bytes() for name in paths}
+        versions = sorted(path.name for path in (self.channel.root / "versions").iterdir())
+        current = installer.Channel(self.channel.root)
+        archive, checksum = self.archive("5.0.0-next.3", with_mcp)
+        with current.lock():
+            with self.assertRaisesRegex(installer.Refusal, "fresh --root"):
+                current.install("5.0.0-next.3", archive, checksum, True)
+        self.assertEqual({name: (self.channel.root / name).read_bytes() for name in paths}, before)
+        self.assertEqual(sorted(path.name for path in (self.channel.root / "versions").iterdir()), versions)
+        with mock.patch.object(legacy.platform, "system", return_value="Darwin"), \
+                mock.patch.object(legacy.platform, "machine", return_value="arm64"):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(legacy.main(["--root", str(self.channel.root), "status"]), 0)
+            self.assertEqual(json.loads(output.getvalue())["selected"], "5.0.0-next.2")
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(legacy.main(["--root", str(self.channel.root), "rollback"]), 0)
+            self.assertEqual(json.loads(output.getvalue())["selected"], "5.0.0-next.1")
+
     def test_active_unknown_failed_and_timed_out_status_never_trigger_down(self):
         self.install()
         cases = [{"phase": "running", "process_alive": True},

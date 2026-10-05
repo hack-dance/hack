@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -129,6 +129,7 @@ test("cancellation starts at most one native request and reaps only its owned ch
       runtime.binary,
       `#!${process.execPath}
 import { appendFileSync, writeFileSync } from "node:fs";
+${mode === "timeout" ? "await Bun.sleep(60_000);" : ""}
 appendFileSync(${JSON.stringify(marker)}, "attempt\\n");
 writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
 await Bun.sleep(60_000);
@@ -138,33 +139,78 @@ await Bun.sleep(60_000);
     if (mode === "before") {
       controller.abort();
     }
-    const attempt = invokeNativeRuntime({
-      runtime,
-      cwd: runtime.home,
-      args: ["runtime", "up", "--json"],
-      signal: controller.signal,
-      timeoutMs: mode === "timeout" ? 250 : 2000,
-    });
-    if (mode === "running") {
-      const deadline = performance.now() + 1500;
-      while (
-        !(await Bun.file(pidFile).exists()) &&
-        performance.now() < deadline
-      ) {
-        await Bun.sleep(10);
+    // Pass through every real spawn; observe only this unique fixture binary.
+    const spawn = spyOn(Bun, "spawn");
+    let child: ReturnType<typeof Bun.spawn> | undefined;
+    try {
+      const attempt = invokeNativeRuntime({
+        runtime,
+        cwd: runtime.home,
+        args: ["runtime", "up", "--json"],
+        signal: controller.signal,
+        timeoutMs: mode === "timeout" ? 250 : 2000,
+      });
+      void attempt.catch(() => undefined);
+      const ownCalls = () =>
+        spawn.mock.calls.flatMap(([argv], index) =>
+          Array.isArray(argv) && argv[0] === runtime.binary ? [index] : []
+        );
+      let exited = false;
+      if (mode !== "before") {
+        expect(ownCalls()).toHaveLength(1);
+        const result = spawn.mock.results[ownCalls()[0] ?? -1];
+        if (result?.type !== "return") {
+          throw new Error("fixture spawn did not return its owned child");
+        }
+        child = result.value;
+        void child.exited.then(() => {
+          exited = true;
+        });
       }
-      expect(await Bun.file(pidFile).exists()).toBe(true);
-      controller.abort();
-    }
-    await expect(attempt).rejects.toThrow(
-      mode === "timeout" ? "timed out" : "canceled"
-    );
-    if (mode === "before") {
-      expect(await Bun.file(marker).exists()).toBe(false);
-    } else {
-      expect(await Bun.file(marker).text()).toBe("attempt\n");
-      const pid = Number(await Bun.file(pidFile).text());
-      expect(() => process.kill(pid, 0)).toThrow();
+      if (mode === "running") {
+        const deadline = performance.now() + 1500;
+        while (
+          !(await Bun.file(pidFile).exists()) &&
+          performance.now() < deadline
+        ) {
+          await Bun.sleep(10);
+        }
+        expect(await Bun.file(pidFile).exists()).toBe(true);
+        controller.abort();
+      }
+      await expect(attempt).rejects.toThrow(
+        mode === "timeout" ? "timed out" : "canceled"
+      );
+      expect(ownCalls()).toHaveLength(mode === "before" ? 0 : 1);
+      if (mode === "running") {
+        if (!child) {
+          throw new Error("running fixture lost its parent-owned child");
+        }
+        expect(await Bun.file(marker).text()).toBe("attempt\n");
+        expect(Number(await Bun.file(pidFile).text())).toBe(child.pid);
+      } else {
+        expect(await Bun.file(marker).exists()).toBe(false);
+        expect(await Bun.file(pidFile).exists()).toBe(false);
+      }
+      // Timeout deliberately precedes the child marker. Parent identity and exit
+      // completion must still prove reaping before the request rejects.
+      if (child) {
+        expect(exited).toBe(true);
+        expect(child.signalCode).toBe("SIGKILL");
+        let probeFailure: unknown;
+        try {
+          process.kill(child.pid, 0);
+        } catch (error) {
+          probeFailure = error;
+        }
+        expect(probeFailure).toMatchObject({ code: "ESRCH" });
+      }
+    } finally {
+      spawn.mockRestore();
+      if (child?.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
     }
   }
 });

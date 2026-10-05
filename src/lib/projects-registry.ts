@@ -21,6 +21,7 @@ import {
   normalizeProjectName,
 } from "./project-name.ts";
 import {
+  deferIfProjectsRegistryBusy,
   withProjectsRegistryLock,
   writeProjectsRegistryAtomic,
 } from "./projects-registry-lock.ts";
@@ -98,6 +99,14 @@ export async function upsertProjectRegistration(opts: {
   const nowIso = opts.nowIso ?? new Date().toISOString();
   const registryPath = getRegistryPath();
   const registryDir = dirname(registryPath);
+  if (opts.waitForLock === false) {
+    // Skip Git and configuration discovery for an already-busy optional upsert.
+    // The late check and atomic publication still arbitrate later arrivals.
+    await deferIfProjectsRegistryBusy({
+      lockPath: getRegistryLockPath(),
+      signal: opts.signal,
+    });
+  }
   await ensureDir(registryDir);
 
   const [repoRootReal, projectDirReal] = await Promise.all([

@@ -42,13 +42,7 @@ export async function withProjectsRegistryLock<T>(opts: {
 }): Promise<T> {
   opts.signal?.throwIfAborted();
   if (opts.waitForLock === false) {
-    // Advisory only: occupied optional refreshes may defer without creating an
-    // owner file. Absence NEVER grants ownership; publish still uses atomic link.
-    const occupied = await lockPathOccupied(opts.lockPath);
-    opts.signal?.throwIfAborted();
-    if (occupied) {
-      throw new Error("Projects registry is busy; optional touch deferred");
-    }
+    await deferIfProjectsRegistryBusy(opts);
   }
   const candidate = `${opts.lockPath}.${randomUUID()}.owner`;
   const file = await open(candidate, "wx", 0o600);
@@ -69,6 +63,22 @@ export async function withProjectsRegistryLock<T>(opts: {
   } finally {
     await file.close();
     await removeAbsentOkay(candidate);
+  }
+}
+
+/**
+ * Optional maintenance may defer before expensive preparation or owner staging.
+ * This observation grants no ownership; absence still requires atomic acquisition.
+ */
+export async function deferIfProjectsRegistryBusy(opts: {
+  readonly lockPath: string;
+  readonly signal?: AbortSignal;
+}): Promise<void> {
+  opts.signal?.throwIfAborted();
+  const occupied = await lockPathOccupied(opts.lockPath);
+  opts.signal?.throwIfAborted();
+  if (occupied) {
+    throw new Error("Projects registry is busy; optional touch deferred");
   }
 }
 

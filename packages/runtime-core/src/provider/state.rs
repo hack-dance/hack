@@ -36,6 +36,10 @@ pub fn check_private_directory(path: &Path) -> Result<(), CandidateError> {
 
 pub struct Lock(File);
 impl Lock {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn file(&self) -> &File {
+        &self.0
+    }
     /// Identity of the retained descriptor, for callers fencing pathname replacement.
     pub(crate) fn identity(&self) -> Result<(u64, u64), CandidateError> {
         let metadata = self.0.metadata().map_err(io)?;
@@ -67,7 +71,9 @@ impl Lock {
         Self::from_file(file)
     }
 
-    fn from_file(file: File) -> Result<Self, CandidateError> {
+    /// Adopt an exclusively created private lock file before publishing its
+    /// pathname. The caller must fence the final pathname against this FD.
+    pub(crate) fn from_file(file: File) -> Result<Self, CandidateError> {
         let m = file.metadata().map_err(io)?;
         if !m.is_file()
             || m.nlink() != 1

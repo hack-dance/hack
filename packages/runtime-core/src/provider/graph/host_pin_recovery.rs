@@ -446,7 +446,9 @@ fn select(
     let (receipt, _) = load(candidate, engine, run)?;
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
     let foreground_root = foreground::transport::root(candidate, run)?;
+    super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
     let foreground_lock = state::Lock::acquire_existing(&foreground_root)?;
+    super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
     let control_lock_root = startup.control_root.join("relay-control");
     let control_lock = state::Lock::acquire_existing(&control_lock_root)?;
     let selected = Selected {

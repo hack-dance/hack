@@ -1330,6 +1330,22 @@ explicit retry with the original receipt hash. A pool boot
 change, replaced process or socket evidence, or ambiguous ownership refuses recovery.
 The separate previous-boot operation below preserves its existing ownership
 requirements.
+
+If current-boot cleanup is already confirmed and retained data is intact, but
+the dead foreground publisher still has its owner and socket while its operation
+lock pathname is missing, ordinary retirement must refuse. First inspect with
+`graph inspect-missing-publication-lock --run-id RUN --json`. After placing the
+exact candidate home in a maintenance window that prevents older Hack binaries
+and background clients from starting new operations, use
+`graph retire-missing-publication-lock --run-id RUN --expect-selection SHA256 --accept-quiesced-candidate-home`.
+The explicit action creates a selected private replacement lock, then reuses the
+current-boot cleanup proof and publisher-retirement journal. It does not alter
+graph receipts, guest resources or retained volumes. An interrupted repair
+blocks ordinary publication until the same selected operation resumes and its
+completion is verified. The CLI cannot itself prove that older binaries obey
+the publication gate; process listings alone do not establish that maintenance
+window. Keep the VM and its guest boot unchanged during this recovery.
+
 A graph with completed host-dependency startup and no inbound routes can also use
 its exact dead relay publication as the previous-boot proof; an empty bridge
 registry alone never grants cleanup authority.

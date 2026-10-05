@@ -551,7 +551,9 @@ pub fn retire_recovered_publisher(
                 )?;
             } else {
                 let foreground_root = foreground::transport::root(candidate, run)?;
+                super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
                 let foreground_lock = state::Lock::acquire_existing(&foreground_root)?;
+                super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
                 let guard = super::host_pin_recovery::acquire_for_cleanup(
                     candidate,
                     run,

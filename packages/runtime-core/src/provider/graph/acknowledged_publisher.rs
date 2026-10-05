@@ -4,6 +4,15 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+mod missing_lock;
+pub use missing_lock::{
+    inspect as inspect_missing_publication_lock, retire as retire_missing_publication_lock,
+};
+pub(in crate::provider::graph) use missing_lock::{
+    require_no_pending as require_no_pending_missing_lock,
+    require_no_pending_root as require_no_pending_missing_lock_root,
+};
+
 const LIMIT: u64 = 2 * 1024 * 1024;
 
 pub struct AcknowledgedPublisherSelection<'a> {
@@ -205,6 +214,7 @@ pub fn retire(
     }
     // Match foreground restore's publication-before-Engine lock order; both
     // locks stay held through observation and each retirement rename.
+    require_no_pending_missing_lock(candidate, selected.run)?;
     let publication = foreground::transport::root(candidate, selected.run)?;
     let lock = state::Lock::acquire_existing(&publication)?;
     host_pin_recovery::exact_lock_path(&publication, &lock)?;

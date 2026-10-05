@@ -1401,3 +1401,16 @@ This record is diagnostic evidence only: it does not acknowledge retirement or
 permit a replacement owner. A missing record (including a helper crash before
 publication) leaves the cause unknown. Preserve the retained owner and finalization
 records for inspection; do not delete them to force another startup.
+
+Managed HTTPS authority startup uses the same five-second provider-lock admission
+budget as ordinary pool startup. This lets a brief concurrent graph inspection
+finish before admission. Pool identity, socket ownership and certificate admission
+are checked only after the lock is acquired; expiry refuses with `provider_busy`
+and no authority is published. Serving and cleanup are never replayed.
+
+An authority child that exits before readiness can supply a bounded structured
+native error code without exposing its stderr. Malformed, oversized or missing
+output leaves the cause unknown. The `authority-ready` diagnostic now covers only
+readiness; later socket-identity, permission-port and Caddyfile failures have
+separate stages. These classifications do not acknowledge cleanup or permit an
+owner to be adopted or replaced.

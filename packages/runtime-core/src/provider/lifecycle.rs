@@ -273,12 +273,12 @@ fn operation_lease<T>(
 
 /// How long ordinary startup waits for a provider lease that another operation holds, such as
 /// the `graph inspect` behind `hack ps`.
-const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
+pub(super) const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
 
 /// Startup's provider lease. Everything `start_pool` does before taking it is read-only
 /// validation, admission sampling and RAII guards, so waiting for a briefly held lease admits
 /// nothing early, and on expiry it refuses `provider_busy` with nothing admitted.
-fn startup_lease(root: &Path, wait: Duration) -> Result<state::Lock, CandidateError> {
+pub(super) fn startup_lease(root: &Path, wait: Duration) -> Result<state::Lock, CandidateError> {
     operation_lease(root, Some(Instant::now() + wait), || Ok(())).map(|(lock, ())| lock)
 }
 

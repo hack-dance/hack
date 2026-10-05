@@ -15,7 +15,9 @@ import {
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
 import {
+  captureNativeHttpsChildFailure,
   type HttpsChild,
   inspectActiveNativeHttpsOwner,
   isNativeHttpsProbePath,
@@ -885,4 +887,120 @@ test("initial authority observation retains a safe startup stage without retryin
   await expect(
     access(join(f.root, "native-https/owner.lock"))
   ).rejects.toThrow();
+});
+
+test.each([
+  [
+    JSON.stringify({ code: "provider_busy", message: "secret-CANARY" }),
+    2,
+    "provider_busy",
+  ],
+  [
+    JSON.stringify({ code: "authority_ownership", message: "secret-CANARY" }),
+    2,
+    "authority_ownership",
+  ],
+  ["secret-CANARY", 2, null],
+  ["x".repeat(9000), 2, null],
+  [JSON.stringify({ code: "secret_canary" }), 2, null],
+  ["", 7, null],
+  [JSON.stringify({ code: "provider_busy" }), 0, null],
+] as const)("authority child output is classified without exposing values (%#)", async (output, code, expected) => {
+  const child = spawnNativeHttpsChild({
+    argv: [
+      process.execPath,
+      "-e",
+      `process.stderr.write(${JSON.stringify(output)}); process.exit(${code});`,
+    ],
+    env: { PATH: "/usr/bin:/bin" },
+    pipe: true,
+    nativeDiagnostics: true,
+  });
+  try {
+    expect(await child.exited).toBe(code);
+    const failure = await child.failure;
+    const classified = new NativeHttpsStartupError("authority-ready", failure);
+    expect(classified.diagnostic.nativeCode).toBe(expected);
+    expect(classified.message).not.toContain("CANARY");
+    if (code === 0) {
+      expect(failure).toBeUndefined();
+    }
+  } finally {
+    child.endInput();
+    child.kill("SIGKILL");
+    await child.exited;
+  }
+});
+
+test("authority child classification bounds an inherited stderr stream after exit", async () => {
+  let canceled = false;
+  const stderr = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(
+        new TextEncoder().encode(
+          '{"code":"provider_busy","message":"secret-CANARY"}'
+        )
+      );
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  const start = Date.now();
+  const failure = await captureNativeHttpsChildFailure({
+    exited: Promise.resolve(2),
+    stderr,
+  });
+  expect(Date.now() - start).toBeLessThan(2000);
+  expect(canceled).toBe(true);
+  expect(failure?.nativeCode).toBe("provider_busy");
+  expect(failure?.message).not.toContain("CANARY");
+});
+
+test("authority exits carry the typed failure through readiness without starting Caddy", async () => {
+  const f = await fixture();
+  const spawn = f.opts.dependencies.spawn!;
+  await expect(
+    startNativeProjectHttps({
+      ...f.opts,
+      dependencies: {
+        ...f.opts.dependencies,
+        spawn: (input) => {
+          const child = spawn(input);
+          if (input.pipe) {
+            expect(input.nativeDiagnostics).toBe(true);
+            f.children[0]?.finish(2);
+            return {
+              ...child,
+              failure: Bun.sleep(100).then(
+                () =>
+                  new NativeRuntimeRequestError({
+                    message: "secret-CANARY",
+                    nativeCode: "provider_busy",
+                  })
+              ),
+            };
+          }
+          return child;
+        },
+      },
+    })
+  ).rejects.toThrow("authority-ready: provider_busy");
+  expect(f.children).toHaveLength(1);
+});
+
+test("permission-port failure is distinct from authority readiness", async () => {
+  const f = await fixture();
+  await expect(
+    startNativeProjectHttps({
+      ...f.opts,
+      dependencies: {
+        ...f.opts.dependencies,
+        permissionPort: async () => {
+          throw new Error("secret-CANARY");
+        },
+      },
+    })
+  ).rejects.toThrow("permission-port");
+  expect(f.children).toHaveLength(1);
 });

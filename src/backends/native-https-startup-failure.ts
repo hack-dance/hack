@@ -19,6 +19,9 @@ const STAGES = [
   "authority-observation",
   "authority-start",
   "authority-ready",
+  "authority-identity",
+  "permission-port",
+  "caddy-configuration",
   "caddy-start",
   "caddy-ready",
   "listener-verification",
@@ -37,6 +40,8 @@ const NATIVE_CODES = new Set([
   "recovery_required",
   "host_endpoint_identity",
   "engine_protocol",
+  "hostname_authority",
+  "authority_ownership",
 ]);
 interface Diagnostic {
   readonly stage: Stage;

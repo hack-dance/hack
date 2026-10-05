@@ -989,6 +989,10 @@ remains available for inspection; do not remove journals or ownership pins to re
 
 Native `hack exec` and `hack run` make this request once with a 180-second frontend
 budget before selecting their command or reading managed environment values.
+If refresh refuses, the frontend preserves only reviewed native error identifiers
+such as `provider_busy` or `graph_owner_recovery: graph_dependency_rebind_incomplete`.
+Subprocess text and unknown codes remain omitted. These diagnostics do not confirm
+whether refresh effects occurred or authorize replay; the command is not dispatched.
 `ps` and `logs` remain observations and do not request refresh. Authenticated relay
 traffic reports a stale endpoint to the foreground owner, which attempts bounded
 refresh without idle polling. The affected application request can fail; it is

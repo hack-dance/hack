@@ -363,6 +363,12 @@ bundle can use it; identity mismatches do not authorize killing sessions or dele
 state. Empty runtime directories and stable lease files remain for safe reuse.
 Client reload/restart behavior remains client-specific.
 
+Ordinary `hack mcp install`, `hack setup mcp`, and `hack setup sync` preserve an
+existing Hack entry, including a selected shared adapter and custom client settings.
+Repeating setup does not switch the selected backend back to standard stdio. Pass
+`--bundle` and `--cli` to select another verified bundle, or remove the selected
+entry and reinstall without bundle options to return to standard stdio.
+
 Candidate installation preserves other JSON servers, custom Hack fields and env
 keys. Codex updates retain custom Hack values and verify the complete TOML meaning
 after replacing its section. Unsupported table layouts, malformed config and HTTP
@@ -381,17 +387,18 @@ isolated CLI tool through the generated adapter entry, and observes the normal
 60-second retirement. Codex discovery alone does not prove a Codex model session
 loaded the server or accepted project trust.
 
-To return a standalone Codex installation to the standard stdio launcher, remove
-the selected scope's Hack entry and reinstall it without bundle options:
+To return a client to the standard stdio launcher, remove the selected scope's
+Hack entry and reinstall it without bundle options. For Codex user scope:
 
 ```sh
 ./dist/hack setup mcp --codex --remove --global
 ./dist/hack mcp install --codex --scope user
 ```
 
-For project scope, omit `--global` and use `--scope project`. Removal clears the
-whole Hack table, including nested env/tool tables and that server's custom
-settings. It preserves other servers and user preferences, and refuses layouts
+Use `--claude` or `--cursor` instead of `--codex` for those clients. For project
+scope, omit `--global` and use `--scope project`. Removal clears the whole selected
+Hack entry, including nested env/tool tables and that server's custom settings.
+It preserves other servers and user preferences, and refuses layouts
 whose complete parsed result cannot be verified. Ordinary quoted table names are
 supported. Inventory parses TOML rather than mistaking a header inside a string for
 an installed server. Reinstallation selects `hack mcp serve` from the client's PATH;

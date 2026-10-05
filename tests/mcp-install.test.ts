@@ -134,6 +134,32 @@ test("invalid server-map shape is refused without dropping existing config", asy
   }
 });
 
+for (const target of ["claude", "cursor"] as const) {
+  test(`invalid ${target} Hack entry is refused without replacing it`, async () => {
+    const home = await setupTempHome();
+    const path = join(
+      home,
+      target === "claude" ? ".claude.json" : ".cursor/mcp.json"
+    );
+    if (target === "cursor") {
+      await mkdir(join(home, ".cursor"));
+    }
+    for (const hack of [null, "invalid", ["invalid"]]) {
+      const text = JSON.stringify({
+        mcpServers: { hack, other: { command: "keep" } },
+      });
+      await Bun.write(path, text);
+      expect(
+        (await installMcpConfig({ targets: [target], scope: "user" }))[0]
+      ).toMatchObject({
+        status: "error",
+        message: "Invalid Hack MCP configuration",
+      });
+      expect(await Bun.file(path).text()).toBe(text);
+    }
+  });
+}
+
 test.skipIf(process.getuid?.() === 0)(
   "an unreadable writable config is never treated as missing",
   async () => {

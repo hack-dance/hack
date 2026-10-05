@@ -320,9 +320,16 @@ async function installJsonConfig(opts: {
   const mcpServersRaw = current.mcpServers;
   const mcpServers = isRecord(mcpServersRaw) ? { ...mcpServersRaw } : {};
   const previous = mcpServers[SERVER_NAME];
-  if (opts.entry.env?.HACK_MCP_COMMAND && previous !== undefined) {
+  if (previous !== undefined) {
+    if (!isRecord(previous)) {
+      return { status: "error", message: "Invalid Hack MCP configuration" };
+    }
+    // Ordinary setup ensures an entry exists; only explicit bundle selection or
+    // removal may replace an existing launch. Match Codex's preservation contract.
+    if (!opts.entry.env?.HACK_MCP_COMMAND) {
+      return { status: "noop" };
+    }
     if (
-      !isRecord(previous) ||
       previous.url !== undefined ||
       (previous.type !== undefined && previous.type !== "stdio") ||
       (previous.env !== undefined && !isRecord(previous.env))

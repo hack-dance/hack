@@ -124,6 +124,8 @@ test("candidate install switches and rolls back Codex while retaining custom set
     expect(result[0]?.status).toBe("updated");
     const text = await Bun.file(path).text();
     expect(text).toContain('# user preference\nmodel = "custom-model"');
+    expect((await installMcpConfig(opts))[0]?.status).toBe("noop");
+    expect(await Bun.file(path).text()).toBe(text);
     expect(Bun.TOML.parse(text)).toMatchObject({
       model: "custom-model",
       mcp_servers: {
@@ -181,6 +183,9 @@ for (const target of ["claude", "cursor"] as const) {
           })
         )[0]?.status
       ).toBe("updated");
+      const selected = await Bun.file(path).text();
+      expect((await installMcpConfig(opts))[0]?.status).toBe("noop");
+      expect(await Bun.file(path).text()).toBe(selected);
       expect(await Bun.file(path).json()).toMatchObject({
         custom: true,
         mcpServers: {

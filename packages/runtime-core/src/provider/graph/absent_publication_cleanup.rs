@@ -530,6 +530,7 @@ struct Reservation {
 impl Reservation {
     fn inspect_existing(candidate: &Candidate, run: &str) -> Result<Option<Self>, CandidateError> {
         let root = foreground::transport::root(candidate, run)?;
+        super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
         match fs::symlink_metadata(&root) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Ok(_) => {
@@ -549,6 +550,7 @@ impl Reservation {
     }
     fn acquire(candidate: &Candidate, run: &str) -> Result<Self, CandidateError> {
         let root = foreground::transport::root(candidate, run)?;
+        super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
         let lock = match fs::symlink_metadata(&root) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 state::Lock::acquire(&root)?

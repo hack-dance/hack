@@ -342,6 +342,7 @@ pub(in crate::provider::graph) fn retire_recovered_publisher_recovery(
         return Err(retirement_refused());
     }
     let root = root(candidate, run)?;
+    super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
     state::check_private_directory(&root).map_err(|_| retirement_refused())?;
     let lock = state::Lock::acquire_existing(&root).map_err(|_| retirement_refused())?;
     retire_recovered_publisher_locked(
@@ -503,6 +504,7 @@ pub(in crate::provider::graph) fn verify_recovered_publisher_retired_recovery(
         return Err(retirement_refused());
     }
     let root = root(candidate, run)?;
+    super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
     state::check_private_directory(&root).map_err(|_| retirement_refused())?;
     let lock = state::Lock::acquire_existing(&root).map_err(|_| retirement_refused())?;
     let intent: Retirement =
@@ -525,10 +527,16 @@ pub(in crate::provider::graph) fn root(
     candidate: &Candidate,
     run: &str,
 ) -> Result<PathBuf, CandidateError> {
+    root_from_state(&candidate.state_root, run)
+}
+pub(in crate::provider::graph) fn root_from_state(
+    state_root: &Path,
+    run: &str,
+) -> Result<PathBuf, CandidateError> {
     if !super::super::hex(run, 32) {
         return Err(refused());
     }
-    let bytes = serde_json::to_vec(&("hack-graph-foreground-v1", &candidate.state_root, run))
+    let bytes = serde_json::to_vec(&("hack-graph-foreground-v1", state_root, run))
         .map_err(|_| refused())?;
     Ok(PathBuf::from(format!(
         "/private/tmp/hkgf-{}",
@@ -786,6 +794,50 @@ pub(in crate::provider::graph) struct LegacyPublisher {
     pub record: (u64, u64),
     pub process: ProcessIdentity,
 }
+
+/// Select an exact dead current-device publisher without requiring its missing
+/// operation lock. This observation grants no file or guest effect.
+pub(in crate::provider::graph) fn dead_publisher_without_lock(
+    candidate: &Candidate,
+    run: &str,
+) -> Result<LegacyPublisher, CandidateError> {
+    let pin = Pin::read(candidate, run)?;
+    if identity::alive(pin.record.process.pid).unwrap_or(true) {
+        return Err(retirement_refused());
+    }
+    no_listener(&pin.root.join("control.sock"))?;
+    Ok(LegacyPublisher {
+        owner_sha256: format!("{:x}", Sha256::digest(&pin.bytes)),
+        parent: pin.record.parent,
+        socket: pin.record.socket,
+        record: pin.record_id,
+        process: pin.record.process,
+    })
+}
+#[cfg(test)]
+pub(in crate::provider::graph) fn fixture_dead_publisher_without_lock(
+    candidate: &Candidate,
+    run: &str,
+) {
+    let publication = Publication::bind(candidate, run).unwrap();
+    let root = root(candidate, run).unwrap();
+    drop(publication);
+    let mut record: Record = state::read(&root.join("owner.json")).unwrap();
+    record.process.pid = 2_000_000;
+    fs::write(
+        root.join("owner.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(root.join("operation.lock")).unwrap();
+}
+#[cfg(test)]
+pub(in crate::provider::graph) fn fixture_next_publication(candidate: &Candidate, run: &str) {
+    let mut publication = Publication::bind(candidate, run).unwrap();
+    publication.verify().unwrap();
+    super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run).unwrap();
+    publication.finish().unwrap();
+}
 pub(super) struct Publication {
     listener: UnixListener,
     pin: Pin,
@@ -802,6 +854,7 @@ impl Publication {
         // Publication precedes the Engine lease. Recovery must exclude new runs
         // at this boundary, rather than relying on a later provider lock alone.
         let gate = super::super::publication_gate::Guard::acquire(candidate)?;
+        super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
         super::super::absent_publication_cleanup::publication_allowed(candidate, run, retired)?;
         let root = root(candidate, run)?;
         let lock = if retired {
@@ -812,6 +865,7 @@ impl Publication {
             state::Lock::acquire(&root).map_err(|_| refused())?
         };
         // The foreground lock serializes a concurrent absence-intent writer.
+        super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
         super::super::absent_publication_cleanup::publication_allowed(candidate, run, retired)?;
         #[cfg(target_os = "macos")]
         if retired {
@@ -1111,6 +1165,7 @@ impl Retired {
     }
 
     pub fn acquire(candidate: &Candidate, run: &str) -> Result<Option<Self>, CandidateError> {
+        super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
         let root = root(candidate, run)?;
         state::check_private_directory(&root)?;
         for name in ["control.sock", "owner.json"] {
@@ -1124,6 +1179,7 @@ impl Retired {
         let lock_identity =
             id(&fs::symlink_metadata(root.join("operation.lock")).map_err(|_| refused())?);
         let lock = state::Lock::acquire_existing(&root)?;
+        super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
         if lock.identity()? != lock_identity {
             return Err(refused());
         }
@@ -1137,6 +1193,7 @@ impl Retired {
         Ok(Some(guard))
     }
     pub fn verify(&self) -> Result<(), CandidateError> {
+        super::super::acknowledged_publisher::require_no_pending_missing_lock_root(&self.root)?;
         state::check_private_directory(&self.root)?;
         if id(&fs::symlink_metadata(&self.root).map_err(|_| refused())?) != self.identity
             || id(&fs::symlink_metadata(self.root.join("operation.lock")).map_err(|_| refused())?)
@@ -1218,7 +1275,9 @@ impl DeadOwner {
         device_rebind: Option<DeviceRebind>,
         host_boot_micros: Option<u64>,
     ) -> Result<Self, CandidateError> {
+        super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
         let lock = state::Lock::acquire_existing(&root(candidate, run)?)?;
+        super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
         let value = Self {
             pin: Pin::read_with_rebind(candidate, run, device_rebind)?,
             _lock: lock,
@@ -1233,6 +1292,7 @@ impl DeadOwner {
         Ok(value)
     }
     pub(in crate::provider::graph) fn verify(&self) -> Result<(), CandidateError> {
+        super::super::acknowledged_publisher::require_no_pending_missing_lock_root(&self.pin.root)?;
         let pathname =
             fs::symlink_metadata(self.pin.root.join("operation.lock")).map_err(|_| refused())?;
         if !pathname.is_file()

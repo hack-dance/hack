@@ -369,12 +369,30 @@ fn dead_witness_requires_lock_dead_exact_process_and_preserves_partial_retiremen
     let selection = witness.selection();
     assert!(dead::Witness::acquire(&root.0, context(), &pin.receipt.process).is_err());
     assert!(dead::retire(&root.0, context(), &selection).is_err());
+    let selected_lock = witness.lock_identity().unwrap();
     drop(witness);
     // Simulate interruption after the first authorized unlink. Retrying retains
     // the immutable original owner selection and finishes only that receipt.
-    fs::remove_file(&pin.paths.socket).unwrap();
+    let checks = std::cell::Cell::new(0);
+    assert!(
+        dead::retire_checked(&root.0, context(), &selection, Some(selected_lock), &|| {
+            checks.set(checks.get() + 1);
+            if checks.get() == 3 {
+                Err(refused())
+            } else {
+                Ok(())
+            }
+        },)
+        .is_err()
+    );
+    assert_eq!(checks.get(), 3);
+    assert!(!pin.paths.socket.exists());
+    assert!(pin.paths.receipt.exists());
     assert!(dead::Witness::acquire(&root.0, context(), &pin.receipt.process).is_err());
-    dead::retire(&root.0, context(), &selection).unwrap();
+    dead::retire_checked(&root.0, context(), &selection, Some(selected_lock), &|| {
+        Ok(())
+    })
+    .unwrap();
     dead::retire(&root.0, context(), &selection).unwrap();
     assert!(!pin.paths.receipt.exists());
     assert!(!pin.paths.socket.exists());

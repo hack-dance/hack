@@ -72,8 +72,9 @@ mod cleanup_diagnostics;
 mod cleanup_enrollment;
 #[cfg(target_os = "macos")]
 pub use acknowledged_publisher::{
-    AcknowledgedPublisherSelection, release_dependencies as release_acknowledged_dependencies,
-    retire as retire_acknowledged_publisher,
+    AcknowledgedPublisherSelection, inspect_missing_publication_lock,
+    release_dependencies as release_acknowledged_dependencies,
+    retire as retire_acknowledged_publisher, retire_missing_publication_lock,
 };
 #[cfg(target_os = "macos")]
 mod dead_owner_cleanup;

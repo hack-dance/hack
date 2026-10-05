@@ -197,6 +197,54 @@ continuity, multiple-lease recovery, browser readiness or performance. Concrete
 refusal, interrupted-archive, process/socket and native application checks remain
 required. No fairness or eventual recovery claim is made.
 
+## Missing publication lock retirement
+
+`missing-publication-lock/MissingLock.tla` models one explicitly selected repair of
+a missing `operation.lock`, one ordinary consumer, and one retired-publication
+consumer. The positive configuration explores **96 distinct states** from two
+eligibility inputs. The durable stages are intent, private temp marker, flock,
+exclusive hard link, temp unlink, standard retirement journal, socket archive,
+owner archive, and completion. One repair crash releases the held locks but keeps
+all committed evidence. The model rechecks the selected proof and replacement lock
+before each archive move and completion. Neither consumer can enter after both
+original paths are gone until the exact completion is durable. The
+`completion-reachable` control intentionally violates `NeverComplete` in `Commit`
+with the selected replacement lock and no unsafe effect; it proves a finite
+completion path exists, not eventual recovery.
+
+| Guard-removal control | Required same-state TLC failure |
+| --- | --- |
+| `negative` | `NoPrematureConsumer` in `AdmitOrdinary`: archived originals, crashed repair, incomplete intent, ordinary consumer admitted |
+| `retired-admission` | `NoPrematureConsumer` in `AdmitRetired` at the same incomplete stage |
+| `stale-proof` | `NoUnprovedCompletion` in `Commit` with selected version 1, current version 2 |
+| `replaced-lock` | `NoUnprovedCompletion` in `Commit` with a foreign lock path after crash |
+| `old-holder` | `NoUncoordinatedLegacy` in `OldHolderPublish` despite the new gate being held |
+
+| Model action | Runtime boundary under `packages/runtime-core/src/provider/graph/` |
+| --- | --- |
+| `Begin` / `WriteIntent` | `acknowledged_publisher/missing_lock.rs::retire` takes the pool publication gate, validates current acknowledged cleanup and exact selection, then writes immutable intent before any lock-path effect |
+| `CreateTemp` / `AcquireTemp` / `LinkLock` / `RemoveTemp` / `AcquireReplacement` | `missing_lock.rs::replacement_lock` fsyncs a private marker, holds flock, links it exclusively to `operation.lock`, removes only its exact temp name, and resumes exact partial states |
+| `StartJournal` / `ArchiveSocket` / `ArchiveOwner` | `foreground/transport.rs::retire_recovered_publisher_locked_fenced` uses its durable journal and exact effect fence, moving the selected socket before owner receipt |
+| `Commit` | `missing_lock.rs::retire` writes completion bound to the intent, retirement journal and replacement lock; `require_no_pending_root` checks the archived identities before consumers proceed |
+| `AdmitOrdinary` / `AdmitRetired` | `foreground/transport.rs` and `acknowledged_publisher/missing_lock.rs::require_no_pending_root` refuse incomplete repair for both entry paths |
+| `Crash` / `Resume` / `ChangeInputs` / `ReplacePath` | Exact intent, marker and journal retry refuses stale selection or a foreign lock; no ambiguous artifact is deleted to force progress |
+
+The positive protocol assumes an externally enforced maintenance window excludes
+pre-gate binaries. The `old-holder` counterexample shows why the new gate alone
+cannot exclude a process holding the old unlinked lock inode. Each TLA stage is an
+abstract durable commit; the model does not prove fsync order, pathname and FD
+identity, raw SHA checks, kernel flock behavior, process death, actual graph or
+volume preservation, or multi-crash liveness. No fairness is asserted. Native
+fault, refusal and exact-retry tests and an observed retained-graph run remain
+separate evidence.
+
+This model covers the foreground publication. It does not model the companion
+relay-control publication or the CLI's relay construction before foreground
+admission. Their acknowledgement-bound retirement, partial-unlink retries and
+pre-publication admission checks require implementation regressions and native
+restart/data-readback evidence; a `MissingLock` pass does not establish those
+properties.
+
 ## Active dependency rebinding
 
 `dependency-rebind/Rebind.tla` checks one physical slot shared by two logical

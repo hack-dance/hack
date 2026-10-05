@@ -9,7 +9,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { acquireNativeHttpsLease } from "../src/backends/native-https-owner.ts";
+import {
+  type acquireNativeHttpsLease,
+  NativeHttpsLeaseAcquisitionError,
+} from "../src/backends/native-https-owner.ts";
+import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
 import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
@@ -2397,4 +2401,146 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
     return await review(request);
   };
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
+});
+
+test("failed HTTPS intent preserves startup classification when cleanup cannot find the endpoint", async () => {
+  const { opts, events } = await httpsFixture();
+  let acquireCalls = 0,
+    recoveryCalls = 0,
+    completed = false;
+  opts.dependencies.finalization = async (request) => {
+    const lifetime = await beginNativeProjectFinalization(request);
+    return {
+      ...lifetime,
+      complete: async () => {
+        completed = true;
+      },
+    };
+  };
+  opts.dependencies.https = async (selection) => {
+    acquireCalls++;
+    const identity = leaseIdentity(selection);
+    await selection.onIntent?.(identity);
+    throw new NativeHttpsLeaseAcquisitionError(identity, {
+      startupFailure: new NativeHttpsStartupError(
+        "authority-observation",
+        new NativeRuntimeRequestError({
+          message: "private startup stderr",
+          nativeCode: "provider_busy",
+        })
+      ),
+    });
+  };
+  opts.dependencies.recoverHttps = async () => {
+    recoveryCalls++;
+    expect(events.at(-1)).toBe("graph inspect");
+    throw Object.assign(new Error("private endpoint path"), { code: "ENOENT" });
+  };
+  let failure: unknown;
+  try {
+    await startNativeProject({ ...opts, https: httpsSelection });
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(NativeHttpsLeaseAcquisitionError);
+  expect(String(failure)).toContain("authority-observation: provider_busy");
+  expect(String(failure)).toContain("Native startup cleanup is unconfirmed");
+  expect(String(failure)).not.toContain("private");
+  expect(acquireCalls).toBe(1);
+  expect(recoveryCalls).toBe(1);
+  expect(completed).toBe(false);
+  expect(events).not.toContain("ready");
+});
+
+test("later graph, temporary, hook and acknowledgement failures cannot mask HTTPS acquisition diagnostics", async () => {
+  for (const phase of [
+    "inspect",
+    "graph-cleanup",
+    "temporary",
+    "hook",
+    "recovery-and-hook",
+    "acknowledge",
+  ] as const) {
+    const { opts, events } = await httpsFixture();
+    let acquired = false,
+      recovered = 0,
+      acknowledged = false;
+    const invoke = opts.dependencies.invoke;
+    opts.dependencies.invoke = async (request) => {
+      if (acquired && request.args[1] === "inspect") {
+        if (phase === "inspect") {
+          throw new Error("private inspect path");
+        }
+        if (phase === "graph-cleanup") {
+          return { receipt: { phase: "cleanup-intent" } };
+        }
+      }
+      return await invoke?.(request);
+    };
+    opts.dependencies.finalization = async (request) => {
+      const lifetime = await beginNativeProjectFinalization(request);
+      return {
+        ...lifetime,
+        complete: async () => {
+          if (phase === "acknowledge") {
+            throw new Error("private acknowledgement path");
+          }
+          acknowledged = true;
+        },
+      };
+    };
+    opts.dependencies.https = async (selection) => {
+      const identity = leaseIdentity(selection);
+      await selection.onIntent?.(identity);
+      acquired = true;
+      throw new NativeHttpsLeaseAcquisitionError(identity, {
+        startupFailure: new NativeHttpsStartupError(
+          "authority-observation",
+          new NativeRuntimeRequestError({
+            message: "private start error",
+            nativeCode: "provider_busy",
+          })
+        ),
+      });
+    };
+    opts.dependencies.recoverHttps = async () => {
+      recovered++;
+      if (phase === "recovery-and-hook") {
+        throw new Error("private lease cleanup output");
+      }
+    };
+    if (phase === "temporary") {
+      opts.dependencies.cleanupTemporary = async (directory) => {
+        await rm(directory, { recursive: true, force: true });
+        throw new Error("private temporary path");
+      };
+    }
+    if (phase === "hook" || phase === "recovery-and-hook") {
+      const before = opts.before;
+      opts.before = async () => {
+        const hooks = await before();
+        return {
+          ...hooks,
+          cleanup: async () => {
+            await hooks.cleanup();
+            throw new Error("private lifecycle output");
+          },
+        };
+      };
+    }
+    let failure: unknown;
+    try {
+      await startNativeProject({ ...opts, https: httpsSelection });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(NativeHttpsLeaseAcquisitionError);
+    expect(String(failure)).toContain("authority-observation: provider_busy");
+    expect(String(failure)).toContain("Native startup cleanup is unconfirmed");
+    expect(String(failure)).not.toContain("private");
+    expect(recovered).toBe(1);
+    // Temporary disposal never determined graph/HTTPS finalization in the original flow.
+    expect(acknowledged).toBe(phase === "temporary");
+    expect(events).not.toContain("ready");
+  }
 });

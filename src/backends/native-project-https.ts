@@ -28,6 +28,7 @@ import { connect as tlsConnect } from "node:tls";
 import { isRecord } from "../lib/guards.ts";
 import { listenPublishedUnixSocket } from "../lib/unix-socket-publish.ts";
 import { checkNativeHttpsPort } from "./native-https-port.ts";
+import { NativeHttpsStartupError } from "./native-https-startup-failure.ts";
 import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
@@ -1374,11 +1375,14 @@ export async function startNativeProjectHttps(opts: {
       }
       await removeOwnedDirectory(lock, lockIdentity, false);
     })());
+  let startupStage: ConstructorParameters<typeof NativeHttpsStartupError>[0] =
+    "owner-challenge";
   try {
     owner = await startOwnerChallenge(
       ownerSocket,
       deps.afterOwnerSocketPublish
     );
+    startupStage = "authority-observation";
     const before = await inspect();
     if (
       !(
@@ -1394,6 +1398,7 @@ export async function startNativeProjectHttps(opts: {
     await privateDirectory(session);
     sessionIdentity = await lstat(session);
     const env: Record<string, string> = { PATH: "/usr/bin:/bin", HOME: home };
+    startupStage = "authority-start";
     authority = deps.spawn({
       argv: [
         opts.runtime.binary,
@@ -1413,6 +1418,7 @@ export async function startNativeProjectHttps(opts: {
     });
     const deadline = Date.now() + 10_000;
     const startedAuthority = authority;
+    startupStage = "authority-ready";
     ownedAuthority = await waitReady(
       deadline,
       () => dead,
@@ -1438,6 +1444,7 @@ export async function startNativeProjectHttps(opts: {
       }),
       { mode: 0o600, flag: "wx" }
     );
+    startupStage = "caddy-start";
     caddy = deps.spawn({
       argv: [
         opts.caddyBinary,
@@ -1459,6 +1466,7 @@ export async function startNativeProjectHttps(opts: {
     void caddy.exited.then(() => {
       dead = true;
     });
+    startupStage = "caddy-ready";
     const caPath = join(data, "caddy/pki/authorities/local/root.crt");
     await waitReady(
       deadline,
@@ -1476,6 +1484,7 @@ export async function startNativeProjectHttps(opts: {
         await validCa(caPath);
       }
     );
+    startupStage = "listener-verification";
     const listener = await inspectHostListener({
       runtime: opts.runtime,
       invoke: deps.invoke,
@@ -1484,6 +1493,7 @@ export async function startNativeProjectHttps(opts: {
       executable: opts.caddyBinary,
     });
     const caSha256 = caDerSha256(await validCa(caPath));
+    startupStage = "owner-publication";
     receiptIdentity = await publishOwnerReceipt({
       path: receiptPath,
       receipt: {
@@ -1504,6 +1514,7 @@ export async function startNativeProjectHttps(opts: {
         },
       },
     });
+    startupStage = "owner-verification";
     const activeOwner = await inspectActiveNativeHttpsOwner({
       runtime: opts.runtime,
       invoke: deps.invoke,
@@ -1533,7 +1544,12 @@ export async function startNativeProjectHttps(opts: {
       close,
     };
   } catch (error) {
-    await close();
-    throw error;
+    let cleanupUnconfirmed = false;
+    try {
+      await close();
+    } catch {
+      cleanupUnconfirmed = true;
+    }
+    throw new NativeHttpsStartupError(startupStage, error, cleanupUnconfirmed);
   }
 }

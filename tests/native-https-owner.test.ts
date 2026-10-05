@@ -73,6 +73,8 @@ async function until<T>(read: () => Promise<T>): Promise<T> {
 async function fixture(
   options: {
     readonly immediateExit?: boolean;
+    readonly startFailure?: boolean;
+    readonly hardExit?: boolean;
     readonly holdRetirement?: boolean;
     /** Fault injected between control-socket publication and its first observation. */
     readonly afterPublish?: "fail" | "replace";
@@ -88,14 +90,17 @@ async function fixture(
     `#!${process.execPath}
 import { serveNativeHttpsOwner } from ${JSON.stringify(serverModule)};
 import { appendFile, chmod, readFile, unlink, writeFile } from "node:fs/promises";
+import { NativeRuntimeRequestError } from ${JSON.stringify(resolve(import.meta.dir, "../src/backends/native-runtime-client.ts"))};
 const home = ${JSON.stringify(home)};
 const fault = ${JSON.stringify(options.afterPublish ?? null)};
 await writeFile(home + "/helper-pid", String(process.pid));
+${options.hardExit ? "process.exit(7);" : ""}
 const never = ${options.immediateExit ? 'Promise.resolve({component:"fixture",code:1})' : "new Promise(() => {})"};
 try {
   await serveNativeHttpsOwner({ configurationPath: process.argv.at(-1), dependencies: {
     start: async () => {
       await appendFile(home + "/events", "start\\n");
+      ${options.startFailure ? 'throw new NativeRuntimeRequestError({ message: "private child output", nativeCode: "provider_busy" });' : ""}
       return { caPath: home + "/fake-ca", httpsPort: 19443, exited: never,
         verifyHostname: async () => ({statusCode:200}),
         close: async () => { await appendFile(home + "/events", "close\\n"); }
@@ -875,3 +880,59 @@ test("native release proof rejects live compute, pending journals, bridges, and 
     verifyNativeHttpsLeaseGraph(binding, selected, "release", invoke)
   ).rejects.toThrow();
 });
+
+test("detached startup failure reports only its generation-bound diagnostic and refuses recovery", async () => {
+  const f = await fixture({ startFailure: true });
+  await expect(f.start()).rejects.toThrow("frontend-start: provider_busy");
+  const configuration = await readNativeHttpsOwnerConfiguration(
+    f.binding.runtime
+  );
+  const root = nativeHttpsOwnerRoot(f.home);
+  const diagnostic = await readFile(join(root, "startup-failure.json"), "utf8");
+  expect(diagnostic).not.toContain("private child output");
+  expect(diagnostic).not.toContain(f.home);
+  expect(await readFile(join(f.home, "events"), "utf8")).toBe("start\n");
+  let verified = false;
+  await expect(
+    recoverNativeHttpsLease({
+      runtime: f.binding.runtime,
+      identity: nativeHttpsLeaseIdentity(configuration, lease("b")),
+      verifyReleased: async () => {
+        verified = true;
+      },
+    })
+  ).rejects.toThrow("frontend-start: provider_busy");
+  expect(verified).toBe(false);
+  expect(await readFile(join(root, "startup-failure.json"), "utf8")).toBe(
+    diagnostic
+  );
+  await expect(readFile(join(root, "endpoint.json"))).rejects.toThrow();
+});
+
+test("helper exit without a failure receipt remains unknown and cannot authorize recovery", async () => {
+  const f = await fixture({ hardExit: true });
+  await expect(f.start()).rejects.toThrow("ENOENT");
+  const configuration = await readNativeHttpsOwnerConfiguration(
+    f.binding.runtime
+  );
+  const before = await readFile(
+    join(nativeHttpsOwnerRoot(f.home), "configuration.json")
+  );
+  let verified = false;
+  await expect(
+    recoverNativeHttpsLease({
+      runtime: f.binding.runtime,
+      identity: nativeHttpsLeaseIdentity(configuration, lease("b")),
+      verifyReleased: async () => {
+        verified = true;
+      },
+    })
+  ).rejects.toThrow("ENOENT");
+  expect(verified).toBe(false);
+  expect(
+    await readFile(join(nativeHttpsOwnerRoot(f.home), "configuration.json"))
+  ).toEqual(before);
+  await expect(
+    readFile(join(nativeHttpsOwnerRoot(f.home), "startup-failure.json"))
+  ).rejects.toThrow();
+}, 25_000);

@@ -38,6 +38,10 @@ import {
   nativeHttpsRemoveFile,
   nativeHttpsWriteNew,
 } from "./native-https-owner-storage.ts";
+import {
+  NativeHttpsStartupError,
+  recordNativeHttpsStartupFailure,
+} from "./native-https-startup-failure.ts";
 import { startNativeProjectHttps } from "./native-project-https.ts";
 import { invokeNativeRuntime } from "./native-runtime-client.ts";
 
@@ -580,6 +584,8 @@ export async function serveNativeHttpsOwner(opts: {
     void serialize(failOwner);
   };
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
+  let startupStage: ConstructorParameters<typeof NativeHttpsStartupError>[0] =
+    "frontend-start";
   try {
     frontend = await opts.dependencies.start(binding);
     const exited = () => {
@@ -592,7 +598,9 @@ export async function serveNativeHttpsOwner(opts: {
     // Keep the published inode at once: failure cleanup then closes this listener
     // and retires only this inode, and every later observation compares against it.
     // The helper set its mode before publication, so the path is never chmodded.
+    startupStage = "control-publication";
     socketIdentity = await listenPublishedUnixSocket(server, socketPath);
+    startupStage = "control-verification";
     await opts.dependencies.afterPublish?.(socketPath);
     const published = await lstat(socketPath);
     if (
@@ -607,6 +615,7 @@ export async function serveNativeHttpsOwner(opts: {
     if (frontendFailed) {
       throw nativeHttpsOwnerRefused();
     }
+    startupStage = "endpoint-publication";
     endpointIdentity = await nativeHttpsWriteNew(join(root, "endpoint.json"), {
       version: 1,
       ownerGeneration,
@@ -632,7 +641,24 @@ export async function serveNativeHttpsOwner(opts: {
       });
     }, opts.startupGraceMs ?? 30_000);
     await completed;
-  } catch {
+  } catch (error) {
+    if (state === "starting") {
+      try {
+        const currentRoot = await lstat(root);
+        if (
+          currentRoot.dev === rootIdentity.dev &&
+          currentRoot.ino === rootIdentity.ino
+        ) {
+          await recordNativeHttpsStartupFailure({
+            configuration,
+            configurationIdentity: configurationFile.identity,
+            error: new NativeHttpsStartupError(startupStage, error),
+          });
+        }
+      } catch {
+        // Diagnostics never overwrite foreign state or change cleanup authority.
+      }
+    }
     await failOwner();
     throw nativeHttpsOwnerRefused();
   } finally {

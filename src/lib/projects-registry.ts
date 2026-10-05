@@ -158,7 +158,7 @@ async function upsertObservedRegistration(input: {
   return await withRegistryLock(
     async () => {
       const current = await readProjectsRegistry();
-      const { project, status } = await upsertInMemory({
+      const update = await upsertInMemory({
         current,
         nowIso,
         incoming: {
@@ -168,35 +168,99 @@ async function upsertObservedRegistration(input: {
         },
       });
 
-      if (status.status === "conflict") {
-        return status;
-      }
-      if (status.status === "noop") {
-        if (status.changed) {
-          await writeRegistryAtomic(
-            registryPath,
-            {
-              version: REGISTRY_VERSION,
-              projects: status.projects,
-            },
-            opts.signal
-          );
-        }
-        return { status: "noop", project };
-      }
-
-      await writeRegistryAtomic(
+      return await commitRegistrationUpdate({
+        update,
         registryPath,
-        {
-          version: REGISTRY_VERSION,
-          projects: status.projects,
-        },
-        opts.signal
-      );
-
-      return { status: status.status, project };
+        signal: opts.signal,
+      });
     },
     { waitForLock: opts.waitForLock, signal: opts.signal }
+  );
+}
+
+async function commitRegistrationUpdate(opts: {
+  readonly update: Awaited<ReturnType<typeof upsertInMemory>>;
+  readonly registryPath: string;
+  readonly signal?: AbortSignal;
+}): Promise<RegisterOutcome> {
+  const { project, status } = opts.update;
+  if (status.status === "conflict") {
+    return status;
+  }
+  if (status.status !== "noop" || status.changed) {
+    await writeRegistryAtomic(
+      opts.registryPath,
+      { version: REGISTRY_VERSION, projects: status.projects },
+      opts.signal
+    );
+  }
+  return { status: status.status, project };
+}
+
+/**
+ * Only an unchanged, unambiguous primary may skip Git discovery. Before locking,
+ * this selection is merely a hint; the owned reread must prove it again.
+ */
+function selectUnchangedPrimary(opts: {
+  readonly registry: ProjectsRegistry;
+  readonly observation: RegistrationObservation;
+}): RegisteredProject | null {
+  const { observation, registry } = opts;
+  const byName = matchingNames(registry.projects, observation.name);
+  const byDir = registry.projects.filter(
+    (entry) => entry.projectDir === observation.projectDir
+  );
+  const entry = byName[0];
+  if (
+    byName.length !== 1 ||
+    byDir.length !== 1 ||
+    entry !== byDir[0] ||
+    !entry ||
+    entry.name !== observation.name ||
+    entry.repoRoot !== observation.repoRoot ||
+    entry.projectDirName !== observation.projectDirName ||
+    entry.devHost !== observation.devHost ||
+    registry.projects.filter((item) => item.id === entry.id).length !== 1
+  ) {
+    return null;
+  }
+  return entry;
+}
+
+/** A failed proof releases ownership completely before the caller discovers Git. */
+async function refreshUnchangedPrimary(opts: {
+  readonly observation: RegistrationObservation;
+  readonly nowIso: string;
+}): Promise<RegisterOutcome | null> {
+  const registryPath = getRegistryPath();
+  await deferIfProjectsRegistryBusy({ lockPath: getRegistryLockPath() });
+  await ensureDir(dirname(registryPath));
+  return await withRegistryLock(
+    async () => {
+      const current = await readProjectsRegistry();
+      const primary = selectUnchangedPrimary({
+        registry: current,
+        observation: opts.observation,
+      });
+      const age =
+        Date.parse(opts.nowIso) - Date.parse(primary?.lastSeenAt ?? "");
+      if (!(primary && age >= 0)) {
+        return null;
+      }
+      if (age < REGISTRY_TOUCH_INTERVAL_MS) {
+        return { status: "noop", project: primary };
+      }
+      return await commitRegistrationUpdate({
+        registryPath,
+        update: await updatePrimaryRegistration({
+          current: current.projects,
+          existing: primary,
+          incoming: opts.observation,
+          nowIso: opts.nowIso,
+        }),
+      });
+    },
+    { waitForLock: false }
   );
 }
 
@@ -205,6 +269,7 @@ async function upsertObservedRegistration(input: {
  *
  * Coalesces unchanged observations for one minute. New or changed checkouts
  * use the normal serialized upsert, but never wait for or reclaim a busy lock.
+ * An unchanged primary refresh skips Git only after a locked registry reread.
  * Configuration and canonical paths are observed once per invocation; a later
  * invocation reads them again even when the registration is still fresh.
  * Registry maintenance must not delay or break a read command.
@@ -228,6 +293,14 @@ export async function touchProjectRegistration(opts: {
     });
     if (fresh) {
       return { status: "noop", project: fresh };
+    }
+    const primaryHint = selectUnchangedPrimary({ registry, observation });
+    const age = Date.parse(nowIso) - Date.parse(primaryHint?.lastSeenAt ?? "");
+    if (primaryHint && age >= 0) {
+      const refreshed = await refreshUnchangedPrimary({ observation, nowIso });
+      if (refreshed) {
+        return refreshed;
+      }
     }
     return await upsertObservedRegistration({
       options: { project: opts.project, nowIso, waitForLock: false },
@@ -675,26 +748,12 @@ async function upsertInMemory(opts: {
       return registrationConflict({ existing: existingByName, incoming });
     }
 
-    const prunedWorktrees = await pruneWorktreeEntries(existingByDir.worktrees);
-    const { worktrees: _staleWorktrees, ...existingBase } = existingByDir;
-    const updated: RegisteredProject = {
-      ...existingBase,
-      name: incoming.name,
-      repoRoot: incoming.repoRoot,
-      projectDirName: incoming.projectDirName,
-      ...(incoming.devHost ? { devHost: incoming.devHost } : {}),
-      lastSeenAt: opts.nowIso,
-      ...(prunedWorktrees && prunedWorktrees.length > 0
-        ? { worktrees: prunedWorktrees }
-        : {}),
-    };
-    return {
-      project: updated,
-      status: {
-        status: shallowEqual(existingByDir, updated) ? "noop" : "updated",
-        projects: replaceById(current, updated),
-      },
-    };
+    return await updatePrimaryRegistration({
+      current,
+      existing: existingByDir,
+      incoming,
+      nowIso: opts.nowIso,
+    });
   }
 
   // 2) Only a proven Git worktree family may share or move a registered identity.
@@ -780,6 +839,44 @@ async function upsertInMemory(opts: {
   return {
     project: created,
     status: { status: "created", projects: [...current, created] },
+  };
+}
+
+async function updatePrimaryRegistration(opts: {
+  readonly current: readonly RegisteredProject[];
+  readonly existing: RegisteredProject;
+  readonly incoming: Pick<
+    RegisteredProject,
+    "name" | "repoRoot" | "projectDirName" | "devHost"
+  >;
+  readonly nowIso: string;
+}): Promise<{
+  readonly project: RegisteredProject;
+  readonly status: {
+    readonly status: "noop" | "updated";
+    readonly projects: readonly RegisteredProject[];
+  };
+}> {
+  const { existing, incoming } = opts;
+  const prunedWorktrees = await pruneWorktreeEntries(existing.worktrees);
+  const { worktrees: _staleWorktrees, ...existingBase } = existing;
+  const updated: RegisteredProject = {
+    ...existingBase,
+    name: incoming.name,
+    repoRoot: incoming.repoRoot,
+    projectDirName: incoming.projectDirName,
+    ...(incoming.devHost ? { devHost: incoming.devHost } : {}),
+    lastSeenAt: opts.nowIso,
+    ...(prunedWorktrees && prunedWorktrees.length > 0
+      ? { worktrees: prunedWorktrees }
+      : {}),
+  };
+  return {
+    project: updated,
+    status: {
+      status: shallowEqual(existing, updated) ? "noop" : "updated",
+      projects: replaceById(opts.current, updated),
+    },
   };
 }
 

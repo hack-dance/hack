@@ -308,7 +308,7 @@ test("already-aborted optional admission reaches no metadata or filesystem work"
   expect(await readdir(registryDir)).toEqual(["projects.json"]);
 });
 
-test("uncontended stale touch uses real Git and persists renamed configuration without changing identity", async () => {
+test("uncontended primary refresh skips Git and renamed configuration still updates identity safely", async () => {
   const refreshed = await report(child("touch"));
   expect(refreshed).toMatchObject({
     result: { status: "updated" },
@@ -321,7 +321,7 @@ test("uncontended stale touch uses real Git and persists renamed configuration w
     projectDirResolutions: 1,
     registryReads: 2,
   });
-  expect(refreshed.gitLaunches).toBe(1);
+  expect(refreshed.gitLaunches).toBe(0);
   await writeFile(
     join(primary, ".hack", "hack.config.json"),
     JSON.stringify({ name: "renamed_project", dev_host: "renamed.hack.local" })
@@ -331,6 +331,9 @@ test("uncontended stale touch uses real Git and persists renamed configuration w
   ).toMatchObject({
     result: { status: "updated" },
     error: null,
+    gitLaunches: 1,
+    ownerOpens: 1,
+    publications: 1,
     registryWrites: 1,
     configReads: 1,
     projectRootResolutions: 1,
@@ -347,12 +350,14 @@ test("uncontended stale touch uses real Git and persists renamed configuration w
   expect(await readdir(registryDir)).toEqual(["projects.json"]);
 });
 
-test("unborn stale touch reuses one observation and keeps two Git calls", async () => {
+test("unborn stale primary refresh reuses one observation without Git", async () => {
   await git(primary, ["symbolic-ref", "HEAD", "refs/heads/unborn"]);
   expect(await report(child("touch"))).toMatchObject({
     result: { status: "updated" },
     error: null,
-    gitLaunches: 2,
+    gitLaunches: 0,
+    ownerOpens: 1,
+    publications: 1,
     configReads: 1,
     projectRootResolutions: 1,
     projectDirResolutions: 1,
@@ -397,7 +402,7 @@ test("a config change after touch observation is read by the next touch in the s
       },
     },
     error: null,
-    gitLaunches: 2,
+    gitLaunches: 1,
     configReads: 2,
     projectRootResolutions: 2,
     projectDirResolutions: 2,
@@ -540,7 +545,7 @@ for (const observation of ["early", "late"] as const) {
       ownerOpens: observation === "early" ? 0 : 1,
       publications: observation === "early" ? 0 : 1,
     });
-    expect(result.gitLaunches).toBeGreaterThan(0);
+    expect(result.gitLaunches).toBe(0);
     expect(await readFile(lockPath, "utf8")).toBe(receipt);
     expect(await readFile(registryPath, "utf8")).toBe(bytes);
     expect((await readdir(registryDir)).sort()).toEqual([
@@ -570,4 +575,373 @@ test("an owner releasing after early occupied observation still safely defers st
   });
   expect(await readFile(registryPath, "utf8")).toBe(bytes);
   expect(await readdir(registryDir)).toEqual(["projects.json"]);
+});
+
+async function primaryEntry() {
+  const entry = (await readProjectsRegistry({ registryPath })).projects[0];
+  if (!entry) {
+    throw new Error("Missing fixture primary registration");
+  }
+  return entry;
+}
+
+for (const change of [
+  "removed",
+  "retargeted",
+  "renamed",
+  "ambiguous-name",
+  "ambiguous-directory",
+  "root",
+  "host",
+  "directory-name",
+  "invalid-time",
+  "future-time",
+] as const) {
+  test(`locked primary proof rejects a ${change} registration and falls back outside the lock`, async () => {
+    const entry = await primaryEntry();
+    const otherRoot = join(fixture, "other");
+    await mkdir(join(otherRoot, ".hack"), { recursive: true });
+    await git(otherRoot, ["init", "-b", "other"]);
+    const other = {
+      ...entry,
+      id: "other-id",
+      name: "other",
+      repoRoot: otherRoot,
+      projectDir: join(otherRoot, ".hack"),
+    };
+    const changed = (() => {
+      switch (change) {
+        case "removed":
+          return [];
+        case "retargeted":
+          return [{ ...other, name: entry.name }];
+        case "renamed":
+          return [{ ...entry, name: "intervening-name" }];
+        case "ambiguous-name":
+          return [entry, { ...other, name: entry.name }];
+        case "ambiguous-directory":
+          return [entry, { ...other, projectDir: entry.projectDir }];
+        case "root":
+          return [{ ...entry, repoRoot: otherRoot }];
+        case "host":
+          return [{ ...entry, devHost: "intervening.hack.local" }];
+        case "directory-name":
+          return [{ ...entry, projectDirName: ".dev" }];
+        case "invalid-time":
+          return [{ ...entry, lastSeenAt: "invalid" }];
+        case "future-time":
+          return [{ ...entry, lastSeenAt: "2026-01-01T00:03:00Z" }];
+        default:
+          throw new Error("Unknown primary proof control");
+      }
+    })();
+    const touch = child("pause-early");
+    await boundary(touch, "observed-absent");
+    const changedBytes = JSON.stringify({ version: 1, projects: changed });
+    await writeFile(registryPath, changedBytes);
+    touch.stdin.end();
+    const result = await report(touch);
+    expect(result).toMatchObject({
+      error: null,
+      ownerOpens: 2,
+      publications: 2,
+      registryReads: 3,
+      configReads: 1,
+      projectRootResolutions: 1,
+      projectDirResolutions: 1,
+    });
+    expect(result.gitStates).toEqual([
+      {
+        ownsLock: false,
+        lockPresent: false,
+        ownerFiles: 0,
+        registryWrites: 0,
+        publications: 1,
+      },
+      ...(change === "retargeted"
+        ? [
+            {
+              ownsLock: true,
+              lockPresent: true,
+              ownerFiles: 0,
+              registryWrites: 0,
+              publications: 2,
+            },
+          ]
+        : []),
+    ]);
+    if (
+      ["retargeted", "ambiguous-name", "ambiguous-directory"].includes(change)
+    ) {
+      expect(result).toMatchObject({
+        result: { status: "conflict" },
+        registryWrites: 0,
+      });
+      expect(await readFile(registryPath, "utf8")).toBe(changedBytes);
+    } else {
+      expect(result).toMatchObject({
+        result: { status: change === "removed" ? "created" : "updated" },
+        registryWrites: 1,
+      });
+      const refreshed = await primaryEntry();
+      expect(refreshed).toMatchObject({
+        name: "admission",
+        repoRoot: primary,
+        projectDir: join(primary, ".hack"),
+        projectDirName: ".hack",
+        devHost: "admission.hack.local",
+        lastSeenAt: "2026-01-01T00:02:00Z",
+      });
+      if (change !== "removed") {
+        expect(refreshed.id).toBe(entry.id);
+        expect(refreshed.createdAt).toBe(entry.createdAt);
+      }
+    }
+    expect(await readdir(registryDir)).toEqual(["projects.json"]);
+  });
+}
+
+test("a duplicate ID introduced after the hint cannot authorize a primary refresh", async () => {
+  const entry = await primaryEntry();
+  const touch = child("pause-fallback");
+  await boundary(touch, "observed-absent");
+  const bytes = JSON.stringify({
+    version: 1,
+    projects: [
+      entry,
+      {
+        ...entry,
+        name: "other",
+        projectDir: join(fixture, "other", ".hack"),
+        repoRoot: join(fixture, "other"),
+      },
+    ],
+  });
+  await writeFile(registryPath, bytes);
+  touch.stdin.end();
+  await boundary(touch, "before-fallback-git");
+  expect(await readFile(registryPath, "utf8")).toBe(bytes);
+  expect(await readdir(registryDir)).toEqual(["projects.json"]);
+  // The existing full upsert does not validate duplicate IDs. Stop at its late
+  // admission boundary, after proving that the new primary path refused to write.
+  const owner = child("hold");
+  await boundary(owner, "held");
+  const receipt = await readFile(lockPath, "utf8");
+  await writeFile(join(fixture, "state", "continue-git"), "continue");
+  expect(await report(touch)).toMatchObject({
+    result: null,
+    error: null,
+    gitLaunches: 1,
+    ownerOpens: 1,
+    publications: 1,
+    registryWrites: 0,
+    gitStates: [
+      {
+        ownsLock: false,
+        lockPresent: false,
+        ownerFiles: 0,
+        registryWrites: 0,
+        publications: 1,
+      },
+    ],
+  });
+  expect(await readFile(registryPath, "utf8")).toBe(bytes);
+  expect(await readFile(lockPath, "utf8")).toBe(receipt);
+  owner.stdin.end();
+  expect(await finish(owner)).toBe("");
+  expect(await readdir(registryDir)).toEqual(["projects.json"]);
+});
+
+test("fallback rereads the registry after an intervening real writer", async () => {
+  const entry = await primaryEntry();
+  const secondary = join(fixture, "secondary");
+  await mkdir(join(secondary, ".hack"), { recursive: true });
+  await writeFile(
+    join(secondary, ".hack", "hack.config.json"),
+    JSON.stringify({ name: "secondary" })
+  );
+  await git(secondary, ["init", "-b", "main"]);
+  const touch = child("pause-fallback");
+  await boundary(touch, "observed-absent");
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      version: 1,
+      projects: [{ ...entry, name: "changed-between-reads" }],
+    })
+  );
+  touch.stdin.end();
+  await boundary(touch, "before-fallback-git");
+  expect(await report(child("optional", secondary))).toMatchObject({
+    result: { status: "created" },
+    error: null,
+  });
+  const registered = (
+    await readProjectsRegistry({ registryPath })
+  ).projects.find((project) => project.name === "secondary");
+  expect(registered).toBeDefined();
+  await writeFile(join(fixture, "state", "continue-git"), "continue");
+  expect(await report(touch)).toMatchObject({
+    result: { status: "updated" },
+    error: null,
+    gitLaunches: 1,
+    ownerOpens: 2,
+    publications: 2,
+    registryWrites: 1,
+    registryReads: 3,
+    gitStates: [
+      {
+        ownsLock: false,
+        lockPresent: false,
+        ownerFiles: 0,
+        registryWrites: 0,
+        publications: 1,
+      },
+    ],
+  });
+  const current = (await readProjectsRegistry({ registryPath })).projects;
+  expect(current).toHaveLength(2);
+  expect(current.find((project) => project.name === "secondary")).toEqual(
+    registered
+  );
+  expect(current.find((project) => project.id === entry.id)).toMatchObject({
+    name: "admission",
+    lastSeenAt: "2026-01-01T00:02:00Z",
+  });
+  expect(await readdir(registryDir)).toEqual(["projects.json"]);
+});
+
+test("a concurrent fresh primary update coalesces without Git or another write", async () => {
+  const touch = child("pause-early");
+  await boundary(touch, "observed-absent");
+  expect(
+    await report(child("optional", primary, "2026-01-01T00:01:59Z"))
+  ).toMatchObject({ result: { status: "updated" } });
+  const bytes = await readFile(registryPath, "utf8");
+  touch.stdin.end();
+  expect(await report(touch)).toMatchObject({
+    result: { status: "noop", project: { lastSeenAt: "2026-01-01T00:01:59Z" } },
+    error: null,
+    gitLaunches: 0,
+    ownerOpens: 1,
+    publications: 1,
+    registryReads: 2,
+    registryWrites: 0,
+  });
+  expect(await readFile(registryPath, "utf8")).toBe(bytes);
+  expect(await readdir(registryDir)).toEqual(["projects.json"]);
+});
+
+test("primary refresh preserves live sibling metadata and removes missing sibling records without Git", async () => {
+  const entry = await primaryEntry();
+  const live = join(fixture, "live");
+  await git(primary, ["worktree", "add", "-b", "feature/live", live]);
+  const sibling = {
+    path: live,
+    branch: "feature/live",
+    lastSeenAt: "2026-01-01T00:00:30Z",
+  };
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      version: 1,
+      projects: [
+        {
+          ...entry,
+          worktrees: [
+            sibling,
+            {
+              ...sibling,
+              path: join(fixture, "missing"),
+              branch: "feature/missing",
+            },
+          ],
+        },
+      ],
+    })
+  );
+  expect(await report(child("touch"))).toMatchObject({
+    result: { status: "updated" },
+    error: null,
+    gitLaunches: 0,
+    ownerOpens: 1,
+    publications: 1,
+    registryWrites: 1,
+  });
+  expect(await primaryEntry()).toEqual({
+    ...entry,
+    lastSeenAt: "2026-01-01T00:02:00Z",
+    worktrees: [sibling],
+  });
+  expect(await readdir(registryDir)).toEqual(["projects.json"]);
+});
+
+for (const operation of ["optional", "required"] as const) {
+  test(`public ${operation} upsert retains metadata discovery for an unchanged primary`, async () => {
+    expect(await report(child(operation))).toMatchObject({
+      result: { status: "updated" },
+      error: null,
+      gitLaunches: 1,
+      ownerOpens: 1,
+      publications: 1,
+      registryWrites: 1,
+      registryReads: 1,
+    });
+    expect(await readdir(registryDir)).toEqual(["projects.json"]);
+  });
+}
+
+for (const lastSeenAt of ["invalid", "2026-01-01T00:03:00Z", undefined]) {
+  test(`primary refresh falls back for timestamp ${String(lastSeenAt)} before lock admission`, async () => {
+    const entry = await primaryEntry();
+    await writeFile(
+      registryPath,
+      JSON.stringify({ version: 1, projects: [{ ...entry, lastSeenAt }] })
+    );
+    const bytes = await readFile(registryPath, "utf8");
+    // Preserve full-upsert behavior: its existing comparison ignores newly added
+    // fields, so an absent timestamp falls back but does not itself cause a write.
+    expect(await report(child("touch"))).toMatchObject({
+      result: { status: lastSeenAt === undefined ? "noop" : "updated" },
+      error: null,
+      gitLaunches: 1,
+      ownerOpens: 1,
+      publications: 1,
+      registryWrites: lastSeenAt === undefined ? 0 : 1,
+      registryReads: 2,
+    });
+    if (lastSeenAt === undefined) {
+      expect(await readFile(registryPath, "utf8")).toBe(bytes);
+    }
+    expect(await readdir(registryDir)).toEqual(["projects.json"]);
+  });
+}
+
+test("legacy alias migration uses full upsert and preserves its identity", async () => {
+  const entry = await primaryEntry();
+  await writeFile(
+    join(primary, ".hack", "hack.config.json"),
+    JSON.stringify({ name: "legacy_project", dev_host: "admission.hack.local" })
+  );
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      version: 1,
+      projects: [{ ...entry, name: "legacy_project" }],
+    })
+  );
+  expect(await report(child("touch"))).toMatchObject({
+    result: { status: "updated" },
+    error: null,
+    gitLaunches: 1,
+    ownerOpens: 1,
+    publications: 1,
+    registryWrites: 1,
+    registryReads: 2,
+  });
+  expect(await primaryEntry()).toEqual({
+    ...entry,
+    name: "legacy-project",
+    lastSeenAt: "2026-01-01T00:02:00Z",
+  });
 });

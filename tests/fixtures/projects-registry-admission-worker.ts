@@ -1,6 +1,7 @@
 import { mock, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import { basename, join } from "node:path";
+import { exec as realExec } from "../../src/lib/shell.ts";
 
 const [
   registryDir,
@@ -24,6 +25,16 @@ let realpaths = 0;
 let projectRootResolutions = 0;
 let projectDirResolutions = 0;
 let observations = 0;
+const gitStates: {
+  readonly ownsLock: boolean;
+  readonly lockPresent: boolean;
+  readonly ownerFiles: number;
+  readonly registryWrites: number;
+  readonly publications: number;
+}[] = [];
+const delegateExec = realExec;
+const readFile = fs.readFile;
+const readdir = fs.readdir;
 const real = {
   lstat: fs.lstat,
   realpath: fs.realpath,
@@ -67,9 +78,12 @@ mock.module("node:fs/promises", () => ({
     if (path === lockPath) {
       observations++;
       if (
-        (["pause-early", "pause-early-repeat", "pause-optional"].includes(
-          operation
-        ) &&
+        ([
+          "pause-early",
+          "pause-early-repeat",
+          "pause-optional",
+          "pause-fallback",
+        ].includes(operation) &&
           observations === 1) ||
         (operation === "pause-late" && observations === 2)
       ) {
@@ -138,6 +152,45 @@ mock.module("node:fs/promises", () => ({
   },
 }));
 
+mock.module("../../src/lib/shell.ts", () => ({
+  exec: async (...args: Parameters<typeof realExec>) => {
+    if (args[0][0] === "git") {
+      const receipt = await readFile(lockPath, "utf8").catch(
+        (failure: unknown) => {
+          if (hasCode(failure, "ENOENT")) {
+            return null;
+          }
+          throw failure;
+        }
+      );
+      gitStates.push({
+        ownsLock: receipt?.startsWith(`${process.pid}\n`) ?? false,
+        lockPresent: receipt !== null,
+        ownerFiles: (await readdir(registryDir)).filter((name) =>
+          name.endsWith(".owner")
+        ).length,
+        registryWrites,
+        publications,
+      });
+      if (operation === "pause-fallback" && gitStates.length === 1) {
+        process.stdout.write("before-fallback-git\n");
+        const state = process.env.HACK_HOME;
+        if (!state) {
+          throw new Error("Missing isolated fixture state");
+        }
+        const deadline = Date.now() + 5000;
+        while (!(await Bun.file(join(state, "continue-git")).exists())) {
+          if (Date.now() >= deadline) {
+            throw new Error("Timed out waiting for fixture Git continuation");
+          }
+          await Bun.sleep(5);
+        }
+      }
+    }
+    return await delegateExec(...args);
+  },
+}));
+
 const { touchProjectRegistration, upsertProjectRegistration } = await import(
   "../../src/lib/projects-registry.ts"
 );
@@ -182,5 +235,5 @@ const gitLaunches = launches.mock.calls.filter(
   ([argv]) => Array.isArray(argv) && basename(String(argv[0])) === "git"
 ).length;
 process.stdout.write(
-  `${JSON.stringify({ result, firstResult, error, gitLaunches, subprocesses: launches.mock.calls.length, configReads: files.mock.calls.filter(([path]) => isConfigFile(path)).length, registryReads: files.mock.calls.filter(([path]) => isRegistryFile(path)).length, bunWrites: writes.mock.calls.length, realpaths, projectRootResolutions, projectDirResolutions, observations, ownerOpens, publications, registryWrites, mutations })}\n`
+  `${JSON.stringify({ result, firstResult, error, gitLaunches, gitStates, subprocesses: launches.mock.calls.length, configReads: files.mock.calls.filter(([path]) => isConfigFile(path)).length, registryReads: files.mock.calls.filter(([path]) => isRegistryFile(path)).length, bunWrites: writes.mock.calls.length, realpaths, projectRootResolutions, projectDirResolutions, observations, ownerOpens, publications, registryWrites, mutations })}\n`
 );

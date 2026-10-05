@@ -66,7 +66,10 @@ atomic acquisition. New or changed checkouts are recorded when the lock is avail
 A registry touch reuses its configuration and canonical checkout paths for
 freshness and any update. A later configuration change is picked up by the next
 invocation, even within the one-minute freshness interval. Updates still reread
-the registry under the lock so they preserve concurrent registrations.
+the registry under the lock so they preserve concurrent registrations. An unchanged
+primary checkout refresh skips Git discovery only after that locked reread confirms
+its paths, configuration, and unique registration. It still removes missing sibling
+records; changed or ambiguous registrations use the normal Git checks.
 Registration combines repository identity and branch discovery in one Git call for
 ordinary committed checkouts; repositories without commits and unusual ref output
 retain separate branch discovery. Linked worktrees still verify their shared

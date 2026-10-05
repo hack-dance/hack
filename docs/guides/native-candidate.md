@@ -1121,6 +1121,33 @@ The only process it can terminate is one of its own bounded commands, whose dire
 stand-in controls run with
 `python3 -m unittest discover -s tests/python -p test_native_frontend_acceptance.py`.
 
+Add `--domain-migration` to qualify domain changes in that same linked worktree.
+This opt-in starts with legacy `.hack` and OAuth `.hack.gy` project/service aliases,
+runs the real Doctor preview and application, then performs a retaining restart
+and requires every old/new `.hack.local` route to serve the exact source. Another
+restart after Doctor rollback must restore the original route set and stop serving
+the removed aliases. Both transitions retain the run, owner, plan, volume bindings
+and exact data marker. Commands infer the branch from the linked checkout. The
+driver also checks exact original file bytes/modes, unchanged primary checkout,
+preview without effects, and refusal to roll back over an independent file edit.
+Only audited `graph inspect` and `runtime status` observations may repeat an exact
+structured `provider_busy` refusal, within a 15-second observation budget and the
+overall run budget. Every attempt retains its output and result. Other errors,
+malformed replies and timeouts stop the run; mutations, refresh and exec never
+use this re-observation path.
+
+The resulting `evidence/domain-roundtrip.json` records this narrower proof separately.
+It does not qualify a simultaneously running sibling graph, system DNS, certificate
+trust or a browser session: HTTPS uses the fixture's private root and `--resolve`.
+Complete any normal-origin browser check separately before marking that acceptance
+criterion complete. The driver never installs trust or DNS and still disposes its
+owned fixture after success; there is no indefinite browser handoff or global change.
+For a manual browser check, request a fresh phase-specific query (for example,
+`/index.txt?phase=<unique-run-and-phase>`) and require the current fixture marker.
+A new tab can still display cached content from an earlier certificate or route;
+it does not prove a new TLS connection. Use an uncached request for both positive
+checks and expected certificate-rejection controls, without bypassing warnings.
+
 ### Optional native HTTPS frontend
 
 For routed foreground startup, explicitly set all three public selections:

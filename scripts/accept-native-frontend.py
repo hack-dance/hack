@@ -19,6 +19,12 @@ Sequence, all inside one private owned --root:
      base is removed, no process or provider alias references the root, and only evidence
      remains.
 
+With --domain-migration, before the final down: preview/apply the linked checkout's
+legacy/OAuth routes, restart with the added local aliases, refuse rollback over a
+file edit, restore the original files, and restart back to the original routes.
+Run/owner/plan/volume bindings and the exact marker must survive both transitions.
+This uses explicit-CA loopback HTTPS; it does not prove DNS or browser trust.
+
 On any failure, or when --budget runs out, the driver issues no further commands and removes
 nothing: the pool, its state and any live `hack up` foreground stay for diagnosis, and
 evidence/failure.json records what happened. The only process it can terminate is one of its
@@ -62,6 +68,16 @@ DEV_HOST = "frontend-accept.hack.local"
 
 class Failure(RuntimeError):
     pass
+
+
+def unique_json_object(pairs):
+    """Duplicate fields are ambiguous control responses, never retry evidence."""
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON field")
+        value[key] = item
+    return value
 
 
 def sha256(path):
@@ -129,13 +145,16 @@ class Acceptance:
         self.main = self.root / "main"
         self.project = self.root / "worktrees" / "app"
         self.branch = f"accept-{secrets.token_hex(3)}"
-        self.host = f"{self.branch}.{DEV_HOST}"
+        self.domain_migration = getattr(args, "domain_migration", False)
+        self.dev_host = "frontend-accept.hack" if self.domain_migration else DEV_HOST
+        self.host = f"{self.branch}.{self.dev_host}"
         self.bundle = Path(args.bundle)
         self.native = self.bundle / "hack-native"
         self.frontend = self.bundle / "hack-v5"
         self.deadline = None
         # How long a route may take to serve the expected source.
         self.https_wait = 60
+        self.observation_wait = 15
         self.foregrounds = []
         self.checks = []
         self.declared = {
@@ -177,13 +196,61 @@ class Acceptance:
     def runtime(self, label, *argv, timeout=120):
         return self.command(label, [str(self.native), "--candidate-root", str(self.home), *argv], timeout)
 
+    def observe(self, label, *argv):
+        """Only audited read-only observations may retry an exact provider-busy refusal."""
+        status = argv == ("runtime", "status", "--json")
+        inspect = (len(argv) == 5 and argv[:3] == ("graph", "inspect", "--run-id") and argv[4] == "--json"
+                   and isinstance(argv[3], str) and len(argv[3]) == 32
+                   and all(char in "0123456789abcdef" for char in argv[3]))
+        if not (status or inspect):
+            raise Failure("observation retry is restricted to runtime status and exact graph inspect")
+        deadline = time.monotonic() + self.remaining(self.observation_wait)
+        attempt = 0
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise Failure(f"{label}: provider_busy observation deadline")
+            attempt += 1
+            try:
+                result = subprocess.run([str(self.native), "--candidate-root", str(self.home), *argv],
+                                        env=self.env, cwd=self.root, capture_output=True, timeout=self.remaining(left))
+            except subprocess.TimeoutExpired as error:
+                (self.evidence / f"{label}.attempt-{attempt}.stdout").write_bytes(error.stdout or b"")
+                (self.evidence / f"{label}.attempt-{attempt}.stderr").write_bytes(error.stderr or b"")
+                (self.evidence / f"{label}.attempt-{attempt}.json").write_text(json.dumps({"timed_out": True}))
+                raise
+            for suffix, value in (("stdout", result.stdout), ("stderr", result.stderr)):
+                (self.evidence / f"{label}.attempt-{attempt}.{suffix}").write_bytes(value)
+                (self.evidence / f"{label}.{suffix}").write_bytes(value)
+            (self.evidence / f"{label}.attempt-{attempt}.json").write_text(json.dumps({"exit_code": result.returncode}))
+            if result.returncode == 0:
+                value = json.loads(result.stdout, object_pairs_hook=unique_json_object)
+                if not isinstance(value, dict):
+                    raise Failure(f"{label}: malformed observation response; evidence retained")
+                return value
+            failure = None
+            if result.returncode == 2 and not result.stdout and len(result.stderr) <= 8192:
+                try:
+                    failure = json.loads(result.stderr, object_pairs_hook=unique_json_object)
+                except (ValueError, UnicodeDecodeError):
+                    pass
+            if not (isinstance(failure, dict) and set(failure) == {"code", "message"}
+                    and failure["code"] == "provider_busy" and isinstance(failure["message"], str)):
+                raise Failure(f"{label}: non-retryable observation exit {result.returncode}; evidence retained")
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+
     def cli(self, label, *argv, timeout=60):
         return self.command(label, [str(self.frontend), *argv], timeout, cwd=self.project)
 
     def fixture(self):
         (self.main / ".hack").mkdir(parents=True, mode=0o700)
-        (self.main / ".hack/hack.config.json").write_text(json.dumps({"name": "frontend-accept", "dev_host": DEV_HOST}))
-        (self.main / ".hack/docker-compose.yml").write_text(COMPOSE.format(image=self.args.image, dev_host=DEV_HOST))
+        config = {"name": "frontend-accept", "dev_host": self.dev_host}
+        hosts = self.dev_host
+        if self.domain_migration:
+            config["oauth"] = {"enabled": True}
+            hosts = ", ".join(self.domain_hosts())
+        (self.main / ".hack/hack.config.json").write_text(json.dumps(config))
+        (self.main / ".hack/docker-compose.yml").write_text(COMPOSE.format(image=self.args.image, dev_host=hosts))
         (self.main / "package.json").write_text("{}\n")
         (self.main / "index.txt").write_text(f"committed-{secrets.token_hex(8)}\n")
         git("init", "--quiet", "--initial-branch=main", str(self.main))
@@ -215,9 +282,9 @@ class Acceptance:
                    [(b["base_id"], b.get("verified")) for b in status["bases"]] == [(self.base, True)]
                    and status["abandoned_work"] == [])
 
-    def up(self, label, previous_container=None):
+    def up(self, label, previous_container=None, command="up"):
         with (self.evidence / f"{label}.stdout").open("wb") as out, (self.evidence / f"{label}.stderr").open("wb") as err:
-            process = subprocess.Popen([str(self.frontend), "up", "--path", str(self.project)], env=self.env,
+            process = subprocess.Popen([str(self.frontend), command, "--path", str(self.project)], env=self.env,
                                        cwd=self.project, stdin=subprocess.DEVNULL, stdout=out, stderr=err)
         self.foregrounds.append((label, process))
         deadline = time.monotonic() + self.remaining(240)
@@ -259,6 +326,106 @@ class Acceptance:
         (self.evidence / f"{label}.https").write_text(repr(body))
         return False
 
+    def domain_hosts(self, migrated=False, branched=False):
+        """The independent expected route set, including service and OAuth aliases."""
+        base = f"{self.branch}.frontend-accept" if branched else "frontend-accept"
+        suffixes = ["hack", "hack.gy", *(["hack.local"] if migrated else [])]
+        return sorted(f"{prefix}{base}.{suffix}" for prefix in ("", "api.") for suffix in suffixes)
+
+    def files(self, checkout):
+        return {name: ((checkout / name).read_bytes(), (checkout / name).stat().st_mode & 0o777)
+                for name in (".hack/hack.config.json", ".hack/docker-compose.yml")}
+
+    def graph_bindings(self, label, run):
+        receipt = self.observe(label, "graph", "inspect", "--run-id", run, "--json")["receipt"]
+        self.check(f"{label} inspects the selected ready run",
+                   receipt["run"] == run and receipt["phase"] == "ready-observed")
+        volumes = {key: value for key, value in receipt["resources"].items() if value["kind"] == "volume"}
+        self.check(f"{label} has the retained data volume", len(volumes) == 1)
+        routes = sorted(host for value in receipt["resources"].values()
+                        for host in (value.get("routing") or {}).get("hostnames", []))
+        return {"run": receipt["run"], "owner": receipt["owner"], "plan": receipt["plan_id"],
+                "volumes": volumes}, routes
+
+    def domain_routes(self, label, expected, hosts):
+        previous = self.host
+        try:
+            for index, host in enumerate(hosts):
+                self.host = host
+                self.check(f"{label} serves exact source at {host}", self.https(f"{label}-{index}", expected))
+        finally:
+            self.host = previous
+
+    def removed_route(self, host):
+        """Accept an explicit TLS/HTTP route rejection, never a connection failure or timeout."""
+        roots = sorted((self.home / "native-https").rglob("root.crt"))
+        if len(roots) != 1:
+            raise Failure("expected one private Caddy root")
+        result = subprocess.run(
+            ["/usr/bin/curl", "--silent", "--show-error", "--noproxy", "*", "--cacert", str(roots[0]),
+             "--max-time", "8", "--resolve", f"{host}:{self.args.https_port}:127.0.0.1",
+             "--write-out", "\n%{http_code}", f"https://{host}:{self.args.https_port}/index.txt"],
+            capture_output=True, timeout=self.remaining(10))
+        status = result.stdout.decode(errors="replace").rsplit("\n", 1)[-1]
+        return result.returncode == 35 or (result.returncode == 0 and status in ("404", "421"))
+
+    def domain_roundtrip(self, process, ps, expected, marker):
+        """Exercise real file migration and retained runtime transitions in the linked checkout."""
+        original, primary = self.files(self.project), self.files(self.main)
+        baseline, routes = self.graph_bindings("domain-before", ps["run"])
+        self.check("initial receipt has exactly the legacy and OAuth branch routes",
+                   routes == self.domain_hosts(branched=True))
+        self.domain_routes("domain-initial", expected, routes)
+        preview = self.cli("domain-preview", "doctor", "--domain-migration", "preview", "--json")
+        self.check("domain preview has no file effects", preview["status"] == "preview"
+                   and self.files(self.project) == original)
+        applied = self.cli("domain-apply", "doctor", "--domain-migration", "apply", "--json")
+        self.check("domain migration applied the expected host", applied["status"] == "applied"
+                   and applied["toHost"] == DEV_HOST)
+        migrated_files = self.files(self.project)
+        self.check("migration changes only the linked checkout", self.files(self.main) == primary)
+        self.check("file application leaves running graph bindings unchanged",
+                   self.graph_bindings("domain-applied-not-restarted", ps["run"]) == (baseline, routes))
+        process, ps = self.domain_restart("domain-forward", process, ps, baseline, expected, marker, True)
+
+        # Rollback must not overwrite a user edit, even when the running routes are valid.
+        compose = self.project / ".hack/docker-compose.yml"
+        compose.write_bytes(compose.read_bytes() + b"\n# independent edit\n")
+        drifted = self.files(self.project)
+        result = subprocess.run([str(self.frontend), "doctor", "--domain-migration", "rollback", "--json"],
+                                cwd=self.project, env=self.env, capture_output=True, timeout=self.remaining(30))
+        self.check("rollback refuses independent file drift without writing either file",
+                   result.returncode != 0 and b"Project domain migration refused" in result.stdout + result.stderr
+                   and self.files(self.project) == drifted)
+        compose.write_bytes(migrated_files[".hack/docker-compose.yml"][0])
+        rollback = self.cli("domain-rollback", "doctor", "--domain-migration", "rollback", "--json")
+        self.check("rollback restores exact original bytes and modes", rollback["status"] == "restored"
+                   and self.files(self.project) == original)
+        process, ps = self.domain_restart("domain-reverse", process, ps, baseline, expected, marker, False)
+        removed = sorted(set(self.domain_hosts(True, True)) - set(self.domain_hosts(False, True)))
+        for host in removed:
+            self.check(f"rollback stops serving removed route {host}", self.removed_route(host))
+        # Bracket negative requests with a known live route; a dead proxy cannot make this pass.
+        self.domain_routes("domain-after-negative", expected, self.domain_hosts(branched=True))
+        self.check("primary checkout remains byte and mode identical", self.files(self.main) == primary)
+        (self.evidence / "domain-roundtrip.json").write_text(json.dumps({
+            "bindings": baseline, "removed_routes": removed, "branch": self.branch,
+            "inferred_branch": True, "browser_verified": False, "dns_verified": False,
+            "primary_unchanged": True, "original_files_restored": True}, indent=2))
+        return process, ps
+
+    def domain_restart(self, label, previous, ps, baseline, expected, marker, migrated):
+        process, current = self.up(label, previous_container=ps["items"][0]["container"], command="restart")
+        self.check(f"{label} retired its previous foreground", previous.wait(timeout=self.remaining(60)) == 0)
+        bindings, routes = self.graph_bindings(f"{label}-bindings", current["run"])
+        self.check(f"{label} retains run, ownership and exact volume bindings", bindings == baseline)
+        self.check(f"{label} publishes exactly the expected branch routes",
+                   routes == self.domain_hosts(migrated, True))
+        self.domain_routes(label, expected, routes)
+        read = self.cli(f"{label}-marker", "exec", "web", "--", "/bin/busybox", "cat", "/data/marker")
+        self.check(f"{label} retains the exact data marker", read.strip() == marker)
+        return process, current
+
     def down(self, label, process):
         self.cli(label, "down", "--path", str(self.project), "--branch", self.branch, timeout=120)
         try:
@@ -271,7 +438,7 @@ class Acceptance:
         self.prepare()
         committed = (self.project / "index.txt").read_text()
         first, ps1 = self.up("up-first")
-        status = self.runtime("pool-status", "runtime", "status", "--json")
+        status = self.observe("pool-status", "runtime", "status", "--json")
         selection = (status.get("prepared_base") or {}).get("selection") or {}
         self.check("the frontend created the pool from the verified base",
                    selection.get("source") == "prepared" and selection.get("base_id") == self.base
@@ -293,6 +460,8 @@ class Acceptance:
         read = self.cli("marker-read", "exec", "--branch", self.branch, "--path", str(self.project), "web", "--",
                         "/bin/busybox", "cat", "/data/marker")
         self.check("the /data marker is retained across down, edit and up", marker in read)
+        if self.domain_migration:
+            second, ps2 = self.domain_roundtrip(second, ps2, edited, marker)
         self.check("second foreground exits 0 after down", self.down("down-2", second) == 0)
         return {"run": ps1.get("run"), "containers": [ps1["items"][0]["container"], ps2["items"][0]["container"]],
                 "base_id": self.base, "branch": self.branch, "origin": f"https://{self.host}:{self.args.https_port}",
@@ -301,7 +470,7 @@ class Acceptance:
     def dispose(self):
         """Owned disposal with readbacks. Any refusal keeps the remaining state."""
         self.runtime("dispose-down", "runtime", "down", "--json", timeout=180)
-        status = self.runtime("dispose-status", "runtime", "status", "--json")
+        status = self.observe("dispose-status", "runtime", "status", "--json")
         if status.get("process_alive") is not False:
             raise Failure(f"pool not confirmed stopped: {json.dumps(status)[:300]}")
         owner = self.home / ".hack-local/run/smolvm/owner.json"
@@ -364,6 +533,8 @@ def main():
     parser.add_argument("--caddy", required=True, help="absolute Caddy executable for native HTTPS")
     parser.add_argument("--https-port", type=int, required=True, help="unprivileged loopback HTTPS port")
     parser.add_argument("--budget", type=float, default=600.0, help="live-test budget in seconds")
+    parser.add_argument("--domain-migration", action="store_true",
+                        help="also verify legacy/OAuth aliases, retained migration and rollback in the linked worktree")
     parser.add_argument("--run", action="store_true", help="execute; without it only the plan is printed")
     args = parser.parse_args()
     for name in ("bundle", "root", "provider_archive", "engine_archive", "network_tools", "caddy"):
@@ -375,10 +546,15 @@ def main():
         parser.error("--https-port must be unprivileged")
     args.caddy_sha256 = sha256(args.caddy) if os.path.isfile(args.caddy) else None
     plan = {"bundle": args.bundle, "root": args.root, "https_port": args.https_port, "budget_s": args.budget,
+            "domain_migration": args.domain_migration, "browser_verified": False,
             "image": args.image, "caddy": args.caddy, "caddy_sha256": args.caddy_sha256,
             "sequence": ["fixture", "prepare home", "build+verify base", "up (prepared, require)", "https committed",
                          "marker", "down", "host edit", "up (same run)", "https edited", "marker readback",
                          "down", "dispose"]}
+    if args.domain_migration:
+        plan["sequence"][-2:-2] = ["domain preview/apply", "retained restart and every alias",
+                                   "rollback drift refusal", "exact file rollback", "retained reverse restart",
+                                   "removed alias refusal with live positive control"]
     if not args.run:
         print(json.dumps({"preview": plan}, indent=2))
         return 0

@@ -22,7 +22,7 @@ spec.loader.exec_module(driver)
 # One stand-in serves as both hack-native and hack-v5 (by file name) over a shared state file.
 # `up` refuses unless a prepared base is required, then stays in the foreground until `down`.
 FAKE = r'''#!PYTHON
-import fcntl, json, os, pathlib, secrets, sys, time
+import fcntl, json, os, pathlib, secrets, subprocess, sys, time
 here = pathlib.Path(__file__).parent
 name = pathlib.Path(__file__).name
 path = here / "state.json"
@@ -55,6 +55,11 @@ state["calls"].append([name, *argv])
 save(state)
 if name == "hack-native":
     argv = argv[2:]
+    if argv[:2] == ["graph", "inspect"]:
+        volume = "wrong" if fault == "replace-volume" and state["container"] > 2 else "data-volume"
+        reply({"receipt": {"run": state["run"], "owner": "owner", "plan_id": "plan", "phase": "ready-observed",
+               "resources": {"volume:data": {"kind": "volume", "name": volume},
+                             "container:web": {"kind": "container", "routing": {"hostnames": state["routes"]}}}}})
     if argv[:2] == ["runtime", "status"]:
         alive = state.get("alive", False)
         share = state.get("share") if fault != "wrong-share" else "/elsewhere"
@@ -82,14 +87,22 @@ if name == "hack-native":
         reply({})
     reply({})
 option = lambda key: argv[argv.index(key) + 1]
-if argv[0] == "up":
+if argv[0] in ("up", "restart"):
     if os.environ.get("HACK_NATIVE_PREPARED_BASE") != "require" or not os.environ.get("HACK_NATIVE_PREPARED_BASE_STORE"):
         reply("prepared base not requested", 2)
     token = secrets.token_hex(4)
     state = load()
+    project = pathlib.Path(option("--path"))
+    branch = subprocess.check_output(["git", "-C", str(project), "branch", "--show-current"], text=True).strip()
+    compose = (project / ".hack/docker-compose.yml").read_text()
+    hosts = next(line.strip()[7:] for line in compose.splitlines() if line.strip().startswith("caddy: ")).split(", ")
+    routes = [host.replace("frontend-accept.", branch + ".frontend-accept.") for host in hosts]
+    if fault == "missing-alias" and state.get("container", 0) >= 2:
+        routes = [host for host in routes if not host.endswith("hack.gy")]
     state.update(foreground=token, alive=True, share=option("--path"), container=state.get("container", 0) + 1,
+                 routes=routes,
                  up_env={k: v for k, v in os.environ.items() if k.startswith("HACK_NATIVE_")})
-    state.setdefault("run", "r" + secrets.token_hex(8))
+    state.setdefault("run", secrets.token_hex(16))
     save(state)
     fcntl.flock(lock, fcntl.LOCK_UN)
     deadline = time.time() + 30
@@ -98,6 +111,29 @@ if argv[0] == "up":
         if load().get("foreground") != token:
             sys.exit(0)
     sys.exit(3)
+if argv[0] == "doctor":
+    project = pathlib.Path.cwd()
+    config = project / ".hack/hack.config.json"
+    compose = project / ".hack/docker-compose.yml"
+    action = option("--domain-migration")
+    if action == "preview":
+        reply({"status": "preview"})
+    if action == "apply":
+        state["original"] = [config.read_text(), compose.read_text()]
+        value = json.loads(config.read_text())
+        value["dev_host"] = "frontend-accept.hack.local"
+        config.write_text(json.dumps(value))
+        contents = compose.read_text().replace("      caddy: ", "      caddy: frontend-accept.hack.local, api.frontend-accept.hack.local, ")
+        compose.write_text(contents)
+        state["migrated"] = [config.read_text(), compose.read_text()]
+        save(state)
+        reply({"status": "applied", "toHost": "frontend-accept.hack.local"})
+    if action == "rollback":
+        if [config.read_text(), compose.read_text()] != state["migrated"] and fault != "overwrite-drift":
+            reply("Project domain migration refused: independent drift", 1)
+        config.write_text(state["original"][0])
+        compose.write_text(state["original"][1] + ("\n# wrong rollback\n" if fault == "wrong-rollback" else ""))
+        reply({"status": "restored"})
 if argv[0] == "ps":
     if fault == "ps-hang":
         fcntl.flock(lock, fcntl.LOCK_UN)
@@ -143,11 +179,16 @@ class Acceptance(unittest.TestCase):
 
         def fetch():
             # The stand-in serves the live worktree, or keeps serving the first content it saw.
+            if acceptance.domain_migration:
+                state = json.loads((self.bundle / "state.json").read_text())
+                if acceptance.host not in state["routes"]:
+                    return None
             body = (acceptance.project / "index.txt").read_text()
             first.append(body)
             return first[0] if stale else body
 
         acceptance.fetch = fetch
+        acceptance.removed_route = lambda host: host not in json.loads((self.bundle / "state.json").read_text())["routes"]
         acceptance.https_wait = 1
         with contextlib.redirect_stdout(io.StringIO()):
             code = acceptance.run()
@@ -288,6 +329,136 @@ class Acceptance(unittest.TestCase):
         self.assertEqual(json.loads(out.getvalue())["preview"]["https_port"], 41443)
         self.assertFalse((self.bundle / "state.json").exists())
         self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_domain_alias_migration_and_rollback_use_inferred_branch_and_preserve_data(self):
+        self.args.domain_migration = True
+        code, acceptance = self.accept()
+        self.assertEqual(code, 0, self.failure() if code else "")
+        proof = json.loads((self.root / "evidence/domain-roundtrip.json").read_text())
+        self.assertTrue(proof["original_files_restored"])
+        self.assertTrue(proof["primary_unchanged"])
+        self.assertFalse(proof["browser_verified"])
+        self.assertFalse(proof["dns_verified"])
+        self.assertEqual(proof["removed_routes"],
+                         sorted([f"api.{acceptance.branch}.frontend-accept.hack.local",
+                                 f"{acceptance.branch}.frontend-accept.hack.local"]))
+        restarts = [c for c in self.calls() if c[:2] == ["hack-v5", "restart"]]
+        self.assertEqual(restarts, [["hack-v5", "restart", "--path", str(acceptance.project)]] * 2)
+        result = json.loads((self.root / "evidence/acceptance.json").read_text())
+        self.assertEqual(result["containers"], ["c1", "c4"])
+
+    def test_domain_mode_refuses_a_replaced_volume_even_with_the_marker(self):
+        self.args.domain_migration = True
+        code, _ = self.accept(fault="replace-volume")
+        self.assertEqual(code, 1)
+        self.assertIn("retains run, ownership and exact volume bindings", self.failure())
+        self.assert_preserved()
+
+    def test_domain_mode_refuses_lost_oauth_aliases(self):
+        self.args.domain_migration = True
+        code, _ = self.accept(fault="missing-alias")
+        self.assertEqual(code, 1)
+        self.assertIn("publishes exactly the expected branch routes", self.failure())
+
+    def test_domain_mode_does_not_accept_rollback_that_overwrites_user_edits(self):
+        self.args.domain_migration = True
+        code, _ = self.accept(fault="overwrite-drift")
+        self.assertEqual(code, 1)
+        self.assertIn("rollback refuses independent file drift", self.failure())
+
+    def test_domain_mode_requires_exact_original_file_restoration(self):
+        self.args.domain_migration = True
+        code, _ = self.accept(fault="wrong-rollback")
+        self.assertEqual(code, 1)
+        self.assertIn("restores exact original bytes and modes", self.failure())
+
+    def test_removed_route_requires_route_rejection_not_transport_failure(self):
+        acceptance = driver.Acceptance(self.args)
+        root = acceptance.home / "native-https/root.crt"
+        root.parent.mkdir(parents=True)
+        root.write_text("test root")
+        acceptance.deadline = driver.time.monotonic() + 60
+        for code, status, expected in [(35, "000", True), (0, "404", True), (0, "421", True),
+                                       (0, "200", False), (7, "000", False), (28, "000", False),
+                                       (60, "000", False)]:
+            with self.subTest(code=code, status=status), mock.patch.object(driver.subprocess, "run") as run:
+                run.return_value = subprocess.CompletedProcess([], code, ("body\n" + status).encode(), b"")
+                self.assertEqual(acceptance.removed_route("removed.example"), expected)
+
+    def observation(self):
+        acceptance = driver.Acceptance(self.args)
+        acceptance.evidence.mkdir()
+        acceptance.deadline = driver.time.monotonic() + 5
+        acceptance.observation_wait = 0.25
+        return acceptance
+
+    def test_provider_busy_observation_retries_once_and_preserves_both_attempts(self):
+        acceptance = self.observation()
+        busy = subprocess.CompletedProcess([], 2, b"", b'{"code":"provider_busy","message":"held"}')
+        ready = subprocess.CompletedProcess([], 0, b'{"phase":"ready-observed"}', b"")
+        with mock.patch.object(driver.subprocess, "run", side_effect=[busy, ready]) as run:
+            result = acceptance.observe("inspect", "graph", "inspect", "--run-id", "a" * 32, "--json")
+        self.assertEqual(result, {"phase": "ready-observed"})
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual((acceptance.evidence / "inspect.attempt-1.stderr").read_bytes(), busy.stderr)
+        self.assertEqual((acceptance.evidence / "inspect.attempt-2.stdout").read_bytes(), ready.stdout)
+        self.assertEqual((acceptance.evidence / "inspect.attempt-1.json").read_text(), '{"exit_code": 2}')
+        self.assertEqual((acceptance.evidence / "inspect.stdout").read_bytes(), ready.stdout)
+
+    def test_observation_does_not_retry_unstructured_other_or_malformed_errors(self):
+        acceptance = self.observation()
+        failures = [
+            subprocess.CompletedProcess([], 2, b"", b'{"code":"engine_protocol","message":"failed"}'),
+            subprocess.CompletedProcess([], 2, b"", b'provider_busy'),
+            subprocess.CompletedProcess([], 2, b"", b'{"code":"provider_busy"}'),
+            subprocess.CompletedProcess([], 2, b"", b'{"code":"provider_busy","message":7}'),
+            subprocess.CompletedProcess([], 2, b"", b'{"code":"engine_protocol","code":"provider_busy","message":"held"}'),
+            subprocess.CompletedProcess([], 2, b"unexpected", b'{"code":"provider_busy","message":"held"}'),
+            subprocess.CompletedProcess([], 1, b"", b'{"code":"provider_busy","message":"held"}'),
+            subprocess.CompletedProcess([], 2, b"", b"x" * 8193),
+        ]
+        for failure in failures:
+            with self.subTest(failure=failure), mock.patch.object(driver.subprocess, "run", return_value=failure) as run:
+                with self.assertRaisesRegex(driver.Failure, "non-retryable observation"):
+                    acceptance.observe("status", "runtime", "status", "--json")
+                self.assertEqual(run.call_count, 1)
+
+    def test_busy_observation_stops_at_its_budget(self):
+        acceptance = self.observation()
+        busy = subprocess.CompletedProcess([], 2, b"", b'{"code":"provider_busy","message":"held"}')
+        with mock.patch.object(driver.subprocess, "run", return_value=busy) as run:
+            with self.assertRaisesRegex(driver.Failure, "provider_busy observation deadline"):
+                acceptance.observe("status", "runtime", "status", "--json")
+        self.assertGreater(run.call_count, 1)
+        self.assertLessEqual(run.call_count, 4)
+        self.assertTrue((acceptance.evidence / "status.attempt-2.json").exists())
+
+    def test_malformed_successful_observation_is_not_retried(self):
+        acceptance = self.observation()
+        for output in [b'[]', b'{', b'', b'{"phase":"stopped","phase":"ready-observed"}']:
+            with self.subTest(output=output), mock.patch.object(driver.subprocess, "run") as run:
+                run.return_value = subprocess.CompletedProcess([], 0, output, b"")
+                with self.assertRaises((driver.Failure, ValueError)):
+                    acceptance.observe("status", "runtime", "status", "--json")
+                self.assertEqual(run.call_count, 1)
+
+    def test_mutations_exec_and_refresh_never_enter_observation_retry(self):
+        acceptance = self.observation()
+        for argv in [("runtime", "down", "--json"), ("graph", "exec", "--run-id", "a" * 32, "--json"),
+                     ("graph", "refresh-dependencies", "--run-id", "a" * 32, "--json"),
+                     ("graph", "inspect", "--run-id", "../foreign", "--json")]:
+            with self.subTest(argv=argv), mock.patch.object(driver.subprocess, "run") as run:
+                with self.assertRaisesRegex(driver.Failure, "restricted to"):
+                    acceptance.observe("refused", *argv)
+                run.assert_not_called()
+
+    def test_observation_timeout_is_not_retried(self):
+        acceptance = self.observation()
+        with mock.patch.object(driver.subprocess, "run", side_effect=subprocess.TimeoutExpired([], 1)) as run:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                acceptance.observe("status", "runtime", "status", "--json")
+            self.assertEqual(run.call_count, 1)
+        self.assertEqual(json.loads((acceptance.evidence / "status.attempt-1.json").read_text()), {"timed_out": True})
 
 
 if __name__ == "__main__":

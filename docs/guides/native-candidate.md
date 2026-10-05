@@ -1392,16 +1392,6 @@ Services without managed values use ordinary exec. The native live qualification
 of this fresh-delivery path remains separate from its unit and transport tests.
 
 
-A detached HTTPS helper that fails during startup may retain a generation-bound
-`startup-failure.json` beside its owner configuration. The CLI reports only the
-reviewed startup stage and an allowlisted native error code; child output, paths
-and application values are omitted. If lease cleanup also fails, the original
-acquisition diagnostic remains visible alongside the unconfirmed cleanup status.
-This record is diagnostic evidence only: it does not acknowledge retirement or
-permit a replacement owner. A missing record (including a helper crash before
-publication) leaves the cause unknown. Preserve the retained owner and finalization
-records for inspection; do not delete them to force another startup.
-
 Managed HTTPS authority startup uses the same five-second provider-lock admission
 budget as ordinary pool startup. This lets a brief concurrent graph inspection
 finish before admission. Pool identity, socket ownership and certificate admission
@@ -1414,6 +1404,16 @@ output leaves the cause unknown. The `authority-ready` diagnostic now covers onl
 readiness; later socket-identity, permission-port and Caddyfile failures have
 separate stages. These classifications do not acknowledge cleanup or permit an
 owner to be adopted or replaced.
+
+A detached HTTPS helper that fails during startup may retain a generation-bound
+`startup-failure.json` beside its owner configuration. The CLI reports only the
+reviewed startup stage and an allowlisted native error code; child output, paths
+and application values are omitted. If lease cleanup also fails, the original
+acquisition diagnostic remains visible alongside the unconfirmed cleanup status.
+This record is diagnostic evidence only: it does not acknowledge retirement or
+permit a replacement owner. A missing record (including a helper crash before
+publication) leaves the cause unknown. Preserve the retained owner and finalization
+records for inspection; do not delete them to force another startup.
 
 When an HTTPS owner refuses an exact lease release, it now attempts a bounded
 failure response containing only the release stage and a reviewed native error

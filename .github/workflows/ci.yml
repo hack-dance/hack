@@ -168,6 +168,8 @@ jobs:
           docker pull alpine:3.20
           docker pull alpine:3.22
           docker pull node:24.11.0-bookworm-slim
+          docker pull oven/bun:1.4.2-slim
+          docker pull postgres:17.6-alpine
       - name: Run local and Docker E2E
         run: HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun run test:e2e:local:docker
       - name: Smoke container resource metadata without optional fields

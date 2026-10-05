@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { open, realpath, rename, stat, unlink } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
   GLOBAL_PROJECTS_REGISTRY_FILENAME,
@@ -16,12 +16,13 @@ import {
 import { getString, isRecord } from "./guards.ts";
 import type { ProjectContext, ProjectDirName } from "./project.ts";
 import { defaultProjectSlugFromPath, readProjectConfig } from "./project.ts";
+import {
+  withProjectsRegistryLock,
+  writeProjectsRegistryAtomic,
+} from "./projects-registry-lock.ts";
 
 const REGISTRY_VERSION = 1 as const;
 const REGISTRY_LOCK_FILENAME = `${GLOBAL_PROJECTS_REGISTRY_FILENAME}.lock`;
-const REGISTRY_LOCK_TIMEOUT_MS = 2000;
-const REGISTRY_LOCK_STALE_MS = 30_000;
-const REGISTRY_LOCK_RETRY_MS = 50;
 const REGISTRY_TOUCH_INTERVAL_MS = 60_000;
 
 export interface RegisteredProjectWorktree {
@@ -88,6 +89,7 @@ export async function upsertProjectRegistration(opts: {
   readonly nowIso?: string;
   /** Optional maintenance may abandon a busy lock without waiting or reclaiming it. */
   readonly waitForLock?: boolean;
+  readonly signal?: AbortSignal;
 }): Promise<RegisterOutcome> {
   const nowIso = opts.nowIso ?? new Date().toISOString();
   const registryPath = getRegistryPath();
@@ -130,22 +132,30 @@ export async function upsertProjectRegistration(opts: {
       }
       if (status.status === "noop") {
         if (status.changed) {
-          await writeRegistryAtomic(registryPath, {
-            version: REGISTRY_VERSION,
-            projects: status.projects,
-          });
+          await writeRegistryAtomic(
+            registryPath,
+            {
+              version: REGISTRY_VERSION,
+              projects: status.projects,
+            },
+            opts.signal
+          );
         }
         return { status: "noop", project };
       }
 
-      await writeRegistryAtomic(registryPath, {
-        version: REGISTRY_VERSION,
-        projects: status.projects,
-      });
+      await writeRegistryAtomic(
+        registryPath,
+        {
+          version: REGISTRY_VERSION,
+          projects: status.projects,
+        },
+        opts.signal
+      );
 
       return { status: status.status, project };
     },
-    { waitForLock: opts.waitForLock }
+    { waitForLock: opts.waitForLock, signal: opts.signal }
   );
 }
 
@@ -304,25 +314,33 @@ export async function resolveRegisteredProjectById(opts: {
 
 export async function removeProjectsById(opts: {
   readonly ids: readonly string[];
+  readonly signal?: AbortSignal;
 }): Promise<{ readonly removed: readonly RegisteredProject[] }> {
   if (opts.ids.length === 0) {
     return { removed: [] };
   }
   const removeIds = new Set(opts.ids);
-  return await withRegistryLock(async () => {
-    const current = await readProjectsRegistry();
-    const removed = current.projects.filter((p) => removeIds.has(p.id));
-    if (removed.length === 0) {
-      return { removed: [] };
-    }
+  return await withRegistryLock(
+    async () => {
+      const current = await readProjectsRegistry();
+      const removed = current.projects.filter((p) => removeIds.has(p.id));
+      if (removed.length === 0) {
+        return { removed: [] };
+      }
 
-    const next = current.projects.filter((p) => !removeIds.has(p.id));
-    await writeRegistryAtomic(getRegistryPath(), {
-      version: REGISTRY_VERSION,
-      projects: next,
-    });
-    return { removed };
-  });
+      const next = current.projects.filter((p) => !removeIds.has(p.id));
+      await writeRegistryAtomic(
+        getRegistryPath(),
+        {
+          version: REGISTRY_VERSION,
+          projects: next,
+        },
+        opts.signal
+      );
+      return { removed };
+    },
+    { signal: opts.signal }
+  );
 }
 
 export type DeadProjectRegistration = {
@@ -450,12 +468,14 @@ function getRegistryLockPath(): string {
 
 async function writeRegistryAtomic(
   path: string,
-  registry: ProjectsRegistry
+  registry: ProjectsRegistry,
+  signal?: AbortSignal
 ): Promise<void> {
-  const json = `${JSON.stringify(registry, null, 2)}\n`;
-  const tmp = `${path}.tmp`;
-  await Bun.write(tmp, json);
-  await rename(tmp, path);
+  await writeProjectsRegistryAtomic({
+    path,
+    text: `${JSON.stringify(registry, null, 2)}\n`,
+    signal,
+  });
 }
 
 async function tryRealpath(path: string): Promise<string> {
@@ -468,69 +488,11 @@ async function tryRealpath(path: string): Promise<string> {
 
 async function withRegistryLock<T>(
   fn: () => Promise<T>,
-  opts?: { readonly waitForLock?: boolean }
+  opts?: { readonly waitForLock?: boolean; readonly signal?: AbortSignal }
 ): Promise<T> {
-  await acquireRegistryLock(opts);
-  try {
-    return await fn();
-  } finally {
-    await releaseRegistryLock();
-  }
-}
-
-async function acquireRegistryLock(opts?: {
-  readonly waitForLock?: boolean;
-}): Promise<void> {
   const lockPath = getRegistryLockPath();
-  const start = Date.now();
-
-  while (true) {
-    try {
-      const file = await open(lockPath, "wx");
-      await file.writeFile(`${process.pid}\n`);
-      await file.close();
-      return;
-    } catch (error: unknown) {
-      const code =
-        typeof error === "object" && error !== null && "code" in error
-          ? (error as { code?: string }).code
-          : undefined;
-      if (code !== "EEXIST") {
-        throw error;
-      }
-      if (opts?.waitForLock === false) {
-        throw new Error("Projects registry is busy; optional touch deferred");
-      }
-      if (await isLockStale(lockPath)) {
-        // biome-ignore lint/suspicious/noEmptyBlockStatements: best-effort stale lock cleanup
-        await unlink(lockPath).catch(() => {});
-        continue;
-      }
-      if (Date.now() - start > REGISTRY_LOCK_TIMEOUT_MS) {
-        throw new Error("Timed out waiting for projects registry lock");
-      }
-      await sleep(REGISTRY_LOCK_RETRY_MS);
-    }
-  }
-}
-
-async function releaseRegistryLock(): Promise<void> {
-  const lockPath = getRegistryLockPath();
-  // biome-ignore lint/suspicious/noEmptyBlockStatements: lock release is best-effort
-  await unlink(lockPath).catch(() => {});
-}
-
-async function isLockStale(lockPath: string): Promise<boolean> {
-  try {
-    const info = await stat(lockPath);
-    return Date.now() - info.mtimeMs > REGISTRY_LOCK_STALE_MS;
-  } catch {
-    return false;
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  await ensureDir(dirname(lockPath));
+  return await withProjectsRegistryLock({ lockPath, run: fn, ...opts });
 }
 
 function sanitizeProjectName(name: string): string {

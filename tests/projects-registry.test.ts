@@ -143,11 +143,16 @@ test("upsertProjectRegistration moves entry when old path missing", async () => 
   );
 });
 
-test("upsertProjectRegistration clears stale registry lock", async () => {
+test("upsertProjectRegistration recovers a confirmed dead registry owner", async () => {
   const project = await createProject({ rootName: "repo-a", name: "alpha" });
   const lockPath = join(tempDir!, ".hack", "projects.json.lock");
   await mkdir(dirname(lockPath), { recursive: true });
-  await writeFile(lockPath, "123\n");
+  const child = Bun.spawn([process.execPath, "-e", "process.exit(0)"], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  await child.exited;
+  await writeFile(lockPath, `${child.pid}\n`);
   const staleTime = new Date(Date.now() - 60_000);
   await utimes(lockPath, staleTime, staleTime);
 

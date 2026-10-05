@@ -147,6 +147,7 @@ pub fn excluded(path: &Path) -> bool {
             ".config",
             ".codex",
             ".claude",
+            ".cursor",
             ".agents",
             "secrets",
             "credentials",

@@ -708,6 +708,14 @@ same bytes under a different selection. Existing schema-1 manifests remain
 verifiable; they are not rewritten or deleted. Cache keys still derive from their
 declared dependency inputs and execution identity.
 
+Source inventory and immutable captures exclude agent-local directories, including
+`.codex`, `.claude`, `.cursor`, and `.agents`, at any depth. This also excludes
+Cursor skill aliases into `.agents`; those aliases do not block project planning.
+Application symlinks into excluded directories and explicit source mounts of those
+directories are still refused. Adding the Cursor exclusion changes source-selection
+identity for affected projects; existing reviewed receipts are not silently adopted.
+These exclusions do not filter an explicitly authorized writable host project share.
+
 Normal native foreground startup requests outbound public internet access by
 default. Package downloads and external APIs do not require per-host configuration.
 This does not publish inbound ports or grant host-service access; the provider's

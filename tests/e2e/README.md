@@ -47,6 +47,36 @@ Image invalidation checks use distinct installed digests. On ARM64, platform
 invalidation changes `linux/arm64` to `linux/arm64/v8`; this verifies declared
 platform identity, not cross-architecture package compatibility.
 
+## Portable multi-service qualification
+
+`portable-multiservice` exercises a Bun HTTP app and PostgreSQL through the selected
+Hack CLI in slim mode. It needs Docker with Compose and locally cached
+`oven/bun:1.4.2-slim` and `postgres:17.6-alpine`; image tags are resolved to immutable
+IDs before startup, and the scenario never pulls. Missing prerequisites fail.
+It uses a private internal Compose network, no published ports or `hack-dev`, and
+explicitly disables Hack internal DNS/TLS. No credentials or global setup are needed.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=portable-multiservice
+```
+
+The scenario requires an empty initial database, writes and reads a marker through
+HTTP using `hack exec` and `hack run`, checks an independent SQL read and bounded
+Compose logs, then verifies that `hack down`/`hack up` creates new containers with
+the same database volume and marker. Cleanup checks exact ownership and resource
+absence; an adjacent owned canary proves unrelated containers, networks and volume
+data survive that cleanup. The canary is then removed separately. PostgreSQL uses
+fixture-only trust on this unexposed network. This qualifies the actual execution
+host, not Codex Cloud capabilities, browser access or native VM support elsewhere.
+
+For a managed cloud environment, repeat acceptance in a fresh task restored from
+the published environment. Setup-session access does not prove task access: local
+listeners and the Docker socket may be restricted even when the tools restore.
+Record normal-permission failures separately from passes through the provider's
+supported command-approval flow. Do not loosen permissions to turn a failed
+capability check into a pass, and verify that the saved startup guidance is
+available to the restored task.
+
 ## Domain migration routing qualification
 
 The local `domain-migration-files` scenario checks the real CLI with both default

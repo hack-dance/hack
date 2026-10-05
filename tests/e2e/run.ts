@@ -13,6 +13,7 @@ import { envSecretsScenario } from "./scenarios/env-secrets.ts";
 import { initScenario } from "./scenarios/init.ts";
 import { lifecycleHostProcessScenario } from "./scenarios/lifecycle-host-process.ts";
 import { lifecycleSessionRecoveryScenario } from "./scenarios/lifecycle-session-recovery.ts";
+import { portableMultiserviceScenario } from "./scenarios/portable-multiservice.ts";
 import { upDownScenario } from "./scenarios/up-down.ts";
 import { worktreeBranchDefaultScenario } from "./scenarios/worktree-branch-default.ts";
 import { worktreeParallelUpScenario } from "./scenarios/worktree-parallel-up.ts";
@@ -55,6 +56,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   dependencyCachePackageScenario,
   domainMigrationScenario,
   upDownScenario,
+  portableMultiserviceScenario,
   lifecycleHostProcessScenario,
   worktreeParallelUpScenario,
 ];

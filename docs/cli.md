@@ -43,8 +43,21 @@ Use a checkout/path directly, or an existing registry entry with `--project`;
 `hack init`, project lifecycle registration and `hack projects` discovery maintain
 registrations. Optional `hack projects` discovery coalesces unchanged observations
 for one minute and defers refresh when the registry lock is busy. New or changed
-checkouts are recorded when the lock is available. Explicit registration and other
-registry mutations retain their locking and failure behavior.
+checkouts are recorded when the lock is available. Explicit registry mutations
+wait up to ten seconds with jittered retries, reread the registry under the lock,
+and publish complete updates by atomic rename. A slow live writer is never evicted
+because its lock is old. A confirmed dead owner can be recovered; an occupied or
+reused PID is treated as live, and uncertain ownership is preserved.
+
+Recovery is serialized separately so competing cleanup attempts cannot delete a
+new writer's lock. If a recovery process itself crashes, its recovery guard may
+need offline inspection after all writers have stopped; age alone never authorizes
+removing it. Interrupted writes may leave uniquely named `.tmp` or `.owner` files
+beside `projects.json`; these are never used as registry input. Preserve the current
+registry and inspect ownership before removing abandoned files. This concurrency
+guarantee applies to cooperating v5 writers. Older v4 writers sharing the same
+registry still use their older lock protocol; use separate `HACK_HOME` directories
+when running the two versions concurrently.
 
 Run `hack help` for the full command list, or `hack help --all` to include hidden unsupported
 experimental commands. Every command and flag on this page is also in the generated

@@ -16,6 +16,53 @@ pinned artifact. Each check has a 120-second timeout, 512 MiB Java heap, two wor
 and bounded output; temporary TLC metadata is removed after success or failure.
 No credentials or running VM are needed.
 
+## Projects registry writer ownership
+
+`registry-writer/RegistryWriter.tla` models two one-shot writers, two independent
+reclaimers, immutable receipt identities, writer/reclaimer crashes, and conservative
+PID-reuse refusal. The positive configuration exhausts **7,721 distinct states**
+(24,575 generated, maximum depth 21). It checks type safety, mutual exclusion and
+that every live writer retains its published lock until its own release. TLC action
+coverage includes 232 enabled `Reap` transitions, 1,290 `Release` transitions and
+3,930 `CrashRecovery` transitions; the safety checks do not pass by excluding recovery
+or crashes. No fairness or eventual recovery is asserted.
+
+The negative control removes only the recovery guard. It must exit 12 and violate
+`NoLiveOwnershipLoss` in a single `Reap` state with `unsafeReap = TRUE`, `lock = 0`
+and `guard = 0`. `unsafeReap` means that the unlink removed a live receipt different
+from the receipt previously checked by that reclaimer. The counterexample is:
+publish writer 1; writer 1 dies; both reclaimers independently inspect and validate
+receipt 1; one unlinks it; writer 2 publishes; the second unlinks writer 2's receipt.
+Which symmetric writer/reclaimer acts first is immaterial. A parse error, arbitrary
+nonzero exit, different invariant or witness split across states is not success.
+
+| Model action/state | `src/lib/projects-registry-lock.ts` boundary |
+| --- | --- |
+| `Prepare` / `Publish` | `withProjectsRegistryLock` finishes the private owner receipt; `publish` uses exclusive hardlink creation. Receipt completion and publication are separate; an empty shared owner is never a modeled state. |
+| `InspectRelease` / `Release` | `releaseIfOwned` validates exact receipt identity/bytes before unlink. The model separates inspection from unlink instead of assuming an atomic compare-and-unlink. |
+| `ObserveBeforeGuard` / `AcquireGuard` | `recoverDeadOwner` may cheaply inspect before exclusive `mkdir` of the recovery guard; this prior observation never authorizes removal. The model permits even irrelevant preliminary observations, a conservative superset of the implementation. |
+| `Observe` / `CheckReceipt` / `Reap` | Fresh receipt/death inspection and identity revalidation under the guard, followed by a separate path unlink. No other cooperative reclaimer can remove/rebind the selected dead receipt between those steps. |
+| `FinishRecovery` | Remove only this invocation's recovery guard. Another writer may publish once the dead receipt is removed, including before guard retirement. |
+| `CrashWriter` / `ReusePid` | Process exit preserves a published receipt; only modeled ESRCH permits recovery. An occupied/reused PID conservatively refuses, even when the old writer really died. |
+| `CrashRecovery` | An interrupted reclaimer leaves its non-reclaiming guard. Offline inspection can be required; automatically stealing that guard is not modeled or authorized. |
+
+The finite model treats each receipt as a unique identity and each exclusive link,
+mkdir or unlink as one filesystem operation. It does **not** make a multi-operation
+inspection/removal sequence atomic. It assumes cooperating new-protocol writers in
+a private local directory; legacy v4 writers with age-based reclamation and arbitrary
+same-user path replacement violate those assumptions. It omits actual device/inode
+reuse, hardlink counts, permissions, symlinks, byte parsing, disk durability, registry
+content, process-probe errors, signals, elapsed-time bounds and repeated/unbounded
+restarts. Missing or inaccessible process information is never abstracted as death.
+Receipt preparation can fail or be cancelled without publication; publication errors,
+descriptor cleanup and cancellation during I/O require implementation tests.
+
+Process-based registry tests must connect the counterexample to overlapping
+reclaimers and a live successor, prove old live receipts are retained, and exercise
+dead-owner, malformed-owner, symlink and release-identity refusal. The abstract pass
+does not prove the implementation, mixed-version safety, performance or application
+acceptance. Logs and TLC metadata belong in ignored run directories, not this tree.
+
 ## Missing post-reboot publications
 
 `absent-publication-recovery/Absent.tla` checks one explicitly selected cleanup

@@ -67,3 +67,21 @@ test("runtime model config selection rejects paths and arbitrary filenames", () 
     );
   }
 });
+
+test("registry ownership control requires live successor deletion in the same Reap state", () => {
+  const model = runtimeModels.find((entry) => entry.name === "registry-writer");
+  expect(model).toBeDefined();
+  const output =
+    "Invariant NoLiveOwnershipLoss is violated.\nState 16: <Reap line 72>\n/\\ unsafeReap = TRUE\n/\\ lock = 0\n/\\ guard = 0\n";
+  expect(model?.verify({ negative: true, exitCode: 12, output })).toBe(true);
+  for (const invalid of [
+    output.replace("unsafeReap = TRUE", "unsafeReap = FALSE"),
+    output.replace("lock = 0", "lock = 2"),
+    output.replace("guard = 0", "guard = 1"),
+    output.replace("/\\ lock", "State 17: <Reap line 72>\n/\\ lock"),
+  ]) {
+    expect(
+      model?.verify({ negative: true, exitCode: 12, output: invalid })
+    ).toBe(false);
+  }
+});

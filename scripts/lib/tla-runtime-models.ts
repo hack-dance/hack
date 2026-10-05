@@ -27,6 +27,14 @@ type ModelContract = {
 // Bounds and witnesses are reviewed contracts, not learned from each run.
 const contracts: readonly ModelContract[] = [
   {
+    name: "registry-writer",
+    module: "RegistryWriter",
+    states: 7721,
+    invariant: "NoLiveOwnershipLoss",
+    action: "Reap",
+    fields: ["unsafeReap = TRUE", "lock = 0", "guard = 0"],
+  },
+  {
     name: "absent-publication-recovery",
     module: "Absent",
     states: 247,

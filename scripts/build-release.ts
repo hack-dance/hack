@@ -26,12 +26,14 @@ interface ParseErr {
   readonly message: string;
 }
 
-const parsed = parseArgs({ argv: Bun.argv.slice(2) });
-if (parsed.ok) {
-  process.exitCode = await main({ args: parsed.args });
-} else {
-  process.stderr.write(`${parsed.message}\n`);
-  process.exitCode = 1;
+if (import.meta.main) {
+  const parsed = parseArgs({ argv: Bun.argv.slice(2) });
+  if (parsed.ok) {
+    process.exitCode = await main({ args: parsed.args });
+  } else {
+    process.stderr.write(`${parsed.message}\n`);
+    process.exitCode = 1;
+  }
 }
 
 async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
@@ -495,7 +497,7 @@ function renderCodexSlimInstallScript(): string {
   ].join("\n");
 }
 
-function renderDownloadInstallScript(): string {
+export function renderDownloadInstallScript(): string {
   return [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
@@ -545,7 +547,8 @@ function renderDownloadInstallScript(): string {
     "",
     'echo "Downloading $URL"',
     'curl -fsSL "$URL" -o "$tmpdir/$TARBALL"',
-    'tar -xzf "$tmpdir/$TARBALL" -C "$tmpdir"',
+    "# Install as the current user; archive builder IDs need not exist or be assignable here.",
+    'tar --no-same-owner -xzf "$tmpdir/$TARBALL" -C "$tmpdir"',
     "",
     'INSTALL_DIR="$tmpdir/hack-$VERSION-release"',
     'if [ ! -d "$INSTALL_DIR" ]; then',
@@ -558,7 +561,7 @@ function renderDownloadInstallScript(): string {
   ].join("\n");
 }
 
-function renderDownloadCodexSlimInstallScript(): string {
+export function renderDownloadCodexSlimInstallScript(): string {
   return [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
@@ -608,7 +611,8 @@ function renderDownloadCodexSlimInstallScript(): string {
     "",
     'echo "Downloading $URL"',
     'curl -fsSL "$URL" -o "$tmpdir/$TARBALL"',
-    'tar -xzf "$tmpdir/$TARBALL" -C "$tmpdir"',
+    "# Install as the current user; archive builder IDs need not exist or be assignable here.",
+    'tar --no-same-owner -xzf "$tmpdir/$TARBALL" -C "$tmpdir"',
     "",
     'INSTALL_DIR="$tmpdir/hack-$VERSION-release"',
     'if [ ! -d "$INSTALL_DIR" ]; then',

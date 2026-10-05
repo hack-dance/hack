@@ -16,5 +16,5 @@ fi
 repo_root="$(cd "${repo_root}" && pwd)"
 
 cd "${repo_root}"
-bun install --frozen-lockfile || bun install
+bun install --frozen-lockfile
 "${script_dir}/install-codex-slim.sh" "${repo_root}"

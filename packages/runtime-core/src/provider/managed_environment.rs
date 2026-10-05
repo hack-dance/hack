@@ -286,6 +286,7 @@ pub fn receive_forwarded(
 }
 /// One-off transport may explicitly carry no managed values. Nonempty input must
 /// name only the selected service; ordinary graph delivery remains nonempty.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn receive_forwarded_for_one_off(
     bytes: &[u8],
     expected_plan: &str,

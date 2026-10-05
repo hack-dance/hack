@@ -35,7 +35,10 @@ import {
   prepareNativeProjectInput,
 } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
-import { recoverNativeInterruptedStartupCleanup } from "./native-project-interrupted-cleanup.ts";
+import {
+  NativePartialShutdownError,
+  recoverNativeInterruptedStartupCleanup,
+} from "./native-project-interrupted-cleanup.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import { serveNativeProjectGraph } from "./native-project-process.ts";
 import { selectNativeProjectRestore } from "./native-project-restore.ts";
@@ -595,7 +598,10 @@ async function confirmForegroundCleanup(opts: {
       final = recovered;
       owned = authoritative(final, opts.run, opts.namespace, opts.planId);
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof NativePartialShutdownError) {
+      throw error;
+    }
     throw cleanupUnconfirmed(opts.startupFailure, opts.nativeCode);
   }
   requireConfirmedCleanup(final, opts.startupFailure, opts.nativeCode);

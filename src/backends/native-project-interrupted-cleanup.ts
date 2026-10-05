@@ -16,6 +16,15 @@ function refused(): Error {
   );
 }
 
+/** A pending shutdown is fenced; it cannot reuse a failed-start selection. */
+export class NativePartialShutdownError extends Error {
+  constructor() {
+    super(
+      "Native retaining shutdown is incomplete; retained state and mapping require inspection. No uncertain stop was replayed. Inspect with hack doctor --native-cleanup inspect and follow explicit owned cleanup recovery; do not repeat down or restart the pool blindly."
+    );
+  }
+}
+
 function sameResources(before: unknown, after: unknown): boolean {
   if (
     !(isRecord(before) && isRecord(after)) ||
@@ -76,6 +85,17 @@ export async function recoverNativeInterruptedStartupCleanup(opts: {
     throw refused();
   }
   const invoke = opts.invoke ?? invokeNativeRuntime;
+  // Only a read-only native hint suppresses failed-start recovery. The hint
+  // never authorizes an effect, even with an older completed startup journal.
+  if (
+    pending &&
+    value.interrupted_start_cleanup_incomplete !== true &&
+    isRecord(value.pending_cleanup) &&
+    value.pending_cleanup.version === 1 &&
+    value.pending_cleanup.kind === "partial_shutdown"
+  ) {
+    throw new NativePartialShutdownError();
+  }
   try {
     const selection = await invoke({
       runtime: opts.runtime,

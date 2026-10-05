@@ -204,6 +204,39 @@ history format. Stable v4 uses its separate state and is unaffected.
 
 ## Named-volume integrity qualification
 
+The ignored foreground-owner fixture
+`foreground::native_test::stop14::fourteen_services_retain_named_data_across_cleanup_and_restore`
+qualifies normal retaining cleanup of thirteen running services and one completed
+job, then restores all fourteen with the original named-volume identity and marker.
+It uses no application source, credentials or host listeners. It does not inject
+a partial stop or qualify successor-boot recovery.
+
+Prepare a separate development pool with the managed provider, engine and network
+tools and load a pinned local Linux ARM64 image containing `/bin/sh`. The pool
+must have no graph attempts. Set `HACK_STOP14_TEST_ROOT` to its private candidate
+home, `HACK_STOP14_TEST_BINARY` to the matching current-source native CLI, and
+`HACK_STOP14_TEST_IMAGE` to the loaded `sha256:<config digest>`. Compile the
+all-feature library test with `--no-run` first, then run this exact ignored test
+with one test thread under a 240-second external watchdog. Failure retains the
+graph, data and foreground owner for explicit inspection; do not rerun it against
+that pool or replay an uncertain stop. Success removes only its graph resources;
+stop the owned pool separately with the managed runtime command.
+
+The ignored fixture
+`foreground::native_test::partial_stop::exact_partial_stop_recovers_only_on_immediate_successor_boot`
+requires another fresh, prepared pool and the same pinned shell image. Set
+`HACK_PARTIAL_STOP_TEST_ROOT` and `HACK_PARTIAL_STOP_TEST_IMAGE`, compile the
+all-feature library test first, and run the exact ignored test with one thread
+under a 300-second external watchdog. A test-only socket accepts one exact
+container stop request and closes without a response; all other selected stops
+use the verified guest engine. It verifies pending cleanup and refuses same-boot
+and stale-receipt recovery, then performs one managed boot rollover and exact
+receipt-selected recovery. Target and stopped-sibling volume identities and
+markers must survive. Success removes only the two owned graphs and stops the
+pool; failure retains their sources, data and owner evidence for inspection.
+This is a controlled transport failure, not a reproduction or diagnosis of an
+unexplained real-world stop timeout.
+
 The ignored Apple Silicon macOS fixture
 `owned_named_volume_integrity_survives_container_restart` writes a synthetic
 64 MiB corpus into one owned named volume. It fsyncs files and directories,

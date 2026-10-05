@@ -8,6 +8,7 @@ import {
   checkLegacyProjectAgentArtifacts,
   checkLegacyUserAgentArtifacts,
 } from "../agents/legacy-artifacts.ts";
+import { runNativeProjectCleanupCommand } from "../backends/native-project-cleanup-command.ts";
 import {
   parseNativeRunMappingRecoveryOptions,
   runNativeProjectMappingCommand,
@@ -214,6 +215,14 @@ const doctorOptions = [
   optBrowserResult,
   optBranch,
   defineOption({
+    name: "nativeCleanup",
+    type: "string",
+    long: "--native-cleanup",
+    valueHint: "inspect",
+    description:
+      "Inspect one mapped native graph's pending cleanup without recovery or stop replay",
+  } as const),
+  defineOption({
     name: "nativeRunMapping",
     type: "string",
     long: "--native-run-mapping",
@@ -338,6 +347,11 @@ async function maybeRunDomainMigration(
   args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
 ): Promise<number | null> {
   if (args.options.domainMigration !== undefined) {
+    if (args.options.nativeCleanup !== undefined) {
+      throw new CliUsageError(
+        "--native-cleanup accepts only inspect with --path, --branch and --json; recovery is explicit and separate."
+      );
+    }
     if (
       args.options.fix ||
       args.options.migrateEnvConfig ||
@@ -362,6 +376,37 @@ async function maybeRunDomainMigration(
 async function maybeRunNativeMappingRecovery(
   args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
 ): Promise<number | null> {
+  if (args.options.nativeCleanup !== undefined) {
+    if (
+      args.options.nativeCleanup !== "inspect" ||
+      args.options.nativeRunMapping !== undefined ||
+      args.options.expectSelection !== undefined ||
+      args.options.acceptLegacyDeviceRebind ||
+      args.options.fix ||
+      args.options.migrateEnvConfig ||
+      args.options.domainMigration ||
+      args.options.browserUrl ||
+      args.options.browserResult
+    ) {
+      throw new CliUsageError(
+        "--native-cleanup accepts only inspect with --path, --branch and --json; recovery is explicit and separate."
+      );
+    }
+    const runtime = resolveNativeRuntimeSelection();
+    if (!runtime) {
+      throw new CliUsageError(
+        "Native cleanup inspection requires an explicitly selected native runtime."
+      );
+    }
+    return await runNativeProjectCleanupCommand({
+      runtime,
+      startDir: args.options.path
+        ? resolve(process.cwd(), args.options.path)
+        : process.cwd(),
+      branch: args.options.branch,
+      json: args.options.json === true,
+    });
+  }
   const mapping = parseNativeRunMappingRecoveryOptions({
     action: args.options.nativeRunMapping,
     expectSelection: args.options.expectSelection,

@@ -1222,6 +1222,60 @@ foreground owner refuses cleanup, the CLI also preserves its bounded cause code
 alongside `graph_owner_recovery`; raw owner diagnostics remain omitted. Failed
 cleanup is never automatically replayed.
 
+Stop failures can also include `stop_failures` version 1 with at most 32 distinct
+admitted service names and fixed stages: `connect_timeout`, `connect`, `timeout`,
+`response`, `worker`, `transport` or `deadline`. `response` covers a rejected or
+unreadable response; these stages describe the request failure, not whether the
+container stopped. Every dispatched stop worker is joined before the failure is
+returned. Container IDs, response bodies, transport messages and credentials are
+omitted. The authenticated foreground client validates the private receipt and
+checks matching service membership and container generations before and after
+the request. Detail never grants retry or deletion authority.
+
+### Inspect a partial retaining shutdown
+
+A pending cleanup of started container generations is different from a failed
+container start. A completed historical startup journal does not make the pending
+shutdown eligible for interrupted-start recovery. The native `graph inspect`
+response includes a read-only `pending_cleanup` version 1 hint when applicable:
+`partial_shutdown`, `interrupted_startup_candidate` or `unclassified`. A startup
+candidate must still pass the separate exact native selection before recovery;
+the hint itself is not an ownership, cleanup or acknowledgement proof.
+
+Inspect a mapped project through the selected candidate:
+
+```sh
+HACK_NATIVE_HOME=/absolute/private/candidate-home /absolute/bundle/hack-v5 doctor \
+  --native-cleanup inspect --path /absolute/project --branch feature-api --json
+```
+
+Omit `--branch` for the base instance, or let linked-worktree auto-selection use
+the configured branch policy. This command performs only native graph inspection,
+reports aggregate container/volume observations and returns exit status 1 when
+cleanup is pending. Missing volumes are reported as absent, not presumed retained.
+It does not run hooks, repeat `down`, retire a publisher, restart the pool, repair
+trust or acknowledge cleanup. The JSON envelope describes a successful inspection;
+the exit status separately indicates pending cleanup. Older executors without the
+hint report `unclassified` rather than inventing eligibility.
+
+Preserve the run mapping and private receipt. For a partial ready-graph shutdown,
+same-boot uncertain stops remain fenced; use the explicit previous-boot cleanup
+flow below. Before stopping a pool, review every graph using it: a pool restart
+affects live siblings. Stop/start must remain explicit, with the same pool identity
+and profile, network, source and socket selections. Select the exact receipt hash
+and follow the two-step recovery, then retire its exact recovered publisher and
+independently verify container absence, retained volumes and unaffected sibling
+data. Another boot rollover, changed receipts, missing data or stale ownership
+refuses recovery. Do not edit journals, fabricate relay acknowledgement or repeat
+stop requests to get past that refusal. Application restoration and frontend
+finalization are separate checks after native cleanup succeeds.
+
+Graphs without ingress routes use the same guarded flow. Recovery binds the
+persisted empty pre-effect route selection to the pending cleanup and verifies
+the dead predecessor publication. That selection belongs to the interrupted
+operation; replacing a selection from an older restored generation still requires
+independent restore-history proof.
+
 ### Explicit cleanup after a dead foreground owner
 
 For a fully ready graph whose foreground owner died while its pool remains on the

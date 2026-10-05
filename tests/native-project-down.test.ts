@@ -763,6 +763,38 @@ test("down recovers a selected interrupted startup without replaying hooks or or
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
+test("down preserves a partial ready-graph shutdown without hooks, stop replay or startup recovery", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  await expect(
+    nativeProjectDown({
+      ...opts,
+      before: async () => {
+        calls.push("before");
+      },
+      after: async () => {
+        calls.push("after");
+      },
+      retireHostProcesses: async () => {
+        calls.push("retire");
+      },
+      invoke: async ({ args }) => {
+        calls.push(args[1]!);
+        const value = snapshot();
+        value.receipt.phase = "cleanup-intent";
+        return {
+          ...value,
+          receipt: { ...value.receipt, relay_cleanup: { phase: "pending" } },
+          interrupted_start_cleanup_incomplete: false,
+          pending_cleanup: { version: 1, kind: "partial_shutdown" },
+        };
+      },
+    })
+  ).rejects.toThrow("Native retaining shutdown is incomplete");
+  expect(calls).toEqual(["inspect"]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
 test("stopped receipt with a remaining container preserves mapping", async () => {
   const opts = await fixture();
   await expect(

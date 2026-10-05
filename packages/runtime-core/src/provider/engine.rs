@@ -18,6 +18,16 @@ mod private_service_exec;
 pub(super) mod relay_exec;
 mod service_exec;
 mod stop;
+pub(in crate::provider) use stop::StopBatchFailure;
+#[cfg(test)]
+pub(in crate::provider) use stop::StopFailure;
+#[cfg(all(
+    test,
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "environment-launcher"
+))]
+pub(in crate::provider) use stop::with_test_stop_socket;
 
 const MAX_BODY: u64 = 4 * 1024 * 1024;
 

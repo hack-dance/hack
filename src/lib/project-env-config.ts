@@ -726,13 +726,12 @@ export async function resolveProjectEnvSelection(opts: {
   };
 }
 
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Env resolution keeps layered local/shared/worktree selection explicit in one place.
-export async function resolveProjectEnvConfig(opts: {
+/** Read the same ordered layers for injection and requested-key disclosure. */
+async function readProjectEnvLayers(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly envName?: string | null;
-  readonly serviceNames: readonly string[];
-}): Promise<ProjectEnvResolvedConfig | null> {
+}) {
   const selection = await resolveProjectEnvSelection({
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
@@ -812,6 +811,82 @@ export async function resolveProjectEnvConfig(opts: {
     layers: envLayers,
     environment: selection.effectiveEnv ?? "default",
   });
+  const files = [selection.defaultPath];
+  if (selection.overlayPath && overlayRead?.exists) {
+    files.push(selection.overlayPath);
+  }
+  for (const read of inheritedReads) {
+    if (read.exists) {
+      files.push(read.path);
+    }
+  }
+  if (localDefaultRead.exists) {
+    files.push(selection.localDefaultPath);
+  }
+  if (selection.localOverlayPath && localOverlayRead?.exists) {
+    files.push(selection.localOverlayPath);
+  }
+
+  return { selection, envLayers, merged, files };
+}
+
+/**
+ * Resolve only the requested winning entry, without decrypting unrelated values.
+ * null means no modern config; { value: null } means a missing/deleted key.
+ * Empty strings remain present. Reading never creates or materializes a key file.
+ */
+export async function resolveProjectEnvValue(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly envName?: string | null;
+  readonly serviceNames: readonly string[];
+  readonly scope?: string;
+  readonly key: string;
+}): Promise<{ readonly value: string | null } | null> {
+  const layers = await readProjectEnvLayers(opts);
+  if (!layers) {
+    return null;
+  }
+  const scope = normalizeProjectEnvScopeName({ scopeName: opts.scope });
+  if (
+    scope !== "global" &&
+    !opts.serviceNames.includes(scope) &&
+    !Object.hasOwn(layers.merged.values, scope)
+  ) {
+    throw new Error("Unknown env scope");
+  }
+  const entries = resolveEffectiveStoredEntries({
+    layers: layers.envLayers,
+    scopeNames: scope === "global" ? ["global"] : ["global", scope],
+  });
+  const entry = Object.hasOwn(entries, opts.key)
+    ? entries[opts.key]
+    : undefined;
+  if (!entry) {
+    return { value: null };
+  }
+  const keyText = isProjectEnvSecretValue(entry.value)
+    ? await resolveProjectEnvKey({
+        projectRoot: opts.projectRoot,
+        required: true,
+      })
+    : null;
+  return {
+    value: decryptProjectEnvStoredValue({ storedValue: entry.value, keyText }),
+  };
+}
+
+export async function resolveProjectEnvConfig(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly envName?: string | null;
+  readonly serviceNames: readonly string[];
+}): Promise<ProjectEnvResolvedConfig | null> {
+  const layers = await readProjectEnvLayers(opts);
+  if (!layers) {
+    return null;
+  }
+  const { selection, envLayers, merged, files } = layers;
   const keyText = await resolveProjectEnvKey({
     projectRoot: opts.projectRoot,
     required: hasSecretEntries({ config: merged }),
@@ -890,22 +965,6 @@ export async function resolveProjectEnvConfig(opts: {
       : ["global", PROJECT_ENV_HOST_SCOPE],
     keyText,
   });
-
-  const files = [selection.defaultPath];
-  if (selection.overlayPath && overlayRead?.exists) {
-    files.push(selection.overlayPath);
-  }
-  for (const read of inheritedReads) {
-    if (read.exists) {
-      files.push(read.path);
-    }
-  }
-  if (localDefaultRead.exists) {
-    files.push(selection.localDefaultPath);
-  }
-  if (selection.localOverlayPath && localOverlayRead?.exists) {
-    files.push(selection.localOverlayPath);
-  }
 
   return {
     selection,
@@ -1794,12 +1853,15 @@ function decryptProjectEnvValue(opts: {
   readonly ciphertext: string;
   readonly keyText: string;
 }): string {
-  const [prefix, ivText, tagText, ciphertextText] = opts.ciphertext.split(":");
+  const parts = opts.ciphertext.split(":");
+  const [prefix, ivText, tagText, ciphertextText] = parts;
+  // AES-GCM authenticates an empty plaintext with an empty ciphertext segment.
   if (
+    parts.length !== 4 ||
     prefix !== PROJECT_ENV_SECRET_PREFIX ||
     !ivText ||
     !tagText ||
-    !ciphertextText
+    ciphertextText === undefined
   ) {
     throw new Error("Invalid secure env value.");
   }

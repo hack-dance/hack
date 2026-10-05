@@ -64,10 +64,13 @@ export type SecretStore = {
  * Resolve the active secret backend for a project context.
  *
  * Backends are controlled via `controlPlane.secrets.backend`.
+ * Set allowKeyProvisioning=false for reads that must not generate or copy key
+ * material. Existing native key access and its authorization are preserved.
  */
 export async function resolveSecretStore(input: {
   readonly projectName: string;
   readonly projectDir?: string;
+  readonly allowKeyProvisioning?: boolean;
 }): Promise<SecretStore> {
   const controlPlane = await readControlPlaneConfig({
     ...(input.projectDir ? { projectDir: input.projectDir } : {}),
@@ -78,6 +81,7 @@ export async function resolveSecretStore(input: {
       projectName: input.projectName,
       projectDir: input.projectDir,
       secretsConfig,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     });
   }
   if (secretsConfig.backend === "cloud") {
@@ -85,6 +89,7 @@ export async function resolveSecretStore(input: {
       projectName: input.projectName,
       projectDir: input.projectDir,
       secretsConfig,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     });
   }
   return createKeychainSecretStore({ projectName: input.projectName });
@@ -192,6 +197,7 @@ function describeSecretStoreDescriptor(input: {
 async function createEncryptedFileSecretStore(input: {
   readonly projectName: string;
   readonly projectDir?: string;
+  readonly allowKeyProvisioning?: boolean;
   readonly secretsConfig: SecretsConfig;
 }): Promise<SecretStore> {
   const filePath = resolveConfiguredPath({
@@ -208,6 +214,7 @@ async function createEncryptedFileSecretStore(input: {
     await resolveEncryptedFileKeyMaterial({
       keyPath,
       storePath: filePath,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     })
   ).key;
   return createEncryptedScopedStore({
@@ -222,6 +229,7 @@ async function createEncryptedFileSecretStore(input: {
 async function createCloudSecretStore(input: {
   readonly projectName: string;
   readonly projectDir?: string;
+  readonly allowKeyProvisioning?: boolean;
   readonly secretsConfig: SecretsConfig;
 }): Promise<SecretStore> {
   const provider = input.secretsConfig.cloud.provider;
@@ -235,6 +243,7 @@ async function createCloudSecretStore(input: {
     provider,
     projectName: input.projectName,
     secretsConfig: input.secretsConfig,
+    allowKeyProvisioning: input.allowKeyProvisioning,
   });
   return {
     descriptor: {
@@ -253,6 +262,7 @@ async function createCloudProviderAdapter(input: {
   readonly provider: CloudSecretProvider;
   readonly projectName: string;
   readonly projectDir?: string;
+  readonly allowKeyProvisioning?: boolean;
   readonly secretsConfig: SecretsConfig;
 }): Promise<
   Pick<SecretStore, "get" | "set" | "delete"> & { readonly location: string }
@@ -263,6 +273,7 @@ async function createCloudProviderAdapter(input: {
       projectName: input.projectName,
       projectDir: input.projectDir,
       secretsConfig: input.secretsConfig,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     });
   }
   if (input.provider === "gcp") {
@@ -271,6 +282,7 @@ async function createCloudProviderAdapter(input: {
       projectName: input.projectName,
       projectDir: input.projectDir,
       secretsConfig: input.secretsConfig,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     });
   }
   if (input.provider === "azure") {
@@ -279,6 +291,7 @@ async function createCloudProviderAdapter(input: {
       projectName: input.projectName,
       projectDir: input.projectDir,
       secretsConfig: input.secretsConfig,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     });
   }
   return await createCloudShimAdapter({
@@ -286,6 +299,7 @@ async function createCloudProviderAdapter(input: {
     projectName: input.projectName,
     projectDir: input.projectDir,
     secretsConfig: input.secretsConfig,
+    allowKeyProvisioning: input.allowKeyProvisioning,
   });
 }
 
@@ -293,6 +307,7 @@ async function createCloudShimAdapter(input: {
   readonly provider: CloudSecretProvider;
   readonly projectName: string;
   readonly projectDir?: string;
+  readonly allowKeyProvisioning?: boolean;
   readonly secretsConfig: SecretsConfig;
 }): Promise<
   Pick<SecretStore, "get" | "set" | "delete"> & { readonly location: string }
@@ -313,6 +328,7 @@ async function createCloudShimAdapter(input: {
     await resolveEncryptedFileKeyMaterial({
       keyPath,
       storePath: filePath,
+      allowKeyProvisioning: input.allowKeyProvisioning,
     })
   ).key;
   const scope = [
@@ -476,15 +492,17 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   readonly keyPath?: string;
   readonly storePath?: string;
   readonly persistResolvedKey?: boolean;
+  readonly allowKeyProvisioning?: boolean;
 }): Promise<{
   readonly key: string;
   readonly source: "env" | "file" | "keychain" | "generated";
 }> {
+  const allowKeyProvisioning = input?.allowKeyProvisioning !== false;
   const envValue = (process.env[ENCRYPTED_FILE_KEY_ENV] ?? "").trim();
   if (envValue.length > 0) {
     cachedEncryptedFileKey = envValue;
     encryptedFileKeyFailureCooldownUntilMs = 0;
-    if (input?.persistResolvedKey && input.keyPath) {
+    if (allowKeyProvisioning && input?.persistResolvedKey && input.keyPath) {
       await writeEncryptedFileKey({
         keyPath: input.keyPath,
         key: envValue,
@@ -524,7 +542,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   }
 
   if (cachedEncryptedFileKey) {
-    if (input?.persistResolvedKey && input.keyPath) {
+    if (allowKeyProvisioning && input?.persistResolvedKey && input.keyPath) {
       await writeEncryptedFileKey({
         keyPath: input.keyPath,
         key: cachedEncryptedFileKey,
@@ -537,6 +555,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   }
 
   const shouldBootstrapFileKey =
+    allowKeyProvisioning &&
     Boolean(configuredKeyPath) &&
     (await canBootstrapEncryptedFileKey({
       storePath: input?.storePath,
@@ -586,7 +605,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     );
   }
   if (existing) {
-    if (configuredKeyPath) {
+    if (allowKeyProvisioning && configuredKeyPath) {
       await writeEncryptedFileKey({
         keyPath: configuredKeyPath,
         key: existing,
@@ -600,7 +619,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     };
   }
 
-  if (configuredKeyPath) {
+  if (configuredKeyPath || !allowKeyProvisioning) {
     throw new Error(
       buildEncryptedBackendKeyRecoveryMessage({
         keyPath: configuredKeyPath,

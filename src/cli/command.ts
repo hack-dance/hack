@@ -101,6 +101,8 @@ export interface CommandSpec<
   readonly subcommands: Subs;
   readonly expandInRootHelp?: boolean;
   readonly allowUnknownOptions?: boolean;
+  /** Fixed stderr-only failure text for commands whose stdout contains sensitive raw data. */
+  readonly sensitiveOutputError?: string;
 }
 
 export type AnyCommandSpec = CommandSpec<

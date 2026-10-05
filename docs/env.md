@@ -197,6 +197,45 @@ hack env apply --service api --env qa
 
 `--show-secrets` prints secret values in plaintext instead of the masked default; use it deliberately.
 
+Read one value explicitly:
+
+```bash
+hack env get SERVICE_TOKEN --service api
+hack env get SERVICE_TOKEN --service api --env qa
+hack env get API_BASE_URL --env default
+```
+
+`hack env get KEY_NAME` writes exactly the resolved UTF-8 value to stdout, with
+**no added newline**, quotes, label, or JSON envelope. Empty values succeed with
+zero output bytes. Multiline content and trailing newlines are preserved; shell
+command substitution may itself remove trailing newlines. Missing or deleted
+values exit nonzero with an error on stderr and empty stdout. Invalid arguments,
+malformed env files, and unavailable or denied keys/backends also fail without
+printing values, ciphertext, or raw backend errors. `--json` and `--show-secrets`
+are not accepted by `get`; help is available separately with `--help`.
+
+Omitting `--env` uses the configured default overlay. `--env default` (also
+`--env base` or `--env none`) selects base layers, including local overrides.
+An absent optional overlay keeps the existing base/local fallback behavior.
+`--service api` selects global plus service values using the same layer ordering
+as runtime injection; the default scope is `global`. Linked worktrees use the
+same primary-local inheritance and checkout-local precedence as other env flows.
+`get` returns that stored scope's value without host-address rewriting.
+
+This explicit command needs no running containers and adds no confirmation.
+Existing native keychain authorization still applies. Modern YAML secrets decrypt
+only the requested winning entry, so an unrelated missing key or corrupt encrypted
+value does not force disclosure or block a plaintext read. Legacy projects retain
+their configured backend and declared-key lookup; only the requested overlay/base
+key is fetched. The existing encrypted-file backend internally decrypts its sealed
+bundle. Empty legacy values are returned as present by `get`; legacy runtime
+injection keeps its existing empty-value fallback behavior.
+
+`get` does not migrate or materialize env files, write plaintext artifacts, or add
+secret values to diagnostics, MCP tools, or audit output. Treat its stdout as a
+secret when the requested value is sensitive; avoid redirecting it into logs or
+committed files. Use `hack env explain KEY_NAME` for inspection without disclosure.
+
 Add or update values:
 
 ```bash

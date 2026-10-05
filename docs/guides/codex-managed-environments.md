@@ -1,230 +1,225 @@
-# Managed Codex Containers
+# Hack in Codex Cloud and remote development environments
 
-This guide is for managed Codex or CI-style containers where you control a repo checkout and setup script,
-but do not control the host machine or a long-lived Docker Desktop style environment.
+Use the existing repository, its encrypted env configuration, and its pinned
+dependencies to prepare a development environment on another machine. Start by
+choosing the target and Hack version explicitly. A portable CLI installation gives
+you env resolution and host commands; starting a full application also requires
+that project's runtime, services, network access, and credentials.
 
-Use this path when:
+The optional `hack-remote` skill guides this workflow. A plugin on your laptop does
+not install Hack or enroll a cloud machine. Confirm that the skill is available in
+the target task, for example through the repository's supported skill location.
 
-- the container is ephemeral or cache-backed
-- you only have a setup script and optional maintenance script
-- `hack global install` is too heavy or not applicable
-- you want env resolution, host exec, agent integrations, and repo-local CLI workflows without the
-  full local host stack
+## Choose the execution path
 
-## Published slim image
+| Target | Useful existing path | Check before starting the app |
+| --- | --- | --- |
+| Codex Cloud or a managed CI container | Portable/slim CLI and the repository's host commands | Toolchain, key injection during the task, network access, and required services |
+| Existing remote development machine with Docker | Hack's Compose workflow | Working Docker Engine and Compose, project dependencies, lifecycle hooks, routing needs |
+| Apple Silicon Mac testing v5 | Explicit native prerelease channel | Verified bundle, provider preparation, isolated native home, application acceptance |
 
-Hack publishes a portable slim image for managed containers:
+The native prerelease installer currently targets Apple Silicon macOS. It is not a
+Linux installer or a qualified nested-VM provisioning path. See
+[candidate installation](candidate-install.md) and
+[native candidate preparation](native-candidate.md). Do not use the unsupported
+Hack node/gateway/dispatch surface as a fallback.
 
-- Docker Hub: `hackdance/hack:slim`
-- GHCR: `ghcr.io/hack-dance/hack:slim`
+For an existing remote machine, establish its identity and the intended checkout
+before installation. Read `AGENTS.md`, inspect `git status --short`, and check
+`uname -s` and `uname -m`. Creating a cloud machine, publishing or sharing an
+environment, and making privileged host changes require authority for that target
+and effect. Ordinary setup should reuse the project's existing development path.
 
-Use it as a base image when you want `hack` and Bun preinstalled, then layer any project-specific
-toolchains on top. For example, a non-JS repo can extend the image and add Rust, Go, or other
-language runtimes without rebuilding the Hack bootstrap each time.
+## Select a CLI without replacing another channel
 
-## Codex remote example
+Use a reviewed absolute executable path throughout setup and verification. Check
+its `--version` and `--help`; do not assume the first `hack` on PATH is the desired
+version. An installed native candidate must use its channel launcher, for example
+`$HOME/.hack-next/bin/hack-next`. That launcher selects the verified executor and
+the version's private homes. Running its raw `hack-cli` binary is not equivalent.
 
-This is the intended baseline for a Codex-style remote environment:
+For a portable installation, select a published stable release that contains
+`hack-codex-install.sh` and the matching platform archive. Download and review the
+script from that same tag. This example uses a caller-supplied approved tag and a
+dedicated installation path:
 
-- base image: `hackdance/hack:slim`
-- repo checked out into the working directory
-- `HACK_ENV_SECRET_KEY` injected by the runtime or secret manager
-- repo-specific toolchains added on top as needed
-
-Example Dockerfile:
-
-```dockerfile
-FROM hackdance/hack:slim
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends \
-    build-essential \
-    pkg-config \
-    python3 \
-  && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /workspace
-```
-
-If your repo also needs Rust, Go, or Python packaging tools, add them in this layer rather than
-waiting for Hack to ship a universal image.
-
-Example setup script:
-
-```bash
+```sh
 set -euo pipefail
+: "${HACK_INSTALL_TAG:?Set the approved release tag before running this script}"
 
-bun install --frozen-lockfile || bun install
+curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  "https://github.com/hack-dance/hack/releases/download/${HACK_INSTALL_TAG}/hack-codex-install.sh" \
+  --output hack-codex-install.sh
 ```
 
-Example maintenance script:
+Review the downloaded script and the release's source and artifact identity before
+running it. Select unused dedicated destinations, or the same installation you
+intend to update:
 
-```bash
-set -euo pipefail
+```sh
+HACK_INSTALL_TAG="$HACK_INSTALL_TAG" \
+HACK_INSTALL_BIN="$HOME/.local/share/hack-portable/bin" \
+HACK_INSTALL_ASSETS="$HOME/.local/share/hack-portable/assets" \
+  bash ./hack-codex-install.sh
 
-bun install --frozen-lockfile || bun install
+hack_cli="$HOME/.local/share/hack-portable/bin/hack"
+"$hack_cli" --version
 ```
 
-Example runtime env injection:
+The portable installer downloads its platform archive over HTTPS; it does not
+implement the native prerelease installer's receipt, inventory, and signature
+checks. Use your environment's artifact verification policy. Do not point the
+portable installer at a native prerelease archive or claim that installing it also
+provisioned a VM.
 
-```bash
-export HACK_ENV_SECRET_KEY="..."
+The wrapper defaults to `HACK_EXECUTION_MODE=codex`, disables Docker event watching,
+and selects its installed assets. It does not need the Bun runtime to execute its
+compiled Hack CLI. Install the project's own toolchain separately. For a Bun
+project, use the repository's pinned Bun version and:
 
-hack env list --json --show-secrets
-hack host exec -- printenv DATABASE_URL
-hack host exec --scope api -- bun test
+```sh
+bun install --frozen-lockfile
 ```
 
-CI exercises this contract in `scripts/portable-container-smoke.sh`: it copies `examples/basic`
-into a temp fixture, seeds values with `hack env add`, removes the local `.hack.secret.key`,
-mounts the fixture into the CI-built slim image, injects `HACK_ENV_SECRET_KEY`, and verifies both
-`hack env list` and `hack host exec` resolve the committed env correctly.
+Resolve lockfile failures instead of silently running an unlocked install. Keep
+the same rule in maintenance scripts and when a new branch changes dependencies.
 
-Scripts and agents in containers should also set `HACK_NO_INTERACTIVE=1` (or pass
-`--no-interactive`): commands then fail fast with `E_INTERACTIVE_REQUIRED` instead of blocking on
-a prompt that can never be answered. Set `NO_COLOR=1` for log-clean output, and use the `--json`
-envelope (`{ok, data | error: {code, message}}`) on `up`/`down`/`restart`/`doctor` for CI
-assertions.
+Container systems that accept a custom base image can use a reviewed, pinned digest
+of `hackdance/hack:slim` or `ghcr.io/hack-dance/hack:slim`, then add project-specific
+tools. Do not assume that an arbitrary managed cloud environment accepts a custom
+image. The slim image includes Hack and Bun; it does not provide every language or
+application dependency.
 
-## What slim mode does
+## Inject the project key for the correct lifetime
 
-Slim mode is enabled by setting `HACK_EXECUTION_MODE=codex` or `HACK_EXECUTION_MODE=slim`.
+Hack resolves committed `.hack/hack.env.default.yaml`, overlays, and local
+overrides. A fresh independent checkout can receive its decryption key through
+`HACK_ENV_SECRET_KEY`. Use the target's approved secret manager or direct runtime
+injection; enter the value through the provider's secret UI, never through chat,
+command arguments, logs, or a checked-in setup script.
 
-It is designed to skip machine-level Hack surfaces:
+The key must be available to the Hack process that decrypts the env. Hack requires
+the actual key bytes. An HTTPS proxy secret placeholder cannot satisfy local
+decryption. Use non-production access for development and inspect variable names
+or masked metadata when checking configuration. Do not copy `.hack.secret.key` into
+images, shell profiles, prepared filesystem snapshots, or dependency caches. Do not
+save decrypted env to extend the lifetime of an injected key. See
+[Env & secrets](../env.md) for key precedence and linked-worktree behavior.
 
-- Caddy
-- CoreDNS
-- Loki
-- Grafana
-- local CA and TLS bootstrap
-- Docker event watching in `hackd`
+### Current Codex Cloud
 
-This mode is intentionally not a substitute for a full local workstation setup.
+Current Cloud records an Install script and Start skill; publication captures the
+prepared filesystem, and new tasks use it. Repository refresh preserves caches but
+does not rerun installation or startup. Review prepared files before publishing,
+then test a new task. See [Cloud environments](https://learn.chatgpt.com/docs/environments/cloud-environments).
 
-## Install from a release
+Request `HACK_ENV_SECRET_KEY` as a direct environment variable, preferably a
+personal value scoped to this environment. It is visible to programs in the task.
+Network secrets instead supply proxy placeholders for HTTPS requests, so they are
+unsuitable for this key. Configure and test required service access separately.
+See [environment variables and network secrets](https://learn.chatgpt.com/docs/environments/cloud-environments#configure-environment-variables-and-network-secrets).
 
-Run this in your managed Codex setup script:
+Put deterministic tool and dependency installation in the Install script. Put the
+selected CLI, env overlay, start command, and readiness check in the Start skill.
+Only publish or share when requested. Keep credentials out of prepared files.
 
-```bash
-curl -fsSL \
-  https://github.com/hack-dance/hack/releases/latest/download/hack-codex-install.sh \
-  | bash
+### Legacy Codex Cloud
+
+The [legacy environment guide](https://learn.chatgpt.com/docs/environments/cloud-environment)
+describes a different lifecycle: secrets are available only during setup and are
+removed before the agent phase. Setup exports do not persist. Cached containers
+can resume with an optional maintenance script.
+
+For this path, a setup-only key does not authorize or enable later decryption.
+Use a separately approved runtime injection mechanism or a secret-free task. Never
+write the key or decrypted values into cached files to work around the boundary.
+Report runtime credentials as unavailable until a fresh agent-phase check proves
+otherwise.
+
+## Verify env resolution without printing secrets
+
+The examples below assume `hack_cli` is the selected absolute executable and
+`project_root` is the intended absolute checkout. These are shell variables, not
+Hack configuration keys. Set `HACK_NO_INTERACTIVE=1` and `NO_COLOR=1` in the target
+command environment so unattended commands fail instead of hanging at prompts.
+
+Replace `DATABASE_URL` with a required key name from the project, and `default`
+with the intended non-production overlay. `env explain` reports provenance without
+the value. The child checks presence without printing it:
+
+```sh
+"$hack_cli" env explain DATABASE_URL --path "$project_root" --env default --json
+"$hack_cli" host exec --path "$project_root" --env default \
+  -- sh -c 'test -n "$DATABASE_URL"'
 ```
 
-The installer resolves the latest release tag, downloads the platform tarball, installs the
-binary and bundled assets under `~/.hack/` (override with `HACK_INSTALL_BIN`), and writes a thin
-`hack` wrapper with these defaults:
+For service-scoped values, add `--scope SERVICE` to `host exec` and
+`--service SERVICE` to `env explain`. Commands run on the current machine with
+Hack's resolved env. `host exec` defaults to host-oriented addresses;
+`--target compose` selects container-oriented values but does not enter or start a
+container. Run the repository's documented test or development command through
+`host exec` when it has a supported host workflow. Inspect that command's logging
+before providing real secrets.
 
-- `HACK_EXECUTION_MODE=codex`
-- `HACK_DAEMON_DISABLE_DOCKER_EVENTS=1`
-- `HACK_ASSETS_DIR` pointed at the installed assets
+Do not use `env get`, `env list --show-secrets`, `printenv`, or a shell env dump as a
+credential check. A presence check proves injection only; an application health
+check must prove that required services are reachable and credentials work.
 
-For reproducible CI, pin the release with `HACK_INSTALL_TAG` or `HACK_INSTALL_VERSION` (and
-`HACK_RELEASE_BASE_URL` for mirrors) instead of tracking `latest`.
+## Start only a supported runtime
 
-If you are already inside a container built from `hackdance/hack:slim`, Hack and Bun are already
-available with the same three mode defaults baked into the image env, and you can skip the
-installer entirely.
+For an existing Compose project, verify the target engine and Compose client:
 
-## Recommended setup script
-
-When you are not using the slim image:
-
-```bash
-set -euo pipefail
-
-mise install "bun@$(awk '/^bun /{print $2}' .tool-versions)"
-export PATH="$HOME/.local/share/mise/shims:$PATH"
-
-bun install
-curl -fsSL \
-  https://github.com/hack-dance/hack/releases/latest/download/hack-codex-install.sh \
-  | bash
+```sh
+docker info >/dev/null
+docker compose version
 ```
 
-When you are using the slim image as your base:
+These are capability checks; use Hack to start and manage the application's
+services. A missing engine is a provisioning requirement, not a reason to retry
+`hack up` or assume Docker-in-Docker or nested virtualization will work. Engine
+installation requires an authorized host setup. Likewise, installing the native
+candidate does not prepare its provider or activate routing/trust.
 
-```bash
-set -euo pipefail
+Once the chosen runtime is ready, inspect the project's lifecycle hooks for the
+remote target, then run:
 
-bun install --frozen-lockfile || bun install
+```sh
+"$hack_cli" up --detach --path "$project_root" --env default --json
+"$hack_cli" ps --path "$project_root" --json
 ```
 
-## Recommended maintenance script
+Use a bounded application health request and one meaningful development operation
+to verify readiness. A running container alone is insufficient. Machine-wide
+`hack global` operations and Loki-backed logs are unavailable in slim mode, which
+skips Caddy, CoreDNS, Loki, Grafana, local CA/TLS bootstrap, and daemon Docker event
+watching. A project that requires those surfaces needs the appropriate authorized
+host setup or its documented portable development path.
 
-When you are not using the slim image:
+Record the target, selected CLI path/version, overlay name, start/readiness result,
+and remaining gap without credentials. Preserve existing services and application
+data; cleanup applies only to resources this task owns and is authorized to remove.
 
-```bash
-set -euo pipefail
+## Contributor checks and current limits
 
-mise install "bun@$(awk '/^bun /{print $2}' .tool-versions)"
-export PATH="$HOME/.local/share/mise/shims:$PATH"
+`scripts/portable-container-smoke.sh` exercises an isolated synthetic project in a
+CI-built slim image: it injects a synthetic key after removing the fixture key
+file, then checks env resolution and host execution. Run it with:
 
-bun install --frozen-lockfile || bun install
-```
-
-When you are using the slim image as your base:
-
-```bash
-set -euo pipefail
-
-bun install --frozen-lockfile || bun install
-```
-
-If you are developing inside the Hack repo itself, the repo-local helpers are still available:
-
-```bash
-bash scripts/install-codex-slim.sh
-bash scripts/maintain-codex-slim.sh
-```
-
-## Good fit for slim mode
-
-- `hack env list`
-- `hack host exec`
-- `hack host shell`
-- repo-local docs, specs, and agent setup
-- command and config surfaces that do not require the machine-wide runtime stack
-
-If the repo uses the modern env overlay model, provide secret decryption material with
-`HACK_ENV_SECRET_KEY` instead of relying on a local `.hack.secret.key` file. (On a developer
-machine you rarely need this: linked worktrees inherit the key through the git common dir — the
-env var is for CI, containers, and detached checkouts. See [Env & secrets](../env.md).)
-
-```bash
-export HACK_ENV_SECRET_KEY="..."
-hack host exec --env qa --scope api -- bun db:migrate
-hack host exec --env qa --scope api --target compose -- bun test
-```
-
-That same pattern is the recommended portable-container contract:
-
-- mount or check out the repo normally
-- inject `HACK_ENV_SECRET_KEY` from the container runtime or secret manager
-- let Hack resolve `.hack/hack.env.default.yaml`, overlays, and worktree-local overrides at runtime
-
-Do not bake `.hack.secret.key` into the image.
-
-Portable smoke test:
-
-```bash
+```sh
 bun run smoke:portable-container
 ```
 
-`hack host exec` and `hack host shell` default to a host-local env view for host commands. Use
-`--scope` when you want service-scoped values without running inside that service container. Use
-`--target compose` when you explicitly want the container-oriented compose view instead. If you are
-checking a value, prefer `hack host exec -- printenv KEY` or
-`hack host exec -- sh -lc 'printf "%s\n" "$KEY"'`; plain `echo $KEY` expands in the parent shell
-before Hack injects env. Use `hack host exec --shell 'echo $KEY'` if you want Hack to start the
-child shell after env injection.
+This proves the portable env/host-command contract for that image. It does not
+prove Codex Cloud skill loading, secret lifetime in a real task, Docker availability
+there, or v5 native application startup on Linux.
 
-## Not available in slim mode
+For Hack contributors using a reviewed source checkout, the repo-local
+`scripts/install-codex-slim.sh` and `scripts/maintain-codex-slim.sh` are separate
+helpers. The source wrapper requires the pinned Bun runtime and references that
+checkout; it is not the compiled release installer. Use a dedicated destination
+when testing it beside another Hack version.
 
-The machine-wide `hack global` surface (install, up, down, status, trust, ca, cert, logs, and
-logs-reset) is slim-gated, along with explicit Loki-backed log paths such as `hack logs --loki`.
-
-When you need full remote runtime orchestration instead of repo-local agent workflows, the
-retained remote node container image exists — but note that the entire
-remote/node/gateway/dispatch surface is unsupported experimental in v3 (hidden behind
-`hack help --all`), not a supported product path.
+Automatic lightweight runtime provisioning on arbitrary fresh cloud machines,
+native Linux qualification, and a complete fresh Codex Cloud application run remain
+separate acceptance work. Report them explicitly rather than treating a successful
+CLI installation or env test as full application readiness.

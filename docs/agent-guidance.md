@@ -15,7 +15,14 @@ Do not ship provider model pins or copy global instruction packs into this plugi
 | `src/agents/onboarding-prompt.ts` | `hack agent onboard`, init handoff, and MCP onboarding prompt |
 | `src/agents/hack-init-skill.ts` | Thin Claude/Codex/plugin adapter that fetches onboarding guidance |
 | `src/agents/init-patterns.ts`, `init-assistant.ts` | Optional init inventory and pattern hints |
-| `scripts/generate-agent-plugins.ts` | Three plugin manifests, two skills, and Cursor rule |
+| `src/agents/install-skill.ts`, `remote-bootstrap-skill.ts` | Plugin installation/channel selection and fresh-host/cloud setup skills |
+| `scripts/generate-agent-plugins.ts` | Portable plugin/MCP manifests, three client compatibility manifests, four skills, and Cursor rule |
+
+The portable plugin manifest derives identity and effective OpenAI presentation
+from `.codex-plugin/plugin.json`; portable MCP derives from `.mcp.json` with an
+explicit transport. Keep launch selection identical across both formats. These
+plugin workflow skills complement the existing standalone setup; personal local
+plugin installation does not synchronize skills into a cloud repository.
 
 Consumer examples live under `examples/basic/`. Do not replace the root contributor
 baseline with a generated consumer snippet. Provider metadata and hook configuration

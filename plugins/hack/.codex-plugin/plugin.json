@@ -13,7 +13,7 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Hack",
-    "shortDescription": "Run local development through Hack",
+    "shortDescription": "Run projects with Hack",
     "longDescription": "Operate Hack-managed services, logs, environments, workspaces, and agent-assisted project onboarding from Codex.",
     "developerName": "Hack Dance LLC",
     "category": "Developer Tools",

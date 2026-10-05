@@ -5,10 +5,14 @@ import { join } from "node:path";
 
 import {
   generateAgentPlugins,
+  portableMcpManifest,
+  portablePluginManifest,
   renderPluginRule,
 } from "../scripts/generate-agent-plugins.ts";
 import { renderCodexSkill } from "../src/agents/codex-skill.ts";
 import { renderHackInitSkill } from "../src/agents/hack-init-skill.ts";
+import { renderHackInstallSkill } from "../src/agents/install-skill.ts";
+import { renderHackRemoteSkill } from "../src/agents/remote-bootstrap-skill.ts";
 
 const repoRoot = join(import.meta.dir, "..");
 
@@ -35,9 +39,21 @@ test("release generation applies the requested version to every client manifest"
     await mkdir(directory, { recursive: true });
     await Bun.write(
       join(directory, "plugin.json"),
-      JSON.stringify({ name: "hack", version: "0.0.0" })
+      JSON.stringify({
+        name: "hack",
+        version: "0.0.0",
+        interface: {
+          shortDescription: "Run projects with Hack",
+        },
+      })
     );
   }
+  await Bun.write(
+    join(pluginRoot, ".mcp.json"),
+    JSON.stringify({
+      mcpServers: { hack: { command: "hack", args: ["mcp", "serve"] } },
+    })
+  );
 
   await generateAgentPlugins({ repoRoot: tempDir, version: "9.8.7" });
 
@@ -47,6 +63,9 @@ test("release generation applies the requested version to every client manifest"
     ).json();
     expect(manifest.version).toBe("9.8.7");
   }
+  expect((await Bun.file(join(pluginRoot, "plugin.json")).json()).version).toBe(
+    "9.8.7"
+  );
 });
 
 test("semantic-release commits all generated client manifests", async () => {
@@ -70,6 +89,12 @@ test("bundled skills and rule match current canonical guidance", async () => {
   expect(await Bun.file(join(root, "skills/hack-init/SKILL.md")).text()).toBe(
     renderHackInitSkill()
   );
+  expect(
+    await Bun.file(join(root, "skills/hack-install/SKILL.md")).text()
+  ).toBe(renderHackInstallSkill());
+  expect(await Bun.file(join(root, "skills/hack-remote/SKILL.md")).text()).toBe(
+    renderHackRemoteSkill()
+  );
   expect(await Bun.file(join(root, "rules/hack.mdc")).text()).toBe(
     renderPluginRule()
   );
@@ -80,6 +105,71 @@ test("bundled skills and rule match current canonical guidance", async () => {
       join(root, `.${client}-plugin/plugin.json`)
     ).json();
     expect(manifest.version).toBe(pkg.version);
+  }
+  const portable = await Bun.file(join(root, "plugin.json")).json();
+  const overlay = await Bun.file(
+    join(root, ".codex-plugin/plugin.json")
+  ).json();
+  expect(portable.version).toBe(pkg.version);
+  expect(portable).toEqual(portablePluginManifest(overlay));
+  expect(await Bun.file(join(root, "mcp.json")).json()).toEqual(
+    portableMcpManifest(await Bun.file(join(root, ".mcp.json")).json())
+  );
+});
+
+test("portable presentation preserves prompts and effective OpenAI hooks and apps", () => {
+  const prompts = ["Start a project", "Set up a project", "Diagnose a project"];
+  const manifest = portablePluginManifest({
+    name: "hack",
+    version: "1.2.3",
+    description: "Test",
+    skills: "./skills/",
+    mcpServers: "./.mcp.json",
+    hooks: "./hooks/hooks.json",
+    apps: "./.app.json",
+    interface: {
+      shortDescription: "Run projects with Hack",
+      defaultPrompt: prompts,
+    },
+  });
+  expect(manifest).not.toHaveProperty("skills");
+  expect(manifest).not.toHaveProperty("mcpServers");
+  expect(manifest).not.toHaveProperty("interface");
+  expect(manifest).not.toHaveProperty("hooks");
+  expect(manifest).not.toHaveProperty("apps");
+  expect(manifest.extensions).toEqual({
+    "com.openai": {
+      hooks: "./hooks/hooks.json",
+      apps: "./.app.json",
+      interface: {
+        shortDescription: "Run projects with Hack",
+        defaultPrompt: prompts,
+      },
+    },
+  });
+  expect(() =>
+    portablePluginManifest({ interface: { shortDescription: "x".repeat(31) } })
+  ).toThrow("30 characters");
+});
+
+test("portable MCP preserves selection and rejects ambiguous transports", () => {
+  const server = {
+    command: "/example/hack-next",
+    args: ["mcp", "serve"],
+    env: { HACK_NO_INTERACTIVE: "1" },
+  };
+  expect(portableMcpManifest({ mcpServers: { hack: server } })).toHaveProperty(
+    "mcpServers.hack",
+    { ...server, type: "stdio" }
+  );
+  for (const invalid of [
+    null,
+    [],
+    { mcpServers: [] },
+    { mcpServers: { hack: { ...server, url: "https://example.com" } } },
+    { mcpServers: { hack: { ...server, type: "streamable-http" } } },
+  ]) {
+    expect(() => portableMcpManifest(invalid)).toThrow();
   }
 });
 
@@ -118,6 +208,9 @@ test("release preparation updates both manifests and rendered guidance after bum
     ).json();
     expect(manifest.version).toBe("9.8.7");
   }
+  expect(
+    (await Bun.file(join(tempDir, "plugins/hack/plugin.json")).json()).version
+  ).toBe("9.8.7");
   const skill = await Bun.file(
     join(tempDir, "plugins/hack/skills/hack-cli/SKILL.md")
   ).text();

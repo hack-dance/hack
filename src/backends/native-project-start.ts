@@ -6,6 +6,7 @@ import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import {
   acquireNativeHttpsLease,
+  NativeHttpsLeaseAcquisitionError,
   type NativeHttpsLeaseIdentity,
   recoverNativeHttpsLease,
 } from "./native-https-owner.ts";
@@ -225,6 +226,7 @@ type Dependencies = {
   serve: typeof serveNativeProjectGraph;
   https: typeof acquireNativeHttpsLease;
   recoverHttps: typeof recoverNativeHttpsLease;
+  cleanupTemporary: (directory: string) => Promise<void>;
   invoke: typeof invokeNativeRuntime;
   load: typeof loadNativeProjectRun;
   loadRestart: typeof loadNativeRestartIntent;
@@ -244,6 +246,8 @@ const DEFAULTS: Dependencies = {
   serve: serveNativeProjectGraph,
   https: acquireNativeHttpsLease,
   recoverHttps: recoverNativeHttpsLease,
+  cleanupTemporary: (directory) =>
+    rm(directory, { recursive: true, force: true }),
   invoke: invokeNativeRuntime,
   load: loadNativeProjectRun,
   loadRestart: loadNativeRestartIntent,
@@ -740,6 +744,18 @@ async function retireRemovedMapping(opts: {
     await opts.remove({ ...opts.scope, expected: opts.mapping });
   }
 }
+function httpsCleanupFailure(acquisition: unknown, cleanup: unknown): unknown {
+  if (
+    acquisition instanceof NativeHttpsLeaseAcquisitionError &&
+    acquisition !== cleanup
+  ) {
+    return new NativeHttpsLeaseAcquisitionError(acquisition.identity, {
+      startupFailure: acquisition.startupFailure,
+      cleanupUnconfirmed: true,
+    });
+  }
+  return cleanup;
+}
 async function acknowledgeFinalization(
   finalization:
     | Awaited<ReturnType<typeof beginNativeProjectFinalization>>
@@ -901,6 +917,7 @@ export async function startNativeProject(opts: {
     | undefined;
   let graphCleanupConfirmed = false;
   let httpsCleanupConfirmed = false;
+  let httpsAcquisitionFailure: unknown;
   try {
     if (opts.signal?.aborted) {
       cancel();
@@ -1177,6 +1194,9 @@ export async function startNativeProject(opts: {
                       });
                       mapping = persistedMapping;
                     },
+                  }).catch((error: unknown) => {
+                    httpsAcquisitionFailure = error;
+                    throw error;
                   });
                   void https.exited.then(() => {
                     if (!httpsClosing) {
@@ -1270,20 +1290,26 @@ export async function startNativeProject(opts: {
             }
             httpsCleanupConfirmed = true;
           } finally {
-            await rm(directory, { recursive: true, force: true });
+            await deps.cleanupTemporary(directory);
           }
         }
       },
     });
+  } catch (error) {
+    throw httpsCleanupFailure(httpsAcquisitionFailure, error);
   } finally {
     process.off("SIGINT", cancel);
     process.off("SIGTERM", terminate);
     opts.signal?.removeEventListener("abort", cancel);
-    await hooks?.cleanup();
+    await hooks?.cleanup().catch((error: unknown) => {
+      throw httpsCleanupFailure(httpsAcquisitionFailure, error);
+    });
     await acknowledgeFinalization(
       finalization,
       graphCleanupConfirmed,
       httpsCleanupConfirmed
-    );
+    ).catch((error: unknown) => {
+      throw httpsCleanupFailure(httpsAcquisitionFailure, error);
+    });
   }
 }

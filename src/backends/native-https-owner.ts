@@ -37,6 +37,10 @@ import {
   nativeHttpsWriteNew,
 } from "./native-https-owner-storage.ts";
 import {
+  NativeHttpsStartupError,
+  readNativeHttpsStartupFailure,
+} from "./native-https-startup-failure.ts";
+import {
   inspectActiveNativeHttpsOwner,
   verifyActiveNativeHttpsConnection,
   verifyNativeHttpsHostname,
@@ -82,11 +86,23 @@ export interface NativeHttpsAcquireOptions {
 }
 export class NativeHttpsLeaseAcquisitionError extends Error {
   readonly identity: NativeHttpsLeaseIdentity;
-  constructor(identity: NativeHttpsLeaseIdentity) {
+  readonly startupFailure: NativeHttpsStartupError | undefined;
+  constructor(
+    identity: NativeHttpsLeaseIdentity,
+    opts?: {
+      readonly startupFailure?: unknown;
+      readonly cleanupUnconfirmed?: true;
+    }
+  ) {
+    const startupFailure =
+      opts?.startupFailure instanceof NativeHttpsStartupError
+        ? new NativeHttpsStartupError("frontend-start", opts.startupFailure)
+        : undefined;
     super(
-      "Shared native HTTPS acquisition is uncertain; use the retained exact lease identity after graph cleanup."
+      `Shared native HTTPS acquisition is uncertain; use the retained exact lease identity after graph cleanup.${startupFailure ? ` ${startupFailure.message}` : ""}${opts?.cleanupUnconfirmed ? " Native startup cleanup is unconfirmed; retained ownership evidence was kept." : ""}`
     );
     this.identity = identity;
+    this.startupFailure = startupFailure;
   }
 }
 
@@ -253,6 +269,10 @@ async function endpointFor(
   ) {
     throw nativeHttpsOwnerRefused();
   }
+  const startupFailure = await readNativeHttpsStartupFailure(configuration);
+  if (startupFailure) {
+    throw startupFailure;
+  }
   const { bytes } = await nativeHttpsReadFile(
     join(
       nativeHttpsOwnerRoot(configuration.binding.runtime.home),
@@ -418,8 +438,8 @@ export async function acquireNativeHttpsLease(
   let socket: Socket;
   try {
     socket = await connectNativeHttpsOwner(configuration);
-  } catch {
-    throw new NativeHttpsLeaseAcquisitionError(intended);
+  } catch (startupFailure) {
+    throw new NativeHttpsLeaseAcquisitionError(intended, { startupFailure });
   }
   const exited = new Promise<{ component: string; code: number }>((resolve) => {
     socket.once("close", () =>

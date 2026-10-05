@@ -26,6 +26,7 @@ import {
   verifyActiveNativeHttpsConnection,
   verifyNativeHttpsHostname,
 } from "../src/backends/native-project-https.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { CURRENT_CA_PEM, OLD_CA_PEM } from "./helpers/ca-certificates.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -410,7 +411,7 @@ test("owner socket preparation failure retires only its bound socket and lock", 
         },
       },
     })
-  ).rejects.toThrow("ownership verification failed");
+  ).rejects.toThrow("startup failed (owner-challenge)");
   expect(f.children).toHaveLength(0);
   await expect(
     access(join(f.root, "native-https/owner.lock"))
@@ -856,4 +857,32 @@ test("HTTPS headers permit unrelated duplicates but keep Location unambiguous", 
       "HTTP/1.1 307 Redirect\r\nLocation: /health\r\nLOCATION: /health\r\n\r\n"
     )
   ).toThrow();
+});
+
+test("initial authority observation retains a safe startup stage without retrying the request", async () => {
+  const f = await fixture();
+  let calls = 0;
+  const invoke = async () => {
+    calls++;
+    throw new NativeRuntimeRequestError({
+      message: "private native stderr",
+      nativeCode: "provider_busy",
+    });
+  };
+  let failure: unknown;
+  try {
+    await startNativeProjectHttps({
+      ...f.opts,
+      dependencies: { ...f.opts.dependencies, invoke },
+    });
+  } catch (error) {
+    failure = error;
+  }
+  expect(String(failure)).toContain("authority-observation: provider_busy");
+  expect(String(failure)).not.toContain("private");
+  expect(calls).toBe(1);
+  expect(f.children).toHaveLength(0);
+  await expect(
+    access(join(f.root, "native-https/owner.lock"))
+  ).rejects.toThrow();
 });

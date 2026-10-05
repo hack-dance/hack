@@ -99,7 +99,26 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       },
     });
   } catch (error: unknown) {
+    const sensitiveError = resolveSensitiveOutputError(argv);
+    if (sensitiveError !== undefined) {
+      // Never echo parser/backend errors: these may contain values or ciphertext.
+      process.stderr.write(`${sensitiveError}\n`);
+      return 1;
+    }
     return await handleRunCliError({ error, jsonRequested });
+  }
+}
+
+/** Recover command identity even when strict parsing rejected its arguments. */
+function resolveSensitiveOutputError(
+  argv: readonly string[]
+): string | undefined {
+  try {
+    const parsed = parseCliArgv(CLI_SPEC, argv, { allowUnknownOptions: true });
+    return resolveCommand(CLI_SPEC, parsed.positionals).command
+      ?.sensitiveOutputError;
+  } catch {
+    return undefined;
   }
 }
 

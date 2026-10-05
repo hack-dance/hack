@@ -28,6 +28,7 @@ import {
   resolveEnvFilePath,
   resolveEnvSecretKey,
   resolveHackEnv,
+  resolveHackEnvValue,
   selectHackEnvValues,
   upsertDotEnvValue,
   validateHackEnvMutationSource,
@@ -63,6 +64,7 @@ import {
   projectEnvConfigExists,
   readMaterializedProjectEnv,
   resolveProjectEnvConfig,
+  resolveProjectEnvValue,
   selectProjectEnvValues,
   selectProjectEnvValuesForExecutionTarget,
   setProjectEnvValue,
@@ -192,6 +194,19 @@ const listSpec = defineCommand({
   options: [optPath, optProject, optEnv, optJson, optShowSecrets, optService],
   positionals: [],
   subcommands: [],
+} as const);
+
+const getSpec = defineCommand({
+  name: "get",
+  summary: "Print one resolved env value without an added newline",
+  description:
+    "Read one global or service value without starting a runtime. Empty values succeed; missing values fail. Omit --env to use the configured default, or use --env default for base layers. Plaintext is written only to stdout; errors go to stderr.",
+  group: "Project",
+  options: [optPath, optProject, optEnv, optService],
+  positionals: [{ name: "key", required: true }],
+  subcommands: [],
+  sensitiveOutputError:
+    "Unable to read env value. Check the key, arguments, project env configuration, and key/backend access. Use hack env get --help for usage.",
 } as const);
 
 const explainSpec = defineCommand({
@@ -974,6 +989,56 @@ async function promptForEnvAddInput(input: {
     value: valuePrompt,
   };
 }
+
+const handleEnvGet: CommandHandlerFor<typeof getSpec> = async ({
+  ctx,
+  args,
+}) => {
+  const key = args.positionals.key;
+  if (!ENV_KEY_PATTERN.test(key)) {
+    throw new CliUsageError("Invalid env key");
+  }
+  const scope = assertValidProjectEnvScopeName({
+    scopeName: args.options.service,
+  });
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const envName = resolveRequestedEnvName({ envOption: args.options.env });
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: project.composeFile,
+  });
+  const modern = await resolveProjectEnvValue({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    envName,
+    serviceNames,
+    scope,
+    key,
+  });
+  const value =
+    modern === null
+      ? await resolveHackEnvValue({
+          projectDir: project.projectDir,
+          projectName: await resolveProjectName(project),
+          envName,
+          scope,
+          key,
+        })
+      : modern.value;
+  if (value === null) {
+    process.stderr.write(
+      "Env value is not set in the selected scope and overlay.\n"
+    );
+    return 1;
+  }
+  // This command is an explicit single-value disclosure. Do not log, decorate,
+  // trim, materialize, or add a newline; empty values are successful zero bytes.
+  process.stdout.write(value);
+  return 0;
+};
 
 const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
   ctx,
@@ -2403,6 +2468,7 @@ export const envCommand = defineCommand({
   positionals: [],
   subcommands: [
     withHandler(listSpec, handleEnvList),
+    withHandler(getSpec, handleEnvGet),
     withHandler(explainSpec, handleEnvExplain),
     withHandler(applySpec, handleEnvApply),
     withHandler(addSpec, handleEnvAdd),

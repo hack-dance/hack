@@ -2092,6 +2092,7 @@ hack env <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack env list` | List resolved env values for the selected overlay |
+| `hack env get <key>` | Print one resolved env value without an added newline |
 | `hack env explain <key>` | Explain a resolved env value without revealing it |
 | `hack env apply` | Recreate one service with its resolved env |
 | `hack env add [key] [value]` | Add or update an env value |
@@ -2129,6 +2130,36 @@ hack env list [options]
 | `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
 | `--json` | Output JSON (machine-readable) |
 | `--show-secrets` | Print secret values (keychain) in plaintext |
+| `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack env get <key>`
+
+Print one resolved env value without an added newline
+
+### Usage
+
+```bash
+hack env get <key> [options]
+```
+
+Read one global or service value without starting a runtime. Empty values succeed; missing values fail. Omit --env to use the configured default, or use --env default for base layers. Plaintext is written only to stdout; errors go to stderr.
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `key` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

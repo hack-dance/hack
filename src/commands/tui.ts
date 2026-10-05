@@ -3,7 +3,8 @@ import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optPath, optProject } from "../cli/options.ts";
 import type { ProjectContext } from "../lib/project.ts";
-import { findProjectContext, sanitizeProjectSlug } from "../lib/project.ts";
+import { findProjectContext } from "../lib/project.ts";
+import { normalizeProjectName } from "../lib/project-name.ts";
 import {
   resolveRegisteredProjectByName,
   upsertProjectRegistration,
@@ -54,13 +55,13 @@ async function resolveProjectForArgs(opts: {
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
 }): Promise<ProjectContext> {
-  if (opts.pathOpt && opts.projectOpt) {
+  if (opts.pathOpt && opts.projectOpt !== undefined) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
 
-  if (opts.projectOpt) {
-    const name = sanitizeProjectSlug(opts.projectOpt);
-    if (name.length === 0) {
+  if (opts.projectOpt !== undefined) {
+    const name = normalizeProjectName(opts.projectOpt);
+    if (!name) {
       throw new CliUsageError("Invalid --project value.");
     }
     const fromRegistry = await resolveRegisteredProjectByName({ name });

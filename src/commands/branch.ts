@@ -23,8 +23,8 @@ import {
   resolveProjectOauthAliasHost,
   resolveProjectRouteBaseHosts,
   sanitizeBranchSlug,
-  sanitizeProjectSlug,
 } from "../lib/project.ts";
+import { normalizeProjectName } from "../lib/project-name.ts";
 import {
   resolveRegisteredProjectByName,
   upsertProjectRegistration,
@@ -347,13 +347,13 @@ async function resolveProjectForArgs(opts: {
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
 }): Promise<ProjectContext> {
-  if (opts.pathOpt && opts.projectOpt) {
+  if (opts.pathOpt && opts.projectOpt !== undefined) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
 
-  if (opts.projectOpt) {
-    const name = sanitizeProjectSlug(opts.projectOpt);
-    if (name.length === 0) {
+  if (opts.projectOpt !== undefined) {
+    const name = normalizeProjectName(opts.projectOpt);
+    if (!name) {
       throw new CliUsageError("Invalid --project value.");
     }
     const fromRegistry = await resolveRegisteredProjectByName({ name });

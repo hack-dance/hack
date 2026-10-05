@@ -17,6 +17,10 @@ import { getString, isRecord } from "./guards.ts";
 import type { ProjectContext, ProjectDirName } from "./project.ts";
 import { defaultProjectSlugFromPath, readProjectConfig } from "./project.ts";
 import {
+  AmbiguousProjectNameError,
+  normalizeProjectName,
+} from "./project-name.ts";
+import {
   withProjectsRegistryLock,
   writeProjectsRegistryAtomic,
 } from "./projects-registry-lock.ts";
@@ -106,7 +110,7 @@ export async function upsertProjectRegistration(opts: {
 
   const cfg = await readProjectConfig(opts.project);
   const derivedName = defaultProjectSlugFromPath(repoRootReal);
-  const name = sanitizeProjectName(cfg.name ?? derivedName);
+  const name = requireProjectName(cfg.name ?? derivedName);
   const devHost = cfg.devHost?.trim();
   const gitBranch = await resolveGitCurrentBranch({ repoRoot: repoRootReal });
 
@@ -202,10 +206,14 @@ async function readFreshRegistration(opts: {
     tryRealpath(opts.project.projectDir),
     tryRealpath(opts.project.projectRoot),
   ]);
-  const name = sanitizeProjectName(
+  const name = requireProjectName(
     cfg.name ?? defaultProjectSlugFromPath(repoRoot)
   );
-  for (const entry of registry.projects) {
+  const matches = matchingNames(registry.projects, name);
+  if (matches.length !== 1) {
+    return null;
+  }
+  for (const entry of matches) {
     if (
       entry.name !== name ||
       entry.devHost !== cfg.devHost?.trim() ||
@@ -244,11 +252,17 @@ export async function resolveRegisteredProjectByName(opts: {
   readonly registryPath?: string;
   readonly name: string;
 }): Promise<ProjectContext | null> {
-  const name = sanitizeProjectName(opts.name);
+  const name = normalizeProjectName(opts.name);
+  if (!name) {
+    return null;
+  }
   const registry = await readProjectsRegistry({
     registryPath: opts.registryPath,
   });
-  const match = registry.projects.find((p) => p.name === name) ?? null;
+  const match = selectRegisteredProjectByName({
+    projects: registry.projects,
+    name,
+  });
   if (!match) {
     return null;
   }
@@ -273,6 +287,22 @@ export async function resolveRegisteredProjectByName(opts: {
     envFile,
     configFile,
   };
+}
+
+/** Select one canonical name/legacy alias without filtering out stale contenders. */
+export function selectRegisteredProjectByName(opts: {
+  readonly projects: readonly RegisteredProject[];
+  readonly name: string;
+}): RegisteredProject | null {
+  const name = normalizeProjectName(opts.name);
+  if (!name) {
+    return null;
+  }
+  const matches = matchingNames(opts.projects, name);
+  if (matches.length > 1) {
+    throw new AmbiguousProjectNameError(name);
+  }
+  return matches[0] ?? null;
 }
 
 export async function resolveRegisteredProjectById(opts: {
@@ -415,7 +445,8 @@ function parseProject(value: unknown): RegisteredProject | null {
 
   return {
     id,
-    name: sanitizeProjectName(name),
+    // Preserve the legacy spelling until an unambiguous owned upsert migrates it.
+    name: name.trim().toLowerCase(),
     repoRoot,
     projectDirName,
     projectDir,
@@ -495,12 +526,42 @@ async function withRegistryLock<T>(
   return await withProjectsRegistryLock({ lockPath, run: fn, ...opts });
 }
 
-function sanitizeProjectName(name: string): string {
-  const trimmed = name.trim();
-  if (trimmed.length === 0) {
-    return "project";
+function requireProjectName(input: string): string {
+  const name = normalizeProjectName(input);
+  if (!name) {
+    throw new Error(
+      "Invalid project name: use a name containing letters or digits."
+    );
   }
-  return trimmed.toLowerCase();
+  return name;
+}
+
+function matchingNames(projects: readonly RegisteredProject[], name: string) {
+  return projects.filter(
+    (project) => normalizeProjectName(project.name) === name
+  );
+}
+
+function registrationConflict(opts: {
+  readonly existing: RegisteredProject;
+  readonly incoming: Pick<
+    RegisteredProject,
+    "name" | "projectDir" | "repoRoot"
+  >;
+}) {
+  return {
+    project: opts.existing,
+    status: {
+      status: "conflict" as const,
+      conflictName: opts.incoming.name,
+      existing: opts.existing,
+      incoming: {
+        name: opts.incoming.name,
+        projectDir: opts.incoming.projectDir,
+        repoRoot: opts.incoming.repoRoot,
+      },
+    },
+  };
 }
 
 function computeId(opts: {
@@ -562,32 +623,19 @@ async function upsertInMemory(opts: {
   const incoming = opts.incoming;
   const current = [...opts.current.projects];
 
-  const byName = new Map(current.map((p) => [p.name, p] as const));
-  const byDir = new Map(current.map((p) => [p.projectDir, p] as const));
-
-  const existingByDir = byDir.get(incoming.projectDir) ?? null;
-  const existingByName = byName.get(incoming.name) ?? null;
+  const byName = matchingNames(current, incoming.name);
+  const byDir = current.filter((p) => p.projectDir === incoming.projectDir);
+  const ambiguous = byName[1] ?? byDir[1];
+  if (ambiguous) {
+    return registrationConflict({ existing: ambiguous, incoming });
+  }
+  const existingByDir = byDir[0] ?? null;
+  const existingByName = byName[0] ?? null;
 
   // 1) Same directory already registered → update name/devHost/lastSeen.
   if (existingByDir) {
-    if (
-      existingByDir.name !== incoming.name &&
-      existingByName &&
-      !isSameProject(existingByName, incoming)
-    ) {
-      return {
-        project: existingByDir,
-        status: {
-          status: "conflict",
-          conflictName: incoming.name,
-          existing: existingByName,
-          incoming: {
-            name: incoming.name,
-            projectDir: incoming.projectDir,
-            repoRoot: incoming.repoRoot,
-          },
-        },
-      };
+    if (existingByName && !isSameProject(existingByName, incoming)) {
+      return registrationConflict({ existing: existingByName, incoming });
     }
 
     const prunedWorktrees = await pruneWorktreeEntries(existingByDir.worktrees);
@@ -612,7 +660,7 @@ async function upsertInMemory(opts: {
     };
   }
 
-  // 2) Name already registered → either move (old path missing) or conflict.
+  // 2) Only a proven Git worktree family may share or move a registered identity.
   if (existingByName) {
     const oldMissing = await isPathLikelyMissing(existingByName.projectDir);
     const sameRepositoryFamily = await isSameRepositoryFamily({
@@ -628,7 +676,10 @@ async function upsertInMemory(opts: {
           lastSeenAt: opts.nowIso,
         },
       });
-      if (nextWorktrees === existingByName.worktrees) {
+      if (
+        nextWorktrees === existingByName.worktrees &&
+        existingByName.name === incoming.name
+      ) {
         return {
           project: existingByName,
           status: {
@@ -640,6 +691,7 @@ async function upsertInMemory(opts: {
 
       const withWorktrees: RegisteredProject = {
         ...existingByName,
+        name: incoming.name,
         ...(nextWorktrees && nextWorktrees.length > 0
           ? { worktrees: nextWorktrees }
           : {}),
@@ -654,24 +706,13 @@ async function upsertInMemory(opts: {
       };
     }
 
-    if (!oldMissing) {
-      return {
-        project: existingByName,
-        status: {
-          status: "conflict",
-          conflictName: incoming.name,
-          existing: existingByName,
-          incoming: {
-            name: incoming.name,
-            projectDir: incoming.projectDir,
-            repoRoot: incoming.repoRoot,
-          },
-        },
-      };
+    if (!(oldMissing && sameRepositoryFamily)) {
+      return registrationConflict({ existing: existingByName, incoming });
     }
 
     const moved: RegisteredProject = {
       ...existingByName,
+      name: incoming.name,
       repoRoot: incoming.repoRoot,
       projectDirName: incoming.projectDirName,
       projectDir: incoming.projectDir,

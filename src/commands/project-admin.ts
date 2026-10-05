@@ -8,6 +8,7 @@ import {
   readProjectConfig,
   sanitizeProjectSlug,
 } from "../lib/project.ts";
+import { normalizeProjectName } from "../lib/project-name.ts";
 import { resolveRegisteredProjectByName } from "../lib/projects-registry.ts";
 import { display } from "../ui/display.ts";
 
@@ -98,13 +99,13 @@ async function resolveProjectTarget(input: {
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
 }) {
-  if (input.pathOpt && input.projectOpt) {
+  if (input.pathOpt && input.projectOpt !== undefined) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
 
-  if (input.projectOpt) {
-    const name = sanitizeProjectSlug(input.projectOpt);
-    if (name.length === 0) {
+  if (input.projectOpt !== undefined) {
+    const name = normalizeProjectName(input.projectOpt);
+    if (!name) {
       throw new CliUsageError("Invalid --project value.");
     }
     const project = await resolveRegisteredProjectByName({ name });

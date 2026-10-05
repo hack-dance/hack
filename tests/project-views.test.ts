@@ -627,3 +627,32 @@ test("buildProjectViews tolerates missing optional mux binaries", async () => {
     await rm(emptyPathDir, { recursive: true, force: true });
   }
 });
+
+test("project views accept an unambiguous legacy alias without rewriting runtime identity", async () => {
+  const legacy = await createProject({ name: "my_app", services: [] });
+  const runtime = makeRuntimeProject({
+    name: "original_runtime",
+    containersByService: {},
+    workingDir: legacy.projectDir,
+  });
+  const views = await buildProjectViews({
+    registryProjects: [legacy],
+    runtime: [runtime],
+    runtimeOk: true,
+    filter: "my-app",
+    includeUnregistered: true,
+  });
+  expect(views).toHaveLength(1);
+  expect(views[0]?.name).toBe("my_app");
+  expect(views[0]?.runtime?.project).toBe("original_runtime");
+  const other = await createProject({ name: "my-app", services: [] });
+  await expect(
+    buildProjectViews({
+      registryProjects: [legacy, other],
+      runtime: [],
+      runtimeOk: true,
+      filter: "my_app",
+      includeUnregistered: true,
+    })
+  ).rejects.toThrow("Ambiguous project name");
+});

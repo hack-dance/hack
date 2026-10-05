@@ -22,6 +22,11 @@ import {
 import { findProjectContext } from "../lib/project.ts";
 import { type ProjectMeta, resolveProjectMeta } from "../lib/project-meta.ts";
 import {
+  AmbiguousProjectNameError,
+  normalizeProjectName,
+} from "../lib/project-name.ts";
+import { assertPruneRuntimeOwnership } from "../lib/project-prune-ownership.ts";
+import {
   findMissingRegistryEntries,
   findOrphanRuntimeProjects,
   type OrphanedRuntimeProject,
@@ -37,6 +42,7 @@ import {
   type RegisteredProject,
   readProjectsRegistry,
   removeProjectsById,
+  selectRegisteredProjectByName,
   touchProjectRegistration,
 } from "../lib/projects-registry.ts";
 import type {
@@ -278,21 +284,20 @@ const handlePrune: CommandHandlerFor<typeof pruneSpec> = async ({
   const includeGlobal = args.options.includeGlobal === true;
   const json = args.options.json === true;
   const registry = await readProjectsRegistry();
-  const candidates = await collectPruneRegistryCandidates({
-    projects: filterPruneRegistryProjects({
-      projects: registry.projects,
-      filter,
-    }),
+  const projects = filterPruneRegistryProjects({
+    projects: registry.projects,
+    filter,
   });
+  const candidates = await collectPruneRegistryCandidates({ projects });
 
   const runtimeResult = await readRuntimeProjects({ includeGlobal });
+  const runtime = filterPruneRuntimeProjects({
+    runtime: runtimeResult.runtime,
+    filter,
+  });
+  await assertPruneRuntimeOwnership({ projects, runtime });
   const orphaned = runtimeResult.ok
-    ? await findOrphanRuntimeProjects({
-        runtime: filterPruneRuntimeProjects({
-          runtime: runtimeResult.runtime,
-          filter,
-        }),
-      })
+    ? await findOrphanRuntimeProjects({ runtime })
     : [];
   const orphanedContainerCount = orphaned.reduce(
     (sum, entry) => sum + entry.containerIds.length,
@@ -464,6 +469,12 @@ async function runProjects(opts: {
 }): Promise<number> {
   const profiler = opts.profiler ?? createOperationTimings();
   const started = opts.started ?? performance.now();
+  if (opts.filter) {
+    selectRegisteredProjectByName({
+      projects: (await readProjectsRegistry()).projects,
+      name: opts.filter,
+    });
+  }
   const daemonRuntimeMeta =
     opts.json || opts.noDaemon ? null : await readDaemonRuntimeRecoveryMeta();
 
@@ -1256,7 +1267,11 @@ function formatRuntimeMeta(opts: {
 }
 
 function sanitizeName(value: string): string {
-  return value.trim().toLowerCase();
+  const name = normalizeProjectName(value);
+  if (!name) {
+    throw new CliUsageError("Invalid --project value.");
+  }
+  return name;
 }
 
 function filterPruneRegistryProjects(opts: {
@@ -1264,24 +1279,46 @@ function filterPruneRegistryProjects(opts: {
   readonly filter: string | null;
 }): readonly RegisteredProject[] {
   if (!opts.filter) {
+    for (const project of opts.projects) {
+      selectRegisteredProjectByName({
+        projects: opts.projects,
+        name: project.name,
+      });
+    }
     return opts.projects;
   }
-  return opts.projects.filter(
-    (project) => sanitizeName(project.name) === opts.filter
-  );
+  const project = selectRegisteredProjectByName({
+    projects: opts.projects,
+    name: opts.filter,
+  });
+  return project ? [project] : [];
 }
 
 function filterPruneRuntimeProjects(opts: {
   readonly runtime: readonly RuntimeProject[];
   readonly filter: string | null;
 }): readonly RuntimeProject[] {
-  if (!opts.filter) {
-    return opts.runtime;
+  const matching = opts.filter
+    ? opts.runtime.filter(
+        (project) =>
+          normalizeProjectName(project.project.split("--")[0] ?? "") ===
+          opts.filter
+      )
+    : opts.runtime;
+  const bases = new Map<string, string>();
+  for (const project of matching) {
+    const base = project.project.split("--")[0] ?? "";
+    const name = normalizeProjectName(base);
+    if (!name) {
+      continue;
+    }
+    const previous = bases.get(name);
+    if (previous !== undefined && previous !== base) {
+      throw new AmbiguousProjectNameError(name);
+    }
+    bases.set(name, base);
   }
-  return opts.runtime.filter((project) => {
-    const name = sanitizeName(project.project);
-    return name === opts.filter || name.startsWith(`${opts.filter}--`);
-  });
+  return matching;
 }
 
 function readNumberField(opts: {

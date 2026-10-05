@@ -18,6 +18,7 @@ import {
   parseOpenHostPreference,
 } from "./open-host.ts";
 import { findUpFile } from "./path.ts";
+import { normalizeProjectName } from "./project-name.ts";
 
 export type ProjectDirName =
   | typeof HACK_PROJECT_DIR_PRIMARY
@@ -84,14 +85,7 @@ export async function findRepoRootForInit(startDir: string): Promise<string> {
 }
 
 export function sanitizeProjectSlug(input: string): string {
-  const trimmed = input.trim().toLowerCase();
-  const replaced = trimmed
-    .replaceAll("_", "-")
-    .replaceAll(" ", "-")
-    .replaceAll("/", "-");
-  const cleaned = replaced.replaceAll(/[^a-z0-9-]/g, "");
-  const collapsed = cleaned.replaceAll(/-+/g, "-").replaceAll(/^-|-$/g, "");
-  return collapsed.length > 0 ? collapsed : "project";
+  return normalizeProjectName(input) ?? "project";
 }
 
 export function normalizeEnvConfigName(input: string): string | null {

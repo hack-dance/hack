@@ -36,6 +36,22 @@ to compare a manually observed browser failure with a verified CLI HTTPS request
 See [macOS browser connectivity](guides/macos-browser-network.md) for supported
 observations, Local Network permission guidance and the required browser recheck.
 
+Project names in the registry and `--project`/MCP selectors use the same lowercase,
+hyphenated key: for example, `my_app` selects `my-app`. Existing registry spellings
+remain readable aliases; a later registration of that checkout canonicalizes the
+name while preserving its project ID. This does not rename Compose projects,
+volumes, hosts or the name in project configuration.
+
+If multiple registrations share a canonical name, selection refuses all aliases,
+including an exact spelling. Inspect `hack projects` and use `--path` to address a
+specific checkout before renaming or pruning the conflicting registration. A
+missing checkout does not authorize another repository to take over its identity;
+automatic relocation requires proof that both checkouts belong to the same Git
+worktree family. Independent clones remain separate even when their remotes match.
+Prune also refuses colliding aliases without a project filter, and checks runtime
+working directories against registered checkout/worktree paths before treating a
+runtime name as an alias. Inspect the conflicting entries before retrying cleanup.
+
 Project resolution for `exec`, `run`, `ps`, `logs`, `open` and host env commands
 does not refresh the global project registry. A held registration lock therefore
 does not block their resolution or require a retry just to update last-seen metadata.

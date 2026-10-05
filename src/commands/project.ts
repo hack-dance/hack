@@ -241,6 +241,7 @@ import {
   inspectListeningTcpPorts,
   resolveLifecycleSingletonDecision,
 } from "../lib/project-lifecycle-singleton.ts";
+import { normalizeProjectName } from "../lib/project-name.ts";
 import {
   readProjectRuntimeStateEntry,
   removeProjectRuntimeStateEntry,
@@ -715,13 +716,13 @@ async function resolveProjectForArgs(opts: {
   readonly projectOpt: string | undefined;
   readonly touchRegistration?: boolean;
 }) {
-  if (opts.pathOpt && opts.projectOpt) {
+  if (opts.pathOpt && opts.projectOpt !== undefined) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
 
-  if (opts.projectOpt) {
-    const name = sanitizeProjectSlug(opts.projectOpt);
-    if (name.length === 0) {
+  if (opts.projectOpt !== undefined) {
+    const name = normalizeProjectName(opts.projectOpt);
+    if (!name) {
       throw new CliUsageError("Invalid --project value.");
     }
     const fromRegistry = await resolveRegisteredProjectByName({ name });

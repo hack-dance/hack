@@ -98,6 +98,62 @@ test("registry ownership control requires live successor deletion in the same Re
   }
 });
 
+test("missing-lock old-holder witness covers only incomplete repair stages", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "missing-publication-lock"
+  );
+  const control = model?.additionalControls.find(
+    (entry) => entry.name === "old-holder"
+  );
+  expect(control).toBeDefined();
+  const witness = (stage: string) =>
+    tlaWitness({
+      invariant: "NoUncoordinatedLegacy",
+      action: "OldHolderPublish",
+      fields: [
+        `stage = "${stage}"`,
+        'repair = "active"',
+        "gate = TRUE",
+        "legacyPublished = TRUE",
+      ],
+    });
+  for (const stage of [
+    "intent",
+    "temp",
+    "linked",
+    "final",
+    "journal",
+    "socket",
+    "owner",
+  ]) {
+    expect(
+      control?.verify({ negative: true, exitCode: 12, output: witness(stage) })
+    ).toBe(true);
+  }
+  for (const stage of ["absent", "complete", "unknown"]) {
+    expect(
+      control?.verify({ negative: true, exitCode: 12, output: witness(stage) })
+    ).toBe(false);
+  }
+  const valid = witness("temp");
+  for (const invalid of [
+    valid.replace("<OldHolderPublish ", "<Commit "),
+    valid.replace('repair = "active"', 'repair = "crashed"'),
+    valid.replace("gate = TRUE", "gate = FALSE"),
+    valid.replace("legacyPublished = TRUE", "legacyPublished = FALSE"),
+    valid.replace("Invariant NoUncoordinatedLegacy", "Invariant Other"),
+    valid.replace(
+      '/\\ stage = "temp"',
+      'State 3: <Other line 2>\n/\\ stage = "temp"'
+    ),
+    `Error: unrelated checker failure\n${valid}`,
+  ]) {
+    expect(
+      control?.verify({ negative: true, exitCode: 12, output: invalid })
+    ).toBe(false);
+  }
+});
+
 test("previous-boot HTTPS publisher witness accepts only the two owner-archived stages", () => {
   const model = runtimeModels.find(
     (entry) => entry.name === "previous-boot-shared-https"

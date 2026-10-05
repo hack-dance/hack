@@ -218,7 +218,7 @@ completion path exists, not eventual recovery.
 | `retired-admission` | `NoPrematureConsumer` in `AdmitRetired` at the same incomplete stage |
 | `stale-proof` | `NoUnprovedCompletion` in `Commit` with selected version 1, current version 2 |
 | `replaced-lock` | `NoUnprovedCompletion` in `Commit` with a foreign lock path after crash |
-| `old-holder` | `NoUncoordinatedLegacy` in `OldHolderPublish` despite the new gate being held |
+| `old-holder` | `NoUncoordinatedLegacy` in `OldHolderPublish` with the gate held at any durable incomplete repair stage from intent through owner archive |
 
 | Model action | Runtime boundary under `packages/runtime-core/src/provider/graph/` |
 | --- | --- |
@@ -231,7 +231,9 @@ completion path exists, not eventual recovery.
 
 The positive protocol assumes an externally enforced maintenance window excludes
 pre-gate binaries. The `old-holder` counterexample shows why the new gate alone
-cannot exclude a process holding the old unlinked lock inode. Each TLA stage is an
+cannot exclude a process holding the old unlinked lock inode. The checker accepts
+only those explicit incomplete stages in the same `OldHolderPublish` state; TLC may
+reach any one first. Each TLA stage is an
 abstract durable commit; the model does not prove fsync order, pathname and FD
 identity, raw SHA checks, kernel flock behavior, process death, actual graph or
 volume preservation, or multi-crash liveness. No fairness is asserted. Native

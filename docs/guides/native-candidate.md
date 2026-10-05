@@ -1482,3 +1482,12 @@ This record is diagnostic evidence only: it does not acknowledge retirement or
 permit a replacement owner. A missing record (including a helper crash before
 publication) leaves the cause unknown. Preserve the retained owner and finalization
 records for inspection; do not delete them to force another startup.
+
+When an HTTPS owner refuses an exact lease release, it now attempts a bounded
+failure response containing only the release stage and a reviewed native error
+code. The client verifies the complete lease identity and rejects extra or
+noncanonical protocol data. This response is not a release acknowledgement and
+never triggers a retry: transport loss still leaves the outcome unconfirmed.
+For example, an observed `graph-verification: provider_busy` would locate the
+refusal without exposing native stderr; it would not prove cleanup completed or
+permit another owner to start. Preserve the original records while investigating.

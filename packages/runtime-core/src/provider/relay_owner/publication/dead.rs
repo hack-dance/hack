@@ -44,6 +44,20 @@ impl Selection {
             device_rebind: None,
         })
     }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn identity(
+        &self,
+        root: &Path,
+        context: Context,
+    ) -> Result<(ProcessIdentity, [u8; 16], [u8; 32]), CandidateError> {
+        let pin = self.pin(root, context)?;
+        Ok((
+            pin.receipt.process.clone(),
+            pin.incarnation(),
+            pin.fingerprint(),
+        ))
+    }
 }
 
 pub(crate) struct Witness {
@@ -133,6 +147,22 @@ impl CleanupWitness {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn present_selection(&self) -> Option<Selection> {
+        match self {
+            Self::Present(witness) => Some(witness.selection()),
+            Self::Absent(_) => None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn lock_identity(&self) -> Result<FileId, CandidateError> {
+        match self {
+            Self::Present(witness) => witness.lock_identity(),
+            Self::Absent(witness) => witness.lock.identity(),
+        }
+    }
+
     pub(crate) fn verify(&self) -> Result<(), CandidateError> {
         match self {
             Self::Present(witness) => witness.verify(),
@@ -180,6 +210,10 @@ impl Witness {
             bytes: self.pin.bytes.clone(),
             record_id: self.pin.receipt_id,
         }
+    }
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn lock_identity(&self) -> Result<FileId, CandidateError> {
+        self.lock.identity()
     }
     pub(crate) fn owner(&self) -> [u8; 16] {
         self.pin.incarnation()
@@ -251,8 +285,36 @@ pub(crate) fn retire(
     context: Context,
     selected: &Selection,
 ) -> Result<(), CandidateError> {
+    retire_checked(root, context, selected, None, &|| Ok(()))
+}
+
+/// The selected acknowledged-cleanup caller also pins the control lock inode
+/// and rechecks its graph proof immediately before each unlink.
+pub(crate) fn retire_checked(
+    root: &Path,
+    context: Context,
+    selected: &Selection,
+    expected_lock: Option<FileId>,
+    verify: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
     let pin = selected.pin(root, context)?;
     let _lock = state::Lock::acquire_existing(&pin.paths.directory)?;
+    let exact_lock = || -> Result<(), CandidateError> {
+        if let Some(expected) = expected_lock {
+            let named = fs::symlink_metadata(pin.paths.directory.join("operation.lock"))
+                .map_err(|_| refused())?;
+            if !named.is_file()
+                || named.nlink() != 1
+                || !private(&named)
+                || id(&named) != expected
+                || _lock.identity()? != expected
+            {
+                return Err(refused());
+            }
+        }
+        verify()
+    };
+    exact_lock()?;
     if identity::alive(pin.receipt.process.pid)? {
         return Err(refused());
     }
@@ -265,15 +327,18 @@ pub(crate) fn retire(
         pin.verify_receipt()?;
     }
     if !socket_absent {
+        exact_lock()?;
         pin.verify_socket()?;
         no_listener(&pin.paths.socket)?;
         fs::remove_file(&pin.paths.socket).map_err(|_| refused())?;
         pin.paths.sync()?;
     }
     if !record_absent {
+        exact_lock()?;
         pin.verify_receipt()?;
         fs::remove_file(&pin.paths.receipt).map_err(|_| refused())?;
         pin.paths.sync()?;
     }
+    exact_lock()?;
     Ok(())
 }

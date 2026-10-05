@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 mod missing_lock;
+mod relay_control;
 pub use missing_lock::{
     inspect as inspect_missing_publication_lock, retire as retire_missing_publication_lock,
 };
@@ -12,6 +13,7 @@ pub(in crate::provider::graph) use missing_lock::{
     require_no_pending as require_no_pending_missing_lock,
     require_no_pending_root as require_no_pending_missing_lock_root,
 };
+pub(in crate::provider::graph) use relay_control::require_complete as require_acknowledged_relay_complete;
 
 const LIMIT: u64 = 2 * 1024 * 1024;
 
@@ -177,6 +179,7 @@ pub(super) fn confirm_retired(
         receipt_sha256: &receipt_sha256,
     };
     verify_cleanup(candidate, &engine, &receipt, &root, &selected)?;
+    relay_control::require_complete(candidate, run)?;
     retired.verify()?;
     exact_receipt(&root, &receipt_sha256)?;
     engine.guest().verify()?;
@@ -230,6 +233,40 @@ pub fn retire(
             &CleanupSelection::from(&selected),
         )
     };
+    verify()?;
+    if let Ok(publisher) =
+        foreground::transport::dead_publisher_without_lock(candidate, selected.run)
+    {
+        if publisher.owner_sha256 != selected.publisher_sha256 {
+            return Err(refused());
+        }
+        let selected_verify = || {
+            verify()?;
+            if foreground::transport::dead_publisher_without_lock(candidate, selected.run)?
+                != publisher
+            {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        relay_control::retire(relay_control::RetireOptions {
+            candidate,
+            engine: &engine,
+            receipt: &receipt,
+            graph_root: &root,
+            publisher: &publisher,
+            verify: &selected_verify,
+        })?;
+    } else if !relay_control::selected_complete(
+        candidate,
+        &root,
+        selected.run,
+        selected.receipt_sha256,
+        selected.publisher_sha256,
+    )? {
+        relay_control::require_retired(&receipt, &engine)?;
+    }
+    relay_control::require_complete(candidate, selected.run)?;
     verify()?;
     // This helper checks the selected publisher bytes, dead process, refused
     // listener and exact lock/path identities before writing or moving files.

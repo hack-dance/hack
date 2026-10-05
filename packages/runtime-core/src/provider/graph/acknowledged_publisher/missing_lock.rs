@@ -707,6 +707,38 @@ pub fn retire(candidate: &Candidate, run: &str, expected: &str) -> Result<Value,
     };
     if !absent(&completion_path(&root))? {
         require_no_pending_root(&root)?;
+        // A completed foreground repair may have been written just before the
+        // old producer died without retiring its independent relay-control
+        // publication. Finish only this same selected graph generation. After
+        // a later graph generation, the historical completion is audit-only.
+        let lock = state::Lock::acquire_existing(&root).map_err(|_| refused())?;
+        exact_marker(&root, &intent, &lock)?;
+        let engine = Engine::connect_cleanup_wait(candidate).map_err(|_| refused())?;
+        let current_graph = directory(candidate, run).map_err(|_| refused())?;
+        let selected_receipt_still_current =
+            digest(&raw(&current_graph.join("state.json"), LIMIT * 32)?)
+                == intent.selection.receipt_sha256;
+        if selected_receipt_still_current {
+            let (receipt, graph_root, _) = verify_fixed(candidate, &engine, &intent.selection)?;
+            let verify = || {
+                gate.verify(candidate).map_err(|_| refused())?;
+                exact_marker(&root, &intent, &lock)?;
+                let _ = verify_fixed(candidate, &engine, &intent.selection)?;
+                Ok(())
+            };
+            verify()?;
+            super::relay_control::retire(super::relay_control::RetireOptions {
+                candidate,
+                engine: &engine,
+                receipt: &receipt,
+                graph_root: &graph_root,
+                publisher: &intent.selection.publisher,
+                verify: &verify,
+            })?;
+            verify()?;
+        } else {
+            super::relay_control::require_complete(candidate, run)?;
+        }
         return Ok(json!({"run":run,"historical_completion":true,
             "missing_lock_repaired":true}));
     }
@@ -720,6 +752,16 @@ pub fn retire(candidate: &Candidate, run: &str, expected: &str) -> Result<Value,
         let _ = verify_fixed(candidate, &engine, selected)?;
         Ok(())
     };
+    verify()?;
+    let (receipt, graph_root, _) = verify_fixed(candidate, &engine, selected)?;
+    super::relay_control::retire(super::relay_control::RetireOptions {
+        candidate,
+        engine: &engine,
+        receipt: &receipt,
+        graph_root: &graph_root,
+        publisher: &selected.publisher,
+        verify: &verify,
+    })?;
     verify()?;
     foreground::transport::retire_recovered_publisher_locked_fenced(
         candidate,

@@ -231,6 +231,13 @@ volume preservation, or multi-crash liveness. No fairness is asserted. Native
 fault, refusal and exact-retry tests and an observed retained-graph run remain
 separate evidence.
 
+This model covers the foreground publication. It does not model the companion
+relay-control publication or the CLI's relay construction before foreground
+admission. Their acknowledgement-bound retirement, partial-unlink retries and
+pre-publication admission checks require implementation regressions and native
+restart/data-readback evidence; a `MissingLock` pass does not establish those
+properties.
+
 ## Active dependency rebinding
 
 `dependency-rebind/Rebind.tla` checks one physical slot shared by two logical

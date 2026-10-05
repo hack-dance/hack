@@ -1346,6 +1346,21 @@ completion is verified. The CLI cannot itself prove that older binaries obey
 the publication gate; process listings alone do not establish that maintenance
 window. Keep the VM and its guest boot unchanged during this recovery.
 
+An interrupted publisher can also leave its separate relay-control publication
+after cleanup is acknowledged. Selected acknowledged retirement verifies that
+relay's exact dead process, socket and confirmed cleanup operation before removing
+its publication. A durable record bound to that publisher permits an exact retry
+after interruption; records from earlier publishers grant no authority over a
+replacement. Restore checks for incomplete retirement before reserving dependency
+slots or creating a relay listener. Relay admission shares the existing bounded
+provider-admission deadline when waiting for a concurrent recovery operation.
+
+Repeating a completed missing-lock repair can finish the same stopped generation's
+relay retirement. If the graph has moved to a later generation, the old completion
+is historical evidence only. A failed current cleanup or ownership check is not
+permission to discard files; preserve the evidence and use the selected recovery
+operation.
+
 A graph with completed host-dependency startup and no inbound routes can also use
 its exact dead relay publication as the previous-boot proof; an empty bridge
 registry alone never grants cleanup authority.

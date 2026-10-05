@@ -249,6 +249,38 @@ fn validate_routes<'a>(
 fn matches_selected_run(selected: Option<&str>, run: &str) -> bool {
     selected.is_none_or(|selected| selected == run)
 }
+fn require_relay_admission(candidate: &Candidate, run: Option<&str>) -> Result<(), CandidateError> {
+    if let Some(run) = run {
+        super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
+        super::super::acknowledged_publisher::require_acknowledged_relay_complete(candidate, run)?;
+    }
+    Ok(())
+}
+fn relay_admission_gate(
+    candidate: &Candidate,
+    run: Option<&str>,
+    deadline: Instant,
+) -> Result<super::super::publication_gate::Guard, CandidateError> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(error(
+                "provider_busy",
+                "Relay publication admission expired before provider acquisition.",
+            ));
+        }
+        match super::super::publication_gate::Guard::acquire(candidate) {
+            Err(error) if error.code == "provider_busy" => {
+                std::thread::sleep(remaining.min(Duration::from_millis(50)));
+            }
+            Err(error) => return Err(error),
+            Ok(gate) => {
+                require_relay_admission(candidate, run)?;
+                return Ok(gate);
+            }
+        }
+    }
+}
 fn control_root(
     state_root: &Path,
     owner: &str,
@@ -379,10 +411,17 @@ impl HostRelayRuntime {
             }
             bytes
         };
-        let engine =
-            Engine::connect_until(candidate, Instant::now() + Duration::from_secs(30), || {
-                false
-            })?;
+        // The CLI constructs this relay before acquiring its foreground run
+        // lock. Fence pending retirement before any new listener or reservation,
+        // in the recovery path's gate-before-Engine order. This local guard is
+        // released before foreground admission takes the gate again.
+        let admission_deadline = Instant::now() + Duration::from_secs(30);
+        let publication_gate = relay_admission_gate(candidate, selected_run, admission_deadline)?;
+        let engine = Engine::connect_until(candidate, admission_deadline, || false)?;
+        // Ordinary ACK retirement also holds the Engine lease. It may have
+        // changed the journals while this constructor waited for that lease.
+        publication_gate.verify(candidate)?;
+        require_relay_admission(candidate, selected_run)?;
         let owner = state::Owner::load(candidate)?;
         engine.guest().verify()?;
         let context = host_relay::context(engine.guest().incarnation(), engine.guest().boot_id())?;
@@ -1197,6 +1236,96 @@ mod route_tests {
         .err()
         .expect("invalid digest refused");
         assert_eq!(failure.code, "graph_startup_input");
+    }
+    #[test]
+    fn pending_relay_retirement_refuses_both_constructors_before_provider_effects() {
+        let fixture = super::super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&fixture.0).unwrap();
+        let run = "a".repeat(32);
+        let root = super::super::super::directory(&candidate, &run).unwrap();
+        state::private_directory(&root).unwrap();
+        let retained = root.join("retained-sentinel");
+        fs::write(&retained, b"retained data").unwrap();
+        let before = fs::symlink_metadata(&retained).unwrap();
+        for phase in ["intent", "complete"] {
+            let pending = root.join(format!(
+                "acknowledged-relay-retirement-{}-{phase}.pending",
+                "c".repeat(64)
+            ));
+            fs::write(&pending, b"interrupted retirement").unwrap();
+            for automatic in [false, true] {
+                let result = if automatic {
+                    HostRelayRuntime::new_for_run_auto(
+                        &candidate,
+                        Path::new("/unread-artifact"),
+                        &"b".repeat(64),
+                        Vec::new(),
+                        &run,
+                    )
+                } else {
+                    HostRelayRuntime::new_for_run(
+                        &candidate,
+                        Path::new("/unread-artifact"),
+                        &"b".repeat(64),
+                        Vec::new(),
+                        &run,
+                    )
+                };
+                assert_eq!(
+                    result.err().expect("pending retirement refused").code,
+                    "graph_acknowledged_relay_retirement"
+                );
+                assert!(!candidate.state_root.join("run/smolvm").exists());
+                assert_eq!(fs::read(&pending).unwrap(), b"interrupted retirement");
+                assert_eq!(fs::read(&retained).unwrap(), b"retained data");
+                let after = fs::symlink_metadata(&retained).unwrap();
+                assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+                // Failure releases the constructor gate; no owner escapes and
+                // ordinary foreground publication can acquire it afterward.
+                super::super::super::publication_gate::Guard::acquire(&candidate).unwrap();
+            }
+            fs::remove_file(pending).unwrap();
+        }
+    }
+    #[test]
+    fn relay_admission_waits_for_gate_release_without_provider_effects() {
+        let fixture = super::super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&fixture.0).unwrap();
+        let gate = super::super::super::publication_gate::Guard::acquire(&candidate).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                drop(gate);
+            });
+            let acquired = relay_admission_gate(&candidate, Some(&"a".repeat(32)), deadline)
+                .expect("released publication gate admitted");
+            acquired.verify(&candidate).unwrap();
+            assert!(!candidate.state_root.join("run/smolvm").exists());
+        });
+        super::super::super::publication_gate::Guard::acquire(&candidate).unwrap();
+    }
+    #[test]
+    fn relay_admission_gate_timeout_has_no_provider_effects_or_deadline_renewal() {
+        let fixture = super::super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&fixture.0).unwrap();
+        let gate = super::super::super::publication_gate::Guard::acquire(&candidate).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(20);
+        let failure = relay_admission_gate(&candidate, None, deadline)
+            .err()
+            .expect("held publication gate expired");
+        assert_eq!(failure.code, "provider_busy");
+        assert!(Instant::now() >= deadline);
+        assert!(!candidate.state_root.join("run/smolvm").exists());
+        gate.verify(&candidate).unwrap();
+        drop(gate);
+        assert_eq!(
+            relay_admission_gate(&candidate, None, deadline)
+                .err()
+                .expect("expired original deadline remains expired")
+                .code,
+            "provider_busy"
+        );
     }
     #[test]
     fn declared_aliases_must_be_bound_exactly_before_owner_creation() {

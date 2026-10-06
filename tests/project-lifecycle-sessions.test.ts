@@ -3,6 +3,8 @@ import { expect, test } from "bun:test";
 import type { LifecycleStateEntry } from "../src/lib/lifecycle-runtime.ts";
 import {
   classifyLifecycleSession,
+  inspectLifecycleSession,
+  killInspectedLifecycleSession,
   killLifecycleSessionWithOwnership,
   resolveLifecycleDefinitionHash,
   resolveLifecycleEnvironmentFingerprint,
@@ -153,6 +155,133 @@ test("classifyLifecycleSession blocks same-name sessions without ownership proof
 
   expect(inspection.classification).toBe("foreign");
   expect(inspection.decision).toMatchObject({ kind: "block" });
+});
+
+function inspectionBackend(overrides: Partial<MuxBackend> = {}): MuxBackend {
+  return {
+    name: "tmux",
+    available: true,
+    listSessions: async () => [session],
+    createSession: async () => ({ ok: true, session }),
+    killSession: async () => {
+      throw new Error("Inspection must not kill a session");
+    },
+    readLifecycleOwnerToken: async () => null,
+    listSessionWindowNames: async () => null,
+    execInSession: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    sendInput: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    ...overrides,
+  };
+}
+
+function inspectFixture(backend: MuxBackend) {
+  return inspectLifecycleSession({
+    backend,
+    entry,
+    expectedSessionName: session.name,
+    expectedProjectRoot: "/tmp/event-agent",
+    expectedDefinitionHash: definitionHash,
+  });
+}
+
+test("inspection accepts exact-owned cleanup between session listing and owner read", async () => {
+  let live = true;
+  let kills = 0;
+  const presenceQueries: string[] = [];
+  const backend = inspectionBackend({
+    listSessions: async () => {
+      const snapshot = live ? [session] : [];
+      // The foreground finalizer retires its session after down took a snapshot.
+      expect(
+        await killLifecycleSessionWithOwnership({
+          backend,
+          sessionName: session.name,
+          ownershipToken,
+        })
+      ).toBe(true);
+      return snapshot;
+    },
+    readLifecycleOwnerToken: async () => (live ? ownershipToken : null),
+    readSessionPresence: async ({ name }) => {
+      presenceQueries.push(name);
+      return live ? "present" : "absent";
+    },
+    killSession: async () => {
+      kills += 1;
+      live = false;
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+  });
+
+  const inspection = await inspectFixture(backend);
+  expect(inspection.classification).toBe("absent");
+  expect(inspection.decision).toEqual({ kind: "create" });
+  expect(inspection.session).toBeNull();
+  expect(presenceQueries).toEqual([session.name]);
+  expect(await killInspectedLifecycleSession({ backend, inspection })).toBe(
+    false
+  );
+  expect(kills).toBe(1);
+});
+
+test.each([
+  "present",
+  "unknown",
+] as const)("inspection refuses missing ownership when fresh session presence is %s", async (presence) => {
+  const backend = inspectionBackend({
+    readSessionPresence: async () => presence,
+  });
+  const inspection = await inspectFixture(backend);
+  expect(inspection.classification).toBe("foreign");
+  expect(inspection.decision.kind).toBe("block");
+});
+
+test("inspection refuses missing ownership without an explicit presence query", async () => {
+  expect((await inspectFixture(inspectionBackend())).decision.kind).toBe(
+    "block"
+  );
+});
+
+test("inspection propagates a presence query failure", async () => {
+  const backend = inspectionBackend({
+    readSessionPresence: async () => {
+      throw new Error("Presence query unavailable");
+    },
+  });
+  await expect(inspectFixture(backend)).rejects.toThrow(
+    "Presence query unavailable"
+  );
+});
+
+test("inspection never excuses a changed token with subsequent absence", async () => {
+  const backend = inspectionBackend({
+    readLifecycleOwnerToken: async () => "foreign-token",
+    readSessionPresence: async () => {
+      throw new Error(
+        "A changed token must refuse without an absence fallback"
+      );
+    },
+  });
+  const inspection = await inspectFixture(backend);
+  expect(inspection.classification).toBe("foreign");
+  expect(inspection.decision.kind).toBe("block");
+});
+
+test("inspection does not reinterpret unrelated persisted ownership", async () => {
+  const backend = inspectionBackend({
+    readSessionPresence: async () => {
+      throw new Error("Mismatched state must not use an absence fallback");
+    },
+  });
+  const inspection = await inspectLifecycleSession({
+    backend,
+    entry: { ...entry, sessionName: "another-session" },
+    expectedSessionName: session.name,
+    expectedProjectRoot: "/tmp/event-agent",
+    expectedDefinitionHash: definitionHash,
+  });
+  expect(inspection.classification).toBe("foreign");
+  expect(inspection.decision.kind).toBe("block");
 });
 
 test("killLifecycleSessionWithOwnership cleans up only an exact token match", async () => {

@@ -54,11 +54,31 @@ retains the existing refusal; use the channel manager's explicit upgrade command
 Shared MCP packages need the matching retained installation manager. Older channels
 keep their original `manager.py`; running a newer installer against that root does
 not update it. The newer installer refuses an MCP upgrade when its own bytes differ
-from the retained manager, before publishing a version or changing selection. Use
-the retained manager when it supports that package, or install with the new reviewed
-installer into a fresh root, such as `--root "$HOME/.hack-next-mcp"`. The old channel
-and its rollback remain intact. Automatic manager migration is not implemented.
-New channels support both old flat bundles and new MCP bundles.
+from the retained manager, before publishing a version or changing selection.
+
+To update the original flat-layout manager shipped with `5.0.0-next.1`, review a
+newer installer containing `upgrade-manager`, then run that saved file explicitly:
+
+```sh
+python3 /absolute/reviewed/install-prerelease.py --root "$HOME/.hack-next" upgrade-manager
+python3 "$HOME/.hack-next/manager.py" --root "$HOME/.hack-next" status
+```
+
+Stop every retained version's graphs and runtime first, using the commands below
+with that version's paths. Manager upgrade takes the channel's exclusive lock,
+refuses active launchers, and applies the existing quiescence checks to every
+retained version. It recognizes the exact original manager bytes and the standard
+launcher; custom or changed code, modified receipts, changed home identities, and
+aliased paths are refused. It preserves the launcher, installed bundles, home
+identities, and the selected/previous versions. The original manager and receipt
+remain in a private staging directory for inspection. Repeating the command with
+the already installed manager is a no-op.
+
+After this step, use the retained manager for ordinary bundle upgrades and rollback.
+It accepts both old flat bundles and new MCP bundles. This operation does not
+enroll MCP clients or migrate application data. For an unsupported manager, keep
+the existing channel and use a fresh root such as `--root "$HOME/.hack-next-mcp"`;
+do not edit its receipt to force adoption.
 
 Stop each candidate graph with its ordinary retained-data shutdown, then stop that
 version's owned runtime through the native executor. For the default installation
@@ -160,3 +180,16 @@ never adopted automatically. The selected prior bundle remains usable when its
 own receipt is unchanged. A later attempt refuses to overwrite the uncommitted
 version. Preserve the evidence and inspect it before an authorized cleanup; the
 manager has no automatic pruning or receipt-repair command.
+
+Manager upgrades change two files: `manager.py` and its hash in `.channel.json`.
+The manager first saves and syncs both versions and publishes an owned upgrade
+journal. While that journal exists, both the original and newer managers refuse
+ordinary launch, status, and selection commands. An interrupted upgrade can
+therefore temporarily make the channel unavailable, while its selection and data
+remain intact. Rerun `upgrade-manager` with the **same saved reviewed installer** to
+verify the journal, staged bytes, receipts, selection and stopped runtimes, then
+finish the upgrade. Recovery refuses changed or ambiguous state. Do not remove the
+journal or staging directory by hand. A failure before journal publication leaves
+the original manager usable; a completed upgrade removes the journal and retains
+the original bytes for inspection. This does not automatically downgrade the
+manager when rolling back a candidate bundle.

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Explicit, side-by-side native prerelease selection (Python 3.9+, standard library).
 
-The single atomic selection receipt is the commit point. Bundles and homes are
-retained by version; this manager never migrates runtime state or edits shell PATH.
+Selection changes commit through one atomic receipt. Explicit manager upgrades
+use a recoverable journal. Bundles and homes are retained by version; this manager
+never migrates runtime state or edits shell PATH.
 """
 
 import argparse
@@ -40,6 +41,12 @@ METADATA_KEYS = {"schema", "version", "tag", "source_revision", "platform"}
 REPOSITORY = "hack-dance/hack"
 DOWNLOAD_HOSTS = {"api.github.com", "github.com", "release-assets.githubusercontent.com",
                   "objects.githubusercontent.com"}
+# Original flat-layout manager, shipped before optional shared-MCP bundles.
+# Keep this an explicit allowlist; a matching user-written receipt is not provenance.
+MANAGER_PREDECESSORS = frozenset({
+    "b7c49e3fec6b06790e833db1d2dcb441d2223c283b792713be46826aa2eef877",
+})
+MANAGER_UPGRADE = ".manager-upgrade.json"
 
 
 class Refusal(Exception):
@@ -135,15 +142,24 @@ def write_file(path, contents, mode=0o600):
         os.fsync(target.fileno())
 
 
-def atomic_json(path, value):
+def atomic_file(path, contents):
     temporary = path.parent / (".selection-" + uuid.uuid4().hex)
     try:
-        write_file(temporary, json_bytes(value))
+        write_file(temporary, contents)
         os.replace(str(temporary), str(path))
         sync_directory(path.parent)
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def atomic_json(path, value):
+    atomic_file(path, json_bytes(value))
+
+
+def launcher_bytes():
+    return ("#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- \"$(dirname -- \"$0\")/..\" && pwd -P)\n"
+            "exec /usr/bin/python3 -I -S \"$root/manager.py\" --root \"$root\" run -- \"$@\"\n").encode()
 
 
 def checksums(raw, expected):
@@ -428,9 +444,7 @@ class Channel:
         (self.root / "bin").mkdir(mode=0o700)
         (self.root / "versions").mkdir(mode=0o700)
         write_file(self.root / "manager.py", Path(__file__).read_bytes())
-        launcher = ("#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- \"$(dirname -- \"$0\")/..\" && pwd -P)\n"
-                    "exec /usr/bin/python3 -I -S \"$root/manager.py\" --root \"$root\" run -- \"$@\"\n")
-        write_file(self.root / "bin/hack-next", launcher.encode(), 0o755)
+        write_file(self.root / "bin/hack-next", launcher_bytes(), 0o755)
         root_info = self.root.stat()
         write_file(self.root / ".channel.json", json_bytes({
             "schema": "hack.prerelease-install/v1", "root": str(self.root), "uid": os.getuid(),
@@ -444,7 +458,7 @@ class Channel:
         sync_directory(self.root)
 
     @contextlib.contextmanager
-    def lock(self, shared=False):
+    def lock(self, shared=False, manager_upgrade=False):
         owned(self.root, directory=True, mode=0o700)
         owned(self.root / ".manager.lock", mode=0o600)
         descriptor = os.open(str(self.root / ".manager.lock"), os.O_RDWR | os.O_NOFOLLOW)
@@ -453,11 +467,15 @@ class Channel:
                 fcntl.flock(handle, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
             except BlockingIOError as error:
                 raise Refusal("Another candidate manager or launcher is active.") from error
-            self.validate()
+            self.validate(manager_upgrade=manager_upgrade)
             yield
 
-    def validate(self):
+    def validate(self, manager_upgrade=False):
         root_info = owned(self.root, directory=True, mode=0o700)
+        pending = os.path.lexists(self.root / MANAGER_UPGRADE)
+        require(not pending or manager_upgrade,
+                "Manager upgrade is pending; rerun upgrade-manager with the same reviewed installer.")
+        transition = self.read_manager_upgrade() if pending else None
         marker = private_json(self.root / ".channel.json")
         require(set(marker) == {"schema", "root", "uid", "device", "inode",
                                 "manager_sha256", "launcher_sha256"}
@@ -468,7 +486,10 @@ class Channel:
         owned(self.root / "manager.py", mode=0o600)
         owned(self.root / "bin", directory=True, mode=0o700)
         owned(self.root / "bin/hack-next", mode=0o755)
-        require(digest(self.root / "manager.py") == marker["manager_sha256"]
+        manager_hash = digest(self.root / "manager.py")
+        require((manager_hash == marker["manager_sha256"] or transition is not None
+                 and manager_hash == transition["to_sha256"]
+                 and marker["manager_sha256"] == transition["from_sha256"])
                 and digest(self.root / "bin/hack-next") == marker["launcher_sha256"],
                 "Installation manager or launcher changed.")
         require({p.name for p in (self.root / "bin").iterdir()} == {"hack-next"},
@@ -497,6 +518,8 @@ class Channel:
                 private_json(entry / ".receipt.json")
                 self.verify_version(entry.name, digest(entry / ".receipt.json"))
         allowed = {".channel.json", ".selection.json", ".manager.lock", "manager.py", "bin", "versions"}
+        if transition is not None:
+            allowed.add(MANAGER_UPGRADE)
         for entry in self.root.iterdir():
             if entry.name in allowed:
                 continue
@@ -508,6 +531,112 @@ class Channel:
                 continue
             raise Refusal("Foreign installation entry: " + entry.name)
         self.state = state
+
+    def read_manager_upgrade(self):
+        """Verify both sides of the only supported two-file transition before recovery.
+
+        The journal closes ordinary launch admission before either file changes.
+        Recovery may finish this exact transition, never adopt changed receipts or
+        select software. The staged originals remain available for inspection.
+        """
+        plan = private_json(self.root / MANAGER_UPGRADE)
+        require(set(plan) == {"schema", "stage", "from_sha256", "to_sha256",
+                              "channel_sha256", "selection_sha256"}
+                and plan["schema"] == "hack.prerelease-manager-upgrade/v1"
+                and isinstance(plan["stage"], str)
+                and re.fullmatch(r"\.stage-[0-9a-f]{32}", plan["stage"]),
+                "Malformed manager upgrade journal.")
+        require(all(isinstance(plan[key], str) and SHA256.fullmatch(plan[key])
+                    for key in ("from_sha256", "to_sha256", "channel_sha256", "selection_sha256")),
+                "Malformed manager upgrade digest.")
+        require(plan["from_sha256"] in MANAGER_PREDECESSORS
+                and plan["to_sha256"] == digest(Path(__file__)),
+                "Manager recovery requires the same reviewed installer and a known predecessor.")
+        stage = self.root / plan["stage"]
+        owned(stage, directory=True, mode=0o700)
+        require({p.name for p in stage.iterdir()} == {
+            "manager-before.py", "manager-after.py", "channel-before.json", "channel-after.json"},
+            "Foreign manager upgrade staging entry.")
+        for entry in stage.iterdir():
+            owned(entry, mode=0o600)
+        before = private_json(stage / "channel-before.json")
+        after = private_json(stage / "channel-after.json")
+        require(digest(stage / "manager-before.py") == plan["from_sha256"]
+                and digest(stage / "manager-after.py") == plan["to_sha256"]
+                and digest(stage / "channel-before.json") == plan["channel_sha256"]
+                and before.get("manager_sha256") == plan["from_sha256"]
+                and after == dict(before, manager_sha256=plan["to_sha256"]),
+                "Manager upgrade staging changed.")
+        owned(self.root / "manager.py", mode=0o600)
+        private_json(self.root / ".channel.json")
+        private_json(self.root / ".selection.json")
+        old_receipt = (stage / "channel-before.json").read_bytes()
+        new_receipt = (stage / "channel-after.json").read_bytes()
+        current_receipt = (self.root / ".channel.json").read_bytes()
+        current_hash = digest(self.root / "manager.py")
+        require((current_hash == plan["from_sha256"] and current_receipt == old_receipt)
+                or (current_hash == plan["to_sha256"] and current_receipt in (old_receipt, new_receipt)),
+                "Manager upgrade publication state changed.")
+        require(digest(self.root / ".selection.json") == plan["selection_sha256"],
+                "Selection changed during manager upgrade; inspection required.")
+        owned(self.root / "bin", directory=True, mode=0o700)
+        owned(self.root / "bin/hack-next", mode=0o755)
+        require((self.root / "bin/hack-next").read_bytes() == launcher_bytes(),
+                "Custom launcher cannot be upgraded.")
+        return plan
+
+    def upgrade_manager(self):
+        """Explicitly replace a known manager, with recoverable fail-closed publication."""
+        self.validate(manager_upgrade=True)
+        pending = os.path.lexists(self.root / MANAGER_UPGRADE)
+        source = canonical(Path(__file__).absolute())
+        owned(source)
+        target = source.read_bytes()
+        target_hash = hashlib.sha256(target).hexdigest()
+        if not pending:
+            current_hash = digest(self.root / "manager.py")
+            if current_hash == target_hash:
+                return
+            require(current_hash in MANAGER_PREDECESSORS,
+                    "Unknown or customized manager; explicit upgrade supports only the reviewed flat-layout predecessor.")
+            require((self.root / "bin/hack-next").read_bytes() == launcher_bytes(),
+                    "Custom launcher cannot be upgraded.")
+        # All retained versions share this manager. Keep the existing executor
+        # ownership checks, including status/down/status, for each of them.
+        for version in self.state["installed"]:
+            self.require_quiescent(version, manager_upgrade=True)
+        self.validate(manager_upgrade=True)
+        if not pending:
+            stage = self.root / (".stage-" + uuid.uuid4().hex)
+            stage.mkdir(mode=0o700)
+            before = (self.root / ".channel.json").read_bytes()
+            after = dict(parse_json(before), manager_sha256=target_hash)
+            write_file(stage / "manager-before.py", (self.root / "manager.py").read_bytes())
+            write_file(stage / "manager-after.py", target)
+            write_file(stage / "channel-before.json", before)
+            write_file(stage / "channel-after.json", json_bytes(after))
+            plan = {"schema": "hack.prerelease-manager-upgrade/v1", "stage": stage.name,
+                    "from_sha256": current_hash, "to_sha256": target_hash,
+                    "channel_sha256": hashlib.sha256(before).hexdigest(),
+                    "selection_sha256": digest(self.root / ".selection.json")}
+            write_file(stage / "journal.json", json_bytes(plan))
+            sync_directory(stage)
+            self.validate()
+            os.rename(str(stage / "journal.json"), str(self.root / MANAGER_UPGRADE))
+            sync_directory(stage)
+            sync_directory(self.root)
+        self.validate(manager_upgrade=True)
+        plan = self.read_manager_upgrade()
+        stage = self.root / plan["stage"]
+        if digest(self.root / "manager.py") != target_hash:
+            atomic_file(self.root / "manager.py", (stage / "manager-after.py").read_bytes())
+        self.validate(manager_upgrade=True)
+        if (self.root / ".channel.json").read_bytes() != (stage / "channel-after.json").read_bytes():
+            atomic_file(self.root / ".channel.json", (stage / "channel-after.json").read_bytes())
+        self.validate(manager_upgrade=True)
+        (self.root / MANAGER_UPGRADE).unlink()
+        sync_directory(self.root)
+        self.validate()
 
     def verify_version(self, version, checksum):
         directory = self.root / "versions" / version
@@ -542,10 +671,10 @@ class Channel:
                             "HACK_HOME": str(directory / "cli-home")})
         return environment
 
-    def require_quiescent(self, version):
+    def require_quiescent(self, version, manager_upgrade=False):
         if version is None:
             return
-        self.validate()
+        self.validate(manager_upgrade=manager_upgrade)
         directory = self.verify_version(version, self.state["installed"][version])
         verify_signatures(directory / "bundle")
         for action in ("status", "down", "status"):
@@ -566,7 +695,7 @@ class Channel:
             if phase == "uninitialized":
                 require(not list((directory / "native-home").iterdir()),
                         "Uninitialized home contains state; inspect it through its owning CLI.")
-            self.validate()
+            self.validate(manager_upgrade=manager_upgrade)
 
     def select(self, version, installed=None):
         self.require_quiescent(self.state["selected"])
@@ -612,11 +741,11 @@ class Channel:
                                              release_metadata)
         # The retained launcher always executes its recorded manager. Never select
         # a new layout that an older manager cannot subsequently validate/rollback.
-        # Automatic manager replacement needs a separate atomic migration protocol.
+        # Manager replacement is a separate explicit, recoverable operation.
         require(set(manifest) <= PAYLOAD
                 or digest(self.root / "manager.py") == digest(Path(__file__)),
                 "Shared MCP requires this channel's retained manager to match the installer. "
-                "Use the retained manager.py, or install with this installer into a fresh --root; "
+                "Run upgrade-manager with this reviewed installer, or use a fresh --root; "
                 "the existing channel and its selection are unchanged.")
         homes = {}
         for name in ("native-home", "cli-home"):
@@ -678,6 +807,7 @@ def parser():
     rollback.add_argument("--version", help="retained version; default previous selection")
     commands.add_parser("stable", help="deselect candidate; retain all bundles and homes")
     commands.add_parser("status")
+    commands.add_parser("upgrade-manager", help="explicitly upgrade a known channel manager, or finish its interrupted upgrade")
     run = commands.add_parser("run")
     run.add_argument("arguments", nargs=argparse.REMAINDER)
     return arguments
@@ -693,9 +823,11 @@ def main(argv=None):
         version_number(args.version)
         require(bool(args.archive) == bool(args.sha256), "--archive and --sha256 must be supplied together.")
         channel.initialize()
-    with channel.lock(shared=args.command == "run"):
+    with channel.lock(shared=args.command == "run", manager_upgrade=args.command == "upgrade-manager"):
         if args.command in ("install", "upgrade"):
             channel.install(args.version, args.archive, args.sha256, args.command == "upgrade")
+        elif args.command == "upgrade-manager":
+            channel.upgrade_manager()
         elif args.command == "rollback":
             version = args.version or channel.state["previous"]
             require(version is not None and version in channel.state["installed"], "No retained rollback version.")

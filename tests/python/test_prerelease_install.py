@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ SOURCE = Path(__file__).resolve().parents[2] / "scripts/install-prerelease.py"
 SPEC = importlib.util.spec_from_file_location("install_prerelease", SOURCE)
 installer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(installer)
+REAL_PROCESS_RUN = subprocess.run
 
 
 def sha(contents):
@@ -139,6 +141,61 @@ class ChannelTests(unittest.TestCase):
 
     def selection(self):
         return installer.private_json(self.channel.root / ".selection.json")
+
+    def legacy_channel(self, name="legacy-channel"):
+        source = SOURCE.parent.parent / "tests/fixtures/prerelease-manager-flat-v1.py"
+        self.assertEqual(installer.digest(source),
+                         "b7c49e3fec6b06790e833db1d2dcb441d2223c283b792713be46826aa2eef877")
+        spec = importlib.util.spec_from_file_location("legacy_prerelease_manager", source)
+        legacy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(legacy)
+        self.channel = legacy.Channel(self.root / name)
+        self.channel.initialize()
+        self.assertEqual((self.channel.root / "bin/hack-next").read_bytes(), installer.launcher_bytes())
+        return legacy
+
+    def retained_snapshot(self):
+        paths = [self.channel.root / ".selection.json", self.channel.root / "bin/hack-next",
+                 *sorted((self.channel.root / "versions").rglob("*"))]
+        return {str(path.relative_to(self.channel.root)): (
+                    path.stat().st_dev, path.stat().st_ino, path.stat().st_mode,
+                    path.read_bytes() if path.is_file() else None)
+                for path in paths}
+
+    def upgrade_manager(self):
+        current = installer.Channel(self.channel.root)
+        with current.lock(manager_upgrade=True):
+            current.upgrade_manager()
+        return current
+
+    def assert_pending_refuses_installed_readers(self, legacy):
+        # Exercise the real predecessor and the exact manager bytes addressed by
+        # the unchanged legacy launcher. Only platform detection is substituted;
+        # refusal must occur before any candidate subprocess can be reached.
+        source = self.channel.root / "manager.py"
+        spec = importlib.util.spec_from_file_location("retained_prerelease_manager", source)
+        retained = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(retained)
+        for module in (legacy, retained, installer):
+            for command in ("status", "run"):
+                with self.subTest(reader=module.__name__, command=command), \
+                        mock.patch.object(module.platform, "system", return_value="Darwin"), \
+                        mock.patch.object(module.platform, "machine", return_value="arm64"), \
+                        mock.patch.object(module.subprocess, "Popen") as spawn:
+                    with self.assertRaisesRegex(module.Refusal, "pending|Foreign installation entry|manager or launcher changed"):
+                        module.main(["--root", str(self.channel.root), command])
+                    spawn.assert_not_called()
+        self.assertEqual((self.channel.root / "bin/hack-next").read_bytes(), installer.launcher_bytes())
+
+        if sys.platform == "darwin" and installer.platform.machine() == "arm64":
+            # On the supported host, run the unchanged shell launcher itself.
+            # A pending transition must fail before codesign or candidate startup.
+            result = REAL_PROCESS_RUN([str(self.channel.root / "bin/hack-next"), "--version"],
+                                      env={"HOME": str(self.stable_home), "PATH": "/usr/bin:/bin"},
+                                      capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, "")
+            self.assertRegex(result.stderr, "pending|Foreign installation entry|manager or launcher changed")
 
     def rejects_install(self, mutate, message):
         if not self.selection()["installed"]:
@@ -275,6 +332,220 @@ class ChannelTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(legacy.main(["--root", str(self.channel.root), "rollback"]), 0)
             self.assertEqual(json.loads(output.getvalue())["selected"], "5.0.0-next.1")
+
+    def test_explicit_manager_upgrade_preserves_retained_data_and_enables_mcp_rollback(self):
+        self.legacy_channel()
+        self.install()
+        self.install("5.0.0-next.2", True)
+        for version in ("5.0.0-next.1", "5.0.0-next.2"):
+            for home in ("native-home", "cli-home"):
+                (self.channel.root / "versions" / version / home / "marker").write_text(version + home)
+        before = self.retained_snapshot()
+        original_manager = (self.channel.root / "manager.py").read_bytes()
+        self.calls = []
+        with mock.patch.object(installer.platform, "system", return_value="Darwin"), \
+                mock.patch.object(installer.platform, "machine", return_value="arm64"), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(installer.main(["--root", str(self.channel.root), "upgrade-manager"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["selected"], "5.0.0-next.2")
+        self.assertEqual(self.retained_snapshot(), before)
+        self.assertEqual((self.channel.root / "manager.py").read_bytes(), SOURCE.read_bytes())
+        self.assertEqual(installer.private_json(self.channel.root / ".channel.json")["manager_sha256"],
+                         installer.digest(SOURCE))
+        stage = next(self.channel.root.glob(".stage-*/manager-before.py"))
+        self.assertEqual(stage.read_bytes(), original_manager)
+        self.assertFalse((self.channel.root / installer.MANAGER_UPGRADE).exists())
+        self.assertEqual([args[4] for args, _ in self.calls if args[0] != "/usr/bin/codesign"],
+                         ["status", "down", "status"] * 2)
+        manager_stat = (self.channel.root / "manager.py").stat()
+        self.upgrade_manager()
+        self.assertEqual((self.channel.root / "manager.py").stat(), manager_stat)
+        self.assertEqual(self.retained_snapshot(), before)
+        self.channel = installer.Channel(self.channel.root)
+        archive, checksum = self.archive("5.0.0-next.3", with_mcp)
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.3", archive, checksum, True)
+            self.channel.select("5.0.0-next.1")
+            self.channel.select("5.0.0-next.3")
+        self.assertEqual(self.selection()["selected"], "5.0.0-next.3")
+        for version in ("5.0.0-next.1", "5.0.0-next.2"):
+            for home in ("native-home", "cli-home"):
+                self.assertEqual((self.channel.root / "versions" / version / home / "marker").read_text(), version + home)
+
+    def test_manager_upgrade_refuses_custom_changed_and_aliased_inputs_without_writes(self):
+        for case in ("custom-manager", "changed-manager", "custom-launcher", "manager-symlink",
+                     "manager-hardlink", "receipt-symlink", "unsafe-root"):
+            with self.subTest(case=case):
+                self.legacy_channel(case)
+                self.install()
+                manager = self.channel.root / "manager.py"
+                marker_path = self.channel.root / ".channel.json"
+                marker = installer.private_json(marker_path)
+                if case in ("custom-manager", "changed-manager"):
+                    manager.write_bytes(manager.read_bytes() + b"# custom\n")
+                    if case == "custom-manager":
+                        marker["manager_sha256"] = installer.digest(manager)
+                        marker_path.write_bytes(installer.json_bytes(marker))
+                elif case == "custom-launcher":
+                    launcher = self.channel.root / "bin/hack-next"
+                    launcher.write_bytes(launcher.read_bytes() + b"# custom\n")
+                    marker["launcher_sha256"] = installer.digest(launcher)
+                    marker_path.write_bytes(installer.json_bytes(marker))
+                elif case in ("manager-symlink", "receipt-symlink"):
+                    path = manager if case == "manager-symlink" else marker_path
+                    saved = self.root / (case + "-saved")
+                    path.rename(saved)
+                    path.symlink_to(saved)
+                elif case == "manager-hardlink":
+                    os.link(manager, self.root / "manager-link")
+                else:
+                    self.channel.root.chmod(0o755)
+                before = self.retained_snapshot()
+                entries = sorted(path.name for path in self.channel.root.iterdir())
+                self.calls = []
+                with self.assertRaises(installer.Refusal):
+                    self.upgrade_manager()
+                self.assertEqual(self.retained_snapshot(), before)
+                self.assertEqual(sorted(path.name for path in self.channel.root.iterdir()), entries)
+                self.assertEqual(self.calls, [])
+
+    def test_manager_upgrade_keeps_launcher_and_runtime_quiescence_gates(self):
+        self.legacy_channel()
+        self.install()
+        self.install("5.0.0-next.2", True)
+        manager = (self.channel.root / "manager.py").read_bytes()
+        before = self.retained_snapshot()
+        with self.channel.lock(shared=True):
+            with self.assertRaisesRegex(installer.Refusal, "active"):
+                self.upgrade_manager()
+        stopped = {"phase": "uninitialized", "process_alive": False}
+        for response in ({"phase": "running", "process_alive": True},
+                         {"phase": "unknown", "process_alive": False}, (1, b""), (0, b"malformed"),
+                         subprocess.TimeoutExpired(["status"], 30)):
+            self.runtime_responses = [stopped] * 3 + [response]
+            with self.assertRaises(installer.Refusal):
+                self.upgrade_manager()
+            self.assertEqual((self.channel.root / "manager.py").read_bytes(), manager)
+            self.assertEqual(self.retained_snapshot(), before)
+            self.assertFalse((self.channel.root / installer.MANAGER_UPGRADE).exists())
+
+    def test_real_process_exit_at_each_manager_publication_boundary_is_recoverable(self):
+        for boundary in ("journal", "manager", "receipt", "complete"):
+            with self.subTest(boundary=boundary):
+                legacy = self.legacy_channel("interrupt-" + boundary)
+                self.install()
+                marker = self.channel.root / "versions/5.0.0-next.1/native-home/marker"
+                marker.write_bytes(b"retained data")
+                before = self.retained_snapshot()
+                pid = os.fork()
+                if pid == 0:
+                    original_rename, original_replace, original_unlink = os.rename, os.replace, Path.unlink
+                    def rename(source, destination):
+                        original_rename(source, destination)
+                        if boundary == "journal" and Path(destination).name == installer.MANAGER_UPGRADE:
+                            os._exit(86)
+                    def replace(source, destination):
+                        original_replace(source, destination)
+                        if Path(destination).name == {"manager": "manager.py", "receipt": ".channel.json"}.get(boundary):
+                            os._exit(86)
+                    def unlink(path, *args, **kwargs):
+                        original_unlink(path, *args, **kwargs)
+                        if boundary == "complete" and path.name == installer.MANAGER_UPGRADE:
+                            os._exit(86)
+                    try:
+                        with mock.patch.object(os, "rename", side_effect=rename), \
+                                mock.patch.object(os, "replace", side_effect=replace), \
+                                mock.patch.object(Path, "unlink", new=unlink):
+                            self.upgrade_manager()
+                    finally:
+                        os._exit(87)
+                _, status = os.waitpid(pid, 0)
+                self.assertEqual(os.waitstatus_to_exitcode(status), 86)
+                self.assertEqual(self.retained_snapshot(), before)
+                if boundary != "complete":
+                    self.assert_pending_refuses_installed_readers(legacy)
+                else:
+                    with installer.Channel(self.channel.root).lock():
+                        pass
+                self.upgrade_manager()
+                self.assertEqual(self.retained_snapshot(), before)
+                self.assertEqual((self.channel.root / "manager.py").read_bytes(), SOURCE.read_bytes())
+                self.assertFalse((self.channel.root / installer.MANAGER_UPGRADE).exists())
+                with installer.Channel(self.channel.root).lock():
+                    pass
+
+    def test_manager_staging_failure_leaves_actual_legacy_status_usable(self):
+        legacy = self.legacy_channel()
+        self.install()
+        before = self.retained_snapshot()
+        manager = (self.channel.root / "manager.py").read_bytes()
+        original = installer.write_file
+        def fail(path, contents, mode=0o600):
+            if path.name == "manager-after.py":
+                raise OSError("injected staging failure")
+            return original(path, contents, mode)
+        with mock.patch.object(installer, "write_file", side_effect=fail):
+            with self.assertRaisesRegex(OSError, "staging failure"):
+                self.upgrade_manager()
+        self.assertEqual(self.retained_snapshot(), before)
+        self.assertEqual((self.channel.root / "manager.py").read_bytes(), manager)
+        self.assertFalse((self.channel.root / installer.MANAGER_UPGRADE).exists())
+        with mock.patch.object(legacy.platform, "system", return_value="Darwin"), \
+                mock.patch.object(legacy.platform, "machine", return_value="arm64"), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(legacy.main(["--root", str(self.channel.root), "status"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["selected"], "5.0.0-next.1")
+        self.upgrade_manager()
+        self.assertEqual(self.retained_snapshot(), before)
+
+    def test_manager_recovery_refuses_changed_journal_stage_selection_and_unordered_state(self):
+        for case in ("new-bytes", "old-bytes", "other-installer", "bad-digest-type",
+                     "stage-symlink", "stage-extra", "journal-symlink", "journal-hardlink",
+                     "selection", "unordered-receipt", "changed-bundle"):
+            with self.subTest(case=case):
+                self.legacy_channel("recovery-" + case)
+                self.install()
+                with mock.patch.object(installer, "atomic_file", side_effect=OSError("before manager publication")):
+                    with self.assertRaisesRegex(OSError, "before manager publication"):
+                        self.upgrade_manager()
+                journal = self.channel.root / installer.MANAGER_UPGRADE
+                plan = installer.private_json(journal)
+                stage = self.channel.root / plan["stage"]
+                if case in ("new-bytes", "old-bytes"):
+                    path = stage / ("manager-after.py" if case == "new-bytes" else "manager-before.py")
+                    path.write_bytes(path.read_bytes() + b"# changed\n")
+                elif case in ("other-installer", "bad-digest-type"):
+                    plan["to_sha256"] = "0" * 64 if case == "other-installer" else {}
+                    journal.write_bytes(installer.json_bytes(plan))
+                elif case in ("stage-symlink", "journal-symlink"):
+                    path = stage if case == "stage-symlink" else journal
+                    saved = self.root / (case + "-saved")
+                    path.rename(saved)
+                    path.symlink_to(saved)
+                elif case == "stage-extra":
+                    (stage / "foreign").write_bytes(b"not owned")
+                elif case == "journal-hardlink":
+                    os.link(journal, self.root / "journal-alias")
+                elif case == "selection":
+                    state = self.selection()
+                    state.update(selected=None, previous=state["selected"])
+                    (self.channel.root / ".selection.json").write_bytes(installer.json_bytes(state))
+                elif case == "unordered-receipt":
+                    (self.channel.root / ".channel.json").write_bytes((stage / "channel-after.json").read_bytes())
+                else:
+                    (self.channel.root / "versions/5.0.0-next.1/bundle/hack-cli").chmod(0o700)
+                    (self.channel.root / "versions/5.0.0-next.1/bundle/hack-cli").write_bytes(b"changed")
+                before = self.retained_snapshot()
+                manager_before = (self.channel.root / "manager.py").read_bytes()
+                channel_before = (self.channel.root / ".channel.json").read_bytes()
+                self.calls = []
+                with self.assertRaises(installer.Refusal):
+                    self.upgrade_manager()
+                self.assertEqual(self.calls, [])
+                self.assertEqual(self.retained_snapshot(), before)
+                self.assertEqual((self.channel.root / "manager.py").read_bytes(), manager_before)
+                self.assertEqual((self.channel.root / ".channel.json").read_bytes(), channel_before)
+                self.assertTrue(os.path.lexists(journal))
 
     def test_active_unknown_failed_and_timed_out_status_never_trigger_down(self):
         self.install()

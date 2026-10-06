@@ -216,6 +216,10 @@ signals received while the mux session is still being initialized.
 If `lifecycle.down.before` fails, shutdown is aborted before Compose or lifecycle processes are
 stopped. `hack restart` preserves the same guard semantics during its down phase.
 
+If a concurrent foreground finalizer removes the same owned lifecycle session during shutdown,
+Hack accepts a fresh, explicit absence check. Missing ownership metadata by itself, a changed token,
+or an unavailable session check still refuses cleanup.
+
 ### `hack restart`
 
 `hack restart` runs the down lifecycle hooks and stops owned host processes, but preserves the

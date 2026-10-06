@@ -165,6 +165,15 @@ fn cleanup_fence_refuses_effects_and_resumes_each_retirement_rename() {
             directory.join("owner.json")
         };
         assert_eq!(fs::read(&owner_path).unwrap(), before);
+        let expected_process = serde_json::from_slice::<Record>(&before).unwrap().process;
+        assert_eq!(
+            selected_retirement_process(&candidate, &run, &owner, &receipt, &lock).unwrap(),
+            expected_process,
+        );
+        assert!(
+            selected_retirement_process(&candidate, &run, &"e".repeat(64), &receipt, &lock)
+                .is_err()
+        );
         let journal = retirement_path(&directory, &owner);
         assert_eq!(journal.exists(), fail_at >= 4);
         assert_eq!(directory.join("control.sock").exists(), fail_at < 5);
@@ -201,6 +210,10 @@ fn cleanup_fence_refuses_effects_and_resumes_each_retirement_rename() {
         .unwrap();
         assert!(!directory.join("control.sock").exists());
         assert!(!directory.join("owner.json").exists());
+        assert_eq!(
+            selected_retirement_process(&candidate, &run, &owner, &receipt, &lock).unwrap(),
+            expected_process,
+        );
         assert_eq!(
             fs::read(retired_path(&directory, &owner, false)).unwrap(),
             before

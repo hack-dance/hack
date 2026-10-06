@@ -1343,6 +1343,14 @@ For a fully ready graph whose foreground owner died while its pool remains on th
 same boot, `graph recover-live-owner --run-id RUN --expect-receipt SHA256` selects
 only that graph. It requires matching dead foreground and relay-owner identities,
 unchanged receipt and resource inventories, and exclusive publication locks. The
+relay endpoint may also be absent after the managed owner exited: both relay files
+must be absent under the original held operation lock, and the exact dead
+foreground process and ready receipt must select the control root derived for
+this run, runtime owner, and current guest boot. Recovery persists that absence
+witness and rechecks its directory/lock identity, process death, endpoint absence,
+and receipt bytes at cleanup boundaries. A partial publication, replacement
+endpoint or lock, legacy unscoped root, or changed receipt is refused. This path
+does not recreate relay metadata or invent a live-owner acknowledgement. The
 operation stops verified guest dependency listeners, removes owned containers and
 network resources, retains persistent data, retires stale foreground and relay
 publications, and releases the graph's dependency reservation before unlocking the

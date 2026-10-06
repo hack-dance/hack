@@ -204,6 +204,22 @@ history format. Stable v4 uses its separate state and is unaffected.
 
 ## Named-volume integrity qualification
 
+The ignored fixture
+`foreground::native_test::same_boot_absent_relay::absent_relay_cleanup_retries_preserve_data_and_live_sibling`
+uses a caller-owned running development pool and a pinned image containing
+`/bin/sh` and `sleep`. Set `HACK_LOCAL_TEST_ROOT` to that private candidate home
+and `HACK_LOCAL_TEST_IMAGE` to the loaded `sha256:<config digest>`. Compile the
+all-feature library test with `--no-run`, then invoke its exact test name with
+`--ignored --exact --nocapture --test-threads=1` under a 300-second external
+watchdog. It starts two unique control-only graphs, lets one managed relay exit
+normally, and checks explicit same-boot recovery after interrupted intent,
+container removal, completed cleanup, and publisher retirement. Persistent data
+and the live sibling must survive; substituted endpoint/lock/directory, receipt
+bytes, and completed-retry process evidence must refuse. It removes only its own
+graph resources on success and never restarts the pool. On failure, inspect its
+retained graph evidence before another attempt. This fixture does not qualify
+application authentication, dependency listeners, browser routing, or publication.
+
 The ignored foreground-owner fixture
 `foreground::native_test::stop14::fourteen_services_retain_named_data_across_cleanup_and_restore`
 qualifies normal retaining cleanup of thirteen running services and one completed

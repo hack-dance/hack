@@ -370,6 +370,8 @@ pub(super) fn attach(
 #[cfg(target_os = "macos")]
 mod runtime;
 #[cfg(target_os = "macos")]
+pub(super) use runtime::control_root;
+#[cfg(target_os = "macos")]
 pub use runtime::{Dependency, HostRelayRuntime, RefreshPolicy};
 
 /// Incomplete native dependency mutation cannot authorize a fresh execution.

@@ -281,7 +281,7 @@ fn relay_admission_gate(
         }
     }
 }
-fn control_root(
+pub(in crate::provider::graph) fn control_root(
     state_root: &Path,
     owner: &str,
     boot: Option<&str>,

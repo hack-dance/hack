@@ -552,5 +552,6 @@ mod host_pin_recovery;
 #[cfg(feature = "native-http-probe")]
 mod retired_rebind_history;
 mod retired_recovery_cleanup;
+mod same_boot_absent_relay;
 mod same_boot_recovery;
 mod source_device_rebind;

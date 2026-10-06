@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 const OWNER: &str = "provider::graph::foreground::native_test::same_boot_absent_relay::owner_child";
 const RECOVERY: &str =
     "provider::graph::foreground::native_test::same_boot_absent_relay::recovery_child";
+const REMOVE_DATA: &str =
+    "provider::graph::foreground::native_test::same_boot_absent_relay::remove_data_child";
 fn candidate() -> Candidate {
     Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap())).unwrap()
 }
@@ -89,6 +91,11 @@ fn recovery_child() {
         &std::env::var("HACK_ABSENT_RELAY_RECEIPT").unwrap(),
     )
     .unwrap();
+}
+#[test]
+#[ignore = "Only the isolated native parent fixture invokes this owned child"]
+fn remove_data_child() {
+    graph::foreground::cleanup_request(&candidate(), &run(), true).unwrap();
 }
 fn child(candidate: &Candidate, run: &str, name: &str, extra: &[(&str, &str)]) -> Process {
     let mut command = Command::new(std::env::current_exe().unwrap());
@@ -192,9 +199,11 @@ fn running_container(candidate: &Candidate, run: &str) -> Value {
         .unwrap();
     assert_eq!(container["State"]["Running"], true);
     assert!(container["Id"].as_str().is_some_and(|id| !id.is_empty()));
-    assert!(container["State"]["StartedAt"]
-        .as_str()
-        .is_some_and(|started| !started.is_empty()));
+    assert!(
+        container["State"]["StartedAt"]
+            .as_str()
+            .is_some_and(|started| !started.is_empty())
+    );
     json!({"id":container["Id"],"started_at":container["State"]["StartedAt"]})
 }
 #[test]
@@ -372,11 +381,47 @@ fn absent_relay_cleanup_retries_preserve_data_and_live_sibling() {
     )
     .unwrap());
     graph::recover_live_owner(&candidate, &runs[1], &sibling_expected).unwrap();
+    // Interrupt the new destructive request after an actual owned volume removal,
+    // before completion publication. Retry must use the persisted same-boot proof.
+    let mut removal = child(
+        &candidate,
+        &runs[0],
+        REMOVE_DATA,
+        &[(
+            "HACK_LOCAL_GRAPH_FAULT",
+            "retained-data-after-volume-remove",
+        )],
+    );
+    let removal_marker = root.join("fault-retained-data-after-volume-remove.json");
+    wait_file(
+        &mut removal,
+        &removal_marker,
+        deadline.min(Instant::now() + Duration::from_secs(40)),
+    );
+    assert_eq!(
+        state::read::<Value>(&removal_marker).unwrap()["run"],
+        runs[0]
+    );
+    removal.child.kill().unwrap();
+    removal.wait(deadline);
+    assert_eq!(
+        graph::inspect(&candidate, &runs[0]).unwrap().receipt.phase,
+        "cleanup-intent"
+    );
+    assert_eq!(marker(&candidate, &runs[1], false), markers[1]);
+    let removal_path = root.join("retired-data-removal.json");
+    let removal_bytes = fs::read(&removal_path).unwrap();
+    assert_eq!(
+        state::read::<Value>(&removal_path).unwrap()["recovery_source"],
+        "same-boot"
+    );
     for run in &runs {
+        graph::foreground::cleanup_request(&candidate, run, true).unwrap();
         graph::foreground::cleanup_request(&candidate, run, true).unwrap();
         assert_eq!(
             graph::inspect(&candidate, run).unwrap().receipt.phase,
             "removed"
         );
     }
+    assert_eq!(fs::read(&removal_path).unwrap(), removal_bytes);
 }

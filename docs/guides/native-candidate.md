@@ -1433,8 +1433,10 @@ boot, journal and exact artifact hashes, with no active or pending journal and a
 independently confirmed current retention proof. Eviction of its old stopped
 receipt does not require repeating completed archival. First-time or interrupted
 archival still requires the exact selected cleanup proof and ownership checks.
-The same-boot completion proof does not authorize direct data removal: restore the
-graph and use ordinary cleanup for that operation. Native routed recovery has been
+An explicitly requested data removal can select a completed same-boot recovery
+after publisher retirement. It pins the exact completion, current guest boot and
+archived publisher identity; retries keep the selected proof source and refuse
+changed evidence. This does not fabricate a relay acknowledgement. Native routed recovery has been
 qualified with repeated owner crashes, retained data and an unaffected sibling's
 HTTPS route; this does not establish normal source-mounted worktree parity.
 

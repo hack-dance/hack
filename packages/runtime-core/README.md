@@ -216,7 +216,8 @@ normally, and checks explicit same-boot recovery after interrupted intent,
 container removal, completed cleanup, and publisher retirement. Persistent data
 and the live sibling must survive; substituted endpoint/lock/directory, receipt
 bytes, and completed-retry process evidence must refuse. It removes only its own
-graph resources on success and never restarts the pool. On failure, inspect its
+graph resources on success, including an interrupted explicit volume removal and
+idempotent retry, and never restarts the pool. On failure, inspect its
 retained graph evidence before another attempt. This fixture does not qualify
 application authentication, dependency listeners, browser routing, or publication.
 
@@ -333,7 +334,10 @@ After confirmed foreground cleanup and clean owner retirement, explicit
 `graph cleanup --run-id <id> --remove-data --json` can remove retained data. The
 operation holds the foreground publication lock, rechecks retirement and resource
 ownership, and records volume identities before removal so an interrupted attempt
-can resume against the same resources. Active owners still handle their own cleanup;
+can resume against the same resources. Completed same-boot recovery is supported
+with exact completion and archived publisher evidence; the removal intent pins its
+proof source so a retry cannot switch to a different recovery generation.
+Active owners still handle their own cleanup;
 stale owner artifacts, uncertain cleanup and changed identities refuse removal.
 Ordinary volume identity is captured when removal is admitted; shared caches also
 retain their existing provenance and shared-resource protections. Persistent data

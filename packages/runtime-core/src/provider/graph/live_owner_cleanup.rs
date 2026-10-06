@@ -34,6 +34,36 @@ pub(super) fn current_completion(
     Ok(intent.complete_sha256.as_deref() == Some(complete.as_str()))
 }
 
+/// Select an independent data-removal request from the exact completed same-boot
+/// generation. A retry pins the entire committed proof, not just receipt phases.
+pub(super) fn removal_selection(
+    root: &Path,
+    receipt: &Receipt,
+    boot: &str,
+    expected: Option<&str>,
+) -> Result<dead_owner_cleanup::RemovalProof, CandidateError> {
+    if exists(&root.join("live-owner-cleanup.pending"))? {
+        return Err(refused());
+    }
+    let intent: Intent = state::read(&root.join(FILE))?;
+    validate(&intent, receipt, &intent.original_sha256, boot)?;
+    let complete = intent.complete_sha256.as_deref().ok_or_else(refused)?;
+    let proof = digest(&intent)?;
+    match expected {
+        None if receipt.phase == "stopped-data-retained" && digest(receipt)? == complete => {}
+        Some(value)
+            if value == proof
+                && ["stopped-data-retained", "cleanup-intent", "removed"]
+                    .contains(&receipt.phase.as_str()) => {}
+        _ => return Err(refused()),
+    }
+    Ok(dead_owner_cleanup::RemovalProof {
+        owner: intent.foreground_sha256,
+        complete: complete.into(),
+        digest: proof,
+    })
+}
+
 fn refused() -> CandidateError {
     error(
         "graph_live_owner_recovery",
@@ -786,6 +816,74 @@ mod tests {
             prior_bridges: None, listeners_retired: true, complete_sha256: Some(digest(&stopped).unwrap()), original,
         }
     }
+    #[test]
+    fn same_boot_removal_requires_exact_completion_and_pins_retry_proof() {
+        let fixture = super::super::tests::Fixture::new();
+        let original = generation(1, "ready-observed");
+        let mut stopped = generation(1, "stopped-data-retained");
+        let mut intent = completed(original);
+        let path = fixture.0.join(FILE);
+        state::write(&path, &intent).unwrap();
+        let proof = removal_selection(&fixture.0, &stopped, "boot", None).unwrap();
+        assert_eq!(proof.owner, intent.foreground_sha256);
+        assert_eq!(proof.complete, intent.complete_sha256.clone().unwrap());
+        let bytes = fs::read(&path).unwrap();
+        for phase in ["stopped-data-retained", "cleanup-intent", "removed"] {
+            stopped.phase = phase.into();
+            assert!(removal_selection(&fixture.0, &stopped, "boot", Some(&proof.digest)).is_ok());
+            assert!(
+                removal_selection(&fixture.0, &stopped, "other-boot", Some(&proof.digest)).is_err()
+            );
+            assert!(
+                removal_selection(&fixture.0, &stopped, "boot", Some(&"0".repeat(64))).is_err()
+            );
+            if phase != "stopped-data-retained" {
+                assert!(removal_selection(&fixture.0, &stopped, "boot", None).is_err());
+            }
+        }
+        stopped.phase = "stopped-data-retained".into();
+        stopped.resources.get_mut("container:web").unwrap().id = Some("9".repeat(64));
+        assert!(removal_selection(&fixture.0, &stopped, "boot", Some(&proof.digest)).is_err());
+        stopped = generation(1, "stopped-data-retained");
+        for case in 0..5 {
+            let mut changed = completed(generation(1, "ready-observed"));
+            match case {
+                0 => changed.complete_sha256 = None,
+                1 => changed.complete_sha256 = Some("9".repeat(64)),
+                2 => changed.listeners_retired = false,
+                3 => changed.original_sha256 = "9".repeat(64),
+                4 => changed.foreground_sha256 = "9".repeat(64),
+                _ => unreachable!(),
+            }
+            state::write(&path, &changed).unwrap();
+            assert!(removal_selection(&fixture.0, &stopped, "boot", Some(&proof.digest)).is_err());
+        }
+        intent.complete_sha256 = Some(digest(&stopped).unwrap());
+        state::write(&path, &intent).unwrap();
+        fs::write(fixture.0.join("live-owner-cleanup.pending"), b"partial").unwrap();
+        assert!(removal_selection(&fixture.0, &stopped, "boot", None).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn absent_relay_completion_supports_independent_removal_selection() {
+        let fixture = super::super::tests::Fixture::new();
+        let stopped = generation(1, "stopped-data-retained");
+        let mut proof = serde_json::to_value(completed(generation(1, "ready-observed"))).unwrap();
+        proof["version"] = json!(2);
+        proof["relay"] = json!({"absent": {
+            "process": {"pid":999999, "start_micros":1, "uid":unsafe {libc::geteuid()}, "executable":"/bin/sleep"},
+            "witness_sha256":"a".repeat(64)
+        }});
+        state::write(&fixture.0.join(FILE), &proof).unwrap();
+        let selected = removal_selection(&fixture.0, &stopped, "boot", None).unwrap();
+        assert_eq!(selected.complete, digest(&stopped).unwrap());
+        removal_selection(&fixture.0, &stopped, "boot", Some(&selected.digest)).unwrap();
+        proof["relay"]["absent"]["witness_sha256"] = json!("b".repeat(64));
+        state::write(&fixture.0.join(FILE), &proof).unwrap();
+        assert!(removal_selection(&fixture.0, &stopped, "boot", Some(&selected.digest)).is_err());
+    }
+
     #[test]
     fn recovery_versions_distinguish_absence_from_legacy_publication() {
         let original = receipt();

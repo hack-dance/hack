@@ -66,7 +66,9 @@ pub(crate) struct Witness {
 }
 /// A clean managed owner exit unlinks both publication paths while leaving the
 /// operation lock. Absence is only a current endpoint fact: callers must bind
-/// the original owner/process/publication to a selected coordinator record.
+/// the original owner/process/publication to a selected coordinator record, or
+/// bind the exact dead foreground process to a ready graph receipt and its
+/// current-boot run-derived control root. Absence alone grants no cleanup.
 pub(crate) enum CleanupWitness {
     Present(Witness),
     Absent(AbsentWitness),
@@ -190,6 +192,7 @@ impl AbsentWitness {
     }
 }
 impl Witness {
+    #[cfg(test)]
     pub(crate) fn acquire(
         root: &Path,
         context: Context,

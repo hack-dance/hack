@@ -4,6 +4,7 @@ use super::*;
 use crate::provider::relay_owner::publication::dead;
 use sha2::{Digest, Sha256};
 use std::path::Path;
+mod relay;
 const FILE: &str = "live-owner-cleanup.json";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -13,7 +14,7 @@ struct Intent {
     original: Receipt,
     original_sha256: String,
     foreground_sha256: String,
-    relay: dead::Selection,
+    relay: relay::Selection,
     environment: Value,
     bridges: bridges::cleanup::Selection,
     prior_bridges: Option<Value>,
@@ -31,6 +32,36 @@ pub(super) fn current_completion(
     let intent: Intent = state::read(&root.join(FILE))?;
     let complete = digest(receipt)?;
     Ok(intent.complete_sha256.as_deref() == Some(complete.as_str()))
+}
+
+/// Select an independent data-removal request from the exact completed same-boot
+/// generation. A retry pins the entire committed proof, not just receipt phases.
+pub(super) fn removal_selection(
+    root: &Path,
+    receipt: &Receipt,
+    boot: &str,
+    expected: Option<&str>,
+) -> Result<dead_owner_cleanup::RemovalProof, CandidateError> {
+    if exists(&root.join("live-owner-cleanup.pending"))? {
+        return Err(refused());
+    }
+    let intent: Intent = state::read(&root.join(FILE))?;
+    validate(&intent, receipt, &intent.original_sha256, boot)?;
+    let complete = intent.complete_sha256.as_deref().ok_or_else(refused)?;
+    let proof = digest(&intent)?;
+    match expected {
+        None if receipt.phase == "stopped-data-retained" && digest(receipt)? == complete => {}
+        Some(value)
+            if value == proof
+                && ["stopped-data-retained", "cleanup-intent", "removed"]
+                    .contains(&receipt.phase.as_str()) => {}
+        _ => return Err(refused()),
+    }
+    Ok(dead_owner_cleanup::RemovalProof {
+        owner: intent.foreground_sha256,
+        complete: complete.into(),
+        digest: proof,
+    })
 }
 
 fn refused() -> CandidateError {
@@ -104,7 +135,8 @@ fn validate(
     boot: &str,
 ) -> Result<(), CandidateError> {
     ready(&intent.original)?;
-    if intent.version != 1
+    intent.relay.validate()?;
+    if intent.version != intent.relay.version()
         || intent.boot != boot
         || boot.is_empty()
         || !hex(expected, 64)
@@ -132,7 +164,11 @@ fn save(root: &Path, intent: &Intent) -> Result<(), CandidateError> {
     )?;
     state::write(&root.join(FILE), intent)
 }
-fn stop_listeners(engine: &Engine<'_>, receipt: &Receipt) -> Result<(), CandidateError> {
+fn stop_listeners(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    verify: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
     for (name, service) in &startup.services {
         if service.phase == startup::Phase::Completed {
@@ -149,6 +185,7 @@ fn stop_listeners(engine: &Engine<'_>, receipt: &Receipt) -> Result<(), Candidat
         let (uid, gid) = launcher::identity(&value["Config"])?;
         for binding in service.bindings.values() {
             let process = binding.process.ok_or_else(refused)?;
+            verify()?;
             engine.guest().stop_orphan_relay_listener(
                 crate::provider::lifecycle::RelayLaunch {
                     container: resource.id.as_deref().ok_or_else(refused)?,
@@ -273,7 +310,12 @@ pub fn recover_live_owner(
     foreground.verify_retirement_ready()?;
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
     let context = host_relay::context(&receipt.owner, engine.guest().boot_id())?;
-    let relay = dead::Witness::acquire(&startup.control_root, context, foreground.process())?;
+    let relay =
+        dead::CleanupWitness::acquire(&startup.control_root, context, foreground.process())?;
+    if matches!(relay, dead::CleanupWitness::Absent(_)) {
+        relay::require_scoped_root(candidate, &receipt, engine.guest().boot_id())?;
+        relay::verify_receipt(&root, &receipt)?;
+    }
     archive_prior(&root, &receipt, expected)?;
     let mut intent = if exists(&root.join(FILE))? {
         state::read::<Intent>(&root.join(FILE))?
@@ -286,13 +328,14 @@ pub fn recover_live_owner(
         for resource in receipt.resources.values() {
             inspect_resource(&engine, &receipt, resource)?;
         }
+        let selected = relay::Selection::capture(&relay, foreground.process())?;
         Intent {
-            version: 1,
+            version: selected.version(),
             boot: engine.guest().boot_id().into(),
             original: receipt.clone(),
             original_sha256: expected.into(),
             foreground_sha256: foreground.fingerprint(),
-            relay: relay.selection(),
+            relay: selected,
             environment: serde_json::to_value(environment::cleanup_inventory(
                 candidate, &engine, &receipt, &root,
             )?)
@@ -304,9 +347,10 @@ pub fn recover_live_owner(
         }
     };
     validate(&intent, &receipt, expected, engine.guest().boot_id())?;
-    if intent.foreground_sha256 != foreground.fingerprint() || intent.relay != relay.selection() {
+    if intent.foreground_sha256 != foreground.fingerprint() {
         return Err(refused());
     }
+    intent.relay.verify(&relay, foreground.process())?;
     startup::require_dependency_rebind_recovery_complete(&root, &intent.original, &intent.boot)?;
     foreground.verify_retirement_ready()?;
     relay.verify()?;
@@ -317,16 +361,35 @@ pub fn recover_live_owner(
     }
     bridges::cleanup::verify_live_remaining(candidate, &engine, &receipt, &intent.bridges)?;
     save(&root, &intent)?;
-    if !intent.listeners_retired {
-        stop_listeners(&engine, &receipt)?;
+    #[cfg(test)]
+    fault_pause(&root, run, "live-owner-after-intent")?;
+    let verify = || {
+        engine.guest().verify()?;
         foreground.verify_retirement_ready()?;
         relay.verify()?;
+        if matches!(relay, dead::CleanupWitness::Absent(_)) {
+            relay::verify_receipt(&root, &intent.original)?;
+        }
+        Ok(())
+    };
+    if !intent.listeners_retired {
+        stop_listeners(&engine, &receipt, &verify)?;
+        verify()?;
         intent.listeners_retired = true;
         save(&root, &intent)?;
     }
     bridges::cleanup::verify_recovery_file(&root, &intent.bridges, intent.prior_bridges.as_ref())?;
+    verify()?;
     bridges::cleanup::recover_persist(&root, &intent.bridges)?;
-    let cleaned = cleanup_owned(candidate, &engine, receipt, &root, false)?;
+    let cleaned = cleanup_owned_fenced(
+        candidate,
+        &engine,
+        receipt,
+        &root,
+        false,
+        matches!(relay, dead::CleanupWitness::Absent(_)),
+        verify,
+    )?;
     host_relay::inspect_cleanup(
         candidate,
         &engine,
@@ -335,10 +398,11 @@ pub fn recover_live_owner(
         &environment,
         &intent.bridges,
     )?;
-    foreground.verify_retirement_ready()?;
-    relay.verify()?;
+    verify()?;
     intent.complete_sha256 = Some(digest(&cleaned)?);
     save(&root, &intent)?;
+    #[cfg(test)]
+    fault_pause(&root, run, "live-owner-after-completion")?;
     // Commit independently verified owned absence before archival. A crash during
     // a rename resumes through the completed intent, never through host adoption.
     drop(relay);
@@ -384,23 +448,56 @@ fn finish_retirement(
     }
     startup::verify_cleanup(engine, receipt)?;
     probes::verify_cleanup(engine, receipt)?;
-    archive_completed_refresh(root, &intent.original, receipt, &intent.boot, &|| {
-        engine.guest().verify()
-    })?;
-    let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
-    dead::retire(
-        &startup.control_root,
-        host_relay::context(&receipt.owner, &intent.boot)?,
-        &intent.relay,
-    )?;
-    foreground::retire_publisher_path(
+    let publisher = foreground::transport::root(candidate, &receipt.run)?;
+    acknowledged_publisher::require_no_pending_missing_lock(candidate, &receipt.run)?;
+    let publisher_lock = state::Lock::acquire_existing(&publisher)?;
+    acknowledged_publisher::require_no_pending_missing_lock(candidate, &receipt.run)?;
+    let process = foreground::transport::selected_retirement_process(
         candidate,
         &receipt.run,
         &intent.foreground_sha256,
         &digest(receipt)?,
+        &publisher_lock,
     )?;
+    let absent = intent
+        .relay
+        .absent_witness(candidate, receipt, &intent.boot, &process)?;
+    let verify = || {
+        engine.guest().verify()?;
+        if let Some(witness) = &absent {
+            let current = foreground::transport::selected_retirement_process(
+                candidate,
+                &receipt.run,
+                &intent.foreground_sha256,
+                &digest(receipt)?,
+                &publisher_lock,
+            )?;
+            intent.relay.verify(witness, &current)?;
+            relay::verify_receipt(root, &intent.original)?;
+        }
+        Ok(())
+    };
+    archive_completed_refresh(root, &intent.original, receipt, &intent.boot, &verify)?;
+    let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
+    if let relay::Selection::Present(selected) = &intent.relay {
+        dead::retire(
+            &startup.control_root,
+            host_relay::context(&receipt.owner, &intent.boot)?,
+            selected,
+        )?;
+    }
+    foreground::transport::retire_recovered_publisher_locked_fenced(
+        candidate,
+        &receipt.run,
+        &intent.foreground_sha256,
+        &digest(receipt)?,
+        None,
+        &publisher_lock,
+        &verify,
+    )?;
+    verify()?;
     dependency_slots::recover_cleaned(candidate, receipt, None)?;
-    engine.guest().verify()
+    verify()
 }
 
 /// Completed cleanup grants archival, not refresh replay. The same exact ready
@@ -718,6 +815,135 @@ mod tests {
             bridges: serde_json::from_value(json!({"version":1,"owner":original.owner,"boot":"boot","run":original.run,"plan":original.plan_id,"capacity":0,"serial":0,"selected":{}})).unwrap(),
             prior_bridges: None, listeners_retired: true, complete_sha256: Some(digest(&stopped).unwrap()), original,
         }
+    }
+    #[test]
+    fn same_boot_removal_requires_exact_completion_and_pins_retry_proof() {
+        let fixture = super::super::tests::Fixture::new();
+        let original = generation(1, "ready-observed");
+        let mut stopped = generation(1, "stopped-data-retained");
+        let mut intent = completed(original);
+        let path = fixture.0.join(FILE);
+        state::write(&path, &intent).unwrap();
+        let proof = removal_selection(&fixture.0, &stopped, "boot", None).unwrap();
+        assert_eq!(proof.owner, intent.foreground_sha256);
+        assert_eq!(proof.complete, intent.complete_sha256.clone().unwrap());
+        let bytes = fs::read(&path).unwrap();
+        for phase in ["stopped-data-retained", "cleanup-intent", "removed"] {
+            stopped.phase = phase.into();
+            assert!(removal_selection(&fixture.0, &stopped, "boot", Some(&proof.digest)).is_ok());
+            assert!(
+                removal_selection(&fixture.0, &stopped, "other-boot", Some(&proof.digest)).is_err()
+            );
+            assert!(
+                removal_selection(&fixture.0, &stopped, "boot", Some(&"0".repeat(64))).is_err()
+            );
+            if phase != "stopped-data-retained" {
+                assert!(removal_selection(&fixture.0, &stopped, "boot", None).is_err());
+            }
+        }
+        stopped.phase = "stopped-data-retained".into();
+        stopped.resources.get_mut("container:web").unwrap().id = Some("9".repeat(64));
+        assert!(removal_selection(&fixture.0, &stopped, "boot", Some(&proof.digest)).is_err());
+        stopped = generation(1, "stopped-data-retained");
+        for case in 0..5 {
+            let mut changed = completed(generation(1, "ready-observed"));
+            match case {
+                0 => changed.complete_sha256 = None,
+                1 => changed.complete_sha256 = Some("9".repeat(64)),
+                2 => changed.listeners_retired = false,
+                3 => changed.original_sha256 = "9".repeat(64),
+                4 => changed.foreground_sha256 = "9".repeat(64),
+                _ => unreachable!(),
+            }
+            state::write(&path, &changed).unwrap();
+            assert!(removal_selection(&fixture.0, &stopped, "boot", Some(&proof.digest)).is_err());
+        }
+        intent.complete_sha256 = Some(digest(&stopped).unwrap());
+        state::write(&path, &intent).unwrap();
+        fs::write(fixture.0.join("live-owner-cleanup.pending"), b"partial").unwrap();
+        assert!(removal_selection(&fixture.0, &stopped, "boot", None).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn absent_relay_completion_supports_independent_removal_selection() {
+        let fixture = super::super::tests::Fixture::new();
+        let stopped = generation(1, "stopped-data-retained");
+        let mut proof = serde_json::to_value(completed(generation(1, "ready-observed"))).unwrap();
+        proof["version"] = json!(2);
+        proof["relay"] = json!({"absent": {
+            "process": {"pid":999999, "start_micros":1, "uid":unsafe {libc::geteuid()}, "executable":"/bin/sleep"},
+            "witness_sha256":"a".repeat(64)
+        }});
+        state::write(&fixture.0.join(FILE), &proof).unwrap();
+        let selected = removal_selection(&fixture.0, &stopped, "boot", None).unwrap();
+        assert_eq!(selected.complete, digest(&stopped).unwrap());
+        removal_selection(&fixture.0, &stopped, "boot", Some(&selected.digest)).unwrap();
+        proof["relay"]["absent"]["witness_sha256"] = json!("b".repeat(64));
+        state::write(&fixture.0.join(FILE), &proof).unwrap();
+        assert!(removal_selection(&fixture.0, &stopped, "boot", Some(&selected.digest)).is_err());
+    }
+
+    #[test]
+    fn recovery_versions_distinguish_absence_from_legacy_publication() {
+        let original = receipt();
+        let legacy = completed(original.clone());
+        let value = serde_json::to_value(&legacy).unwrap();
+        assert!(value["relay"]["bytes"].is_array());
+        assert!(value["relay"].get("absent").is_none());
+        let restored: Intent = serde_json::from_value(value.clone()).unwrap();
+        validate(&restored, &original, &digest(&original).unwrap(), "boot").unwrap();
+        let mut absent = value;
+        absent["relay"] = json!({"absent": {
+            "process": {"pid":999999, "start_micros":1, "uid":unsafe {libc::geteuid()}, "executable":"/bin/sleep"},
+            "witness_sha256":"a".repeat(64)
+        }});
+        let old_version: Intent = serde_json::from_value(absent.clone()).unwrap();
+        assert!(validate(&old_version, &original, &digest(&original).unwrap(), "boot").is_err());
+        absent["version"] = json!(2);
+        let selected: Intent = serde_json::from_value(absent.clone()).unwrap();
+        validate(&selected, &original, &digest(&original).unwrap(), "boot").unwrap();
+        assert!(
+            validate(
+                &selected,
+                &original,
+                &digest(&original).unwrap(),
+                "changed-boot"
+            )
+            .is_err()
+        );
+        absent["relay"]["absent"]["witness_sha256"] = json!("malformed");
+        let malformed: Intent = serde_json::from_value(absent.clone()).unwrap();
+        assert!(validate(&malformed, &original, &digest(&original).unwrap(), "boot").is_err());
+        absent["relay"]["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<Intent>(absent).is_err());
+    }
+    #[test]
+    fn absence_receipt_fence_rejects_changed_bytes_and_resources() {
+        let fixture = super::super::tests::Fixture::new();
+        let original = receipt();
+        let path = fixture.0.join("state.json");
+        state::write(&path, &original).unwrap();
+        relay::verify_receipt(&fixture.0, &original).unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.push(b'\n');
+        fs::write(&path, &bytes).unwrap();
+        assert!(relay::verify_receipt(&fixture.0, &original).is_err());
+        let mut changed = original.clone();
+        changed.phase = "cleanup-intent".into();
+        state::write(&path, &changed).unwrap();
+        relay::verify_receipt(&fixture.0, &original).unwrap();
+        changed.owner = "f".repeat(32);
+        state::write(&path, &changed).unwrap();
+        assert!(relay::verify_receipt(&fixture.0, &original).is_err());
+        changed = original.clone();
+        changed.relay_startup.as_mut().unwrap().control_root = "/private/foreign".into();
+        state::write(&path, &changed).unwrap();
+        assert!(relay::verify_receipt(&fixture.0, &original).is_err());
+        changed = original.clone();
+        changed.phase = "removed".into();
+        state::write(&path, &changed).unwrap();
+        assert!(relay::verify_receipt(&fixture.0, &original).is_err());
     }
     #[test]
     fn historical_recovery_survives_eviction_without_lending_current_authority() {

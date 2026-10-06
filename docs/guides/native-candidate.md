@@ -1343,6 +1343,14 @@ For a fully ready graph whose foreground owner died while its pool remains on th
 same boot, `graph recover-live-owner --run-id RUN --expect-receipt SHA256` selects
 only that graph. It requires matching dead foreground and relay-owner identities,
 unchanged receipt and resource inventories, and exclusive publication locks. The
+relay endpoint may also be absent after the managed owner exited: both relay files
+must be absent under the original held operation lock, and the exact dead
+foreground process and ready receipt must select the control root derived for
+this run, runtime owner, and current guest boot. Recovery persists that absence
+witness and rechecks its directory/lock identity, process death, endpoint absence,
+and receipt bytes at cleanup boundaries. A partial publication, replacement
+endpoint or lock, legacy unscoped root, or changed receipt is refused. This path
+does not recreate relay metadata or invent a live-owner acknowledgement. The
 operation stops verified guest dependency listeners, removes owned containers and
 network resources, retains persistent data, retires stale foreground and relay
 publications, and releases the graph's dependency reservation before unlocking the
@@ -1425,8 +1433,10 @@ boot, journal and exact artifact hashes, with no active or pending journal and a
 independently confirmed current retention proof. Eviction of its old stopped
 receipt does not require repeating completed archival. First-time or interrupted
 archival still requires the exact selected cleanup proof and ownership checks.
-The same-boot completion proof does not authorize direct data removal: restore the
-graph and use ordinary cleanup for that operation. Native routed recovery has been
+An explicitly requested data removal can select a completed same-boot recovery
+after publisher retirement. It pins the exact completion, current guest boot and
+archived publisher identity; retries keep the selected proof source and refuse
+changed evidence. This does not fabricate a relay acknowledgement. Native routed recovery has been
 qualified with repeated owner crashes, retained data and an unaffected sibling's
 HTTPS route; this does not establish normal source-mounted worktree parity.
 

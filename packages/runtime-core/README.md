@@ -204,6 +204,23 @@ history format. Stable v4 uses its separate state and is unaffected.
 
 ## Named-volume integrity qualification
 
+The ignored fixture
+`foreground::native_test::same_boot_absent_relay::absent_relay_cleanup_retries_preserve_data_and_live_sibling`
+uses a caller-owned running development pool and a pinned image containing
+`/bin/sh` and `sleep`. Set `HACK_LOCAL_TEST_ROOT` to that private candidate home
+and `HACK_LOCAL_TEST_IMAGE` to the loaded `sha256:<config digest>`. Compile the
+all-feature library test with `--no-run`, then invoke its exact test name with
+`--ignored --exact --nocapture --test-threads=1` under a 300-second external
+watchdog. It starts two unique control-only graphs, lets one managed relay exit
+normally, and checks explicit same-boot recovery after interrupted intent,
+container removal, completed cleanup, and publisher retirement. Persistent data
+and the live sibling must survive; substituted endpoint/lock/directory, receipt
+bytes, and completed-retry process evidence must refuse. It removes only its own
+graph resources on success, including an interrupted explicit volume removal and
+idempotent retry, and never restarts the pool. On failure, inspect its
+retained graph evidence before another attempt. This fixture does not qualify
+application authentication, dependency listeners, browser routing, or publication.
+
 The ignored foreground-owner fixture
 `foreground::native_test::stop14::fourteen_services_retain_named_data_across_cleanup_and_restore`
 qualifies normal retaining cleanup of thirteen running services and one completed
@@ -317,7 +334,10 @@ After confirmed foreground cleanup and clean owner retirement, explicit
 `graph cleanup --run-id <id> --remove-data --json` can remove retained data. The
 operation holds the foreground publication lock, rechecks retirement and resource
 ownership, and records volume identities before removal so an interrupted attempt
-can resume against the same resources. Active owners still handle their own cleanup;
+can resume against the same resources. Completed same-boot recovery is supported
+with exact completion and archived publisher evidence; the removal intent pins its
+proof source so a retry cannot switch to a different recovery generation.
+Active owners still handle their own cleanup;
 stale owner artifacts, uncertain cleanup and changed identities refuse removal.
 Ordinary volume identity is captured when removal is admitted; shared caches also
 retain their existing provenance and shared-resource protections. Persistent data

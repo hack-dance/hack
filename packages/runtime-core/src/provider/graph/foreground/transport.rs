@@ -373,6 +373,43 @@ pub(in crate::provider::graph) fn retire_recovered_publisher_locked(
     )
 }
 
+/// Read the exact selected dead process before retirement or after either
+/// interrupted rename. The caller holds the publication lock throughout its
+/// cleanup fences; a self-consistent external process receipt is insufficient.
+pub(in crate::provider::graph) fn selected_retirement_process(
+    candidate: &Candidate,
+    run: &str,
+    expected_owner: &str,
+    expected_receipt: &str,
+    lock: &state::Lock,
+) -> Result<ProcessIdentity, CandidateError> {
+    let root = root(candidate, run)?;
+    super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
+    super::super::host_pin_recovery::exact_lock_path(&root, lock)?;
+    let path = retirement_path(&root, expected_owner);
+    if metadata(&path)?.is_some() {
+        let intent: Retirement = state::read(&path).map_err(|_| retirement_refused())?;
+        verify_retirement(
+            candidate,
+            run,
+            (expected_owner, expected_receipt),
+            &root,
+            lock,
+            &intent,
+            None,
+        )?;
+        return Ok(intent.owner.process);
+    }
+    let pin = Pin::read(candidate, run)?;
+    if format!("{:x}", Sha256::digest(&pin.bytes)) != expected_owner
+        || identity::alive(pin.record.process.pid).unwrap_or(true)
+    {
+        return Err(retirement_refused());
+    }
+    no_listener(&root.join("control.sock"))?;
+    Ok(pin.record.process)
+}
+
 /// The caller's current cleanup proof remains valid at each publication effect.
 pub(in crate::provider::graph) fn retire_recovered_publisher_locked_fenced(
     candidate: &Candidate,
@@ -438,6 +475,12 @@ pub(in crate::provider::graph) fn retire_recovered_publisher_locked_fenced(
         fs::File::open(&root)
             .and_then(|file| file.sync_all())
             .map_err(|_| retirement_refused())?;
+        #[cfg(test)]
+        super::super::fault_pause(
+            &super::super::directory(candidate, run)?,
+            run,
+            "live-owner-after-socket-retirement",
+        )?;
     }
     if record_original {
         verify_cleanup()?;

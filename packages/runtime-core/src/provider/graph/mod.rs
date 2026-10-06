@@ -1741,6 +1741,10 @@ fn cleanup_owned_fenced(
             // only the final receipt needs another commit, including environment-slot retirement.
             #[cfg(test)]
             fault_pause(root, &receipt.run, "cleanup-after-remove")?;
+            #[cfg(test)]
+            if kind == Kind::Volume {
+                fault_pause(root, &receipt.run, "retained-data-after-volume-remove")?;
+            }
         }
     }
     fence()?;

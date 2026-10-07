@@ -268,8 +268,8 @@ class ChannelTests(unittest.TestCase):
         for name in nested:
             self.assertEqual((bundle / name).stat().st_mode & 0o777,
                              0o400 if name.endswith("manifest.json") else 0o500)
-        signed = {Path(arguments[-1]).name for arguments, _ in self.calls
-                  if arguments[0] == "/usr/bin/codesign"}
+        signed = {Path(path).name for arguments, _ in self.calls
+                  if arguments[0] == "/usr/bin/codesign" for path in arguments[3:]}
         self.assertTrue(set(installer.MCP_FILES.values()) <= signed)
         with self.channel.lock():
             self.channel.select("5.0.0-next.1")
@@ -309,8 +309,8 @@ class ChannelTests(unittest.TestCase):
                 with self.channel.lock():
                     self.channel.select(prior)
                 self.assertEqual(self.selection()["selected"], prior)
-        signed = {Path(arguments[-1]).name for arguments, _ in self.calls
-                  if arguments[0] == "/usr/bin/codesign"}
+        signed = {Path(path).name for arguments, _ in self.calls
+                  if arguments[0] == "/usr/bin/codesign" for path in arguments[3:]}
         self.assertIn("hack-config-compiler", signed)
         self.assertNotIn("hack.project.schema.json", signed)
         self.assertNotIn("hack.local.schema.json", signed)
@@ -379,14 +379,68 @@ class ChannelTests(unittest.TestCase):
         before = self.selection()
         original = self.process
         def fail_compiler(arguments, **options):
-            if arguments[0] == "/usr/bin/codesign" and Path(arguments[-1]).name == "hack-config-compiler":
+            if arguments[0] == "/usr/bin/codesign" and any(
+                    Path(path).name == "hack-config-compiler" for path in arguments[3:]):
                 return subprocess.CompletedProcess(arguments, 1)
             return original(arguments, **options)
         with mock.patch.object(installer.subprocess, "run", side_effect=fail_compiler):
             with self.channel.lock():
-                with self.assertRaisesRegex(installer.Refusal, "signature failed: hack-config-compiler"):
+                with self.assertRaisesRegex(installer.Refusal, "Candidate code signature failed"):
                     self.channel.install("5.0.0-next.2", archive, checksum, True)
         self.assertEqual(self.selection(), before)
+
+    def test_signature_batch_covers_all_executable_assets_in_one_strict_call(self):
+        archive, checksum = self.archive(mutate=lambda entries: with_mcp(with_compiler(entries)))
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.1", archive, checksum)
+        bundle = self.channel.root / "versions/5.0.0-next.1/bundle"
+        self.calls.clear()
+        installer.verify_signatures(bundle)
+        self.assertEqual(len(self.calls), 1)
+        arguments, options = self.calls[0]
+        self.assertEqual(arguments[:3], ["/usr/bin/codesign", "--verify", "--strict"])
+        paths = [Path(path) for path in arguments[3:]]
+        self.assertEqual([path.name for path in paths], [
+            "hack-native", "hack-cli", "hack-config-compiler",
+            "hack-mcp-adapter", "hack-mcp-backend", "hack-mcp-owner"])
+        self.assertEqual(len(set(paths)), 6)
+        self.assertTrue(all(path.is_relative_to(bundle) for path in paths))
+        self.assertEqual(options, {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                                   "stderr": subprocess.DEVNULL, "timeout": 30, "check": False})
+
+    def test_signature_batch_failures_preserve_selection_and_refuse_before_spawn(self):
+        archive, checksum = self.archive(mutate=lambda entries: with_mcp(with_compiler(entries)))
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.1", archive, checksum)
+        before = self.retained_snapshot()
+        cases = ("hack-native", "hack-mcp-adapter", "hack-mcp-owner", "timeout", "os-error")
+        for case in cases:
+            with self.subTest(failure=case):
+                calls = []
+                def fail_signature(arguments, **options):
+                    self.assertEqual(arguments[:3], ["/usr/bin/codesign", "--verify", "--strict"])
+                    calls.append((arguments, options))
+                    if case == "timeout":
+                        raise subprocess.TimeoutExpired(arguments, 30, stderr=b"private-signature-sentinel")
+                    if case == "os-error":
+                        raise OSError("private-signature-sentinel")
+                    failed = any(Path(path).name == case for path in arguments[3:])
+                    return subprocess.CompletedProcess(arguments, int(failed),
+                                                       stderr=b"private-signature-sentinel")
+                child = mock.Mock()
+                child.wait.return_value = 0
+                current = installer.Channel(self.channel.root)
+                with mock.patch.object(installer.subprocess, "run", side_effect=fail_signature), \
+                        mock.patch.object(installer.subprocess, "Popen", return_value=child) as spawn:
+                    with self.assertRaises(installer.Refusal) as refusal:
+                        with current.lock(shared=True):
+                            current.run(["--version"])
+                    message = ("Cannot verify candidate code signature." if case in ("timeout", "os-error")
+                               else "Candidate code signature failed.")
+                    self.assertEqual(str(refusal.exception), message)
+                    spawn.assert_not_called()
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(self.retained_snapshot(), before)
 
     def test_reviewed_mcp_manager_upgrades_before_accepting_compiler_pair(self):
         source = SOURCE.parent.parent / "tests/fixtures/prerelease-manager-mcp-v2.py"
@@ -949,7 +1003,8 @@ print(json.dumps(stages))
         archive, checksum = self.archive("5.0.0-next.2")
         original = self.process
         def fail_signature(arguments, **options):
-            if arguments[0] == "/usr/bin/codesign" and ".stage-" in arguments[-1]:
+            if arguments[0] == "/usr/bin/codesign" and any(
+                    ".stage-" in path for path in arguments[3:]):
                 return subprocess.CompletedProcess(arguments, 1)
             return original(arguments, **options)
         with mock.patch.object(installer.subprocess, "run", side_effect=fail_signature):

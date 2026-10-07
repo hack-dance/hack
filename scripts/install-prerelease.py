@@ -281,16 +281,18 @@ def verify_signatures(bundle):
     payload = bundle_inventory(bundle)
     if "hack-config-compiler" in payload:
         names.append("hack-config-compiler")
-    names.extend(name for name in payload
-                 if MCP_MEMBER.fullmatch(name) and not name.endswith("/manifest.json"))
-    for name in names:
-        try:
-            result = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(bundle / name)],
-                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL, timeout=30, check=False)
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise Refusal("Cannot verify candidate code signature.") from error
-        require(result.returncode == 0, "Candidate code signature failed: " + name)
+    names.extend(sorted(name for name in payload
+                        if MCP_MEMBER.fullmatch(name) and not name.endswith("/manifest.json")))
+    # codesign verifies every supplied path and fails if any is invalid. Keep all
+    # executables and strict validation in one bounded, output-redacted process.
+    try:
+        result = subprocess.run(["/usr/bin/codesign", "--verify", "--strict",
+                                 *(str(bundle / name) for name in names)],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise Refusal("Cannot verify candidate code signature.") from error
+    require(result.returncode == 0, "Candidate code signature failed.")
 
 
 def extract_archive(archive, checksum, destination, version, release_metadata=None):

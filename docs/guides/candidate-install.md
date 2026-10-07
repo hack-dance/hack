@@ -46,8 +46,10 @@ candidate command; selecting another bundle refuses while any launcher is active
 Every invocation verifies the retained bundle bytes and receipts again. MCP's
 nested identity uses digests from that same verification pass; it does not reread
 the same executable or reuse a previous invocation's trust result. Download and
-archive code loads only when installing software. These reductions preserve
-signature checks, retained-version validation and the selection lock. Apply the
+archive code loads only when installing software. Strict signature verification
+checks all bundled macOS binaries in one bounded `codesign` invocation and refuses
+any failed or unavailable check. These reductions preserve retained-version
+validation and the selection lock. Apply the
 reviewed `upgrade-manager` operation below to an older installation to receive
 manager changes; upgrading a bundle alone retains the original manager.
 

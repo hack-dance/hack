@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../src/agents/integration-revision.ts";
 import {
   assertDoctorOptionCompatibility,
@@ -41,6 +41,75 @@ async function createDoctorTestProject(opts: {
   }
   return root;
 }
+
+test("doctor refuses native input before probing or repairing global runtime", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-doctor-native-"));
+  try {
+    const project = join(root, "project");
+    const tools = join(root, "tools");
+    await mkdir(join(project, ".hack"), { recursive: true });
+    await mkdir(tools);
+    const cache = join(root, "cache");
+    await mkdir(cache);
+    await writeFile(
+      join(project, ".hack", "hack.project.json"),
+      "{invalid-native"
+    );
+    const sentinel = join(root, "runtime-called");
+    await writeFile(
+      join(tools, "docker"),
+      '#!/bin/sh\nprintf called > "$RUNTIME_SENTINEL"\nexit 99\n',
+      { mode: 0o700 }
+    );
+    const cli = resolve(import.meta.dir, "..", "index.ts");
+    for (const flags of [[], ["--fix"], ["--migrate-env-config"], ["--json"]]) {
+      const child = Bun.spawn(
+        [process.execPath, cli, "doctor", "--path", project, ...flags],
+        {
+          cwd: project,
+          env: {
+            ...process.env,
+            HOME: root,
+            HACK_HOME: join(root, "state"),
+            HACK_GLOBAL_CONFIG_PATH: join(root, "state", "hack.config.json"),
+            HACK_DAEMON_DISABLE: "1",
+            HACK_NO_INTERACTIVE: "1",
+            HACK_LOGGER: "console",
+            XDG_CACHE_HOME: cache,
+            PATH: `${tools}:/usr/bin:/bin`,
+            RUNTIME_SENTINEL: sentinel,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        }
+      );
+      const [exit, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(exit).not.toBe(0);
+      expect(stdout + stderr).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+      if (flags.includes("--json")) {
+        expect(JSON.parse(stdout)).toMatchObject({
+          ok: false,
+          error: { code: "E_NATIVE_PROJECT_UNSUPPORTED" },
+        });
+      }
+      expect(await Bun.file(sentinel).exists()).toBe(false);
+      expect((await readdir(root)).sort()).toEqual([
+        "cache",
+        "project",
+        "tools",
+      ]);
+      expect(await readdir(join(project, ".hack"))).toEqual([
+        "hack.project.json",
+      ]);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("doctor guidance distinguishes restartable proxy drift from deeper repair", () => {
   const guidance = buildDoctorRecoveryGuidance({

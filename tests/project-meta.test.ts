@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -17,6 +17,27 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
+});
+
+test("direct project metadata refuses mixed native inputs before legacy parsing", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "hack-project-meta-native-"));
+  tempDirs.add(repoRoot);
+  const projectDir = join(repoRoot, ".hack");
+  await mkdir(projectDir);
+  const composeFile = join(projectDir, PROJECT_COMPOSE_FILENAME);
+  await writeFile(composeFile, "invalid legacy compose:");
+  const marker = join(projectDir, "hack.project.json");
+  await writeFile(marker, "{invalid-native");
+  await expect(
+    resolveProjectMeta({
+      projectName: "native",
+      repoRoot,
+      projectDir,
+      composeFile,
+    })
+  ).rejects.toThrow("E_NATIVE_PROJECT_CONFLICT");
+  expect(await readFile(marker, "utf8")).toBe("{invalid-native");
+  expect(await readFile(composeFile, "utf8")).toBe("invalid legacy compose:");
 });
 
 test("resolveProjectMeta reads modern env config repos without a legacy contract", async () => {

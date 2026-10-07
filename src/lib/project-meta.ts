@@ -16,6 +16,7 @@ import {
   projectEnvConfigExists,
   resolveProjectEnvConfig,
 } from "./project-env-config.ts";
+import { assertLegacyProjectDirectory } from "./project-input-selection.ts";
 import { exec } from "./shell.ts";
 
 export type GitWorktreeMeta = {
@@ -98,6 +99,7 @@ export async function resolveProjectMeta(opts: {
   readonly projectDir: string;
   readonly composeFile: string;
 }): Promise<ProjectMeta> {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   const [config, git, hackBranches, env, sessions, composeBuild] =
     await Promise.all([
       readProjectConfig({

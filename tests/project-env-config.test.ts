@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -22,6 +23,7 @@ import { upsertDotEnvValue } from "../src/lib/hack-env.ts";
 import { readProjectDefaultEnvConfig } from "../src/lib/project.ts";
 import {
   assertValidProjectEnvScopeName,
+  ensureHackDirGitignore,
   ensureProjectEnvSecretKey,
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
@@ -29,6 +31,7 @@ import {
   materializeProjectEnv,
   migrateLegacyProjectEnv,
   parseProjectEnvTarget,
+  removeLegacyProjectEnvArtifacts,
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
   resolveProjectEnvLocalConfigPath,
@@ -1443,3 +1446,105 @@ async function initializeGitRepo(opts: {
   await runGit(["add", "."], opts.projectRoot);
   await runGit(["commit", "-m", "test: seed env fixture"], opts.projectRoot);
 }
+
+test.each([
+  false,
+  true,
+])("legacy env mutation owners refuse native input without changing bytes (legacy conflict: %s)", async (legacy) => {
+  const repo = await createRepo();
+  const nativePath = join(repo.projectDir, "hack.project.json");
+  const envPath = join(repo.projectDir, ".env");
+  const contractPath = join(repo.projectDir, PROJECT_ENV_CONTRACT_FILENAME);
+  await writeFile(nativePath, "{malformed native marker\n");
+  await writeFile(envPath, "PUBLIC_FIXTURE=preserve\n");
+  await writeFile(
+    contractPath,
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "PUBLIC_FIXTURE", source: "plain_env" }],
+    })
+  );
+  if (!legacy) {
+    await unlink(repo.composeFile);
+    await unlink(repo.configFile);
+  }
+  const existingPaths = [
+    nativePath,
+    envPath,
+    contractPath,
+    ...(legacy ? [repo.composeFile, repo.configFile] : []),
+  ];
+  const before = await Promise.all(
+    existingPaths.map(async (path) => ({ path, bytes: await readFile(path) }))
+  );
+  const mutation = {
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "PUBLIC_FIXTURE",
+  };
+  const operations = [
+    () =>
+      migrateLegacyProjectEnv({
+        ...repo,
+        projectName: "fixture",
+        serviceNames: ["api"],
+        materialize: true,
+      }),
+    () =>
+      repairLegacyComposeEnvFileReferences({
+        composeFile: repo.composeFile,
+        projectDir: repo.projectDir,
+      }),
+    () =>
+      setProjectEnvValue({
+        ...mutation,
+        value: "changed",
+        secret: true,
+        local: true,
+      }),
+    () => unsetProjectEnvValue(mutation),
+    () => materializeProjectEnv({ ...repo, serviceNames: ["api"] }),
+    () => ensureProjectEnvSecretKey({ projectRoot: repo.projectRoot }),
+    () => ensureHackDirGitignore({ projectDir: repo.projectDir }),
+    () =>
+      removeLegacyProjectEnvArtifacts({
+        projectRoot: repo.projectRoot,
+        paths: [envPath, contractPath],
+      }),
+  ];
+  for (const operation of operations) {
+    await expect(operation()).rejects.toThrow(
+      legacy ? "E_NATIVE_PROJECT_CONFLICT" : "E_NATIVE_PROJECT_UNSUPPORTED"
+    );
+    for (const file of before) {
+      expect(await readFile(file.path)).toEqual(file.bytes);
+    }
+  }
+  for (const path of [
+    join(repo.projectRoot, PROJECT_ENV_KEY_FILENAME),
+    join(repo.projectRoot, ".gitignore"),
+    join(repo.projectDir, ".gitignore"),
+    join(repo.projectDir, "hack.env.default.yaml"),
+    join(repo.projectDir, PROJECT_ENV_STATE_FILENAME),
+  ]) {
+    expect(await Bun.file(path).exists()).toBe(false);
+  }
+});
+
+test("Compose env repair rechecks native selection after reading the repair input", async () => {
+  const repo = await createRepo();
+  const contents = "services:\n  api:\n    env_file: .env\n";
+  await writeFile(repo.composeFile, contents);
+  await expect(
+    repairLegacyComposeEnvFileReferences({
+      projectDir: repo.projectDir,
+      get composeFile() {
+        writeFileSync(join(repo.projectDir, "hack.project.json"), "{}\n");
+        return repo.composeFile;
+      },
+    })
+  ).rejects.toThrow("E_NATIVE_PROJECT_CONFLICT");
+  expect(await readFile(repo.composeFile, "utf8")).toBe(contents);
+});

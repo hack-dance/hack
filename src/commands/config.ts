@@ -22,6 +22,7 @@ import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import { findProjectContext } from "../lib/project.ts";
+import { assertLegacyProjectDirectory } from "../lib/project-input-selection.ts";
 import { normalizeProjectName } from "../lib/project-name.ts";
 import {
   resolveRegisteredProjectByName,
@@ -187,6 +188,10 @@ const handleConfigSet: CommandHandlerFor<typeof configSetSpec> = async ({
   const nextText = `${JSON.stringify(read.value, null, 2)}\n`;
   if (project.scope === "global") {
     await ensureDir(dirname(read.path));
+  } else {
+    await assertLegacyProjectDirectory({
+      projectDir: project.project.projectDir,
+    });
   }
   const result = await writeTextFileIfChanged(read.path, nextText);
 
@@ -329,6 +334,9 @@ async function readConfigObject(opts: {
     opts.target.project.projectDir,
     PROJECT_CONFIG_FILENAME
   );
+  await assertLegacyProjectDirectory({
+    projectDir: opts.target.project.projectDir,
+  });
   const jsonText = await readTextFile(jsonPath);
   if (jsonText !== null) {
     const parsed = parseJsonObject({ text: jsonText, path: jsonPath });
@@ -381,6 +389,9 @@ async function readConfigJsonForSet(opts: {
     opts.target.project.projectDir,
     PROJECT_CONFIG_FILENAME
   );
+  await assertLegacyProjectDirectory({
+    projectDir: opts.target.project.projectDir,
+  });
   const jsonText = await readTextFile(jsonPath);
   if (jsonText === null) {
     const tomlPath = resolve(

@@ -3,6 +3,7 @@ import {
   access,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   writeFile,
@@ -179,6 +180,67 @@ test("config get does not create or lock the global project registry", async () 
   const registryPath = join(tempDir, ".hack", "projects.json");
   expect(await exists(lockPath)).toBe(false);
   expect(await exists(registryPath)).toBe(false);
+});
+
+for (const mixed of [false, true]) {
+  test(`config get/set refuses native project paths without creating legacy files or registration (mixed=${mixed})`, async () => {
+    const projectRoot = join(tempDir!, "native");
+    const projectDir = join(projectRoot, ".hack");
+    await mkdir(projectDir, { recursive: true });
+    const marker = join(projectDir, "hack.project.json");
+    await writeFile(marker, "{invalid-native");
+    const legacy = join(projectDir, "hack.config.json");
+    if (mixed) {
+      await writeFile(legacy, '{"name":"original"}\n');
+      await writeFile(join(projectDir, "docker-compose.yml"), "services: {}\n");
+    }
+    const before = await readdir(projectDir);
+    const { runCli } = await import("../src/cli/run.ts");
+    for (const args of [
+      ["config", "get", "--path", projectRoot, "name"],
+      ["config", "set", "--path", projectRoot, "name", "changed"],
+    ]) {
+      expect(await runCli(args)).not.toBe(0);
+    }
+    expect(await readdir(projectDir)).toEqual(before);
+    expect(await readFile(marker, "utf8")).toBe("{invalid-native");
+    if (mixed) {
+      expect(await readFile(legacy, "utf8")).toBe('{"name":"original"}\n');
+    }
+    expect(await exists(join(tempDir!, ".hack"))).toBe(false);
+  });
+}
+
+test("config registered selection refuses a native marker and preserves registry bytes", async () => {
+  const projectRoot = join(tempDir!, "native");
+  const projectDir = join(projectRoot, ".hack");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(join(projectDir, "hack.project.json"), "{}");
+  const registry = join(tempDir!, ".hack", "projects.json");
+  await mkdir(dirname(registry), { recursive: true });
+  const before = JSON.stringify({
+    version: 1,
+    projects: [
+      {
+        id: "native-id",
+        name: "native",
+        repoRoot: projectRoot,
+        projectDir,
+        projectDirName: ".hack",
+        createdAt: "2026-10-06T00:00:00Z",
+      },
+    ],
+  });
+  await writeFile(registry, before);
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli(["config", "get", "--project", "native", "name"])
+  ).not.toBe(0);
+  expect(
+    await runCli(["config", "set", "--project", "native", "name", "changed"])
+  ).not.toBe(0);
+  expect(await readFile(registry, "utf8")).toBe(before);
+  expect(await readdir(dirname(registry))).toEqual(["projects.json"]);
 });
 
 async function exists(path: string): Promise<boolean> {

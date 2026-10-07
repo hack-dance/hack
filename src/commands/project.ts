@@ -224,6 +224,10 @@ import {
 } from "../lib/project-env-config.ts";
 import { resolveProjectExecutionTarget } from "../lib/project-execution.ts";
 import {
+  assertLegacyProjectDiscovery,
+  assertLegacyProjectInputFamily,
+} from "../lib/project-input-selection.ts";
+import {
   readProcessSnapshot,
   resolveLifecycleProcessGroupIdsForTmuxState,
   resolveLifecycleStopProcessGroupIds,
@@ -3891,6 +3895,7 @@ async function promptInitUseDiscovery(opts: {
 async function ensureInitHackDir(opts: {
   readonly hackDir: string;
 }): Promise<"proceed" | "skip" | null> {
+  await assertLegacyProjectInputFamily({ projectRoot: dirname(opts.hackDir) });
   if (await pathExists(opts.hackDir)) {
     const ok = await confirm({
       message: `${HACK_PROJECT_DIR_PRIMARY}/ already exists. Overwrite scaffold files?`,
@@ -3899,13 +3904,15 @@ async function ensureInitHackDir(opts: {
     if (isCancel(ok)) {
       return null;
     }
+    await assertLegacyProjectInputFamily({
+      projectRoot: dirname(opts.hackDir),
+    });
     if (!ok) {
       return "skip";
     }
     return "proceed";
   }
 
-  await ensureDir(opts.hackDir);
   return "proceed";
 }
 
@@ -3917,10 +3924,15 @@ async function handleInit({
   readonly args: InitArgs;
 }): Promise<number> {
   const withValue = resolveInitWithOption({ withRaw: args.options.with });
+  const startDir = resolveStartDir(ctx, args.options.path);
+  await assertLegacyProjectDiscovery({ startDir });
 
   if (args.options.auto) {
     return await handleInitAuto({ ctx, args, withValue });
   }
+
+  const repoRoot = await findRepoRootForInit(startDir);
+  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
 
   if (!canPrompt()) {
     requireInteractive({
@@ -3928,9 +3940,6 @@ async function handleInit({
       hint: "Use `hack init --auto` (optionally with --name, --dev-host, --oauth, --oauth-tld, --manual) for scripted setup.",
     });
   }
-
-  const startDir = resolveStartDir(ctx, args.options.path);
-  const repoRoot = await findRepoRootForInit(startDir);
 
   const slug = await promptInitProjectSlug({
     repoRoot,
@@ -3994,6 +4003,7 @@ async function handleInit({
           ".hack/ already exists — handing off the onboarding prompt for the existing setup.",
       });
       await runInitOnboardingHandoff({
+        repoRoot,
         withValue,
         mode: "existing-project",
         projectName: slug,
@@ -4003,19 +4013,7 @@ async function handleInit({
     return 0;
   }
 
-  // Committed, hack-owned ignore file for machine-local generated files
-  // (.internal/, .branch/, .env, env state, env-local overrides).
-  await ensureHackDirGitignore({ projectDir: hackDir });
-
-  await writeTextFileIfChanged(
-    configFile,
-    renderProjectConfigJson({
-      name: slug,
-      devHost,
-      oauth: { enabled: oauth.enabled, tld: oauth.tld },
-    })
-  );
-
+  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
   const compose = useDiscovery
     ? await buildDiscoveredCompose({
         repoRoot,
@@ -4030,21 +4028,45 @@ async function handleInit({
         projectSlug: slug,
         oauth: { enabled: oauth.enabled, tld: oauth.tld },
       });
-  await writeTextFileIfChanged(composeFile, compose);
+  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
+  await ensureDir(hackDir);
 
-  await writeTextFileIfChanged(
-    resolve(hackDir, "README.md"),
-    renderHackFolderReadme({
+  // Committed, hack-owned ignore file for machine-local generated files
+  // (.internal/, .branch/, .env, env state, env-local overrides).
+  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
+  await ensureHackDirGitignore({ projectDir: hackDir });
+
+  await writeInitScaffoldFile({
+    repoRoot,
+    file: configFile,
+    content: renderProjectConfigJson({
+      name: slug,
       devHost,
       oauth: { enabled: oauth.enabled, tld: oauth.tld },
-    })
-  );
+    }),
+  });
+  await writeInitScaffoldFile({
+    repoRoot,
+    file: composeFile,
+    content: compose,
+  });
 
-  await writeTextFileIfChanged(
-    resolve(hackDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
-    renderProjectEnvConfigYaml()
-  );
+  await writeInitScaffoldFile({
+    repoRoot,
+    file: resolve(hackDir, "README.md"),
+    content: renderHackFolderReadme({
+      devHost,
+      oauth: { enabled: oauth.enabled, tld: oauth.tld },
+    }),
+  });
 
+  await writeInitScaffoldFile({
+    repoRoot,
+    file: resolve(hackDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
+    content: renderProjectEnvConfigYaml(),
+  });
+
+  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
   const registration = await upsertProjectRegistration({
     project: {
       projectRoot: repoRoot,
@@ -4085,6 +4107,7 @@ async function handleInit({
 
   if (withValue) {
     await runInitOnboardingHandoff({
+      repoRoot,
       withValue,
       mode: "new-project",
       projectName: slug,
@@ -4106,6 +4129,7 @@ async function handleInitAuto({
 }): Promise<number> {
   const startDir = resolveStartDir(ctx, args.options.path);
   const repoRoot = await findRepoRootForInit(startDir);
+  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
 
   const slug = resolveInitSlug({
     repoRoot,
@@ -4141,12 +4165,14 @@ async function handleInitAuto({
   const composeFile = resolve(hackDir, PROJECT_COMPOSE_FILENAME);
   const configFile = resolve(hackDir, PROJECT_CONFIG_FILENAME);
 
+  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
   if (await pathExists(hackDir)) {
     if (withValue) {
       logger.info({
         message: `${HACK_PROJECT_DIR_PRIMARY}/ already exists — skipping init and handing off the onboarding prompt for the existing setup.`,
       });
       await runInitOnboardingHandoff({
+        repoRoot,
         withValue,
         mode: "existing-project",
         projectName: slug,
@@ -4158,21 +4184,6 @@ async function handleInitAuto({
       `${HACK_PROJECT_DIR_PRIMARY}/ already exists. Run without --auto to overwrite.`
     );
   }
-
-  await ensureDir(hackDir);
-
-  // Committed, hack-owned ignore file for machine-local generated files
-  // (.internal/, .branch/, .env, env state, env-local overrides).
-  await ensureHackDirGitignore({ projectDir: hackDir });
-
-  await writeTextFileIfChanged(
-    configFile,
-    renderProjectConfigJson({
-      name: slug,
-      devHost,
-      oauth: { enabled: oauth.enabled, tld: oauth.tld },
-    })
-  );
 
   const compose = useDiscovery
     ? await buildDiscoveredComposeAuto({
@@ -4188,21 +4199,45 @@ async function handleInitAuto({
         projectSlug: slug,
         oauth,
       });
-  await writeTextFileIfChanged(composeFile, compose);
+  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
+  await ensureDir(hackDir);
 
-  await writeTextFileIfChanged(
-    resolve(hackDir, "README.md"),
-    renderHackFolderReadme({
+  // Committed, hack-owned ignore file for machine-local generated files
+  // (.internal/, .branch/, .env, env state, env-local overrides).
+  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
+  await ensureHackDirGitignore({ projectDir: hackDir });
+
+  await writeInitScaffoldFile({
+    repoRoot,
+    file: configFile,
+    content: renderProjectConfigJson({
+      name: slug,
       devHost,
       oauth: { enabled: oauth.enabled, tld: oauth.tld },
-    })
-  );
+    }),
+  });
+  await writeInitScaffoldFile({
+    repoRoot,
+    file: composeFile,
+    content: compose,
+  });
 
-  await writeTextFileIfChanged(
-    resolve(hackDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
-    renderProjectEnvConfigYaml()
-  );
+  await writeInitScaffoldFile({
+    repoRoot,
+    file: resolve(hackDir, "README.md"),
+    content: renderHackFolderReadme({
+      devHost,
+      oauth: { enabled: oauth.enabled, tld: oauth.tld },
+    }),
+  });
 
+  await writeInitScaffoldFile({
+    repoRoot,
+    file: resolve(hackDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
+    content: renderProjectEnvConfigYaml(),
+  });
+
+  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
   const registration = await upsertProjectRegistration({
     project: {
       projectRoot: repoRoot,
@@ -4235,6 +4270,7 @@ async function handleInitAuto({
 
   if (withValue) {
     await runInitOnboardingHandoff({
+      repoRoot,
       withValue,
       mode: "new-project",
       projectName: slug,
@@ -4243,6 +4279,15 @@ async function handleInitAuto({
   }
 
   return 0;
+}
+
+async function writeInitScaffoldFile(opts: {
+  readonly repoRoot: string;
+  readonly file: string;
+  readonly content: string;
+}): Promise<void> {
+  await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
+  await writeTextFileIfChanged(opts.file, opts.content);
 }
 
 /**
@@ -4273,11 +4318,13 @@ function resolveInitWithOption(opts: {
  * instead. Init success is never rolled back by handoff problems.
  */
 async function runInitOnboardingHandoff(opts: {
+  readonly repoRoot: string;
   readonly withValue: OnboardingWith;
   readonly mode: OnboardingMode;
   readonly projectName: string;
   readonly devHost: string;
 }): Promise<void> {
+  await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
   const prompt = renderOnboardingPrompt({
     mode: opts.mode,
     projectName: opts.projectName,
@@ -4388,6 +4435,7 @@ type SetupIntegration = "cursor" | "claude" | "codex" | "agents" | "mcp";
 async function maybeSetupAgentIntegrations(opts: {
   readonly repoRoot: string;
 }): Promise<void> {
+  await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
   if (!canPrompt()) {
     return;
   }
@@ -4421,6 +4469,7 @@ async function maybeSetupAgentIntegrations(opts: {
   const selection = new Set(selected);
 
   if (selection.has("cursor")) {
+    await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
     const result = await installCursorRules({
       scope: "project",
       projectRoot: opts.repoRoot,
@@ -4434,6 +4483,7 @@ async function maybeSetupAgentIntegrations(opts: {
   }
 
   if (selection.has("claude")) {
+    await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
     const result = await installClaudeHooks({
       scope: "project",
       projectRoot: opts.repoRoot,
@@ -4447,6 +4497,7 @@ async function maybeSetupAgentIntegrations(opts: {
   }
 
   if (selection.has("codex")) {
+    await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
     const result = await installCodexSkill({
       scope: "project",
       projectRoot: opts.repoRoot,
@@ -4460,6 +4511,7 @@ async function maybeSetupAgentIntegrations(opts: {
   }
 
   if (selection.has("agents")) {
+    await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
     const results = await upsertAgentDocs({
       projectRoot: opts.repoRoot,
       targets: ["agents", "claude"],
@@ -4475,6 +4527,7 @@ async function maybeSetupAgentIntegrations(opts: {
   }
 
   if (selection.has("mcp")) {
+    await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
     const targetHints = selected.filter(
       (value) => value === "cursor" || value === "claude" || value === "codex"
     );

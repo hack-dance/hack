@@ -335,7 +335,7 @@ export function createRuntimeCache(opts: {
       ? await profiler.measure("metadata_ms", () =>
           Promise.all(
             views.map(async (view) => {
-              if (view.kind !== "registered") {
+              if (view.kind !== "registered" || view.inputDiagnostic) {
                 return null;
               }
               const reg = registryByName.get(view.name) ?? null;

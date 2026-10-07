@@ -1,10 +1,29 @@
 # Native config compiler foundation
 
 This is an experimental, pure compiler for a bounded subset of the planned
-`.hack/hack.project.json` format. It does not discover projects, execute workloads,
+`.hack/hack.project.json` format. The compiler does not discover projects, execute workloads,
 import Compose, migrate data, decrypt environment values, perform host admission,
 or change how existing projects run. A successful compile is syntax and semantic
 validation, not backend capability or application acceptance.
+
+The CLI recognizes this filename as a project boundary. Native runtime and adoption
+are not enabled yet: legacy project commands refuse with
+`E_NATIVE_PROJECT_UNSUPPORTED`. If active `.hack/` or `.dev/` Compose, JSON or TOML
+inputs also exist, they refuse with `E_NATIVE_PROJECT_CONFLICT`. The marker still
+blocks fallback when malformed, a future version, a directory or a dangling link.
+Filesystem inspection failures also refuse. Generated internal files, branch files,
+backups and a root-level Compose file are not competing authored Hack inputs.
+
+Discovery never crosses a native boundary to select an ancestor Compose project.
+Registered name/ID lookup checks the stored root directly. Project listing marks
+blocked registered entries `unavailable`, includes `input_diagnostic`, and continues
+listing other entries without parsing the blocked legacy configuration. Global
+configuration and explicit offline validation remain available. Init, legacy env
+repair, config writes and domain migration/rollback refuse before modifying native
+input; a refused rollback preserves its recovery journal. Selection is checked
+again at mutation boundaries, but this is not atomic protection against concurrent
+external edits. Locked adoption belongs to a later integration step.
+`hack env get` retains its fixed redacted failure message and empty stdout.
 
 The standalone `packages/config-compiler` Rust package has no dependency on the
 native runtime, virtualization, Docker, or platform provider APIs. It uses the

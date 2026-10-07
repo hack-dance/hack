@@ -1,4 +1,17 @@
-import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  test,
+} from "bun:test";
+import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { readProjectsRegistry } from "../src/lib/projects-registry.ts";
+import type { RuntimeProject } from "../src/lib/runtime-projects.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
@@ -6,6 +19,30 @@ let dockerAvailable = false;
 let currentIds: string[] = [];
 let inspectExitCode = 0;
 const inspectCalls: string[][] = [];
+let tempDir: string | null = null;
+let originalHackHome: string | undefined;
+let markerBeforeRegistrationFile: string | null = null;
+
+const projectFileMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/fs.ts",
+  overrides: {
+    pathExists: async (file: string) => {
+      let exists = false;
+      try {
+        await stat(file);
+        exists = true;
+      } catch {
+        exists = false;
+      }
+      if (file === markerBeforeRegistrationFile) {
+        await Bun.write(join(file, "..", "hack.project.json"), "{}\n");
+        markerBeforeRegistrationFile = null;
+      }
+      return exists;
+    },
+  },
+});
 
 const shellMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -44,6 +81,7 @@ const shellMock = await registerScopedModuleMock({
 });
 
 const {
+  autoRegisterRuntimeHackProjects,
   createRuntimeInspectCache,
   getRuntimeInspectCacheDiagnostics,
   readRuntimeProjects,
@@ -51,17 +89,33 @@ const {
 
 beforeAll(() => {
   shellMock.activate();
+  projectFileMock.activate();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+  originalHackHome = process.env.HACK_HOME;
+  tempDir = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-runtime-projects-"))
+  );
+  process.env.HACK_HOME = join(tempDir, "hack-home");
+  markerBeforeRegistrationFile = null;
   dockerAvailable = false;
   currentIds = [];
   inspectExitCode = 0;
   inspectCalls.length = 0;
 });
 
+afterEach(async () => {
+  restoreEnv("HACK_HOME", originalHackHome);
+  if (tempDir) {
+    await rm(tempDir, { recursive: true, force: true });
+    tempDir = null;
+  }
+});
+
 afterAll(() => {
   shellMock.deactivate();
+  projectFileMock.deactivate();
 });
 
 test("readRuntimeProjects reports docker absence instead of throwing", async () => {
@@ -128,6 +182,73 @@ test("runtime inspection keeps valid stdout when another container disappears", 
   const app = result.runtime[0]?.services.get("service-aaaaaaaaaaaa");
   expect(app?.containers[0]?.image).toBe("image:aaaaaaaaaaaa");
   expect(app?.containers[0]?.networks[0]?.name).toBe("hack-dev");
+});
+
+test("runtime auto-registration skips native/mixed roots and still registers legacy peers", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp directory");
+  }
+  const roots = ["native", "mixed-primary", "mixed-legacy", "legacy"];
+  const runtime: RuntimeProject[] = [];
+  for (const name of roots) {
+    const projectRoot = join(tempDir, name);
+    const projectDirName = name === "mixed-legacy" ? ".dev" : ".hack";
+    const projectDir = join(projectRoot, projectDirName);
+    await mkdir(projectDir, { recursive: true });
+    if (name !== "native") {
+      await Bun.write(
+        join(projectDir, "docker-compose.yml"),
+        `name: ${name}\nservices:\n  web: {}\n`
+      );
+      await Bun.write(
+        join(projectDir, "hack.config.json"),
+        JSON.stringify({ name })
+      );
+    }
+    if (name !== "legacy") {
+      await mkdir(join(projectRoot, ".hack", "hack.project.json"), {
+        recursive: true,
+      });
+    }
+    runtime.push({
+      project: name,
+      workingDir: projectDir,
+      services: new Map(),
+      isGlobal: false,
+    });
+  }
+
+  await autoRegisterRuntimeHackProjects({ runtime });
+
+  const registry = await readProjectsRegistry();
+  expect(registry.projects.map((project) => project.name)).toEqual(["legacy"]);
+  expect(registry.projects[0]?.repoRoot).toBe(join(tempDir, "legacy"));
+});
+
+test("runtime auto-registration skips an input family that changes before registration", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp directory");
+  }
+  const projectDir = join(tempDir, "changed", ".hack");
+  const composeFile = join(projectDir, "docker-compose.yml");
+  await Bun.write(composeFile, "name: changed\nservices:\n  web: {}\n");
+  markerBeforeRegistrationFile = composeFile;
+
+  await autoRegisterRuntimeHackProjects({
+    runtime: [
+      {
+        project: "changed",
+        workingDir: projectDir,
+        services: new Map(),
+        isGlobal: false,
+      },
+    ],
+  });
+
+  expect(await Bun.file(join(projectDir, "hack.project.json")).exists()).toBe(
+    true
+  );
+  expect((await readProjectsRegistry()).projects).toEqual([]);
 });
 
 function makePsRow(opts: { readonly id: string }): Record<string, string> {

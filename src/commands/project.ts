@@ -193,6 +193,7 @@ import {
   resolveShouldTryLoki,
   resolveUseLoki,
 } from "../lib/logs.ts";
+import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { readNodesRegistry } from "../lib/nodes-registry.ts";
 import {
   parseOpenHostPreference,
@@ -461,6 +462,13 @@ const downOptions = [
   optPruneCaches,
   optYes,
   optJson,
+  defineOption({
+    name: "recoverNativeCompose",
+    type: "boolean",
+    long: "--recover",
+    description:
+      "Explicitly reconcile an interrupted native Compose stop while retaining data",
+  } as const),
 ] as const;
 const restartOptions = [
   optPath,
@@ -6124,6 +6132,7 @@ async function handleNativeUp({
             json: false,
             pruneCaches: false,
             yes: false,
+            recoverNativeCompose: false,
           },
           positionals: {},
           raw: args.raw,
@@ -6152,6 +6161,22 @@ async function handleUp({
   readonly ctx: CliContext;
   readonly args: UpArgs;
 }): Promise<number> {
+  const authored = await tryNativeComposeCommand({
+    cwd: ctx.cwd,
+    path: args.options.path,
+    project: args.options.project,
+    operation: "up",
+    instance: args.options.branch,
+    profiles: parseCsvList(args.options.profile),
+    overlay: args.options.env,
+    json: args.options.json,
+    detach: args.options.detach,
+    services: args.positionals.services,
+    unsupportedOptions: Boolean(args.options.target),
+  });
+  if (authored !== null) {
+    return authored;
+  }
   const native = resolveNativeRuntimeSelection();
   if (native) {
     return await handleNativeUp({ ctx, args, native });
@@ -6662,6 +6687,14 @@ function writeDownNotice(opts: {
   }
 }
 
+function refuseLegacyNativeRecovery(recover: boolean): void {
+  if (recover) {
+    throw new CliUsageError(
+      "--recover requires a native-authored Compose instance."
+    );
+  }
+}
+
 async function handleDown({
   ctx,
   args,
@@ -6671,6 +6704,26 @@ async function handleDown({
   readonly args: DownArgs;
   readonly deferFinalization?: boolean;
 }): Promise<number> {
+  const authored = await tryNativeComposeCommand({
+    cwd: ctx.cwd,
+    path: args.options.path,
+    project: args.options.project,
+    operation: "down",
+    instance: args.options.branch,
+    profiles: parseCsvList(args.options.profile),
+    overlay: args.options.env,
+    json: args.options.json,
+    recover: args.options.recoverNativeCompose,
+    unsupportedOptions: [
+      args.options.target,
+      args.options.pruneCaches,
+      args.options.yes,
+    ].some(Boolean),
+  });
+  if (authored !== null) {
+    return authored;
+  }
+  refuseLegacyNativeRecovery(args.options.recoverNativeCompose);
   const native = resolveNativeRuntimeSelection();
   if (native) {
     if (args.options.json) {
@@ -7573,16 +7626,12 @@ async function runTargetedServiceRestart(opts: {
   };
 }
 
-async function handleRestart({
-  ctx,
-  args,
-}: {
-  readonly ctx: CliContext;
-  readonly args: RestartArgs;
-}): Promise<number> {
-  const recover = args.options.recoverFrontend === true;
-  const expectAttempt = args.options.expectFinalizationAttempt;
-  const legacyPid = args.options.expectFrontendPid;
+function validateFrontendRecoveryOptions(opts: {
+  readonly recover: boolean;
+  readonly expectAttempt: string | undefined;
+  readonly legacyPid: number | undefined;
+}): void {
+  const { recover, expectAttempt, legacyPid } = opts;
   if (
     (recover &&
       (typeof expectAttempt !== "string" ||
@@ -7594,6 +7643,39 @@ async function handleRestart({
     throw new CliUsageError(
       "Native frontend recovery requires --recover-frontend and the exact --expect-finalization-attempt; legacy state also requires --expect-frontend-pid."
     );
+  }
+}
+
+async function handleRestart({
+  ctx,
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: RestartArgs;
+}): Promise<number> {
+  const recover = args.options.recoverFrontend === true;
+  const expectAttempt = args.options.expectFinalizationAttempt;
+  const legacyPid = args.options.expectFrontendPid;
+  validateFrontendRecoveryOptions({ recover, expectAttempt, legacyPid });
+  const authored = await tryNativeComposeCommand({
+    cwd: ctx.cwd,
+    path: args.options.path,
+    project: args.options.project,
+    operation: "restart",
+    instance: args.options.branch,
+    profiles: parseCsvList(args.options.profile),
+    overlay: args.options.env,
+    json: args.options.json,
+    services: args.positionals.services,
+    unsupportedOptions: [
+      args.options.target,
+      recover,
+      expectAttempt,
+      legacyPid,
+    ].some(Boolean),
+  });
+  if (authored !== null) {
+    return authored;
   }
   const native = resolveNativeRuntimeSelection();
   if (native) {
@@ -8104,6 +8186,18 @@ async function handlePs({
   readonly ctx: CliContext;
   readonly args: PsArgs;
 }): Promise<number> {
+  const authored = await tryNativeComposeCommand({
+    cwd: ctx.cwd,
+    path: args.options.path,
+    project: args.options.project,
+    operation: "ps",
+    instance: args.options.branch,
+    profiles: parseCsvList(args.options.profile),
+    json: args.options.json,
+  });
+  if (authored !== null) {
+    return authored;
+  }
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -8228,6 +8322,21 @@ async function handleRun({
   readonly ctx: CliContext;
   readonly args: RunArgs;
 }): Promise<number> {
+  const authored = await tryNativeComposeCommand({
+    cwd: ctx.cwd,
+    path: args.options.path,
+    project: args.options.project,
+    operation: "run",
+    instance: args.options.branch,
+    profiles: parseCsvList(args.options.profile),
+    overlay: args.options.env,
+    service: args.positionals.service,
+    command: args.positionals.cmd,
+    workdir: args.options.workdir,
+  });
+  if (authored !== null) {
+    return authored;
+  }
   const native = resolveNativeRuntimeSelection();
   validateRunBackendOptions(Boolean(native), args);
   const project = await resolveProjectForArgs({
@@ -8394,8 +8503,23 @@ async function handleExec({
   readonly ctx: CliContext;
   readonly args: ExecArgs;
 }): Promise<number> {
+  const authored = await tryNativeComposeCommand({
+    cwd: ctx.cwd,
+    path: args.options.path,
+    project: args.options.project,
+    operation: "exec",
+    instance: args.options.branch,
+    profiles: parseCsvList(args.options.profile),
+    overlay: args.options.env,
+    service: args.positionals.service,
+    command: args.positionals.cmd,
+    workdir: args.options.workdir,
+  });
+  if (authored !== null) {
+    return authored;
+  }
   const native = resolveNativeRuntimeSelection();
-  if (native && (args.options.env || args.options.profile)) {
+  if (native && [args.options.env, args.options.profile].some(Boolean)) {
     throw new CliUsageError(
       "Native exec does not support --env or --profile changes; it uses the running service environment."
     );
@@ -9009,6 +9133,32 @@ async function handleLogs({
   readonly ctx: CliContext;
   readonly args: LogsArgs;
 }): Promise<number> {
+  const authored = await tryNativeComposeCommand({
+    cwd: ctx.cwd,
+    path: args.options.path,
+    project: args.options.project,
+    operation: "logs",
+    instance: args.options.branch,
+    profiles: parseCsvList(args.options.profile),
+    service: args.positionals.service,
+    json: args.options.json,
+    follow: !args.options.noFollow,
+    tail: args.options.tail,
+    logFormat: resolveLogFormat({
+      json: args.options.json,
+      pretty: args.options.pretty,
+    }),
+    unsupportedOptions: Boolean(
+      args.options.loki ||
+        args.options.query ||
+        args.options.services ||
+        args.options.since ||
+        args.options.until
+    ),
+  });
+  if (authored !== null) {
+    return authored;
+  }
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,

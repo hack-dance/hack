@@ -243,7 +243,14 @@ jobs:
           docker pull node:24.11.0-bookworm-slim
           docker pull oven/bun:1.4.2-slim
           docker pull postgres:17.6-alpine
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Build current-branch CLI and native config compiler
+        run: |
+          bun run build
+          bun run build:config-compiler
       - name: Run local and Docker E2E
+        env:
+          HACK_E2E_CLI_BIN: ${{ github.workspace }}/dist/hack
         run: HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun run test:e2e:local:docker
       - name: Smoke container resource metadata without optional fields
         run: |

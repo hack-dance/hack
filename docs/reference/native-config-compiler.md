@@ -445,6 +445,14 @@ text, never managed values, ciphertext, key material or private file paths. It
 leaves the authored `semantic_hash` and local `resolution_hash` unchanged. This is
 binding completeness, not runtime admission, secret delivery or an atomic snapshot.
 
+The internal native-selected value API shares the managed-env owner's layer
+selection and declared-workload/requested-host scope rules. It supplies private
+values through the existing key and decryption owner, never creates keys on reads,
+and bounds file acquisition and returned values. These values must stay out of
+compiler metadata, plans, reports and diagnostics. This API does not provide an
+atomic admission or freshness fence, and its tests do not establish execution
+acceptance.
+
 The sidecar `plan` operation accepts the original `resolve` request fields plus
 `env_metadata:{metadata_version:1,overlay:null|string,overlay_exists:boolean,
 workloads:{NAME:{KEY:{scope:string,secret:boolean}}},inactive_scopes:string[]}`.

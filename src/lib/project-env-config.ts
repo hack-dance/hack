@@ -4,7 +4,16 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { chmod, lstat, readdir, rm, stat } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import {
+  chmod,
+  lstat,
+  open,
+  readdir,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import {
@@ -60,6 +69,7 @@ import {
   isNativeManagedLocalTracked,
   resolvePrimaryLocalProjectDir,
   resolveVerifiedPrimaryWorktreeRoot,
+  resolveVerifiedProjectEnvKeyGitLocation,
   shouldInheritPrimaryLocalInputs,
   validatePrimaryLocalFile,
 } from "./worktree-local-config.ts";
@@ -1000,7 +1010,7 @@ export type NativeProjectEnvMetadata = {
   readonly hostMetadata?: NativeProjectEnvHostMetadata;
 };
 
-type NativeEnvSelectionOptions = {
+export type NativeProjectEnvSelectionOptions = {
   readonly projectRoot: string;
   readonly overlay: string | null;
   readonly inheritLocal: boolean;
@@ -1008,6 +1018,24 @@ type NativeEnvSelectionOptions = {
   readonly hostTargets?: NativeProjectEnvHostTargets;
   readonly signal?: AbortSignal;
 };
+
+type NativeEnvTargetValues = Readonly<Record<string, string>>;
+
+/** Values are private execution inputs; callers must never serialize them into plans or diagnostics. */
+export type NativeProjectEnvResolvedConfig = NativeProjectEnvMetadata & {
+  readonly globalEnv: NativeEnvTargetValues;
+  readonly workloadEnv: Readonly<Record<string, NativeEnvTargetValues>>;
+  readonly hostValues?: {
+    readonly default?: NativeEnvTargetValues;
+    readonly workloads: Readonly<Record<string, NativeEnvTargetValues>>;
+  };
+};
+
+function nativeEnvValuesError(): Error {
+  return new Error(
+    "Cannot resolve native managed env values: selected inputs or decryption key are missing, invalid, unreadable, unstable or oversized; values omitted."
+  );
+}
 
 function nativeEnvMetadataError(): Error {
   return new Error(
@@ -1097,7 +1125,7 @@ function checkNativeEnvCancellation(signal?: AbortSignal): void {
   if (signal?.aborted) {
     throw new NativeConfigCompilerError(
       "E_COMPILER_CANCELLED",
-      "Native managed env metadata acquisition was cancelled."
+      "Native managed env acquisition was cancelled."
     );
   }
 }
@@ -1169,115 +1197,129 @@ async function readNativeLocalBase(opts: {
  * Optional host targets select declared workloads, never host-process names.
  * Only requested host baselines are allocated, under a combined output budget.
  */
-export async function resolveProjectEnvMetadataForNativeSelection(
-  opts: NativeEnvSelectionOptions
-): Promise<NativeProjectEnvMetadata> {
-  try {
-    checkNativeEnvCancellation(opts.signal);
-    if (
-      opts.overlay !== null &&
-      (typeof opts.overlay !== "string" ||
-        !NATIVE_ENV_OVERLAY_PATTERN.test(opts.overlay))
-    ) {
-      throw nativeEnvMetadataError();
-    }
-    const hostTargets = validateNativeHostTargets(
-      opts.hostTargets,
-      opts.declaredWorkloadNames
-    );
-    const projectRoot = resolve(opts.projectRoot);
-    await assertNativeProjectInputRoot({ projectRoot, signal: opts.signal });
-    let primaryRoot: string | null = null;
-    if (shouldInheritPrimaryLocalInputs(opts)) {
-      primaryRoot = await resolveVerifiedPrimaryWorktreeRoot({
-        projectRoot,
-        signal: opts.signal,
-      });
-      if (primaryRoot) {
-        await assertNativeProjectInputRoot({
-          projectRoot: primaryRoot,
-          signal: opts.signal,
-        });
-      }
-    }
-    const read = (root: string, envName: string | null, local: boolean) => {
-      const projectDir = resolve(root, HACK_PROJECT_DIR_PRIMARY);
-      return readNativeEnvLayer({
-        projectRoot: root,
-        filename: basename(
-          local
-            ? resolveProjectEnvLocalConfigPath({ projectDir, envName })
-            : resolveProjectEnvConfigPath({ projectDir, envName })
-        ),
-        environment: envName ?? "default",
-        signal: opts.signal,
-      });
-    };
-    const base = await read(projectRoot, null, false);
-    const overlay =
-      opts.overlay === null
-        ? null
-        : await read(projectRoot, opts.overlay, false);
-    const envLayers = [
-      base,
-      overlay,
-      primaryRoot
-        ? await readNativeLocalBase({
-            projectRoot: primaryRoot,
-            signal: opts.signal,
-          })
-        : null,
-      primaryRoot && opts.overlay !== null
-        ? await read(primaryRoot, opts.overlay, true)
-        : null,
-      await readNativeLocalBase({ projectRoot, signal: opts.signal }),
-      opts.overlay === null
-        ? null
-        : await read(projectRoot, opts.overlay, true),
-    ];
-    const merged = mergeProjectEnvConfigLayers({
-      layers: envLayers,
-      environment: opts.overlay ?? "default",
+async function readNativeProjectEnvSelection(
+  opts: NativeProjectEnvSelectionOptions
+) {
+  checkNativeEnvCancellation(opts.signal);
+  const overlayName = opts.overlay;
+  const inheritLocal = opts.inheritLocal;
+  const declaredWorkloadNames = [...opts.declaredWorkloadNames];
+  if (
+    overlayName !== null &&
+    (typeof overlayName !== "string" ||
+      !NATIVE_ENV_OVERLAY_PATTERN.test(overlayName))
+  ) {
+    throw nativeEnvMetadataError();
+  }
+  const hostTargets = validateNativeHostTargets(
+    opts.hostTargets,
+    declaredWorkloadNames
+  );
+  const projectRoot = resolve(opts.projectRoot);
+  await assertNativeProjectInputRoot({ projectRoot, signal: opts.signal });
+  let primaryRoot: string | null = null;
+  if (shouldInheritPrimaryLocalInputs({ inheritLocal })) {
+    primaryRoot = await resolveVerifiedPrimaryWorktreeRoot({
+      projectRoot,
+      signal: opts.signal,
     });
-    const projection = projectEnvScopeProjection({
-      layers: { envLayers, merged },
-      serviceNames: opts.declaredWorkloadNames,
-      metadataByteLimit: NATIVE_CONFIG_INPUT_LIMIT,
-      includeHostMetadata: false,
-    });
-    const guestResult: NativeProjectEnvMetadata = {
-      overlay: opts.overlay,
-      overlayExists: overlay !== null,
-      effectiveMetadata: envLayers.some((layer) => layer !== null)
-        ? projection.metadata.effectiveMetadata
-        : {},
-      unknownScopes: projection.metadata.unknownScopes,
-    };
-    const result: NativeProjectEnvMetadata =
-      hostTargets === undefined
-        ? guestResult
-        : {
-            ...guestResult,
-            hostMetadata: projectNativeHostMetadata({
-              targets: hostTargets,
-              envLayers,
-              projection,
-              guestResult,
-              signal: opts.signal,
-            }),
-          };
-    if (Buffer.byteLength(JSON.stringify(result)) > NATIVE_CONFIG_INPUT_LIMIT) {
-      throw nativeEnvMetadataError();
-    }
-    await assertNativeProjectInputRoot({ projectRoot, signal: opts.signal });
     if (primaryRoot) {
       await assertNativeProjectInputRoot({
         projectRoot: primaryRoot,
         signal: opts.signal,
       });
     }
-    checkNativeEnvCancellation(opts.signal);
-    return result;
+  }
+  const read = (root: string, envName: string | null, local: boolean) => {
+    const projectDir = resolve(root, HACK_PROJECT_DIR_PRIMARY);
+    return readNativeEnvLayer({
+      projectRoot: root,
+      filename: basename(
+        local
+          ? resolveProjectEnvLocalConfigPath({ projectDir, envName })
+          : resolveProjectEnvConfigPath({ projectDir, envName })
+      ),
+      environment: envName ?? "default",
+      signal: opts.signal,
+    });
+  };
+  const base = await read(projectRoot, null, false);
+  const overlay =
+    overlayName === null ? null : await read(projectRoot, overlayName, false);
+  const envLayers = [
+    base,
+    overlay,
+    primaryRoot
+      ? await readNativeLocalBase({
+          projectRoot: primaryRoot,
+          signal: opts.signal,
+        })
+      : null,
+    primaryRoot && overlayName !== null
+      ? await read(primaryRoot, overlayName, true)
+      : null,
+    await readNativeLocalBase({ projectRoot, signal: opts.signal }),
+    overlayName === null ? null : await read(projectRoot, overlayName, true),
+  ];
+  const merged = mergeProjectEnvConfigLayers({
+    layers: envLayers,
+    environment: overlayName ?? "default",
+  });
+  const projection = projectEnvScopeProjection({
+    layers: { envLayers, merged },
+    serviceNames: declaredWorkloadNames,
+    metadataByteLimit: NATIVE_CONFIG_INPUT_LIMIT,
+    includeHostMetadata: false,
+  });
+  const guestResult: NativeProjectEnvMetadata = {
+    overlay: overlayName,
+    overlayExists: overlay !== null,
+    effectiveMetadata: envLayers.some((layer) => layer !== null)
+      ? projection.metadata.effectiveMetadata
+      : {},
+    unknownScopes: projection.metadata.unknownScopes,
+  };
+  const result: NativeProjectEnvMetadata =
+    hostTargets === undefined
+      ? guestResult
+      : {
+          ...guestResult,
+          hostMetadata: projectNativeHostMetadata({
+            targets: hostTargets,
+            envLayers,
+            projection,
+            guestResult,
+            signal: opts.signal,
+          }),
+        };
+  if (Buffer.byteLength(JSON.stringify(result)) > NATIVE_CONFIG_INPUT_LIMIT) {
+    throw nativeEnvMetadataError();
+  }
+  await assertNativeProjectInputRoot({ projectRoot, signal: opts.signal });
+  if (primaryRoot) {
+    await assertNativeProjectInputRoot({
+      projectRoot: primaryRoot,
+      signal: opts.signal,
+    });
+  }
+  checkNativeEnvCancellation(opts.signal);
+  return {
+    projectRoot,
+    primaryRoot,
+    envLayers,
+    projection,
+    metadata: result,
+    declaredWorkloadNames,
+    hostTargets,
+  };
+}
+
+/** Resolve native names and winning scope/secret flags without acquiring any key or decrypting values. */
+export async function resolveProjectEnvMetadataForNativeSelection(
+  opts: NativeProjectEnvSelectionOptions
+): Promise<NativeProjectEnvMetadata> {
+  try {
+    return (await readNativeProjectEnvSelection(opts)).metadata;
   } catch (error: unknown) {
     if (
       error instanceof NativeConfigCompilerError &&
@@ -1287,6 +1329,198 @@ export async function resolveProjectEnvMetadataForNativeSelection(
     }
     throw nativeEnvMetadataError();
   }
+}
+
+/**
+ * Deliver values for an explicit native selection through the managed-env owner.
+ * Shares bounded layer acquisition and scope precedence with metadata planning;
+ * does not read legacy config/defaults, dotenv or materialized state. Only declared
+ * workloads and requested host baselines receive values. Reads never create keys.
+ * Acquisition is not an atomic execution-admission fence: callers own that fence
+ * and the lifetime and disclosure protection of these private execution inputs.
+ */
+export async function resolveProjectEnvConfigForNativeSelection(
+  opts: NativeProjectEnvSelectionOptions
+): Promise<NativeProjectEnvResolvedConfig> {
+  try {
+    const selected = await readNativeProjectEnvSelection(opts);
+    const scopes = new Map(
+      selected.projection.serviceTargets.map((target) => [
+        target.serviceName,
+        target,
+      ])
+    );
+    const guestTargets = selected.declaredWorkloadNames.map((name) => {
+      if (!NATIVE_ENV_WORKLOAD_PATTERN.test(name)) {
+        throw nativeEnvValuesError();
+      }
+      const target = scopes.get(name);
+      if (!target) {
+        throw nativeEnvValuesError();
+      }
+      return target;
+    });
+    const requestedScopes = [
+      ["global"],
+      ...guestTargets.map((target) => target.composeScopeNames),
+      ...(selected.hostTargets?.includeDefault
+        ? [selected.projection.globalHostScopeNames]
+        : []),
+      ...(selected.hostTargets?.workloadNames ?? []).map((name) => {
+        const target = scopes.get(name);
+        if (!target) {
+          throw nativeEnvValuesError();
+        }
+        return target.hostScopeNames;
+      }),
+    ];
+    const required = requestedScopes.some((scopeNames) =>
+      Object.values(
+        resolveEffectiveStoredEntries({
+          layers: selected.envLayers,
+          scopeNames,
+        })
+      ).some((entry) => isProjectEnvSecretValue(entry.value))
+    );
+    const keyText = required
+      ? await resolveProjectEnvKey({
+          projectRoot: selected.projectRoot,
+          required: true,
+          nativeSelection: { signal: opts.signal },
+        })
+      : null;
+    const workloadEnv: Record<string, NativeEnvTargetValues> = {};
+    let bytes = Buffer.byteLength(
+      JSON.stringify({
+        ...selected.metadata,
+        globalEnv: {},
+        workloadEnv: {},
+        ...(selected.hostTargets ? { hostValues: { workloads: {} } } : {}),
+      })
+    );
+    const values = (name: string, scopeNames: readonly string[]) => {
+      checkNativeEnvCancellation(opts.signal);
+      const result: Record<string, string> = {};
+      bytes += Buffer.byteLength(JSON.stringify({ [name]: {} }));
+      const entries = resolveEffectiveStoredEntries({
+        layers: selected.envLayers,
+        scopeNames,
+      });
+      for (const [key, entry] of Object.entries(entries)) {
+        checkNativeEnvCancellation(opts.signal);
+        const value = decryptProjectEnvStoredValue({
+          storedValue: entry.value,
+          keyText,
+        });
+        bytes += Buffer.byteLength(JSON.stringify({ [key]: value }));
+        if (bytes > NATIVE_CONFIG_INPUT_LIMIT) {
+          throw nativeEnvValuesError();
+        }
+        result[key] = value;
+      }
+      if (bytes > NATIVE_CONFIG_INPUT_LIMIT) {
+        throw nativeEnvValuesError();
+      }
+      return result;
+    };
+    const globalEnv = values("globalEnv", ["global"]);
+    for (const target of guestTargets) {
+      workloadEnv[target.serviceName] = values(
+        target.serviceName,
+        target.composeScopeNames
+      );
+    }
+    const hostValues = resolveNativeHostValues({
+      targets: selected.hostTargets,
+      projection: selected.projection,
+      values,
+    });
+    await assertNativeProjectInputRoot({
+      projectRoot: selected.projectRoot,
+      signal: opts.signal,
+    });
+    if (selected.primaryRoot) {
+      await assertNativeProjectInputRoot({
+        projectRoot: selected.primaryRoot,
+        signal: opts.signal,
+      });
+    }
+    checkNativeEnvCancellation(opts.signal);
+    return {
+      ...selected.metadata,
+      globalEnv,
+      workloadEnv,
+      ...(hostValues === undefined ? {} : { hostValues }),
+    };
+  } catch (error: unknown) {
+    if (
+      error instanceof NativeConfigCompilerError &&
+      error.code === "E_COMPILER_CANCELLED"
+    ) {
+      throw error;
+    }
+    throw nativeEnvValuesError();
+  }
+}
+
+function resolveNativeHostValues(opts: {
+  readonly targets: NativeProjectEnvHostTargets | undefined;
+  readonly projection: ReturnType<typeof projectEnvScopeProjection>;
+  readonly values: (
+    name: string,
+    scopeNames: readonly string[]
+  ) => NativeEnvTargetValues;
+}): NativeProjectEnvResolvedConfig["hostValues"] {
+  if (!opts.targets) {
+    return undefined;
+  }
+  const workloads: Record<string, NativeEnvTargetValues> = {};
+  const defaultValues = opts.targets.includeDefault
+    ? opts.values("default", opts.projection.globalHostScopeNames)
+    : undefined;
+  const scopes = new Map(
+    opts.projection.serviceTargets.map((target) => [
+      target.serviceName,
+      target.hostScopeNames,
+    ])
+  );
+  for (const name of opts.targets.workloadNames) {
+    const scopeNames = scopes.get(name);
+    if (!scopeNames) {
+      throw nativeEnvValuesError();
+    }
+    workloads[name] = opts.values(name, scopeNames);
+  }
+  return {
+    ...(defaultValues === undefined ? {} : { default: defaultValues }),
+    workloads,
+  };
+}
+
+/** Select only a declared guest workload or an explicitly requested host baseline. */
+export function selectProjectEnvValuesForNativeExecutionTarget(opts: {
+  readonly resolved: NativeProjectEnvResolvedConfig;
+  readonly target: "guest" | "host";
+  readonly workloadName?: string | null;
+}): Record<string, string> {
+  const workloadName = opts.workloadName ?? null;
+  const targets =
+    opts.target === "host"
+      ? (opts.resolved.hostValues?.workloads ?? {})
+      : opts.resolved.workloadEnv;
+  let selected: NativeEnvTargetValues | undefined;
+  if (workloadName === null) {
+    selected =
+      opts.target === "host"
+        ? opts.resolved.hostValues?.default
+        : opts.resolved.globalEnv;
+  } else if (Object.hasOwn(targets, workloadName)) {
+    selected = targets[workloadName];
+  }
+  if (!selected) {
+    throw nativeEnvValuesError();
+  }
+  return { ...selected };
 }
 
 /** Keep legacy selection provenance outside the shared scope projection. */
@@ -2081,7 +2315,14 @@ function formatProjectEnvStateValue(opts: {
 async function resolveProjectEnvKey(opts: {
   readonly projectRoot: string;
   readonly required: boolean;
+  readonly nativeSelection?: { readonly signal?: AbortSignal };
 }): Promise<string | null> {
+  if (opts.nativeSelection) {
+    return await resolveNativeProjectEnvKey({
+      ...opts,
+      signal: opts.nativeSelection.signal,
+    });
+  }
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
   const sharedKeyPath = await resolveProjectEnvSharedKeyPath({
     projectRoot: opts.projectRoot,
@@ -2116,6 +2357,163 @@ async function resolveProjectEnvKey(opts: {
     );
   }
   return null;
+}
+
+/** Native reads preserve this owner's local/shared/primary/environment key priority without mutation. */
+async function resolveNativeProjectEnvKey(opts: {
+  readonly projectRoot: string;
+  readonly required: boolean;
+  readonly signal?: AbortSignal;
+}): Promise<string | null> {
+  checkNativeEnvCancellation(opts.signal);
+  const localKey = await readNativeProjectEnvKeyFile({
+    path: resolveProjectEnvKeyPath(opts),
+    directories: [opts.projectRoot],
+    signal: opts.signal,
+  });
+  if (localKey) {
+    return localKey;
+  }
+  // Key sharing is independent of local env inheritance opt-outs and runner modes.
+  const gitLocation = await resolveVerifiedProjectEnvKeyGitLocation(opts);
+  if (gitLocation) {
+    const sharedKey = await readNativeProjectEnvKeyFile({
+      path: resolve(gitLocation.commonDir, PROJECT_ENV_KEY_FILENAME),
+      directories: [gitLocation.checkoutRoot, gitLocation.commonDir],
+      signal: opts.signal,
+    });
+    if (sharedKey) {
+      return sharedKey;
+    }
+  }
+  const primaryRoot = gitLocation?.primaryRoot;
+  if (primaryRoot) {
+    const inheritedKey = await readNativeProjectEnvKeyFile({
+      path: resolveProjectEnvKeyPath({ projectRoot: primaryRoot }),
+      directories: [primaryRoot],
+      signal: opts.signal,
+    });
+    if (inheritedKey) {
+      return inheritedKey;
+    }
+  }
+  checkNativeEnvCancellation(opts.signal);
+  const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";
+  if (Buffer.byteLength(envFallback) > NATIVE_CONFIG_INPUT_LIMIT) {
+    throw nativeEnvValuesError();
+  }
+  if (envFallback) {
+    return envFallback;
+  }
+  if (opts.required) {
+    throw nativeEnvValuesError();
+  }
+  return null;
+}
+
+function sameNativeKeyFile(before: Stats, after: Stats): boolean {
+  return (
+    before.dev === after.dev &&
+    before.ino === after.ino &&
+    before.size === after.size &&
+    before.mtimeMs === after.mtimeMs &&
+    before.ctimeMs === after.ctimeMs
+  );
+}
+
+/** Keys stay inside their existing owner; reject redirected, oversized or changing descriptor reads. */
+async function readNativeProjectEnvKeyFile(opts: {
+  readonly path: string;
+  readonly directories: readonly string[];
+  readonly signal?: AbortSignal;
+}): Promise<string | null> {
+  checkNativeEnvCancellation(opts.signal);
+  const directories = await Promise.all(
+    opts.directories.map(async (path) => {
+      const stats = await lstat(path);
+      if (!stats.isDirectory() || (await realpath(path)) !== path) {
+        throw nativeEnvValuesError();
+      }
+      return { path, stats };
+    })
+  );
+  const recheckDirectories = async () => {
+    for (const { path, stats } of directories) {
+      const current = await lstat(path);
+      if (
+        !current.isDirectory() ||
+        current.dev !== stats.dev ||
+        current.ino !== stats.ino ||
+        (await realpath(path)) !== path
+      ) {
+        throw nativeEnvValuesError();
+      }
+    }
+    checkNativeEnvCancellation(opts.signal);
+  };
+  const observed = await lstat(opts.path).catch((error: unknown) => {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  });
+  if (!observed) {
+    await recheckDirectories();
+    return null;
+  }
+  if (
+    !observed.isFile() ||
+    observed.size > NATIVE_CONFIG_INPUT_LIMIT ||
+    (observed.mode & 0o444) === 0 ||
+    (await realpath(opts.path)) !== opts.path
+  ) {
+    throw nativeEnvValuesError();
+  }
+  const file = await open(
+    opts.path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+  );
+  try {
+    checkNativeEnvCancellation(opts.signal);
+    const before = await file.stat();
+    if (!(before.isFile() && sameNativeKeyFile(observed, before))) {
+      throw nativeEnvValuesError();
+    }
+    const buffer = Buffer.alloc(before.size + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      checkNativeEnvCancellation(opts.signal);
+      const { bytesRead } = await file.read(
+        buffer,
+        size,
+        buffer.length - size,
+        size
+      );
+      if (bytesRead === 0) {
+        break;
+      }
+      size += bytesRead;
+    }
+    const after = await file.stat();
+    const current = await lstat(opts.path);
+    if (
+      size !== before.size ||
+      !current.isFile() ||
+      !sameNativeKeyFile(before, after) ||
+      !sameNativeKeyFile(before, current) ||
+      (await realpath(opts.path)) !== opts.path
+    ) {
+      throw nativeEnvValuesError();
+    }
+    await recheckDirectories();
+    return (
+      new TextDecoder("utf-8", { fatal: true })
+        .decode(buffer.subarray(0, size))
+        .trim() || null
+    );
+  } finally {
+    await file.close();
+  }
 }
 
 export type EnsureProjectEnvSecretKeyResult = {

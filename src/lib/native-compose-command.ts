@@ -2,7 +2,12 @@ import { randomBytes } from "node:crypto";
 import type { LogOutputFormat } from "../backends/log-backend.ts";
 import type { RuntimeBaseOptions } from "../backends/runtime-backend.ts";
 import { CliUsageError } from "../cli/command.ts";
-import { emitCliResult, HackCliError, okResult } from "./cli-result.ts";
+import {
+  emitCliResult,
+  errorResult,
+  HackCliError,
+  okResult,
+} from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
 import {
@@ -14,8 +19,17 @@ import {
   type NativeComposeGeneration,
   NativeComposeGenerationError,
   type NativeComposeGenerationStore,
+  type NativeComposeMutation,
   openNativeComposeGenerationStore,
 } from "./native-compose-generation.ts";
+import {
+  NativeComposeHostHookError,
+  selectNativeComposeBeforeHooks,
+} from "./native-compose-host-contract.ts";
+import {
+  assertNativeComposeBeforeHookBindings,
+  runNativeComposeBeforeHooks,
+} from "./native-compose-host-hooks.ts";
 import { acquireNativeComposeInputs } from "./native-compose-inputs.ts";
 import {
   assertNativeComposeOwned,
@@ -263,6 +277,27 @@ async function savedCommand(opts: {
       ? pending
       : (state.generation ?? (options.operation === "ps" ? pending : null));
   if (!generation) {
+    if (state.beforeHooksPending) {
+      if (options.operation === "ps" && options.json) {
+        emitCliResult({
+          result: okResult({
+            data: {
+              composeProject: store.identity.composeProject,
+              stopped: true,
+              pending: true,
+              beforeHooksPending: true,
+              services: [],
+            },
+          }),
+        });
+        return 0;
+      }
+      throw new HackCliError({
+        code: "E_LIFECYCLE_FAILED",
+        message:
+          "Native host hook completion is uncertain; no saved engine generation is available. Hook recovery is not supported in this slice. Values omitted.",
+      });
+    }
     throw new HackCliError({
       code: "E_PROJECT_NOT_FOUND",
       message:
@@ -319,6 +354,13 @@ async function savedCommand(opts: {
             "Native Compose stop is incomplete; saved ownership and persistent data are retained.",
         });
       }
+      if ((await store.loadCurrent()).beforeHooksPending) {
+        throw new HackCliError({
+          code: "E_LIFECYCLE_FAILED",
+          message:
+            "Retained engine resources stopped; host hook completion remains uncertain and recovery is not supported in this slice. Persistent data is retained. Values omitted.",
+        });
+      }
       if (options.json) {
         emitCliResult({
           result: okResult({
@@ -345,6 +387,7 @@ async function savedCommand(opts: {
                 composeProject: generation.identity.composeProject,
                 stopped: state.stopped,
                 pending: state.pending !== null,
+                beforeHooksPending: state.beforeHooksPending,
                 services: observed.containers.map(
                   ({ service, state: status, exitCode, health, oneoff }) => ({
                     service,
@@ -358,6 +401,11 @@ async function savedCommand(opts: {
             }),
           });
           return 0;
+        }
+        if (state.beforeHooksPending) {
+          process.stderr.write(
+            "Native host hook completion remains uncertain; hook recovery is not supported in this slice.\n"
+          );
         }
         return await run([...composeArgs(generation), "ps"], {
           cwd: base.cwd,
@@ -437,19 +485,15 @@ async function prepareCommand(opts: {
   readonly signal: AbortSignal;
 }): Promise<number> {
   const { options, projectRoot, signal } = opts;
-  const inputs = await acquireNativeComposeInputs({
-    projectRoot,
-    profiles: options.profiles,
-    explicitOverlay: options.overlay,
-    signal,
-  });
-  if (Object.keys(inputs.result.environment_plan.workloads).length === 0) {
-    throw new HackCliError({
-      code: "E_NATIVE_PROJECT_UNSUPPORTED",
-      message:
-        "The selected native Compose profile has no workloads to execute.",
+  const acquire = () =>
+    acquireNativeComposeInputs({
+      projectRoot,
+      profiles: options.profiles,
+      explicitOverlay: options.overlay,
+      signal,
     });
-  }
+  let inputs = await acquire();
+  assertSelectedWorkloads(inputs);
   assertNativeComposeSupported({
     plan: inputs.result.plan,
     environmentPlan: inputs.result.environment_plan,
@@ -457,8 +501,20 @@ async function prepareCommand(opts: {
     runtimeIdentity: "native-preflight",
     generationIdentity: "0".repeat(32),
     ownerToken: "0".repeat(32),
+    beforeHooksOwned: true,
   });
-  const values = await inputs.resolveManagedValues();
+  const hooks = selectNativeComposeBeforeHooks(inputs.result.plan);
+  assertNativeComposeBeforeHookBindings({
+    hooks,
+    environmentPlan: inputs.result.environment_plan,
+  });
+  if (options.operation === "run" && hooks.length > 0) {
+    throw new HackCliError({
+      code: "E_NATIVE_PROJECT_UNSUPPORTED",
+      message:
+        "Native Compose run with authored host hooks is not supported in this slice. No hook or engine operation ran. Values omitted.",
+    });
+  }
   const store = await openNativeComposeGenerationStore({
     projectRoot,
     instance: options.instance ?? null,
@@ -467,46 +523,37 @@ async function prepareCommand(opts: {
   try {
     return await store.withMutation(async (mutation) => {
       const current = await store.loadCurrent();
-      const existingRun =
-        options.operation === "run" ? current.generation : null;
-      const reservation = existingRun ? null : mutation.reserveGeneration();
-      const generationId =
-        existingRun?.generationId ?? reservation?.generationId;
-      if (!generationId) {
-        return invalid();
-      }
-      const rendered = renderNativeCompose({
-        plan: inputs.result.plan,
-        environmentPlan: inputs.result.environment_plan,
-        projectRoot,
-        runtimeIdentity: store.identity.composeProject,
-        generationIdentity: generationId,
-        ownerToken: store.identity.ownerToken,
-        managedValues: values,
-      });
-      let generation: NativeComposeGeneration;
-      if (existingRun) {
-        const saved = await store.readGenerationDocument(existingRun);
-        if (JSON.stringify(saved) !== JSON.stringify(rendered.document)) {
-          throw new HackCliError({
-            code: "E_CONFIG_INVALID",
-            message:
-              "Native Compose inputs differ from the running generation. Run hack up or restart before a one-off command. Values omitted.",
-          });
-        }
-        generation = existingRun;
-      } else {
-        if (!reservation) {
-          return invalid();
-        }
-        generation = await mutation.publish({
-          reservation,
-          composeJson: rendered.json,
-          profiles: rendered.profiles,
-          inputRevision: inputs.inputRevision,
-          assertFresh: inputs.assertFresh,
+      if (current.beforeHooksPending) {
+        throw new HackCliError({
+          code: "E_LIFECYCLE_FAILED",
+          message:
+            "Native host hook completion remains uncertain; startup is blocked without replay. Hook recovery is not supported in this slice. Values omitted.",
         });
       }
+      if (current.pending !== null) {
+        throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
+      }
+      const prepared = await prepareBeforeHooks({
+        inputs,
+        acquire,
+        mutation,
+        store,
+        options,
+        projectRoot,
+        signal,
+      });
+      if (prepared.code !== 0) {
+        return prepared.code;
+      }
+      inputs = prepared.inputs;
+      const { generation, rendered } = await prepareGeneration({
+        inputs,
+        options,
+        current,
+        mutation,
+        store,
+        projectRoot,
+      });
       const selection = await ownershipSelection({
         store,
         generation,
@@ -598,6 +645,179 @@ async function prepareCommand(opts: {
   }
 }
 
+type AcquiredComposeInputs = Awaited<
+  ReturnType<typeof acquireNativeComposeInputs>
+>;
+
+function assertSelectedWorkloads(inputs: AcquiredComposeInputs): void {
+  if (Object.keys(inputs.result.environment_plan.workloads).length === 0) {
+    throw new HackCliError({
+      code: "E_NATIVE_PROJECT_UNSUPPORTED",
+      message:
+        "The selected native Compose profile has no workloads to execute.",
+    });
+  }
+}
+
+async function prepareGeneration(opts: {
+  readonly inputs: AcquiredComposeInputs;
+  readonly options: NativeComposeCommandOptions;
+  readonly current: Awaited<
+    ReturnType<NativeComposeGenerationStore["loadCurrent"]>
+  >;
+  readonly mutation: NativeComposeMutation;
+  readonly store: NativeComposeGenerationStore;
+  readonly projectRoot: string;
+}) {
+  const { inputs, options, current, mutation, store, projectRoot } = opts;
+  const values = await inputs.resolveManagedValues();
+  const existingRun = options.operation === "run" ? current.generation : null;
+  const reservation = existingRun ? null : mutation.reserveGeneration();
+  const generationId = existingRun?.generationId ?? reservation?.generationId;
+  if (!generationId) {
+    return invalid();
+  }
+  const rendered = renderNativeCompose({
+    plan: inputs.result.plan,
+    environmentPlan: inputs.result.environment_plan,
+    projectRoot,
+    runtimeIdentity: store.identity.composeProject,
+    generationIdentity: generationId,
+    ownerToken: store.identity.ownerToken,
+    managedValues: values,
+    beforeHooksOwned: true,
+  });
+  let generation: NativeComposeGeneration;
+  if (existingRun) {
+    const saved = await store.readGenerationDocument(existingRun);
+    if (JSON.stringify(saved) !== JSON.stringify(rendered.document)) {
+      throw new HackCliError({
+        code: "E_CONFIG_INVALID",
+        message:
+          "Native Compose inputs differ from the running generation. Run hack up or restart before a one-off command. Values omitted.",
+      });
+    }
+    generation = existingRun;
+  } else {
+    if (!reservation) {
+      return invalid();
+    }
+    generation = await mutation.publish({
+      reservation,
+      composeJson: rendered.json,
+      profiles: rendered.profiles,
+      inputRevision: inputs.inputRevision,
+      assertFresh: inputs.assertFresh,
+    });
+  }
+  return { generation, rendered };
+}
+
+async function prepareBeforeHooks(opts: {
+  readonly inputs: AcquiredComposeInputs;
+  readonly acquire: () => Promise<AcquiredComposeInputs>;
+  readonly mutation: NativeComposeMutation;
+  readonly store: NativeComposeGenerationStore;
+  readonly options: NativeComposeCommandOptions;
+  readonly projectRoot: string;
+  readonly signal: AbortSignal;
+}) {
+  let inputs = opts.inputs;
+  const { acquire, mutation, options, projectRoot, signal } = opts;
+  const hooks = selectNativeComposeBeforeHooks(inputs.result.plan);
+  if (hooks.length === 0) {
+    return { inputs, code: 0 };
+  }
+  const admitted = hookSelectionIdentity(inputs);
+  // Credential approval and private delivery precede the effect journal: a rejected
+  // approval must not leave ambiguous hook effects when no command could have spawned.
+  const managedValues = new Map<string, Readonly<Record<string, string>>>();
+  for (const hook of hooks) {
+    managedValues.set(hook.name, await inputs.resolveHostValues(hook.name));
+  }
+  assertNativeComposeBeforeHookBindings({
+    hooks,
+    environmentPlan: inputs.result.environment_plan,
+    managedValues,
+  });
+  const result = await mutation.runBeforeHooks({
+    assertFresh: inputs.assertFresh,
+    effect: () =>
+      runNativeComposeBeforeHooks({
+        hooks,
+        projectRoot,
+        environmentPlan: inputs.result.environment_plan,
+        resolveHostValues: (name) => {
+          const values = managedValues.get(name);
+          if (!values) {
+            throw new NativeComposeHostHookError();
+          }
+          return Promise.resolve(values);
+        },
+        signal,
+        timeoutMs: resolveComposeStartupTimeoutMs(),
+        json: options.json === true,
+      }),
+  });
+  if (result.outcome !== "complete") {
+    throw new HackCliError({
+      code: "E_LIFECYCLE_FAILED",
+      message:
+        "Native host hook completion is uncertain; startup is blocked without replay. Hook recovery is not supported in this slice. Values omitted.",
+    });
+  }
+  if (result.value !== 0) {
+    const message =
+      "Native host before hook failed; no engine startup ran. Values omitted.";
+    if (options.json) {
+      emitCliResult({
+        result: errorResult({ code: "E_LIFECYCLE_FAILED", message }),
+      });
+    } else {
+      process.stderr.write(`${message}\n`);
+    }
+    return { inputs, code: result.value };
+  }
+  // Hooks may deliberately write managed env/local bindings. Reacquire every owner;
+  // changed identity or hook selection must not skip a newly authored sequence.
+  inputs = await acquire();
+  assertSelectedWorkloads(inputs);
+  if (hookSelectionIdentity(inputs) !== admitted) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Native project identity or hook selection changed during before hooks; no engine startup ran. Values omitted.",
+    });
+  }
+  assertNativeComposeSupported({
+    plan: inputs.result.plan,
+    environmentPlan: inputs.result.environment_plan,
+    projectRoot,
+    runtimeIdentity: opts.store.identity.composeProject,
+    generationIdentity: "0".repeat(32),
+    ownerToken: opts.store.identity.ownerToken,
+    beforeHooksOwned: true,
+  });
+  assertNativeComposeBeforeHookBindings({
+    hooks: selectNativeComposeBeforeHooks(inputs.result.plan),
+    environmentPlan: inputs.result.environment_plan,
+  });
+  return { inputs, code: 0 };
+}
+
+function hookSelectionIdentity(
+  inputs: Awaited<ReturnType<typeof acquireNativeComposeInputs>>
+): string {
+  const plan = inputs.result.plan;
+  return JSON.stringify({
+    name: plan.name,
+    source: plan.source,
+    worktree: plan.worktree,
+    profiles: plan.selected_profiles,
+    host: plan.host,
+  });
+}
+
 function validateNativeOptions(options: NativeComposeCommandOptions): boolean {
   if (
     options.unsupportedOptions ||
@@ -658,6 +878,12 @@ export async function tryNativeComposeCommand(
       await store.close();
     }
   } catch (error: unknown) {
+    if (error instanceof NativeComposeHostHookError) {
+      throw new HackCliError({
+        code: "E_NATIVE_PROJECT_UNSUPPORTED",
+        message: error.message,
+      });
+    }
     if (
       error instanceof NativeComposeGenerationError ||
       error instanceof NativeComposeOwnershipError

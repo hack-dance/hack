@@ -172,6 +172,47 @@ test("random reservation precedes render; exact immutable document and private r
   ]);
 });
 
+test("generation accepts only the fixed external ingress and never claims it as owned", async () => {
+  const root = await fixture();
+  const owner = await store(root);
+  await owner.withMutation(async (mutation) => {
+    const reservation = mutation.reserveGeneration();
+    const content = JSON.parse(document(reservation));
+    content.networks.ingress = { name: "hack-dev", external: true };
+    const generation = await mutation.publish({
+      reservation,
+      composeJson: JSON.stringify(content),
+      profiles: [],
+      inputRevision: REVISION,
+      assertFresh: async () => {},
+    });
+    expect(
+      (await owner.readGenerationDocument(generation)).networks
+    ).toMatchObject({ ingress: { name: "hack-dev", external: true } });
+  });
+  for (const invalid of [
+    { name: "foreign", external: true },
+    { name: "hack-dev", external: false },
+    { name: "hack-dev", external: true, labels: {} },
+  ]) {
+    await owner.withMutation(async (mutation) => {
+      const reservation = mutation.reserveGeneration();
+      const content = JSON.parse(document(reservation));
+      content.networks.ingress = invalid;
+      await rejected(
+        mutation.publish({
+          reservation,
+          composeJson: JSON.stringify(content),
+          profiles: [],
+          inputRevision: REVISION,
+          assertFresh: async () => {},
+        }),
+        "E_NATIVE_COMPOSE_STATE"
+      );
+    });
+  }
+});
+
 test("complete cold run retains its dependency generation for saved observation and stop", async () => {
   const root = await fixture();
   const owner = await store(root);

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { renderNativeCompose } from "../src/lib/native-compose-renderer.ts";
 import {
   NativeComposeRoutingError,
   planNativeComposeRouting,
@@ -86,6 +87,33 @@ test("compiler-selected active origins and OAuth aliases form one Caddy group", 
   expect(JSON.stringify(result)).not.toContain("inactive");
   expect(Object.isFrozen(result)).toBe(true);
   expect(Object.isFrozen(result?.labels.web)).toBe(true);
+});
+
+test("private Compose document joins only routed services to the external ingress", () => {
+  const input = fixture();
+  const base = composeFixture({
+    services: { web: { image: "fixture/web:1" } },
+  });
+  const rendered = renderNativeCompose({
+    ...base,
+    plan: input.plan,
+    routingResolution: input.resolution,
+    declaredWorkloads: input.declared,
+  });
+  expect(rendered.document.networks.ingress).toEqual({
+    name: "hack-dev",
+    external: true,
+  });
+  expect(rendered.document.services.web?.networks).toEqual([
+    "default",
+    "ingress",
+  ]);
+  expect(rendered.document.services.web?.labels).toMatchObject({
+    caddy_0: "https://fixture.dev.test, https://fixture.hack.gy",
+    "caddy_0.reverse_proxy": "{{upstreams http 3000}}",
+    "io.hack.native-config.owner": base.ownerToken,
+    "io.hack.native-config.generation": base.generationIdentity,
+  });
 });
 
 test("distinct upstream protocols and ports remain separate site groups", () => {

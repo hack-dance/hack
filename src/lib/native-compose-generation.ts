@@ -12,6 +12,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
 import { inspectProjectInputsAtRoot } from "./project-input-selection.ts";
 import { resolveVerifiedPrimaryWorktreeRoot } from "./worktree-local-config.ts";
@@ -715,8 +716,13 @@ function documentOwned(
   return (
     !Object.hasOwn(document, "networks") ||
     (isRecord(document.networks) &&
-      Object.values(document.networks).every((network) =>
-        labelsMatch(network, false)
+      Object.entries(document.networks).every(([name, network]) =>
+        name === "ingress"
+          ? isRecord(network) &&
+            keys(network, "external,name") &&
+            network.external === true &&
+            network.name === DEFAULT_INGRESS_NETWORK
+          : labelsMatch(network, false)
       ))
   );
 }

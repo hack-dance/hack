@@ -19,6 +19,10 @@ import signal
 import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
+import urllib.parse
+import urllib.request
 import uuid
 
 
@@ -40,13 +44,12 @@ METADATA_KEYS = {"schema", "version", "tag", "source_revision", "platform"}
 REPOSITORY = "hack-dance/hack"
 DOWNLOAD_HOSTS = {"api.github.com", "github.com", "release-assets.githubusercontent.com",
                   "objects.githubusercontent.com"}
-# Reviewed flat-layout, shared-MCP, and compiler managers.
+# Reviewed flat-layout, shared-MCP, and project-schema compiler managers.
 # Keep this an explicit allowlist; a matching user-written receipt is not provenance.
 MANAGER_PREDECESSORS = frozenset({
     "b459ffc4f227482119b48e357c91e4607aa4f7d1f88c7ccf5b7d684f66f2c0cd",
     "b7c49e3fec6b06790e833db1d2dcb441d2223c283b792713be46826aa2eef877",
     "ca432b7fc6562bb091d17d3217f5d1daf9f91621a6919c8964ca51bee2111d0c",
-    "d39e77623be1876567e9db66c468e8da96067aeac0d88089df28efc11f850ef8",
 })
 MANAGER_UPGRADE = ".manager-upgrade.json"
 
@@ -219,7 +222,7 @@ def payload_mode(name):
     return 0o755 if name in EXECUTABLES else 0o600
 
 
-def verify_mcp_bundle(bundle, payload, verified_digests):
+def verify_mcp_bundle(bundle, payload):
     nested = sorted(name for name in payload if MCP_MEMBER.fullmatch(name))
     if not nested:
         return
@@ -244,10 +247,7 @@ def verify_mcp_bundle(bundle, payload, verified_digests):
                 and type(entry["bytes"]) is int and 0 < entry["bytes"] <= 256 * 1024 * 1024,
                 "Invalid MCP asset fingerprint.")
         asset = bundle / prefix / name
-        # Compare the nested identity against bytes hashed in this verification,
-        # not just the outer manifest's claims. Never retain this across calls.
-        require(asset.stat().st_size == entry["bytes"]
-                and verified_digests[prefix + "/" + name] == entry["sha256"],
+        require(asset.stat().st_size == entry["bytes"] and digest(asset) == entry["sha256"],
                 "MCP asset fingerprint mismatch.")
         canonical_files[role] = {"sha256": entry["sha256"], "bytes": entry["bytes"]}
     body = {"schemaVersion": 1, "startupProtocol": 2, "wireProtocol": 1,
@@ -266,13 +266,10 @@ def verify_bundle(bundle, version):
             and (bundle / "prerelease.json").stat().st_size <= 64 * 1024,
             "Oversized bundle metadata or checksum manifest.")
     manifest = checksums((bundle / "SHA256SUMS").read_bytes(), payload)
-    verified_digests = {}
     for name, checksum in manifest.items():
-        actual = digest(bundle / name)
-        require(actual == checksum, "Candidate checksum mismatch: " + name)
-        verified_digests[name] = actual
+        require(digest(bundle / name) == checksum, "Candidate checksum mismatch: " + name)
     identity = metadata((bundle / "prerelease.json").read_bytes(), version)
-    verify_mcp_bundle(bundle, payload, verified_digests)
+    verify_mcp_bundle(bundle, payload)
     return identity, manifest
 
 
@@ -294,8 +291,6 @@ def verify_signatures(bundle):
 
 
 def extract_archive(archive, checksum, destination, version, release_metadata=None):
-    import tarfile
-
     owned(archive)
     require(SHA256.fullmatch(checksum) is not None, "Expected archive SHA-256 is required.")
     require(archive.stat().st_size <= MAX_ARCHIVE and digest(archive) == checksum,
@@ -371,34 +366,23 @@ def extract_archive(archive, checksum, destination, version, release_metadata=No
 
 
 def secure_url(url):
-    import urllib.parse
-
     parsed = urllib.parse.urlsplit(url)
     require(parsed.scheme == "https" and parsed.hostname in DOWNLOAD_HOSTS
             and parsed.port in (None, 443) and not parsed.username and not parsed.password
             and not parsed.fragment, "Refusing nonofficial or non-HTTPS download.")
 
 
-def official_redirect_handler():
-    # Local launches do not need the TLS/network/archive import graph. Load the
-    # same restricted redirect handler only when an official download is needed.
-    import urllib.request
-
-    class OfficialRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, request, response, code, message, headers, url):
-            secure_url(url)
-            return super().redirect_request(request, response, code, message, headers, url)
-
-    return OfficialRedirect()
+class OfficialRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, url):
+        secure_url(url)
+        return super().redirect_request(request, response, code, message, headers, url)
 
 
 def download(url, target, limit):
-    import urllib.request
-
     secure_url(url)
     request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "hack-prerelease-installer"})
-    opener = urllib.request.build_opener(official_redirect_handler())
+    opener = urllib.request.build_opener(OfficialRedirect())
     with opener.open(request, timeout=30) as response:
         secure_url(response.geturl())
         descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -626,7 +610,7 @@ class Channel:
             if current_hash == target_hash:
                 return
             require(current_hash in MANAGER_PREDECESSORS,
-                    "Unknown or customized manager; explicit upgrade supports only reviewed predecessors.")
+                    "Unknown or customized manager; explicit upgrade supports only the reviewed flat-layout predecessor.")
             require((self.root / "bin/hack-next").read_bytes() == launcher_bytes(),
                     "Custom launcher cannot be upgraded.")
         # All retained versions share this manager. Keep the existing executor

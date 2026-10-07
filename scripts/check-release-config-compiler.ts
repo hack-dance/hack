@@ -90,6 +90,7 @@ try {
     "cp",
     "curl",
     "dirname",
+    "gzip",
     "head",
     "mkdir",
     "mktemp",

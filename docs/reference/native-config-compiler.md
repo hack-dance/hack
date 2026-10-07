@@ -31,6 +31,23 @@ native runtime, virtualization, Docker, or platform provider APIs. It uses the
 repository's pinned Rust 1.97.1 and committed Cargo lockfile when building. The
 compiled executable requires no host Rust installation, network, or VM.
 
+Standalone Unix release archives contain the matching host `hack-config-compiler`
+beside `hack` for Linux x86-64/arm64 and macOS arm64/x86-64. Normal and slim release
+installers copy it into the same bin directory as `hack` or `hack-real`. Both native
+schemas, `hack.project.schema.json` and `hack.local.schema.json`, ship under
+`assets/schemas` and install with the other schemas under `HACK_INSTALL_ASSETS`
+(default `~/.hack/assets`). Legacy project schemas and installer behavior remain
+available. This packaging does not change the opt-in native candidate channel or
+enable native workload execution.
+
+The CLI uses the adjacent compiler and checks its protocol before validation or
+planning. An unavailable compiler refuses with `E_COMPILER_MISSING`; an incompatible
+protocol refuses with `E_COMPILER_VERSION`. It never downloads a compiler or searches
+`PATH`. `HACK_CONFIG_COMPILER_BINARY` is an explicit absolute-path override for a
+reviewed compiler; ordinary standalone installations need no override. Keep the
+compiled CLI and compiler together when relocating executables. The slim shell
+wrapper retains its configured absolute installation path.
+
 ## Supported authored core
 
 `schema_version` must be `1`; `name` is required. Services, jobs, storage, profiles
@@ -551,11 +568,21 @@ or reject extra properties supplied through untyped inputs.
 
 ```sh
 bun run build:config-compiler
+bun run build:release --skip-tests
+bun scripts/check-release-config-compiler.ts dist/release
 cargo +1.97.1 fmt --manifest-path packages/config-compiler/Cargo.toml --check
 cargo +1.97.1 clippy --locked --manifest-path packages/config-compiler/Cargo.toml --all-targets -- -D warnings
 cargo +1.97.1 test --locked --manifest-path packages/config-compiler/Cargo.toml
 ```
 
-Generated projections must match a fresh `generate` run. Cross-platform packaging,
-CLI transport, installed-sidecar checks and schema-validator qualification are
-separate integration gates; unit tests alone do not establish them.
+Release assembly requires pinned Rust at build time and verifies projections against
+a fresh `generate` run before packaging. The release acceptance script verifies
+checksums with the host SHA-256 tool, runs the generated normal/slim download and
+install scripts against local archives, and exercises the installed and relocated
+compiled executables with no Bun/Rust/VM tools on the CLI's PATH. macOS uses a network
+sandbox; Linux requires noninteractive sudo for an isolated network namespace and
+drops back to the invoking user before running the fixture. A live loopback canary
+checks network denial. Validation, metadata planning, missing/mismatch refusal,
+ignored PATH compilers and legacy config reads are separate assertions. CI runs
+this gate on all four release host architectures. Hosted CI and published artifact
+results still need their own evidence; unit tests alone do not establish them.

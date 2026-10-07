@@ -14,9 +14,21 @@ jobs:
     name: Config compiler (${{ matrix.os }})
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+          - os: macos-latest
+            platform: darwin
+            arch: arm64
+          - os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+          - os: macos-15-intel
+            platform: darwin
+            arch: x64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -31,6 +43,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: bun install --frozen-lockfile
+      - name: Verify release host architecture
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: bun -e 'if (process.platform !== process.env.EXPECTED_PLATFORM || process.arch !== process.env.EXPECTED_ARCH) throw new Error("Unexpected compiler release host");'
       - run: bun run check:config-compiler && bun run test:config-compiler
       - run: bun run build:config-compiler
       - name: Independently validate generated schema shape corpus
@@ -40,10 +57,12 @@ jobs:
           "$RUNNER_TEMP/config-schema/bin/python" scripts/check-config-schema.py
       - name: Test transport, projections and compiled bundle without host toolchains
         run: |
-          bunx ultracite check scripts/build-config-compiler.ts scripts/check-config-compiler-cli.ts tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts tests/native-project-inputs.test.ts tests/native-project-inputs-acquisition-race.test.ts
+          bunx ultracite check scripts/build-config-compiler.ts scripts/build-release.ts scripts/check-release-config-compiler.ts scripts/check-config-compiler-cli.ts tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts tests/native-project-inputs.test.ts tests/native-project-inputs-acquisition-race.test.ts tests/release-download-installer.test.ts
           bun test tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts tests/native-project-inputs.test.ts tests/native-project-inputs-acquisition-race.test.ts
           bun run --cwd packages/cli typecheck
-          bun run build
+          bun test tests/release-download-installer.test.ts
+          bun run build:release --skip-tests --out=dist/config-compiler-release
+          bun scripts/check-release-config-compiler.ts dist/config-compiler-release
           bun scripts/check-config-compiler-cli.ts
           bunx ultracite check scripts/check-native-env-plan-cli.ts tests/native-env-plan-transport.test.ts tests/native-env-metadata.test.ts
           bun test tests/native-env-plan-transport.test.ts tests/native-env-metadata.test.ts tests/project-env-config.test.ts tests/project-env-metadata.test.ts
@@ -245,7 +264,7 @@ jobs:
         with:
           bun-version: "1.4.2"
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
       - name: Typecheck (Turbo)
         run: bun run turbo:typecheck
       - name: Privacy check
@@ -256,6 +275,7 @@ jobs:
         run: bun run turbo:test
       - name: Build CLI
         run: bun run build
+      - uses: dtolnay/rust-toolchain@1.97.1
       - name: Build release smoke (no tests)
         run: bun run build:release --skip-tests --no-clean --out=dist/release-ci
 

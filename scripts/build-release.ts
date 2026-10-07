@@ -9,6 +9,7 @@ import {
   renderProjectEnvSchemaJson,
   renderProjectManagedEnvSchemaJson,
 } from "../src/templates.ts";
+import { buildConfigCompiler } from "./build-config-compiler.ts";
 
 interface BuildArgs {
   readonly outDirRaw: string | null;
@@ -78,6 +79,7 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
     }
   }
 
+  await buildConfigCompiler();
   const binaryPath = resolve(distRoot, "hack");
   const buildExit = await run({
     cmd: ["bun", "build", "index.ts", "--compile", "--outfile", binaryPath],
@@ -88,6 +90,12 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
   }
 
   await copyFile({ from: binaryPath, to: resolve(releaseDir, "hack") });
+  const compilerPath = resolve(releaseDir, "hack-config-compiler");
+  await copyFile({
+    from: resolve(distRoot, "hack-config-compiler"),
+    to: compilerPath,
+  });
+  await chmodExecutable({ path: compilerPath });
 
   const assetsDir = resolve(releaseDir, "assets");
   const gifsDir = resolve(assetsDir, "gifs");
@@ -120,6 +128,12 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
     resolve(schemasDir, "hack.branches.schema.json"),
     renderProjectBranchesSchemaJson()
   );
+  for (const name of ["hack.project.schema.json", "hack.local.schema.json"]) {
+    await copyFile({
+      from: resolve(repoRoot, "packages/config-compiler/generated", name),
+      to: resolve(schemasDir, name),
+    });
+  }
 
   const gumSourceDir = resolve(repoRoot, "binaries", "gum");
   const gumDestDir = resolve(releaseDir, "binaries", "gum");
@@ -339,6 +353,8 @@ function renderInstallScript(): string {
     'BINARIES_DIR="$ROOT/binaries"',
     "",
     'mkdir -p "$INSTALL_BIN" "$INSTALL_ASSETS"',
+    'cp "$ROOT/hack-config-compiler" "$INSTALL_BIN/hack-config-compiler"',
+    'chmod +x "$INSTALL_BIN/hack-config-compiler"',
     'cp "$ROOT/hack" "$INSTALL_BIN/hack"',
     'chmod +x "$INSTALL_BIN/hack"',
     "",
@@ -464,6 +480,8 @@ function renderCodexSlimInstallScript(): string {
     'WRAPPER_BIN="$INSTALL_BIN/hack"',
     "",
     'mkdir -p "$INSTALL_BIN" "$INSTALL_ASSETS"',
+    'cp "$ROOT/hack-config-compiler" "$INSTALL_BIN/hack-config-compiler"',
+    'chmod +x "$INSTALL_BIN/hack-config-compiler"',
     'cp "$ROOT/hack" "$REAL_BIN"',
     'chmod +x "$REAL_BIN"',
     "",

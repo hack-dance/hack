@@ -157,6 +157,8 @@ test("owned resources yield only bounded readiness observations and exact read-o
     containers: [
       {
         id: ID,
+        name: `${PROJECT}-web-1`,
+        generationId: GENERATION,
         service: "web",
         state: "running",
         exitCode: 0,
@@ -226,10 +228,50 @@ test("oneoffs and successful jobs use receipt-selected generations and explicit 
   expect((await assertNativeComposeOwned(options)).containers).toEqual([
     {
       id: ID,
+      name: `${PROJECT}-install-run-random`,
+      generationId: PENDING,
       service: "install",
       state: "exited",
       exitCode: 0,
       health: null,
+      oneoff: true,
+    },
+  ]);
+});
+test("mixed receipt-selected generations remain distinct in sanitized observations", async () => {
+  const fixture = owned();
+  const [current] = fixture.container ?? [];
+  if (!current) {
+    throw new Error("Missing fixture resource");
+  }
+  const pendingId = "e".repeat(64);
+  fixture.container = [
+    current,
+    {
+      ...current,
+      id: pendingId,
+      name: `/${PROJECT}-web-run-pending`,
+      generation: PENDING,
+      oneoff: "True",
+      state: "exited",
+      health: null,
+    },
+  ];
+  await prepare(fixture);
+  const { containers } = await assertNativeComposeOwned(options);
+  expect(containers).toMatchObject([
+    {
+      id: ID,
+      name: `${PROJECT}-web-1`,
+      generationId: GENERATION,
+      service: "web",
+      oneoff: false,
+    },
+    {
+      id: pendingId,
+      name: `${PROJECT}-web-run-pending`,
+      generationId: PENDING,
+      service: "web",
       oneoff: true,
     },
   ]);

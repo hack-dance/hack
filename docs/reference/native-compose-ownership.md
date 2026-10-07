@@ -29,8 +29,11 @@ generation, an unknown service, a malformed reply, or uncertain inspection refus
 Docker queries request only structured IDs, names, fixed ownership labels, and
 container state, exit code, health status, and one-off status. They never request
 `Config.Env`, image values, health logs, or complete inspect objects. Returned
-observations contain only validated workload states, volume names/storage keys,
-and network IDs/names. Failures discard daemon output and diagnostics.
+observations contain only validated workload IDs, names, generation IDs and states,
+volume names/storage keys, and network IDs/names. Container names omit Docker's
+inspect-only leading slash. Callers can distinguish current and proposed
+generations and bind a one-off result to its exact owned name before applying
+readiness or cleanup decisions. Failures discard daemon output and diagnostics.
 
 Containers and networks are inspected by full immutable IDs. Docker volumes expose
 names rather than immutable engine IDs. The selected inventory is checked again

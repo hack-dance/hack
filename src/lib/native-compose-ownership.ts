@@ -37,6 +37,9 @@ const FORMATS = {
 
 export type NativeComposeContainerObservation = {
   readonly id: string;
+  /** Verified Docker container name without its inspect-only leading slash. */
+  readonly name: string;
+  readonly generationId: string;
   readonly service: string;
   readonly state:
     | "created"
@@ -380,8 +383,11 @@ function containerObservation(
       row.health === "unhealthy"
   );
   requireValue(typeof row.id === "string" && ID.test(row.id));
+  requireValue(typeof row.name === "string");
   return {
     id: row.id,
+    name: row.name.startsWith("/") ? row.name.slice(1) : row.name,
+    generationId: row.generation,
     service: row.service,
     state: row.state,
     exitCode: row.exitCode,

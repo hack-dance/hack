@@ -344,6 +344,17 @@ test("JSON stays strict rather than accepting YAML-compatible syntax", () => {
   }
 });
 
+test.each([
+  "tag:yaml.org,2002:",
+  "tag:private.invalid,2026:",
+])("explicit standard tag handle directive refuses even without tagged nodes: %s", (prefix) => {
+  const result = mapLegacyNativeImport({
+    configText: CONFIG,
+    composeText: `%TAG !! ${prefix}\n---\n${COMPOSE}`,
+  });
+  code(result, "unsupported_yaml_directive");
+});
+
 test("parser budgets refuse huge or deeply nested documents", () => {
   for (const text of [
     "x".repeat(1024 * 1024 + 1),

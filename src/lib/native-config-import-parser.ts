@@ -1,11 +1,12 @@
 import {
+  Composer,
   isAlias,
   isMap,
   isNode,
   isScalar,
   isSeq,
   LineCounter,
-  parseAllDocuments,
+  Parser,
 } from "yaml";
 import { isRecord } from "./guards.ts";
 
@@ -38,6 +39,31 @@ type PendingNode = {
   readonly pointer: string;
   readonly depth: number;
 };
+
+function parseSource(opts: {
+  readonly text: string;
+  readonly document: ImportDocument;
+  readonly lines: LineCounter;
+}) {
+  const tokens = [...new Parser(opts.lines.addNewLine).parse(opts.text)];
+  const directives = tokens.filter((token) => token.type === "directive");
+  const composer = new Composer({
+    version: "1.2",
+    schema: opts.document === "config" ? "json" : "core",
+    compat: opts.document === "compose" ? "yaml-1.1" : null,
+    strict: true,
+    uniqueKeys: true,
+    stringKeys: true,
+    merge: false,
+    prettyErrors: false,
+    logLevel: "silent",
+    lineCounter: opts.lines,
+  });
+  return {
+    docs: [...composer.compose(tokens, true, opts.text.length)],
+    directives,
+  };
+}
 
 function children(opts: {
   readonly current: PendingNode;
@@ -151,18 +177,16 @@ export function parseImportDocument(opts: {
     if (opts.document === "config") {
       JSON.parse(opts.text);
     }
-    const docs = parseAllDocuments(opts.text, {
-      version: "1.2",
-      schema: opts.document === "config" ? "json" : "core",
-      compat: opts.document === "compose" ? "yaml-1.1" : null,
-      strict: true,
-      uniqueKeys: true,
-      stringKeys: true,
-      merge: false,
-      prettyErrors: false,
-      logLevel: "silent",
-      lineCounter: lines,
-    });
+    const { docs, directives } = parseSource({ ...opts, lines });
+    // Directive tokens preserve explicit default/rebound tag handles that the AST
+    // merges into its defaults. Never infer directive absence from that merged map.
+    if (directives.length) {
+      return {
+        fields: directives.map((token) =>
+          field("", token.offset, "unsupported_yaml_directive")
+        ),
+      };
+    }
     // Silent parseDocument suppresses MULTIPLE_DOCS; own the document-count fence.
     const doc = docs[0];
     if (docs.length !== 1 || !doc) {
@@ -178,12 +202,6 @@ export function parseImportDocument(opts: {
           )
         ),
       };
-    }
-    if (
-      doc.directives?.yaml.explicit ||
-      Object.keys(doc.directives?.tags ?? {}).some((key) => key !== "!!")
-    ) {
-      return { fields: [field("", 0, "unsupported_yaml_directive")] };
     }
     const { fields, safe } = inspectAst(doc.contents, field);
     if (!safe) {

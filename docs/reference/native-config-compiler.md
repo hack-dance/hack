@@ -46,6 +46,10 @@ versions refuse; omitted fields retain their documented defaults.
     "web": {
       "image": "example/web:1",
       "command": { "exec": ["web", "--port", "3000"] },
+      "entrypoint": { "exec": [] },
+      "init": true,
+      "shutdown": { "signal": "SIGTERM", "grace": "45s" },
+      "restart": { "kind": "on-failure", "max_retries": 3 },
       "working_directory": "/app",
       "mounts": [{ "source": ".", "target": "/app", "access": "read-only" }],
       "environment": { "TOKEN": { "env_ref": "TOKEN" } }
@@ -60,6 +64,30 @@ versions refuse; omitted fields retain their documented defaults.
 - Omitted command preserves image defaults. `{ "exec": ["program", "argument"] }`
   and `{ "shell": "explicit shell source" }` are distinct. Empty commands and NUL
   bytes refuse. Argument order is preserved.
+- Optional `entrypoint` uses the same explicit `exec` or `shell` tags. Its
+  `{ "exec": [] }` form clears the image entrypoint; an empty `command.exec`
+  still refuses. A nonempty argv needs a nonempty executable. Omission preserves
+  image defaults. Optional `init` is a strict boolean; explicit false stays false.
+- Optional `shutdown` has `signal`, `grace`, or both. Signals use the 31 canonical
+  `SIG`-prefixed Linux names enumerated in the schema; aliases, numeric
+  signals and realtime signal tokens refuse. Grace is a positive integer in
+  `ms`, `s`, `m` or `h`, normalized to milliseconds up to 4,294,967,295 ms.
+  Empty objects, nulls and unknown fields refuse. Omitted signal/grace remains
+  omitted rather than guessing an image default.
+- Optional `restart` is `{ "kind": "no" }`, `{ "kind": "always" }`,
+  `{ "kind": "unless-stopped" }` or `{ "kind": "on-failure" }`. Only
+  `on-failure` accepts `max_retries`, a positive integer up to 4,294,967,295.
+  Jobs reject `always` and `unless-stopped`, including inactive jobs, to preserve
+  their successful-exit completion contract. Omitted restart means no automatic
+  restart without adding a serialized default to the plan.
+- These process fields are validated intent. Backend signal support, entrypoint
+  clearing, init behavior, restart execution and shutdown precision require
+  separate runtime qualification. Planning accepts grace values above 30 seconds;
+  an existing backend admission limit is not an authored-format restriction.
+  Local settings cannot supply workload process definitions. All four fields
+  remain absent when omitted, preserving existing plans and hashes. Compiler
+  protocol capability `process_plan_version: 1` is required when authored process
+  settings are present, even when the workload is inactive.
 - Mounts select exactly one relative `source` or declared `storage`, an absolute
   container `target` and explicit `access`: `read-only` or `read-write`. Targets
   must be unique after lexical normalization. Mount order is preserved.
@@ -107,8 +135,7 @@ backslashes and drive syntax. Lexical `.` and repeated separators normalize; no
 filesystem or symlink resolution occurs. Working directories and mount targets
 must be absolute POSIX container paths without `..`.
 
-Container shutdown/restart policies,
-network/security/resources, cache protocols, backend options, arbitrary extensions,
+Network/security/resources, cache protocols, advanced build options, backend options, arbitrary extensions,
 and other local settings are not yet implemented. They refuse rather than being
 silently dropped. This foundation does not replace the full native contract or
 qualify a migrated advanced project.

@@ -71,7 +71,7 @@ fn absolute(value: &str) -> Option<String> {
             .join("/")
     ))
 }
-fn duration(value: &str) -> Option<String> {
+pub(crate) fn duration(value: &str) -> Option<String> {
     let (digits, factor) = if let Some(s) = value.strip_suffix("ms") {
         (s, 1)
     } else if let Some(s) = value.strip_suffix('s') {
@@ -146,6 +146,7 @@ pub fn lower(mut project: Project, profiles: &[String], at: &At) -> Result<Plan,
                 return Err(at("invalid_name", &pointer));
             }
             validate_workload(workload, &pointer, &project.profiles, &project.storage, at)?;
+            crate::process::normalize(workload, kind == "jobs", &pointer, at)?;
         }
     }
     for key in project.services.keys() {

@@ -327,3 +327,39 @@ unchanged. The shared 8 MiB report budget counts binding reports and every expan
 endpoint before insertion. No new fields alter old hashes or replies when absent.
 This compiler does not resolve DNS, execute hooks, start services, or prove endpoint
 reachability; native execution and backend translation remain separate work.
+
+## Workload process policy
+
+`process_plan_version: 1` adds optional service/job `entrypoint`, `init`,
+`shutdown`, and `restart` fields. Each field preserves omission; the compiler
+does not supply a new default or rewrite image behavior. Explicit `init: false`
+and explicit no-restart intent remain distinct from omission in the plan and
+semantic identity. Every declaration is validated before profile filtering.
+
+`entrypoint` has exactly one form: `{exec: ["program", "argument"]}` or
+`{shell: "explicit shell text"}`. The distinct entrypoint type also permits
+`{exec: []}` to clear an inherited image entrypoint. A nonempty exec list requires
+a nonempty first argument; later arguments can be empty strings. Shell text must
+be nonempty. No argument or shell text can contain NUL bytes. Normal commands,
+readiness commands, and host commands still reject empty exec lists. Entrypoint
+intent is retained independently of the normal workload command.
+
+`shutdown` contains optional `signal` and `grace`, with at least one field required.
+Signal is a canonical named Linux signal from the generated `ShutdownSignal`
+enum, including the 31 ordinary names from `SIGHUP` through `SIGSYS`. Numeric
+signals, prefixless names, aliases (`SIGIOT`, `SIGCLD`, `SIGPOLL`, `SIGUNUSED`),
+and realtime syntax refuse. Grace uses the existing positive integer duration
+parser for `ms`, `s`, `m`, or `h`, normalized to milliseconds within the supported
+u32 millisecond range. Authored grace is not capped by a backend's execution
+timeout; a backend must preserve or explicitly refuse unsupported intent during
+admission. The plan does not prove that a signal can be delivered by a runtime.
+
+`restart` is a tagged object with `kind: "no"`, `"always"`, `"unless-stopped"`,
+or `"on-failure"`. Only `on-failure` may include `max_retries`, a positive u32
+integer; omission is retained as symbolic intent. Jobs reject perpetual `always`
+and `unless-stopped` policies even when inactive. Jobs permit `no` and
+`on-failure` as authored intent, without claiming that a backend executes job
+retries. The generated schema includes this job restriction and entrypoint
+clearing distinction. Null, unknown fields, tuple forms, ambiguous tags, and
+invalid scalar types refuse with redacted diagnostics. Compilation performs no
+entrypoint execution, init launch, signal delivery, or restart supervision.

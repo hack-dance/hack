@@ -5,6 +5,7 @@ pub mod host;
 mod json;
 pub mod local;
 pub mod model;
+pub mod process;
 pub mod routing;
 mod shape;
 mod validate;
@@ -103,6 +104,15 @@ fn diagnostic_message(code: &str) -> &'static str {
         "invalid_image" => "The image reference must be nonempty and contain no whitespace.",
         "invalid_command" => {
             "Use a nonempty exec argument list or explicit shell command without NUL bytes."
+        }
+        "invalid_entrypoint" => {
+            "Use an exec entrypoint or a nonempty explicit shell entrypoint without NUL bytes."
+        }
+        "invalid_shutdown" => {
+            "Shutdown intent requires at least one supported signal or grace duration."
+        }
+        "invalid_restart" => {
+            "Use a supported restart policy and positive failure retry count; jobs cannot restart perpetually."
         }
         "invalid_environment_key" => "Use a valid environment variable name.",
         "invalid_environment_value" => "Environment values cannot contain NUL bytes.",
@@ -264,6 +274,19 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
     schema["$defs"]["HostSingleton"]["properties"]["ports"]["items"]["minimum"] =
         serde_json::json!(1);
     schema["properties"]["host_bindings"]["propertyNames"] = endpoint::binding_name_schema();
+    schema["properties"]["jobs"]["additionalProperties"] = serde_json::json!({
+        "allOf": [
+            {"$ref":"#/$defs/Workload"},
+            {"properties":{"restart":{"properties":{"kind":{"enum":["no","on-failure"]}}}}}
+        ]
+    });
+    if let Some(variants) = schema["$defs"]["Entrypoint"]["anyOf"].as_array_mut() {
+        for variant in variants {
+            if let Some(exec) = variant["properties"].get_mut("exec") {
+                exec["prefixItems"] = serde_json::json!([{"type":"string","minLength":1}]);
+            }
+        }
+    }
     let schema = serde_json::to_string_pretty(&schema)? + "\n";
     let cfg = ts_rs::Config::default();
     let declarations = [
@@ -311,6 +334,10 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
         EnvironmentSelection::decl(&cfg),
         Build::decl(&cfg),
         Command::decl(&cfg),
+        process::Entrypoint::decl(&cfg),
+        process::ShutdownSignal::decl(&cfg),
+        process::Shutdown::decl(&cfg),
+        process::Restart::decl(&cfg),
         True::decl(&cfg),
         EnvironmentValue::decl(&cfg),
         StorageKind::decl(&cfg),
@@ -351,5 +378,5 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
 }
 
 pub fn protocol() -> Value {
-    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1,"endpoint_plan_version":1})
+    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1,"endpoint_plan_version":1,"process_plan_version":1})
 }

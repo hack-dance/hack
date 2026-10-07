@@ -57,6 +57,9 @@ jobs:
           bunx ultracite check scripts/check-native-endpoint-plan-cli.ts src/lib/native-endpoint-plan-protocol.ts tests/native-endpoint-plan-transport.test.ts tests/native-endpoint-project.test.ts
           bun test tests/native-endpoint-plan-transport.test.ts tests/native-endpoint-project.test.ts
           bun scripts/check-native-endpoint-plan-cli.ts
+          bunx ultracite check scripts/check-native-process-plan-cli.ts src/lib/native-process-plan-protocol.ts tests/native-process-plan-transport.test.ts tests/native-process-project.test.ts
+          bun test tests/native-process-plan-transport.test.ts tests/native-process-project.test.ts
+          bun scripts/check-native-process-plan-cli.ts
 
   state-models:
     name: Runtime state models

@@ -51,7 +51,14 @@ pub(crate) fn project(document: &json::Document) -> Result<(), Diagnostic> {
             for key in workloads.keys() {
                 let pointer = json::child(&root, key);
                 object(document, &pointer)?;
-                for field in ["build", "command", "readiness"] {
+                for field in [
+                    "build",
+                    "command",
+                    "readiness",
+                    "entrypoint",
+                    "shutdown",
+                    "restart",
+                ] {
                     optional_object(document, &json::child(&pointer, field))?;
                 }
                 optional_object(document, &format!("{pointer}/readiness/command"))?;

@@ -23,6 +23,12 @@ import {
   parseNativeHostTargets,
 } from "./native-host-plan-protocol.ts";
 import {
+  authoredProcessPlanningRequired,
+  nativeProcessPlanIsValid,
+  nativeProcessPlanningRequired,
+  nativeProcessSourceMatches,
+} from "./native-process-plan-protocol.ts";
+import {
   type NativeRoutingResolution,
   nativeRoutingPlanIsValid,
   nativeRoutingSelectionMatches,
@@ -165,6 +171,7 @@ export async function compileNativeConfig(opts: {
   readonly requireHostPlanning?: boolean;
   readonly requireRoutingPlanning?: boolean;
   readonly requireEndpointPlanning?: boolean;
+  readonly requireProcessPlanning?: boolean;
 }): Promise<NativeConfigCompileResult> {
   if (opts.input.byteLength > NATIVE_CONFIG_INPUT_LIMIT) {
     throw failure(
@@ -180,6 +187,9 @@ export async function compileNativeConfig(opts: {
     requireHostPlanning: opts.requireHostPlanning,
     requireRoutingPlanning: opts.requireRoutingPlanning,
     requireEndpointPlanning: opts.requireEndpointPlanning,
+    requireProcessPlanning:
+      opts.requireProcessPlanning ||
+      authoredProcessPlanningRequired(opts.input),
   });
   const response = await invokeCompiler({
     ...request,
@@ -187,6 +197,12 @@ export async function compileNativeConfig(opts: {
     input: opts.input,
   });
   const result = parseCompileResponse(response);
+  if (result.ok) {
+    assertProcessSource({ input: opts.input, result, profiles: opts.profiles });
+    if (nativeProcessPlanningRequired(result.plan)) {
+      await checkProtocol({ ...request, requireProcessPlanning: true });
+    }
+  }
   if (result.ok && hasRouting(result.plan) && !opts.requireRoutingPlanning) {
     await checkProtocol({ ...request, requireRoutingPlanning: true });
   }
@@ -223,6 +239,7 @@ export async function resolveNativeConfig(opts: {
   readonly requireHostPlanning?: boolean;
   readonly requireRoutingPlanning?: boolean;
   readonly requireEndpointPlanning?: boolean;
+  readonly requireProcessPlanning?: boolean;
   readonly probeRoutingInputs?: boolean;
 }): Promise<NativeConfigResolveResult> {
   const plainInput = encodeResolveRequest(opts);
@@ -235,6 +252,9 @@ export async function resolveNativeConfig(opts: {
     requireRoutingPlanning:
       opts.requireRoutingPlanning || hasRoutingInputs(opts),
     requireEndpointPlanning: opts.requireEndpointPlanning,
+    requireProcessPlanning:
+      opts.requireProcessPlanning ||
+      authoredProcessPlanningRequired(opts.input),
   });
   const routingProbe =
     opts.probeRoutingInputs === true && capabilities.routingPlanning;
@@ -258,6 +278,14 @@ export async function resolveNativeConfig(opts: {
   });
   if (!parsed.ok) {
     return parsed;
+  }
+  assertProcessSource({
+    input: opts.input,
+    result: parsed,
+    profiles: opts.profiles,
+  });
+  if (nativeProcessPlanningRequired(parsed.plan)) {
+    await checkProtocol({ ...request, requireProcessPlanning: true });
   }
   if (parsed.routing_resolution || parsed.routing_inputs_required) {
     await checkProtocol({ ...request, requireRoutingPlanning: true });
@@ -355,6 +383,7 @@ export async function planNativeConfig(
     readonly signal?: AbortSignal;
     readonly requireRoutingPlanning?: boolean;
     readonly requireEndpointPlanning?: boolean;
+    readonly requireProcessPlanning?: boolean;
   }
 ): Promise<NativeConfigPlanResult> {
   const metadata = parseNativeEnvMetadata(opts.envMetadata);
@@ -378,6 +407,9 @@ export async function planNativeConfig(
     requireRoutingPlanning:
       opts.requireRoutingPlanning || hasRoutingInputs(opts),
     requireEndpointPlanning: opts.requireEndpointPlanning,
+    requireProcessPlanning:
+      opts.requireProcessPlanning ||
+      authoredProcessPlanningRequired(opts.input),
   });
   const response = await invokeCompiler({
     ...request,
@@ -396,6 +428,14 @@ export async function planNativeConfig(
   });
   if (!parsed.ok) {
     return parsed;
+  }
+  assertProcessSource({
+    input: opts.input,
+    result: parsed,
+    profiles: opts.profiles,
+  });
+  if (nativeProcessPlanningRequired(parsed.plan)) {
+    await checkProtocol({ ...request, requireProcessPlanning: true });
   }
   if (parsed.routing_resolution) {
     await checkProtocol({ ...request, requireRoutingPlanning: true });
@@ -665,6 +705,7 @@ async function checkProtocol(opts: {
   readonly requireHostPlanning?: boolean;
   readonly requireRoutingPlanning?: boolean;
   readonly requireEndpointPlanning?: boolean;
+  readonly requireProcessPlanning?: boolean;
 }): Promise<{ readonly routingPlanning: boolean }> {
   const handshake = await invokeCompiler({ ...opts, args: ["--protocol"] });
   const protocol = parseControlJson(handshake.output);
@@ -678,6 +719,7 @@ async function checkProtocol(opts: {
     (opts.requireHostPlanning && protocol.host_env_plan_version !== 1) ||
     (opts.requireRoutingPlanning && protocol.routing_plan_version !== 1) ||
     (opts.requireEndpointPlanning && protocol.endpoint_plan_version !== 1) ||
+    (opts.requireProcessPlanning && protocol.process_plan_version !== 1) ||
     (opts.requireLocalResolution &&
       (protocol.resolve_version !== 1 || protocol.local_version !== 1))
   ) {
@@ -964,18 +1006,7 @@ function parseCompileValue(opts: {
       plan: value.plan,
       declared,
     });
-    if (!nativeRoutingPlanIsValid({ plan: value.plan, declared })) {
-      throw failure(
-        "E_COMPILER_RESPONSE",
-        "Native compiler returned invalid routing declarations."
-      );
-    }
-    if (!nativeEndpointPlanIsValid({ plan: value.plan, declared })) {
-      throw failure(
-        "E_COMPILER_RESPONSE",
-        "Native compiler returned invalid endpoint declarations."
-      );
-    }
+    assertPlanDeclarations({ plan: value.plan, declared });
     return {
       transport_version: 1,
       ok: true,
@@ -998,6 +1029,44 @@ function parseCompileValue(opts: {
     "E_COMPILER_RESPONSE",
     "Native configuration compiler returned an invalid result."
   );
+}
+
+function assertPlanDeclarations(opts: {
+  readonly plan: Readonly<Record<string, unknown>>;
+  readonly declared?: NativeDeclaredWorkloads;
+}): void {
+  for (const [kind, valid] of [
+    ["routing", nativeRoutingPlanIsValid(opts)],
+    ["endpoint", nativeEndpointPlanIsValid(opts)],
+    ["process", nativeProcessPlanIsValid(opts)],
+  ] as const) {
+    if (!valid) {
+      throw failure(
+        "E_COMPILER_RESPONSE",
+        `Native compiler returned invalid ${kind} declarations.`
+      );
+    }
+  }
+}
+
+function assertProcessSource(opts: {
+  readonly input: Uint8Array;
+  readonly result: Extract<NativeConfigCompileResult, { readonly ok: true }>;
+  readonly profiles?: readonly string[];
+}): void {
+  if (
+    !nativeProcessSourceMatches({
+      input: opts.input,
+      plan: opts.result.plan,
+      declared: opts.result.declared_workloads,
+      profiles: opts.profiles,
+    })
+  ) {
+    throw failure(
+      "E_COMPILER_RESPONSE",
+      "Native compiler changed the authored process requirements."
+    );
+  }
 }
 
 function hasRouting(plan: Readonly<Record<string, unknown>>): boolean {

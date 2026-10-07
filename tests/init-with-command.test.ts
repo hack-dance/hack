@@ -1,7 +1,15 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  test,
+} from "bun:test";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 /**
  * CLI-level coverage for `hack init --with <agent>`.
@@ -20,12 +28,50 @@ type CapturedRunResult = {
 
 type SavedEnv = Record<string, string | undefined>;
 
-const ENV_KEYS = ["PATH", "HACK_HOME", "HACK_NO_INTERACTIVE"] as const;
+const ENV_KEYS = [
+  "PATH",
+  "HACK_HOME",
+  "HACK_NO_INTERACTIVE",
+  "HACK_LOGGER",
+] as const;
 
 let tempDir: string | null = null;
 let savedEnv: SavedEnv = {};
+let discoveryMarkerRoot: string | null = null;
+let markerDiscoveryCall = 0;
+let discoveryCalls = 0;
+
+const { discoverRepo: realDiscoverRepo } = await import(
+  "../src/init/discovery.ts"
+);
+const discoveryMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/init/discovery.ts",
+  overrides: {
+    discoverRepo: async (repoRoot: string) => {
+      const result = await realDiscoverRepo(repoRoot);
+      if (repoRoot === discoveryMarkerRoot) {
+        discoveryCalls += 1;
+        if (discoveryCalls === markerDiscoveryCall) {
+          await Bun.write(join(repoRoot, ".hack", "hack.project.json"), "{}\n");
+        }
+      }
+      return result;
+    },
+  },
+});
+
+beforeAll(() => {
+  discoveryMock.activate();
+});
+
+afterAll(() => {
+  discoveryMock.deactivate();
+});
 
 beforeEach(async () => {
+  discoveryMarkerRoot = null;
+  discoveryCalls = 0;
   savedEnv = {};
   for (const key of ENV_KEYS) {
     savedEnv[key] = process.env[key];
@@ -37,6 +83,7 @@ beforeEach(async () => {
   process.env.PATH = join(tempDir, "empty-path");
   process.env.HACK_HOME = join(tempDir, "hack-home");
   process.env.HACK_NO_INTERACTIVE = "1";
+  process.env.HACK_LOGGER = "console";
 });
 
 afterEach(async () => {
@@ -121,6 +168,164 @@ test("hack init --auto --with proceeds to handoff when .hack already exists", as
       .dev_host
   ).toBe("existing.hack");
 });
+
+for (const nativeKind of [
+  "valid",
+  "invalid",
+  "directory",
+  "symlink",
+] as const) {
+  for (const auto of [false, true]) {
+    test(`hack init ${auto ? "--auto --with" : "interactive"} refuses ${nativeKind} native markers before prompting or handoff`, async () => {
+      const repoRoot = await setupTempRepo();
+      const nativeFile = join(repoRoot, ".hack", "hack.project.json");
+      if (nativeKind === "directory") {
+        await mkdir(nativeFile, { recursive: true });
+      } else if (nativeKind === "symlink") {
+        await mkdir(join(repoRoot, ".hack"), { recursive: true });
+        await symlink(join(repoRoot, "absent-native.json"), nativeFile);
+      } else {
+        await Bun.write(
+          nativeFile,
+          nativeKind === "valid" ? "{}\n" : "{broken\n"
+        );
+      }
+
+      const result = await runCliWithCapturedOutput([
+        "init",
+        ...(auto ? ["--auto", "--with", "codex"] : []),
+        "--path",
+        repoRoot,
+      ]);
+
+      expect(result.exitCode).toBe(1);
+      const output = `${result.stdout}${result.stderr}`;
+      expect(output).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+      expect(output).not.toContain("hack onboarding");
+      expect(output).not.toContain("asks for project name");
+      for (const file of [
+        "hack.config.json",
+        "docker-compose.yml",
+        ".gitignore",
+        "README.md",
+      ]) {
+        expect(await Bun.file(join(repoRoot, ".hack", file)).exists()).toBe(
+          false
+        );
+      }
+      expect(
+        await Bun.file(
+          join(process.env.HACK_HOME ?? "", "projects.json")
+        ).exists()
+      ).toBe(false);
+      if (nativeKind === "valid" || nativeKind === "invalid") {
+        expect(await Bun.file(nativeFile).text()).toBe(
+          nativeKind === "valid" ? "{}\n" : "{broken\n"
+        );
+      }
+    });
+  }
+}
+
+for (const legacyDir of [".hack", ".dev"] as const) {
+  test(`hack init --auto --with refuses native plus ${legacyDir} inputs without changes`, async () => {
+    const repoRoot = await setupTempRepo();
+    const nativeFile = join(repoRoot, ".hack", "hack.project.json");
+    const composeFile = join(repoRoot, legacyDir, "docker-compose.yml");
+    const configFile = join(repoRoot, legacyDir, "hack.config.json");
+    const compose = "name: existing\nservices:\n  app: {}\n";
+    const config = '{"name":"existing","dev_host":"existing.hack"}\n';
+    await Bun.write(nativeFile, "{broken\n");
+    await Bun.write(composeFile, compose);
+    await Bun.write(configFile, config);
+
+    const result = await runCliWithCapturedOutput([
+      "init",
+      "--auto",
+      "--with",
+      "claude",
+      "--path",
+      repoRoot,
+    ]);
+
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain(
+      "E_NATIVE_PROJECT_CONFLICT"
+    );
+    expect(result.stdout).not.toContain("hack onboarding");
+    expect(await Bun.file(nativeFile).text()).toBe("{broken\n");
+    expect(await Bun.file(composeFile).text()).toBe(compose);
+    expect(await Bun.file(configFile).text()).toBe(config);
+    expect(await Bun.file(join(repoRoot, ".hack", ".gitignore")).exists()).toBe(
+      false
+    );
+    expect(
+      await Bun.file(
+        join(process.env.HACK_HOME ?? "", "projects.json")
+      ).exists()
+    ).toBe(false);
+  });
+}
+
+test("hack init from a nested native project refuses before choosing an ancestor package root", async () => {
+  const outerRoot = await setupTempRepo();
+  const nativeRoot = join(outerRoot, "native");
+  const startDir = join(nativeRoot, "src", "nested");
+  await mkdir(startDir, { recursive: true });
+  await Bun.write(join(nativeRoot, ".hack", "hack.project.json"), "{}\n");
+
+  const result = await runCliWithCapturedOutput([
+    "init",
+    "--auto",
+    "--with",
+    "codex",
+    "--path",
+    startDir,
+  ]);
+
+  expect(result.exitCode).toBe(1);
+  expect(`${result.stdout}${result.stderr}`).toContain(
+    "E_NATIVE_PROJECT_UNSUPPORTED"
+  );
+  expect(result.stdout).not.toContain("hack onboarding");
+  expect(
+    await Bun.file(join(outerRoot, ".hack", "hack.config.json")).exists()
+  ).toBe(false);
+});
+
+for (const discoveryCall of [1, 2]) {
+  test(`hack init rechecks native inputs after discovery pass ${discoveryCall} before any scaffold write`, async () => {
+    const repoRoot = await setupTempRepo();
+    discoveryMarkerRoot = repoRoot;
+    markerDiscoveryCall = discoveryCall;
+
+    const result = await runCliWithCapturedOutput([
+      "init",
+      "--auto",
+      "--with",
+      "codex",
+      "--path",
+      repoRoot,
+    ]);
+
+    expect(result.exitCode).toBe(1);
+    expect(discoveryCalls).toBe(discoveryCall);
+    expect(`${result.stdout}${result.stderr}`).toContain(
+      "E_NATIVE_PROJECT_UNSUPPORTED"
+    );
+    expect(result.stdout).not.toContain("hack onboarding");
+    for (const file of [
+      "hack.config.json",
+      "docker-compose.yml",
+      ".gitignore",
+      "README.md",
+    ]) {
+      expect(await Bun.file(join(repoRoot, ".hack", file)).exists()).toBe(
+        false
+      );
+    }
+  });
+}
 
 test("new default routes and README retain the canonical OAuth alias", async () => {
   const repoRoot = await setupTempRepo();

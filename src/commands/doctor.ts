@@ -121,6 +121,7 @@ import {
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
 } from "../lib/project-env-config.ts";
+import { assertLegacyProjectDiscovery } from "../lib/project-input-selection.ts";
 import {
   inspectProjectLifecycleHygiene,
   repairProjectLifecycleSessions,
@@ -443,6 +444,9 @@ async function maybeRunNativeMappingRecovery(
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
+  await assertLegacyProjectDiscovery({
+    startDir: resolveDoctorStartDir(args.options.path),
+  });
   const mappingResult = await maybeRunNativeMappingRecovery(args);
   if (mappingResult !== null) {
     return mappingResult;
@@ -888,6 +892,10 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 
   return 0;
 };
+
+function resolveDoctorStartDir(pathOption: string | undefined): string {
+  return resolve(process.cwd(), pathOption ?? ".");
+}
 
 async function handleNativeDoctor(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -3181,6 +3189,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
 
   const removed = await removeLegacyProjectEnvArtifacts({
     paths: cleanupCandidates,
+    projectRoot: project.projectRoot,
   });
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");

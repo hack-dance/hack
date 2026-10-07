@@ -3,7 +3,7 @@ import {
   DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_TLD,
   DEFAULT_PROJECT_TLD,
-  HACK_PROJECT_DIR_LEGACY,
+  type HACK_PROJECT_DIR_LEGACY,
   HACK_PROJECT_DIR_PRIMARY,
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
@@ -17,7 +17,12 @@ import {
   type OpenHostPreference,
   parseOpenHostPreference,
 } from "./open-host.ts";
-import { findUpFile } from "./path.ts";
+import {
+  assertLegacyProjectDirectory,
+  discoverProjectInputs,
+  inspectProjectInputsAtRoot,
+  requireLegacyProjectInputs,
+} from "./project-input-selection.ts";
 import { normalizeProjectName } from "./project-name.ts";
 
 export type ProjectDirName =
@@ -36,23 +41,28 @@ export interface ProjectContext {
 export async function findProjectContext(
   startDir: string
 ): Promise<ProjectContext | null> {
-  const primaryRoot = await findUpFile(
-    startDir,
-    `${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_COMPOSE_FILENAME}`
-  );
-  if (primaryRoot) {
-    return buildProjectContext(primaryRoot, HACK_PROJECT_DIR_PRIMARY);
+  const selected = await discoverProjectInputs({ startDir });
+  if (!selected) {
+    return null;
   }
+  requireLegacyProjectInputs(selected);
+  const directory = selected.composeDirectories[0];
+  return directory
+    ? buildProjectContext(selected.projectRoot, directory)
+    : null;
+}
 
-  const legacyRoot = await findUpFile(
-    startDir,
-    `${HACK_PROJECT_DIR_LEGACY}/${PROJECT_COMPOSE_FILENAME}`
-  );
-  if (legacyRoot) {
-    return buildProjectContext(legacyRoot, HACK_PROJECT_DIR_LEGACY);
-  }
-
-  return null;
+/** Resolve a registered exact root, never an ancestor or a native fake Compose context. */
+export async function findProjectContextAtRoot(opts: {
+  readonly projectRoot: string;
+  readonly projectDirName?: ProjectDirName;
+}): Promise<ProjectContext | null> {
+  const selected = await inspectProjectInputsAtRoot(opts);
+  requireLegacyProjectInputs(selected);
+  const directory = opts.projectDirName ?? selected.composeDirectories[0];
+  return directory && selected.composeDirectories.includes(directory)
+    ? buildProjectContext(selected.projectRoot, directory)
+    : null;
 }
 
 function buildProjectContext(
@@ -71,17 +81,28 @@ function buildProjectContext(
 }
 
 export async function findRepoRootForInit(startDir: string): Promise<string> {
-  const byPackageJson = await findUpFile(startDir, "package.json");
-  if (byPackageJson) {
-    return byPackageJson;
+  let current = resolve(startDir);
+  let nearestGit: string | null = null;
+  while (true) {
+    const selected = await inspectProjectInputsAtRoot({ projectRoot: current });
+    if (selected.kind === "native" || selected.kind === "conflict") {
+      if (nearestGit) {
+        return nearestGit;
+      }
+      requireLegacyProjectInputs(selected);
+    }
+    if (await pathExists(resolve(current, "package.json"))) {
+      return current;
+    }
+    if (!nearestGit && (await pathExists(resolve(current, ".git")))) {
+      nearestGit = current;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return nearestGit ?? resolve(startDir);
+    }
+    current = parent;
   }
-
-  const byGit = await findUpFile(startDir, ".git");
-  if (byGit) {
-    return byGit;
-  }
-
-  return resolve(startDir);
 }
 
 export function sanitizeProjectSlug(input: string): string {
@@ -400,6 +421,7 @@ export function resolveProjectRouteBaseHosts(opts: {
 export async function readProjectConfig(
   ctx: ProjectContext
 ): Promise<ProjectConfig> {
+  await assertLegacyProjectDirectory({ projectDir: ctx.projectDir });
   const jsonPath = resolve(ctx.projectDir, PROJECT_CONFIG_FILENAME);
   const jsonText = await readTextFile(jsonPath);
   if (jsonText !== null) {

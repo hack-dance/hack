@@ -18,6 +18,10 @@ import {
   type ProjectOwnershipConfig,
   readProjectConfig,
 } from "./project.ts";
+import {
+  assertLegacyProjectInputFamily,
+  ProjectInputSelectionError,
+} from "./project-input-selection.ts";
 import { normalizeProjectName } from "./project-name.ts";
 import type {
   RegisteredProject,
@@ -91,6 +95,10 @@ export type ProjectView = {
   readonly serviceHosts: Readonly<Record<string, readonly string[]>> | null;
   readonly runtimeConfigured: boolean | null;
   readonly runtimeStatus: ProjectRuntimeStatus;
+  readonly inputDiagnostic?: {
+    readonly code: ProjectInputSelectionError["code"];
+    readonly message: string;
+  };
   readonly runtime: RuntimeProject | null;
   readonly branchRuntime: readonly BranchRuntime[];
   readonly sessions: readonly ProjectSession[];
@@ -102,6 +110,7 @@ export type ProjectView = {
     | "stopped"
     | "missing"
     | "unregistered"
+    | "unavailable"
     | "unknown";
 };
 
@@ -110,6 +119,7 @@ export type ProjectRuntimeStatus =
   | "stopped"
   | "missing"
   | "unknown"
+  | "unavailable"
   | "not_configured";
 
 type BuildProjectViewsOptions = {
@@ -240,6 +250,20 @@ async function buildRegisteredProjectView(opts: {
   readonly runtimeOk: boolean;
   readonly muxSessions: readonly MuxSession[];
 }): Promise<ProjectView> {
+  try {
+    await assertLegacyProjectInputFamily({
+      projectRoot: opts.registration.repoRoot,
+    });
+  } catch (error: unknown) {
+    if (!(error instanceof ProjectInputSelectionError)) {
+      throw error;
+    }
+    return buildUnavailableProjectView({
+      name: opts.name,
+      registration: opts.registration,
+      error,
+    });
+  }
   const projectDirOk = await pathExists(opts.registration.projectDir);
   const composeFile = resolve(
     opts.registration.projectDir,
@@ -309,6 +333,35 @@ async function buildRegisteredProjectView(opts: {
   };
 }
 
+function buildUnavailableProjectView(opts: {
+  readonly name: string;
+  readonly registration: RegisteredProject;
+  readonly error: ProjectInputSelectionError;
+}): ProjectView {
+  return {
+    projectId: opts.registration.id,
+    name: opts.name,
+    devHost: opts.registration.devHost ?? null,
+    repoRoot: opts.registration.repoRoot,
+    projectDir: opts.registration.projectDir,
+    ownership: null,
+    definedServices: null,
+    extensionsEnabled: null,
+    features: null,
+    serviceHosts: null,
+    runtimeConfigured: null,
+    runtimeStatus: "unavailable",
+    inputDiagnostic: { code: opts.error.code, message: opts.error.message },
+    runtime: null,
+    branchRuntime: [],
+    sessions: [],
+    lifecycle: null,
+    worktrees: opts.registration.worktrees ?? null,
+    kind: "registered",
+    status: "unavailable",
+  };
+}
+
 function buildUnregisteredProjectView(opts: {
   readonly name: string;
   readonly runtime: RuntimeProject | null;
@@ -359,6 +412,7 @@ export function serializeProjectSummary(
     dev_host: view.devHost,
     status: view.status,
     runtime_status: view.runtimeStatus,
+    ...(view.inputDiagnostic ? { input_diagnostic: view.inputDiagnostic } : {}),
     defined_service_count: view.definedServices?.length ?? null,
     host_process_count: containers.filter(
       (container) => container.labels?.["hack.lifecycle.process"] === "true"
@@ -399,6 +453,7 @@ export function serializeProjectView(
     service_hosts: view.serviceHosts ?? null,
     runtime_configured: view.runtimeConfigured ?? null,
     runtime_status: view.runtimeStatus,
+    ...(view.inputDiagnostic ? { input_diagnostic: view.inputDiagnostic } : {}),
     runtime: view.runtime ? serializeRuntimeProject(view.runtime) : null,
     branch_runtime: view.branchRuntime.map((entry) => ({
       branch: entry.branch,

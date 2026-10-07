@@ -83,6 +83,23 @@ async function get(
   return await capture(["env", "get", key, "--path", path, ...extra]);
 }
 
+for (const mixed of [false, true]) {
+  test(`get refuses native inputs with a redacted error and no filesystem changes (mixed=${mixed})`, async () => {
+    if (!mixed) {
+      await rm(join(projectDir, "hack.config.json"));
+      await rm(join(projectDir, "docker-compose.yml"));
+    }
+    const marker = join(projectDir, "hack.project.json");
+    await writeFile(marker, "{synthetic-private-canary");
+    const before = await readdir(projectDir);
+    const result = await get("VALUE");
+    expectFailure(result);
+    expect(result.stderr.toString()).toContain("Unable to read env value.");
+    expect(await readdir(projectDir)).toEqual(before);
+    expect(await readFile(marker, "utf8")).toBe("{synthetic-private-canary");
+  });
+}
+
 async function capture(args: readonly string[]) {
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];

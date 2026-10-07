@@ -3,6 +3,7 @@ import { PROJECT_CONFIG_FILENAME } from "../constants.ts";
 import { resolveGlobalConfigPath } from "./config-paths.ts";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import { isRecord } from "./guards.ts";
+import { assertLegacyProjectDirectory } from "./project-input-selection.ts";
 
 /**
  * Updates a value in the global config file at ~/.hack/hack.config.json.
@@ -48,6 +49,7 @@ export async function updateProjectConfig({
     configPath,
     path,
     value,
+    projectDir,
   });
 }
 
@@ -72,6 +74,7 @@ export async function updateProjectConfigBatch({
   return await updateConfigFileValuesAtPath({
     configPath,
     values,
+    projectDir,
   });
 }
 
@@ -79,10 +82,12 @@ async function updateConfigFileAtPath({
   configPath,
   path,
   value,
+  projectDir,
 }: {
   readonly configPath: string;
   readonly path: string;
   readonly value: unknown;
+  readonly projectDir?: string;
 }): Promise<{ readonly changed: boolean }> {
   const parsedPath = parseKeyPath({ raw: path });
 
@@ -93,14 +98,17 @@ async function updateConfigFileAtPath({
   return await updateConfigFileValuesAtPath({
     configPath,
     values: [{ path, value }],
+    projectDir,
   });
 }
 
 async function updateConfigFileValuesAtPath({
   configPath,
   values,
+  projectDir,
 }: {
   readonly configPath: string;
+  readonly projectDir?: string;
   readonly values: ReadonlyArray<{
     readonly path: string;
     readonly value: unknown;
@@ -108,6 +116,10 @@ async function updateConfigFileValuesAtPath({
 }): Promise<{ readonly changed: boolean }> {
   if (values.length === 0) {
     return { changed: false };
+  }
+
+  if (projectDir) {
+    await assertLegacyProjectDirectory({ projectDir });
   }
 
   for (const entry of values) {
@@ -128,7 +140,13 @@ async function updateConfigFileValuesAtPath({
   }
 
   const nextText = `${JSON.stringify(config, null, 2)}\n`;
+  if (projectDir) {
+    await assertLegacyProjectDirectory({ projectDir });
+  }
   await ensureDir(dirname(configPath));
+  if (projectDir) {
+    await assertLegacyProjectDirectory({ projectDir });
+  }
   const result = await writeTextFileIfChanged(configPath, nextText);
 
   return { changed: result.changed };

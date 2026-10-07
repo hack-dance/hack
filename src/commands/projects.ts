@@ -20,6 +20,7 @@ import {
   type OperationTimings,
 } from "../lib/operation-timings.ts";
 import { findProjectContext } from "../lib/project.ts";
+import { ProjectInputSelectionError } from "../lib/project-input-selection.ts";
 import { type ProjectMeta, resolveProjectMeta } from "../lib/project-meta.ts";
 import {
   AmbiguousProjectNameError,
@@ -216,7 +217,15 @@ const handleProjects: CommandHandlerFor<typeof spec> = async ({
 async function touchCwdProjectRegistration(opts: {
   readonly cwd: string;
 }): Promise<void> {
-  const project = await findProjectContext(opts.cwd);
+  let project: Awaited<ReturnType<typeof findProjectContext>>;
+  try {
+    project = await findProjectContext(opts.cwd);
+  } catch (error: unknown) {
+    if (error instanceof ProjectInputSelectionError) {
+      return;
+    }
+    throw error;
+  }
   if (!project) {
     return;
   }
@@ -568,6 +577,8 @@ async function runProjects(opts: {
     }),
   });
 
+  await renderProjectInputDiagnostics(views);
+
   if (opts.details) {
     const caddyIp = await resolveGlobalCaddyIp();
     for (const p of views) {
@@ -581,6 +592,23 @@ async function runProjects(opts: {
   }
 
   return 0;
+}
+
+async function renderProjectInputDiagnostics(
+  views: readonly ProjectView[]
+): Promise<void> {
+  const lines = views.flatMap((project) =>
+    project.inputDiagnostic
+      ? [`${project.name}: ${project.inputDiagnostic.message}`]
+      : []
+  );
+  if (lines.length > 0) {
+    await display.panel({
+      title: "Project input diagnostics",
+      tone: "warn",
+      lines,
+    });
+  }
 }
 
 async function outputDaemonProjects({
@@ -743,6 +771,9 @@ async function renderProjectDetails(opts: {
 
   const meta: Array<readonly [string, string]> = [];
   meta.push(["Status", p.status]);
+  if (p.inputDiagnostic) {
+    meta.push(["Input diagnostic", p.inputDiagnostic.message]);
+  }
   if (p.projectId) {
     meta.push(["Project id", p.projectId]);
   }
@@ -922,7 +953,13 @@ async function buildMetaByProjectName(opts: {
 }): Promise<Map<string, ProjectMeta>> {
   const out = new Map<string, ProjectMeta>();
   const tasks = opts.views
-    .filter((p) => p.kind === "registered" && p.repoRoot && p.projectDir)
+    .filter(
+      (p) =>
+        p.kind === "registered" &&
+        p.repoRoot &&
+        p.projectDir &&
+        !p.inputDiagnostic
+    )
     .map(async (p) => {
       if (!(p.repoRoot && p.projectDir)) {
         return;

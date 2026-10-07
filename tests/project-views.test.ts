@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  test,
+} from "bun:test";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +15,7 @@ import {
 } from "../src/constants.ts";
 import {
   buildProjectViews,
+  serializeProjectSummary,
   serializeProjectView,
 } from "../src/lib/project-views.ts";
 
@@ -18,11 +26,42 @@ import type {
   RuntimeService,
 } from "../src/lib/runtime-projects.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 let tempDir: string | null = null;
 let originalGlobalConfigPath: string | undefined;
+let blockedReadRoot: string | null = null;
+const blockedReadPaths: string[] = [];
+
+const projectReadMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/fs.ts",
+  overrides: {
+    readTextFile: async (file: string) => {
+      if (blockedReadRoot && file.startsWith(`${blockedReadRoot}/`)) {
+        blockedReadPaths.push(file);
+        throw new Error("Legacy input must not be read under a native marker");
+      }
+      try {
+        return await Bun.file(file).text();
+      } catch {
+        return null;
+      }
+    },
+  },
+});
+
+beforeAll(() => {
+  projectReadMock.activate();
+});
+
+afterAll(() => {
+  projectReadMock.deactivate();
+});
 
 beforeEach(async () => {
+  blockedReadRoot = null;
+  blockedReadPaths.length = 0;
   tempDir = await mkdtemp(join(tmpdir(), "hack-views-"));
   originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
   process.env.HACK_GLOBAL_CONFIG_PATH = join(tempDir, "global.config.json");
@@ -222,6 +261,74 @@ test("buildProjectViews filters retired extensions from upgraded configs", async
   expect(views[0]?.extensionsEnabled).toEqual(["dance.example.custom"]);
   expect(views[0]?.features).toEqual(["dance.example.custom"]);
 });
+
+for (const legacyDir of [null, ".hack", ".dev"] as const) {
+  test(`native ${legacyDir ? `plus ${legacyDir}` : "only"} registered roots are unavailable without reading legacy files`, async () => {
+    const blocked = await createProject({ name: "blocked", services: [] });
+    const healthy = await createProject({ name: "healthy", services: ["web"] });
+    await rm(join(blocked.projectDir, PROJECT_COMPOSE_FILENAME));
+    await mkdir(join(blocked.projectDir, "hack.project.json"));
+    if (legacyDir) {
+      const legacyProjectDir = join(blocked.repoRoot, legacyDir);
+      await mkdir(join(legacyProjectDir, PROJECT_COMPOSE_FILENAME), {
+        recursive: true,
+      });
+      await mkdir(join(legacyProjectDir, PROJECT_CONFIG_FILENAME), {
+        recursive: true,
+      });
+    }
+    const runtime = makeRuntimeProject({
+      name: blocked.name,
+      workingDir: blocked.projectDir,
+      containersByService: {
+        web: [
+          makeContainer({
+            project: blocked.name,
+            service: "web",
+            name: "old-web",
+            state: "running",
+          }),
+        ],
+      },
+    });
+    blockedReadRoot = blocked.repoRoot;
+
+    const views = await buildProjectViews({
+      registryProjects: [blocked, healthy],
+      runtime: [runtime],
+      runtimeOk: true,
+      filter: null,
+      includeUnregistered: true,
+      muxSessions: [],
+    });
+
+    expect(views).toHaveLength(2);
+    expect(blockedReadPaths).toEqual([]);
+    const blockedView = views.find((view) => view.name === blocked.name);
+    expect(blockedView?.status).toBe("unavailable");
+    expect(blockedView?.runtimeStatus).toBe("unavailable");
+    expect(blockedView?.inputDiagnostic?.code).toBe(
+      legacyDir ? "E_NATIVE_PROJECT_CONFLICT" : "E_NATIVE_PROJECT_UNSUPPORTED"
+    );
+    expect(blockedView?.definedServices).toBeNull();
+    expect(blockedView?.extensionsEnabled).toBeNull();
+    expect(blockedView?.lifecycle).toBeNull();
+    expect(blockedView?.runtime).toBeNull();
+    expect(
+      views.find((view) => view.name === healthy.name)?.definedServices
+    ).toEqual(["web"]);
+    if (!blockedView) {
+      throw new Error("Missing blocked project view");
+    }
+    for (const serialized of [
+      serializeProjectView(blockedView),
+      serializeProjectSummary(blockedView),
+    ]) {
+      expect(serialized.status).toBe("unavailable");
+      expect(serialized.input_diagnostic).toEqual(blockedView.inputDiagnostic);
+    }
+  });
+}
 
 test("buildProjectViews includes explicit project ownership metadata", async () => {
   const alpha = await createProject({

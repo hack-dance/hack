@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readdir, readFile, rm, stat } from "node:fs/promises";
+import {
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { join } from "node:path";
 import type { ProjectContext } from "../src/lib/project.ts";
 import {
   findDeadProjectRegistrations,
@@ -39,6 +47,70 @@ async function expectUnchanged(before: string) {
   expect(await readFile(fixture.registryPath, "utf8")).toBe(before);
   expect(await readdir(fixture.state)).toEqual(["projects.json"]);
 }
+
+for (const mixed of [false, true]) {
+  test(`registered native input refuses name/ID lookup and updates without changing registration (mixed=${mixed})`, async () => {
+    const { project, entry } = await fixture.createProject("native", "native");
+    await fixture.writeRegistry([entry]);
+    if (!mixed) {
+      await rm(project.composeFile);
+      await rm(project.configFile);
+    }
+    await writeFile(
+      join(project.projectDir, "hack.project.json"),
+      "{invalid-native"
+    );
+    const before = await readFile(fixture.registryPath, "utf8");
+    const code = mixed
+      ? "E_NATIVE_PROJECT_CONFLICT"
+      : "E_NATIVE_PROJECT_UNSUPPORTED";
+    await expect(
+      resolveRegisteredProjectByName({ name: entry.name })
+    ).rejects.toThrow(code);
+    await expect(
+      resolveRegisteredProjectById({ id: entry.id })
+    ).rejects.toThrow(code);
+    await expect(
+      upsertProjectRegistration({ project, nowIso: NOW })
+    ).rejects.toThrow(code);
+    await expect(
+      touchProjectRegistration({ project, nowIso: NOW })
+    ).rejects.toThrow(code);
+    await expectUnchanged(before);
+    expect(
+      await readFile(join(project.projectDir, "hack.project.json"), "utf8")
+    ).toBe("{invalid-native");
+  });
+}
+
+test("native refusal happens before creating a global registry directory", async () => {
+  const { project } = await fixture.createProject("native", "native");
+  await writeFile(join(project.projectDir, "hack.project.json"), "{}");
+  await rm(fixture.state, { recursive: true, force: true });
+  await expect(
+    upsertProjectRegistration({ project, nowIso: NOW })
+  ).rejects.toThrow("E_NATIVE_PROJECT_CONFLICT");
+  await expect(
+    touchProjectRegistration({ project, nowIso: NOW })
+  ).rejects.toThrow("E_NATIVE_PROJECT_CONFLICT");
+  expect(await Bun.file(fixture.registryPath).exists()).toBe(false);
+  await expect(readdir(fixture.state)).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+});
+
+test("registered lookup stays at its stored root instead of an ancestor Compose project", async () => {
+  const { project, entry } = await fixture.createProject("parent", "parent");
+  const child = join(project.projectRoot, "child");
+  await mkdir(child, { recursive: true });
+  await fixture.writeRegistry([
+    { ...entry, repoRoot: child, projectDir: join(child, ".hack") },
+  ]);
+  const before = await readFile(fixture.registryPath, "utf8");
+  expect(await resolveRegisteredProjectByName({ name: entry.name })).toBeNull();
+  expect(await resolveRegisteredProjectById({ id: entry.id })).toBeNull();
+  await expectUnchanged(before);
+});
 
 function git(cwd: string, args: readonly string[]) {
   const result = Bun.spawnSync(["git", "-C", cwd, ...args], {

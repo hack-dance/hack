@@ -43,6 +43,11 @@ import { getRecord, getString, isRecord } from "./guards.ts";
 import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
 import {
+  assertLegacyProjectDirectory,
+  assertLegacyProjectInputFamily,
+  ProjectInputSelectionError,
+} from "./project-input-selection.ts";
+import {
   resolvePrimaryLocalProjectDir,
   validatePrimaryLocalFile,
 } from "./worktree-local-config.ts";
@@ -341,7 +346,9 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
 export async function ensureHackDirGitignore(opts: {
   readonly projectDir: string;
 }): Promise<{ readonly changed: boolean }> {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await ensureDir(opts.projectDir);
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   return await ensureManagedGitignoreBlock({
     gitignorePath: resolve(opts.projectDir, ".gitignore"),
     beginMarker: HACK_DIR_GITIGNORE_BEGIN_MARKER,
@@ -1226,6 +1233,8 @@ export async function setProjectEnvValue(opts: {
   readonly secret: boolean;
   readonly local?: boolean;
 }): Promise<ProjectEnvMutationResult> {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   if (!PROJECT_ENV_KEY_PATTERN.test(opts.key)) {
     throw new Error(`Invalid env key: ${opts.key}`);
   }
@@ -1313,6 +1322,8 @@ export async function unsetProjectEnvValue(opts: {
   readonly key: string;
   readonly local?: boolean;
 }): Promise<{ readonly changed: boolean; readonly filePath: string }> {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const filePath =
     opts.local === true
       ? await resolveProjectEnvEffectiveLocalConfigPath({
@@ -1376,6 +1387,7 @@ async function writeProjectEnvConfigFile(opts: {
 }): Promise<boolean> {
   const yaml = YAML.stringify(opts.config, null, 2);
   const text = yaml.endsWith("\n") ? yaml : `${yaml}\n`;
+  await assertLegacyProjectDirectory({ projectDir: dirname(opts.path) });
   return (await writeTextFileIfChanged(opts.path, text)).changed;
 }
 
@@ -1390,6 +1402,8 @@ export async function materializeProjectEnv(opts: {
   readonly changed: boolean;
   readonly effectiveEnvName: string | null;
 }> {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const resolved = await resolveProjectEnvConfig({
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
@@ -1406,25 +1420,26 @@ export async function materializeProjectEnv(opts: {
   });
   const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
   const text = serializeDotEnv(selectedEnv);
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   const changed = (await writeTextFileIfChanged(envPath, text)).changed;
   await ensureDir(
     dirname(resolveProjectEnvStatePath({ projectDir: opts.projectDir }))
   );
+  const stateText = `${JSON.stringify(
+    {
+      version: 1,
+      selectedOverlay: resolved.selection.effectiveEnv,
+      selectedService: opts.serviceName ?? null,
+      generatedAt: new Date().toISOString(),
+      inputs: await buildProjectEnvStateDigests({ files: resolved.files }),
+    },
+    null,
+    2
+  )}\n`;
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await writeTextFile(
     resolveProjectEnvStatePath({ projectDir: opts.projectDir }),
-    `${JSON.stringify(
-      {
-        version: 1,
-        selectedOverlay: resolved.selection.effectiveEnv,
-        selectedService: opts.serviceName ?? null,
-        generatedAt: new Date().toISOString(),
-        inputs: await buildProjectEnvStateDigests({
-          files: resolved.files,
-        }),
-      },
-      null,
-      2
-    )}\n`
+    stateText
   );
   return {
     envPath,
@@ -1760,6 +1775,7 @@ export type EnsureProjectEnvSecretKeyResult = {
 export async function ensureProjectEnvSecretKey(opts: {
   readonly projectRoot: string;
 }): Promise<EnsureProjectEnvSecretKeyResult> {
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
   const sharedLocation = await resolveProjectEnvSharedKeyLocation({
     projectRoot: opts.projectRoot,
@@ -1853,11 +1869,15 @@ async function writeProjectEnvKeyWithFallback(opts: {
   if (opts.preferredKeyPath !== null) {
     try {
       await writeProjectEnvKeyFile({
+        projectRoot: opts.projectRoot,
         path: opts.preferredKeyPath,
         keyText: opts.keyText,
       });
       return { keyPath: opts.preferredKeyPath, warnings };
     } catch (error: unknown) {
+      if (error instanceof ProjectInputSelectionError) {
+        throw error;
+      }
       const message = error instanceof Error ? error.message : String(error);
       warnings.push(
         `Failed to write shared env key at ${opts.preferredKeyPath} (${message}); falling back to a checkout-local key at ${opts.localKeyPath}. Sibling git worktrees will NOT share this key and secrets encrypted here may not decrypt elsewhere.`
@@ -1873,9 +1893,11 @@ async function writeProjectEnvKeyWithFallback(opts: {
   }
 
   await writeProjectEnvKeyFile({
+    projectRoot: opts.projectRoot,
     path: opts.localKeyPath,
     keyText: opts.keyText,
   });
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   await ensureGitignoreEntry({
     gitignorePath: resolve(opts.projectRoot, ".gitignore"),
     entry: PROJECT_ENV_KEY_FILENAME,
@@ -1886,10 +1908,13 @@ async function writeProjectEnvKeyWithFallback(opts: {
 }
 
 async function writeProjectEnvKeyFile(opts: {
+  readonly projectRoot: string;
   readonly path: string;
   readonly keyText: string;
 }): Promise<void> {
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   await ensureDir(dirname(opts.path));
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   await writeTextFile(opts.path, `${opts.keyText}\n`);
   await chmod(opts.path, 0o600);
 }
@@ -2047,6 +2072,7 @@ export async function repairLegacyComposeEnvFileReferences(opts: {
   readonly changed: boolean;
   readonly removed: readonly LegacyComposeEnvFileReference[];
 }> {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   const text = await readTextFile(opts.composeFile);
   if (!text) {
     return { changed: false, removed: [] };
@@ -2094,6 +2120,7 @@ export async function repairLegacyComposeEnvFileReferences(opts: {
 
   const nextYaml = YAML.stringify(parsed, null, 2);
   const nextText = nextYaml.endsWith("\n") ? nextYaml : `${nextYaml}\n`;
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   const result = await writeTextFileIfChanged(opts.composeFile, nextText);
   return {
     changed: result.changed,
@@ -2265,6 +2292,8 @@ export async function migrateLegacyProjectEnv(opts: {
   readonly blockedCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
 }> {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const contract = await readHackEnvContract({ projectDir: opts.projectDir });
   if (!contract.exists) {
     return {
@@ -2390,13 +2419,16 @@ export async function migrateLegacyProjectEnv(opts: {
 }
 
 export async function removeLegacyProjectEnvArtifacts(opts: {
+  readonly projectRoot: string;
   readonly paths: readonly string[];
 }): Promise<readonly string[]> {
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const removed: string[] = [];
   for (const path of opts.paths) {
     if (!(await pathExists(path))) {
       continue;
     }
+    await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
     await rm(path, { recursive: false, force: true });
     removed.push(path);
   }
@@ -2549,6 +2581,8 @@ async function migrateLegacyProjectConfig(opts: {
   readonly changed: boolean;
   readonly cleanupCandidates: readonly string[];
 }> {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const configPath = resolve(opts.projectDir, PROJECT_CONFIG_FILENAME);
   const text = await readTextFile(configPath);
   if (text === null) {
@@ -2578,6 +2612,7 @@ async function migrateLegacyProjectConfig(opts: {
   }
 
   const nextText = `${JSON.stringify(topLevel.config, null, 2)}\n`;
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   const result = await writeTextFileIfChanged(configPath, nextText);
   return {
     changed: result.changed,

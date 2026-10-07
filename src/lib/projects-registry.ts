@@ -1,12 +1,7 @@
 import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import {
-  GLOBAL_PROJECTS_REGISTRY_FILENAME,
-  PROJECT_COMPOSE_FILENAME,
-  PROJECT_CONFIG_FILENAME,
-  PROJECT_ENV_FILENAME,
-} from "../constants.ts";
+import { GLOBAL_PROJECTS_REGISTRY_FILENAME } from "../constants.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, pathExists, readTextFile } from "./fs.ts";
 import {
@@ -16,7 +11,15 @@ import {
 } from "./git-worktree.ts";
 import { getString, isRecord } from "./guards.ts";
 import type { ProjectContext, ProjectDirName } from "./project.ts";
-import { defaultProjectSlugFromPath, readProjectConfig } from "./project.ts";
+import {
+  defaultProjectSlugFromPath,
+  findProjectContextAtRoot,
+  readProjectConfig,
+} from "./project.ts";
+import {
+  assertLegacyProjectDirectory,
+  ProjectInputSelectionError,
+} from "./project-input-selection.ts";
 import {
   AmbiguousProjectNameError,
   normalizeProjectName,
@@ -142,6 +145,7 @@ async function upsertObservedRegistration(input: {
   readonly observation?: RegistrationObservation;
 }): Promise<RegisterOutcome> {
   const opts = input.options;
+  await assertLegacyProjectDirectory({ projectDir: opts.project.projectDir });
   const nowIso = opts.nowIso ?? new Date().toISOString();
   const registryPath = getRegistryPath();
   const registryDir = dirname(registryPath);
@@ -165,6 +169,9 @@ async function upsertObservedRegistration(input: {
 
   return await withRegistryLock(
     async () => {
+      await assertLegacyProjectDirectory({
+        projectDir: opts.project.projectDir,
+      });
       const current = await readProjectsRegistry();
       const update = await upsertInMemory({
         current,
@@ -180,6 +187,7 @@ async function upsertObservedRegistration(input: {
         update,
         registryPath,
         signal: opts.signal,
+        projectDir: opts.project.projectDir,
       });
     },
     { waitForLock: opts.waitForLock, signal: opts.signal }
@@ -190,12 +198,14 @@ async function commitRegistrationUpdate(opts: {
   readonly update: Awaited<ReturnType<typeof upsertInMemory>>;
   readonly registryPath: string;
   readonly signal?: AbortSignal;
+  readonly projectDir: string;
 }): Promise<RegisterOutcome> {
   const { project, status } = opts.update;
   if (status.status === "conflict") {
     return status;
   }
   if (status.status !== "noop" || status.changed) {
+    await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
     await writeRegistryAtomic(
       opts.registryPath,
       { version: REGISTRY_VERSION, projects: status.projects },
@@ -241,10 +251,16 @@ async function refreshUnchangedPrimary(opts: {
   readonly nowIso: string;
 }): Promise<RegisterOutcome | null> {
   const registryPath = getRegistryPath();
+  await assertLegacyProjectDirectory({
+    projectDir: opts.observation.projectDir,
+  });
   await deferIfProjectsRegistryBusy({ lockPath: getRegistryLockPath() });
   await ensureDir(dirname(registryPath));
   return await withRegistryLock(
     async () => {
+      await assertLegacyProjectDirectory({
+        projectDir: opts.observation.projectDir,
+      });
       const current = await readProjectsRegistry();
       const primary = selectUnchangedPrimary({
         registry: current,
@@ -260,6 +276,7 @@ async function refreshUnchangedPrimary(opts: {
       }
       return await commitRegistrationUpdate({
         registryPath,
+        projectDir: opts.observation.projectDir,
         update: await updatePrimaryRegistration({
           current: current.projects,
           existing: primary,
@@ -288,6 +305,7 @@ export async function touchProjectRegistration(opts: {
   readonly project: ProjectContext;
   readonly nowIso?: string;
 }): Promise<RegisterOutcome | null> {
+  await assertLegacyProjectDirectory({ projectDir: opts.project.projectDir });
   try {
     const nowIso = opts.nowIso ?? new Date().toISOString();
     const [registry, observation] = await Promise.all([
@@ -314,7 +332,10 @@ export async function touchProjectRegistration(opts: {
       options: { project: opts.project, nowIso, waitForLock: false },
       observation,
     });
-  } catch {
+  } catch (error: unknown) {
+    if (error instanceof ProjectInputSelectionError) {
+      throw error;
+    }
     return null;
   }
 }
@@ -389,26 +410,10 @@ export async function resolveRegisteredProjectByName(opts: {
     return null;
   }
 
-  if (!(await pathExists(match.projectDir))) {
-    return null;
-  }
-
-  const composeFile = resolve(match.projectDir, PROJECT_COMPOSE_FILENAME);
-  const configFile = resolve(match.projectDir, PROJECT_CONFIG_FILENAME);
-  const envFile = resolve(match.projectDir, PROJECT_ENV_FILENAME);
-
-  if (!(await pathExists(composeFile))) {
-    return null;
-  }
-
-  return {
+  return await findProjectContextAtRoot({
     projectRoot: match.repoRoot,
     projectDirName: match.projectDirName,
-    projectDir: match.projectDir,
-    composeFile,
-    envFile,
-    configFile,
-  };
+  });
 }
 
 /** Select one canonical name/legacy alias without filtering out stale contenders. */
@@ -457,28 +462,17 @@ export async function resolveRegisteredProjectById(opts: {
     return null;
   }
 
-  if (!(await pathExists(match.projectDir))) {
-    return null;
-  }
-
-  const composeFile = resolve(match.projectDir, PROJECT_COMPOSE_FILENAME);
-  const configFile = resolve(match.projectDir, PROJECT_CONFIG_FILENAME);
-  const envFile = resolve(match.projectDir, PROJECT_ENV_FILENAME);
-
-  if (!(await pathExists(composeFile))) {
+  const project = await findProjectContextAtRoot({
+    projectRoot: match.repoRoot,
+    projectDirName: match.projectDirName,
+  });
+  if (!project) {
     return null;
   }
 
   return {
     registration: match,
-    project: {
-      projectRoot: match.repoRoot,
-      projectDirName: match.projectDirName,
-      projectDir: match.projectDir,
-      composeFile,
-      envFile,
-      configFile,
-    },
+    project,
   };
 }
 

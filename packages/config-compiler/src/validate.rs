@@ -233,6 +233,7 @@ fn validate_workload(
     if workload.image.is_some() == workload.build.is_some() {
         return Err(at("image_build_exclusive", pointer));
     }
+    crate::acquisition::validate(workload, pointer, at)?;
     if let Some(image) = &workload.image
         && (image.is_empty() || image.chars().any(char::is_whitespace) || image.contains('\0'))
     {

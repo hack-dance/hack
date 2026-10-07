@@ -161,6 +161,14 @@ pub struct Workload {
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
+    #[schemars(with = "crate::acquisition::PullPolicy")]
+    #[ts(optional, type = "PullPolicy")]
+    pub pull_policy: Option<crate::acquisition::PullPolicy>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     #[schemars(with = "Command")]
     #[ts(optional, type = "Command")]
     pub command: Option<Command>,

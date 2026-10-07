@@ -644,6 +644,16 @@
       ],
       "type": "string"
     },
+    "PullPolicy": {
+      "description": "The initial native contract accepts four canonical spellings without synthesizing defaults.",
+      "enum": [
+        "always",
+        "never",
+        "missing",
+        "build"
+      ],
+      "type": "string"
+    },
     "Readiness": {
       "oneOf": [
         {
@@ -994,6 +1004,15 @@
               "build"
             ]
           },
+          "properties": {
+            "pull_policy": {
+              "enum": [
+                "always",
+                "never",
+                "missing"
+              ]
+            }
+          },
           "required": [
             "image"
           ]
@@ -1003,6 +1022,11 @@
             "required": [
               "image"
             ]
+          },
+          "properties": {
+            "pull_policy": {
+              "const": "build"
+            }
           },
           "required": [
             "build"
@@ -1052,6 +1076,9 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "pull_policy": {
+          "$ref": "#/$defs/PullPolicy"
         },
         "readiness": {
           "$ref": "#/$defs/Readiness"

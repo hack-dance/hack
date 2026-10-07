@@ -51,6 +51,18 @@ pub(crate) fn project(document: &json::Document) -> Result<(), Diagnostic> {
             for key in workloads.keys() {
                 let pointer = json::child(&root, key);
                 object(document, &pointer)?;
+                let policy_pointer = json::child(&pointer, "pull_policy");
+                if document
+                    .value
+                    .pointer(&policy_pointer)
+                    .is_some_and(|value| !value.is_string())
+                {
+                    return Err(diagnostic_at(
+                        &document.positions,
+                        "invalid_shape",
+                        &policy_pointer,
+                    ));
+                }
                 for field in [
                     "build",
                     "command",

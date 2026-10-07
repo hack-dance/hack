@@ -45,6 +45,7 @@ versions refuse; omitted fields retain their documented defaults.
   "services": {
     "web": {
       "image": "example/web:1",
+      "pull_policy": "missing",
       "command": { "exec": ["web", "--port", "3000"] },
       "entrypoint": { "exec": [] },
       "init": true,
@@ -61,6 +62,25 @@ versions refuse; omitted fields retain their documented defaults.
 - Each workload selects exactly one `image` or `build`. Basic build accepts a
   relative `context`, a relative `dockerfile` (default `Dockerfile`) and optional
   `target`. Advanced build settings are not accepted in this slice.
+- Optional `pull_policy` is a canonical string: image-only workloads accept
+  `always`, `never` or `missing`; build-only workloads accept `build`. The names
+  follow [Compose's pull policies](https://docs.docker.com/reference/compose-file/services/#pull_policy):
+  registry refresh, cached image only, cache-or-pull, or rebuilding the declared
+  source, respectively. This initial format keeps image and build mutually
+  exclusive. It rejects explicit null, `if_not_present`, timed policies such as
+  `daily`, `weekly` or `every_12h`, and other values. Inactive workloads are still
+  validated. Omission stays absent in the normalized plan and preserves earlier
+  plan hashes; the compiler does not invent an acquisition default.
+- Acquisition policy is intent only. Validation and metadata planning do not
+  inspect an image cache, contact a registry, build an image or authenticate a
+  registry. Backend lowering and execution must qualify details such as Compose's
+  special handling of the `latest` tag under `missing`. Local settings cannot
+  inject workload acquisition policies. `acquisition_plan_version: 1` is required
+  before sending authored policies to a compiler, including inactive policies.
+  Successful replies are checked against the original project identity, selected
+  workload namespace, image/build kind, image value and exact policy presence/value.
+  This acquisition check does not authenticate every normalized build field; Rust
+  retains ownership of build validation and path normalization.
 - Omitted command preserves image defaults. `{ "exec": ["program", "argument"] }`
   and `{ "shell": "explicit shell source" }` are distinct. Empty commands and NUL
   bytes refuse. Argument order is preserved.

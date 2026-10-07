@@ -1,4 +1,5 @@
 //! Pure, bounded native configuration compiler. It performs no host admission or secret lookup.
+pub mod acquisition;
 pub mod endpoint;
 pub mod environment;
 pub mod host;
@@ -101,6 +102,9 @@ fn diagnostic_message(code: &str) -> &'static str {
         "inactive_dependency" => "An active workload depends on a disabled profile target.",
         "dependency_cycle" => "The workload dependency graph contains a cycle.",
         "image_build_exclusive" => "Specify exactly one image or build definition.",
+        "invalid_pull_policy_source" => {
+            "Image pull policies require an image; build policy requires a build definition."
+        }
         "invalid_image" => "The image reference must be nonempty and contain no whitespace.",
         "invalid_command" => {
             "Use a nonempty exec argument list or explicit shell command without NUL bytes."
@@ -268,8 +272,8 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
     let mut schema = serde_json::to_value(schemars::schema_for!(Project))?;
     // Cross-field choice enforced by lower() and independently exercised in the schema corpus.
     schema["$defs"]["Workload"]["oneOf"] = serde_json::json!([
-        {"required":["image"], "not":{"required":["build"]}},
-        {"required":["build"], "not":{"required":["image"]}}
+        {"required":["image"], "not":{"required":["build"]}, "properties":{"pull_policy":{"enum":["always","never","missing"]}}},
+        {"required":["build"], "not":{"required":["image"]}, "properties":{"pull_policy":{"const":"build"}}}
     ]);
     schema["$defs"]["HostSingleton"]["properties"]["ports"]["items"]["minimum"] =
         serde_json::json!(1);
@@ -333,6 +337,7 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
         Source::decl(&cfg),
         EnvironmentSelection::decl(&cfg),
         Build::decl(&cfg),
+        acquisition::PullPolicy::decl(&cfg),
         Command::decl(&cfg),
         process::Entrypoint::decl(&cfg),
         process::ShutdownSignal::decl(&cfg),
@@ -378,5 +383,5 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
 }
 
 pub fn protocol() -> Value {
-    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1,"endpoint_plan_version":1,"process_plan_version":1})
+    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1,"endpoint_plan_version":1,"process_plan_version":1,"acquisition_plan_version":1})
 }

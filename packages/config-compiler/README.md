@@ -363,3 +363,28 @@ retries. The generated schema includes this job restriction and entrypoint
 clearing distinction. Null, unknown fields, tuple forms, ambiguous tags, and
 invalid scalar types refuse with redacted diagnostics. Compilation performs no
 entrypoint execution, init launch, signal delivery, or restart supervision.
+
+## Image and build acquisition policy
+
+`acquisition_plan_version: 1` adds optional service/job `pull_policy` with exactly
+four canonical values: `always`, `never`, `missing`, and `build`. The image
+policies `always`, `never`, and `missing` require `image`; `build` requires a build
+definition. The existing exactly-one-image-or-build rule remains mandatory. An
+incompatible source returns redacted `invalid_pull_policy_source` at the authored
+policy location, including for inactive profiles. Null, non-string values,
+unknown policies, and alternate field names refuse without echoing values.
+
+The field is omitted from a plan and its hashes when absent; no default is
+synthesized. Explicit policy intent participates in semantic identity and is
+preserved unchanged across compile, resolve, and metadata planning. In particular,
+the compiler does not rewrite `missing` based on an image tag or observed cache.
+Consumers negotiate acquisition capability separately from process policy.
+
+The four spellings follow the [Compose pull policy reference](https://docs.docker.com/reference/compose-file/services/#pull_policy):
+`always` requests pulling, `never` requires a cached image, `missing` permits
+pulling when needed (Compose always pulls `latest`), and `build` requests rebuilding.
+This initial native grammar deliberately rejects the compatibility alias
+`if_not_present` and the timed policies `daily`, `weekly`, and `every_<duration>`.
+Imports or execution adapters must preserve qualified acquisition semantics or
+explicitly refuse them. Compilation does not inspect a registry or cache, pull an
+image, read a Dockerfile, invoke a builder, or claim backend execution support.

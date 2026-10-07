@@ -4749,5 +4749,807 @@
         }
       }
     }
+  },
+  {
+    "name": "acquisition services always none",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "always"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services always image",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "always",
+          "image": "image:1"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services always build",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "always",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services always both",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "always",
+          "image": "image:1",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services never none",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "never"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services never image",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "never",
+          "image": "image:1"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services never build",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "never",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services never both",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "never",
+          "image": "image:1",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services missing none",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "missing"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services missing image",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "missing",
+          "image": "image:1"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services missing build",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "missing",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services missing both",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "missing",
+          "image": "image:1",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services build none",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "build"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services build image",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "build",
+          "image": "image:1"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services build build",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "build",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition services build both",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "pull_policy": "build",
+          "image": "image:1",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs always none",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "always"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs always image",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "always",
+          "image": "image:1"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs always build",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "always",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs always both",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "always",
+          "image": "image:1",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs never none",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "never"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs never image",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "never",
+          "image": "image:1"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs never build",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "never",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs never both",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "never",
+          "image": "image:1",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs missing none",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "missing"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs missing image",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "missing",
+          "image": "image:1"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs missing build",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "missing",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs missing both",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "missing",
+          "image": "image:1",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs build none",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "build"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs build image",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "build",
+          "image": "image:1"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs build build",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "build",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition jobs build both",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "pull_policy": "build",
+          "image": "image:1",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 0",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": null
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 1",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": false
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 2",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": 1
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 3",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": 1.5
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 4",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": []
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 5",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": ["always"]
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 6",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": {
+            "always": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 7",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": {
+            "kind": "always"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 8",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": {
+            "policy": "sentinel"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 9",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": ""
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 10",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": "ALWAYS"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 11",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": " always "
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 12",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": "if_not_present"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 13",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": "daily"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 14",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": "weekly"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 15",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": "every_12h"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 16",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": "every_1w"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition invalid policy shape 17",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "pull_policy": "unknown"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition inactive services wrong source refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "image": "image:1",
+          "profiles": ["dev"],
+          "pull_policy": "build"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition inactive services canonical policy",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "image": "image:1",
+          "profiles": ["dev"],
+          "pull_policy": "never"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition inactive jobs wrong source refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "image": "image:1",
+          "profiles": ["dev"],
+          "pull_policy": "build"
+        }
+      }
+    }
+  },
+  {
+    "name": "acquisition inactive jobs canonical policy",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "image": "image:1",
+          "profiles": ["dev"],
+          "pull_policy": "never"
+        }
+      }
+    }
   }
 ]

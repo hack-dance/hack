@@ -40,8 +40,8 @@ jobs:
           "$RUNNER_TEMP/config-schema/bin/python" scripts/check-config-schema.py
       - name: Test transport, projections and compiled bundle without host toolchains
         run: |
-          bunx ultracite check scripts/build-config-compiler.ts scripts/check-config-compiler-cli.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts
-          bun test tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts
+          bunx ultracite check scripts/build-config-compiler.ts scripts/check-config-compiler-cli.ts tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts
+          bun test tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts
           bun run --cwd packages/cli typecheck
           bun run build
           bun scripts/check-config-compiler-cli.ts

@@ -35,7 +35,7 @@ export async function buildConfigCompiler(): Promise<void> {
   const dist = join(root, "dist");
   const output = join(dist, "hack-config-compiler");
   for (const path of [join(root, ".hack-local"), target, dist, output]) {
-    await refuseAlias(path);
+    await verifyConfigCompilerBuildPath({ path });
   }
   await run(
     [
@@ -53,12 +53,19 @@ export async function buildConfigCompiler(): Promise<void> {
     root
   );
   const binary = join(target, "release/hack-config-compiler");
-  await refuseAlias(binary);
+  // Cargo can hard-link its Linux target executable to the deps artifact.
+  // It is read-only input here; dist and shipped files must remain independent.
+  await verifyConfigCompilerBuildPath({
+    path: binary,
+    allowCargoHardLink: true,
+  });
   const generated = await mkdtemp(join(tmpdir(), "hack-config-projections-"));
   try {
     await run([binary, "generate", generated], root);
     for (const name of GENERATED) {
-      await refuseAlias(join(root, "packages/config-compiler/generated", name));
+      await verifyConfigCompilerBuildPath({
+        path: join(root, "packages/config-compiler/generated", name),
+      });
       const [actual, expected] = await Promise.all([
         readFile(join(generated, name)),
         readFile(join(root, "packages/config-compiler/generated", name)),
@@ -80,10 +87,16 @@ export async function buildConfigCompiler(): Promise<void> {
   );
 }
 
-async function refuseAlias(path: string): Promise<void> {
+export async function verifyConfigCompilerBuildPath(opts: {
+  readonly path: string;
+  readonly allowCargoHardLink?: boolean;
+}): Promise<void> {
   try {
-    const info = await lstat(path);
-    if (info.isSymbolicLink() || (info.isFile() && info.nlink !== 1)) {
+    const info = await lstat(opts.path);
+    if (
+      info.isSymbolicLink() ||
+      (info.isFile() && info.nlink !== 1 && !opts.allowCargoHardLink)
+    ) {
       throw new Error("Refusing aliased configuration compiler build paths.");
     }
   } catch (error: unknown) {

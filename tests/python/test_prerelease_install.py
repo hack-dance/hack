@@ -183,7 +183,11 @@ class ChannelTests(unittest.TestCase):
         source = self.channel.root / "manager.py"
         spec = importlib.util.spec_from_file_location("retained_prerelease_manager", source)
         retained = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(retained)
+        # Import the retained reader without adding unowned bytecode to its
+        # channel. This must hold even when unittest itself runs without -B.
+        with mock.patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(retained)
+        self.assertFalse((self.channel.root / "__pycache__").exists())
         for module in (legacy, retained, installer):
             for command in ("status", "run"):
                 with self.subTest(reader=module.__name__, command=command), \

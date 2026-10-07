@@ -7,8 +7,10 @@ or change how existing projects run. A successful compile is syntax and semantic
 validation, not backend capability or application acceptance. The CLI can acquire
 the selected project and permitted local settings for offline resolution.
 
-The CLI recognizes this filename as a project boundary. Native runtime and adoption
-are not enabled yet: legacy project commands refuse with
+The CLI recognizes this filename as a project boundary. The experimental
+[Compose command adapter](native-compose-commands.md) runs its supported subset
+for new disposable projects. Native graph execution and existing-project adoption
+remain unsupported; commands outside that subset refuse with
 `E_NATIVE_PROJECT_UNSUPPORTED`. If active `.hack/` or `.dev/` Compose, JSON or TOML
 inputs also exist, they refuse with `E_NATIVE_PROJECT_CONFLICT`. The marker still
 blocks fallback when malformed, a future version, a directory or a dangling link.

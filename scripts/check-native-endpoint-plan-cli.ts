@@ -367,13 +367,18 @@ try {
     "actual resolution rejects unbound logical reference"
   );
   await authored(checkout, project);
-  const runtime = await invoke(["up"], checkout, {}, false);
+  const runtime = await invoke(
+    ["up"],
+    checkout,
+    { HACK_RUNTIME_BACKEND: "native" },
+    false
+  );
   assert(
     runtime.exit !== 0 &&
       (runtime.stdout + runtime.stderr).includes(
         "E_NATIVE_PROJECT_UNSUPPORTED"
       ),
-    "native-authored execution remains fenced"
+    "explicit native VM backend remains fenced"
   );
   assert(
     !(await Bun.file(marker).exists()),

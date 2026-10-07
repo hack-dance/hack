@@ -13,10 +13,13 @@ import {
   acquireNativeProjectInput,
 } from "./native-project-inputs.ts";
 import { acquireNativeGlobalDomain } from "./native-routing-inputs.ts";
-import { resolveProjectEnvMetadataForNativeSelection } from "./project-env-config.ts";
+import {
+  type NativeProjectEnvMetadata,
+  resolveProjectEnvMetadataForNativeSelection,
+} from "./project-env-config.ts";
 import { resolveVerifiedNativeBranch } from "./worktree-local-config.ts";
 
-type NativeProjectSelection = {
+export type NativeProjectSelection = {
   readonly startDir: string;
   readonly profiles?: readonly string[];
   readonly explicitOverlay?: string | null;
@@ -28,14 +31,14 @@ type NativeProjectSelection = {
 export async function validateNativeProject(
   opts: NativeProjectSelection
 ): Promise<NativeConfigResolveResult> {
-  return (await prepareNativeProject(opts)).result;
+  return (await prepareNativeProjectSelection(opts)).result;
 }
 
 /** Explicit metadata inspection; this is binding completeness, not runtime admission. */
 export async function planNativeProject(
   opts: NativeProjectSelection
 ): Promise<NativeConfigPlanResult> {
-  const prepared = await prepareNativeProject({
+  const prepared = await prepareNativeProjectSelection({
     ...opts,
     requireEnvPlanning: true,
   });
@@ -78,8 +81,34 @@ export async function planNativeProject(
       "Cannot inspect selected managed environment metadata; values omitted."
     );
   }
+  return await planPreparedNativeProject({
+    prepared,
+    metadata,
+    signal: opts.signal,
+  });
+}
+
+/** Private execution preparation may plan metadata from its same owned value acquisition. */
+export async function planPreparedNativeProject(opts: {
+  readonly prepared: NativePreparedProject;
+  readonly metadata: NativeProjectEnvMetadata;
+  readonly signal?: AbortSignal;
+}): Promise<NativeConfigPlanResult> {
+  const { prepared, metadata } = opts;
+  const resolved = prepared.result;
+  if (!resolved.ok) {
+    return resolved;
+  }
+  const declared = resolved.declared_workloads;
+  if (!declared) {
+    throw new NativeConfigCompilerError(
+      "E_COMPILER_RESPONSE",
+      "Native compiler omitted the declared workload namespace."
+    );
+  }
   const result = await planNativeConfig({
-    ...opts,
+    ...prepared.selection,
+    signal: opts.signal,
     input: prepared.input,
     ...prepared.locals,
     ...prepared.routingInputs,
@@ -117,11 +146,23 @@ export async function planNativeProject(
   return result;
 }
 
-async function prepareNativeProject(
-  opts: NativeProjectSelection & {
+export type NativePreparedProject = Awaited<
+  ReturnType<typeof prepareNativeProjectSelection>
+>;
+
+/** Raw selected inputs remain private; this is not a runtime admission or public report. */
+export async function prepareNativeProjectSelection(
+  inputOpts: NativeProjectSelection & {
     readonly requireEnvPlanning?: boolean;
   }
 ) {
+  const selection = {
+    ...inputOpts,
+    ...(inputOpts.profiles === undefined
+      ? {}
+      : { profiles: [...inputOpts.profiles] }),
+  };
+  const opts = selection;
   const project = await acquireNativeProjectInput({
     startDir: opts.startDir,
     signal: opts.signal,
@@ -142,7 +183,7 @@ async function prepareNativeProject(
         document: "project" as const,
       })),
     };
-    return { ...project, result, locals: {}, routingInputs: {} };
+    return { ...project, selection, result, locals: {}, routingInputs: {} };
   }
   const worktree = compiled.plan.worktree;
   if (!isRecord(worktree) || typeof worktree.inherit_local !== "boolean") {
@@ -210,5 +251,5 @@ async function prepareNativeProject(
     });
   }
   checkResolvedIdentity(result);
-  return { ...project, result, locals, routingInputs };
+  return { ...project, selection, result, locals, routingInputs };
 }

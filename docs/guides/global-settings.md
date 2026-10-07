@@ -10,6 +10,11 @@ hack config get --global controlPlane.gateway.allowWrites
 hack config set --global controlPlane.gateway.allowWrites true
 ```
 
+Automatic settings updates, including `hack env backend use`, create a missing
+global config but refuse to replace an existing unreadable file, malformed JSON,
+or a non-object JSON value. An empty file is invalid JSON. Repair the reported file
+before retrying; the failed update preserves its contents.
+
 Common settings:
 
 - `controlPlane.gateway.bind` (default `127.0.0.1`)

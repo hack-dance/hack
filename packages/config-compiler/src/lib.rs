@@ -1,4 +1,5 @@
 //! Pure, bounded native configuration compiler. It performs no host admission or secret lookup.
+pub mod environment;
 mod json;
 pub mod local;
 pub mod model;
@@ -34,6 +35,20 @@ impl Diagnostic {
 }
 fn diagnostic_message(code: &str) -> &'static str {
     match code {
+        "unsupported_metadata_version" => "The environment metadata version is not supported.",
+        "invalid_metadata" => {
+            "Environment metadata does not match the declared workload selection."
+        }
+        "missing_env_reference" => "A required managed environment reference is missing.",
+        "env_reference_collision" => {
+            "A remapped reference conflicts with an existing managed destination."
+        }
+        "missing_overlay" => {
+            "The selected overlay is missing; available base and local layers are used."
+        }
+        "inactive_env_scope" => {
+            "Stored environment scopes outside the declared workload namespace are inactive."
+        }
         "unsupported_request_version" => "The resolution request version is not supported.",
         "input_too_large" => "Configuration exceeds the compiler input byte limit.",
         "invalid_utf8" => "Configuration must be UTF-8.",
@@ -80,7 +95,8 @@ pub enum CompileResult {
         transport_version: u32,
         #[ts(type = "true")]
         ok: bool,
-        plan: Plan,
+        plan: Box<Plan>,
+        declared_workloads: BTreeMap<String, WorkloadKind>,
         semantic_hash: String,
     },
     Failure {
@@ -104,16 +120,29 @@ impl CompileResult {
 /// Compiles explicit input and profile names only. Environment directives stay symbolic.
 pub fn compile(bytes: &[u8], profiles: &[String]) -> CompileResult {
     match compile_inner(bytes, profiles) {
-        Ok((plan, semantic_hash)) => CompileResult::Success {
+        Ok(compiled) => CompileResult::Success {
             transport_version: 1,
             ok: true,
-            plan,
-            semantic_hash,
+            plan: Box::new(compiled.plan),
+            declared_workloads: compiled.declared_workloads,
+            semantic_hash: compiled.semantic_hash,
         },
         Err(error) => CompileResult::failure(error),
     }
 }
-fn compile_inner(bytes: &[u8], profiles: &[String]) -> Result<(Plan, String), Diagnostic> {
+#[derive(Debug, Clone, Serialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadKind {
+    Service,
+    Job,
+}
+struct Compiled {
+    plan: Plan,
+    semantic_hash: String,
+    declared_workloads: BTreeMap<String, WorkloadKind>,
+    positions: BTreeMap<String, (usize, usize)>,
+}
+fn compile_inner(bytes: &[u8], profiles: &[String]) -> Result<Compiled, Diagnostic> {
     let document = json::parse(bytes)?;
     let at = |code: &str, pointer: &str| diagnostic_at(&document.positions, code, pointer);
     if let Some(version) = document.value.get("schema_version")
@@ -146,10 +175,26 @@ fn compile_inner(bytes: &[u8], profiles: &[String]) -> Result<(Plan, String), Di
             };
             at(code, &pointer)
         })?;
+    let declared_workloads = project
+        .services
+        .keys()
+        .map(|name| (name.clone(), WorkloadKind::Service))
+        .chain(
+            project
+                .jobs
+                .keys()
+                .map(|name| (name.clone(), WorkloadKind::Job)),
+        )
+        .collect();
     let plan = validate::lower(project, profiles, &at)?;
     let encoded = serde_json::to_vec(&plan).map_err(|_| at("encoding_failed", ""))?;
     let semantic_hash = format!("{:x}", Sha256::digest(encoded));
-    Ok((plan, semantic_hash))
+    Ok(Compiled {
+        plan,
+        semantic_hash,
+        declared_workloads,
+        positions: document.positions,
+    })
 }
 fn diagnostic_at(
     positions: &BTreeMap<String, (usize, usize)>,
@@ -181,6 +226,12 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
     let schema = serde_json::to_string_pretty(&schema)? + "\n";
     let cfg = ts_rs::Config::default();
     let declarations = [
+        environment::ManagedBindingMetadata::decl(&cfg),
+        environment::EnvMetadata::decl(&cfg),
+        environment::EnvPlanRequest::decl(&cfg),
+        environment::EnvironmentBinding::decl(&cfg),
+        environment::EnvironmentPlan::decl(&cfg),
+        environment::PlanResult::decl(&cfg),
         WorktreePolicy::decl(&cfg),
         SourceMode::decl(&cfg),
         Source::decl(&cfg),
@@ -202,6 +253,7 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
         Project::decl(&cfg),
         Plan::decl(&cfg),
         Diagnostic::decl(&cfg),
+        WorkloadKind::decl(&cfg),
         CompileResult::decl(&cfg),
         local::LocalEnvironment::decl(&cfg),
         local::LocalConfig::decl(&cfg),
@@ -226,5 +278,5 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
 }
 
 pub fn protocol() -> Value {
-    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1})
+    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1})
 }

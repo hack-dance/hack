@@ -89,6 +89,50 @@ type GitCheckoutIdentity = {
   readonly commonDir: string;
 };
 
+/** Inspect only the managed owner's historical local-overlay filename at an exact Git root. */
+export async function isNativeManagedLocalTracked(opts: {
+  readonly projectRoot: string;
+  readonly signal?: AbortSignal;
+}): Promise<boolean | null> {
+  try {
+    const projectRoot = resolve(opts.projectRoot);
+    const before = await readGitCheckoutIdentity({ ...opts, projectRoot });
+    if (!before) {
+      return null;
+    }
+    const path = ".hack/hack.env.local.yaml";
+    const output = await readGitInspection({
+      ...opts,
+      projectRoot,
+      args: [
+        "-c",
+        "core.fsmonitor=false",
+        "ls-files",
+        "--cached",
+        "-z",
+        "--",
+        path,
+      ],
+    });
+    const after = await readGitCheckoutIdentity({ ...opts, projectRoot });
+    if (
+      output === null ||
+      !after ||
+      after.gitDir !== before.gitDir ||
+      after.commonDir !== before.commonDir ||
+      (output !== "" && output !== `${path}\0`)
+    ) {
+      throw worktreeVerificationError();
+    }
+    return output !== "";
+  } catch (error: unknown) {
+    if (error instanceof NativeConfigCompilerError) {
+      throw error;
+    }
+    throw worktreeVerificationError();
+  }
+}
+
 async function readGitCheckoutIdentity(opts: {
   readonly projectRoot: string;
   readonly signal?: AbortSignal;

@@ -505,6 +505,7 @@ hack config <subcommand> [options]
 | `hack config get <key>` | Read a value from hack.config.json |
 | `hack config set <key> <value>` | Update a value in hack.config.json |
 | `hack config validate` | Validate native configuration and selected local overlays without starting workloads |
+| `hack config plan` | Inspect native environment binding completeness without decrypting or starting workloads |
 
 ### Options
 
@@ -586,6 +587,30 @@ Uses the matching bundled Rust compiler. Without --file, discovers a native proj
 | Option | Description |
 | --- | --- |
 | `--file <path>` | Validate only this native project JSON file, without discovery or local overrides |
+| `--profile <names>` | Comma-separated declared native profiles |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack config plan`
+
+Inspect native environment binding completeness without decrypting or starting workloads
+
+### Usage
+
+```bash
+hack config plan [options]
+```
+
+Resolves the native project and permitted local env selection, then inspects managed-env names, winning scopes and secret flags. Managed YAML is parsed by its existing owner; keys and values are never decrypted or returned. Required unresolved refs return a nonzero exit. This experimental report does not establish runtime admission or enable native execution; use config validate for validation without managed-document reads.
+
+### Options
+
+| Option | Description |
+| --- | --- |
 | `--profile <names>` | Comma-separated declared native profiles |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |

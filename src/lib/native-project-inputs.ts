@@ -20,6 +20,8 @@ import {
 } from "./worktree-local-config.ts";
 
 const NATIVE_LOCAL_FILENAME = "hack.local.json";
+const MANAGED_ENV_FILENAME =
+  /^hack\.env\.[a-z0-9]+(?:-[a-z0-9]+)*(?:\.local)?\.yaml$/;
 
 /** Fixed failures never disclose authored bytes, paths, or filesystem error text. */
 export class NativeProjectInputError extends HackCliError {
@@ -132,7 +134,7 @@ export async function acquireNativeLocalInputs(opts: {
   }
 }
 
-async function requireNativeFamilyAtRoot(opts: {
+export async function requireNativeFamilyAtRoot(opts: {
   readonly projectRoot: string;
 }): Promise<void> {
   const selected = await inspectProjectInputsAtRoot(opts);
@@ -141,6 +143,58 @@ async function requireNativeFamilyAtRoot(opts: {
   }
   if (selected.kind !== "native") {
     throw new NativeProjectInputError("unsupported");
+  }
+}
+
+/** Verify an exact native root and its required marker without interpreting authored policy. */
+export async function assertNativeProjectInputRoot(opts: {
+  readonly projectRoot: string;
+  readonly signal?: AbortSignal;
+}): Promise<void> {
+  try {
+    throwIfCancelled(opts.signal);
+    const projectRoot = resolve(opts.projectRoot);
+    await requireNativeFamilyAtRoot({ projectRoot });
+    await readAuthoredNativeFile({
+      ...opts,
+      projectRoot,
+      filename: NATIVE_PROJECT_FILENAME,
+      required: true,
+    });
+    await requireNativeFamilyAtRoot({ projectRoot });
+    throwIfCancelled(opts.signal);
+  } catch (error: unknown) {
+    throw redactAcquisitionError(error);
+  }
+}
+
+/**
+ * The managed-env owner may acquire only its YAML layers through the same bounded
+ * descriptor boundary. These bytes can contain secrets: never expose them outside
+ * that owner. File checks do not provide an atomic multi-file snapshot.
+ */
+export async function acquireNativeManagedEnvFile(opts: {
+  readonly projectRoot: string;
+  readonly filename: string;
+  readonly signal?: AbortSignal;
+}): Promise<Uint8Array | undefined> {
+  try {
+    throwIfCancelled(opts.signal);
+    if (!MANAGED_ENV_FILENAME.test(opts.filename)) {
+      throw new NativeProjectInputError("unsafe");
+    }
+    const projectRoot = resolve(opts.projectRoot);
+    await requireNativeFamilyAtRoot({ projectRoot });
+    const bytes = await readAuthoredNativeFile({
+      ...opts,
+      projectRoot,
+      required: false,
+    });
+    await requireNativeFamilyAtRoot({ projectRoot });
+    throwIfCancelled(opts.signal);
+    return bytes;
+  } catch (error: unknown) {
+    throw redactAcquisitionError(error);
   }
 }
 

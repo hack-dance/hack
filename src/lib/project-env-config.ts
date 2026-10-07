@@ -8,6 +8,7 @@ import { chmod, lstat, readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import {
+  HACK_PROJECT_DIR_PRIMARY,
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
   PROJECT_ENV_CONFIG_DEFAULT_FILENAME,
@@ -41,6 +42,14 @@ import {
 } from "./git-worktree.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
 import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
+import {
+  NATIVE_CONFIG_INPUT_LIMIT,
+  NativeConfigCompilerError,
+} from "./native-config-compiler.ts";
+import {
+  acquireNativeManagedEnvFile,
+  assertNativeProjectInputRoot,
+} from "./native-project-inputs.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
 import {
   assertLegacyProjectDirectory,
@@ -48,12 +57,16 @@ import {
   ProjectInputSelectionError,
 } from "./project-input-selection.ts";
 import {
+  isNativeManagedLocalTracked,
   resolvePrimaryLocalProjectDir,
+  resolveVerifiedPrimaryWorktreeRoot,
+  shouldInheritPrimaryLocalInputs,
   validatePrimaryLocalFile,
 } from "./worktree-local-config.ts";
 
 const PROJECT_ENV_CONFIG_VERSION = 1 as const;
 const PROJECT_ENV_SECRETS_PROVIDER = "project_key" as const;
+const NATIVE_ENV_OVERLAY_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const PROJECT_ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const PROJECT_ENV_SCOPE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const PROJECT_ENV_SECRET_PREFIX = "v1" as const;
@@ -963,12 +976,232 @@ export async function resolveProjectEnvMetadata(
   }
 }
 
-/** One scope projection owns both metadata planning and runtime injection. */
+/** Native planning carries names and winning scope/secret flags, never stored values. */
+export type NativeProjectEnvMetadata = {
+  readonly overlay: string | null;
+  readonly overlayExists: boolean;
+  readonly effectiveMetadata: EffectiveEnvMetadata;
+  readonly unknownScopes: readonly string[];
+};
+
+type NativeEnvSelectionOptions = {
+  readonly projectRoot: string;
+  readonly overlay: string | null;
+  readonly inheritLocal: boolean;
+  readonly declaredWorkloadNames: readonly string[];
+  readonly signal?: AbortSignal;
+};
+
+function nativeEnvMetadataError(): Error {
+  return new Error(
+    "Cannot resolve native managed env metadata: selected inputs are invalid, unreadable, unstable or oversized; values omitted."
+  );
+}
+
+function checkNativeEnvCancellation(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new NativeConfigCompilerError(
+      "E_COMPILER_CANCELLED",
+      "Native managed env metadata acquisition was cancelled."
+    );
+  }
+}
+
+async function readNativeEnvLayer(opts: {
+  readonly projectRoot: string;
+  readonly filename: string;
+  readonly environment: string;
+  readonly signal?: AbortSignal;
+}): Promise<ProjectEnvConfig | null> {
+  const bytes = await acquireNativeManagedEnvFile(opts);
+  checkNativeEnvCancellation(opts.signal);
+  if (bytes === undefined) {
+    return null;
+  }
+  return parseNativeEnvLayer({ bytes, environment: opts.environment });
+}
+
+function parseNativeEnvLayer(opts: {
+  readonly bytes: Uint8Array;
+  readonly environment: string;
+}): ProjectEnvConfig {
+  const parsed: unknown = YAML.parse(
+    new TextDecoder("utf-8", { fatal: true }).decode(opts.bytes)
+  );
+  const result = parseProjectEnvConfig({
+    parsed,
+    environment: opts.environment,
+  });
+  if (!result.ok) {
+    throw nativeEnvMetadataError();
+  }
+  return result.config;
+}
+
+/** Preserve tracked local-overlay compatibility without reading legacy policy. */
+async function readNativeLocalBase(opts: {
+  readonly projectRoot: string;
+  readonly signal?: AbortSignal;
+}): Promise<ProjectEnvConfig | null> {
+  const bytes = await acquireNativeManagedEnvFile({
+    ...opts,
+    filename: "hack.env.local.yaml",
+  });
+  if (bytes === undefined) {
+    return null;
+  }
+  const tracked = await isNativeManagedLocalTracked(opts);
+  const local =
+    tracked === true
+      ? null
+      : parseNativeEnvLayer({ bytes, environment: "default" });
+  if (tracked ?? local?.environment === "local") {
+    return await readNativeEnvLayer({
+      ...opts,
+      filename: "hack.env.default.local.yaml",
+      environment: "default",
+    });
+  }
+  return local;
+}
+
+/**
+ * Resolve an explicit native selection through the existing managed-env owner.
+ * Does not read legacy policy/defaults, dotenv, keys, or decrypt stored entries.
+ * Only missing files are optional; selected files are bounded stable regular
+ * files in unredirected native roots. This is not an atomic multi-file snapshot.
+ * Unknown scopes remain names for diagnostics, not authorized workload targets.
+ */
+export async function resolveProjectEnvMetadataForNativeSelection(
+  opts: NativeEnvSelectionOptions
+): Promise<NativeProjectEnvMetadata> {
+  try {
+    checkNativeEnvCancellation(opts.signal);
+    if (
+      opts.overlay !== null &&
+      (typeof opts.overlay !== "string" ||
+        !NATIVE_ENV_OVERLAY_PATTERN.test(opts.overlay))
+    ) {
+      throw nativeEnvMetadataError();
+    }
+    const projectRoot = resolve(opts.projectRoot);
+    await assertNativeProjectInputRoot({ projectRoot, signal: opts.signal });
+    let primaryRoot: string | null = null;
+    if (shouldInheritPrimaryLocalInputs(opts)) {
+      primaryRoot = await resolveVerifiedPrimaryWorktreeRoot({
+        projectRoot,
+        signal: opts.signal,
+      });
+      if (primaryRoot) {
+        await assertNativeProjectInputRoot({
+          projectRoot: primaryRoot,
+          signal: opts.signal,
+        });
+      }
+    }
+    const read = (root: string, envName: string | null, local: boolean) => {
+      const projectDir = resolve(root, HACK_PROJECT_DIR_PRIMARY);
+      return readNativeEnvLayer({
+        projectRoot: root,
+        filename: basename(
+          local
+            ? resolveProjectEnvLocalConfigPath({ projectDir, envName })
+            : resolveProjectEnvConfigPath({ projectDir, envName })
+        ),
+        environment: envName ?? "default",
+        signal: opts.signal,
+      });
+    };
+    const base = await read(projectRoot, null, false);
+    const overlay =
+      opts.overlay === null
+        ? null
+        : await read(projectRoot, opts.overlay, false);
+    const envLayers = [
+      base,
+      overlay,
+      primaryRoot
+        ? await readNativeLocalBase({
+            projectRoot: primaryRoot,
+            signal: opts.signal,
+          })
+        : null,
+      primaryRoot && opts.overlay !== null
+        ? await read(primaryRoot, opts.overlay, true)
+        : null,
+      await readNativeLocalBase({ projectRoot, signal: opts.signal }),
+      opts.overlay === null
+        ? null
+        : await read(projectRoot, opts.overlay, true),
+    ];
+    const merged = mergeProjectEnvConfigLayers({
+      layers: envLayers,
+      environment: opts.overlay ?? "default",
+    });
+    const projection = projectEnvScopeProjection({
+      layers: { envLayers, merged },
+      serviceNames: opts.declaredWorkloadNames,
+      metadataByteLimit: NATIVE_CONFIG_INPUT_LIMIT,
+      includeHostMetadata: false,
+    });
+    const result: NativeProjectEnvMetadata = {
+      overlay: opts.overlay,
+      overlayExists: overlay !== null,
+      effectiveMetadata: envLayers.some((layer) => layer !== null)
+        ? projection.metadata.effectiveMetadata
+        : {},
+      unknownScopes: projection.metadata.unknownScopes,
+    };
+    if (Buffer.byteLength(JSON.stringify(result)) > NATIVE_CONFIG_INPUT_LIMIT) {
+      throw nativeEnvMetadataError();
+    }
+    await assertNativeProjectInputRoot({ projectRoot, signal: opts.signal });
+    if (primaryRoot) {
+      await assertNativeProjectInputRoot({
+        projectRoot: primaryRoot,
+        signal: opts.signal,
+      });
+    }
+    checkNativeEnvCancellation(opts.signal);
+    return result;
+  } catch (error: unknown) {
+    if (
+      error instanceof NativeConfigCompilerError &&
+      error.code === "E_COMPILER_CANCELLED"
+    ) {
+      throw error;
+    }
+    throw nativeEnvMetadataError();
+  }
+}
+
+/** Keep legacy selection provenance outside the shared scope projection. */
 function projectEnvProjection(opts: {
   readonly layers: ProjectEnvLayers;
   readonly serviceNames: readonly string[];
 }) {
-  const { selection, envLayers, merged, files } = opts.layers;
+  const projection = projectEnvScopeProjection(opts);
+  return {
+    ...projection,
+    metadata: {
+      ...projection.metadata,
+      selection: opts.layers.selection,
+      files: opts.layers.files,
+    },
+  };
+}
+
+/** One scope projection owns metadata planning and runtime injection. */
+function projectEnvScopeProjection(opts: {
+  readonly layers: {
+    readonly envLayers: readonly (ProjectEnvConfig | null)[];
+    readonly merged: ProjectEnvConfig;
+  };
+  readonly serviceNames: readonly string[];
+  readonly metadataByteLimit?: number;
+  readonly includeHostMetadata?: boolean;
+}) {
+  const { envLayers, merged } = opts.layers;
   const declaredScopes = Object.keys(merged.values).sort((left, right) =>
     left.localeCompare(right)
   );
@@ -998,6 +1231,19 @@ function projectEnvProjection(opts: {
   const effectiveMetadata: EffectiveEnvMetadata = {
     global: resolveMetadata({ layers: envLayers, scopeNames: ["global"] }),
   };
+  let metadataBytes =
+    opts.metadataByteLimit === undefined
+      ? 0
+      : Buffer.byteLength(JSON.stringify(effectiveMetadata));
+  const checkMetadataSize = () => {
+    if (
+      opts.metadataByteLimit !== undefined &&
+      metadataBytes > opts.metadataByteLimit
+    ) {
+      throw nativeEnvMetadataError();
+    }
+  };
+  checkMetadataSize();
   const hostEffectiveMetadata: EffectiveEnvMetadata = {};
   for (const {
     serviceName,
@@ -1008,21 +1254,29 @@ function projectEnvProjection(opts: {
       layers: envLayers,
       scopeNames: composeScopeNames,
     });
-    hostEffectiveMetadata[serviceName] = resolveMetadata({
-      layers: envLayers,
-      scopeNames: hostScopeNames,
-    });
+    if (opts.metadataByteLimit !== undefined) {
+      metadataBytes += Buffer.byteLength(
+        JSON.stringify({ [serviceName]: effectiveMetadata[serviceName] })
+      );
+      checkMetadataSize();
+    }
+    if (opts.includeHostMetadata !== false) {
+      hostEffectiveMetadata[serviceName] = resolveMetadata({
+        layers: envLayers,
+        scopeNames: hostScopeNames,
+      });
+    }
   }
   const globalHostScopeNames = hostScopeConflictsWithService
     ? ["global"]
     : ["global", PROJECT_ENV_HOST_SCOPE];
-  hostEffectiveMetadata.global = resolveMetadata({
-    layers: envLayers,
-    scopeNames: globalHostScopeNames,
-  });
-  const metadata: ProjectEnvResolvedMetadata = {
-    selection,
-    files,
+  if (opts.includeHostMetadata !== false) {
+    hostEffectiveMetadata.global = resolveMetadata({
+      layers: envLayers,
+      scopeNames: globalHostScopeNames,
+    });
+  }
+  const metadata = {
     effectiveMetadata,
     hostEffectiveMetadata,
     declaredScopes,

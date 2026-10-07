@@ -23,6 +23,35 @@ fn main() -> std::process::ExitCode {
             }
         }
         [command, directory] if command == "generate" => generate(Path::new(directory)),
+        [command, rest @ ..] if command == "plan" => {
+            let mut profiles = Vec::new();
+            for pair in rest.chunks(2) {
+                if pair.len() != 2 || pair[0] != "--profile" {
+                    return usage();
+                }
+                profiles.push(pair[1].clone());
+            }
+            let mut bytes = Vec::new();
+            let result = if io::stdin()
+                .take((MAX_REQUEST_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .is_err()
+            {
+                hack_config_compiler::environment::PlanResult::failure(
+                    hack_config_compiler::local::ResolveDiagnostic {
+                        document: DocumentRole::Request,
+                        diagnostic: Diagnostic::new("input_read_failed", "", 1, 1),
+                    },
+                )
+            } else {
+                hack_config_compiler::environment::plan(&bytes, &profiles)
+            };
+            if emit(&result).is_err() || !result.complete() {
+                1
+            } else {
+                0
+            }
+        }
         [command, rest @ ..] if command == "resolve" => {
             let mut profiles = Vec::new();
             for pair in rest.chunks(2) {
@@ -82,7 +111,7 @@ fn main() -> std::process::ExitCode {
 }
 fn usage() -> std::process::ExitCode {
     eprintln!(
-        "Usage: hack-config-compiler --protocol | compile [--profile NAME]... | resolve [--profile NAME]... | generate DIR"
+        "Usage: hack-config-compiler --protocol | compile [--profile NAME]... | resolve [--profile NAME]... | plan [--profile NAME]... | generate DIR"
     );
     std::process::ExitCode::from(2)
 }

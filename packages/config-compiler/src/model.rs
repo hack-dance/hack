@@ -3,10 +3,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use ts_rs::TS;
 
-fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+pub(crate) fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
     T::deserialize(d).map(Some)
 }
-fn dot() -> String {
+pub(crate) fn dot() -> String {
     ".".into()
 }
 
@@ -38,6 +40,14 @@ pub struct Project {
     #[serde(default)]
     #[ts(as = "Option<WorktreePolicy>", optional)]
     pub worktree: WorktreePolicy,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "crate::host::HostConfig")]
+    #[ts(optional, type = "HostConfig")]
+    pub host: Option<crate::host::HostConfig>,
 }
 
 fn enabled() -> bool {
@@ -333,6 +343,9 @@ pub struct Plan {
     pub source: Source,
     pub environment: EnvironmentSelection,
     pub worktree: WorktreePolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "HostConfig")]
+    pub host: Option<crate::host::HostConfig>,
     pub selected_profiles: Vec<String>,
     pub storage: BTreeMap<String, Storage>,
     pub services: BTreeMap<String, Workload>,

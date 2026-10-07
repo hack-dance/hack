@@ -157,6 +157,203 @@
         }
       ]
     },
+    "HostConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "down": {
+          "$ref": "#/$defs/HostHooks",
+          "default": {
+            "after": [],
+            "before": []
+          }
+        },
+        "processes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/HostProcess"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "up": {
+          "$ref": "#/$defs/HostHooks",
+          "default": {
+            "after": [],
+            "before": []
+          }
+        }
+      },
+      "type": "object"
+    },
+    "HostConflict": {
+      "enum": [
+        "fail",
+        "adopt"
+      ],
+      "type": "string"
+    },
+    "HostEnvTarget": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "host",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "workload",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HostExit": {
+      "enum": [
+        "stop_on_down"
+      ],
+      "type": "string"
+    },
+    "HostHook": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/Command"
+        },
+        "cwd": {
+          "default": ".",
+          "type": "string"
+        },
+        "env_target": {
+          "$ref": "#/$defs/HostEnvTarget",
+          "default": {
+            "kind": "host"
+          }
+        },
+        "environment": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EnvironmentValue"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "command"
+      ],
+      "type": "object"
+    },
+    "HostHooks": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HostHook"
+          },
+          "type": "array"
+        },
+        "before": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HostHook"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "HostProcess": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/Command"
+        },
+        "cwd": {
+          "default": ".",
+          "type": "string"
+        },
+        "env_target": {
+          "$ref": "#/$defs/HostEnvTarget",
+          "default": {
+            "kind": "host"
+          }
+        },
+        "environment": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EnvironmentValue"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "exit": {
+          "$ref": "#/$defs/HostExit",
+          "default": "stop_on_down"
+        },
+        "singleton": {
+          "$ref": "#/$defs/HostSingleton"
+        },
+        "startup": {
+          "$ref": "#/$defs/HostStartup",
+          "default": "up"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "HostSingleton": {
+      "additionalProperties": false,
+      "properties": {
+        "on_conflict": {
+          "$ref": "#/$defs/HostConflict",
+          "default": "fail"
+        },
+        "ports": {
+          "items": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "ports"
+      ],
+      "type": "object"
+    },
+    "HostStartup": {
+      "enum": [
+        "up"
+      ],
+      "type": "string"
+    },
     "JobCondition": {
       "enum": [
         "completed"
@@ -469,6 +666,9 @@
     "environment": {
       "$ref": "#/$defs/EnvironmentSelection",
       "default": {}
+    },
+    "host": {
+      "$ref": "#/$defs/HostConfig"
     },
     "jobs": {
       "additionalProperties": {

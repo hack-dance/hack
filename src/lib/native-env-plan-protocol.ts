@@ -7,6 +7,12 @@ import type {
 } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "./guards.ts";
 import type { NativeConfigDiagnostic } from "./native-config-compiler.ts";
+import {
+  type NativeHostEnvironmentPlan,
+  type NativeHostMetadata,
+  parseNativeHostMetadata,
+  parseNativeHostReports,
+} from "./native-host-plan-protocol.ts";
 
 const WORKLOAD_NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const MANAGED_KEY = /^[A-Z_][A-Z0-9_]*$/;
@@ -17,22 +23,24 @@ const OVERLAY = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export type NativeDeclaredWorkloads = Readonly<Record<string, WorkloadKind>>;
 export type NativeManagedEntry = Readonly<ManagedBindingMetadata>;
 export type NativeEnvMetadata = Readonly<
-  Omit<EnvMetadata, "workloads" | "inactive_scopes">
+  Omit<EnvMetadata, "workloads" | "inactive_scopes" | "host">
 > & {
   readonly workloads: Readonly<
     Record<string, Readonly<Record<string, NativeManagedEntry>>>
   >;
   readonly inactive_scopes: readonly string[];
+  readonly host?: NativeHostMetadata;
 };
 export type NativeEnvBinding = Readonly<EnvironmentBinding>;
 export type NativeEnvironmentPlan = Readonly<
-  Omit<EnvironmentPlan, "workloads" | "warnings" | "diagnostics">
+  Omit<EnvironmentPlan, "workloads" | "warnings" | "diagnostics" | "host">
 > & {
   readonly workloads: Readonly<
     Record<string, Readonly<Record<string, NativeEnvBinding>>>
   >;
   readonly warnings: readonly NativeConfigDiagnostic[];
   readonly diagnostics: readonly NativeConfigDiagnostic[];
+  readonly host?: NativeHostEnvironmentPlan;
 };
 
 function hasOnly(
@@ -76,6 +84,7 @@ export function parseNativeEnvMetadata(
         "overlay_exists",
         "workloads",
         "inactive_scopes",
+        "host",
       ])
     ) ||
     value.metadata_version !== 1 ||
@@ -86,8 +95,38 @@ export function parseNativeEnvMetadata(
   ) {
     return null;
   }
+  const workloads = parseWorkloadMetadata(value.workloads);
+  if (!workloads) {
+    return null;
+  }
+  const inactiveScopes: string[] = [];
+  for (const scope of value.inactive_scopes) {
+    if (typeof scope !== "string" || !SCOPE.test(scope)) {
+      return null;
+    }
+    inactiveScopes.push(scope);
+  }
+  const host = Object.hasOwn(value, "host")
+    ? parseNativeHostMetadata(value.host)
+    : undefined;
+  if (host === null) {
+    return null;
+  }
+  return {
+    metadata_version: 1,
+    overlay: value.overlay,
+    overlay_exists: value.overlay_exists,
+    workloads,
+    inactive_scopes: inactiveScopes,
+    ...(host === undefined ? {} : { host }),
+  };
+}
+
+function parseWorkloadMetadata(
+  value: Record<string, unknown>
+): Record<string, Record<string, NativeManagedEntry>> | null {
   const workloads: Record<string, Record<string, NativeManagedEntry>> = {};
-  for (const [name, entries] of Object.entries(value.workloads)) {
+  for (const [name, entries] of Object.entries(value)) {
     if (!(WORKLOAD_NAME.test(name) && isRecord(entries))) {
       return null;
     }
@@ -109,20 +148,7 @@ export function parseNativeEnvMetadata(
     }
     workloads[name] = projected;
   }
-  const inactiveScopes: string[] = [];
-  for (const scope of value.inactive_scopes) {
-    if (typeof scope !== "string" || !SCOPE.test(scope)) {
-      return null;
-    }
-    inactiveScopes.push(scope);
-  }
-  return {
-    metadata_version: 1,
-    overlay: value.overlay,
-    overlay_exists: value.overlay_exists,
-    workloads,
-    inactive_scopes: inactiveScopes,
-  };
+  return workloads;
 }
 
 function parseBinding(value: unknown): NativeEnvBinding | null {
@@ -172,6 +198,7 @@ export function parseNativeEnvironmentPlan(opts: {
         "workloads",
         "warnings",
         "diagnostics",
+        "host",
       ])
     ) ||
     value.plan_version !== 1 ||
@@ -207,7 +234,11 @@ export function parseNativeEnvironmentPlan(opts: {
   }
   const warnings = value.warnings.map(opts.parseDiagnostic);
   const diagnostics = value.diagnostics.map(opts.parseDiagnostic);
+  const host = Object.hasOwn(value, "host")
+    ? parseNativeHostReports({ value: value.host, parseBinding })
+    : undefined;
   if (
+    host === null ||
     value.complete !== (diagnostics.length === 0) ||
     [...warnings, ...diagnostics].some((entry) => entry.document === undefined)
   ) {
@@ -221,5 +252,6 @@ export function parseNativeEnvironmentPlan(opts: {
     workloads,
     warnings,
     diagnostics,
+    ...(host === undefined ? {} : { host }),
   };
 }

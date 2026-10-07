@@ -113,6 +113,9 @@ pub enum ResolveResult {
         plan: Box<Plan>,
         semantic_hash: String,
         declared_workloads: std::collections::BTreeMap<String, crate::WorkloadKind>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "HostEnvTargets")]
+        host_env_targets: Option<crate::host::HostEnvTargets>,
         local_resolution: LocalResolution,
     },
     Failure {
@@ -227,6 +230,12 @@ pub fn resolve(bytes: &[u8], profiles: &[String]) -> ResolveResult {
         Ok(resolved) => ResolveResult::Success {
             transport_version: 1,
             ok: true,
+            host_env_targets: resolved
+                .compiled
+                .plan
+                .host
+                .as_ref()
+                .map(crate::host::HostConfig::targets),
             plan: Box::new(resolved.compiled.plan),
             semantic_hash: resolved.compiled.semantic_hash,
             declared_workloads: resolved.compiled.declared_workloads,

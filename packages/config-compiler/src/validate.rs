@@ -2,7 +2,7 @@ use crate::{Diagnostic, json::child, model::*};
 use std::collections::{BTreeMap, BTreeSet};
 
 type At<'a> = dyn Fn(&str, &str) -> Diagnostic + 'a;
-fn name(value: &str) -> bool {
+pub(crate) fn name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 63
         && value.bytes().enumerate().all(|(i, c)| {
@@ -37,7 +37,7 @@ fn managed_key(value: &str) -> bool {
             .enumerate()
             .all(|(i, b)| b.is_ascii_uppercase() || b == b'_' || (i > 0 && b.is_ascii_digit()))
 }
-fn relative(value: &str) -> Option<String> {
+pub(crate) fn relative(value: &str) -> Option<String> {
     if value.starts_with('/') || value.contains(['\\', '\0', ':']) || value.is_empty() {
         return None;
     }
@@ -88,7 +88,7 @@ fn duration(value: &str) -> Option<String> {
     let n = digits.parse::<u64>().ok()?.checked_mul(factor)?;
     (n > 0 && n <= u32::MAX as u64).then(|| format!("{n}ms"))
 }
-fn command(command: &Command, pointer: &str, at: &At) -> Result<(), Diagnostic> {
+pub(crate) fn command(command: &Command, pointer: &str, at: &At) -> Result<(), Diagnostic> {
     let valid = match command {
         Command::Exec { exec } => {
             !exec.is_empty() && !exec[0].is_empty() && exec.iter().all(|s| !s.contains('\0'))
@@ -185,6 +185,14 @@ pub fn lower(mut project: Project, profiles: &[String], at: &At) -> Result<Plan,
         }
     }
     check_cycles(&all, at)?;
+    if let Some(host) = &mut project.host {
+        crate::host::normalize(
+            host,
+            &all.keys().map(|name| (*name).to_owned()).collect(),
+            at,
+        )?;
+    }
+    project.host = project.host.filter(|host| !host.empty());
     project.services.retain(|_, w| active(w));
     project.jobs.retain(|_, w| active(w));
     for workload in project
@@ -200,6 +208,7 @@ pub fn lower(mut project: Project, profiles: &[String], at: &At) -> Result<Plan,
         source: project.source,
         environment: project.environment,
         worktree: project.worktree,
+        host: project.host,
         selected_profiles: selected,
         storage: project.storage,
         services: project.services,
@@ -242,24 +251,7 @@ fn validate_workload(
     if workload.profiles.iter().any(|p| !profiles.contains(p)) {
         return Err(at("unknown_profile", &child(pointer, "profiles")));
     }
-    for (key, value) in &workload.environment {
-        let path = child(&child(pointer, "environment"), key);
-        if !env_name(key) {
-            return Err(at("invalid_environment_key", &path));
-        }
-        match value {
-            EnvironmentValue::Reference { env_ref } if !managed_key(env_ref) => {
-                return Err(at("invalid_environment_key", &child(&path, "env_ref")));
-            }
-            EnvironmentValue::Literal { literal: value }
-            | EnvironmentValue::Default { default: value }
-                if value.contains('\0') =>
-            {
-                return Err(at("invalid_environment_value", &path));
-            }
-            _ => {}
-        }
-    }
+    environment(&workload.environment, pointer, at)?;
     let mut targets = BTreeSet::new();
     for (index, mount) in workload.mounts.iter_mut().enumerate() {
         let path = format!("{pointer}/mounts/{index}");
@@ -380,6 +372,32 @@ fn check_cycles(all: &BTreeMap<&str, (&str, &Workload)>, at: &At) -> Result<(), 
             "dependency_cycle",
             &format!("{}/depends_on", child(&format!("/{kind}"), name)),
         ));
+    }
+    Ok(())
+}
+
+pub(crate) fn environment(
+    environment: &BTreeMap<String, EnvironmentValue>,
+    pointer: &str,
+    at: &At,
+) -> Result<(), Diagnostic> {
+    for (key, value) in environment {
+        let path = child(&child(pointer, "environment"), key);
+        if !env_name(key) {
+            return Err(at("invalid_environment_key", &path));
+        }
+        match value {
+            EnvironmentValue::Reference { env_ref } if !managed_key(env_ref) => {
+                return Err(at("invalid_environment_key", &child(&path, "env_ref")));
+            }
+            EnvironmentValue::Literal { literal: value }
+            | EnvironmentValue::Default { default: value }
+                if value.contains('\0') =>
+            {
+                return Err(at("invalid_environment_value", &path));
+            }
+            _ => {}
+        }
     }
     Ok(())
 }

@@ -1,5 +1,6 @@
 //! Pure, bounded native configuration compiler. It performs no host admission or secret lookup.
 pub mod environment;
+pub mod host;
 mod json;
 pub mod local;
 pub mod model;
@@ -50,6 +51,7 @@ fn diagnostic_message(code: &str) -> &'static str {
             "Stored environment scopes outside the declared workload namespace are inactive."
         }
         "unsupported_request_version" => "The resolution request version is not supported.",
+        "plan_too_large" => "The expanded plan exceeds the compiler output safety limit.",
         "input_too_large" => "Configuration exceeds the compiler input byte limit.",
         "invalid_utf8" => "Configuration must be UTF-8.",
         "invalid_json" => "Configuration is not a complete valid JSON document.",
@@ -60,6 +62,8 @@ fn diagnostic_message(code: &str) -> &'static str {
         "invalid_shape" => "The value does not match the supported configuration shape.",
         "invalid_name" => "Use a unique canonical name within the declared namespace.",
         "invalid_path" => "The path must use the required portable relative or absolute form.",
+        "unknown_env_target" => "The host environment target must name a declared workload.",
+        "invalid_singleton" => "Singleton ports must be distinct nonzero ports.",
         "unknown_profile" => "The profile must be declared by the project.",
         "duplicate_workload" => "Services and jobs must have distinct names.",
         "unknown_dependency" => {
@@ -97,6 +101,9 @@ pub enum CompileResult {
         ok: bool,
         plan: Box<Plan>,
         declared_workloads: BTreeMap<String, WorkloadKind>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "HostEnvTargets")]
+        host_env_targets: Option<host::HostEnvTargets>,
         semantic_hash: String,
     },
     Failure {
@@ -123,6 +130,7 @@ pub fn compile(bytes: &[u8], profiles: &[String]) -> CompileResult {
         Ok(compiled) => CompileResult::Success {
             transport_version: 1,
             ok: true,
+            host_env_targets: compiled.plan.host.as_ref().map(host::HostConfig::targets),
             plan: Box::new(compiled.plan),
             declared_workloads: compiled.declared_workloads,
             semantic_hash: compiled.semantic_hash,
@@ -223,15 +231,29 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
         {"required":["image"], "not":{"required":["build"]}},
         {"required":["build"], "not":{"required":["image"]}}
     ]);
+    schema["$defs"]["HostSingleton"]["properties"]["ports"]["items"]["minimum"] =
+        serde_json::json!(1);
     let schema = serde_json::to_string_pretty(&schema)? + "\n";
     let cfg = ts_rs::Config::default();
     let declarations = [
         environment::ManagedBindingMetadata::decl(&cfg),
         environment::EnvMetadata::decl(&cfg),
+        environment::HostMetadata::decl(&cfg),
+        environment::HostEnvironmentPlan::decl(&cfg),
         environment::EnvPlanRequest::decl(&cfg),
         environment::EnvironmentBinding::decl(&cfg),
         environment::EnvironmentPlan::decl(&cfg),
         environment::PlanResult::decl(&cfg),
+        host::HostConfig::decl(&cfg),
+        host::HostHooks::decl(&cfg),
+        host::HostHook::decl(&cfg),
+        host::HostProcess::decl(&cfg),
+        host::HostEnvTarget::decl(&cfg),
+        host::HostStartup::decl(&cfg),
+        host::HostExit::decl(&cfg),
+        host::HostSingleton::decl(&cfg),
+        host::HostConflict::decl(&cfg),
+        host::HostEnvTargets::decl(&cfg),
         WorktreePolicy::decl(&cfg),
         SourceMode::decl(&cfg),
         Source::decl(&cfg),
@@ -278,5 +300,5 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
 }
 
 pub fn protocol() -> Value {
-    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1})
+    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1})
 }

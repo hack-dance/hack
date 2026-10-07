@@ -66,6 +66,7 @@ import {
 
 const PROJECT_ENV_CONFIG_VERSION = 1 as const;
 const PROJECT_ENV_SECRETS_PROVIDER = "project_key" as const;
+const NATIVE_ENV_WORKLOAD_PATTERN = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const NATIVE_ENV_OVERLAY_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const PROJECT_ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const PROJECT_ENV_SCOPE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
@@ -976,12 +977,27 @@ export async function resolveProjectEnvMetadata(
   }
 }
 
+export type NativeProjectEnvHostTargets = {
+  readonly includeDefault: boolean;
+  readonly workloadNames: readonly string[];
+};
+
+type EnvTargetMetadata = Readonly<
+  Record<string, { readonly scope: string; readonly secret: boolean }>
+>;
+
+export type NativeProjectEnvHostMetadata = {
+  readonly default?: EnvTargetMetadata;
+  readonly workloads: Readonly<Record<string, EnvTargetMetadata>>;
+};
+
 /** Native planning carries names and winning scope/secret flags, never stored values. */
 export type NativeProjectEnvMetadata = {
   readonly overlay: string | null;
   readonly overlayExists: boolean;
   readonly effectiveMetadata: EffectiveEnvMetadata;
   readonly unknownScopes: readonly string[];
+  readonly hostMetadata?: NativeProjectEnvHostMetadata;
 };
 
 type NativeEnvSelectionOptions = {
@@ -989,6 +1005,7 @@ type NativeEnvSelectionOptions = {
   readonly overlay: string | null;
   readonly inheritLocal: boolean;
   readonly declaredWorkloadNames: readonly string[];
+  readonly hostTargets?: NativeProjectEnvHostTargets;
   readonly signal?: AbortSignal;
 };
 
@@ -996,6 +1013,84 @@ function nativeEnvMetadataError(): Error {
   return new Error(
     "Cannot resolve native managed env metadata: selected inputs are invalid, unreadable, unstable or oversized; values omitted."
   );
+}
+
+function validateNativeHostTargets(
+  value: unknown,
+  declaredWorkloadNames: readonly string[]
+): NativeProjectEnvHostTargets | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    !isRecord(value) ||
+    typeof value.includeDefault !== "boolean" ||
+    !Array.isArray(value.workloadNames)
+  ) {
+    throw nativeEnvMetadataError();
+  }
+  const declared = new Set(declaredWorkloadNames);
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const name of value.workloadNames) {
+    if (
+      typeof name !== "string" ||
+      !NATIVE_ENV_WORKLOAD_PATTERN.test(name) ||
+      !declared.has(name) ||
+      seen.has(name)
+    ) {
+      throw nativeEnvMetadataError();
+    }
+    names.push(name);
+    seen.add(name);
+  }
+  return { includeDefault: value.includeDefault, workloadNames: names };
+}
+
+/** Resolve only selected host baselines; scope precedence remains owned by the shared projection. */
+function projectNativeHostMetadata(opts: {
+  readonly targets: NativeProjectEnvHostTargets;
+  readonly envLayers: readonly (ProjectEnvConfig | null)[];
+  readonly projection: ReturnType<typeof projectEnvScopeProjection>;
+  readonly guestResult: NativeProjectEnvMetadata;
+  readonly signal?: AbortSignal;
+}): NativeProjectEnvHostMetadata {
+  const workloads: Record<string, EnvTargetMetadata> = {};
+  let defaultMetadata: EnvTargetMetadata | undefined;
+  // Charge the envelope and each returned map, including duplicate default/workload
+  // baselines. Never build all host maps and then discover that expansion is too large.
+  let bytes = Buffer.byteLength(
+    JSON.stringify({ ...opts.guestResult, hostMetadata: { workloads: {} } })
+  );
+  const acquire = (name: string, scopeNames: readonly string[]) => {
+    checkNativeEnvCancellation(opts.signal);
+    const metadata = resolveMetadata({ layers: opts.envLayers, scopeNames });
+    bytes += Buffer.byteLength(JSON.stringify({ [name]: metadata }));
+    if (bytes > NATIVE_CONFIG_INPUT_LIMIT) {
+      throw nativeEnvMetadataError();
+    }
+    return metadata;
+  };
+  if (opts.targets.includeDefault) {
+    defaultMetadata = acquire("default", opts.projection.globalHostScopeNames);
+  }
+  const scopeNamesByWorkload = new Map(
+    opts.projection.serviceTargets.map((target) => [
+      target.serviceName,
+      target.hostScopeNames,
+    ])
+  );
+  for (const name of opts.targets.workloadNames) {
+    const scopeNames = scopeNamesByWorkload.get(name);
+    if (!scopeNames) {
+      throw nativeEnvMetadataError();
+    }
+    workloads[name] = acquire(name, scopeNames);
+  }
+  return {
+    ...(defaultMetadata === undefined ? {} : { default: defaultMetadata }),
+    workloads,
+  };
 }
 
 function checkNativeEnvCancellation(signal?: AbortSignal): void {
@@ -1071,6 +1166,8 @@ async function readNativeLocalBase(opts: {
  * Only missing files are optional; selected files are bounded stable regular
  * files in unredirected native roots. This is not an atomic multi-file snapshot.
  * Unknown scopes remain names for diagnostics, not authorized workload targets.
+ * Optional host targets select declared workloads, never host-process names.
+ * Only requested host baselines are allocated, under a combined output budget.
  */
 export async function resolveProjectEnvMetadataForNativeSelection(
   opts: NativeEnvSelectionOptions
@@ -1084,6 +1181,10 @@ export async function resolveProjectEnvMetadataForNativeSelection(
     ) {
       throw nativeEnvMetadataError();
     }
+    const hostTargets = validateNativeHostTargets(
+      opts.hostTargets,
+      opts.declaredWorkloadNames
+    );
     const projectRoot = resolve(opts.projectRoot);
     await assertNativeProjectInputRoot({ projectRoot, signal: opts.signal });
     let primaryRoot: string | null = null;
@@ -1144,7 +1245,7 @@ export async function resolveProjectEnvMetadataForNativeSelection(
       metadataByteLimit: NATIVE_CONFIG_INPUT_LIMIT,
       includeHostMetadata: false,
     });
-    const result: NativeProjectEnvMetadata = {
+    const guestResult: NativeProjectEnvMetadata = {
       overlay: opts.overlay,
       overlayExists: overlay !== null,
       effectiveMetadata: envLayers.some((layer) => layer !== null)
@@ -1152,6 +1253,19 @@ export async function resolveProjectEnvMetadataForNativeSelection(
         : {},
       unknownScopes: projection.metadata.unknownScopes,
     };
+    const result: NativeProjectEnvMetadata =
+      hostTargets === undefined
+        ? guestResult
+        : {
+            ...guestResult,
+            hostMetadata: projectNativeHostMetadata({
+              targets: hostTargets,
+              envLayers,
+              projection,
+              guestResult,
+              signal: opts.signal,
+            }),
+          };
     if (Buffer.byteLength(JSON.stringify(result)) > NATIVE_CONFIG_INPUT_LIMIT) {
       throw nativeEnvMetadataError();
     }

@@ -21,7 +21,7 @@ fn handshake_and_compile_need_no_environment_or_host_tools() {
     let protocol: Value = serde_json::from_slice(&handshake.stdout).unwrap();
     assert_eq!(
         protocol,
-        serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1})
+        serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1})
     );
     let result = run(&["compile"], br#"{"schema_version":1,"name":"example"}"#);
     assert!(result.status.success());
@@ -128,5 +128,27 @@ fn environment_plan_process_separates_valid_documents_from_complete_bindings() {
         !String::from_utf8(output.stderr)
             .unwrap()
             .contains("private-sentinel")
+    );
+}
+
+#[test]
+fn host_planning_does_not_execute_authored_commands() {
+    let project = r#"{"schema_version":1,"name":"example","host":{"up":{"before":[{"name":"before","command":{"shell":"exit 93"}}]},"processes":{"watch":{"command":{"shell":"exit 94"},"singleton":{"ports":[1],"on_conflict":"adopt"}}}}}"#;
+    let request = serde_json::json!({"request_version":1,"project":project,"env_metadata":{"metadata_version":1,"overlay":null,"overlay_exists":false,"workloads":{},"inactive_scopes":[],"host":{"default":{},"workloads":{}}}});
+    let output = run(&["plan"], request.to_string().as_bytes());
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["environment_plan"]["complete"], true);
+    assert_eq!(
+        result["host_env_targets"],
+        serde_json::json!({"include_default":true,"workloads":[]})
+    );
+    assert_eq!(
+        result["environment_plan"]["host"]
+            .as_object()
+            .unwrap()
+            .len(),
+        2
     );
 }

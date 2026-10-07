@@ -138,6 +138,38 @@ Projects can set a default overlay in `.hack/hack.config.json`:
 
 Use `--env=base` to bypass that default and read only `.hack/hack.env.default.yaml`.
 
+## Metadata-only planning API
+
+Repository integrations can call `resolveProjectEnvMetadata` from
+`src/lib/project-env-config.ts` to inspect modern env bindings without obtaining a
+key or decrypting values. Pass `projectRoot`, `projectDir`, and `serviceNames`;
+optional `envName` selects an overlay, omission uses the project default, and
+`null` bypasses that default.
+
+The result contains selection and file paths, declared and unknown scope names,
+and per-target key metadata (`scope` and `secret`) for Compose and host execution.
+It contains no plaintext values, ciphertext, merged config, or raw layers. It
+reads the same ordered files and uses the same scope projection as
+`resolveProjectEnvConfig`: later layers override earlier ones, null removes an
+earlier binding, and a later value can reintroduce it. Linked worktrees inherit
+primary local layers before their own local overrides, subject to the existing
+inheritance settings. If a service is named `host`, that scope remains a service
+scope rather than an override applied to every host target.
+
+A `null` result means no modern env configuration exists; it does not inspect or
+resolve legacy `.env` or secret-store values. Callers retain responsibility for
+their existing legacy fallback. Selected managed-env layer reads distinguish a
+missing path from a failed read or a dangling symlink. Only regular files
+(including readable symlinks to regular files) are read; invalid or unreadable
+layers throw a value-free error without YAML excerpts or a nested cause. Project configuration
+selection keeps its existing semantics. Metadata inspection never writes key
+files or materializes `.env`.
+
+Paths, variable names and scope names can still disclose private project details;
+keep this metadata private. It is not portable plan serialization or an atomic
+snapshot/admission check. It does not establish that encrypted values can be
+decrypted or that runtime injection will succeed.
+
 ## Runtime behavior
 
 Direct runtime injection is the default path.

@@ -4,7 +4,7 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { chmod, readdir, rm } from "node:fs/promises";
+import { chmod, lstat, readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import {
@@ -105,12 +105,18 @@ type EffectiveEnvMetadata = Record<
   Record<string, { readonly scope: string; readonly secret: boolean }>
 >;
 
-export type ProjectEnvResolvedConfig = {
+/** Names, winning scopes and secret flags only; never carries stored values. */
+export type ProjectEnvResolvedMetadata = {
   readonly effectiveMetadata: EffectiveEnvMetadata;
   readonly hostEffectiveMetadata: EffectiveEnvMetadata;
   readonly selection: ProjectEnvSelection;
-  readonly merged: ProjectEnvConfig;
   readonly files: readonly string[];
+  readonly declaredScopes: readonly string[];
+  readonly unknownScopes: readonly string[];
+};
+
+export type ProjectEnvResolvedConfig = ProjectEnvResolvedMetadata & {
+  readonly merged: ProjectEnvConfig;
   readonly globalEnv: Readonly<Record<string, string>>;
   readonly hostEnv: Readonly<Record<string, string>>;
   readonly hostTargetEnv: Readonly<
@@ -119,8 +125,6 @@ export type ProjectEnvResolvedConfig = {
   readonly serviceEnv: Readonly<
     Record<string, Readonly<Record<string, string>>>
   >;
-  readonly declaredScopes: readonly string[];
-  readonly unknownScopes: readonly string[];
 };
 
 export function selectProjectEnvValues(opts: {
@@ -523,11 +527,43 @@ export async function listProjectEnvOverlayNames(opts: {
     .sort((left, right) => left.localeCompare(right));
 }
 
+/** Strict planning reads distinguish missing paths from failed/non-file layers. */
+async function readProjectEnvLayerText(opts: {
+  readonly path: string;
+  readonly strictRead?: boolean;
+}): Promise<string | null> {
+  if (!opts.strictRead) {
+    return await readTextFile(opts.path);
+  }
+  try {
+    const selected = await stat(opts.path);
+    if (!selected.isFile()) {
+      throw new Error("Selected env layer is not a regular file");
+    }
+  } catch (error: unknown) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      try {
+        await lstat(opts.path);
+      } catch (entryError: unknown) {
+        if (isRecord(entryError) && entryError.code === "ENOENT") {
+          return null;
+        }
+        throw entryError;
+      }
+    }
+    // A dangling link is an existing invalid layer, not an absent one.
+    throw error;
+  }
+  // Preflight is not an atomic input fence; a failed read after it still refuses.
+  return await Bun.file(opts.path).text();
+}
+
 async function readProjectEnvConfigFile(opts: {
   readonly path: string;
   readonly environment: string;
+  readonly strictRead?: boolean;
 }): Promise<ProjectEnvConfigReadResult> {
-  const text = await readTextFile(opts.path);
+  const text = await readProjectEnvLayerText(opts);
   if (text === null) {
     return {
       path: opts.path,
@@ -731,6 +767,7 @@ async function readProjectEnvLayers(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly envName?: string | null;
+  readonly strictRead?: boolean;
 }) {
   const selection = await resolveProjectEnvSelection({
     projectRoot: opts.projectRoot,
@@ -739,6 +776,7 @@ async function readProjectEnvLayers(opts: {
   });
 
   const defaultRead = await readProjectEnvConfigFile({
+    strictRead: opts.strictRead,
     path: selection.defaultPath,
     environment: "default",
   });
@@ -746,10 +784,12 @@ async function readProjectEnvLayers(opts: {
     selection.overlayPath === null
       ? null
       : await readProjectEnvConfigFile({
+          strictRead: opts.strictRead,
           path: selection.overlayPath,
           environment: selection.effectiveEnv ?? "default",
         });
   const localDefaultRead = await readProjectEnvConfigFile({
+    strictRead: opts.strictRead,
     path: selection.localDefaultPath,
     environment: "default",
   });
@@ -757,6 +797,7 @@ async function readProjectEnvLayers(opts: {
     selection.localOverlayPath === null
       ? null
       : await readProjectEnvConfigFile({
+          strictRead: opts.strictRead,
           path: selection.localOverlayPath,
           environment: selection.effectiveEnv ?? "default",
         });
@@ -772,6 +813,7 @@ async function readProjectEnvLayers(opts: {
     await validatePrimaryLocalFile(primaryDefaultPath);
     inheritedReads.push(
       await readProjectEnvConfigFile({
+        strictRead: opts.strictRead,
         path: primaryDefaultPath,
         environment: "default",
       })
@@ -784,6 +826,7 @@ async function readProjectEnvLayers(opts: {
       await validatePrimaryLocalFile(primaryOverlayPath);
       inheritedReads.push(
         await readProjectEnvConfigFile({
+          strictRead: opts.strictRead,
           path: primaryOverlayPath,
           environment: selection.effectiveEnv,
         })
@@ -876,27 +919,49 @@ export async function resolveProjectEnvValue(opts: {
   };
 }
 
-export async function resolveProjectEnvConfig(opts: {
+type ProjectEnvResolveOptions = {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly envName?: string | null;
   readonly serviceNames: readonly string[];
-}): Promise<ProjectEnvResolvedConfig | null> {
-  const layers = await readProjectEnvLayers(opts);
-  if (!layers) {
-    return null;
-  }
-  const { selection, envLayers, merged, files } = layers;
-  const keyText = await resolveProjectEnvKey({
-    projectRoot: opts.projectRoot,
-    required: hasSecretEntries({ config: merged }),
-  });
-  const globalEnv = resolveLayeredProjectEnvValuesForScopes({
-    layers: envLayers,
-    scopeNames: ["global"],
-    keyText,
-  });
+};
 
+type ProjectEnvLayers = NonNullable<
+  Awaited<ReturnType<typeof readProjectEnvLayers>>
+>;
+
+/**
+ * Plan modern env bindings without acquiring a key or decrypting any value.
+ * Uses the same layers and target scopes as runtime injection. Omitted envName
+ * selects the configured default; null bypasses it. null output means no modern
+ * config, so callers can preserve their own legacy fallback. Errors intentionally
+ * omit parser diagnostics because YAML errors may include stored value excerpts.
+ * Selected env layer read failures refuse; only ENOENT means an absent layer.
+ * Project selection retains legacy behavior. Paths and names are private metadata,
+ * not a portable public plan or an atomic snapshot of configuration inputs.
+ */
+export async function resolveProjectEnvMetadata(
+  opts: ProjectEnvResolveOptions
+): Promise<ProjectEnvResolvedMetadata | null> {
+  try {
+    const layers = await readProjectEnvLayers({ ...opts, strictRead: true });
+    return layers
+      ? projectEnvProjection({ layers, serviceNames: opts.serviceNames })
+          .metadata
+      : null;
+  } catch {
+    throw new Error(
+      "Cannot resolve project env metadata: selected configuration is invalid or unreadable."
+    );
+  }
+}
+
+/** One scope projection owns both metadata planning and runtime injection. */
+function projectEnvProjection(opts: {
+  readonly layers: ProjectEnvLayers;
+  readonly serviceNames: readonly string[];
+}) {
+  const { selection, envLayers, merged, files } = opts.layers;
   const declaredScopes = Object.keys(merged.values).sort((left, right) =>
     left.localeCompare(right)
   );
@@ -904,80 +969,110 @@ export async function resolveProjectEnvConfig(opts: {
   const hostScopeConflictsWithService = knownServiceSet.has(
     PROJECT_ENV_HOST_SCOPE
   );
-  const hostEnv = hostScopeConflictsWithService
-    ? {}
-    : resolveLayeredProjectEnvValuesForScopes({
-        layers: envLayers,
-        scopeNames: [PROJECT_ENV_HOST_SCOPE],
-        keyText,
-      });
   const unknownScopes = declaredScopes
     .filter((scope) => scope !== "global")
     .filter((scope) => scope !== PROJECT_ENV_HOST_SCOPE)
     .filter((scope) => !knownServiceSet.has(scope));
-
   const serviceSet = new Set<string>([
     ...opts.serviceNames,
     ...declaredScopes.filter((scope) => scope !== "global"),
   ]);
+  const serviceTargets = [...serviceSet].map((serviceName) => {
+    const composeScopeNames =
+      serviceName === "global" ? ["global"] : ["global", serviceName];
+    return {
+      serviceName,
+      composeScopeNames,
+      hostScopeNames: hostScopeConflictsWithService
+        ? composeScopeNames
+        : [...composeScopeNames, PROJECT_ENV_HOST_SCOPE],
+    };
+  });
   const effectiveMetadata: EffectiveEnvMetadata = {
     global: resolveMetadata({ layers: envLayers, scopeNames: ["global"] }),
   };
   const hostEffectiveMetadata: EffectiveEnvMetadata = {};
-  const serviceEnv: Record<string, Record<string, string>> = {};
-  const hostTargetEnv: Record<string, Record<string, string>> = {};
-  for (const serviceName of serviceSet) {
-    const composeScopeNames =
-      serviceName === "global" ? ["global"] : ["global", serviceName];
+  for (const {
+    serviceName,
+    composeScopeNames,
+    hostScopeNames,
+  } of serviceTargets) {
     effectiveMetadata[serviceName] = resolveMetadata({
       layers: envLayers,
       scopeNames: composeScopeNames,
     });
     hostEffectiveMetadata[serviceName] = resolveMetadata({
       layers: envLayers,
-      scopeNames: hostScopeConflictsWithService
-        ? composeScopeNames
-        : [...composeScopeNames, PROJECT_ENV_HOST_SCOPE],
-    });
-    serviceEnv[serviceName] = resolveLayeredProjectEnvValuesForScopes({
-      layers: envLayers,
-      scopeNames: composeScopeNames,
-      keyText,
-    });
-    hostTargetEnv[serviceName] = resolveLayeredProjectEnvValuesForScopes({
-      layers: envLayers,
-      scopeNames: hostScopeConflictsWithService
-        ? composeScopeNames
-        : [...composeScopeNames, PROJECT_ENV_HOST_SCOPE],
-      keyText,
+      scopeNames: hostScopeNames,
     });
   }
+  const globalHostScopeNames = hostScopeConflictsWithService
+    ? ["global"]
+    : ["global", PROJECT_ENV_HOST_SCOPE];
   hostEffectiveMetadata.global = resolveMetadata({
     layers: envLayers,
-    scopeNames: hostScopeConflictsWithService
-      ? ["global"]
-      : ["global", PROJECT_ENV_HOST_SCOPE],
+    scopeNames: globalHostScopeNames,
   });
-  hostTargetEnv.global = resolveLayeredProjectEnvValuesForScopes({
-    layers: envLayers,
-    scopeNames: hostScopeConflictsWithService
-      ? ["global"]
-      : ["global", PROJECT_ENV_HOST_SCOPE],
-    keyText,
-  });
-
-  return {
+  const metadata: ProjectEnvResolvedMetadata = {
     selection,
+    files,
     effectiveMetadata,
     hostEffectiveMetadata,
+    declaredScopes,
+    unknownScopes,
+  };
+  return {
+    metadata,
+    serviceTargets,
+    globalHostScopeNames,
+    hostScopeNames: hostScopeConflictsWithService
+      ? []
+      : [PROJECT_ENV_HOST_SCOPE],
+  };
+}
+
+export async function resolveProjectEnvConfig(
+  opts: ProjectEnvResolveOptions
+): Promise<ProjectEnvResolvedConfig | null> {
+  const layers = await readProjectEnvLayers(opts);
+  if (!layers) {
+    return null;
+  }
+  const { envLayers, merged } = layers;
+  const keyText = await resolveProjectEnvKey({
+    projectRoot: opts.projectRoot,
+    required: hasSecretEntries({ config: merged }),
+  });
+  const projection = projectEnvProjection({
+    layers,
+    serviceNames: opts.serviceNames,
+  });
+  const resolveScopes = (scopeNames: readonly string[]) =>
+    resolveLayeredProjectEnvValuesForScopes({
+      layers: envLayers,
+      scopeNames,
+      keyText,
+    });
+  const globalEnv = resolveScopes(["global"]);
+  const hostEnv = resolveScopes(projection.hostScopeNames);
+  const serviceEnv: Record<string, Record<string, string>> = {};
+  const hostTargetEnv: Record<string, Record<string, string>> = {};
+  for (const {
+    serviceName,
+    composeScopeNames,
+    hostScopeNames,
+  } of projection.serviceTargets) {
+    serviceEnv[serviceName] = resolveScopes(composeScopeNames);
+    hostTargetEnv[serviceName] = resolveScopes(hostScopeNames);
+  }
+  hostTargetEnv.global = resolveScopes(projection.globalHostScopeNames);
+  return {
+    ...projection.metadata,
     merged,
-    files,
     globalEnv,
     hostEnv,
     hostTargetEnv,
     serviceEnv,
-    declaredScopes,
-    unknownScopes,
   };
 }
 

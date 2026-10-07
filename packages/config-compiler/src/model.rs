@@ -169,6 +169,38 @@ pub struct Workload {
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
+    #[schemars(with = "crate::process::Entrypoint")]
+    #[ts(optional, type = "Entrypoint")]
+    pub entrypoint: Option<crate::process::Entrypoint>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "bool")]
+    #[ts(optional, type = "boolean")]
+    pub init: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "crate::process::Shutdown")]
+    #[ts(optional, type = "Shutdown")]
+    pub shutdown: Option<crate::process::Shutdown>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "crate::process::Restart")]
+    #[ts(optional, type = "Restart")]
+    pub restart: Option<crate::process::Restart>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     #[schemars(with = "String")]
     #[ts(optional, type = "string")]
     pub working_directory: Option<String>,

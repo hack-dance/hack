@@ -3209,5 +3209,1545 @@
         }
       }
     }
+  },
+  {
+    "name": "process entrypoint clear",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "entrypoint": {
+            "exec": []
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process entrypoint exec",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "entrypoint": {
+            "exec": ["entrypoint", "", "--flag"]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process entrypoint shell",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "entrypoint": {
+            "shell": "exec service \"$@\""
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process entrypoint null refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "entrypoint": null
+        }
+      }
+    }
+  },
+  {
+    "name": "process entrypoint array refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "entrypoint": []
+        }
+      }
+    }
+  },
+  {
+    "name": "process entrypoint tuple refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "entrypoint": [[]]
+        }
+      }
+    }
+  },
+  {
+    "name": "process entrypoint missing refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "entrypoint": {}
+        }
+      }
+    }
+  },
+  {
+    "name": "process entrypoint mixed refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "entrypoint": {
+            "exec": [],
+            "shell": "true"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process entrypoint unknown refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "entrypoint": {
+            "exec": [],
+            "command": "true"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process entrypoint empty first refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "entrypoint": {
+            "exec": [""]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process entrypoint empty shell refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "entrypoint": {
+            "shell": ""
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process init true",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "init": true
+        }
+      }
+    }
+  },
+  {
+    "name": "process init false",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "init": false
+        }
+      }
+    }
+  },
+  {
+    "name": "process init null refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "init": null
+        }
+      }
+    }
+  },
+  {
+    "name": "process init string refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "init": "false"
+        }
+      }
+    }
+  },
+  {
+    "name": "process init number refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "init": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "process init array refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "init": []
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGHUP",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGHUP"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGINT",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGINT"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGQUIT",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGQUIT"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGILL",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGILL"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGTRAP",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGTRAP"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGABRT",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGABRT"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGBUS",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGBUS"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGFPE",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGFPE"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGKILL",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGKILL"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGUSR1",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGUSR1"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGSEGV",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGSEGV"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGUSR2",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGUSR2"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGPIPE",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGPIPE"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGALRM",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGALRM"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGTERM",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGTERM"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGSTKFLT",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGSTKFLT"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGCHLD",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGCHLD"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGCONT",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGCONT"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGSTOP",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGSTOP"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGTSTP",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGTSTP"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGTTIN",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGTTIN"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGTTOU",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGTTOU"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGURG",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGURG"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGXCPU",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGXCPU"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGXFSZ",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGXFSZ"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGVTALRM",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGVTALRM"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGPROF",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGPROF"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGWINCH",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGWINCH"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGIO",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGIO"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGPWR",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGPWR"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGSYS",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGSYS"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown grace only",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "grace": "45s"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown signal and grace",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGTERM",
+            "grace": "1h"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown null refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": null
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown array refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": []
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown tuple refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": ["SIGTERM", "1s"]
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown empty refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {}
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown unknown refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGTERM",
+            "command": "true"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown null signal refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown null grace refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "grace": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown numeric signal refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": 15
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown prefixless refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "TERM"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown unknown signal refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGUNKNOWN"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown numeric grace refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "grace": 1
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown zero grace refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "grace": "0ms"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown fractional grace refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "grace": "1.5s"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGIOT refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGIOT"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGCLD refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGCLD"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGPOLL refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGPOLL"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGUNUSED refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGUNUSED"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGRTMIN refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGRTMIN"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown SIGRTMIN+1 refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "SIGRTMIN+1"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown sigterm refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "sigterm"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process shutdown 15 refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "shutdown": {
+            "signal": "15"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart no",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "no"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart always",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "always"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart unless-stopped",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "unless-stopped"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart on-failure",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "on-failure"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart max retries",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "on-failure",
+            "max_retries": 4294967295
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart null refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": null
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart array refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": []
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart tuple refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": ["always"]
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart string refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": "no"
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart empty refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {}
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart bad tag refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "unless_stopped"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart no with count refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "no",
+            "max_retries": 1
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart always with count refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "always",
+            "max_retries": 1
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart unless stopped with count refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "unless-stopped",
+            "max_retries": 1
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart zero count refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "on-failure",
+            "max_retries": 0
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart null count refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "on-failure",
+            "max_retries": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart negative count refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "on-failure",
+            "max_retries": -1
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart fractional count refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "on-failure",
+            "max_retries": 1.5
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart too large count refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "on-failure",
+            "max_retries": 4294967296
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart string count refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "on-failure",
+            "max_retries": "1"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process restart unknown field refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "restart": {
+            "kind": "no",
+            "command": "true"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process inactive job always refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "check": {
+          "image": "check:1",
+          "profiles": ["dev"],
+          "restart": {
+            "kind": "always"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process inactive job unless-stopped refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "check": {
+          "image": "check:1",
+          "profiles": ["dev"],
+          "restart": {
+            "kind": "unless-stopped"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process inactive job no omitted",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "check": {
+          "image": "check:1",
+          "profiles": ["dev"],
+          "restart": {
+            "kind": "no"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process inactive job on-failure omitted",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "check": {
+          "image": "check:1",
+          "profiles": ["dev"],
+          "restart": {
+            "kind": "on-failure"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "process inactive job on-failure 1",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "check": {
+          "image": "check:1",
+          "profiles": ["dev"],
+          "restart": {
+            "kind": "on-failure",
+            "max_retries": 1
+          }
+        }
+      }
+    }
   }
 ]

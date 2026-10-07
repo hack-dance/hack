@@ -172,6 +172,45 @@
         }
       ]
     },
+    "Entrypoint": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "exec": {
+              "items": {
+                "type": "string"
+              },
+              "prefixItems": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              ],
+              "type": "array"
+            }
+          },
+          "required": [
+            "exec"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "shell": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "shell"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Unlike a normal command, an explicitly empty exec list clears the image entrypoint."
+    },
     "EnvironmentSelection": {
       "additionalProperties": false,
       "properties": {
@@ -715,6 +754,69 @@
         }
       ]
     },
+    "Restart": {
+      "description": "Retry count only applies to failure-triggered restart. Jobs cannot request perpetual restart.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "no",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "always",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "unless-stopped",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "on-failure",
+              "type": "string"
+            },
+            "max_retries": {
+              "format": "uint32",
+              "maximum": 4294967295,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "RouteAlias": {
       "anyOf": [
         {
@@ -776,6 +878,58 @@
       "enum": [
         "started",
         "ready"
+      ],
+      "type": "string"
+    },
+    "Shutdown": {
+      "additionalProperties": false,
+      "description": "Omitted fields preserve image/backend defaults; at least one authored field is required.",
+      "minProperties": 1,
+      "properties": {
+        "grace": {
+          "pattern": "^[0-9]*[1-9][0-9]*(?:ms|s|m|h)$",
+          "type": "string"
+        },
+        "signal": {
+          "$ref": "#/$defs/ShutdownSignal"
+        }
+      },
+      "type": "object"
+    },
+    "ShutdownSignal": {
+      "description": "Portable signal spelling; numeric IDs and backend aliases are intentionally not accepted.",
+      "enum": [
+        "SIGHUP",
+        "SIGTERM",
+        "SIGINT",
+        "SIGQUIT",
+        "SIGILL",
+        "SIGTRAP",
+        "SIGABRT",
+        "SIGBUS",
+        "SIGFPE",
+        "SIGKILL",
+        "SIGUSR1",
+        "SIGSEGV",
+        "SIGUSR2",
+        "SIGPIPE",
+        "SIGALRM",
+        "SIGSTKFLT",
+        "SIGCHLD",
+        "SIGCONT",
+        "SIGSTOP",
+        "SIGTSTP",
+        "SIGTTIN",
+        "SIGTTOU",
+        "SIGURG",
+        "SIGXCPU",
+        "SIGXFSZ",
+        "SIGVTALRM",
+        "SIGPROF",
+        "SIGWINCH",
+        "SIGIO",
+        "SIGPWR",
+        "SIGSYS"
       ],
       "type": "string"
     },
@@ -869,6 +1023,9 @@
           },
           "type": "array"
         },
+        "entrypoint": {
+          "$ref": "#/$defs/Entrypoint"
+        },
         "environment": {
           "additionalProperties": {
             "$ref": "#/$defs/EnvironmentValue"
@@ -878,6 +1035,9 @@
         },
         "image": {
           "type": "string"
+        },
+        "init": {
+          "type": "boolean"
         },
         "mounts": {
           "default": [],
@@ -895,6 +1055,12 @@
         },
         "readiness": {
           "$ref": "#/$defs/Readiness"
+        },
+        "restart": {
+          "$ref": "#/$defs/Restart"
+        },
+        "shutdown": {
+          "$ref": "#/$defs/Shutdown"
         },
         "working_directory": {
           "type": "string"
@@ -942,7 +1108,25 @@
     },
     "jobs": {
       "additionalProperties": {
-        "$ref": "#/$defs/Workload"
+        "allOf": [
+          {
+            "$ref": "#/$defs/Workload"
+          },
+          {
+            "properties": {
+              "restart": {
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "no",
+                      "on-failure"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ]
       },
       "default": {},
       "type": "object"

@@ -84,6 +84,71 @@ export async function resolveVerifiedPrimaryWorktreeRoot(opts: {
   }
 }
 
+/**
+ * Resolve the existing managed-env key owner's Git locations without parsing
+ * project policy. Nested projects share repository keys; env-layer inheritance
+ * still uses the separate exact-root resolver. Git inspection remains bounded,
+ * ignores caller redirection and verifies linked-worktree ownership before use.
+ */
+export async function resolveVerifiedProjectEnvKeyGitLocation(opts: {
+  readonly projectRoot: string;
+  readonly signal?: AbortSignal;
+}): Promise<{
+  readonly checkoutRoot: string;
+  readonly commonDir: string;
+  readonly primaryRoot: string | null;
+} | null> {
+  try {
+    throwIfCancelled(opts.signal);
+    const projectRoot = await realpath(opts.projectRoot);
+    let checkoutRoot = projectRoot;
+    for (;;) {
+      throwIfCancelled(opts.signal);
+      const marker = await lstat(resolve(checkoutRoot, ".git")).catch(
+        (error: unknown) => {
+          if (isRecord(error) && error.code === "ENOENT") {
+            return null;
+          }
+          throw error;
+        }
+      );
+      if (marker) {
+        break;
+      }
+      const parent = dirname(checkoutRoot);
+      if (parent === checkoutRoot) {
+        return null;
+      }
+      checkoutRoot = parent;
+    }
+    const checkout = await readGitCheckoutIdentity({
+      projectRoot: checkoutRoot,
+      signal: opts.signal,
+    });
+    if (!checkout) {
+      throw worktreeVerificationError();
+    }
+    const linkedPrimary = await resolveVerifiedPrimaryWorktreeRoot({
+      projectRoot: checkoutRoot,
+      signal: opts.signal,
+    });
+    const primaryRoot =
+      linkedPrimary ??
+      (checkout.gitDir === checkout.commonDir &&
+      checkout.commonDir === resolve(checkoutRoot, ".git") &&
+      checkoutRoot !== projectRoot
+        ? checkoutRoot
+        : null);
+    throwIfCancelled(opts.signal);
+    return { checkoutRoot, commonDir: checkout.commonDir, primaryRoot };
+  } catch (error: unknown) {
+    if (error instanceof NativeConfigCompilerError) {
+      throw error;
+    }
+    throw worktreeVerificationError();
+  }
+}
+
 /** Derive a read-only linked-worktree namespace under the existing collision convention. */
 export async function resolveVerifiedNativeBranch(opts: {
   readonly projectRoot: string;

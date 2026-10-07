@@ -134,3 +134,72 @@ fn interrupted_fence_publication_requires_canonical_valid_transition() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn normalization_pending_probe_is_readonly_and_requires_exact_complete_transition() {
+    let source = include_str!("../src/provider/graph/relay-normalize-observe.sh");
+    let block = source
+        .split("# NORMALIZATION_PENDING_BEGIN\n")
+        .nth(1)
+        .unwrap()
+        .split("# NORMALIZATION_PENDING_END")
+        .next()
+        .unwrap();
+    let script = format!(
+        "set -efu\ncontrol=$1; action=$2; phase=$3; serial=7; allocation=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nabsent() {{ test ! -e \"$1\" && test ! -L \"$1\"; }}\nprivate_file() {{ test ! -L \"$1\" && test -f \"$1\"; }}\n{block}"
+    );
+    let root =
+        std::env::temp_dir().join(format!("hack-normalization-fence-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let allocation = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    for phase in ["launching", "closing", "stopped"] {
+        for next in ["launching", "closing", "stopped"] {
+            for action in ["capture", "verify"] {
+                let before = format!("7 {allocation} {phase}\n");
+                let pending = format!("7 {allocation} {next}\n");
+                fs::write(root.join("state"), &before).unwrap();
+                fs::write(root.join("pending"), &pending).unwrap();
+                let allowed = action == "verify"
+                    && matches!(
+                        (phase, next),
+                        ("launching", "closing")
+                            | ("closing", "closing")
+                            | ("closing", "stopped")
+                            | ("stopped", "closing")
+                    );
+                let status = Command::new("/bin/sh")
+                    .args(["-c", &script, "test"])
+                    .arg(&root)
+                    .args([action, phase])
+                    .output()
+                    .unwrap()
+                    .status;
+                assert_eq!(status.success(), allowed, "{action}: {phase} -> {next}");
+                assert_eq!(fs::read_to_string(root.join("state")).unwrap(), before);
+                assert_eq!(fs::read_to_string(root.join("pending")).unwrap(), pending);
+            }
+        }
+    }
+    for pending in [
+        String::new(),
+        format!("7 {allocation} closing"),
+        format!("7 {allocation} closing\n\n"),
+        format!("8 {allocation} closing\n"),
+        "7 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb closing\n".into(),
+        format!("7 {allocation} closing extra\n"),
+    ] {
+        fs::write(root.join("pending"), &pending).unwrap();
+        assert!(
+            !Command::new("/bin/sh")
+                .args(["-c", &script, "test"])
+                .arg(&root)
+                .args(["verify", "launching"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        assert_eq!(fs::read_to_string(root.join("pending")).unwrap(), pending);
+    }
+    fs::remove_dir_all(root).unwrap();
+}

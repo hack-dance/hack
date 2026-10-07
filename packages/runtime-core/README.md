@@ -221,6 +221,24 @@ idempotent retry, and never restarts the pool. On failure, inspect its
 retained graph evidence before another attempt. This fixture does not qualify
 application authentication, dependency listeners, browser routing, or publication.
 
+The two ignored tests under
+`foreground::native_test::same_boot_absent_relay::bridge_normalization` use the same
+300-second external watchdog and a caller-owned capacity-two development pool.
+Set `HACK_LOCAL_TEST_NATIVE` to the absolute current `hack-native` binary to run
+the final positive recovery through its public CLI. The read-only ignored
+`removed_fixture_has_no_engine_resources_or_selected_guest_helpers` child audits
+an exact `HACK_LOCAL_GRAPH_RUN` afterward, including engine absence and the
+selected guest process identities.
+Their pinned image additionally supplies BusyBox `httpd`; the target has two
+HTTP-probed services on an internal network. They qualify an exited bridge plus a
+never-launched reservation, and separately a second originally live bridge that
+exits after normalization selection. Exact pending-fence writes, socket unlink,
+owner unlink, registry removal and completion are interrupted and retried. A
+replaced reservation refuses. Named markers and a live **unbridged** sibling must
+survive; both owned graphs are removed through guarded cleanup on success. These
+fixtures do not qualify simultaneous bridged siblings or application/browser
+acceptance. Inspect failed-run resources before allocating another fixture.
+
 The ignored foreground-owner fixture
 `foreground::native_test::stop14::fourteen_services_retain_named_data_across_cleanup_and_restore`
 qualifies normal retaining cleanup of thirteen running services and one completed

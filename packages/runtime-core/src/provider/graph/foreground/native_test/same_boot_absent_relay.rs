@@ -2,6 +2,7 @@
 //! drop only their managed relay runtime before exiting. No receipt is fabricated
 //! to manufacture the absent endpoint. Fault controls affect only owned fixtures.
 use super::*;
+mod bridge_normalization;
 use crate::provider::{identity::ProcessIdentity, relay_owner::publication::dead};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -44,7 +45,14 @@ fn owner_child() {
     )
     .unwrap();
     let _publication = Publication::bind(&candidate, &run).unwrap();
-    let readiness = BTreeMap::from([("app".into(), graph::Condition::Started)]);
+    let readiness = if std::env::var_os("HACK_NORMALIZATION_FIXTURE").is_some() {
+        BTreeMap::from([
+            ("app".into(), graph::Condition::Healthy),
+            ("reserved".into(), graph::Condition::Healthy),
+        ])
+    } else {
+        BTreeMap::from([("app".into(), graph::Condition::Started)])
+    };
     let values = BTreeMap::new();
     let receipt = graph::run_with_host_dependencies_until(
         &candidate,

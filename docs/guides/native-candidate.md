@@ -1365,6 +1365,21 @@ the live relay acknowledgement protocol.
 When a restored publisher is admitted, older absence-retirement records remain
 validated history; the exact current cleanup proof supplies retention authority.
 
+Before the main recovery intent, the operation journals and normalizes owned
+bridge reservations that never launched (`reserved` with no relay intent) or whose
+exact reservation-v1 helper has exited. The journal binds the original receipt,
+boot, owner witnesses and complete same-run bridge inventory. It resumes confirmed
+stop/removal interruptions, including canonical pending fence writes, without
+removing a replacement socket, helper, allocation or reservation. A helper may
+remove its own socket on exit; its exact process identity and retained private
+socket receipt remain required. An originally live, unchanged bridge that exits
+before main intent enrollment can be added to the journal with fresh exit proof.
+Starting reservations, unknown or partial metadata, added assignments and replaced
+identities refuse. Live helpers are left for the existing main recovery path;
+other graphs are not selected. The normalizer does not run on an existing main
+intent retry. Completed normalization journals are generation-bound history after
+an independently verified retained restore.
+
 After completion, retained restore can create a fresh owner;
 `graph retire-recovered-publisher --run-id RUN --expect-owner OWNER` remains an
 idempotent compatibility operation. Interrupted cleanup retains its journal for an

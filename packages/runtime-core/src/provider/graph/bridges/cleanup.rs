@@ -1,5 +1,6 @@
 //! Retained bridge selection survives registry release and graph archival.
 use super::*;
+pub(crate) mod normalization;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -964,7 +965,7 @@ mod tests {
             selected: BTreeMap::new(),
         }
     }
-    fn live_selection() -> (Selection, Store) {
+    pub(super) fn live_selection() -> (Selection, Store) {
         let mut selected = selection(1);
         selected.boot = "11111111-1111-1111-1111-111111111111".into();
         selected.capacity = 3;
@@ -1009,7 +1010,7 @@ mod tests {
         (selected, store)
     }
 
-    fn receipt_for_assignment(selected: &Selection, assignment: &Assignment) -> Receipt {
+    pub(super) fn receipt_for_assignment(selected: &Selection, assignment: &Assignment) -> Receipt {
         serde_json::from_value(json!({
             "version":1,
             "run":selected.run,

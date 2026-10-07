@@ -14,6 +14,8 @@ working directories. Jobs require successful completion; services with readiness
 require health, and other services require startup. Workload names, including dots,
 remain exact. Omitted process fields preserve image/backend defaults. Source and
 worktree declarations and local resolution remain intent only.
+An explicit entrypoint requires an authored command, matching the bounded NC03
+renderer; image CMD inheritance under an entrypoint override remains unqualified.
 
 The compiler owns profiles and environment policy. Caller-selected private values
 must match its active managed source keys exactly, after unset/profile selection.

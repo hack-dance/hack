@@ -425,6 +425,27 @@ fn explicit_shell_empty_entrypoint_and_process_omissions_survive() {
 }
 
 #[test]
+fn entrypoint_overrides_without_authored_command_refuse_until_image_cmd_is_qualified() {
+    for entrypoint in [
+        json!({"exec":["/bin/entrypoint"]}),
+        json!({"exec":[]}),
+        json!({"shell":"exec \"$@\""}),
+    ] {
+        let mut project = basic();
+        project["services"]["web"]["entrypoint"] = entrypoint;
+        let authored = serde_json::to_vec(&project).unwrap();
+        assert!(matches!(
+            hack_config_compiler::compile(&authored, &[]),
+            hack_config_compiler::CompileResult::Success { .. }
+        ));
+        refusal(
+            lower(&project, json!({"web":{}}), &BTreeMap::new()),
+            "native_graph_subset",
+        );
+    }
+}
+
+#[test]
 fn unsupported_intent_is_never_dropped() {
     let empty = BTreeMap::new();
     for field in [

@@ -131,6 +131,7 @@ fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, Candi
     if value.build.is_some()
         || value.pull_policy.is_some()
         || !value.mounts.is_empty()
+        || (value.entrypoint.is_some() && value.command.is_none())
         || value
             .restart
             .as_ref()

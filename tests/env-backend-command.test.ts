@@ -84,6 +84,28 @@ test(
 );
 
 test(
+  "env backend use refuses invalid existing config without exposing or overwriting it",
+  async () => {
+    if (!tempGlobalConfigPath) {
+      throw new Error("Missing temp global config state");
+    }
+    const contents = '{"fixtureOnly":"do-not-echo",';
+    await writeFile(tempGlobalConfigPath, contents);
+    const result = await runHack({
+      args: ["env", "backend", "use", "encrypted_file", "--json"],
+      env: { ...process.env, HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath },
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain(
+      `Cannot update config at ${tempGlobalConfigPath}: invalid JSON`
+    );
+    expect(`${result.stdout}${result.stderr}`).not.toContain("do-not-echo");
+    expect(await readFile(tempGlobalConfigPath, "utf8")).toBe(contents);
+  },
+  { timeout: 20_000 }
+);
+
+test(
   "env backend use encrypted_file persists selection",
   async () => {
     const result = await runHack({

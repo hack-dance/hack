@@ -117,9 +117,7 @@ async function updateConfigFileValuesAtPath({
     }
   }
 
-  const jsonText = await readTextFile(configPath);
-  const config: Record<string, unknown> =
-    jsonText !== null ? parseJsonSafe(jsonText) : {};
+  const config = await readConfigForUpdate({ configPath });
 
   for (const entry of values) {
     setPathValue({
@@ -134,6 +132,40 @@ async function updateConfigFileValuesAtPath({
   const result = await writeTextFileIfChanged(configPath, nextText);
 
   return { changed: result.changed };
+}
+
+/** Only an absent file may be initialized; existing unreadable or invalid config must survive. */
+async function readConfigForUpdate({
+  configPath,
+}: {
+  readonly configPath: string;
+}): Promise<Record<string, unknown>> {
+  let text: string;
+  try {
+    text = await Bun.file(configPath).text();
+  } catch (error: unknown) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return {};
+    }
+    throw new Error(
+      `Cannot update config at ${configPath}: unable to read the existing file. Check its permissions and retry.`
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Cannot update config at ${configPath}: invalid JSON. Repair the file before retrying; it has not been changed.`
+    );
+  }
+  if (!isRecord(parsed)) {
+    throw new Error(
+      `Cannot update config at ${configPath}: expected a JSON object. Repair the file before retrying; it has not been changed.`
+    );
+  }
+  return parsed;
 }
 
 /**

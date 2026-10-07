@@ -20,7 +20,7 @@ const spec = defineCommand({
     "Inspect native environment binding completeness without decrypting or starting workloads",
   group: "Project",
   description:
-    "Resolves the native project and permitted local env selection, then inspects managed-env names, winning scopes and secret flags. Managed YAML is parsed by its existing owner; keys and values are never decrypted or returned. Required unresolved refs return a nonzero exit. This experimental report does not establish runtime admission or enable native execution; use config validate for validation without managed-document reads.",
+    "Resolves the native project, permitted local env selection and routing preview, then inspects managed-env names, winning scopes and secret flags. Managed YAML is parsed by its existing owner; keys and values are never decrypted or returned. Required unresolved refs return a nonzero exit. This experimental report does not establish runtime admission or enable native execution; use config validate for validation without managed-document reads.",
   options: [
     defineOption({
       name: "profile",
@@ -28,6 +28,13 @@ const spec = defineCommand({
       long: "--profile",
       valueHint: "<names>",
       description: "Comma-separated declared native profiles",
+    } as const),
+    defineOption({
+      name: "domain",
+      type: "string",
+      long: "--domain",
+      valueHint: "<suffix>",
+      description: "Select the generated native routing domain suffix",
     } as const),
     optPath,
     optEnv,
@@ -50,6 +57,7 @@ export const configPlanCommand = withHandler(spec, async ({ ctx, args }) => {
     const result = await planNativeProject({
       startDir: resolve(ctx.cwd, args.options.path ?? "."),
       profiles,
+      explicitDomain: args.options.domain,
       explicitOverlay: args.options.env === "base" ? null : args.options.env,
       signal: controller.signal,
     });
@@ -100,6 +108,12 @@ function renderPlan(opts: {
   process.stdout.write(
     `Selected env: ${envPlan.overlay ?? "base"} (${result.local_resolution.origin}). This report does not establish runtime admission.\n`
   );
+  if (result.routing_resolution) {
+    const routing = result.routing_resolution;
+    process.stdout.write(
+      `Routing preview: ${routing.open_origin}. Domain: ${routing.domain} (${routing.domain_origin}). DNS and TLS are not checked.\n`
+    );
+  }
   for (const diagnostic of [...envPlan.warnings, ...envPlan.diagnostics]) {
     renderDiagnostic(diagnostic);
   }

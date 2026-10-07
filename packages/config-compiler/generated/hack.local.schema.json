@@ -7,6 +7,12 @@
       "$ref": "#/$defs/LocalEnvironment",
       "default": {}
     },
+    "open": {
+      "$ref": "#/$defs/LocalOpen"
+    },
+    "routes": {
+      "$ref": "#/$defs/LocalRoutes"
+    },
     "schema_version": {
       "type": "integer",
       "format": "uint32",
@@ -31,6 +37,32 @@
         }
       },
       "additionalProperties": false
+    },
+    "LocalOpen": {
+      "type": "object",
+      "properties": {
+        "prefer": {
+          "$ref": "#/$defs/OpenPreference"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LocalRoutes": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "OpenPreference": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "alias",
+        "dev"
+      ]
     }
   }
 }

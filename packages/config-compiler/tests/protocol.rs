@@ -21,7 +21,7 @@ fn handshake_and_compile_need_no_environment_or_host_tools() {
     let protocol: Value = serde_json::from_slice(&handshake.stdout).unwrap();
     assert_eq!(
         protocol,
-        serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1})
+        serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1})
     );
     let result = run(&["compile"], br#"{"schema_version":1,"name":"example"}"#);
     assert!(result.status.success());

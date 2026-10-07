@@ -354,6 +354,40 @@
       ],
       "type": "string"
     },
+    "HttpProtocol": {
+      "enum": [
+        "http",
+        "https"
+      ],
+      "type": "string"
+    },
+    "HttpRoute": {
+      "additionalProperties": false,
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "protocol": {
+          "$ref": "#/$defs/HttpProtocol",
+          "default": "http"
+        },
+        "service": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "port",
+        "hostname"
+      ],
+      "type": "object"
+    },
     "JobCondition": {
       "enum": [
         "completed"
@@ -403,6 +437,24 @@
           "type": "object"
         }
       ]
+    },
+    "OpenConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "prefer": {
+          "$ref": "#/$defs/OpenPreference",
+          "default": "auto"
+        }
+      },
+      "type": "object"
+    },
+    "OpenPreference": {
+      "enum": [
+        "auto",
+        "alias",
+        "dev"
+      ],
+      "type": "string"
     },
     "Readiness": {
       "oneOf": [
@@ -513,6 +565,63 @@
           "type": "object"
         }
       ]
+    },
+    "RouteAlias": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "domain": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "domain"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "origin": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "origin"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Routes": {
+      "additionalProperties": false,
+      "properties": {
+        "aliases": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RouteAlias"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "http": {
+          "additionalProperties": {
+            "$ref": "#/$defs/HttpRoute"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "oauth_alias": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        }
+      },
+      "type": "object"
     },
     "ServiceCondition": {
       "enum": [
@@ -680,12 +789,18 @@
     "name": {
       "type": "string"
     },
+    "open": {
+      "$ref": "#/$defs/OpenConfig"
+    },
     "profiles": {
       "default": [],
       "items": {
         "type": "string"
       },
       "type": "array"
+    },
+    "routes": {
+      "$ref": "#/$defs/Routes"
     },
     "schema_version": {
       "format": "uint32",

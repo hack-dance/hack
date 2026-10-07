@@ -109,8 +109,8 @@
     }
   },
   {
-    "name": "refuse-routes",
-    "valid": false,
+    "name": "routes-empty",
+    "valid": true,
     "input": {
       "schema_version": 1,
       "name": "example",
@@ -2015,6 +2015,709 @@
             }
           }
         }
+      }
+    }
+  },
+  {
+    "name": "routing domain",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "domain": "hack.gy"
+      }
+    }
+  },
+  {
+    "name": "routing origin",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "origin": "http://localhost:3000"
+      }
+    }
+  },
+  {
+    "name": "routing alias",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "aliases": {
+          "oauth": {
+            "domain": "hack.gy"
+          }
+        },
+        "oauth_alias": "oauth"
+      }
+    }
+  },
+  {
+    "name": "routing http",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": {
+          "web": {
+            "service": "web",
+            "port": 80,
+            "hostname": "project"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "routing https",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": {
+          "web": {
+            "service": "web",
+            "port": 80,
+            "hostname": "project",
+            "protocol": "https"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "routing maximum port",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": {
+          "web": {
+            "service": "web",
+            "port": 65535,
+            "hostname": "project"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "routing routes None",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": null
+    }
+  },
+  {
+    "name": "routing open None",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "open": null
+    }
+  },
+  {
+    "name": "routing routes []",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": []
+    }
+  },
+  {
+    "name": "routing open []",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "open": []
+    }
+  },
+  {
+    "name": "routing routes False",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": false
+    }
+  },
+  {
+    "name": "routing open False",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "open": false
+    }
+  },
+  {
+    "name": "routing null domain",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "domain": null
+      }
+    }
+  },
+  {
+    "name": "routing null origin",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "origin": null
+      }
+    }
+  },
+  {
+    "name": "routing null aliases",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "aliases": null
+      }
+    }
+  },
+  {
+    "name": "routing null oauth_alias",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "oauth_alias": null
+      }
+    }
+  },
+  {
+    "name": "routing null http",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": null
+      }
+    }
+  },
+  {
+    "name": "routing alias form []",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "aliases": {
+          "oauth": []
+        }
+      }
+    }
+  },
+  {
+    "name": "routing alias form None",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "aliases": {
+          "oauth": null
+        }
+      }
+    }
+  },
+  {
+    "name": "routing alias form {'domain': 'hack.gy', 'origin': 'https://other.test'}",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "aliases": {
+          "oauth": {
+            "domain": "hack.gy",
+            "origin": "https://other.test"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "routing alias form {'domain': 'hack.gy', 'extra': True}",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "aliases": {
+          "oauth": {
+            "domain": "hack.gy",
+            "extra": true
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "routing route form []",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": {
+          "web": []
+        }
+      }
+    }
+  },
+  {
+    "name": "routing route form None",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": {
+          "web": null
+        }
+      }
+    }
+  },
+  {
+    "name": "routing route form {'service': 'web', 'port': 0, 'hostname': 'project'}",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": {
+          "web": {
+            "service": "web",
+            "port": 0,
+            "hostname": "project"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "routing route form {'service': 'web', 'port': 65536, 'hostname': 'project'}",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": {
+          "web": {
+            "service": "web",
+            "port": 65536,
+            "hostname": "project"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "routing route form {'service': 'web', 'port': '80', 'hostname': 'project'}",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": {
+          "web": {
+            "service": "web",
+            "port": "80",
+            "hostname": "project"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "routing route form {'service': 'web', 'port': 80, 'hostname': 'project', 'protocol': 'tcp'}",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": {
+          "web": {
+            "service": "web",
+            "port": 80,
+            "hostname": "project",
+            "protocol": "tcp"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "routing route form {'service': 'web', 'port': 80, 'hostname': 'project', 'protocol': None}",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": {
+          "web": {
+            "service": "web",
+            "port": 80,
+            "hostname": "project",
+            "protocol": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "routing route form {'service': 'web', 'port': 80, 'hostname': 'project', 'extra': True}",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": {
+          "web": {
+            "service": "web",
+            "port": 80,
+            "hostname": "project",
+            "extra": true
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "routing route form {'service': 'web', 'port': 80}",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": {
+          "web": {
+            "service": "web",
+            "port": 80
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "routing route form {'port': 80, 'hostname': 'project'}",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "http": {
+          "web": {
+            "port": 80,
+            "hostname": "project"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "routing unknown routes field",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "routes": {
+        "extra": true
+      }
+    }
+  },
+  {
+    "name": "routing open auto",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "open": {
+        "prefer": "auto"
+      }
+    }
+  },
+  {
+    "name": "routing open dev",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "open": {
+        "prefer": "dev"
+      }
+    }
+  },
+  {
+    "name": "routing open alias",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "open": {
+        "prefer": "alias"
+      }
+    }
+  },
+  {
+    "name": "routing open prefer None",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "open": {
+        "prefer": null
+      }
+    }
+  },
+  {
+    "name": "routing open prefer 'unknown'",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "open": {
+        "prefer": "unknown"
+      }
+    }
+  },
+  {
+    "name": "routing open prefer False",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "open": {
+        "prefer": false
+      }
+    }
+  },
+  {
+    "name": "routing unknown open field",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "open": {
+        "extra": true
       }
     }
   }

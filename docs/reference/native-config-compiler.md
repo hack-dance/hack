@@ -82,8 +82,8 @@ versions refuse; omitted fields retain their documented defaults.
   command selection.
 - Project `worktree.auto_branch` and `worktree.inherit_local` are strict booleans,
   both defaulting to true. They appear in the normalized plan. This validation
-  command uses inheritance policy; it does not create branch instances or execute
-  `auto_branch` behavior.
+  command uses inheritance policy and previews the verified linked-worktree branch
+  namespace for routing. It does not create branch instances.
 - Dependencies are `{service:"db",condition:"started"|"ready"}` or
   `{job:"init",condition:"completed"}`. References must match the declared kind.
   Ready dependencies require explicit readiness. Services and jobs share one name
@@ -107,11 +107,77 @@ backslashes and drive syntax. Lexical `.` and repeated separators normalize; no
 filesystem or symlink resolution occurs. Working directories and mount targets
 must be absolute POSIX container paths without `..`.
 
-Routes, container shutdown/restart policies, endpoint references,
+Container shutdown/restart policies, endpoint references,
 network/security/resources, cache protocols, backend options, arbitrary extensions,
-and local settings other than environment selection are not yet implemented. They refuse rather than being
+and other local settings are not yet implemented. They refuse rather than being
 silently dropped. This foundation does not replace the full native contract or
 qualify a migrated advanced project.
+
+## Routing and domain previews
+
+Optional `routes` declares project origins, aliases and named HTTP routes:
+
+```json
+{
+  "schema_version": 1,
+  "name": "example",
+  "services": { "web": { "image": "example/web:1" } },
+  "routes": {
+    "domain": "hack.local",
+    "aliases": { "oauth": { "domain": "hack.gy" } },
+    "oauth_alias": "oauth",
+    "http": {
+      "web": { "service": "web", "port": 3000, "hostname": "project" }
+    }
+  },
+  "open": { "prefer": "auto" }
+}
+```
+
+`routes.domain` is a canonical lowercase DNS suffix. The effective suffix is
+explicit `--domain`, checkout local, inherited verified primary local, project,
+global `default_domain`, then `hack.local`, in that order. A global domain is
+read as one scalar from a bounded regular config file; private global fields are
+not sent to the compiler. Invalid or redirected policy files refuse.
+
+Generated origins are `https://[branch.]NAME.SUFFIX`. Branch names are derived
+from a verified linked Git worktree and normalized with the existing branch
+namespace rules. Primary checkouts, non-Git projects, CI, slim mode and
+`worktree.auto_branch:false` omit that namespace. Detached linked worktrees refuse
+when a branch is required. `inherit_local:false` disables primary settings without
+disabling branch isolation.
+
+`routes.origin` pins an explicit HTTP(S) project origin. An alias selects exactly
+one `domain` or `origin`; generated domain aliases follow the same branch namespace,
+while explicit origins remain pinned. Origins normalize scheme/host case and
+default ports. Credentials, paths (including `/`), queries, fragments, wildcards,
+ambiguous numeric hosts and invalid ports refuse. Canonical loopback IPv4, bracketed
+IPv6 and `localhost` are allowed. Generated names must be valid DNS labels.
+
+Each `routes.http` entry requires a declared **service**, a port in 1–65,535 and
+`hostname`: `project` uses the base origin; another canonical relative DNS name
+prefixes each project/alias hostname. IP origins cannot be prefixed. Upstream
+`protocol` defaults to `http`; it is separate from the browser origin's scheme.
+Unknown services, job targets, duplicate origins and expanded route/alias collisions
+refuse, including in inactive declarations. Inactive routes stay in the portable
+plan but are omitted from the selected routing report. Expansion is bounded before
+allocation and charged to the shared planning output budget.
+
+`open.prefer` accepts `auto` (default), `alias` or `dev`. `auto` selects the
+explicit `routes.oauth_alias` when present, otherwise the project origin; `alias`
+requires that selection; `dev` selects the project origin. Alias names have no
+implicit OAuth meaning. Local `open.prefer` overrides inherited/project settings.
+`hack.local` remains the development default; an OAuth provider that requires a
+public suffix can use an explicitly selected `hack.gy` or custom-domain alias.
+Provider registration and browser acceptance are separate checks.
+
+Project-aware `config validate` and `config plan` return `routing_resolution` with
+the selected domain and provenance, project/alias origins, branch namespace, open
+choice and selected routes. The CLI cross-checks the report against authored
+declarations and request context. Routing changes affect the local resolution hash;
+local policy never rewrites the authored semantic hash. This is offline planning:
+it does not configure DNS, trust certificates, run hooks, bind ports or admit a
+runtime. Endpoint bindings and execution remain later integration steps.
 
 ## Host declarations
 
@@ -189,6 +255,7 @@ The CLI supports project-aware and explicit-document validation:
 ```sh
 hack config validate --json
 hack config validate --path /path/to/native-project --env base --json
+hack config validate --domain hack.gy --json
 hack config validate --file .hack/hack.project.json
 hack config validate --file .hack/hack.project.json --profile dev,test --json
 ```
@@ -200,19 +267,22 @@ explicitly selects base; another canonical name selects that overlay. This selec
 a name only: overlay existence, managed metadata, keys and required references are
 not inspected, and no env values are read. Runtime/adoption commands remain fenced.
 
-`--file` validates only that document, ignores all local files and performs no
-project discovery. It cannot be combined with `--path` or `--env`.
+`--file` validates only that document, ignores local/global policy files and performs
+no project discovery or origin resolution. It cannot be combined with `--path`,
+`--env` or `--domain`.
 `--json` returns the authored normalized plan, including
 authored public literals and commands. Those values are intentionally visible;
 diagnostic redaction does not turn the plan into a secret-safe storage format.
 
 - `hack-config-compiler --protocol` emits
-  `{"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1}`.
+  `{"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1}`.
   Project-aware validation requires local resolution capabilities; explicit
   metadata planning additionally requires `env_plan_version:1`. Older matching
   compilers can still serve their supported validation modes.
   Host planning requires `host_env_plan_version:1` before acquiring host metadata;
   hostless env-plan-v1 compilers remain supported.
+  Typed routing and policy resolution require `routing_plan_version:1`; unchanged
+  non-routing calls remain compatible with older matching compilers.
 - `hack-config-compiler compile [--profile NAME]...` reads one UTF-8 JSON document
   from stdin through EOF. Input is limited to 1 MiB and 64 nested containers. These
   are parser safety bounds, not container resource or workload-count limits.
@@ -228,11 +298,17 @@ diagnostic redaction does not turn the plan into a secret-safe storage format.
   from the authored identity and includes explicit targets from inactive workloads.
 - Invalid invocation exits 2 with fixed usage on stderr and no JSON on stdout.
 - `hack-config-compiler resolve [--profile NAME]...` reads a versioned request:
-  `{request_version:1,project:"original JSON text",primary_local?:"original JSON text",checkout_local?:"original JSON text",explicit_overlay?:null|string}`.
+  `{request_version:1,project:"original JSON text",primary_local?:"original JSON text",checkout_local?:"original JSON text",explicit_overlay?:null|string,global_domain?:string,explicit_domain?:string,branch?:string}`.
   JSON texts retain duplicate keys until Rust checks each document. Each document
   is limited to 1 MiB, their combined text to 3 MiB, and the encoded request to
   20 MiB to allow JSON escaping. Diagnostics add `document` identifying `project`,
   `primary_local`, `checkout_local` or `request`.
+  A routing-v1 compiler also accepts `routing_probe:true` on `resolve` only.
+  This validates authored/local policy and returns `routing_inputs_required:true`
+  when routing context is needed, without deriving provisional origins. The CLI
+  then acquires verified global/branch inputs and sends an ordinary resolve.
+  The probe is not part of the resolution hash and is never a final plan. Old
+  non-routing compilers receive no probe flag.
 - `hack-config-compiler generate DIR` writes deterministic
   `hack.project.schema.json`, `hack.local.schema.json` (2020-12) and
   `native-config.ts` projections.
@@ -243,6 +319,7 @@ diagnostic redaction does not turn the plan into a secret-safe storage format.
 hack config plan --json
 hack config plan --path /path/to/native-project --env qa --profile dev --json
 hack config plan --env base
+hack config plan --domain hack.gy --json
 ```
 
 This project-aware command uses the same validated local selection as `config
@@ -302,8 +379,9 @@ The optional `.hack/hack.local.json` is a separate versioned document:
 {"schema_version":1,"environment":{"default_overlay":null}}
 ```
 
-Only `environment.default_overlay` is supported in this slice. Omission inherits;
-null selects base; a canonical name selects that overlay. Other fields, workload
+Local settings permit `environment.default_overlay`, `routes.domain` and
+`open.prefer`. Omission inherits; overlay null selects base, while domain/open null
+refuses. A canonical overlay name selects that overlay. Other fields, workload
 definitions, unversioned documents, duplicate keys and unknown versions refuse.
 The effective selection is project default/base, then verified primary local,
 current checkout local, then explicit `--env`. Each later present value wins.
@@ -319,7 +397,8 @@ local settings; primary inheritance requires the project root to be the Git root
 Success adds `local_resolution` with selected `overlay` (null means base), `origin`,
 worktree policy and `resolution_hash`. Local settings do not rewrite the authored
 plan or its `semantic_hash`. The separate hash binds normalized supplied local
-documents and explicit selection, including missing versus null. Neither hash
+documents, supplied routing context and explicit selection, including missing
+versus null. Neither hash
 proves an atomic multi-file snapshot or provides an admission/freshness fence.
 Future apply must recheck private input generations. Adding defaulted worktree
 policy changes hashes relative to the earlier experimental compiler; do not reuse

@@ -14,6 +14,12 @@ import {
   nativeHostSelectionMatches,
   parseNativeHostTargets,
 } from "./native-host-plan-protocol.ts";
+import {
+  type NativeRoutingResolution,
+  nativeRoutingPlanIsValid,
+  nativeRoutingSelectionMatches,
+  parseNativeRoutingResolution,
+} from "./native-routing-plan-protocol.ts";
 
 export const NATIVE_CONFIG_INPUT_LIMIT = 1024 * 1024;
 const OUTPUT_LIMIT = 8 * 1024 * 1024;
@@ -49,6 +55,8 @@ export type NativeLocalResolution = {
 export type NativeConfigResolveResult =
   | (Extract<NativeConfigCompileResult, { readonly ok: true }> & {
       readonly local_resolution: NativeLocalResolution;
+      readonly routing_resolution?: NativeRoutingResolution;
+      readonly routing_inputs_required?: true;
     })
   | Extract<NativeConfigCompileResult, { readonly ok: false }>;
 
@@ -146,6 +154,7 @@ export async function compileNativeConfig(opts: {
   readonly requireLocalResolution?: boolean;
   readonly requireEnvPlanning?: boolean;
   readonly requireHostPlanning?: boolean;
+  readonly requireRoutingPlanning?: boolean;
 }): Promise<NativeConfigCompileResult> {
   if (opts.input.byteLength > NATIVE_CONFIG_INPUT_LIMIT) {
     throw failure(
@@ -159,6 +168,7 @@ export async function compileNativeConfig(opts: {
     requireLocalResolution: opts.requireLocalResolution,
     requireEnvPlanning: opts.requireEnvPlanning,
     requireHostPlanning: opts.requireHostPlanning,
+    requireRoutingPlanning: opts.requireRoutingPlanning,
   });
   const response = await invokeCompiler({
     ...request,
@@ -166,6 +176,9 @@ export async function compileNativeConfig(opts: {
     input: opts.input,
   });
   const result = parseCompileResponse(response);
+  if (result.ok && hasRouting(result.plan) && !opts.requireRoutingPlanning) {
+    await checkProtocol({ ...request, requireRoutingPlanning: true });
+  }
   if (opts.requireEnvPlanning && result.ok && !result.declared_workloads) {
     throw failure(
       "E_COMPILER_RESPONSE",
@@ -181,29 +194,51 @@ export async function resolveNativeConfig(opts: {
   readonly primaryLocal?: Uint8Array;
   readonly checkoutLocal?: Uint8Array;
   readonly explicitOverlay?: string | null;
+  readonly explicitDomain?: string;
+  readonly globalDomain?: string;
+  readonly branch?: string;
   readonly binary?: string;
   readonly profiles?: readonly string[];
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
   readonly requireEnvPlanning?: boolean;
   readonly requireHostPlanning?: boolean;
+  readonly requireRoutingPlanning?: boolean;
+  readonly probeRoutingInputs?: boolean;
 }): Promise<NativeConfigResolveResult> {
-  const input = encodeResolveRequest(opts);
+  const plainInput = encodeResolveRequest(opts);
   const request = compilerRequest(opts);
-  await checkProtocol({
+  const capabilities = await checkProtocol({
     ...request,
     requireLocalResolution: true,
     requireEnvPlanning: opts.requireEnvPlanning,
     requireHostPlanning: opts.requireHostPlanning,
+    requireRoutingPlanning:
+      opts.requireRoutingPlanning || hasRoutingInputs(opts),
   });
+  const routingProbe =
+    opts.probeRoutingInputs === true && capabilities.routingPlanning;
+  const input = routingProbe
+    ? encodeResolveRequest({ ...opts, routingProbe })
+    : plainInput;
   const response = await invokeCompiler({
     ...request,
     args: compileArguments("resolve", opts.profiles),
     input,
   });
-  const parsed = parseResolveResponse(response);
+  const parsed = parseResolveResponse({
+    ...response,
+    requireRouting: opts.requireRoutingPlanning || hasRoutingInputs(opts),
+    branch: opts.branch,
+    explicitDomain: opts.explicitDomain,
+    globalDomain: opts.globalDomain,
+    routingProbe,
+  });
   if (!parsed.ok) {
     return parsed;
+  }
+  if (parsed.routing_resolution || parsed.routing_inputs_required) {
+    await checkProtocol({ ...request, requireRoutingPlanning: true });
   }
   if (opts.requireEnvPlanning && !parsed.declared_workloads) {
     throw failure(
@@ -221,13 +256,29 @@ type NativeResolveInputs = {
   readonly primaryLocal?: Uint8Array;
   readonly checkoutLocal?: Uint8Array;
   readonly explicitOverlay?: string | null;
+  readonly explicitDomain?: string;
+  readonly globalDomain?: string;
+  readonly branch?: string;
 };
 
 function encodeResolveRequest(
   opts: NativeResolveInputs & {
     readonly envMetadata?: NativeEnvMetadata;
+    readonly routingProbe?: boolean;
   }
 ): Uint8Array {
+  for (const value of [opts.explicitDomain, opts.globalDomain, opts.branch]) {
+    if (
+      value !== undefined &&
+      (typeof value !== "string" ||
+        Buffer.byteLength(value, "utf8") > NATIVE_CONFIG_INPUT_LIMIT)
+    ) {
+      throw failure(
+        "E_CONFIG_INPUT",
+        "Native routing selection is invalid or exceeds its budget."
+      );
+    }
+  }
   if (
     typeof opts.explicitOverlay === "string" &&
     Buffer.byteLength(opts.explicitOverlay, "utf8") > NATIVE_CONFIG_INPUT_LIMIT
@@ -250,7 +301,11 @@ function encodeResolveRequest(
           ? undefined
           : documentText(opts.checkoutLocal, "checkout_local"),
       explicit_overlay: opts.explicitOverlay,
+      explicit_domain: opts.explicitDomain,
+      global_domain: opts.globalDomain,
+      branch: opts.branch,
       env_metadata: opts.envMetadata,
+      routing_probe: opts.routingProbe ? true : undefined,
     })
   );
   if (input.byteLength > RESOLVE_REQUEST_LIMIT) {
@@ -270,6 +325,7 @@ export async function planNativeConfig(
     readonly profiles?: readonly string[];
     readonly timeoutMs?: number;
     readonly signal?: AbortSignal;
+    readonly requireRoutingPlanning?: boolean;
   }
 ): Promise<NativeConfigPlanResult> {
   const metadata = parseNativeEnvMetadata(opts.envMetadata);
@@ -290,6 +346,8 @@ export async function planNativeConfig(
     requireLocalResolution: true,
     requireEnvPlanning: true,
     requireHostPlanning: metadata.host !== undefined,
+    requireRoutingPlanning:
+      opts.requireRoutingPlanning || hasRoutingInputs(opts),
   });
   const response = await invokeCompiler({
     ...request,
@@ -299,9 +357,16 @@ export async function planNativeConfig(
   const parsed = parseResolveResponse({
     ...response,
     allowIncompletePlan: true,
+    requireRouting: opts.requireRoutingPlanning || hasRoutingInputs(opts),
+    branch: opts.branch,
+    explicitDomain: opts.explicitDomain,
+    globalDomain: opts.globalDomain,
   });
   if (!parsed.ok) {
     return parsed;
+  }
+  if (parsed.routing_resolution) {
+    await checkProtocol({ ...request, requireRoutingPlanning: true });
   }
   const environmentPlan = parseNativeEnvironmentPlan({
     value: parsed.envelope.environment_plan,
@@ -373,6 +438,11 @@ function parseResolveResponse(opts: {
   readonly output: Uint8Array;
   readonly exitCode: number;
   readonly allowIncompletePlan?: boolean;
+  readonly requireRouting?: boolean;
+  readonly branch?: string;
+  readonly explicitDomain?: string;
+  readonly globalDomain?: string;
+  readonly routingProbe?: boolean;
 }):
   | (Extract<NativeConfigResolveResult, { readonly ok: true }> & {
       readonly envelope: Readonly<Record<string, unknown>>;
@@ -401,9 +471,53 @@ function parseResolveResponse(opts: {
       "Native local resolution returned an invalid envelope."
     );
   }
+  const routing =
+    envelope.routing_resolution === undefined
+      ? undefined
+      : parseNativeRoutingResolution(envelope.routing_resolution);
+  const routingInputsRequired = envelope.routing_inputs_required;
+  if (
+    (routingInputsRequired !== undefined &&
+      !(opts.routingProbe && routingInputsRequired === true)) ||
+    (opts.routingProbe && routing !== undefined) ||
+    (opts.routingProbe &&
+      (opts.requireRouting ||
+        Object.hasOwn(result.plan, "routes") ||
+        Object.hasOwn(result.plan, "open")) &&
+      routingInputsRequired !== true)
+  ) {
+    throw failure(
+      "E_COMPILER_RESPONSE",
+      "Native routing input probe returned an invalid result."
+    );
+  }
+  if (
+    routing === null ||
+    !(
+      opts.routingProbe ||
+      nativeRoutingSelectionMatches({
+        plan: result.plan,
+        declared: result.declared_workloads,
+        resolution: routing,
+        required: opts.requireRouting,
+        branch: opts.branch,
+        explicitDomain: opts.explicitDomain,
+        globalDomain: opts.globalDomain,
+      })
+    )
+  ) {
+    throw failure(
+      "E_COMPILER_RESPONSE",
+      "Native routing resolution returned an invalid result."
+    );
+  }
   return {
     ...result,
     local_resolution: parseLocalResolution(envelope.local_resolution),
+    ...(routing === undefined ? {} : { routing_resolution: routing }),
+    ...(routingInputsRequired === true
+      ? { routing_inputs_required: true as const }
+      : {}),
     envelope,
   };
 }
@@ -456,7 +570,8 @@ async function checkProtocol(opts: {
   readonly requireLocalResolution?: boolean;
   readonly requireEnvPlanning?: boolean;
   readonly requireHostPlanning?: boolean;
-}): Promise<void> {
+  readonly requireRoutingPlanning?: boolean;
+}): Promise<{ readonly routingPlanning: boolean }> {
   const handshake = await invokeCompiler({ ...opts, args: ["--protocol"] });
   const protocol = parseControlJson(handshake.output);
   if (
@@ -467,6 +582,7 @@ async function checkProtocol(opts: {
     protocol.plan_version !== 1 ||
     (opts.requireEnvPlanning && protocol.env_plan_version !== 1) ||
     (opts.requireHostPlanning && protocol.host_env_plan_version !== 1) ||
+    (opts.requireRoutingPlanning && protocol.routing_plan_version !== 1) ||
     (opts.requireLocalResolution &&
       (protocol.resolve_version !== 1 || protocol.local_version !== 1))
   ) {
@@ -475,6 +591,7 @@ async function checkProtocol(opts: {
       "Native configuration compiler version mismatch."
     );
   }
+  return { routingPlanning: protocol.routing_plan_version === 1 };
 }
 
 function compileArguments(
@@ -698,8 +815,19 @@ function parseCompileResponse(opts: {
   readonly output: Uint8Array;
   readonly exitCode: number;
 }): NativeConfigCompileResult {
+  const value = parseControlJson(opts.output);
+  if (
+    isRecord(value) &&
+    (Object.hasOwn(value, "routing_resolution") ||
+      Object.hasOwn(value, "routing_inputs_required"))
+  ) {
+    throw failure(
+      "E_COMPILER_RESPONSE",
+      "Native compilation returned a context-dependent routing report."
+    );
+  }
   return parseCompileValue({
-    value: parseControlJson(opts.output),
+    value,
     exitCode: opts.exitCode,
   });
 }
@@ -740,6 +868,12 @@ function parseCompileValue(opts: {
       plan: value.plan,
       declared,
     });
+    if (!nativeRoutingPlanIsValid({ plan: value.plan, declared })) {
+      throw failure(
+        "E_COMPILER_RESPONSE",
+        "Native compiler returned invalid routing declarations."
+      );
+    }
     return {
       transport_version: 1,
       ok: true,
@@ -761,6 +895,18 @@ function parseCompileValue(opts: {
   throw failure(
     "E_COMPILER_RESPONSE",
     "Native configuration compiler returned an invalid result."
+  );
+}
+
+function hasRouting(plan: Readonly<Record<string, unknown>>): boolean {
+  return plan.routes !== undefined || plan.open !== undefined;
+}
+
+function hasRoutingInputs(opts: NativeResolveInputs): boolean {
+  return (
+    opts.explicitDomain !== undefined ||
+    opts.globalDomain !== undefined ||
+    opts.branch !== undefined
   );
 }
 

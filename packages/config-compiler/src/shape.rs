@@ -21,7 +21,7 @@ fn optional_object(document: &json::Document, pointer: &str) -> Result<(), Diagn
 
 pub(crate) fn project(document: &json::Document) -> Result<(), Diagnostic> {
     object(document, "")?;
-    for key in ["source", "environment", "worktree"] {
+    for key in ["source", "environment", "worktree", "routes", "open"] {
         optional_object(document, &json::child("", key))?;
     }
     if let Some(storage) = document.value.get("storage").and_then(Value::as_object) {
@@ -81,6 +81,20 @@ pub(crate) fn project(document: &json::Document) -> Result<(), Diagnostic> {
     {
         for name in processes.keys() {
             host_invocation(document, &json::child("/host/processes", name))?;
+        }
+    }
+    for namespace in ["aliases", "http"] {
+        if let Some(entries) = document
+            .value
+            .pointer(&format!("/routes/{namespace}"))
+            .and_then(Value::as_object)
+        {
+            for name in entries.keys() {
+                object(
+                    document,
+                    &json::child(&format!("/routes/{namespace}"), name),
+                )?;
+            }
         }
     }
     Ok(())

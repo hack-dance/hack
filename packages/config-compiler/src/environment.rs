@@ -57,8 +57,27 @@ pub struct HostEnvironmentPlan {
 /// Projection only; parsing retains strict resolve fields and separately validates metadata.
 #[derive(Debug, Serialize, JsonSchema, TS)]
 pub struct EnvPlanRequest {
-    #[serde(flatten)]
-    pub request: local::ResolveRequest,
+    #[ts(type = "1")]
+    pub request_version: u32,
+    pub project: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string")]
+    pub primary_local: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string")]
+    pub checkout_local: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable,as="Option<String>")]
+    pub explicit_overlay: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string")]
+    pub global_domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string")]
+    pub explicit_domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string")]
+    pub branch: Option<String>,
     pub env_metadata: EnvMetadata,
 }
 #[derive(Debug, Serialize, JsonSchema, TS)]
@@ -105,6 +124,9 @@ pub enum PlanResult {
         #[ts(optional, type = "HostEnvTargets")]
         host_env_targets: Option<crate::host::HostEnvTargets>,
         local_resolution: local::LocalResolution,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "RoutingResolution")]
+        routing_resolution: Option<Box<crate::routing::RoutingResolution>>,
         environment_plan: Box<EnvironmentPlan>,
     },
     Failure {
@@ -143,6 +165,7 @@ pub fn plan(bytes: &[u8], profiles: &[String]) -> PlanResult {
             semantic_hash: resolved.compiled.semantic_hash,
             declared_workloads: resolved.compiled.declared_workloads,
             local_resolution: resolved.local_resolution,
+            routing_resolution: resolved.routing_resolution.map(Box::new),
             environment_plan: Box::new(environment_plan),
         },
         Err(error) => PlanResult::failure(error),
@@ -296,6 +319,12 @@ fn plan_inner(
 ) -> Result<(local::Resolved, EnvironmentPlan), local::ResolveDiagnostic> {
     let mut document = json::parse_with_limit(bytes, local::MAX_REQUEST_BYTES)
         .map_err(|d| local::with_role(local::DocumentRole::Request, d))?;
+    if document.value.get("routing_probe").is_some() {
+        return Err(local::with_role(
+            local::DocumentRole::Request,
+            diagnostic_at(&document.positions, "unknown_field", "/routing_probe"),
+        ));
+    }
     let metadata = read_metadata(&mut document)?;
     let metadata_location = diagnostic_at(&document.positions, "invalid_metadata", "/env_metadata");
     let resolved = local::resolve_document(document, profiles)?;
@@ -517,7 +546,7 @@ impl std::io::Write for CountingWriter {
         Ok(())
     }
 }
-fn serialized_size(value: &(impl Serialize + ?Sized)) -> Result<usize, ()> {
+pub(crate) fn serialized_size(value: &(impl Serialize + ?Sized)) -> Result<usize, ()> {
     let mut counter = CountingWriter { bytes: 0 };
     serde_json::to_writer(&mut counter, value).map_err(|_| ())?;
     Ok(counter.bytes)
@@ -541,6 +570,7 @@ impl ReportBudget {
         result.value(&resolved.compiled.semantic_hash, resolved, "")?;
         result.value(&resolved.compiled.declared_workloads, resolved, "")?;
         result.value(&resolved.local_resolution, resolved, "")?;
+        result.value(&resolved.routing_resolution, resolved, "")?;
         result.value(&metadata.overlay, resolved, "")?;
         if let Some(host) = &resolved.compiled.plan.host {
             result.value(&host.targets(), resolved, "")?;

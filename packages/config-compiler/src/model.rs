@@ -64,6 +64,14 @@ pub struct Project {
     #[schemars(with = "crate::routing::OpenConfig")]
     #[ts(optional, type = "OpenConfig")]
     pub open: Option<crate::routing::OpenConfig>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "BTreeMap<String,crate::endpoint::HostBindingTarget>")]
+    #[ts(optional, type = "{ [key in string]: HostBindingTarget }")]
+    pub host_bindings: Option<BTreeMap<String, crate::endpoint::HostBindingTarget>>,
 }
 
 fn enabled() -> bool {
@@ -233,6 +241,9 @@ pub enum EnvironmentValue {
     Unset {
         unset: True,
     },
+    Endpoint {
+        endpoint: crate::endpoint::EndpointReference,
+    },
 }
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 #[serde(try_from = "bool", into = "bool")]
@@ -368,6 +379,9 @@ pub struct Plan {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "OpenConfig")]
     pub open: Option<crate::routing::OpenConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "{ [key in string]: HostBindingTarget }")]
+    pub host_bindings: Option<BTreeMap<String, crate::endpoint::HostBindingTarget>>,
 
     pub selected_profiles: Vec<String>,
     pub storage: BTreeMap<String, Storage>,

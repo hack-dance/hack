@@ -7,6 +7,7 @@ import {
   planNativeConfig,
   resolveNativeConfig,
 } from "./native-config-compiler.ts";
+import { nativeEndpointPlanningRequired } from "./native-endpoint-plan-protocol.ts";
 import {
   acquireNativeLocalInputs,
   acquireNativeProjectInput,
@@ -104,7 +105,9 @@ export async function planNativeProject(
       result.local_resolution.resolution_hash !==
         resolved.local_resolution.resolution_hash ||
       JSON.stringify(result.routing_resolution) !==
-        JSON.stringify(resolved.routing_resolution))
+        JSON.stringify(resolved.routing_resolution) ||
+      JSON.stringify(result.host_binding_resolution) !==
+        JSON.stringify(resolved.host_binding_resolution))
   ) {
     throw new NativeConfigCompilerError(
       "E_COMPILER_RESPONSE",
@@ -167,6 +170,7 @@ async function prepareNativeProject(
       opts.explicitDomain !== undefined ||
       Object.hasOwn(compiled.plan, "routes") ||
       Object.hasOwn(compiled.plan, "open"),
+    requireEndpointPlanning: nativeEndpointPlanningRequired(compiled.plan),
   };
   const checkResolvedIdentity = (result: NativeConfigResolveResult) => {
     if (

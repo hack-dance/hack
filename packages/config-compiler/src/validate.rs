@@ -196,6 +196,7 @@ pub fn lower(mut project: Project, profiles: &[String], at: &At) -> Result<Plan,
     if let Some(routes) = &mut project.routes {
         crate::routing::normalize(routes, &project.services.keys().cloned().collect(), at)?;
     }
+    crate::endpoint::validate_project(&project, &selected, at)?;
     project.services.retain(|_, w| active(w));
     project.jobs.retain(|_, w| active(w));
     for workload in project
@@ -214,6 +215,7 @@ pub fn lower(mut project: Project, profiles: &[String], at: &At) -> Result<Plan,
         host: project.host,
         routes: project.routes,
         open: project.open,
+        host_bindings: project.host_bindings,
         selected_profiles: selected,
         storage: project.storage,
         services: project.services,

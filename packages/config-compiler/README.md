@@ -32,7 +32,7 @@ are rejected. Each document is limited to 1 MiB, their combined decoded size to
 These are parser resource bounds, not runtime workload limits.
 
 A local document permits `schema_version: 1` and optional `environment`,
-`routes`, and `open`. Environment permits only `default_overlay`. Omission inherits, `null` selects base,
+`routes`, `open`, and `host_bindings`. Environment permits only `default_overlay`. Omission inherits, `null` selects base,
 and a string selects a canonical overlay matching `[a-z0-9]+(?:-[a-z0-9]+)*`.
 No normalization silently changes names.
 
@@ -270,3 +270,60 @@ bindings. Oversized expansion returns fixed redacted `plan_too_large`; this is a
 input-amplification bound, not a runtime route or workload capacity limit. This
 package does not register DNS, acquire certificates, bind ports, configure proxies,
 open browsers or claim that an origin is reachable.
+
+## Structured endpoints and local host bindings
+
+`endpoint_plan_version: 1` adds one exclusive authored environment form:
+`{endpoint: {kind, ...}}`. References are `{kind: "route", name}`, a declared
+service `{kind: "service", name, port, protocol}`, or a logical binding
+`{kind: "host_binding", name}`. Ports are explicit integers from 1–65535 and
+protocol is `http`, `https`, or `tcp`. References accept no credentials, path,
+query, command, or arbitrary scope. A route selects its centrally derived project
+origin, not its OAuth alias. Services and routes must exist in the authored
+namespace and cannot target jobs. Every reference is validated before profile
+filtering; an active invocation cannot reference an inactive service or route.
+
+Project `host_bindings` is an optional map from canonical logical names (lowercase
+letters/digits, single separating hyphens, at most 63 bytes) to either
+`{kind: "host", port, protocol}` or
+`{kind: "external", hostname, port, protocol}`. External hostname is literal,
+canonical lowercase DNS (including a single label), strict dotted IPv4, or
+compressed hexadecimal IPv6 in brackets. It has no authority port, credentials,
+path, wildcard, query, fragment, or normalization. Explicit external loopback
+addresses retain their meaning in the calling context; they do not imply host
+gateway access. Use the typed `host` intent for that purpose.
+
+Local maps merge by logical name: project, verified primary when inheritance is
+enabled, then current checkout. Local `null` removes that binding, including an
+inherited binding; a later target readds it. Null is not a project target and the
+whole map cannot be null. Binding definitions contain no process command, resource
+ID, source replacement, or credential. Empty maps explicitly enable binding
+reporting. Ignored primary maps are still validated and enter resolution identity.
+
+Context-free compile keeps logical host-binding references symbolic, allowing
+local provisioning without tracked host addresses. Actual resolve requires every
+referenced binding, including those in inactive invocations, to exist after local
+merging. Missing references refuse with `unknown_host_binding`; tombstoned
+references refuse with `removed_host_binding` at the removing local document's
+original location. The authored plan retains only project definitions. Optional
+`host_binding_resolution: {bindings, removed}` reports effective typed targets and
+each winning/removing `project`, `primary_local`, or `checkout_local` source.
+The probe performs this merge/reference check while deferring routing expansion.
+
+Metadata planning produces `{kind: "endpoint", reference, target}` without a
+string `value`. Route targets contain a centrally derived `origin`; direct service
+targets remain symbolic `{kind: "service", name, port, protocol}`. Typed host
+targets add `context: "host" | "workload"`; they require backend-qualified loopback
+or gateway translation during execution. External targets retain the canonical
+hostname, port and protocol. Direct service references in host invocations produce
+an incomplete `unsupported_endpoint_context` diagnostic and omit the destination,
+because guest service names are not host addresses.
+
+Endpoints cannot replace a same-key managed baseline entry: the plan preserves
+that managed entry, reports `env_endpoint_collision`, and remains incomplete.
+Combining endpoint and unset forms refuses; unsetting another key grants no
+replacement permission. Existing remapped managed-reference collision rules stay
+unchanged. The shared 8 MiB report budget counts binding reports and every expanded
+endpoint before insertion. No new fields alter old hashes or replies when absent.
+This compiler does not resolve DNS, execute hooks, start services, or prove endpoint
+reachability; native execution and backend translation remain separate work.

@@ -2720,5 +2720,494 @@
         "extra": true
       }
     }
+  },
+  {
+    "name": "endpoint service reference",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TARGET": {
+              "endpoint": {
+                "kind": "service",
+                "name": "web",
+                "port": 3000,
+                "protocol": "http"
+              }
+            }
+          }
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 5432,
+          "protocol": "tcp"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint host binding reference",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TARGET": {
+              "endpoint": {
+                "kind": "host_binding",
+                "name": "database"
+              }
+            }
+          }
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 5432,
+          "protocol": "tcp"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint route reference",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TARGET": {
+              "endpoint": {
+                "kind": "route",
+                "name": "app"
+              }
+            }
+          }
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 5432,
+          "protocol": "tcp"
+        }
+      },
+      "routes": {
+        "http": {
+          "app": {
+            "service": "web",
+            "port": 3000,
+            "hostname": "app"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid binding shape 0",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "host_bindings": {
+        "database": null
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid binding shape 1",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "host_bindings": {
+        "database": []
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid binding shape 2",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "host_bindings": {
+        "database": ["host", 2, "tcp"]
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid binding shape 3",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 0,
+          "protocol": "tcp"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid binding shape 4",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 2,
+          "protocol": "udp"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid binding shape 5",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 2,
+          "protocol": "tcp",
+          "command": "false"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid binding shape 6",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "external",
+          "hostname": "api.example.com",
+          "port": 2,
+          "protocol": "https",
+          "secret": "sentinel"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid reference shape 0",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TARGET": {
+              "endpoint": null
+            }
+          }
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 5432,
+          "protocol": "tcp"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid reference shape 1",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TARGET": {
+              "endpoint": []
+            }
+          }
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 5432,
+          "protocol": "tcp"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid reference shape 2",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TARGET": {
+              "endpoint": ["route", "app"]
+            }
+          }
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 5432,
+          "protocol": "tcp"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid reference shape 3",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TARGET": {
+              "endpoint": {
+                "kind": "service",
+                "name": "web",
+                "port": 2
+              }
+            }
+          }
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 5432,
+          "protocol": "tcp"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid reference shape 4",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TARGET": {
+              "endpoint": {
+                "kind": "service",
+                "name": "web",
+                "port": 2,
+                "protocol": "udp"
+              }
+            }
+          }
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 5432,
+          "protocol": "tcp"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid reference shape 5",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TARGET": {
+              "endpoint": {
+                "kind": "service",
+                "name": "web",
+                "port": 0,
+                "protocol": "tcp"
+              }
+            }
+          }
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 5432,
+          "protocol": "tcp"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid reference shape 6",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TARGET": {
+              "endpoint": {
+                "kind": "host_binding",
+                "name": "database",
+                "command": "false"
+              }
+            }
+          }
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 5432,
+          "protocol": "tcp"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint unset mixed refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TARGET": {
+              "unset": true,
+              "endpoint": {
+                "kind": "host_binding",
+                "name": "database"
+              }
+            }
+          }
+        }
+      },
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 5432,
+          "protocol": "tcp"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint invalid logical binding key",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "host_bindings": {
+        "DATABASE": {
+          "kind": "host",
+          "port": 2,
+          "protocol": "tcp"
+        }
+      }
+    }
+  },
+  {
+    "name": "endpoint local provisioning compile symbolic",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TARGET": {
+              "endpoint": {
+                "kind": "host_binding",
+                "name": "locally-provided"
+              }
+            }
+          }
+        }
+      }
+    }
   }
 ]

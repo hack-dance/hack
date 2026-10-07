@@ -16,6 +16,7 @@ hack run --profile toolchain toolchain -- test
 hack run --profile toolchain toolchain -- check
 hack run --profile toolchain toolchain -- rust
 hack run --profile toolchain toolchain -- rust-check
+hack run --profile toolchain toolchain -- config-compiler
 hack run --profile toolchain toolchain -- build
 hack run --profile toolchain toolchain -- exec bun index.ts --help
 ```

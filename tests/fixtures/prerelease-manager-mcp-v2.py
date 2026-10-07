@@ -31,9 +31,7 @@ SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 REVISION = re.compile(r"[0-9a-f]{40}\Z")
 PAYLOAD = frozenset(("hack-native", "hack-relay-guest", "hack-cli", "hack-v5",
                      "provider-pins.json", "README.md", "prerelease.json"))
-COMPILER_PAYLOAD = frozenset(("hack-config-compiler", "hack.project.schema.json"))
-EXECUTABLES = frozenset(("hack-native", "hack-relay-guest", "hack-cli", "hack-v5",
-                         "hack-config-compiler"))
+EXECUTABLES = frozenset(("hack-native", "hack-relay-guest", "hack-cli", "hack-v5"))
 BUNDLE_FILES = PAYLOAD | {"SHA256SUMS"}
 MCP_FILES = {"adapter": "hack-mcp-adapter", "owner": "hack-mcp-owner",
              "backend": "hack-mcp-backend"}
@@ -43,11 +41,10 @@ METADATA_KEYS = {"schema", "version", "tag", "source_revision", "platform"}
 REPOSITORY = "hack-dance/hack"
 DOWNLOAD_HOSTS = {"api.github.com", "github.com", "release-assets.githubusercontent.com",
                   "objects.githubusercontent.com"}
-# Reviewed flat-layout and shared-MCP managers, before optional compiler sidecars.
+# Original flat-layout manager, shipped before optional shared-MCP bundles.
 # Keep this an explicit allowlist; a matching user-written receipt is not provenance.
 MANAGER_PREDECESSORS = frozenset({
     "b7c49e3fec6b06790e833db1d2dcb441d2223c283b792713be46826aa2eef877",
-    "ca432b7fc6562bb091d17d3217f5d1daf9f91621a6919c8964ca51bee2111d0c",
 })
 MANAGER_UPGRADE = ".manager-upgrade.json"
 
@@ -182,12 +179,10 @@ def checksums(raw, expected):
 
 
 def payload_inventory(names):
-    """Accept complete optional compiler and MCP groups alongside the original payload."""
+    """Accept the original flat payload or one complete content-addressed MCP bundle."""
     names = set(names)
     require(BUNDLE_FILES <= names, "Incomplete candidate bundle.")
-    compiler = names & COMPILER_PAYLOAD
-    require(not compiler or compiler == COMPILER_PAYLOAD, "Incomplete config compiler payload.")
-    extra = names - BUNDLE_FILES - COMPILER_PAYLOAD
+    extra = names - BUNDLE_FILES
     if extra:
         matches = [MCP_MEMBER.fullmatch(name) for name in extra]
         require(all(matches), "Foreign candidate MCP payload.")
@@ -220,7 +215,7 @@ def payload_mode(name):
 
 
 def verify_mcp_bundle(bundle, payload):
-    nested = sorted(name for name in payload if MCP_MEMBER.fullmatch(name))
+    nested = sorted(set(payload) - PAYLOAD)
     if not nested:
         return
     prefix = str(Path(nested[0]).parent)
@@ -272,11 +267,7 @@ def verify_bundle(bundle, version):
 
 def verify_signatures(bundle):
     names = ["hack-native", "hack-cli"]
-    payload = bundle_inventory(bundle)
-    if "hack-config-compiler" in payload:
-        names.append("hack-config-compiler")
-    names.extend(name for name in payload
-                 if MCP_MEMBER.fullmatch(name) and not name.endswith("/manifest.json"))
+    names.extend(name for name in bundle_inventory(bundle) - PAYLOAD if not name.endswith("/manifest.json"))
     for name in names:
         try:
             result = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(bundle / name)],
@@ -298,8 +289,8 @@ def extract_archive(archive, checksum, destination, version, release_metadata=No
             seen = set()
             total = 0
             for entry in source:
-                require(len(entries) < len(BUNDLE_FILES) + len(COMPILER_PAYLOAD) + 4, "Incomplete or duplicate archive entries.")
-                require((entry.name in BUNDLE_FILES | COMPILER_PAYLOAD or MCP_MEMBER.fullmatch(entry.name)) and entry.name not in seen,
+                require(len(entries) < len(BUNDLE_FILES) + 4, "Incomplete or duplicate archive entries.")
+                require((entry.name in BUNDLE_FILES or MCP_MEMBER.fullmatch(entry.name)) and entry.name not in seen,
                         "Foreign, duplicate or traversing archive entry.")
                 require(entry.isfile() and not entry.issparse() and entry.size > 0
                         and entry.size <= MAX_ARCHIVE, "Only bounded regular archive files are accepted.")
@@ -330,7 +321,7 @@ def extract_archive(archive, checksum, destination, version, release_metadata=No
                         value.update(chunk)
                 require(value.hexdigest() == manifest[name], "Candidate checksum mismatch: " + name)
             destination.mkdir(mode=0o700)
-            nested = {name for name in payload if MCP_MEMBER.fullmatch(name)}
+            nested = payload - PAYLOAD
             if nested:
                 prefix = Path(next(iter(nested))).parent
                 (destination / "mcp").mkdir(mode=0o700)
@@ -753,7 +744,7 @@ class Channel:
         # Manager replacement is a separate explicit, recoverable operation.
         require(set(manifest) <= PAYLOAD
                 or digest(self.root / "manager.py") == digest(Path(__file__)),
-                "Optional candidate payloads require this channel's retained manager to match the installer. "
+                "Shared MCP requires this channel's retained manager to match the installer. "
                 "Run upgrade-manager with this reviewed installer, or use a fresh --root; "
                 "the existing channel and its selection are unchanged.")
         homes = {}

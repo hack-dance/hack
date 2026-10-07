@@ -1,0 +1,856 @@
+[
+  {
+    "name": "minimal",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1"
+        }
+      }
+    }
+  },
+  {
+    "name": "exec",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "command": {
+            "exec": ["web", "--port", "3000"]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "shell",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "command": {
+            "shell": "exec web"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "environment-tags",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "environment": {
+            "TOKEN": {
+              "env_ref": "TOKEN"
+            },
+            "MODE": {
+              "default": "dev"
+            },
+            "PUBLIC": {
+              "literal": "yes"
+            },
+            "DROP": {
+              "unset": true
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "basic-build",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "build": {
+            "context": ".",
+            "target": "dev"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "http-readiness",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "http",
+            "port": 3000,
+            "path": "/health",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 3
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "refuse-routes",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1"
+        }
+      },
+      "routes": {}
+    }
+  },
+  {
+    "name": "refuse-schema_version",
+    "valid": false,
+    "input": {
+      "schema_version": 2,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1"
+        }
+      }
+    }
+  },
+  {
+    "name": "refuse-unknown",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1"
+        }
+      },
+      "unknown": "value"
+    }
+  },
+  {
+    "name": "refuse-source",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1"
+        }
+      },
+      "source": null
+    }
+  },
+  {
+    "name": "refuse-workload-image-10",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": null
+        }
+      }
+    }
+  },
+  {
+    "name": "refuse-workload-command-11",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "command": null
+        }
+      }
+    }
+  },
+  {
+    "name": "refuse-workload-environment-12",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "environment": null
+        }
+      }
+    }
+  },
+  {
+    "name": "refuse-workload-working_directory-13",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "working_directory": null
+        }
+      }
+    }
+  },
+  {
+    "name": "refuse-workload-build-14",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "build": {
+            "context": "."
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "refuse-workload-command-15",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "command": {
+            "exec": []
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "refuse-workload-command-16",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "command": {
+            "exec": ["x"],
+            "shell": "x"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "refuse-workload-mounts-17",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "mounts": [
+            {
+              "source": ".",
+              "target": "/app"
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "refuse-workload-environment-18",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "environment": {
+            "KEY": {
+              "unset": false
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "refuse-workload-environment-19",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "environment": {
+            "KEY": {
+              "literal": "x",
+              "default": "y"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "refuse-workload-backend_options-20",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "backend_options": {}
+        }
+      }
+    }
+  },
+  {
+    "name": "tcp-retries-0",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "tcp",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 0,
+            "port": 80
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "tcp-retries-1",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "tcp",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 1,
+            "port": 80
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "tcp-retries-4294967295",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "tcp",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 4294967295,
+            "port": 80
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "tcp-retries-4294967296",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "tcp",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 4294967296,
+            "port": 80
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "tcp-port-0",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "tcp",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 3,
+            "port": 0
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "tcp-port-1",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "tcp",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 3,
+            "port": 1
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "tcp-port-65535",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "tcp",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 3,
+            "port": 65535
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "tcp-port-65536",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "tcp",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 3,
+            "port": 65536
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "http-retries-0",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "http",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 0,
+            "port": 80,
+            "path": "/health"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "http-retries-1",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "http",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 1,
+            "port": 80,
+            "path": "/health"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "http-retries-4294967295",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "http",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 4294967295,
+            "port": 80,
+            "path": "/health"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "http-retries-4294967296",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "http",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 4294967296,
+            "port": 80,
+            "path": "/health"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "http-port-0",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "http",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 3,
+            "port": 0,
+            "path": "/health"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "http-port-1",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "http",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 3,
+            "port": 1,
+            "path": "/health"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "http-port-65535",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "http",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 3,
+            "port": 65535,
+            "path": "/health"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "http-port-65536",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "http",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 3,
+            "port": 65536,
+            "path": "/health"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "exec-retries-0",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "exec",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 0,
+            "command": {
+              "exec": ["true"]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "exec-retries-1",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "exec",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 1,
+            "command": {
+              "exec": ["true"]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "exec-retries-4294967295",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "exec",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 4294967295,
+            "command": {
+              "exec": ["true"]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "exec-retries-4294967296",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "readiness": {
+            "kind": "exec",
+            "interval": "1s",
+            "timeout": "500ms",
+            "retries": 4294967296,
+            "command": {
+              "exec": ["true"]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "overlay-qa-test",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1"
+        }
+      },
+      "environment": {
+        "default_overlay": "qa-test"
+      }
+    }
+  },
+  {
+    "name": "overlay-qa_test",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1"
+        }
+      },
+      "environment": {
+        "default_overlay": "qa_test"
+      }
+    }
+  },
+  {
+    "name": "overlay-qa.test",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1"
+        }
+      },
+      "environment": {
+        "default_overlay": "qa.test"
+      }
+    }
+  },
+  {
+    "name": "overlay-qa-",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1"
+        }
+      },
+      "environment": {
+        "default_overlay": "qa-"
+      }
+    }
+  },
+  {
+    "name": "env-ref-VALID_KEY",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "environment": {
+            "TARGET": {
+              "env_ref": "VALID_KEY"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "env-ref-lowercase",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "example/web:1",
+          "environment": {
+            "TARGET": {
+              "env_ref": "lowercase"
+            }
+          }
+        }
+      }
+    }
+  }
+]

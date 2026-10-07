@@ -16,6 +16,14 @@ case "$task" in
   check) install_deps; bun run typecheck; exec bun run check ;;
   rust-check) cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check; exec cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir /build/rust --all-targets --all-features --jobs 2 -- -D warnings ;;
   rust) exec cargo test --all-features --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir /build/rust --jobs 2 "$@" ;;
+  config-compiler)
+    install_deps
+    cargo fmt --manifest-path packages/config-compiler/Cargo.toml --check
+    cargo clippy --locked --manifest-path packages/config-compiler/Cargo.toml --target-dir /build/config-compiler --all-targets --jobs 2 -- -D warnings
+    cargo test --locked --manifest-path packages/config-compiler/Cargo.toml --target-dir /build/config-compiler --jobs 2
+    export HACK_CONFIG_COMPILER_TARGET_DIR=/build/config-compiler
+    exec bun scripts/build-config-compiler.ts
+    ;;
   build)
     install_deps
     # Bun 1.3.9 stages in cwd; its cross-device fallback can emit zero-filled
@@ -26,5 +34,5 @@ case "$task" in
     exec /app/dist/hack --version
     ;;
   exec) exec "$@" ;;
-  *) echo "Tasks: models, install, test [paths], check, rust [args], rust-check, build, exec <command>" >&2; exit 2 ;;
+  *) echo "Tasks: models, install, test [paths], check, rust [args], rust-check, config-compiler, build, exec <command>" >&2; exit 2 ;;
 esac

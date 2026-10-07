@@ -28,6 +28,7 @@ import {
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
 import { logger } from "../ui/logger.ts";
+import { configValidateCommand } from "./config-validate.ts";
 
 type ConfigReadResult =
   | {
@@ -39,7 +40,8 @@ type ConfigReadResult =
 
 const configSpec = defineCommand({
   name: "config",
-  summary: "Read/write hack.config.json values",
+  summary:
+    "Read/write legacy config or validate an explicit native project file",
   group: "Project",
   options: [],
   positionals: [],
@@ -203,6 +205,7 @@ export const configCommand = defineCommand({
   subcommands: [
     withHandler(configGetSpec, handleConfigGet),
     withHandler(configSetSpec, handleConfigSet),
+    configValidateCommand,
   ],
 } as const);
 

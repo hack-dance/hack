@@ -13,6 +13,10 @@ export const PRERELEASE_PAYLOAD = [
   "README.md",
   "prerelease.json",
 ] as const;
+export const CONFIG_COMPILER_PAYLOAD = [
+  "hack-config-compiler",
+  "hack.project.schema.json",
+] as const;
 const VERSION = /^5\.0\.0-next\.[1-9][0-9]*$/;
 const REVISION = /^[0-9a-f]{40}$/;
 const STABLE_TAG = /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
@@ -396,16 +400,24 @@ export async function packagePrerelease({
   if (!(await lstat(bundle)).isDirectory()) {
     throw new Error("Native bundle root must be a directory, not an alias");
   }
+  const entries = await readdir(bundle);
+  const compilerPayload = CONFIG_COMPILER_PAYLOAD.filter((name) =>
+    entries.includes(name)
+  );
+  if (compilerPayload.length !== 0 && compilerPayload.length !== 2) {
+    throw new Error(
+      "Native config compiler payload must include both compiler and schema"
+    );
+  }
   const mcpPayload = await nativeCandidateMcpPayload(bundle);
-  const payload = [...PRERELEASE_PAYLOAD, ...mcpPayload];
+  const payload = [...PRERELEASE_PAYLOAD, ...compilerPayload, ...mcpPayload];
   const expected = [
     ...PRERELEASE_PAYLOAD,
+    ...compilerPayload,
     "SHA256SUMS",
     ...(mcpPayload.length ? ["mcp"] : []),
   ].sort();
-  if (
-    JSON.stringify((await readdir(bundle)).sort()) !== JSON.stringify(expected)
-  ) {
+  if (JSON.stringify(entries.sort()) !== JSON.stringify(expected)) {
     throw new Error(
       "Native prerelease bundle must contain exactly the complete payload and checksums"
     );
@@ -414,6 +426,17 @@ export async function packagePrerelease({
     const entry = await lstat(join(bundle, name));
     if (!entry.isFile() || entry.nlink !== 1) {
       throw new Error(`Native bundle payload must be a regular file: ${name}`);
+    }
+    if (
+      name === "hack-config-compiler" ||
+      name === "hack.project.schema.json"
+    ) {
+      const mode = name === "hack-config-compiler" ? 0o755 : 0o600;
+      if ((entry.mode & 0o7777) !== mode) {
+        throw new Error(
+          `Native config compiler payload has unsafe permissions: ${name}`
+        );
+      }
     }
   }
   const metadata = prereleaseMetadata({

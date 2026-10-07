@@ -44,6 +44,14 @@ def with_mcp(entries, change=None):
     return [(name, value, tarfile.REGTYPE) for name, value in payload.items()]
 
 
+def with_compiler(entries):
+    payload = {name: value for name, value, _ in entries if name != "SHA256SUMS"}
+    payload.update({"hack-config-compiler": b"synthetic compiler", "hack.project.schema.json": b"{}\n"})
+    payload["SHA256SUMS"] = "".join(sha(value) + "  " + name + "\n"
+                                    for name, value in sorted(payload.items())).encode()
+    return [(name, value, tarfile.REGTYPE) for name, value in payload.items()]
+
+
 class ChannelTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="hack-prerelease-")
@@ -175,7 +183,11 @@ class ChannelTests(unittest.TestCase):
         source = self.channel.root / "manager.py"
         spec = importlib.util.spec_from_file_location("retained_prerelease_manager", source)
         retained = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(retained)
+        # Import the retained reader without adding unowned bytecode to its
+        # channel. This must hold even when unittest itself runs without -B.
+        with mock.patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(retained)
+        self.assertFalse((self.channel.root / "__pycache__").exists())
         for module in (legacy, retained, installer):
             for command in ("status", "run"):
                 with self.subTest(reader=module.__name__, command=command), \
@@ -272,6 +284,116 @@ class ChannelTests(unittest.TestCase):
             with self.channel.lock():
                 self.fail("Aliased MCP bundle accepted")
         self.assertEqual((self.channel.root / ".selection.json").read_bytes(), before)
+
+    def test_compiler_pair_upgrade_preserves_old_layouts_and_installed_modes(self):
+        self.install()
+        archive, checksum = self.archive("5.0.0-next.2", with_mcp)
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.2", archive, checksum, True)
+        for number, mutate in ((3, with_compiler), (4, lambda entries: with_compiler(with_mcp(entries)))):
+            version = "5.0.0-next." + str(number)
+            archive, checksum = self.archive(version, mutate)
+            with self.channel.lock():
+                self.channel.install(version, archive, checksum, True)
+            bundle = self.channel.root / "versions" / version / "bundle"
+            _, manifest = installer.verify_bundle(bundle, version)
+            self.assertTrue(installer.COMPILER_PAYLOAD <= set(manifest))
+            for name in installer.COMPILER_PAYLOAD:
+                self.assertEqual((bundle / name).stat().st_mode & 0o777,
+                                 0o755 if name == "hack-config-compiler" else 0o600)
+            for prior in ("5.0.0-next.1", "5.0.0-next.2", version):
+                with self.channel.lock():
+                    self.channel.select(prior)
+                self.assertEqual(self.selection()["selected"], prior)
+        signed = {Path(arguments[-1]).name for arguments, _ in self.calls
+                  if arguments[0] == "/usr/bin/codesign"}
+        self.assertIn("hack-config-compiler", signed)
+        self.assertNotIn("hack.project.schema.json", signed)
+
+    def test_partial_tampered_and_aliased_compiler_archives_preserve_selection(self):
+        for name in installer.COMPILER_PAYLOAD:
+            for case in ("missing", "tampered", tarfile.SYMTYPE, tarfile.LNKTYPE):
+                with self.subTest(name=name, case=case):
+                    def mutate(entries):
+                        return [(key, b"changed" if case == "tampered" and key == name else value,
+                                 case if case in (tarfile.SYMTYPE, tarfile.LNKTYPE) and key == name else kind)
+                                for key, value, kind in with_compiler(entries)
+                                if not (case == "missing" and key == name)]
+                    self.rejects_install(mutate, "compiler payload|checksum mismatch|regular archive files")
+
+    def test_installed_compiler_pair_tampering_and_modes_are_refused(self):
+        archive, checksum = self.archive(mutate=with_compiler)
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.1", archive, checksum)
+        bundle = self.channel.root / "versions/5.0.0-next.1/bundle"
+        for name in installer.COMPILER_PAYLOAD:
+            path = bundle / name
+            before = path.read_bytes()
+            mode = path.stat().st_mode & 0o777
+            for case in ("bytes", "mode", "hardlink", "symlink"):
+                with self.subTest(name=name, case=case):
+                    alias = self.root / "compiler-alias"
+                    if case == "bytes":
+                        path.write_bytes(b"changed")
+                    elif case == "mode":
+                        path.chmod(0o777)
+                    elif case == "hardlink":
+                        os.link(path, alias)
+                    else:
+                        path.rename(alias)
+                        path.symlink_to(alias)
+                    with self.assertRaises(installer.Refusal):
+                        installer.verify_bundle(bundle, "5.0.0-next.1")
+                    if case == "symlink":
+                        path.unlink()
+                        alias.rename(path)
+                    elif case == "hardlink":
+                        alias.unlink()
+                    else:
+                        path.write_bytes(before)
+                        path.chmod(mode)
+
+    def test_failed_compiler_signature_preserves_selection(self):
+        self.install()
+        archive, checksum = self.archive("5.0.0-next.2", with_compiler)
+        before = self.selection()
+        original = self.process
+        def fail_compiler(arguments, **options):
+            if arguments[0] == "/usr/bin/codesign" and Path(arguments[-1]).name == "hack-config-compiler":
+                return subprocess.CompletedProcess(arguments, 1)
+            return original(arguments, **options)
+        with mock.patch.object(installer.subprocess, "run", side_effect=fail_compiler):
+            with self.channel.lock():
+                with self.assertRaisesRegex(installer.Refusal, "signature failed: hack-config-compiler"):
+                    self.channel.install("5.0.0-next.2", archive, checksum, True)
+        self.assertEqual(self.selection(), before)
+
+    def test_reviewed_mcp_manager_upgrades_before_accepting_compiler_pair(self):
+        source = SOURCE.parent.parent / "tests/fixtures/prerelease-manager-mcp-v2.py"
+        self.assertEqual(installer.digest(source),
+                         "ca432b7fc6562bb091d17d3217f5d1daf9f91621a6919c8964ca51bee2111d0c")
+        spec = importlib.util.spec_from_file_location("mcp_prerelease_manager", source)
+        previous = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(previous)
+        self.channel = previous.Channel(self.root / "mcp-channel")
+        self.channel.initialize()
+        self.install()
+        archive, checksum = self.archive("5.0.0-next.2", with_mcp)
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.2", archive, checksum, True)
+        before = self.retained_snapshot()
+        archive, checksum = self.archive("5.0.0-next.3", with_compiler)
+        current = installer.Channel(self.channel.root)
+        with current.lock():
+            with self.assertRaisesRegex(installer.Refusal, "upgrade-manager"):
+                current.install("5.0.0-next.3", archive, checksum, True)
+        self.assertEqual(self.retained_snapshot(), before)
+        self.channel = self.upgrade_manager()
+        self.assertEqual(self.retained_snapshot(), before)
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.3", archive, checksum, True)
+            self.channel.select("5.0.0-next.2")
+        self.assertEqual(self.selection()["selected"], "5.0.0-next.2")
 
     def test_mcp_corruption_and_nested_inventory_preserve_previous_selection(self):
         def manifest_change(payload, prefix, field, value):

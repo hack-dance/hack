@@ -227,6 +227,8 @@ test("conflicting worktree aliases retain both original refusals", () => {
 test.each([
   ["command", CANARY],
   ["command", []],
+  ["command", [""]],
+  ["entrypoint", [""]],
   ["entrypoint", CANARY],
   ["image", "${PRIVATE}"],
   ["init", "true"],
@@ -275,6 +277,26 @@ test("missing image cannot become a normalized build or image fallback", () => {
     map({ name: "fixture" }, { services: { web: {} } }),
     "image_required_in_first_slice"
   );
+});
+
+test.each([
+  "web.v1",
+  "web_one",
+  "Web",
+  "${PRIVATE}",
+])("unsupported service spelling retains its original name %s", (name) => {
+  const result = map(
+    { name: "fixture" },
+    { services: { [name]: { image: "fixture" } } }
+  );
+  code(result, "invalid_service_name_first_slice");
+  expect(
+    result.report.fields.some(
+      (field) =>
+        field.pointer === `/services/${name}` &&
+        field.code === "invalid_service_name_first_slice"
+    )
+  ).toBe(true);
 });
 
 test.each([

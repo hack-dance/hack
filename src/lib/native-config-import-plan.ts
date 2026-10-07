@@ -119,7 +119,11 @@ function mappingFields(
   };
 }
 
-/** Closed, pure conversion. Every raw field starts refused until explicitly mapped. */
+/**
+ * Closed, pure conversion. Every raw field starts refused until explicitly mapped.
+ * Completeness here describes mapping coverage; the preview owner separately requires
+ * authoritative compiler validation before exposing a complete public preview.
+ */
 export function mapLegacyNativeImport(opts: {
   readonly configText: string;
   readonly composeText: string;
@@ -327,6 +331,7 @@ function staticText(value: unknown): value is string {
 function argv(value: unknown, empty: boolean): unknown {
   return Array.isArray(value) &&
     (empty || value.length > 0) &&
+    (value.length === 0 || value[0] !== "") &&
     value.every(
       (part) =>
         typeof part === "string" && !part.includes("$") && !part.includes("\0")
@@ -433,6 +438,9 @@ function mapServices(
     const pointer = importPointer("/services", name);
     if (isRecord(source)) {
       services[name] = mapService({ ...opts, source, pointer, profiles });
+      if (!NAME.test(name)) {
+        opts.refuse("compose", pointer, "invalid_service_name_first_slice");
+      }
     } else {
       opts.refuse("compose", pointer, "invalid_service");
     }

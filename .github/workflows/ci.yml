@@ -82,6 +82,9 @@ jobs:
           bunx ultracite check scripts/check-native-acquisition-plan-cli.ts src/lib/native-acquisition-plan-protocol.ts tests/native-acquisition-plan-transport.test.ts tests/native-acquisition-project.test.ts
           bun test tests/native-acquisition-plan-transport.test.ts tests/native-acquisition-project.test.ts
           bun scripts/check-native-acquisition-plan-cli.ts
+          bunx ultracite check scripts/check-native-config-import-cli.ts tests/native-config-import-plan.test.ts tests/native-config-import-preview.test.ts
+          bun test tests/native-config-import-plan.test.ts tests/native-config-import-preview.test.ts
+          bun scripts/check-native-config-import-cli.ts
 
   state-models:
     name: Runtime state models

@@ -43,6 +43,16 @@ Arguments, standard input and output, exit codes, and signals reach the selected
 candidate. Concurrent observation and stop commands can accompany a foreground
 candidate command; selecting another bundle refuses while any launcher is active.
 
+Every invocation verifies the retained bundle bytes and receipts again. MCP's
+nested identity uses digests from that same verification pass; it does not reread
+the same executable or reuse a previous invocation's trust result. Download and
+archive code loads only when installing software. Strict signature verification
+checks all bundled macOS binaries in one bounded `codesign` invocation and refuses
+any failed or unavailable check. These reductions preserve retained-version
+validation and the selection lock. Apply the
+reviewed `upgrade-manager` operation below to an older installation to receive
+manager changes; upgrading a bundle alone retains the original manager.
+
 Provider setup and actual application acceptance remain separate steps. Installation
 does not install the provider, boot a VM, enroll a project, move volumes, or activate
 system DNS or trust. Follow [native candidate preparation](native-candidate.md)
@@ -56,8 +66,9 @@ keep their original `manager.py`; running a newer installer against that root do
 not update it. The newer installer refuses an MCP upgrade when its own bytes differ
 from the retained manager, before publishing a version or changing selection.
 
-To update the original flat-layout manager shipped with `5.0.0-next.1`, review a
-newer installer containing `upgrade-manager`, then run that saved file explicitly:
+To update a reviewed predecessor manager, including the original flat-layout
+manager shipped with `5.0.0-next.1`, review a newer installer containing
+`upgrade-manager`, then run that saved file explicitly:
 
 ```sh
 python3 /absolute/reviewed/install-prerelease.py --root "$HOME/.hack-next" upgrade-manager
@@ -67,7 +78,7 @@ python3 "$HOME/.hack-next/manager.py" --root "$HOME/.hack-next" status
 Stop every retained version's graphs and runtime first, using the commands below
 with that version's paths. Manager upgrade takes the channel's exclusive lock,
 refuses active launchers, and applies the existing quiescence checks to every
-retained version. It recognizes the exact original manager bytes and the standard
+retained version. It recognizes exact reviewed predecessor bytes and the standard
 launcher; custom or changed code, modified receipts, changed home identities, and
 aliased paths are refused. It preserves the launcher, installed bundles, home
 identities, and the selected/previous versions. The original manager and receipt

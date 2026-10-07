@@ -268,8 +268,8 @@ class ChannelTests(unittest.TestCase):
         for name in nested:
             self.assertEqual((bundle / name).stat().st_mode & 0o777,
                              0o400 if name.endswith("manifest.json") else 0o500)
-        signed = {Path(arguments[-1]).name for arguments, _ in self.calls
-                  if arguments[0] == "/usr/bin/codesign"}
+        signed = {Path(path).name for arguments, _ in self.calls
+                  if arguments[0] == "/usr/bin/codesign" for path in arguments[3:]}
         self.assertTrue(set(installer.MCP_FILES.values()) <= signed)
         with self.channel.lock():
             self.channel.select("5.0.0-next.1")
@@ -309,8 +309,8 @@ class ChannelTests(unittest.TestCase):
                 with self.channel.lock():
                     self.channel.select(prior)
                 self.assertEqual(self.selection()["selected"], prior)
-        signed = {Path(arguments[-1]).name for arguments, _ in self.calls
-                  if arguments[0] == "/usr/bin/codesign"}
+        signed = {Path(path).name for arguments, _ in self.calls
+                  if arguments[0] == "/usr/bin/codesign" for path in arguments[3:]}
         self.assertIn("hack-config-compiler", signed)
         self.assertNotIn("hack.project.schema.json", signed)
         self.assertNotIn("hack.local.schema.json", signed)
@@ -379,14 +379,68 @@ class ChannelTests(unittest.TestCase):
         before = self.selection()
         original = self.process
         def fail_compiler(arguments, **options):
-            if arguments[0] == "/usr/bin/codesign" and Path(arguments[-1]).name == "hack-config-compiler":
+            if arguments[0] == "/usr/bin/codesign" and any(
+                    Path(path).name == "hack-config-compiler" for path in arguments[3:]):
                 return subprocess.CompletedProcess(arguments, 1)
             return original(arguments, **options)
         with mock.patch.object(installer.subprocess, "run", side_effect=fail_compiler):
             with self.channel.lock():
-                with self.assertRaisesRegex(installer.Refusal, "signature failed: hack-config-compiler"):
+                with self.assertRaisesRegex(installer.Refusal, "Candidate code signature failed"):
                     self.channel.install("5.0.0-next.2", archive, checksum, True)
         self.assertEqual(self.selection(), before)
+
+    def test_signature_batch_covers_all_executable_assets_in_one_strict_call(self):
+        archive, checksum = self.archive(mutate=lambda entries: with_mcp(with_compiler(entries)))
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.1", archive, checksum)
+        bundle = self.channel.root / "versions/5.0.0-next.1/bundle"
+        self.calls.clear()
+        installer.verify_signatures(bundle)
+        self.assertEqual(len(self.calls), 1)
+        arguments, options = self.calls[0]
+        self.assertEqual(arguments[:3], ["/usr/bin/codesign", "--verify", "--strict"])
+        paths = [Path(path) for path in arguments[3:]]
+        self.assertEqual([path.name for path in paths], [
+            "hack-native", "hack-cli", "hack-config-compiler",
+            "hack-mcp-adapter", "hack-mcp-backend", "hack-mcp-owner"])
+        self.assertEqual(len(set(paths)), 6)
+        self.assertTrue(all(path.is_relative_to(bundle) for path in paths))
+        self.assertEqual(options, {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                                   "stderr": subprocess.DEVNULL, "timeout": 30, "check": False})
+
+    def test_signature_batch_failures_preserve_selection_and_refuse_before_spawn(self):
+        archive, checksum = self.archive(mutate=lambda entries: with_mcp(with_compiler(entries)))
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.1", archive, checksum)
+        before = self.retained_snapshot()
+        cases = ("hack-native", "hack-mcp-adapter", "hack-mcp-owner", "timeout", "os-error")
+        for case in cases:
+            with self.subTest(failure=case):
+                calls = []
+                def fail_signature(arguments, **options):
+                    self.assertEqual(arguments[:3], ["/usr/bin/codesign", "--verify", "--strict"])
+                    calls.append((arguments, options))
+                    if case == "timeout":
+                        raise subprocess.TimeoutExpired(arguments, 30, stderr=b"private-signature-sentinel")
+                    if case == "os-error":
+                        raise OSError("private-signature-sentinel")
+                    failed = any(Path(path).name == case for path in arguments[3:])
+                    return subprocess.CompletedProcess(arguments, int(failed),
+                                                       stderr=b"private-signature-sentinel")
+                child = mock.Mock()
+                child.wait.return_value = 0
+                current = installer.Channel(self.channel.root)
+                with mock.patch.object(installer.subprocess, "run", side_effect=fail_signature), \
+                        mock.patch.object(installer.subprocess, "Popen", return_value=child) as spawn:
+                    with self.assertRaises(installer.Refusal) as refusal:
+                        with current.lock(shared=True):
+                            current.run(["--version"])
+                    message = ("Cannot verify candidate code signature." if case in ("timeout", "os-error")
+                               else "Candidate code signature failed.")
+                    self.assertEqual(str(refusal.exception), message)
+                    spawn.assert_not_called()
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(self.retained_snapshot(), before)
 
     def test_reviewed_mcp_manager_upgrades_before_accepting_compiler_pair(self):
         source = SOURCE.parent.parent / "tests/fixtures/prerelease-manager-mcp-v2.py"
@@ -414,6 +468,137 @@ class ChannelTests(unittest.TestCase):
             self.channel.install("5.0.0-next.3", archive, checksum, True)
             self.channel.select("5.0.0-next.2")
         self.assertEqual(self.selection()["selected"], "5.0.0-next.2")
+
+    def test_reviewed_compiler_manager_upgrade_preserves_selection_and_payloads(self):
+        source = SOURCE.parent.parent / "tests/fixtures/prerelease-manager-compiler-v3.py"
+        predecessor = "d39e77623be1876567e9db66c468e8da96067aeac0d88089df28efc11f850ef8"
+        self.assertEqual(installer.digest(source), predecessor)
+        self.assertIn(predecessor, installer.MANAGER_PREDECESSORS)
+        spec = importlib.util.spec_from_file_location("compiler_prerelease_manager", source)
+        previous = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(previous)
+        self.channel = previous.Channel(self.root / "compiler-channel")
+        self.channel.initialize()
+        archive, checksum = self.archive(mutate=lambda entries: with_mcp(with_compiler(entries)))
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.1", archive, checksum)
+        for home in ("native-home", "cli-home"):
+            (self.channel.root / "versions/5.0.0-next.1" / home / "marker").write_bytes(home.encode())
+        before = self.retained_snapshot()
+        self.assertEqual(installer.digest(self.channel.root / "manager.py"), predecessor)
+        self.channel = self.upgrade_manager()
+        self.assertEqual(self.retained_snapshot(), before)
+        self.assertEqual((self.channel.root / "manager.py").read_bytes(), SOURCE.read_bytes())
+        with self.channel.lock():
+            self.assertEqual(self.channel.state["selected"], "5.0.0-next.1")
+        child = mock.Mock()
+        child.wait.return_value = 17
+        with self.channel.lock(shared=True), \
+                mock.patch.object(installer.subprocess, "Popen", return_value=child) as spawn:
+            self.assertEqual(self.channel.run(["--version"]), 17)
+        self.assertEqual(spawn.call_args.args[0][1:], ["--version"])
+        self.assertEqual(self.retained_snapshot(), before)
+
+    def test_bundle_verification_hashes_each_payload_once_without_cross_call_cache(self):
+        archive, checksum = self.archive(mutate=lambda entries: with_mcp(with_compiler(entries)))
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.1", archive, checksum)
+        bundle = self.channel.root / "versions/5.0.0-next.1/bundle"
+        payload = installer.bundle_inventory(bundle)
+        for _ in range(2):
+            with mock.patch.object(installer, "digest", wraps=installer.digest) as reads:
+                identity, manifest = installer.verify_bundle(bundle, "5.0.0-next.1")
+            self.assertEqual(identity["version"], "5.0.0-next.1")
+            self.assertEqual(set(manifest), payload)
+            self.assertCountEqual([call.args[0] for call in reads.call_args_list],
+                                  [bundle / name for name in payload])
+
+    def test_nested_mcp_fingerprint_refuses_changed_bytes_despite_valid_outer_sums(self):
+        def same_size_asset_change(payload, prefix):
+            path = prefix + "hack-mcp-backend"
+            before = payload[path]
+            payload[path] = bytes([before[0] ^ 1]) + before[1:]
+            self.assertEqual(len(payload[path]), len(before))
+        self.rejects_install(lambda entries: with_mcp(entries, same_size_asset_change),
+                             "MCP asset fingerprint mismatch")
+
+    def test_retained_payload_tamper_with_restored_mtime_refuses_next_launch(self):
+        for version in ("5.0.0-next.1", "5.0.0-next.2"):
+            archive, checksum = self.archive(version, with_mcp)
+            with self.channel.lock():
+                self.channel.install(version, archive, checksum, version.endswith(".2"))
+        before = self.selection()
+        for version in ("5.0.0-next.1", "5.0.0-next.2"):
+            bundle = self.channel.root / "versions" / version / "bundle"
+            paths = [bundle / "hack-cli", next((bundle / "mcp").glob("*/hack-mcp-backend"))]
+            for path in paths:
+                with self.subTest(version=version, payload=path.name):
+                    contents, info = path.read_bytes(), path.stat()
+                    try:
+                        path.chmod(info.st_mode | 0o200)
+                        path.write_bytes(bytes([contents[0] ^ 1]) + contents[1:])
+                        path.chmod(info.st_mode)
+                        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+                        self.assertEqual(path.stat().st_size, info.st_size)
+                        self.assertEqual(path.stat().st_mtime_ns, info.st_mtime_ns)
+                        self.assertEqual(path.stat().st_mode, info.st_mode)
+                        self.assertEqual(path.stat().st_ino, info.st_ino)
+                        current = installer.Channel(self.channel.root)
+                        with mock.patch.object(installer.subprocess, "Popen") as spawn:
+                            with self.assertRaisesRegex(installer.Refusal, "checksum mismatch"):
+                                with current.lock(shared=True):
+                                    current.run(["--version"])
+                            spawn.assert_not_called()
+                        self.assertEqual(self.selection(), before)
+                    finally:
+                        path.chmod(info.st_mode | 0o200)
+                        path.write_bytes(contents)
+                        path.chmod(info.st_mode)
+                        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+    def test_selected_payload_changed_after_validation_refuses_before_spawn(self):
+        self.install()
+        path = self.channel.root / "versions/5.0.0-next.1/bundle/hack-cli"
+        contents, info = path.read_bytes(), path.stat()
+        with self.channel.lock(shared=True):
+            path.write_bytes(bytes([contents[0] ^ 1]) + contents[1:])
+            os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+            with mock.patch.object(installer.subprocess, "Popen") as spawn:
+                with self.assertRaisesRegex(installer.Refusal, "checksum mismatch"):
+                    self.channel.run(["--version"])
+                spawn.assert_not_called()
+
+    def test_status_and_run_do_not_load_archive_or_download_modules(self):
+        self.install()
+        script = """
+import importlib.util, io, json, sys
+spec = importlib.util.spec_from_file_location('isolated_installer', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+def loaded():
+    return sorted(name for name in sys.modules
+                  if name == 'tarfile' or name in ('urllib.request', 'urllib.error'))
+stages = {'import': loaded()}
+module.platform.system = lambda: 'Darwin'
+module.platform.machine = lambda: 'arm64'
+module.verify_signatures = lambda bundle: None
+class Child:
+    def __init__(self, *arguments, **options): pass
+    def wait(self): return 0
+    def send_signal(self, signum): pass
+module.subprocess.Popen = Child
+with module.contextlib.redirect_stdout(io.StringIO()):
+    assert module.main(['--root', sys.argv[2], 'status']) == 0
+stages['status'] = loaded()
+assert module.main(['--root', sys.argv[2], 'run', '--', '--version']) == 0
+stages['run'] = loaded()
+print(json.dumps(stages))
+"""
+        result = REAL_PROCESS_RUN([sys.executable, "-I", "-B", "-S", "-c", script,
+                                   str(SOURCE), str(self.channel.root)],
+                                  capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"import": [], "status": [], "run": []})
 
     def test_mcp_corruption_and_nested_inventory_preserve_previous_selection(self):
         def manifest_change(payload, prefix, field, value):
@@ -818,7 +1003,8 @@ class ChannelTests(unittest.TestCase):
         archive, checksum = self.archive("5.0.0-next.2")
         original = self.process
         def fail_signature(arguments, **options):
-            if arguments[0] == "/usr/bin/codesign" and ".stage-" in arguments[-1]:
+            if arguments[0] == "/usr/bin/codesign" and any(
+                    ".stage-" in path for path in arguments[3:]):
                 return subprocess.CompletedProcess(arguments, 1)
             return original(arguments, **options)
         with mock.patch.object(installer.subprocess, "run", side_effect=fail_signature):
@@ -979,6 +1165,69 @@ class ChannelTests(unittest.TestCase):
                     "https://github.com.evil.test/x", "https://user@github.com/x", "file:///tmp/x"):
             with self.assertRaises(installer.Refusal):
                 installer.secure_url(url)
+
+    def test_official_redirect_factory_accepts_assets_and_refuses_foreign_targets(self):
+        import urllib.request
+
+        origin = "https://github.com/hack-dance/hack/releases/download/v5.0.0-next.1/artifact"
+        request = urllib.request.Request(origin)
+        handler = installer.official_redirect_handler()
+        self.assertIsInstance(handler, urllib.request.HTTPRedirectHandler)
+        assets = "https://release-assets.githubusercontent.com/github-production-release-asset/fixture"
+        redirected = handler.redirect_request(request, None, 302, "Found", {}, assets)
+        self.assertEqual(redirected.full_url, assets)
+        for url in ("http://release-assets.githubusercontent.com/fixture", "https://example.com/fixture",
+                    "https://github.com.evil.test/fixture", "https://user:password@github.com/fixture",
+                    "https://github.com:444/fixture", "https://github.com/fixture#fragment"):
+            with self.subTest(url=url), self.assertRaisesRegex(installer.Refusal, "nonofficial"):
+                handler.redirect_request(request, None, 302, "Found", {}, url)
+
+    def test_download_uses_restricted_handler_and_writes_owned_exclusive_output(self):
+        import urllib.request
+
+        origin = "https://github.com/hack-dance/hack/releases/download/v5.0.0-next.1/artifact"
+        target = self.root / "official-download"
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.geturl.return_value = "https://release-assets.githubusercontent.com/fixture"
+        response.read.side_effect = [b"verified transport fixture", b""]
+        opener = mock.Mock()
+        opener.open.return_value = response
+        with mock.patch.object(urllib.request, "build_opener", return_value=opener) as build:
+            installer.download(origin, target, 128)
+        build.assert_called_once()
+        self.assertEqual(len(build.call_args.args), 1)
+        handler = build.call_args.args[0]
+        self.assertIsInstance(handler, urllib.request.HTTPRedirectHandler)
+        with self.assertRaises(installer.Refusal):
+            handler.redirect_request(urllib.request.Request(origin), None, 302, "Found", {},
+                                     "https://example.com/fixture")
+        opener.open.assert_called_once()
+        self.assertEqual(opener.open.call_args.args[0].full_url, origin)
+        self.assertEqual(opener.open.call_args.kwargs, {"timeout": 30})
+        self.assertEqual(target.read_bytes(), b"verified transport fixture")
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        with mock.patch.object(urllib.request, "build_opener", return_value=opener):
+            with self.assertRaises(FileExistsError):
+                installer.download(origin, target, 128)
+        self.assertEqual(target.read_bytes(), b"verified transport fixture")
+
+    def test_download_refuses_final_foreign_url_before_target_creation_or_read(self):
+        import urllib.request
+
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.geturl.return_value = "https://example.com/fixture"
+        opener = mock.Mock()
+        opener.open.return_value = response
+        target = self.root / "refused-download"
+        with mock.patch.object(urllib.request, "build_opener", return_value=opener) as build:
+            with self.assertRaisesRegex(installer.Refusal, "nonofficial"):
+                installer.download("https://github.com/hack-dance/hack/fixture", target, 128)
+        build.assert_called_once()
+        opener.open.assert_called_once()
+        response.read.assert_not_called()
+        self.assertFalse(target.exists())
 
     def test_moved_annotated_foreign_and_malformed_tags_never_activate(self):
         self.install()

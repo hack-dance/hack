@@ -141,6 +141,7 @@ hack down [options]
 | `--prune-caches` | After down, remove confirmed Compose-owned disposable cache volumes |
 | `--yes` | Confirm --prune-caches without prompting |
 | `--json` | Output JSON (machine-readable) |
+| `--recover` | Explicitly reconcile an interrupted native Compose stop while retaining data |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

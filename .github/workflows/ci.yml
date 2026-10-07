@@ -154,6 +154,10 @@ jobs:
         run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --jobs 2 -- -D warnings
       - name: Test candidate isolation contracts
         run: cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --jobs 2
+      - name: Lint candidate optional features
+        run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --all-features --jobs 2 -- -D warnings
+      - name: Test candidate optional feature contracts
+        run: cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-features --jobs 2
       - name: Build and inspect local candidate
         run: |
           mise exec zig -- ./scripts/build-hack-local.sh

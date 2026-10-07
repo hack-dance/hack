@@ -94,6 +94,10 @@ pub enum EnvironmentBinding {
     Default {
         value: String,
     },
+    Endpoint {
+        reference: crate::endpoint::EndpointReference,
+        target: crate::endpoint::EndpointTarget,
+    },
 }
 #[derive(Debug, Serialize, JsonSchema, TS)]
 pub struct EnvironmentPlan {
@@ -127,6 +131,9 @@ pub enum PlanResult {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional, type = "RoutingResolution")]
         routing_resolution: Option<Box<crate::routing::RoutingResolution>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "HostBindingResolution")]
+        host_binding_resolution: Option<Box<crate::endpoint::HostBindingResolution>>,
         environment_plan: Box<EnvironmentPlan>,
     },
     Failure {
@@ -166,6 +173,7 @@ pub fn plan(bytes: &[u8], profiles: &[String]) -> PlanResult {
             declared_workloads: resolved.compiled.declared_workloads,
             local_resolution: resolved.local_resolution,
             routing_resolution: resolved.routing_resolution.map(Box::new),
+            host_binding_resolution: resolved.host_binding_resolution.map(Box::new),
             environment_plan: Box::new(environment_plan),
         },
         Err(error) => PlanResult::failure(error),
@@ -396,7 +404,10 @@ fn bind(
                 &pointer,
                 &mut output.diagnostics,
                 &mut budget,
-                &format!("workload/{name}"),
+                BindingOwner {
+                    cache_key: &format!("workload/{name}"),
+                    endpoint_context: crate::endpoint::EndpointContext::Workload,
+                },
             )?;
             output.workloads.insert(name.clone(), bindings);
         }
@@ -425,7 +436,10 @@ fn bind(
                     &entry.pointer,
                     &mut output.diagnostics,
                     &mut budget,
-                    &cache_key,
+                    BindingOwner {
+                        cache_key: &cache_key,
+                        endpoint_context: crate::endpoint::EndpointContext::Host,
+                    },
                 )?;
                 plans.insert(
                     entry.name.to_owned(),
@@ -442,6 +456,10 @@ fn bind(
     Ok(output)
 }
 
+struct BindingOwner<'a> {
+    cache_key: &'a str,
+    endpoint_context: crate::endpoint::EndpointContext,
+}
 fn bind_environment(
     resolved: &local::Resolved,
     baseline: &BTreeMap<String, ManagedBindingMetadata>,
@@ -449,9 +467,9 @@ fn bind_environment(
     pointer: &str,
     diagnostics: &mut Vec<local::ResolveDiagnostic>,
     budget: &mut ReportBudget,
-    baseline_key: &str,
+    owner: BindingOwner<'_>,
 ) -> Result<BTreeMap<String, EnvironmentBinding>, local::ResolveDiagnostic> {
-    budget.baseline(baseline_key, baseline, resolved, pointer)?;
+    budget.baseline(owner.cache_key, baseline, resolved, pointer)?;
     let mut bindings: BTreeMap<String, EnvironmentBinding> = baseline
         .iter()
         .map(|(key, b)| (key.clone(), managed(key, b)))
@@ -504,6 +522,30 @@ fn bind_environment(
                         project_diagnostic(resolved, "missing_env_reference", &pointer);
                     budget.value(&diagnostic, resolved, &pointer)?;
                     diagnostics.push(diagnostic);
+                }
+            }
+            EnvironmentValue::Endpoint { endpoint } => {
+                let target = if baseline.contains_key(dest) {
+                    Err("env_endpoint_collision")
+                } else {
+                    crate::endpoint::target(endpoint, owner.endpoint_context, resolved)
+                };
+                match target {
+                    Ok(target) => {
+                        budget.value(&target, resolved, &pointer)?;
+                        bindings.insert(
+                            dest.clone(),
+                            EnvironmentBinding::Endpoint {
+                                reference: endpoint.clone(),
+                                target,
+                            },
+                        );
+                    }
+                    Err(code) => {
+                        let diagnostic = project_diagnostic(resolved, code, &pointer);
+                        budget.value(&diagnostic, resolved, &pointer)?;
+                        diagnostics.push(diagnostic);
+                    }
                 }
             }
         }
@@ -571,6 +613,7 @@ impl ReportBudget {
         result.value(&resolved.compiled.declared_workloads, resolved, "")?;
         result.value(&resolved.local_resolution, resolved, "")?;
         result.value(&resolved.routing_resolution, resolved, "")?;
+        result.value(&resolved.host_binding_resolution, resolved, "")?;
         result.value(&metadata.overlay, resolved, "")?;
         if let Some(host) = &resolved.compiled.plan.host {
             result.value(&host.targets(), resolved, "")?;

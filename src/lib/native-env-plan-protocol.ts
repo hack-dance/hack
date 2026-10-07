@@ -7,6 +7,7 @@ import type {
 } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "./guards.ts";
 import type { NativeConfigDiagnostic } from "./native-config-compiler.ts";
+import { parseNativeEndpointBinding } from "./native-endpoint-plan-protocol.ts";
 import {
   type NativeHostEnvironmentPlan,
   type NativeHostMetadata,
@@ -154,6 +155,9 @@ function parseWorkloadMetadata(
 function parseBinding(value: unknown): NativeEnvBinding | null {
   if (!isRecord(value)) {
     return null;
+  }
+  if (value.kind === "endpoint") {
+    return parseNativeEndpointBinding(value);
   }
   if (
     value.kind === "managed" &&

@@ -21,8 +21,24 @@ fn optional_object(document: &json::Document, pointer: &str) -> Result<(), Diagn
 
 pub(crate) fn project(document: &json::Document) -> Result<(), Diagnostic> {
     object(document, "")?;
-    for key in ["source", "environment", "worktree", "routes", "open"] {
+    for key in [
+        "source",
+        "environment",
+        "worktree",
+        "routes",
+        "open",
+        "host_bindings",
+    ] {
         optional_object(document, &json::child("", key))?;
+    }
+    if let Some(bindings) = document
+        .value
+        .get("host_bindings")
+        .and_then(Value::as_object)
+    {
+        for name in bindings.keys() {
+            object(document, &json::child("/host_bindings", name))?;
+        }
     }
     if let Some(storage) = document.value.get("storage").and_then(Value::as_object) {
         for key in storage.keys() {
@@ -45,10 +61,12 @@ pub(crate) fn project(document: &json::Document) -> Result<(), Diagnostic> {
                     .and_then(Value::as_object)
                 {
                     for key in env.keys() {
+                        let entry = json::child(&format!("{pointer}/environment"), key);
                         object(
                             document,
                             &json::child(&format!("{pointer}/environment"), key),
                         )?;
+                        optional_object(document, &format!("{entry}/endpoint"))?;
                     }
                 }
                 for field in ["mounts", "depends_on"] {
@@ -114,6 +132,13 @@ fn host_invocation(document: &json::Document, pointer: &str) -> Result<(), Diagn
             object(
                 document,
                 &json::child(&format!("{pointer}/environment"), name),
+            )?;
+            optional_object(
+                document,
+                &format!(
+                    "{}/endpoint",
+                    json::child(&format!("{pointer}/environment"), name)
+                ),
             )?;
         }
     }

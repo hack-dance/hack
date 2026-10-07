@@ -1,11 +1,137 @@
 {
+  "$defs": {
+    "EndpointProtocol": {
+      "enum": [
+        "http",
+        "https",
+        "tcp"
+      ],
+      "type": "string"
+    },
+    "HostBindingTarget": {
+      "description": "`host` is the host loopback/gateway intent; an external hostname is a literal address.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "host",
+              "type": "string"
+            },
+            "port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "protocol": {
+              "$ref": "#/$defs/EndpointProtocol"
+            }
+          },
+          "required": [
+            "kind",
+            "port",
+            "protocol"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "hostname": {
+              "maxLength": 253,
+              "minLength": 1,
+              "type": "string"
+            },
+            "kind": {
+              "const": "external",
+              "type": "string"
+            },
+            "port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "protocol": {
+              "$ref": "#/$defs/EndpointProtocol"
+            }
+          },
+          "required": [
+            "kind",
+            "hostname",
+            "port",
+            "protocol"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LocalEnvironment": {
+      "additionalProperties": false,
+      "properties": {
+        "default_overlay": {
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "LocalOpen": {
+      "additionalProperties": false,
+      "properties": {
+        "prefer": {
+          "$ref": "#/$defs/OpenPreference"
+        }
+      },
+      "type": "object"
+    },
+    "LocalRoutes": {
+      "additionalProperties": false,
+      "properties": {
+        "domain": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "OpenPreference": {
+      "enum": [
+        "auto",
+        "alias",
+        "dev"
+      ],
+      "type": "string"
+    }
+  },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "LocalConfig",
-  "type": "object",
+  "additionalProperties": false,
   "properties": {
     "environment": {
       "$ref": "#/$defs/LocalEnvironment",
       "default": {}
+    },
+    "host_bindings": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/HostBindingTarget"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "propertyNames": {
+        "maxLength": 63,
+        "minLength": 1,
+        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        "type": "string"
+      },
+      "type": "object"
     },
     "open": {
       "$ref": "#/$defs/LocalOpen"
@@ -14,55 +140,15 @@
       "$ref": "#/$defs/LocalRoutes"
     },
     "schema_version": {
-      "type": "integer",
       "format": "uint32",
       "maximum": 1,
-      "minimum": 1
+      "minimum": 1,
+      "type": "integer"
     }
   },
-  "additionalProperties": false,
   "required": [
     "schema_version"
   ],
-  "$defs": {
-    "LocalEnvironment": {
-      "type": "object",
-      "properties": {
-        "default_overlay": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
-        }
-      },
-      "additionalProperties": false
-    },
-    "LocalOpen": {
-      "type": "object",
-      "properties": {
-        "prefer": {
-          "$ref": "#/$defs/OpenPreference"
-        }
-      },
-      "additionalProperties": false
-    },
-    "LocalRoutes": {
-      "type": "object",
-      "properties": {
-        "domain": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false
-    },
-    "OpenPreference": {
-      "type": "string",
-      "enum": [
-        "auto",
-        "alias",
-        "dev"
-      ]
-    }
-  }
+  "title": "LocalConfig",
+  "type": "object"
 }

@@ -284,6 +284,13 @@ fn parse_origin(value: &str) -> Option<Origin> {
         ip,
     })
 }
+
+/// Canonical DNS or IP literal host, without authority syntax or implicit normalization.
+pub(crate) fn hostname(value: &str) -> bool {
+    value.len() <= 253
+        && parse_origin(&format!("http://{value}"))
+            .is_some_and(|origin| origin.port.is_none() && origin.host == value)
+}
 fn origin(value: &str) -> Option<String> {
     Some(parse_origin(value)?.text())
 }
@@ -386,6 +393,7 @@ pub(crate) struct Context<'a> {
     pub primary: Option<&'a crate::local::ParsedLocal>,
     pub checkout: Option<&'a crate::local::ParsedLocal>,
     pub overlay: &'a Option<String>,
+    pub host_binding_resolution: Option<&'a crate::endpoint::HostBindingResolution>,
 }
 fn at(
     positions: &BTreeMap<String, (usize, usize)>,
@@ -481,6 +489,7 @@ pub(crate) fn resolve(
     budget.value(plan, &ctx)?;
     budget.value(&ctx.compiled.declared_workloads, &ctx)?;
     budget.value(ctx.overlay, &ctx)?;
+    budget.value(&ctx.host_binding_resolution, &ctx)?;
     let mut domain_value = "hack.local".to_owned();
     let mut domain_origin = DomainOrigin::Default;
     if let Some(value) = &ctx.request.global_domain {

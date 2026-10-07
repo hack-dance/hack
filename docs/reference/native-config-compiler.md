@@ -107,7 +107,7 @@ backslashes and drive syntax. Lexical `.` and repeated separators normalize; no
 filesystem or symlink resolution occurs. Working directories and mount targets
 must be absolute POSIX container paths without `..`.
 
-Container shutdown/restart policies, endpoint references,
+Container shutdown/restart policies,
 network/security/resources, cache protocols, backend options, arbitrary extensions,
 and other local settings are not yet implemented. They refuse rather than being
 silently dropped. This foundation does not replace the full native contract or
@@ -177,7 +177,72 @@ choice and selected routes. The CLI cross-checks the report against authored
 declarations and request context. Routing changes affect the local resolution hash;
 local policy never rewrites the authored semantic hash. This is offline planning:
 it does not configure DNS, trust certificates, run hooks, bind ports or admit a
-runtime. Endpoint bindings and execution remain later integration steps.
+runtime. Execution remains a later integration step.
+
+## Endpoint references and host bindings
+
+Environment destinations can reference a route, service or logical host binding:
+
+```json
+{
+  "API": { "endpoint": { "kind": "service", "name": "api", "port": 3000, "protocol": "http" } },
+  "APP_ORIGIN": { "endpoint": { "kind": "route", "name": "web" } },
+  "SEARCH": { "endpoint": { "kind": "host_binding", "name": "search" } }
+}
+```
+
+Service references require a declared service, a port from 1 to 65,535 and an
+explicit `http`, `https` or `tcp` protocol. Jobs cannot be service targets. Route
+references name an entry in `routes.http`. Unknown references and active consumers
+of inactive service targets refuse; disabled declarations still receive static
+validation. A route endpoint uses the selected origin from `routing_resolution`.
+The port and protocol of a direct service endpoint remain typed rather than being
+turned into a guessed URL or credentials-bearing connection string.
+
+Optional project `host_bindings` declares targets in a separate logical namespace:
+
+```json
+{
+  "host_bindings": {
+    "search": { "kind": "host", "port": 9200, "protocol": "http" },
+    "remote": { "kind": "external", "hostname": "search.example.com", "port": 443, "protocol": "https" }
+  }
+}
+```
+
+`host` identifies an endpoint on the machine running the project. Its report
+retains `context:"host"` or `context:"workload"`; an execution backend must choose
+the appropriate loopback or guest-to-host address. `external` preserves a validated
+hostname, port and protocol. Neither definition starts a tunnel, grants ownership
+of a process, probes connectivity or configures DNS. Commands, credentials,
+resource IDs and source paths are not binding targets. External hostnames cannot
+contain credentials, schemes, ports, paths, queries or fragments.
+
+Local `host_bindings` merges by logical name: project, inherited verified primary,
+then checkout. A local `null` removes that binding; a later target restores it.
+There is no recursive patch or command injection. Actual resolution reports
+`host_binding_resolution:{bindings:{NAME:{target,origin}},removed:{NAME:origin}}`,
+where `origin` is `project`, `primary_local` or `checkout_local`.
+Context-free `--file` validation keeps local-only binding references symbolic.
+Project-aware validation rejects missing or removed referenced bindings before
+reading managed environment documents. CI, slim and inheritance opt-out rules
+apply to binding inheritance just as they do to other local settings.
+
+`config plan` returns endpoint bindings as
+`{kind:"endpoint",reference:{...},target:{...}}`. An existing managed key at the
+destination produces `env_endpoint_collision`, keeps the managed binding intact,
+and makes the plan incomplete with exit 1. Endpoint and unset tags cannot share
+an entry. A direct service endpoint in a host invocation produces
+`unsupported_endpoint_context` rather than assuming guest DNS works on the host.
+This is a planning refusal, not a failure to launch a process.
+
+Endpoint support requires the sidecar's `endpoint_plan_version:1` capability.
+Consumers validate report targets against their authored references and existing
+routing/binding reports. Authored identity includes project binding declarations;
+local binding selection affects only resolution identity. The shared output budget
+covers expanded binding reports and endpoint entries. No managed values, ciphertext,
+keys or host paths enter these reports. Late hook-produced bindings and runtime
+address delivery still require separate execution and generation-fence work.
 
 ## Host declarations
 
@@ -379,8 +444,9 @@ The optional `.hack/hack.local.json` is a separate versioned document:
 {"schema_version":1,"environment":{"default_overlay":null}}
 ```
 
-Local settings permit `environment.default_overlay`, `routes.domain` and
-`open.prefer`. Omission inherits; overlay null selects base, while domain/open null
+Local settings permit `environment.default_overlay`, `routes.domain`,
+`open.prefer` and `host_bindings`. Omission inherits; overlay null selects base,
+binding null removes a logical target, while domain/open null
 refuses. A canonical overlay name selects that overlay. Other fields, workload
 definitions, unversioned documents, duplicate keys and unknown versions refuse.
 The effective selection is project default/base, then verified primary local,

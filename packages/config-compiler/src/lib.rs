@@ -1,4 +1,5 @@
 //! Pure, bounded native configuration compiler. It performs no host admission or secret lookup.
+pub mod endpoint;
 pub mod environment;
 pub mod host;
 mod json;
@@ -45,6 +46,22 @@ fn diagnostic_message(code: &str) -> &'static str {
         "env_reference_collision" => {
             "A remapped reference conflicts with an existing managed destination."
         }
+        "env_endpoint_collision" => "An endpoint cannot replace an existing managed destination.",
+        "unsupported_endpoint_context" => {
+            "A direct service endpoint has no qualified host address."
+        }
+        "unknown_endpoint_target" => "The endpoint must name a declared route or service.",
+        "inactive_endpoint_target" => {
+            "An active invocation references a disabled service endpoint."
+        }
+        "unknown_host_binding" => {
+            "The logical host binding is absent from the effective local selection."
+        }
+        "removed_host_binding" => "The local selection removes a referenced logical host binding.",
+        "invalid_host_binding" => {
+            "Use a canonical hostname and explicit nonzero port and protocol."
+        }
+        "invalid_endpoint" => "Use a canonical reference name and explicit nonzero service port.",
         "missing_overlay" => {
             "The selected overlay is missing; available base and local layers are used."
         }
@@ -159,6 +176,7 @@ struct Compiled {
     semantic_hash: String,
     declared_workloads: BTreeMap<String, WorkloadKind>,
     positions: BTreeMap<String, (usize, usize)>,
+    endpoint_uses: Vec<endpoint::EndpointUse>,
 }
 fn compile_inner(bytes: &[u8], profiles: &[String]) -> Result<Compiled, Diagnostic> {
     let document = json::parse(bytes)?;
@@ -204,6 +222,7 @@ fn compile_inner(bytes: &[u8], profiles: &[String]) -> Result<Compiled, Diagnost
                 .map(|name| (name.clone(), WorkloadKind::Job)),
         )
         .collect();
+    let endpoint_uses = endpoint::uses(&project);
     let plan = validate::lower(project, profiles, &at)?;
     let encoded = serde_json::to_vec(&plan).map_err(|_| at("encoding_failed", ""))?;
     let semantic_hash = format!("{:x}", Sha256::digest(encoded));
@@ -212,6 +231,7 @@ fn compile_inner(bytes: &[u8], profiles: &[String]) -> Result<Compiled, Diagnost
         semantic_hash,
         declared_workloads,
         positions: document.positions,
+        endpoint_uses,
     })
 }
 fn diagnostic_at(
@@ -243,6 +263,7 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
     ]);
     schema["$defs"]["HostSingleton"]["properties"]["ports"]["items"]["minimum"] =
         serde_json::json!(1);
+    schema["properties"]["host_bindings"]["propertyNames"] = endpoint::binding_name_schema();
     let schema = serde_json::to_string_pretty(&schema)? + "\n";
     let cfg = ts_rs::Config::default();
     let declarations = [
@@ -252,6 +273,14 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
         environment::HostEnvironmentPlan::decl(&cfg),
         environment::EnvPlanRequest::decl(&cfg),
         environment::EnvironmentBinding::decl(&cfg),
+        endpoint::EndpointProtocol::decl(&cfg),
+        endpoint::EndpointReference::decl(&cfg),
+        endpoint::HostBindingTarget::decl(&cfg),
+        endpoint::HostBindingOrigin::decl(&cfg),
+        endpoint::ResolvedHostBinding::decl(&cfg),
+        endpoint::HostBindingResolution::decl(&cfg),
+        endpoint::EndpointContext::decl(&cfg),
+        endpoint::EndpointTarget::decl(&cfg),
         environment::EnvironmentPlan::decl(&cfg),
         environment::PlanResult::decl(&cfg),
         host::HostConfig::decl(&cfg),
@@ -322,5 +351,5 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
 }
 
 pub fn protocol() -> Value {
-    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1})
+    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1,"endpoint_plan_version":1})
 }

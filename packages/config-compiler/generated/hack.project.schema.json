@@ -94,6 +94,84 @@
         }
       ]
     },
+    "EndpointProtocol": {
+      "enum": [
+        "http",
+        "https",
+        "tcp"
+      ],
+      "type": "string"
+    },
+    "EndpointReference": {
+      "description": "References select a named public route, a guest service, or a locally provisioned binding.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "route",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "service",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "protocol": {
+              "$ref": "#/$defs/EndpointProtocol"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "port",
+            "protocol"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "host_binding",
+              "type": "string"
+            },
+            "name": {
+              "maxLength": 63,
+              "minLength": 1,
+              "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "EnvironmentSelection": {
       "additionalProperties": false,
       "properties": {
@@ -152,6 +230,77 @@
           },
           "required": [
             "unset"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {
+              "$ref": "#/$defs/EndpointReference"
+            }
+          },
+          "required": [
+            "endpoint"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HostBindingTarget": {
+      "description": "`host` is the host loopback/gateway intent; an external hostname is a literal address.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "host",
+              "type": "string"
+            },
+            "port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "protocol": {
+              "$ref": "#/$defs/EndpointProtocol"
+            }
+          },
+          "required": [
+            "kind",
+            "port",
+            "protocol"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "hostname": {
+              "maxLength": 253,
+              "minLength": 1,
+              "type": "string"
+            },
+            "kind": {
+              "const": "external",
+              "type": "string"
+            },
+            "port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "protocol": {
+              "$ref": "#/$defs/EndpointProtocol"
+            }
+          },
+          "required": [
+            "kind",
+            "hostname",
+            "port",
+            "protocol"
           ],
           "type": "object"
         }
@@ -778,6 +927,18 @@
     },
     "host": {
       "$ref": "#/$defs/HostConfig"
+    },
+    "host_bindings": {
+      "additionalProperties": {
+        "$ref": "#/$defs/HostBindingTarget"
+      },
+      "propertyNames": {
+        "maxLength": 63,
+        "minLength": 1,
+        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        "type": "string"
+      },
+      "type": "object"
     },
     "jobs": {
       "additionalProperties": {

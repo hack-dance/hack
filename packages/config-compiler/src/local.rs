@@ -53,6 +53,17 @@ pub struct LocalConfig {
     #[schemars(with = "crate::routing::LocalOpen")]
     #[ts(optional, type = "LocalOpen")]
     pub open: Option<crate::routing::LocalOpen>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(
+        with = "std::collections::BTreeMap<String,Option<crate::endpoint::HostBindingTarget>>"
+    )]
+    #[ts(optional, type = "{ [key in string]: HostBindingTarget | null }")]
+    pub host_bindings:
+        Option<std::collections::BTreeMap<String, Option<crate::endpoint::HostBindingTarget>>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, TS)]
@@ -171,6 +182,9 @@ pub enum ResolveResult {
         #[ts(optional, type = "RoutingResolution")]
         routing_resolution: Option<Box<crate::routing::RoutingResolution>>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "HostBindingResolution")]
+        host_binding_resolution: Option<Box<crate::endpoint::HostBindingResolution>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional, type = "true")]
         routing_inputs_required: Option<bool>,
     },
@@ -251,12 +265,36 @@ fn read_local(text: &str, role: DocumentRole) -> Result<ParsedLocal, ResolveDiag
     if document.value.get("environment").is_some() {
         crate::shape::object(&document, "/environment").map_err(|d| with_role(role, d))?;
     }
-    for key in ["routes", "open"] {
+    for key in ["routes", "open", "host_bindings"] {
         if document.value.get(key).is_some() {
             crate::shape::object(&document, &format!("/{key}")).map_err(|d| with_role(role, d))?;
         }
     }
+    if let Some(bindings) = document
+        .value
+        .get("host_bindings")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, target) in bindings {
+            if !target.is_null() {
+                crate::shape::object(&document, &json::child("/host_bindings", name))
+                    .map_err(|d| with_role(role, d))?;
+            }
+        }
+    }
     let local: LocalConfig = decode(&document, role)?;
+    if let Some(bindings) = &local.host_bindings {
+        let at = |code: &str, pointer: &str| diagnostic_at(&document.positions, code, pointer);
+        for (name, target) in bindings {
+            crate::endpoint::validate_binding(
+                name,
+                target.as_ref(),
+                &json::child("/host_bindings", name),
+                &at,
+            )
+            .map_err(|d| with_role(role, d))?;
+        }
+    }
     if local
         .routes
         .as_ref()
@@ -315,6 +353,7 @@ pub fn resolve(bytes: &[u8], profiles: &[String]) -> ResolveResult {
             declared_workloads: resolved.compiled.declared_workloads,
             local_resolution: resolved.local_resolution,
             routing_resolution: resolved.routing_resolution.map(Box::new),
+            host_binding_resolution: resolved.host_binding_resolution.map(Box::new),
             routing_inputs_required: resolved.routing_inputs_required,
         },
         Err(diagnostic) => ResolveResult::Failure {
@@ -329,6 +368,7 @@ pub(crate) struct Resolved {
     pub(crate) local_resolution: LocalResolution,
     pub(crate) overlay_location: ResolveDiagnostic,
     pub(crate) routing_resolution: Option<crate::routing::RoutingResolution>,
+    pub(crate) host_binding_resolution: Option<crate::endpoint::HostBindingResolution>,
     pub(crate) routing_inputs_required: Option<bool>,
 }
 fn resolve_inner(bytes: &[u8], profiles: &[String]) -> Result<Resolved, ResolveDiagnostic> {
@@ -465,12 +505,15 @@ pub(crate) fn resolve_document(
             diagnostic_at(&document.positions, "missing_overlay", "/explicit_overlay"),
         );
     }
+    let host_binding_resolution =
+        crate::endpoint::resolve_bindings(&compiled, primary.as_ref(), checkout.as_ref())?;
     let routing_context = crate::routing::Context {
         compiled: &compiled,
         request: &request,
         primary: primary.as_ref(),
         checkout: checkout.as_ref(),
         overlay: &overlay,
+        host_binding_resolution: host_binding_resolution.as_ref(),
     };
     let routing_active = crate::routing::required(&routing_context);
     let routing_inputs_required =
@@ -521,10 +564,13 @@ pub(crate) fn resolve_document(
         local_resolution,
         overlay_location,
         routing_resolution,
+        host_binding_resolution,
         routing_inputs_required,
     })
 }
 
 pub fn local_schema() -> Result<String, serde_json::Error> {
-    Ok(serde_json::to_string_pretty(&schemars::schema_for!(LocalConfig))? + "\n")
+    let mut schema = serde_json::to_value(schemars::schema_for!(LocalConfig))?;
+    schema["properties"]["host_bindings"]["propertyNames"] = crate::endpoint::binding_name_schema();
+    Ok(serde_json::to_string_pretty(&schema)? + "\n")
 }

@@ -419,5 +419,125 @@
         "extra": true
       }
     }
+  },
+  {
+    "name": "typed host bindings",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 2,
+          "protocol": "tcp"
+        },
+        "external": {
+          "kind": "external",
+          "hostname": "api.example.com",
+          "port": 443,
+          "protocol": "https"
+        }
+      }
+    }
+  },
+  {
+    "name": "host binding tombstone",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "host_bindings": {
+        "database": null
+      }
+    }
+  },
+  {
+    "name": "empty host binding map",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "host_bindings": {}
+    }
+  },
+  {
+    "name": "null binding map",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "host_bindings": null
+    }
+  },
+  {
+    "name": "array binding map",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "host_bindings": []
+    }
+  },
+  {
+    "name": "tuple binding target",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "host_bindings": {
+        "database": ["host", 2, "tcp"]
+      }
+    }
+  },
+  {
+    "name": "invalid local binding name",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "host_bindings": {
+        "DATABASE": null
+      }
+    }
+  },
+  {
+    "name": "invalid local binding kind",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "host_bindings": {
+        "database": {
+          "kind": "service",
+          "name": "web",
+          "port": 2,
+          "protocol": "tcp"
+        }
+      }
+    }
+  },
+  {
+    "name": "host binding command refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "host_bindings": {
+        "database": {
+          "kind": "host",
+          "port": 2,
+          "protocol": "tcp",
+          "command": "false"
+        }
+      }
+    }
+  },
+  {
+    "name": "host binding credential refuses",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "host_bindings": {
+        "database": {
+          "kind": "external",
+          "hostname": "api.example.com",
+          "port": 2,
+          "protocol": "https",
+          "credential": "sentinel"
+        }
+      }
+    }
   }
 ]

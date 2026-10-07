@@ -81,3 +81,64 @@ cargo +1.97.1 fmt --manifest-path packages/config-compiler/Cargo.toml --check
 cargo +1.97.1 clippy --locked --manifest-path packages/config-compiler/Cargo.toml --all-targets -- -D warnings
 cargo +1.97.1 test --locked --manifest-path packages/config-compiler/Cargo.toml
 ```
+
+## Metadata-only environment planning
+
+`compile` and `resolve` return a separate `declared_workloads` map from every
+validated service/job name to `service` or `job`, including inactive profiles.
+This projection does not change the authored plan or semantic hash. Consumers use
+it to ask the existing environment owner for effective metadata without parsing
+authored project JSON themselves.
+
+The protocol advertises `env_plan_version: 1`. `plan [--profile NAME]...` accepts
+the resolve request fields plus required `env_metadata`:
+
+```json
+{
+  "metadata_version": 1,
+  "overlay": null,
+  "overlay_exists": false,
+  "workloads": {
+    "web": { "TOKEN": { "scope": "global", "secret": true } }
+  },
+  "inactive_scopes": []
+}
+```
+
+`overlay` is required and nullable. It must equal the resolved selection; base
+uses `overlay_exists: false`. Metadata must include exactly the complete declared
+workload namespace. Each winning scope must be `global` or that owning workload;
+managed key names use `[A-Z_][A-Z0-9_]*`. A workload named `host` owns its own
+metadata; it does not grant generic host scope to other workloads. Inactive scopes
+must be distinct valid stored scope names outside the declared namespace, excluding
+reserved `global` and `host`. All supplied metadata is validated, including inactive
+workloads. Unknown fields, arrays used as objects, and duplicates refuse. The JSON
+serialization of metadata is limited to 1 MiB, in addition to the existing document
+and encoded-request bounds. Managed values, ciphertext and paths are unsupported.
+
+Successful parsing returns `ok: true` and the unchanged plan, semantic hash, local
+resolution and declared namespace, plus `environment_plan`. That object contains
+`plan_version: 1`, selection metadata, `complete`, selected `workloads`, `warnings`
+and `diagnostics`. Bindings have one of three forms:
+
+- `managed`: symbolic `key`, winning `scope`, and `secret` flag;
+- `literal`: the explicit public authored `value`;
+- `default`: the explicit public fallback `value` used when no baseline key exists.
+
+Managed baseline presence includes an empty managed value. `unset` removes a
+binding. References always read the immutable owning baseline before authored
+changes; a literal cannot create a reference source, nor can unset remove one.
+Same-key references are allowed. A reference remapped onto a different existing
+managed destination produces `env_reference_collision`; a missing source produces
+`missing_env_reference`. Both make `complete: false`. Only selected workloads
+contribute binding diagnostics. Missing selected overlays and inactive scopes emit
+visible fixed warnings without authorizing new targets or suppressing missing refs.
+Binding diagnostics use original project pointers and positions, without managed
+values. Missing-overlay warnings identify the document that supplied the winning
+selection: project, primary local, checkout local, or explicit request, preserving
+that document’s pointer and line/column.
+
+The process exits `1` for incomplete bindings even when `ok: true`, and `0` only
+for a complete metadata plan. Completeness is not runtime admission: this operation
+cannot decrypt, verify secret availability, apply config, run hooks, or start a
+workload. No metadata-derived or secret-derived hash is added to the portable plan.

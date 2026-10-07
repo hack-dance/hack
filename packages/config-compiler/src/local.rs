@@ -80,7 +80,7 @@ pub enum DocumentRole {
     CheckoutLocal,
     Request,
 }
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Serialize, JsonSchema, TS)]
 pub struct ResolveDiagnostic {
     pub document: DocumentRole,
     #[serde(flatten)]
@@ -112,6 +112,7 @@ pub enum ResolveResult {
         ok: bool,
         plan: Box<Plan>,
         semantic_hash: String,
+        declared_workloads: std::collections::BTreeMap<String, crate::WorkloadKind>,
         local_resolution: LocalResolution,
     },
     Failure {
@@ -134,13 +135,13 @@ impl ResolveResult {
         }
     }
 }
-fn with_role(document: DocumentRole, diagnostic: Diagnostic) -> ResolveDiagnostic {
+pub(crate) fn with_role(document: DocumentRole, diagnostic: Diagnostic) -> ResolveDiagnostic {
     ResolveDiagnostic {
         document,
         diagnostic,
     }
 }
-fn decode<T: serde::de::DeserializeOwned>(
+pub(crate) fn decode<T: serde::de::DeserializeOwned>(
     document: &json::Document,
     role: DocumentRole,
 ) -> Result<T, ResolveDiagnostic> {
@@ -166,7 +167,11 @@ fn decode<T: serde::de::DeserializeOwned>(
         with_role(role, diagnostic_at(&document.positions, code, &pointer))
     })
 }
-fn read_local(text: &str, role: DocumentRole) -> Result<LocalConfig, ResolveDiagnostic> {
+struct ParsedLocal {
+    config: LocalConfig,
+    overlay_location: ResolveDiagnostic,
+}
+fn read_local(text: &str, role: DocumentRole) -> Result<ParsedLocal, ResolveDiagnostic> {
     let document = json::parse(text.as_bytes()).map_err(|d| with_role(role, d))?;
     if document
         .value
@@ -203,18 +208,29 @@ fn read_local(text: &str, role: DocumentRole) -> Result<LocalConfig, ResolveDiag
             ),
         ));
     }
-    Ok(local)
+    Ok(ParsedLocal {
+        config: local,
+        overlay_location: with_role(
+            role,
+            diagnostic_at(
+                &document.positions,
+                "missing_overlay",
+                "/environment/default_overlay",
+            ),
+        ),
+    })
 }
 
 /// Resolve only the explicitly supplied original documents. No discovery, acquisition or decryption.
 pub fn resolve(bytes: &[u8], profiles: &[String]) -> ResolveResult {
     match resolve_inner(bytes, profiles) {
-        Ok((plan, semantic_hash, local_resolution)) => ResolveResult::Success {
+        Ok(resolved) => ResolveResult::Success {
             transport_version: 1,
             ok: true,
-            plan: Box::new(plan),
-            semantic_hash,
-            local_resolution,
+            plan: Box::new(resolved.compiled.plan),
+            semantic_hash: resolved.compiled.semantic_hash,
+            declared_workloads: resolved.compiled.declared_workloads,
+            local_resolution: resolved.local_resolution,
         },
         Err(diagnostic) => ResolveResult::Failure {
             transport_version: 1,
@@ -223,12 +239,20 @@ pub fn resolve(bytes: &[u8], profiles: &[String]) -> ResolveResult {
         },
     }
 }
-fn resolve_inner(
-    bytes: &[u8],
-    profiles: &[String],
-) -> Result<(Plan, String, LocalResolution), ResolveDiagnostic> {
+pub(crate) struct Resolved {
+    pub(crate) compiled: crate::Compiled,
+    pub(crate) local_resolution: LocalResolution,
+    pub(crate) overlay_location: ResolveDiagnostic,
+}
+fn resolve_inner(bytes: &[u8], profiles: &[String]) -> Result<Resolved, ResolveDiagnostic> {
     let document = json::parse_with_limit(bytes, MAX_REQUEST_BYTES)
         .map_err(|d| with_role(DocumentRole::Request, d))?;
+    resolve_document(document, profiles)
+}
+pub(crate) fn resolve_document(
+    document: json::Document,
+    profiles: &[String],
+) -> Result<Resolved, ResolveDiagnostic> {
     if document
         .value
         .get("request_version")
@@ -282,8 +306,10 @@ fn resolve_inner(
             diagnostic_at(&document.positions, "invalid_name", "/explicit_overlay"),
         ));
     }
-    let (plan, semantic_hash) = compile_inner(request.project.as_bytes(), profiles)
+    let compiled = compile_inner(request.project.as_bytes(), profiles)
         .map_err(|d| with_role(DocumentRole::Project, d))?;
+    let plan = &compiled.plan;
+    let semantic_hash = &compiled.semantic_hash;
     // Even opted-out supplied primary input must be valid, and remains bound into the resolution generation.
     let primary = request
         .primary_local
@@ -297,39 +323,51 @@ fn resolve_inner(
         .transpose()?;
     let mut overlay = plan.environment.default_overlay.clone();
     let mut origin = OverlayOrigin::Project;
+    let mut overlay_location = with_role(
+        DocumentRole::Project,
+        diagnostic_at(
+            &compiled.positions,
+            "missing_overlay",
+            "/environment/default_overlay",
+        ),
+    );
     if plan.worktree.inherit_local
-        && let Some(value) = primary
-            .as_ref()
-            .and_then(|v| v.environment.default_overlay.as_ref())
+        && let Some(input) = &primary
+        && let Some(value) = &input.config.environment.default_overlay
     {
         overlay = value.clone();
         origin = OverlayOrigin::PrimaryLocal;
+        overlay_location = input.overlay_location.clone();
     }
-    if let Some(value) = checkout
-        .as_ref()
-        .and_then(|v| v.environment.default_overlay.as_ref())
+    if let Some(input) = &checkout
+        && let Some(value) = &input.config.environment.default_overlay
     {
         overlay = value.clone();
         origin = OverlayOrigin::CheckoutLocal;
+        overlay_location = input.overlay_location.clone();
     }
     if let Some(value) = &request.explicit_overlay {
         overlay = value.clone();
         origin = OverlayOrigin::Explicit;
+        overlay_location = with_role(
+            DocumentRole::Request,
+            diagnostic_at(&document.positions, "missing_overlay", "/explicit_overlay"),
+        );
     }
     #[derive(Serialize)]
     struct ResolutionInputs<'a> {
         resolve_version: u32,
         semantic_hash: &'a str,
-        primary_local: &'a Option<LocalConfig>,
-        checkout_local: &'a Option<LocalConfig>,
+        primary_local: Option<&'a LocalConfig>,
+        checkout_local: Option<&'a LocalConfig>,
         #[serde(skip_serializing_if = "Option::is_none")]
         explicit_overlay: &'a Option<Option<String>>,
     }
     let encoded = serde_json::to_vec(&ResolutionInputs {
         resolve_version: 1,
-        semantic_hash: &semantic_hash,
-        primary_local: &primary,
-        checkout_local: &checkout,
+        semantic_hash,
+        primary_local: primary.as_ref().map(|input| &input.config),
+        checkout_local: checkout.as_ref().map(|input| &input.config),
         explicit_overlay: &request.explicit_overlay,
     })
     .map_err(|_| {
@@ -345,7 +383,11 @@ fn resolve_inner(
         inherit_local: plan.worktree.inherit_local,
         resolution_hash: format!("{:x}", Sha256::digest(encoded)),
     };
-    Ok((plan, semantic_hash, local_resolution))
+    Ok(Resolved {
+        compiled,
+        local_resolution,
+        overlay_location,
+    })
 }
 
 pub fn local_schema() -> Result<String, serde_json::Error> {

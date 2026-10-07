@@ -219,6 +219,7 @@ fn schema_generation_is_deterministic_and_closed() {
     assert_eq!(v["$defs"]["Workload"]["additionalProperties"], false);
     assert!(dto.contains("env_ref"));
     assert!(dto.contains("plan_version: 1"));
+    assert_eq!(dto.matches("export type WorkloadKind =").count(), 1);
 }
 
 #[test]

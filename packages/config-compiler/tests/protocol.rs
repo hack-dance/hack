@@ -21,7 +21,7 @@ fn handshake_and_compile_need_no_environment_or_host_tools() {
     let protocol: Value = serde_json::from_slice(&handshake.stdout).unwrap();
     assert_eq!(
         protocol,
-        serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1})
+        serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1})
     );
     let result = run(&["compile"], br#"{"schema_version":1,"name":"example"}"#);
     assert!(result.status.success());
@@ -102,4 +102,31 @@ fn resolve_binary_preserves_profiles_and_reports_document_roles() {
     let value: Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(value["diagnostics"][0]["code"], "duplicate_key");
     assert_eq!(value["diagnostics"][0]["document"], "checkout_local");
+}
+
+#[test]
+fn environment_plan_process_separates_valid_documents_from_complete_bindings() {
+    let project = r#"{"schema_version":1,"name":"example","jobs":{"init":{"image":"init:1","environment":{"NEEDED":{"env_ref":"KEY"}}}}}"#;
+    let mut request = serde_json::json!({"request_version":1,"project":project,"env_metadata":{"metadata_version":1,"overlay":null,"overlay_exists":false,"workloads":{"init":{}},"inactive_scopes":[]}});
+    let output = run(&["plan"], request.to_string().as_bytes());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["environment_plan"]["complete"], false);
+    request["env_metadata"]["workloads"]["init"]["KEY"] =
+        serde_json::json!({"scope":"init","secret":true});
+    let output = run(&["plan"], request.to_string().as_bytes());
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["environment_plan"]["complete"], true);
+    let output = run(&["plan", "--unsupported", "private-sentinel"], b"");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        !String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("private-sentinel")
+    );
 }

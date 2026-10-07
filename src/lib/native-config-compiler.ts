@@ -1,6 +1,14 @@
 import { stat } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { isRecord } from "./guards.ts";
+import {
+  type NativeDeclaredWorkloads,
+  type NativeEnvironmentPlan,
+  type NativeEnvMetadata,
+  parseDeclaredWorkloads,
+  parseNativeEnvironmentPlan,
+  parseNativeEnvMetadata,
+} from "./native-env-plan-protocol.ts";
 
 export const NATIVE_CONFIG_INPUT_LIMIT = 1024 * 1024;
 const OUTPUT_LIMIT = 8 * 1024 * 1024;
@@ -39,12 +47,20 @@ export type NativeConfigResolveResult =
     })
   | Extract<NativeConfigCompileResult, { readonly ok: false }>;
 
+export type NativeConfigPlanResult =
+  | (Extract<NativeConfigResolveResult, { readonly ok: true }> & {
+      readonly declared_workloads: NativeDeclaredWorkloads;
+      readonly environment_plan: NativeEnvironmentPlan;
+    })
+  | Extract<NativeConfigCompileResult, { readonly ok: false }>;
+
 export type NativeConfigCompileResult =
   | {
       readonly transport_version: 1;
       readonly ok: true;
       readonly plan: Readonly<Record<string, unknown>>;
       readonly semantic_hash: string;
+      readonly declared_workloads?: NativeDeclaredWorkloads;
     }
   | {
       readonly transport_version: 1;
@@ -122,6 +138,7 @@ export async function compileNativeConfig(opts: {
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
   readonly requireLocalResolution?: boolean;
+  readonly requireEnvPlanning?: boolean;
 }): Promise<NativeConfigCompileResult> {
   if (opts.input.byteLength > NATIVE_CONFIG_INPUT_LIMIT) {
     throw failure(
@@ -133,13 +150,21 @@ export async function compileNativeConfig(opts: {
   await checkProtocol({
     ...request,
     requireLocalResolution: opts.requireLocalResolution,
+    requireEnvPlanning: opts.requireEnvPlanning,
   });
   const response = await invokeCompiler({
     ...request,
     args: compileArguments("compile", opts.profiles),
     input: opts.input,
   });
-  return parseCompileResponse(response);
+  const result = parseCompileResponse(response);
+  if (opts.requireEnvPlanning && result.ok && !result.declared_workloads) {
+    throw failure(
+      "E_COMPILER_RESPONSE",
+      "Native compiler omitted the declared workload namespace."
+    );
+  }
+  return result;
 }
 
 /** Resolve original document text in Rust; this transport never parses local policy. */
@@ -152,7 +177,47 @@ export async function resolveNativeConfig(opts: {
   readonly profiles?: readonly string[];
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  readonly requireEnvPlanning?: boolean;
 }): Promise<NativeConfigResolveResult> {
+  const input = encodeResolveRequest(opts);
+  const request = compilerRequest(opts);
+  await checkProtocol({
+    ...request,
+    requireLocalResolution: true,
+    requireEnvPlanning: opts.requireEnvPlanning,
+  });
+  const response = await invokeCompiler({
+    ...request,
+    args: compileArguments("resolve", opts.profiles),
+    input,
+  });
+  const parsed = parseResolveResponse(response);
+  if (!parsed.ok) {
+    return parsed;
+  }
+  if (opts.requireEnvPlanning && !parsed.declared_workloads) {
+    throw failure(
+      "E_COMPILER_RESPONSE",
+      "Native compiler omitted the declared workload namespace."
+    );
+  }
+  const { envelope, ...result } = parsed;
+  void envelope;
+  return result;
+}
+
+type NativeResolveInputs = {
+  readonly input: Uint8Array;
+  readonly primaryLocal?: Uint8Array;
+  readonly checkoutLocal?: Uint8Array;
+  readonly explicitOverlay?: string | null;
+};
+
+function encodeResolveRequest(
+  opts: NativeResolveInputs & {
+    readonly envMetadata?: NativeEnvMetadata;
+  }
+): Uint8Array {
   if (
     typeof opts.explicitOverlay === "string" &&
     Buffer.byteLength(opts.explicitOverlay, "utf8") > NATIVE_CONFIG_INPUT_LIMIT
@@ -175,6 +240,7 @@ export async function resolveNativeConfig(opts: {
           ? undefined
           : documentText(opts.checkoutLocal, "checkout_local"),
       explicit_overlay: opts.explicitOverlay,
+      env_metadata: opts.envMetadata,
     })
   );
   if (input.byteLength > RESOLVE_REQUEST_LIMIT) {
@@ -183,17 +249,122 @@ export async function resolveNativeConfig(opts: {
       "Native local resolution request exceeds the input budget."
     );
   }
+  return input;
+}
+
+/** Inspect only metadata supplied by the managed-env owner; no decryption or runtime effects. */
+export async function planNativeConfig(
+  opts: NativeResolveInputs & {
+    readonly envMetadata: NativeEnvMetadata;
+    readonly binary?: string;
+    readonly profiles?: readonly string[];
+    readonly timeoutMs?: number;
+    readonly signal?: AbortSignal;
+  }
+): Promise<NativeConfigPlanResult> {
+  const metadata = parseNativeEnvMetadata(opts.envMetadata);
+  if (
+    !metadata ||
+    Buffer.byteLength(JSON.stringify(metadata), "utf8") >
+      NATIVE_CONFIG_INPUT_LIMIT
+  ) {
+    throw failure(
+      "E_CONFIG_METADATA",
+      "Native environment metadata is invalid or exceeds its budget; values omitted."
+    );
+  }
+  const input = encodeResolveRequest({ ...opts, envMetadata: metadata });
   const request = compilerRequest(opts);
-  await checkProtocol({ ...request, requireLocalResolution: true });
+  await checkProtocol({
+    ...request,
+    requireLocalResolution: true,
+    requireEnvPlanning: true,
+  });
   const response = await invokeCompiler({
     ...request,
-    args: compileArguments("resolve", opts.profiles),
+    args: compileArguments("plan", opts.profiles),
     input,
   });
-  const envelope = parseControlJson(response.output);
+  const parsed = parseResolveResponse({
+    ...response,
+    allowIncompletePlan: true,
+  });
+  if (!parsed.ok) {
+    return parsed;
+  }
+  const environmentPlan = parseNativeEnvironmentPlan({
+    value: parsed.envelope.environment_plan,
+    parseDiagnostic,
+  });
+  if (
+    !(parsed.declared_workloads && environmentPlan) ||
+    environmentPlan.overlay !== parsed.local_resolution.overlay ||
+    environmentPlan.overlay !== metadata.overlay ||
+    environmentPlan.overlay_exists !== metadata.overlay_exists ||
+    !environmentPlanMatchesSelection({
+      plan: parsed.plan,
+      declared: parsed.declared_workloads,
+      environmentPlan,
+    }) ||
+    response.exitCode !== (environmentPlan.complete ? 0 : 1)
+  ) {
+    throw failure(
+      "E_COMPILER_RESPONSE",
+      "Native environment planning returned an invalid result."
+    );
+  }
+  const { envelope, ...result } = parsed;
+  void envelope;
+  return {
+    ...result,
+    declared_workloads: parsed.declared_workloads,
+    environment_plan: environmentPlan,
+  };
+}
+
+/** Reject inconsistent compiler envelopes without interpreting authored selection policy. */
+function environmentPlanMatchesSelection(opts: {
+  readonly plan: Readonly<Record<string, unknown>>;
+  readonly declared: NativeDeclaredWorkloads;
+  readonly environmentPlan: NativeEnvironmentPlan;
+}): boolean {
+  const selected = new Set<string>();
+  for (const [field, kind] of [
+    ["services", "service"],
+    ["jobs", "job"],
+  ] as const) {
+    const workloads = opts.plan[field];
+    if (!isRecord(workloads)) {
+      return false;
+    }
+    for (const name of Object.keys(workloads)) {
+      if (selected.has(name) || opts.declared[name] !== kind) {
+        return false;
+      }
+      selected.add(name);
+    }
+  }
+  const reportNames = Object.keys(opts.environmentPlan.workloads);
+  return (
+    selected.size === reportNames.length &&
+    reportNames.every((name) => selected.has(name))
+  );
+}
+
+function parseResolveResponse(opts: {
+  readonly output: Uint8Array;
+  readonly exitCode: number;
+  readonly allowIncompletePlan?: boolean;
+}):
+  | (Extract<NativeConfigResolveResult, { readonly ok: true }> & {
+      readonly envelope: Readonly<Record<string, unknown>>;
+    })
+  | Extract<NativeConfigResolveResult, { readonly ok: false }> {
+  const envelope = parseControlJson(opts.output);
   const result = parseCompileValue({
     value: envelope,
-    exitCode: response.exitCode,
+    exitCode: opts.exitCode,
+    allowIncompletePlan: opts.allowIncompletePlan,
   });
   if (!result.ok) {
     if (
@@ -215,6 +386,7 @@ export async function resolveNativeConfig(opts: {
   return {
     ...result,
     local_resolution: parseLocalResolution(envelope.local_resolution),
+    envelope,
   };
 }
 
@@ -264,6 +436,7 @@ async function checkProtocol(opts: {
   readonly timeoutMs: number;
   readonly signal?: AbortSignal;
   readonly requireLocalResolution?: boolean;
+  readonly requireEnvPlanning?: boolean;
 }): Promise<void> {
   const handshake = await invokeCompiler({ ...opts, args: ["--protocol"] });
   const protocol = parseControlJson(handshake.output);
@@ -273,6 +446,7 @@ async function checkProtocol(opts: {
     protocol.transport_version !== 1 ||
     protocol.authored_version !== 1 ||
     protocol.plan_version !== 1 ||
+    (opts.requireEnvPlanning && protocol.env_plan_version !== 1) ||
     (opts.requireLocalResolution &&
       (protocol.resolve_version !== 1 || protocol.local_version !== 1))
   ) {
@@ -284,7 +458,7 @@ async function checkProtocol(opts: {
 }
 
 function compileArguments(
-  command: "compile" | "resolve",
+  command: "compile" | "resolve" | "plan",
   profiles?: readonly string[]
 ): string[] {
   const args: string[] = [command];
@@ -347,12 +521,14 @@ async function invokeCompiler(opts: {
     );
   }
   let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  const ownsProcessGroup = process.platform !== "win32";
   try {
     child = Bun.spawn([opts.binary, ...opts.args], {
       env: { PATH: "/usr/bin:/bin" },
       stdin: opts.input === undefined ? "ignore" : opts.input,
       stdout: "pipe",
       stderr: "pipe",
+      detached: ownsProcessGroup,
     });
   } catch {
     throw failure(
@@ -362,34 +538,35 @@ async function invokeCompiler(opts: {
   }
   let timedOut = false;
   let cancelled = false;
+  const io = new AbortController();
+  const kill = () => {
+    killOwnedCompiler({ child, ownsProcessGroup });
+    io.abort();
+  };
   const cancel = () => {
     cancelled = true;
-    child.kill("SIGKILL");
+    kill();
   };
   const timer = setTimeout(() => {
     timedOut = true;
-    child.kill("SIGKILL");
+    kill();
   }, opts.timeoutMs);
   opts.signal?.addEventListener("abort", cancel, { once: true });
   if (opts.signal?.aborted) {
     cancel();
   }
+  const outputRead = readBounded(child.stdout, OUTPUT_LIMIT, io.signal);
+  const errorRead = readBounded(child.stderr, STDERR_LIMIT, io.signal);
   try {
     const [output, , exitCode] = await Promise.all([
-      readBounded(child.stdout, OUTPUT_LIMIT),
-      readBounded(child.stderr, STDERR_LIMIT),
+      outputRead,
+      errorRead,
       child.exited,
     ]);
-    if (cancelled || timedOut) {
-      throw failure(
-        cancelled ? "E_COMPILER_CANCELLED" : "E_COMPILER_TIMEOUT",
-        cancelled
-          ? "Native configuration validation was cancelled."
-          : "Native configuration compiler timed out."
-      );
-    }
+    throwIfCompilerInterrupted({ cancelled, timedOut });
     return { output, exitCode };
   } catch (error: unknown) {
+    throwIfCompilerInterrupted({ cancelled, timedOut });
     if (error instanceof NativeConfigCompilerError) {
       throw error;
     }
@@ -400,20 +577,63 @@ async function invokeCompiler(opts: {
   } finally {
     clearTimeout(timer);
     opts.signal?.removeEventListener("abort", cancel);
-    if (child.exitCode === null) {
-      child.kill("SIGKILL");
-      await child.exited;
+    // A wrapper may leave descendants holding the pipes after the leader exits.
+    kill();
+    await Promise.allSettled([outputRead, errorRead, child.exited]);
+  }
+}
+
+function throwIfCompilerInterrupted(opts: {
+  readonly cancelled: boolean;
+  readonly timedOut: boolean;
+}): void {
+  if (opts.cancelled || opts.timedOut) {
+    throw failure(
+      opts.cancelled ? "E_COMPILER_CANCELLED" : "E_COMPILER_TIMEOUT",
+      opts.cancelled
+        ? "Native configuration validation was cancelled."
+        : "Native configuration compiler timed out."
+    );
+  }
+}
+
+function killOwnedCompiler(opts: {
+  readonly child: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  readonly ownsProcessGroup: boolean;
+}): void {
+  if (opts.ownsProcessGroup) {
+    try {
+      process.kill(-opts.child.pid, "SIGKILL");
+    } catch {
+      // An exited group is already clean; still reap a live direct child below.
+    }
+  }
+  if (opts.child.exitCode === null) {
+    try {
+      opts.child.kill("SIGKILL");
+    } catch {
+      // Child exit may race the group signal.
     }
   }
 }
 
 async function readBounded(
   stream: ReadableStream<Uint8Array>,
-  limit: number
+  limit: number,
+  signal?: AbortSignal
 ): Promise<Uint8Array> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
+  const cancel = () => {
+    reader.cancel().catch(() => {
+      // A concurrently closed stream already satisfies cancellation.
+    });
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  if (signal?.aborted) {
+    cancel();
+  }
   try {
     while (true) {
       const next = await reader.read();
@@ -422,7 +642,7 @@ async function readBounded(
       }
       size += next.value.byteLength;
       if (size > limit) {
-        await reader.cancel();
+        cancel();
         throw failure(
           "E_COMPILER_BUDGET",
           "Native configuration I/O exceeds its budget."
@@ -431,6 +651,7 @@ async function readBounded(
       chunks.push(next.value);
     }
   } finally {
+    signal?.removeEventListener("abort", cancel);
     reader.releaseLock();
   }
   const output = new Uint8Array(size);
@@ -466,6 +687,7 @@ function parseCompileResponse(opts: {
 function parseCompileValue(opts: {
   readonly value: unknown;
   readonly exitCode: number;
+  readonly allowIncompletePlan?: boolean;
 }): NativeConfigCompileResult {
   const value = opts.value;
   if (!isRecord(value) || value.transport_version !== 1) {
@@ -475,18 +697,30 @@ function parseCompileValue(opts: {
     );
   }
   if (
-    opts.exitCode === 0 &&
+    (opts.exitCode === 0 ||
+      (opts.allowIncompletePlan && opts.exitCode === 1)) &&
     value.ok === true &&
     isRecord(value.plan) &&
     value.plan.plan_version === 1 &&
     typeof value.semantic_hash === "string" &&
     HASH_PATTERN.test(value.semantic_hash)
   ) {
+    const declared =
+      value.declared_workloads === undefined
+        ? undefined
+        : parseDeclaredWorkloads(value.declared_workloads);
+    if (declared === null) {
+      throw failure(
+        "E_COMPILER_RESPONSE",
+        "Native compiler returned an invalid workload namespace."
+      );
+    }
     return {
       transport_version: 1,
       ok: true,
       plan: value.plan,
       semantic_hash: value.semantic_hash,
+      ...(declared === undefined ? {} : { declared_workloads: declared }),
     };
   }
   if (

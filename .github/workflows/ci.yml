@@ -45,6 +45,9 @@ jobs:
           bun run --cwd packages/cli typecheck
           bun run build
           bun scripts/check-config-compiler-cli.ts
+          bunx ultracite check scripts/check-native-env-plan-cli.ts tests/native-env-plan-transport.test.ts tests/native-env-metadata.test.ts
+          bun test tests/native-env-plan-transport.test.ts tests/native-env-metadata.test.ts tests/project-env-config.test.ts tests/project-env-metadata.test.ts
+          bun scripts/check-native-env-plan-cli.ts
 
   state-models:
     name: Runtime state models

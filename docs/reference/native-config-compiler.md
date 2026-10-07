@@ -72,8 +72,9 @@ versions refuse; omitted fields retain their documented defaults.
   destination names match `[A-Za-z_][A-Za-z0-9_]*`; managed `env_ref` names match
   the owning store's `[A-Z_][A-Z0-9_]*`. Public literals are authored configuration;
   never copy secrets into them. The compiler never reads managed stores or process
-  environment. Required references stay symbolic; managed-layer selection, missing
-  keys, remapping collisions and secret delivery remain later owner/admission checks.
+  environment. Required references stay symbolic during validation. Explicit
+  metadata planning checks managed-layer selection, missing keys and remapping
+  collisions; secret delivery and runtime admission remain separate steps.
 - Project `environment.default_overlay` may select a canonical named overlay;
   omission selects base. Names must already match `[a-z0-9]+(?:-[a-z0-9]+)*`;
   noncanonical spellings refuse rather than selecting a normalized different name.
@@ -137,13 +138,14 @@ authored public literals and commands. Those values are intentionally visible;
 diagnostic redaction does not turn the plan into a secret-safe storage format.
 
 - `hack-config-compiler --protocol` emits
-  `{"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1}`.
-  The CLI requires the two new capabilities for project-aware validation; an older
-  compiler can still serve explicit-file validation.
+  `{"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1}`.
+  Project-aware validation requires local resolution capabilities; explicit
+  metadata planning additionally requires `env_plan_version:1`. Older matching
+  compilers can still serve their supported validation modes.
 - `hack-config-compiler compile [--profile NAME]...` reads one UTF-8 JSON document
   from stdin through EOF. Input is limited to 1 MiB and 64 nested containers. These
   are parser safety bounds, not container resource or workload-count limits.
-- Success exits 0 and emits `{transport_version:1,ok:true,plan,semantic_hash}`.
+- Success exits 0 and emits `{transport_version:1,ok:true,plan,semantic_hash,declared_workloads}`.
   The plan declares `plan_version:1`. Failure exits 1 and emits
   `{transport_version:1,ok:false,diagnostics:[...]}`. One deterministic first
   diagnostic contains a stable code, fixed redacted message, JSON pointer and
@@ -160,6 +162,52 @@ diagnostic redaction does not turn the plan into a secret-safe storage format.
 - `hack-config-compiler generate DIR` writes deterministic
   `hack.project.schema.json`, `hack.local.schema.json` (2020-12) and
   `native-config.ts` projections.
+
+## Explicit managed-env metadata planning
+
+```sh
+hack config plan --json
+hack config plan --path /path/to/native-project --env qa --profile dev --json
+hack config plan --env base
+```
+
+This project-aware command uses the same validated local selection as `config
+validate`, then asks the existing managed-env owner for effective key names,
+winning scopes and secret flags. It parses selected managed YAML files internally;
+it does not read the secret key, decrypt values, run hooks, touch the registry or
+start workloads. `config validate` continues to perform no managed-document reads.
+`config plan` has no `--file` mode.
+
+The owner merges tracked base/overlay, verified primary local base/overlay and
+current checkout local base/overlay in that order. Later layers win before scope
+precedence is applied. Null tombstones remove a key; an empty string is present.
+CI, slim mode and `inherit_local:false` exclude primary inheritance. Unreadable,
+redirected or invalid selected files refuse with fixed redacted errors. Missing
+optional files are allowed. A missing selected named overlay keeps base/local
+fallback and produces `missing_overlay`; unknown stored scopes produce
+`inactive_env_scope` and grant no target authority. Services and jobs, including
+inactive declarations, share one namespace. A workload named `host` owns that
+scope; generic host overrides are otherwise excluded from guest bindings.
+
+The Rust planner binds `env_ref` against each workload's immutable managed baseline,
+before authored directives. Literals replace bindings, defaults apply only when
+the destination is absent, and unset removes it. Remapping into a different
+already-bound managed destination refuses with `env_reference_collision`.
+Unresolved required refs produce `missing_env_reference`. These failures yield
+`ok:true`, `environment_plan.complete:false` and exit 1; a complete report exits 0.
+Malformed inputs yield `ok:false` and exit 1.
+
+The report contains symbolic managed bindings and authored public literal/default
+text, never managed values, ciphertext, key material or private file paths. It
+leaves the authored `semantic_hash` and local `resolution_hash` unchanged. This is
+binding completeness, not runtime admission, secret delivery or an atomic snapshot.
+
+The sidecar `plan` operation accepts the original `resolve` request fields plus
+`env_metadata:{metadata_version:1,overlay:null|string,overlay_exists:boolean,
+workloads:{NAME:{KEY:{scope:string,secret:boolean}}},inactive_scopes:string[]}`.
+Every declared workload must appear, including inactive ones. Unknown fields,
+target names, invalid scopes and mismatched selections refuse. Serialized metadata
+is limited to 1 MiB in addition to the existing document and encoded-request bounds.
 
 ## Local settings and worktrees
 

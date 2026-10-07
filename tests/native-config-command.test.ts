@@ -14,6 +14,7 @@ afterEach(async () => {
 
 async function startCli(opts: {
   compilerBody: string;
+  operation?: "validate" | "plan";
   json?: boolean;
   project?: boolean;
   args?: readonly string[];
@@ -30,7 +31,7 @@ async function startCli(opts: {
   }
   await Bun.write(
     compiler,
-    `#!${process.execPath}\nif (process.argv[2] === '--protocol') { console.log('{"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1}'); } else { ${opts.compilerBody} }`
+    `#!${process.execPath}\nif (process.argv[2] === '--protocol') { console.log('{"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1}'); } else { ${opts.compilerBody} }`
   );
   await chmod(compiler, 0o755);
   return Bun.spawn(
@@ -38,8 +39,8 @@ async function startCli(opts: {
       process.execPath,
       join(root, "index.ts"),
       "config",
-      "validate",
-      ...(opts.project ? [] : ["--file", file]),
+      opts.operation ?? "validate",
+      ...(opts.project || opts.operation === "plan" ? [] : ["--file", file]),
       ...(opts.args ?? []),
       ...(opts.json ? ["--json"] : []),
     ],
@@ -125,6 +126,102 @@ test.each([
   const child = await startCli({
     json: true,
     compilerBody: `await Bun.write(${JSON.stringify(pidPath)}, String(process.pid)); await Bun.sleep(10000);`,
+  });
+  try {
+    const deadline = Date.now() + 4000;
+    while (!(await Bun.file(pidPath).exists()) && Date.now() < deadline) {
+      await Bun.sleep(20);
+    }
+    expect(await Bun.file(pidPath).exists()).toBe(true);
+    const compilerPid = Number(await Bun.file(pidPath).text());
+    child.kill(signal);
+    const [stdout, exit] = await Promise.all([
+      new Response(child.stdout).text(),
+      child.exited,
+    ]);
+    expect(exit).toBe(1);
+    expect(JSON.parse(stdout).error.code).toBe("E_COMPILER_CANCELLED");
+    expect(() => process.kill(compilerPid, 0)).toThrow();
+  } finally {
+    if (child.exitCode === null) {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }
+});
+
+const PLAN_SUCCESS = {
+  transport_version: 1,
+  ok: true,
+  plan: {
+    plan_version: 1,
+    worktree: { auto_branch: true, inherit_local: true },
+    services: {},
+    jobs: {},
+  },
+  semantic_hash: "a".repeat(64),
+  declared_workloads: {},
+  local_resolution: {
+    overlay: null,
+    origin: "project",
+    auto_branch: true,
+    inherit_local: true,
+    resolution_hash: "b".repeat(64),
+  },
+};
+
+test("plan human report identifies incomplete bindings and escapes diagnostic pointers", async () => {
+  const response = {
+    ...PLAN_SUCCESS,
+    environment_plan: {
+      plan_version: 1,
+      overlay: null,
+      overlay_exists: false,
+      complete: false,
+      workloads: {},
+      warnings: [],
+      diagnostics: [
+        {
+          document: "project",
+          code: "missing_env_reference",
+          pointer: "/services/\u001b[2J\nforged",
+          message: "Required managed env reference is absent.",
+          line: 2,
+          column: 3,
+        },
+      ],
+    },
+  };
+  const child = await startCli({
+    operation: "plan",
+    project: true,
+    compilerBody: `const planning=process.argv[2]==='plan'; console.log(JSON.stringify(planning ? ${JSON.stringify(response)} : ${JSON.stringify(PLAN_SUCCESS)})); process.exitCode=planning ? 1 : 0;`,
+  });
+  const [stdout, stderr, exit] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(exit).toBe(1);
+  expect(stdout).toContain("bindings are incomplete");
+  expect(stdout).toContain("does not establish runtime admission");
+  expect(stderr).toContain(
+    'project missing_env_reference "/services/\\u001b[2J\\nforged" (2:3)'
+  );
+  expect(stderr).not.toContain("\u001b[2J");
+  expect(stderr).not.toContain("\nforged");
+});
+
+test.each([
+  "SIGINT",
+  "SIGTERM",
+] as const)("plan CLI %s reaps its owned planning child", async (signal) => {
+  const pidPath = join(directory, "plan-pid");
+  const child = await startCli({
+    operation: "plan",
+    project: true,
+    json: true,
+    compilerBody: `if(process.argv[2]==='plan') { await Bun.write(${JSON.stringify(pidPath)},String(process.pid)); await Bun.sleep(10000); } else { console.log(${JSON.stringify(JSON.stringify(PLAN_SUCCESS))}); }`,
   });
   try {
     const deadline = Date.now() + 4000;

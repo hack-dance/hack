@@ -264,13 +264,15 @@ try {
     ],
     checkout
   );
-  const runtime = await invoke(["up"], checkout, false);
+  const runtime = await invoke(["up"], checkout, false, {
+    HACK_RUNTIME_BACKEND: "native",
+  });
   assert(
     runtime.exit !== 0 &&
       (runtime.stdout + runtime.stderr).includes(
         "E_NATIVE_PROJECT_UNSUPPORTED"
       ),
-    "native execution remains fenced before any engine acquisition"
+    "explicit native VM backend remains fenced before engine acquisition"
   );
   assert(!(await Bun.file(marker).exists()), "planning executes no hook");
   for (const cwd of [primary, checkout]) {
@@ -334,10 +336,20 @@ async function success(args: readonly string[], cwd: string) {
   );
   return result.value;
 }
-async function invoke(args: readonly string[], cwd: string, json = true) {
+async function invoke(
+  args: readonly string[],
+  cwd: string,
+  json = true,
+  extraEnv: Readonly<Record<string, string>> = {}
+) {
   const child = Bun.spawn([join(bundle, "hack"), ...args], {
     cwd,
-    env: { PATH: "/usr/bin:/bin", HOME: home, HACK_LOGGER: "console" },
+    env: {
+      PATH: "/usr/bin:/bin",
+      HOME: home,
+      HACK_LOGGER: "console",
+      ...extraEnv,
+    },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

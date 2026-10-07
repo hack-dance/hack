@@ -26,6 +26,14 @@ bounded to 32 KiB and 256 destination keys per workload; process argv is bounded
 to 4096 arguments and 64 KiB. Build/acquisition policy, mounts, storage, routing,
 endpoints, host effects, HTTP/TCP readiness and automatic restart explicitly refuse.
 
+`project::native::review` validates the same subset without acquiring private values.
+Its hash-only identity includes the authored semantic hash, local-resolution hash,
+selected profiles and a separate versioned environment-policy hash. That policy hash
+comes from the compiler's selected directives and resolved public bindings, including
+managed source keys/scopes and typed endpoints; private values never enter it. Endpoint
+execution still refuses. Compilation returns the same identity so a future native
+admission boundary can compare fresh inputs with the reviewed selection.
+
 No backend consumes this adapter yet. Native input provenance, image availability,
 source/storage ownership, provider admission and installed execution/recovery remain
 separate qualification gates. Existing Compose plans and receipts retain their formats.

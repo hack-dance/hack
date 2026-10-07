@@ -3,11 +3,16 @@ use super::execution::{Condition, Graph, Service};
 use crate::CandidateError;
 use hack_config_compiler::{
     WorkloadKind,
-    environment::{EnvironmentBinding, PlanResult},
+    environment::{EnvironmentBinding, EnvironmentPlan, PlanResult},
     local::LocalResolution,
-    model::{Command, Dependency, Readiness, ServiceCondition, Source, Workload, WorktreePolicy},
+    model::{
+        Command, Dependency, EnvironmentValue, Plan, Readiness, ServiceCondition, Source, Workload,
+        WorktreePolicy,
+    },
     process::{Entrypoint, Restart, ShutdownSignal},
 };
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Caller-selected private values keyed by workload, then the compiler binding's source key.
@@ -27,6 +32,7 @@ pub struct CompileOptions<'a> {
 /// No source ownership, image availability, backend capability or runtime admission is implied.
 pub struct NativeInputs {
     pub semantic_hash: String,
+    pub environment_policy_hash: String,
     pub local_resolution: LocalResolution,
     pub source: Source,
     pub worktree: WorktreePolicy,
@@ -35,6 +41,48 @@ pub struct NativeInputs {
     pub workloads: BTreeMap<String, WorkloadInputs>,
     /// Destination keys only; values cannot enter public engine configuration or receipts.
     pub managed_environment: ManagedValues,
+}
+
+/// Public compiler identity only. Managed values and executable text are excluded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewIdentity {
+    pub semantic_hash: String,
+    pub local_resolution_hash: String,
+    pub environment_policy_hash: String,
+    pub selected_profiles: Vec<String>,
+}
+impl NativeInputs {
+    pub fn review_identity(&self) -> ReviewIdentity {
+        ReviewIdentity {
+            semantic_hash: self.semantic_hash.clone(),
+            local_resolution_hash: self.local_resolution.resolution_hash.clone(),
+            environment_policy_hash: self.environment_policy_hash.clone(),
+            selected_profiles: self.selected_profiles.clone(),
+        }
+    }
+}
+
+fn policy_hash(plan: &Plan, bindings: &EnvironmentPlan) -> Result<String, CandidateError> {
+    #[derive(Serialize)]
+    struct Policy<'a> {
+        directives: BTreeMap<&'a str, &'a BTreeMap<String, EnvironmentValue>>,
+        bindings: &'a EnvironmentPlan,
+    }
+    let policy = Policy {
+        directives: plan
+            .services
+            .iter()
+            .chain(plan.jobs.iter())
+            .map(|(name, workload)| (name.as_str(), &workload.environment))
+            .collect(),
+        bindings,
+    };
+    let bytes = serde_json::to_vec(&policy).map_err(|_| private_refused())?;
+    let mut hash = Sha256::new();
+    hash.update(b"hack.native-environment-policy/v1\0");
+    hash.update(bytes);
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 /// Authored process and public environment, not a provider create request or durable plan.
@@ -189,13 +237,31 @@ fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, Candi
 /// plan are sent through the compiler. Errors never disclose authored or private text.
 /// Provider entry points do not consume this result; execution/replay remain later gates.
 pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateError> {
+    compile_inputs(
+        options.request,
+        options.profiles,
+        Some(options.managed_values),
+    )
+}
+
+/// Review the same supported typed subset without acquiring private values.
+/// Preparation must recompile with the exact managed selection and compare this identity.
+pub fn review(request: &[u8], profiles: &[String]) -> Result<ReviewIdentity, CandidateError> {
+    compile_inputs(request, profiles, None).map(|inputs| inputs.review_identity())
+}
+
+fn compile_inputs(
+    request: &[u8],
+    profiles: &[String],
+    managed_values: Option<&ManagedValues>,
+) -> Result<NativeInputs, CandidateError> {
     let PlanResult::Success {
         plan,
         semantic_hash,
         local_resolution,
         environment_plan,
         ..
-    } = hack_config_compiler::environment::plan(options.request, options.profiles)
+    } = hack_config_compiler::environment::plan(request, profiles)
     else {
         return Err(CandidateError::new(
             "native_graph_compile",
@@ -205,6 +271,7 @@ pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateErr
     if !environment_plan.complete || !environment_plan.diagnostics.is_empty() {
         return Err(private_refused());
     }
+    let environment_policy_hash = policy_hash(&plan, &environment_plan)?;
     if !plan.storage.is_empty()
         || plan.routes.is_some()
         || plan.open.is_some()
@@ -252,14 +319,22 @@ pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateErr
                 .workloads
                 .get(&name)
                 .ok_or_else(private_refused)?;
-            let private = options.managed_values.get(&name);
+            let private = managed_values.and_then(|values| values.get(&name));
             let mut source_keys = BTreeSet::new();
+            let mut managed_count = 0;
             let mut destinations = BTreeMap::new();
             let mut private_bytes = 2;
             for (destination, binding) in bindings {
                 match binding {
                     EnvironmentBinding::Managed { key, .. } => {
                         source_keys.insert(key);
+                        managed_count += 1;
+                        if managed_count > 256 {
+                            return Err(private_refused());
+                        }
+                        if managed_values.is_none() {
+                            continue;
+                        }
                         let value = private
                             .and_then(|values| values.get(key))
                             .ok_or_else(private_refused)?;
@@ -303,15 +378,13 @@ pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateErr
             workloads.insert(name, inputs);
         }
     }
-    if options
-        .managed_values
-        .keys()
-        .any(|name| !workloads.contains_key(name))
+    if managed_values.is_some_and(|values| values.keys().any(|name| !workloads.contains_key(name)))
     {
         return Err(private_refused());
     }
     Ok(NativeInputs {
         semantic_hash,
+        environment_policy_hash,
         local_resolution,
         source: plan.source,
         worktree: plan.worktree,

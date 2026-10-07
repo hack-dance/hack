@@ -293,8 +293,81 @@ fn compiler_environment_remapping_defaults_and_unset_preserve_private_separation
     let second = lower(&project, metadata, &rotated).unwrap();
     assert_eq!(first.semantic_hash, second.semantic_hash);
     assert_eq!(
+        first.environment_policy_hash,
+        second.environment_policy_hash
+    );
+    assert_eq!(
         first.local_resolution.resolution_hash,
         second.local_resolution.resolution_hash
+    );
+}
+
+#[test]
+fn public_review_requires_no_private_values_and_binds_compiler_metadata_policy() {
+    let project = basic();
+    let first_metadata = json!({"web":{"TOKEN":{"scope":"web","secret":true}}});
+    let bytes = request(&project, first_metadata.clone());
+    let reviewed = review(&bytes, &[]).unwrap();
+    let values = BTreeMap::from([(
+        "web".into(),
+        BTreeMap::from([("TOKEN".into(), "synthetic-private".into())]),
+    )]);
+    assert_eq!(
+        lower(&project, first_metadata, &values)
+            .unwrap()
+            .review_identity(),
+        reviewed
+    );
+    let changed = review(
+        &request(
+            &project,
+            json!({"web":{"TOKEN":{"scope":"global","secret":false}}}),
+        ),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(reviewed.semantic_hash, changed.semantic_hash);
+    assert_eq!(
+        reviewed.local_resolution_hash,
+        changed.local_resolution_hash
+    );
+    assert_ne!(
+        reviewed.environment_policy_hash,
+        changed.environment_policy_hash
+    );
+    assert!(
+        !serde_json::to_string(&reviewed)
+            .unwrap()
+            .contains("synthetic-private")
+    );
+}
+
+#[test]
+fn policy_hash_uses_real_compiler_directives_and_resolved_endpoints_even_when_execution_refuses() {
+    let mut project = basic();
+    project["services"]["web"]["environment"] =
+        json!({"API":{"endpoint":{"kind":"service","name":"web","port":3000,"protocol":"http"}}});
+    let hash = |project: &Value| {
+        let PlanResult::Success {
+            plan,
+            environment_plan,
+            ..
+        } = hack_config_compiler::environment::plan(&request(project, json!({"web":{}})), &[])
+        else {
+            panic!("endpoint policy must really compile")
+        };
+        policy_hash(&plan, &environment_plan).unwrap()
+    };
+    let first = hash(&project);
+    project["services"]["web"]["environment"]["API"]["endpoint"]["port"] = json!(3001);
+    assert_ne!(first, hash(&project));
+    refusal(
+        lower(&project, json!({"web":{}}), &BTreeMap::new()),
+        "native_graph_subset",
+    );
+    refusal(
+        review(&request(&project, json!({"web":{}})), &[]).map(|_| unreachable!()),
+        "native_graph_subset",
     );
 }
 

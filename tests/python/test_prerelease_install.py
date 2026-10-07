@@ -44,9 +44,11 @@ def with_mcp(entries, change=None):
     return [(name, value, tarfile.REGTYPE) for name, value in payload.items()]
 
 
-def with_compiler(entries):
+def with_compiler(entries, local=True):
     payload = {name: value for name, value, _ in entries if name != "SHA256SUMS"}
     payload.update({"hack-config-compiler": b"synthetic compiler", "hack.project.schema.json": b"{}\n"})
+    if local:
+        payload["hack.local.schema.json"] = b"{}\n"
     payload["SHA256SUMS"] = "".join(sha(value) + "  " + name + "\n"
                                     for name, value in sorted(payload.items())).encode()
     return [(name, value, tarfile.REGTYPE) for name, value in payload.items()]
@@ -290,18 +292,20 @@ class ChannelTests(unittest.TestCase):
         archive, checksum = self.archive("5.0.0-next.2", with_mcp)
         with self.channel.lock():
             self.channel.install("5.0.0-next.2", archive, checksum, True)
-        for number, mutate in ((3, with_compiler), (4, lambda entries: with_compiler(with_mcp(entries)))):
+        for number, mutate in ((3, lambda entries: with_compiler(entries, local=False)),
+                               (4, with_compiler), (5, lambda entries: with_compiler(with_mcp(entries)))):
             version = "5.0.0-next." + str(number)
             archive, checksum = self.archive(version, mutate)
             with self.channel.lock():
                 self.channel.install(version, archive, checksum, True)
             bundle = self.channel.root / "versions" / version / "bundle"
             _, manifest = installer.verify_bundle(bundle, version)
-            self.assertTrue(installer.COMPILER_PAYLOAD <= set(manifest))
-            for name in installer.COMPILER_PAYLOAD:
+            compiler = installer.LEGACY_COMPILER_PAYLOAD if number == 3 else installer.COMPILER_PAYLOAD
+            self.assertEqual(set(manifest) & installer.COMPILER_PAYLOAD, compiler)
+            for name in compiler:
                 self.assertEqual((bundle / name).stat().st_mode & 0o777,
                                  0o755 if name == "hack-config-compiler" else 0o600)
-            for prior in ("5.0.0-next.1", "5.0.0-next.2", version):
+            for prior in ("5.0.0-next.1", "5.0.0-next.2", "5.0.0-next.3", version):
                 with self.channel.lock():
                     self.channel.select(prior)
                 self.assertEqual(self.selection()["selected"], prior)
@@ -309,6 +313,22 @@ class ChannelTests(unittest.TestCase):
                   if arguments[0] == "/usr/bin/codesign"}
         self.assertIn("hack-config-compiler", signed)
         self.assertNotIn("hack.project.schema.json", signed)
+        self.assertNotIn("hack.local.schema.json", signed)
+
+    def test_incomplete_compiler_groups_refuse_even_matching_checksums(self):
+        invalid = (("hack-config-compiler",), ("hack.project.schema.json",), ("hack.local.schema.json",),
+                   ("hack-config-compiler", "hack.local.schema.json"),
+                   ("hack.project.schema.json", "hack.local.schema.json"))
+        for members in invalid:
+            with self.subTest(members=members):
+                def mutate(entries):
+                    payload = {name: value for name, value, _ in with_compiler(entries)
+                               if name != "SHA256SUMS" and
+                               (name not in installer.COMPILER_PAYLOAD or name in members)}
+                    payload["SHA256SUMS"] = "".join(sha(value) + "  " + name + "\n"
+                                                    for name, value in sorted(payload.items())).encode()
+                    return [(name, value, tarfile.REGTYPE) for name, value in payload.items()]
+                self.rejects_install(mutate, "Incomplete config compiler payload")
 
     def test_partial_tampered_and_aliased_compiler_archives_preserve_selection(self):
         for name in installer.COMPILER_PAYLOAD:
@@ -319,7 +339,7 @@ class ChannelTests(unittest.TestCase):
                                  case if case in (tarfile.SYMTYPE, tarfile.LNKTYPE) and key == name else kind)
                                 for key, value, kind in with_compiler(entries)
                                 if not (case == "missing" and key == name)]
-                    self.rejects_install(mutate, "compiler payload|checksum mismatch|regular archive files")
+                    self.rejects_install(mutate, "compiler payload|checksum mismatch|checksum entry|regular archive files")
 
     def test_installed_compiler_pair_tampering_and_modes_are_refused(self):
         archive, checksum = self.archive(mutate=with_compiler)

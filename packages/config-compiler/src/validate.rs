@@ -20,7 +20,7 @@ fn env_name(value: &str) -> bool {
 }
 // Canonical spelling only, equivalent to project.ts normalizeEnvConfigName(value) === value.
 // Managed layer selection remains exclusively owned by the environment subsystem.
-fn overlay_name(value: &str) -> bool {
+pub(crate) fn overlay_name(value: &str) -> bool {
     !value.is_empty()
         && value.split('-').all(|part| {
             !part.is_empty()
@@ -199,6 +199,7 @@ pub fn lower(mut project: Project, profiles: &[String], at: &At) -> Result<Plan,
         name: project.name,
         source: project.source,
         environment: project.environment,
+        worktree: project.worktree,
         selected_profiles: selected,
         storage: project.storage,
         services: project.services,

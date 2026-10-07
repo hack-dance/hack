@@ -1,6 +1,8 @@
 //! Pure, bounded native configuration compiler. It performs no host admission or secret lookup.
 mod json;
+pub mod local;
 pub mod model;
+mod shape;
 mod validate;
 pub use json::MAX_INPUT_BYTES;
 use model::{Plan, Project};
@@ -32,6 +34,7 @@ impl Diagnostic {
 }
 fn diagnostic_message(code: &str) -> &'static str {
     match code {
+        "unsupported_request_version" => "The resolution request version is not supported.",
         "input_too_large" => "Configuration exceeds the compiler input byte limit.",
         "invalid_utf8" => "Configuration must be UTF-8.",
         "invalid_json" => "Configuration is not a complete valid JSON document.",
@@ -119,6 +122,7 @@ fn compile_inner(bytes: &[u8], profiles: &[String]) -> Result<(Plan, String), Di
     {
         return Err(at("unsupported_version", "/schema_version"));
     }
+    shape::project(&document)?;
     let project: Project =
         serde_path_to_error::deserialize(document.value.clone()).map_err(|error| {
             let mut pointer = String::new();
@@ -177,6 +181,7 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
     let schema = serde_json::to_string_pretty(&schema)? + "\n";
     let cfg = ts_rs::Config::default();
     let declarations = [
+        WorktreePolicy::decl(&cfg),
         SourceMode::decl(&cfg),
         Source::decl(&cfg),
         EnvironmentSelection::decl(&cfg),
@@ -198,6 +203,14 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
         Plan::decl(&cfg),
         Diagnostic::decl(&cfg),
         CompileResult::decl(&cfg),
+        local::LocalEnvironment::decl(&cfg),
+        local::LocalConfig::decl(&cfg),
+        local::ResolveRequest::decl(&cfg),
+        local::DocumentRole::decl(&cfg),
+        local::ResolveDiagnostic::decl(&cfg),
+        local::OverlayOrigin::decl(&cfg),
+        local::LocalResolution::decl(&cfg),
+        local::ResolveResult::decl(&cfg),
     ];
     Ok((
         schema,
@@ -213,5 +226,5 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
 }
 
 pub fn protocol() -> Value {
-    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1})
+    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1})
 }

@@ -35,6 +35,33 @@ pub struct Project {
     #[serde(default)]
     #[ts(as = "Option<EnvironmentSelection>", optional)]
     pub environment: EnvironmentSelection,
+    #[serde(default)]
+    #[ts(as = "Option<WorktreePolicy>", optional)]
+    pub worktree: WorktreePolicy,
+}
+
+fn enabled() -> bool {
+    true
+}
+
+/// Authored worktree policy; neither flag grants runtime admission or cleanup authority.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreePolicy {
+    #[serde(default = "enabled")]
+    #[ts(as = "Option<bool>", optional)]
+    pub auto_branch: bool,
+    #[serde(default = "enabled")]
+    #[ts(as = "Option<bool>", optional)]
+    pub inherit_local: bool,
+}
+impl Default for WorktreePolicy {
+    fn default() -> Self {
+        Self {
+            auto_branch: true,
+            inherit_local: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
@@ -305,6 +332,7 @@ pub struct Plan {
     pub name: String,
     pub source: Source,
     pub environment: EnvironmentSelection,
+    pub worktree: WorktreePolicy,
     pub selected_profiles: Vec<String>,
     pub storage: BTreeMap<String, Storage>,
     pub services: BTreeMap<String, Workload>,

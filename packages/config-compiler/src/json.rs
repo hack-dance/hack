@@ -18,7 +18,11 @@ struct Parser<'a> {
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Document, Diagnostic> {
-    if bytes.len() > MAX_INPUT_BYTES {
+    parse_with_limit(bytes, MAX_INPUT_BYTES)
+}
+
+pub(crate) fn parse_with_limit(bytes: &[u8], limit: usize) -> Result<Document, Diagnostic> {
+    if bytes.len() > limit {
         return Err(Diagnostic::new("input_too_large", "", 1, 1));
     }
     let text = std::str::from_utf8(bytes).map_err(|_| Diagnostic::new("invalid_utf8", "", 1, 1))?;

@@ -446,6 +446,21 @@
         }
       },
       "type": "object"
+    },
+    "WorktreePolicy": {
+      "additionalProperties": false,
+      "description": "Authored worktree policy; neither flag grants runtime admission or cleanup authority.",
+      "properties": {
+        "auto_branch": {
+          "default": true,
+          "type": "boolean"
+        },
+        "inherit_local": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -498,6 +513,13 @@
       },
       "default": {},
       "type": "object"
+    },
+    "worktree": {
+      "$ref": "#/$defs/WorktreePolicy",
+      "default": {
+        "auto_branch": true,
+        "inherit_local": true
+      }
     }
   },
   "required": [

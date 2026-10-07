@@ -1,10 +1,11 @@
-# Native config compiler foundation
+# Native configuration validation
 
 This is an experimental, pure compiler for a bounded subset of the planned
-`.hack/hack.project.json` format. The compiler does not discover projects, execute workloads,
+`.hack/hack.project.json` format. The pure compiler does not discover projects, execute workloads,
 import Compose, migrate data, decrypt environment values, perform host admission,
 or change how existing projects run. A successful compile is syntax and semantic
-validation, not backend capability or application acceptance.
+validation, not backend capability or application acceptance. The CLI can acquire
+the selected project and permitted local settings for offline resolution.
 
 The CLI recognizes this filename as a project boundary. Native runtime and adoption
 are not enabled yet: legacy project commands refuse with
@@ -76,7 +77,12 @@ versions refuse; omitted fields retain their documented defaults.
 - Project `environment.default_overlay` may select a canonical named overlay;
   omission selects base. Names must already match `[a-z0-9]+(?:-[a-z0-9]+)*`;
   noncanonical spellings refuse rather than selecting a normalized different name.
-  Local override files are not accepted by this compiler.
+  Project null refuses; null is supported only in local settings and explicit
+  command selection.
+- Project `worktree.auto_branch` and `worktree.inherit_local` are strict booleans,
+  both defaulting to true. They appear in the normalized plan. This validation
+  command uses inheritance policy; it does not create branch instances or execute
+  `auto_branch` behavior.
 - Dependencies are `{service:"db",condition:"started"|"ready"}` or
   `{job:"init",condition:"completed"}`. References must match the declared kind.
   Ready dependencies require explicit readiness. Services and jobs share one name
@@ -102,26 +108,38 @@ must be absolute POSIX container paths without `..`.
 
 Routes, shutdown/restart policies, host hooks/processes, endpoint references,
 network/security/resources, cache protocols, backend options, arbitrary extensions,
-and local/worktree policy are not yet implemented. They refuse rather than being
+and local settings other than environment selection are not yet implemented. They refuse rather than being
 silently dropped. This foundation does not replace the full native contract or
 qualify a migrated advanced project.
 
 ## Protocol and diagnostics
 
-The current CLI exposes explicit validation only:
+The CLI supports project-aware and explicit-document validation:
 
 ```sh
+hack config validate --json
+hack config validate --path /path/to/native-project --env base --json
 hack config validate --file .hack/hack.project.json
 hack config validate --file .hack/hack.project.json --profile dev,test --json
 ```
 
-`--file` is required; this command does not switch project discovery or runtime
-execution to the native format. `--json` returns the normalized plan, including
+Without `--file`, discovery selects a native project without touching the registry.
+Legacy or absent projects refuse; mixed active inputs refuse with
+`E_NATIVE_PROJECT_CONFLICT`. `--path` changes the discovery start. `--env base`
+explicitly selects base; another canonical name selects that overlay. This selects
+a name only: overlay existence, managed metadata, keys and required references are
+not inspected, and no env values are read. Runtime/adoption commands remain fenced.
+
+`--file` validates only that document, ignores all local files and performs no
+project discovery. It cannot be combined with `--path` or `--env`.
+`--json` returns the authored normalized plan, including
 authored public literals and commands. Those values are intentionally visible;
 diagnostic redaction does not turn the plan into a secret-safe storage format.
 
 - `hack-config-compiler --protocol` emits
-  `{"transport_version":1,"authored_version":1,"plan_version":1}`.
+  `{"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1}`.
+  The CLI requires the two new capabilities for project-aware validation; an older
+  compiler can still serve explicit-file validation.
 - `hack-config-compiler compile [--profile NAME]...` reads one UTF-8 JSON document
   from stdin through EOF. Input is limited to 1 MiB and 64 nested containers. These
   are parser safety bounds, not container resource or workload-count limits.
@@ -133,8 +151,46 @@ diagnostic redaction does not turn the plan into a secret-safe storage format.
   location; errors for a missing property or CLI-selected profile may point to its
   containing object. Input contents and parser excerpts never appear in messages.
 - Invalid invocation exits 2 with fixed usage on stderr and no JSON on stdout.
+- `hack-config-compiler resolve [--profile NAME]...` reads a versioned request:
+  `{request_version:1,project:"original JSON text",primary_local?:"original JSON text",checkout_local?:"original JSON text",explicit_overlay?:null|string}`.
+  JSON texts retain duplicate keys until Rust checks each document. Each document
+  is limited to 1 MiB, their combined text to 3 MiB, and the encoded request to
+  20 MiB to allow JSON escaping. Diagnostics add `document` identifying `project`,
+  `primary_local`, `checkout_local` or `request`.
 - `hack-config-compiler generate DIR` writes deterministic
-  `hack.project.schema.json` (2020-12) and `native-config.ts` projections.
+  `hack.project.schema.json`, `hack.local.schema.json` (2020-12) and
+  `native-config.ts` projections.
+
+## Local settings and worktrees
+
+The optional `.hack/hack.local.json` is a separate versioned document:
+
+```json
+{"schema_version":1,"environment":{"default_overlay":null}}
+```
+
+Only `environment.default_overlay` is supported in this slice. Omission inherits;
+null selects base; a canonical name selects that overlay. Other fields, workload
+definitions, unversioned documents, duplicate keys and unknown versions refuse.
+The effective selection is project default/base, then verified primary local,
+current checkout local, then explicit `--env`. Each later present value wins.
+
+Primary inheritance requires a verified linked Git worktree in the same repository
+family and a primary checkout with native inputs. Different input families refuse;
+redirected/nonregular input files refuse. `inherit_local:false`, CI and slim mode
+exclude primary reads. Current checkout local settings remain available. Files are
+read in place; no primary files, secrets, keys or generated state are copied.
+Native projects nested below a Git checkout root currently use only their own
+local settings; primary inheritance requires the project root to be the Git root.
+
+Success adds `local_resolution` with selected `overlay` (null means base), `origin`,
+worktree policy and `resolution_hash`. Local settings do not rewrite the authored
+plan or its `semantic_hash`. The separate hash binds normalized supplied local
+documents and explicit selection, including missing versus null. Neither hash
+proves an atomic multi-file snapshot or provides an admission/freshness fence.
+Future apply must recheck private input generations. Adding defaulted worktree
+policy changes hashes relative to the earlier experimental compiler; do not reuse
+historical compiler hashes as resource identities.
 
 Duplicate keys, including escaped-equivalent keys in nested objects and arrays,
 are rejected before map insertion. Graph cycle checking is iterative. Serialization

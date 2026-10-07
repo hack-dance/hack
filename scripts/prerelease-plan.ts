@@ -16,6 +16,7 @@ export const PRERELEASE_PAYLOAD = [
 export const CONFIG_COMPILER_PAYLOAD = [
   "hack-config-compiler",
   "hack.project.schema.json",
+  "hack.local.schema.json",
 ] as const;
 const VERSION = /^5\.0\.0-next\.[1-9][0-9]*$/;
 const REVISION = /^[0-9a-f]{40}$/;
@@ -388,6 +389,25 @@ async function pages({
   throw new Error("GitHub pagination limit exceeded");
 }
 
+/** Older bundles may omit local schema, but never the compiler/project-schema pair. */
+function configCompilerPayload(entries: readonly string[]) {
+  const compilerPayload = CONFIG_COMPILER_PAYLOAD.filter((name) =>
+    entries.includes(name)
+  );
+  if (
+    compilerPayload.length !== 0 &&
+    !(
+      compilerPayload.includes("hack-config-compiler") &&
+      compilerPayload.includes("hack.project.schema.json")
+    )
+  ) {
+    throw new Error(
+      "Native config compiler payload requires the compiler and project schema; local schema is optional for older bundles"
+    );
+  }
+  return compilerPayload;
+}
+
 export async function packagePrerelease({
   plan,
   bundle,
@@ -401,14 +421,7 @@ export async function packagePrerelease({
     throw new Error("Native bundle root must be a directory, not an alias");
   }
   const entries = await readdir(bundle);
-  const compilerPayload = CONFIG_COMPILER_PAYLOAD.filter((name) =>
-    entries.includes(name)
-  );
-  if (compilerPayload.length !== 0 && compilerPayload.length !== 2) {
-    throw new Error(
-      "Native config compiler payload must include both compiler and schema"
-    );
-  }
+  const compilerPayload = configCompilerPayload(entries);
   const mcpPayload = await nativeCandidateMcpPayload(bundle);
   const payload = [...PRERELEASE_PAYLOAD, ...compilerPayload, ...mcpPayload];
   const expected = [
@@ -429,7 +442,8 @@ export async function packagePrerelease({
     }
     if (
       name === "hack-config-compiler" ||
-      name === "hack.project.schema.json"
+      name === "hack.project.schema.json" ||
+      name === "hack.local.schema.json"
     ) {
       const mode = name === "hack-config-compiler" ? 0o755 : 0o600;
       if ((entry.mode & 0o7777) !== mode) {

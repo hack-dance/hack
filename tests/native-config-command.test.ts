@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -12,13 +12,25 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
-async function startCli(opts: { compilerBody: string; json?: boolean }) {
+async function startCli(opts: {
+  compilerBody: string;
+  json?: boolean;
+  project?: boolean;
+  args?: readonly string[];
+}) {
   const compiler = join(directory, "compiler");
   const file = join(directory, "input.json");
   await Bun.write(file, '{"schema_version":1,"name":"example"}');
+  if (opts.project) {
+    await mkdir(join(directory, ".hack"));
+    await Bun.write(
+      join(directory, ".hack/hack.project.json"),
+      '{"schema_version":1,"name":"example"}'
+    );
+  }
   await Bun.write(
     compiler,
-    `#!${process.execPath}\nif (process.argv[2] === '--protocol') { console.log('{"transport_version":1,"authored_version":1,"plan_version":1}'); } else { ${opts.compilerBody} }`
+    `#!${process.execPath}\nif (process.argv[2] === '--protocol') { console.log('{"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1}'); } else { ${opts.compilerBody} }`
   );
   await chmod(compiler, 0o755);
   return Bun.spawn(
@@ -27,8 +39,8 @@ async function startCli(opts: { compilerBody: string; json?: boolean }) {
       join(root, "index.ts"),
       "config",
       "validate",
-      "--file",
-      file,
+      ...(opts.project ? [] : ["--file", file]),
+      ...(opts.args ?? []),
       ...(opts.json ? ["--json"] : []),
     ],
     {
@@ -45,6 +57,38 @@ async function startCli(opts: { compilerBody: string; json?: boolean }) {
     }
   );
 }
+
+test("project diagnostics preserve the document role and escaped pointer", async () => {
+  const child = await startCli({
+    project: true,
+    compilerBody: `console.log(JSON.stringify({transport_version:1,ok:false,diagnostics:[{code:"duplicate_key",pointer:"/name\\u001b[2J",message:"Duplicate JSON object keys are not allowed.",line:2,column:3}]})); process.exitCode=1;`,
+  });
+  const [stdout, stderr, exit] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(exit).toBe(1);
+  expect(stdout).toBe("");
+  expect(stderr).toContain('project duplicate_key "/name\\u001b[2J" (2:3)');
+  expect(stderr).not.toContain("\u001b[2J");
+});
+
+test.each([
+  ["--env", "base"],
+  ["--path", "."],
+])("explicit-file mode refuses project-selection flags %s", async (flag, value) => {
+  const child = await startCli({
+    compilerBody: "throw new Error('compiler must not run');",
+    args: [flag, value],
+  });
+  const [stderr, exit] = await Promise.all([
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(exit).not.toBe(0);
+  expect(stderr).toContain("cannot be combined with --path or --env");
+});
 
 test("human diagnostics escape authored control characters", async () => {
   const response = {

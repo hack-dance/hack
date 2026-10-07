@@ -514,6 +514,10 @@ async function compilerFixture(bundle: string) {
     mode: 0o600,
   });
   await chmod(join(bundle, "hack.project.schema.json"), 0o600);
+  await writeFile(join(bundle, "hack.local.schema.json"), "{}\n", {
+    mode: 0o600,
+  });
+  await chmod(join(bundle, "hack.local.schema.json"), 0o600);
   await Bun.write(
     join(bundle, "SHA256SUMS"),
     await renderChecksums({
@@ -523,7 +527,7 @@ async function compilerFixture(bundle: string) {
   );
 }
 
-test("packages the optional compiler/schema pair beside the CLI", async () => {
+test("packages the compiler and both schemas beside the CLI", async () => {
   const root = await mkdtemp(join(tmpdir(), "hack-compiler-package-"));
   try {
     const bundle = await fixture(root);
@@ -542,6 +546,71 @@ test("packages the optional compiler/schema pair beside the CLI", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("preserves the older complete compiler/project-schema pair", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-compiler-legacy-pair-"));
+  try {
+    const bundle = await fixture(root);
+    await compilerFixture(bundle);
+    await rm(join(bundle, "hack.local.schema.json"));
+    const names = [
+      ...PRERELEASE_PAYLOAD,
+      "hack-config-compiler",
+      "hack.project.schema.json",
+    ];
+    await Bun.write(
+      join(bundle, "SHA256SUMS"),
+      await renderChecksums({ root: bundle, names })
+    );
+    const plan = createPrereleasePlan(input);
+    const output = join(root, "assets");
+    await packagePrerelease({ plan, bundle, output });
+    expect(
+      (await archiveMembers(join(output, plan.archive)))
+        .map((entry) => entry.name)
+        .sort()
+    ).toEqual([...names, "SHA256SUMS"].sort());
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const members of [
+  ["hack-config-compiler"],
+  ["hack.project.schema.json"],
+  ["hack.local.schema.json"],
+  ["hack-config-compiler", "hack.local.schema.json"],
+  ["hack.project.schema.json", "hack.local.schema.json"],
+]) {
+  test(`refuses incomplete compiler inventory despite matching checksums: ${members.join(",")}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "hack-compiler-inventory-"));
+    try {
+      const bundle = await fixture(root);
+      await compilerFixture(bundle);
+      for (const name of CONFIG_COMPILER_PAYLOAD) {
+        if (!members.includes(name)) {
+          await rm(join(bundle, name));
+        }
+      }
+      await Bun.write(
+        join(bundle, "SHA256SUMS"),
+        await renderChecksums({
+          root: bundle,
+          names: [...PRERELEASE_PAYLOAD, ...members],
+        })
+      );
+      await expect(
+        packagePrerelease({
+          plan: createPrereleasePlan(input),
+          bundle,
+          output: join(root, "refused"),
+        })
+      ).rejects.toThrow("requires the compiler and project schema");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 for (const name of CONFIG_COMPILER_PAYLOAD) {
   for (const corruption of [

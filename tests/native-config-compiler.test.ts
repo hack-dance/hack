@@ -6,6 +6,7 @@ import {
   compileNativeConfig,
   NATIVE_CONFIG_INPUT_LIMIT,
   readNativeConfigInput,
+  resolveNativeConfig,
   resolveNativeConfigCompilerBinary,
 } from "../src/lib/native-config-compiler.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -22,6 +23,144 @@ let directory = "";
 
 beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), "hack-compiler-transport-"));
+});
+
+const LOCAL_RESOLUTION = {
+  overlay: "qa",
+  origin: "checkout_local",
+  auto_branch: true,
+  inherit_local: true,
+  resolution_hash: "b".repeat(64),
+} as const;
+
+function resolverScript(body: string): string {
+  return `if (process.argv[2] === '--protocol') { console.log(${JSON.stringify(JSON.stringify({ ...PROTOCOL, resolve_version: 1, local_version: 1 }))}); } else { ${body} }`;
+}
+
+test("local resolution preserves original document text and explicit tri-state", async () => {
+  const local =
+    '\ufeff{"schema_version":1,"environment":{"default_overlay":"qa","default_overlay":null}}';
+  const binary = await fixture(
+    resolverScript(
+      `const received = JSON.parse(await Bun.stdin.text()); console.log(JSON.stringify({ ...${JSON.stringify(SUCCESS)}, plan: {plan_version:1, received, arguments:process.argv.slice(2), keys:Object.keys(process.env).sort()}, local_resolution:${JSON.stringify(LOCAL_RESOLUTION)} }));`
+    )
+  );
+  for (const explicitOverlay of [undefined, null, "qa"]) {
+    const result = await resolveNativeConfig({
+      input: INPUT,
+      checkoutLocal: new TextEncoder().encode(local),
+      explicitOverlay,
+      binary,
+      profiles: ["qa"],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error("Expected local resolution success");
+    }
+    expect(result.plan.received).toEqual({
+      request_version: 1,
+      project: new TextDecoder().decode(INPUT),
+      checkout_local: local,
+      ...(explicitOverlay === undefined
+        ? {}
+        : { explicit_overlay: explicitOverlay }),
+    });
+    expect(result.plan.arguments).toEqual(["resolve", "--profile", "qa"]);
+    expect(result.plan.keys).toEqual(["PATH"]);
+    expect(result.local_resolution).toEqual(LOCAL_RESOLUTION);
+  }
+});
+
+test("old compiler can compile explicit input but refuses project resolution before input", async () => {
+  const receipt = join(directory, "resolver-received-input");
+  const binary = await fixture(
+    script(
+      `await Bun.write(${JSON.stringify(receipt)}, await Bun.stdin.text()); console.log(${JSON.stringify(JSON.stringify(SUCCESS))});`
+    )
+  );
+  await expect(resolveNativeConfig({ input: INPUT, binary })).rejects.toThrow(
+    "version mismatch"
+  );
+  await expect(
+    compileNativeConfig({ input: INPUT, binary, requireLocalResolution: true })
+  ).rejects.toThrow("version mismatch");
+  expect(await Bun.file(receipt).exists()).toBe(false);
+  expect((await compileNativeConfig({ input: INPUT, binary })).ok).toBe(true);
+});
+
+test("local diagnostics retain role and fixed redacted messages", async () => {
+  const result = {
+    transport_version: 1,
+    ok: false,
+    diagnostics: [
+      {
+        document: "checkout_local",
+        code: "duplicate_key",
+        pointer: "/environment",
+        message: "Duplicate JSON object keys are not allowed.",
+        line: 2,
+        column: 3,
+      },
+    ],
+  } as const;
+  const binary = await fixture(
+    resolverScript(
+      `console.log(${JSON.stringify(JSON.stringify(result))}); process.exitCode=1;`
+    )
+  );
+  expect(await resolveNativeConfig({ input: INPUT, binary })).toEqual(result);
+});
+
+test.each([
+  { ...LOCAL_RESOLUTION, overlay: "QA" },
+  { ...LOCAL_RESOLUTION, origin: "private-output" },
+  { ...LOCAL_RESOLUTION, inherit_local: null },
+  { ...LOCAL_RESOLUTION, resolution_hash: "invalid" },
+  undefined,
+])("rejects invalid local resolution metadata without exposing it", async (local_resolution) => {
+  const binary = await fixture(
+    resolverScript(
+      `console.log(${JSON.stringify(JSON.stringify({ ...SUCCESS, local_resolution }))});`
+    )
+  );
+  await expect(resolveNativeConfig({ input: INPUT, binary })).rejects.toThrow(
+    "invalid result"
+  );
+});
+
+test("local resolution refuses invalid UTF-8 and oversized documents before spawning", async () => {
+  const binary = join(directory, "absent");
+  await expect(
+    resolveNativeConfig({
+      input: INPUT,
+      checkoutLocal: new Uint8Array([255]),
+      binary,
+    })
+  ).rejects.toThrow("checkout_local input must be valid UTF-8");
+  await expect(
+    resolveNativeConfig({
+      input: INPUT,
+      primaryLocal: new Uint8Array(NATIVE_CONFIG_INPUT_LIMIT + 1),
+      binary,
+    })
+  ).rejects.toThrow("input budget");
+  await expect(
+    resolveNativeConfig({
+      input: INPUT,
+      explicitOverlay: "x".repeat(NATIVE_CONFIG_INPUT_LIMIT + 1),
+      binary,
+    })
+  ).rejects.toThrow("selection exceeds the input budget");
+  const escaped = new Uint8Array(NATIVE_CONFIG_INPUT_LIMIT);
+  await expect(
+    resolveNativeConfig({
+      input: escaped,
+      primaryLocal: escaped,
+      checkoutLocal: escaped,
+      explicitOverlay: "\u0000".repeat(NATIVE_CONFIG_INPUT_LIMIT),
+      binary,
+    })
+  ).rejects.toThrow("request exceeds the input budget");
 });
 afterEach(async () => {
   await rm(directory, { recursive: true, force: true });

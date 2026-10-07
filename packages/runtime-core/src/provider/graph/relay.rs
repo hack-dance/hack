@@ -110,6 +110,35 @@ pub(super) fn operate(
     ];
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     let script = include_str!("relay.sh").replace("# RELAY_FENCE", include_str!("relay-fence.sh"));
+    #[cfg(test)]
+    let script = {
+        if std::env::var("HACK_LOCAL_GRAPH_RUN").ok().as_deref() == Some(assignment.run.as_str()) {
+            match (
+                action,
+                std::env::var("HACK_LOCAL_GRAPH_FAULT").ok().as_deref(),
+            ) {
+                ("stop", Some("bridge-normalization-closing-pending")) => script.replace(
+                    " mv \"$control/pending\" \"$control/state\"",
+                    " if test \"$1\" = closing; then exit 97; fi\n mv \"$control/pending\" \"$control/state\"",
+                ),
+                ("stop", Some("bridge-normalization-stopped-pending")) => script.replace(
+                    " mv \"$control/pending\" \"$control/state\"",
+                    " if test \"$1\" = stopped; then exit 97; fi\n mv \"$control/pending\" \"$control/state\"",
+                ),
+                ("stop", Some("bridge-normalization-socket-unlinked")) => script.replace(
+                    "if test \"$serial\" -ne 0; then fence_write stopped; fi",
+                    "exit 97",
+                ),
+                ("remove", Some("bridge-normalization-owner-unlinked")) => script.replace(
+                    "rm \"$root/owner\"\n rmdir \"$root\"",
+                    "rm \"$root/owner\"\n exit 97",
+                ),
+                _ => script,
+            }
+        } else {
+            script
+        }
+    };
     let result = if action == "start" {
         engine.guest().execute(&script, &args, input)?
     } else {
@@ -334,6 +363,129 @@ pub(super) fn capture_cleanup(
     assignment: &bridges::Assignment,
 ) -> Result<CleanupEvidence, CandidateError> {
     CleanupEvidence::parse(&observe_cleanup(engine, slot, assignment, None)?)
+}
+/// Canonical numeric-only metadata pins an already exited helper and the guest
+/// allocation/fence identities throughout interrupted stop and removal.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(super) struct ExitedEvidence(String);
+#[cfg(target_os = "macos")]
+impl ExitedEvidence {
+    pub(super) fn valid(&self) -> bool {
+        let fields: Vec<_> = self.0.split(' ').collect();
+        let canonical = |v: &str| {
+            v.parse::<u64>()
+                .is_ok_and(|n| n > 0 && n <= i64::MAX as u64 && n.to_string() == v)
+        };
+        fields.len() == 8
+            && fields[0] == "relay-normalization-exited-v1"
+            && canonical(fields[1])
+            && canonical(fields[2])
+            && fields[3..].iter().all(|v| {
+                v.split_once(':').is_some_and(|(a, b)| {
+                    a.parse::<u64>().is_ok_and(|n| n.to_string() == a) && canonical(b)
+                })
+            })
+    }
+}
+#[cfg(target_os = "macos")]
+fn observe_normalization(
+    engine: &Engine<'_>,
+    slot: u8,
+    assignment: &bridges::Assignment,
+    expected: Option<&ExitedEvidence>,
+    finish_empty: bool,
+) -> Result<String, CandidateError> {
+    let relay = assignment.relay.as_ref().ok_or_else(observation_refused)?;
+    if !relay.valid()
+        || relay.transport != Transport::ReservationV1
+        || relay.launch_serial == 0
+        || assignment.boot_id != engine.guest().boot_id()
+        || !hex(&assignment.reservation, 32)
+        || !hex(&assignment.run, 32)
+        || expected.is_some_and(|v| !v.valid())
+    {
+        return Err(observation_refused());
+    }
+    let args = [
+        if finish_empty {
+            "finish-empty".into()
+        } else if expected.is_some() {
+            "verify".into()
+        } else {
+            "capture".into()
+        },
+        assignment.reservation.clone(),
+        format!(
+            "{}:{}:{}:{}",
+            engine.guest().incarnation(),
+            assignment.run,
+            assignment.reservation,
+            assignment.boot_id
+        ),
+        format!("/run/hack-local/bridge-{slot:02}.sock"),
+        relay.binary_sha256.clone(),
+        relay.launch_serial.to_string(),
+        slot.to_string(),
+        expected.map_or_else(String::new, |v| v.0.clone()),
+    ];
+    engine.guest().execute_cleanup(
+        include_str!("relay-normalize-observe.sh"),
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+}
+#[cfg(target_os = "macos")]
+pub(super) fn normalization_selection(
+    engine: &Engine<'_>,
+    slot: u8,
+    assignment: &bridges::Assignment,
+) -> Result<Option<ExitedEvidence>, CandidateError> {
+    let output = observe_normalization(engine, slot, assignment, None, false)?;
+    if output == "relay-normalization-running\n" {
+        capture_cleanup(engine, slot, assignment)?;
+        return Ok(None);
+    }
+    let value = ExitedEvidence(
+        output
+            .strip_suffix('\n')
+            .ok_or_else(observation_refused)?
+            .into(),
+    );
+    if !value.valid() {
+        return Err(observation_refused());
+    }
+    Ok(Some(value))
+}
+#[cfg(target_os = "macos")]
+pub(super) fn verify_normalization(
+    engine: &Engine<'_>,
+    slot: u8,
+    assignment: &bridges::Assignment,
+    expected: &ExitedEvidence,
+) -> Result<(), CandidateError> {
+    if observe_normalization(engine, slot, assignment, Some(expected), false)?
+        != "relay-normalization-verified\n"
+    {
+        return Err(observation_refused());
+    }
+    Ok(())
+}
+
+/// Resume only the final empty-directory window of this exact selected allocation.
+#[cfg(target_os = "macos")]
+pub(super) fn finish_normalization_removal(
+    engine: &Engine<'_>,
+    slot: u8,
+    assignment: &bridges::Assignment,
+    expected: &ExitedEvidence,
+) -> Result<(), CandidateError> {
+    if observe_normalization(engine, slot, assignment, Some(expected), true)?
+        != "relay-normalization-verified\n"
+    {
+        return Err(observation_refused());
+    }
+    Ok(())
 }
 /// Independently verify captured generation retirement without invoking the helper,
 /// editing its fence, or deleting allocations. This proves the actual helper

@@ -329,6 +329,16 @@ pub fn recover_live_owner(
             inspect_resource(&engine, &receipt, resource)?;
         }
         let selected = relay::Selection::capture(&relay, foreground.process())?;
+        let authority = digest(&(expected, foreground.fingerprint(), &selected))?;
+        let verify = || {
+            engine.guest().verify()?;
+            foreground.verify_retirement_ready()?;
+            relay.verify()?;
+            relay::verify_receipt(&root, &receipt)
+        };
+        bridges::cleanup::normalization::normalize(
+            candidate, &engine, &receipt, &root, &authority, &verify,
+        )?;
         Intent {
             version: selected.version(),
             boot: engine.guest().boot_id().into(),

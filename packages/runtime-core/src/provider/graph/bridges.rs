@@ -628,12 +628,24 @@ fn stop_slot(
     store: &mut Store,
     slot: u8,
 ) -> Result<(), CandidateError> {
+    stop_slot_fenced(candidate, engine, store, slot, &|| Ok(()), &|| Ok(()))
+}
+fn stop_slot_fenced(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    store: &mut Store,
+    slot: u8,
+    fence: &dyn Fn() -> Result<(), CandidateError>,
+    finish_partial: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    fence()?;
     let a = store.slots.get(&slot).expect("selected slot");
     super::super::publication::release(
         candidate,
         engine.guest().incarnation(),
         Some((&a.run, &a.reservation)),
     )?;
+    fence()?;
     if a.relay.is_none() {
         return Ok(());
     }
@@ -645,12 +657,23 @@ fn stop_slot(
     if a.phase != "stopped" {
         store.slots.get_mut(&slot).expect("selected slot").phase = "stopping".into();
         save(candidate, store)?;
+        fence()?;
         relay::operate(engine, slot, &store.slots[&slot], "stop", None)?;
+        #[cfg(test)]
+        fault_pause(
+            &directory(candidate, &store.slots[&slot].run)?,
+            &store.slots[&slot].run,
+            "bridge-normalization-after-guest-stop",
+        )?;
+        fence()?;
         store.slots.get_mut(&slot).expect("selected slot").phase = "stopped".into();
         save(candidate, store)?;
     }
+    fence()?;
+    finish_partial()?;
+    fence()?;
     relay::operate(engine, slot, &store.slots[&slot], "remove", None)?;
-    Ok(())
+    fence()
 }
 pub fn inspect_bridges(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;

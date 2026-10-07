@@ -22,7 +22,7 @@ type Inventory = {
 const FORMATS = {
   container: {
     list: `{"id":{{json .ID}},"name":{{json .Names}},"project":{{json (.Label "${PROJECT_LABEL}")}}}`,
-    inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"version":{{json (index .Config.Labels "${PREFIX}.version")}},"instance":{{json (index .Config.Labels "${PREFIX}.instance")}},"owner":{{json (index .Config.Labels "${PREFIX}.owner")}},"generation":{{json (index .Config.Labels "${PREFIX}.generation")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"state":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}}}`,
+    inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"version":{{json (index .Config.Labels "${PREFIX}.version")}},"instance":{{json (index .Config.Labels "${PREFIX}.instance")}},"owner":{{json (index .Config.Labels "${PREFIX}.owner")}},"generation":{{json (index .Config.Labels "${PREFIX}.generation")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"state":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}null{{end}}}`,
   },
   volume: {
     // Docker volumes have a name, rather than an immutable engine object ID.

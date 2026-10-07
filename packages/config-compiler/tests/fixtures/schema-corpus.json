@@ -852,5 +852,480 @@
         }
       }
     }
+  },
+  {
+    "name": "worktree defaults",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "worktree": {}
+    }
+  },
+  {
+    "name": "worktree false",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "worktree": {
+        "auto_branch": false,
+        "inherit_local": false
+      }
+    }
+  },
+  {
+    "name": "worktree partial",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "worktree": {
+        "inherit_local": false
+      }
+    }
+  },
+  {
+    "name": "worktree null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "worktree": null
+    }
+  },
+  {
+    "name": "worktree unknown",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "worktree": {
+        "extra": true
+      }
+    }
+  },
+  {
+    "name": "worktree boolean string",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "worktree": {
+        "auto_branch": "false"
+      }
+    }
+  },
+  {
+    "name": "worktree boolean null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "worktree": {
+        "inherit_local": null
+      }
+    }
+  },
+  {
+    "name": "worktree boolean number",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "worktree": {
+        "auto_branch": 1
+      }
+    }
+  },
+  {
+    "name": "worktree array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "worktree": []
+    }
+  },
+  {
+    "name": "source object rejects array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "source": []
+    }
+  },
+  {
+    "name": "environment object rejects array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "environment": []
+    }
+  },
+  {
+    "name": "storage object rejects array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "storage": {
+        "data": []
+      }
+    }
+  },
+  {
+    "name": "services workload rejects array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": []
+      }
+    }
+  },
+  {
+    "name": "jobs workload rejects array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "jobs": {
+        "web": []
+      }
+    }
+  },
+  {
+    "name": "build object rejects array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "build": []
+        }
+      }
+    }
+  },
+  {
+    "name": "command object rejects array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "command": []
+        }
+      }
+    }
+  },
+  {
+    "name": "readiness object rejects array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "readiness": []
+        }
+      }
+    }
+  },
+  {
+    "name": "mounts item rejects array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "mounts": [[]]
+        }
+      }
+    }
+  },
+  {
+    "name": "depends_on item rejects array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "depends_on": [[]]
+        }
+      }
+    }
+  },
+  {
+    "name": "environment directive rejects array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TEST": []
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "readiness command rejects array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "readiness": {
+            "kind": "exec",
+            "command": [],
+            "interval": "1s",
+            "timeout": "1s",
+            "retries": 1
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "source object rejects null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "source": null
+    }
+  },
+  {
+    "name": "environment object rejects null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "environment": null
+    }
+  },
+  {
+    "name": "storage object rejects null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "storage": {
+        "data": null
+      }
+    }
+  },
+  {
+    "name": "services workload rejects null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": null
+      }
+    }
+  },
+  {
+    "name": "jobs workload rejects null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1"
+        }
+      },
+      "jobs": {
+        "web": null
+      }
+    }
+  },
+  {
+    "name": "build object rejects null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "build": null
+        }
+      }
+    }
+  },
+  {
+    "name": "command object rejects null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "command": null
+        }
+      }
+    }
+  },
+  {
+    "name": "readiness object rejects null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "readiness": null
+        }
+      }
+    }
+  },
+  {
+    "name": "mounts item rejects null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "mounts": [null]
+        }
+      }
+    }
+  },
+  {
+    "name": "depends_on item rejects null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "depends_on": [null]
+        }
+      }
+    }
+  },
+  {
+    "name": "environment directive rejects null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "environment": {
+            "TEST": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "readiness command rejects null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "image": "web:1",
+          "readiness": {
+            "kind": "exec",
+            "command": null,
+            "interval": "1s",
+            "timeout": "1s",
+            "retries": 1
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "root array",
+    "valid": false,
+    "input": [1, "example"]
+  },
+  {
+    "name": "storage struct sequence",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "storage": {
+        "data": ["persistent", "worktree"]
+      }
+    }
+  },
+  {
+    "name": "build struct sequence",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "web": {
+          "build": ["."]
+        }
+      }
+    }
   }
 ]

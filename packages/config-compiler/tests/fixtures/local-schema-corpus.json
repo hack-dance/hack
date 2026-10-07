@@ -1,0 +1,295 @@
+[
+  {
+    "name": "minimal",
+    "valid": true,
+    "input": {
+      "schema_version": 1
+    }
+  },
+  {
+    "name": "empty environment",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "environment": {}
+    }
+  },
+  {
+    "name": "explicit base",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "environment": {
+        "default_overlay": null
+      }
+    }
+  },
+  {
+    "name": "named overlay",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "environment": {
+        "default_overlay": "qa-2"
+      }
+    }
+  },
+  {
+    "name": "noncanonical 'qa_test'",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": {
+        "default_overlay": "qa_test"
+      }
+    }
+  },
+  {
+    "name": "noncanonical 'QA'",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": {
+        "default_overlay": "QA"
+      }
+    }
+  },
+  {
+    "name": "noncanonical 'qa.test'",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": {
+        "default_overlay": "qa.test"
+      }
+    }
+  },
+  {
+    "name": "noncanonical 'qa-'",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": {
+        "default_overlay": "qa-"
+      }
+    }
+  },
+  {
+    "name": "noncanonical ''",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": {
+        "default_overlay": ""
+      }
+    }
+  },
+  {
+    "name": "noncanonical '-qa'",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": {
+        "default_overlay": "-qa"
+      }
+    }
+  },
+  {
+    "name": "overlay type False",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": {
+        "default_overlay": false
+      }
+    }
+  },
+  {
+    "name": "overlay type 1",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": {
+        "default_overlay": 1
+      }
+    }
+  },
+  {
+    "name": "overlay type {}",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": {
+        "default_overlay": {}
+      }
+    }
+  },
+  {
+    "name": "overlay type []",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": {
+        "default_overlay": []
+      }
+    }
+  },
+  {
+    "name": "environment type None",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": null
+    }
+  },
+  {
+    "name": "environment type []",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": []
+    }
+  },
+  {
+    "name": "environment type False",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": false
+    }
+  },
+  {
+    "name": "environment type 'qa'",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": "qa"
+    }
+  },
+  {
+    "name": "root None",
+    "valid": false,
+    "input": null
+  },
+  {
+    "name": "root []",
+    "valid": false,
+    "input": []
+  },
+  {
+    "name": "root False",
+    "valid": false,
+    "input": false
+  },
+  {
+    "name": "root 1",
+    "valid": false,
+    "input": 1
+  },
+  {
+    "name": "version None",
+    "valid": false,
+    "input": {
+      "schema_version": null
+    }
+  },
+  {
+    "name": "version 0",
+    "valid": false,
+    "input": {
+      "schema_version": 0
+    }
+  },
+  {
+    "name": "version 2",
+    "valid": false,
+    "input": {
+      "schema_version": 2
+    }
+  },
+  {
+    "name": "version '1'",
+    "valid": false,
+    "input": {
+      "schema_version": "1"
+    }
+  },
+  {
+    "name": "version True",
+    "valid": false,
+    "input": {
+      "schema_version": true
+    }
+  },
+  {
+    "name": "missing version",
+    "valid": false,
+    "input": {}
+  },
+  {
+    "name": "forbidden services",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "services": {}
+    }
+  },
+  {
+    "name": "forbidden jobs",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "jobs": {}
+    }
+  },
+  {
+    "name": "forbidden source",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "source": {}
+    }
+  },
+  {
+    "name": "forbidden storage",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "storage": {}
+    }
+  },
+  {
+    "name": "forbidden worktree",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "worktree": {}
+    }
+  },
+  {
+    "name": "forbidden name",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": {}
+    }
+  },
+  {
+    "name": "forbidden secrets",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "secrets": {}
+    }
+  },
+  {
+    "name": "unknown environment field",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "environment": {
+        "overlay": "qa"
+      }
+    }
+  }
+]

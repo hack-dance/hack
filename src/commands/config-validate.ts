@@ -5,27 +5,32 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
-import { optJson } from "../cli/options.ts";
+import { optEnv, optJson, optPath } from "../cli/options.ts";
+import { HackCliError } from "../lib/cli-result.ts";
 import {
   compileNativeConfig,
+  type NativeConfigCompileResult,
   NativeConfigCompilerError,
+  type NativeConfigResolveResult,
   readNativeConfigInput,
 } from "../lib/native-config-compiler.ts";
+import { validateNativeProject } from "../lib/native-project-validation.ts";
 
 const spec = defineCommand({
   name: "validate",
   summary:
-    "Validate an explicit native project file without starting workloads",
+    "Validate native configuration and selected local overlays without starting workloads",
   group: "Project",
   description:
-    "Uses the matching bundled Rust compiler. This experimental command does not discover a project, resolve secrets, or adopt native configuration for runtime commands.",
+    "Uses the matching bundled Rust compiler. Without --file, discovers a native project and resolves permitted worktree-local overlay settings. --file validates only the explicit document. Neither mode reads env values, writes state, or starts workloads.",
   options: [
     defineOption({
       name: "file",
       type: "string",
       long: "--file",
       valueHint: "<path>",
-      description: "Required native project JSON file",
+      description:
+        "Validate only this native project JSON file, without discovery or local overrides",
     } as const),
     defineOption({
       name: "profile",
@@ -34,6 +39,8 @@ const spec = defineCommand({
       valueHint: "<names>",
       description: "Comma-separated declared native profiles",
     } as const),
+    optPath,
+    optEnv,
     optJson,
   ],
   positionals: [],
@@ -44,8 +51,16 @@ export const configValidateCommand = withHandler(
   spec,
   async ({ ctx, args }) => {
     const file = args.options.file;
-    if (!file?.trim()) {
-      throw new CliUsageError("Native validation requires --file <path>.");
+    if (file !== undefined && !file.trim()) {
+      throw new CliUsageError("Native file paths must not be empty.");
+    }
+    if (
+      file !== undefined &&
+      (args.options.path !== undefined || args.options.env !== undefined)
+    ) {
+      throw new CliUsageError(
+        "--file validates one document and cannot be combined with --path or --env."
+      );
     }
     const profiles = args.options.profile
       ?.split(",")
@@ -58,31 +73,28 @@ export const configValidateCommand = withHandler(
     process.once("SIGINT", cancel);
     process.once("SIGTERM", cancel);
     try {
-      const input = await readNativeConfigInput({
-        path: resolve(ctx.cwd, file),
-      });
-      const result = await compileNativeConfig({
-        input,
-        profiles,
-        signal: controller.signal,
-      });
-      if (args.options.json) {
-        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      } else if (result.ok) {
-        process.stdout.write(
-          `Native configuration is valid. Semantic hash: ${result.semantic_hash}\n`
-        );
-      } else {
-        for (const diagnostic of result.diagnostics) {
-          process.stderr.write(
-            `${diagnostic.code} ${JSON.stringify(diagnostic.pointer || "/")} (${diagnostic.line}:${diagnostic.column}): ${diagnostic.message}\n`
-          );
-        }
-      }
+      const result =
+        file === undefined
+          ? await validateNativeProject({
+              startDir: resolve(ctx.cwd, args.options.path ?? "."),
+              profiles,
+              explicitOverlay:
+                args.options.env === "base" ? null : args.options.env,
+              signal: controller.signal,
+            })
+          : await compileNativeConfig({
+              input: await readNativeConfigInput({
+                path: resolve(ctx.cwd, file),
+              }),
+              profiles,
+              signal: controller.signal,
+            });
+      renderValidationResult({ result, json: args.options.json === true });
       return result.ok ? 0 : 1;
     } catch (error: unknown) {
       const failure =
-        error instanceof NativeConfigCompilerError
+        error instanceof NativeConfigCompilerError ||
+        error instanceof HackCliError
           ? error
           : new NativeConfigCompilerError(
               "E_COMPILER_REQUEST",
@@ -102,3 +114,29 @@ export const configValidateCommand = withHandler(
     }
   }
 );
+
+function renderValidationResult(opts: {
+  readonly result: NativeConfigCompileResult | NativeConfigResolveResult;
+  readonly json: boolean;
+}): void {
+  const result = opts.result;
+  if (opts.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else if (result.ok) {
+    process.stdout.write(
+      `Native configuration is valid. Semantic hash: ${result.semantic_hash}\n`
+    );
+    if ("local_resolution" in result) {
+      const local = result.local_resolution;
+      process.stdout.write(
+        `Selected env: ${local.overlay ?? "base"} (${local.origin}). Local resolution hash: ${local.resolution_hash}\n`
+      );
+    }
+  } else {
+    for (const diagnostic of result.diagnostics) {
+      process.stderr.write(
+        `${diagnostic.document ? `${diagnostic.document} ` : ""}${diagnostic.code} ${JSON.stringify(diagnostic.pointer || "/")} (${diagnostic.line}:${diagnostic.column}): ${diagnostic.message}\n`
+      );
+    }
+  }
+}

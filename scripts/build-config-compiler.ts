@@ -11,7 +11,11 @@ import {
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
-const GENERATED = ["hack.project.schema.json", "native-config.ts"] as const;
+const GENERATED = [
+  "hack.project.schema.json",
+  "hack.local.schema.json",
+  "native-config.ts",
+] as const;
 
 /** Build the pure host compiler; verify projections before publishing local output. */
 export async function buildConfigCompiler(): Promise<void> {

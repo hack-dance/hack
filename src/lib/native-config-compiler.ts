@@ -7,6 +7,8 @@ const OUTPUT_LIMIT = 8 * 1024 * 1024;
 const STDERR_LIMIT = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
+const OVERLAY_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const RESOLVE_REQUEST_LIMIT = 20 * 1024 * 1024;
 
 export type NativeConfigDiagnostic = {
   readonly code: string;
@@ -14,7 +16,28 @@ export type NativeConfigDiagnostic = {
   readonly message: string;
   readonly line: number;
   readonly column: number;
+  readonly document?: NativeConfigDocumentRole;
 };
+
+export type NativeConfigDocumentRole =
+  | "project"
+  | "primary_local"
+  | "checkout_local"
+  | "request";
+
+export type NativeLocalResolution = {
+  readonly overlay: string | null;
+  readonly origin: "project" | "primary_local" | "checkout_local" | "explicit";
+  readonly auto_branch: boolean;
+  readonly inherit_local: boolean;
+  readonly resolution_hash: string;
+};
+
+export type NativeConfigResolveResult =
+  | (Extract<NativeConfigCompileResult, { readonly ok: true }> & {
+      readonly local_resolution: NativeLocalResolution;
+    })
+  | Extract<NativeConfigCompileResult, { readonly ok: false }>;
 
 export type NativeConfigCompileResult =
   | {
@@ -98,6 +121,7 @@ export async function compileNativeConfig(opts: {
   readonly profiles?: readonly string[];
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  readonly requireLocalResolution?: boolean;
 }): Promise<NativeConfigCompileResult> {
   if (opts.input.byteLength > NATIVE_CONFIG_INPUT_LIMIT) {
     throw failure(
@@ -105,6 +129,122 @@ export async function compileNativeConfig(opts: {
       "Native configuration exceeds the input budget."
     );
   }
+  const request = compilerRequest(opts);
+  await checkProtocol({
+    ...request,
+    requireLocalResolution: opts.requireLocalResolution,
+  });
+  const response = await invokeCompiler({
+    ...request,
+    args: compileArguments("compile", opts.profiles),
+    input: opts.input,
+  });
+  return parseCompileResponse(response);
+}
+
+/** Resolve original document text in Rust; this transport never parses local policy. */
+export async function resolveNativeConfig(opts: {
+  readonly input: Uint8Array;
+  readonly primaryLocal?: Uint8Array;
+  readonly checkoutLocal?: Uint8Array;
+  readonly explicitOverlay?: string | null;
+  readonly binary?: string;
+  readonly profiles?: readonly string[];
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+}): Promise<NativeConfigResolveResult> {
+  if (
+    typeof opts.explicitOverlay === "string" &&
+    Buffer.byteLength(opts.explicitOverlay, "utf8") > NATIVE_CONFIG_INPUT_LIMIT
+  ) {
+    throw failure(
+      "E_CONFIG_INPUT",
+      "Native explicit overlay selection exceeds the input budget."
+    );
+  }
+  const input = new TextEncoder().encode(
+    JSON.stringify({
+      request_version: 1,
+      project: documentText(opts.input, "project"),
+      primary_local:
+        opts.primaryLocal === undefined
+          ? undefined
+          : documentText(opts.primaryLocal, "primary_local"),
+      checkout_local:
+        opts.checkoutLocal === undefined
+          ? undefined
+          : documentText(opts.checkoutLocal, "checkout_local"),
+      explicit_overlay: opts.explicitOverlay,
+    })
+  );
+  if (input.byteLength > RESOLVE_REQUEST_LIMIT) {
+    throw failure(
+      "E_CONFIG_INPUT",
+      "Native local resolution request exceeds the input budget."
+    );
+  }
+  const request = compilerRequest(opts);
+  await checkProtocol({ ...request, requireLocalResolution: true });
+  const response = await invokeCompiler({
+    ...request,
+    args: compileArguments("resolve", opts.profiles),
+    input,
+  });
+  const envelope = parseControlJson(response.output);
+  const result = parseCompileValue({
+    value: envelope,
+    exitCode: response.exitCode,
+  });
+  if (!result.ok) {
+    if (
+      result.diagnostics.some((diagnostic) => diagnostic.document === undefined)
+    ) {
+      throw failure(
+        "E_COMPILER_RESPONSE",
+        "Native local resolution returned an invalid diagnostic."
+      );
+    }
+    return result;
+  }
+  if (!isRecord(envelope)) {
+    throw failure(
+      "E_COMPILER_RESPONSE",
+      "Native local resolution returned an invalid envelope."
+    );
+  }
+  return {
+    ...result,
+    local_resolution: parseLocalResolution(envelope.local_resolution),
+  };
+}
+
+function documentText(
+  input: Uint8Array,
+  role: NativeConfigDocumentRole
+): string {
+  if (input.byteLength > NATIVE_CONFIG_INPUT_LIMIT) {
+    throw failure(
+      "E_CONFIG_INPUT",
+      "Native configuration exceeds the input budget."
+    );
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      input
+    );
+  } catch {
+    throw failure(
+      "E_CONFIG_INPUT",
+      `Native ${role} input must be valid UTF-8.`
+    );
+  }
+}
+
+function compilerRequest(opts: {
+  readonly binary?: string;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+}) {
   const binary = opts.binary ?? resolveNativeConfigCompilerBinary();
   if (!isAbsolute(binary)) {
     throw failure("E_COMPILER_PATH", "Compiler path must be absolute.");
@@ -116,31 +256,81 @@ export async function compileNativeConfig(opts: {
       "Compiler timeout is outside the supported budget."
     );
   }
-  const request = { binary, timeoutMs, signal: opts.signal };
-  const handshake = await invokeCompiler({ ...request, args: ["--protocol"] });
+  return { binary, timeoutMs, signal: opts.signal };
+}
+
+async function checkProtocol(opts: {
+  readonly binary: string;
+  readonly timeoutMs: number;
+  readonly signal?: AbortSignal;
+  readonly requireLocalResolution?: boolean;
+}): Promise<void> {
+  const handshake = await invokeCompiler({ ...opts, args: ["--protocol"] });
   const protocol = parseControlJson(handshake.output);
   if (
     handshake.exitCode !== 0 ||
     !isRecord(protocol) ||
     protocol.transport_version !== 1 ||
     protocol.authored_version !== 1 ||
-    protocol.plan_version !== 1
+    protocol.plan_version !== 1 ||
+    (opts.requireLocalResolution &&
+      (protocol.resolve_version !== 1 || protocol.local_version !== 1))
   ) {
     throw failure(
       "E_COMPILER_VERSION",
       "Native configuration compiler version mismatch."
     );
   }
-  const args = ["compile"];
-  for (const profile of opts.profiles ?? []) {
+}
+
+function compileArguments(
+  command: "compile" | "resolve",
+  profiles?: readonly string[]
+): string[] {
+  const args: string[] = [command];
+  for (const profile of profiles ?? []) {
     args.push("--profile", profile);
   }
-  const response = await invokeCompiler({
-    ...request,
-    args,
-    input: opts.input,
-  });
-  return parseCompileResponse(response);
+  return args;
+}
+
+function isResolutionOrigin(
+  value: unknown
+): value is NativeLocalResolution["origin"] {
+  return (
+    value === "project" ||
+    value === "primary_local" ||
+    value === "checkout_local" ||
+    value === "explicit"
+  );
+}
+
+function parseLocalResolution(value: unknown): NativeLocalResolution {
+  if (
+    !(
+      isRecord(value) &&
+      (value.overlay === null ||
+        (typeof value.overlay === "string" &&
+          OVERLAY_PATTERN.test(value.overlay))) &&
+      isResolutionOrigin(value.origin)
+    ) ||
+    typeof value.auto_branch !== "boolean" ||
+    typeof value.inherit_local !== "boolean" ||
+    typeof value.resolution_hash !== "string" ||
+    !HASH_PATTERN.test(value.resolution_hash)
+  ) {
+    throw failure(
+      "E_COMPILER_RESPONSE",
+      "Native local resolution returned an invalid result."
+    );
+  }
+  return {
+    overlay: value.overlay,
+    origin: value.origin,
+    auto_branch: value.auto_branch,
+    inherit_local: value.inherit_local,
+    resolution_hash: value.resolution_hash,
+  };
 }
 
 async function invokeCompiler(opts: {
@@ -267,7 +457,17 @@ function parseCompileResponse(opts: {
   readonly output: Uint8Array;
   readonly exitCode: number;
 }): NativeConfigCompileResult {
-  const value = parseControlJson(opts.output);
+  return parseCompileValue({
+    value: parseControlJson(opts.output),
+    exitCode: opts.exitCode,
+  });
+}
+
+function parseCompileValue(opts: {
+  readonly value: unknown;
+  readonly exitCode: number;
+}): NativeConfigCompileResult {
+  const value = opts.value;
   if (!isRecord(value) || value.transport_version !== 1) {
     throw failure(
       "E_COMPILER_RESPONSE",
@@ -316,7 +516,8 @@ function parseDiagnostic(value: unknown): NativeConfigDiagnostic {
     value.line < 1 ||
     typeof value.column !== "number" ||
     !Number.isSafeInteger(value.column) ||
-    value.column < 1
+    value.column < 1 ||
+    (value.document !== undefined && !isDocumentRole(value.document))
   ) {
     throw failure(
       "E_COMPILER_RESPONSE",
@@ -329,7 +530,17 @@ function parseDiagnostic(value: unknown): NativeConfigDiagnostic {
     message: value.message,
     line: value.line,
     column: value.column,
+    ...(isDocumentRole(value.document) ? { document: value.document } : {}),
   };
+}
+
+function isDocumentRole(value: unknown): value is NativeConfigDocumentRole {
+  return (
+    value === "project" ||
+    value === "primary_local" ||
+    value === "checkout_local" ||
+    value === "request"
+  );
 }
 
 function failure(code: string, message: string): NativeConfigCompilerError {

@@ -31,7 +31,8 @@ SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 REVISION = re.compile(r"[0-9a-f]{40}\Z")
 PAYLOAD = frozenset(("hack-native", "hack-relay-guest", "hack-cli", "hack-v5",
                      "provider-pins.json", "README.md", "prerelease.json"))
-COMPILER_PAYLOAD = frozenset(("hack-config-compiler", "hack.project.schema.json"))
+LEGACY_COMPILER_PAYLOAD = frozenset(("hack-config-compiler", "hack.project.schema.json"))
+COMPILER_PAYLOAD = LEGACY_COMPILER_PAYLOAD | {"hack.local.schema.json"}
 EXECUTABLES = frozenset(("hack-native", "hack-relay-guest", "hack-cli", "hack-v5",
                          "hack-config-compiler"))
 BUNDLE_FILES = PAYLOAD | {"SHA256SUMS"}
@@ -43,9 +44,10 @@ METADATA_KEYS = {"schema", "version", "tag", "source_revision", "platform"}
 REPOSITORY = "hack-dance/hack"
 DOWNLOAD_HOSTS = {"api.github.com", "github.com", "release-assets.githubusercontent.com",
                   "objects.githubusercontent.com"}
-# Reviewed flat-layout and shared-MCP managers, before optional compiler sidecars.
+# Reviewed flat-layout, shared-MCP, and project-schema compiler managers.
 # Keep this an explicit allowlist; a matching user-written receipt is not provenance.
 MANAGER_PREDECESSORS = frozenset({
+    "b459ffc4f227482119b48e357c91e4607aa4f7d1f88c7ccf5b7d684f66f2c0cd",
     "b7c49e3fec6b06790e833db1d2dcb441d2223c283b792713be46826aa2eef877",
     "ca432b7fc6562bb091d17d3217f5d1daf9f91621a6919c8964ca51bee2111d0c",
 })
@@ -186,7 +188,8 @@ def payload_inventory(names):
     names = set(names)
     require(BUNDLE_FILES <= names, "Incomplete candidate bundle.")
     compiler = names & COMPILER_PAYLOAD
-    require(not compiler or compiler == COMPILER_PAYLOAD, "Incomplete config compiler payload.")
+    require(not compiler or compiler in (LEGACY_COMPILER_PAYLOAD, COMPILER_PAYLOAD),
+            "Incomplete config compiler payload.")
     extra = names - BUNDLE_FILES - COMPILER_PAYLOAD
     if extra:
         matches = [MCP_MEMBER.fullmatch(name) for name in extra]

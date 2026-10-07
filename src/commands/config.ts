@@ -41,8 +41,7 @@ type ConfigReadResult =
 
 const configSpec = defineCommand({
   name: "config",
-  summary:
-    "Read/write legacy config or validate an explicit native project file",
+  summary: "Read/write legacy config or validate native project configuration",
   group: "Project",
   options: [],
   positionals: [],

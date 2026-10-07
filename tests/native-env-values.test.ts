@@ -6,6 +6,7 @@ import { YAML } from "bun";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import {
+  acquireProjectEnvForNativeExecution,
   type NativeProjectEnvSelectionOptions,
   type ProjectEnvStoredValue,
   type ProjectEnvValuesByScope,
@@ -833,4 +834,255 @@ test("noncanonical and unknown host targets refuse before value delivery", async
   await expect(values(p, { signal: controller.signal })).rejects.toMatchObject({
     code: "E_COMPILER_CANCELLED",
   });
+});
+
+test("private env capability shares one initial acquisition and exposes only frozen safe metadata", async () => {
+  const p = await project();
+  const envPath = join(p, ".hack/hack.env.default.yaml");
+  await layer(p, "hack.env.default.yaml", { global: { VALUE: "captured" } });
+  const originalOpen = fs.open;
+  let initialReads = 0;
+  spyOn(fs, "open").mockImplementation(async (...args) => {
+    if (args[0] === envPath) {
+      initialReads++;
+    }
+    return await originalOpen(...args);
+  });
+  const opts = selection(p);
+  const acquired = await acquireProjectEnvForNativeExecution(opts);
+  expect(initialReads).toBe(1);
+  expect(Object.keys(acquired)).toEqual(["metadata"]);
+  expect(JSON.parse(JSON.stringify(acquired))).toEqual({
+    metadata: acquired.metadata,
+  });
+  expect(JSON.stringify(acquired)).not.toContain("captured");
+  expect(
+    Reflect.set(acquired.metadata.effectiveMetadata.global ?? {}, "FORGED", {
+      scope: "global",
+      secret: false,
+    })
+  ).toBe(false);
+  await acquired.assertFresh(opts);
+  const result = await acquired.resolveValues();
+  // One explicit freshness check plus value delivery's before/after checks;
+  // delivery itself reuses the captured baseline rather than acquiring another.
+  expect(initialReads).toBe(4);
+  expect(result.globalEnv).toEqual({ VALUE: "captured" });
+  expect(Reflect.set(result.globalEnv, "VALUE", "forged")).toBe(false);
+  expect((await acquired.resolveValues()).globalEnv).toEqual({
+    VALUE: "captured",
+  });
+});
+
+for (const change of ["plain", "whitespace", "ciphertext"] as const) {
+  test(`private env revision detects ${change} changes without public metadata changes`, async () => {
+    const p = await project();
+    const secret = await encrypted();
+    await fs.writeFile(join(p, PROJECT_ENV_KEY_FILENAME), KEY);
+    await layer(p, "hack.env.default.yaml", {
+      global: { VALUE: change === "ciphertext" ? secret : "first" },
+    });
+    const opts = selection(p);
+    const acquired = await acquireProjectEnvForNativeExecution(opts);
+    if (change === "whitespace") {
+      await fs.appendFile(join(p, ".hack/hack.env.default.yaml"), "\n  \n");
+    } else {
+      await layer(p, "hack.env.default.yaml", {
+        global: {
+          VALUE: change === "ciphertext" ? await encrypted() : "second",
+        },
+      });
+    }
+    expect(await resolveProjectEnvMetadataForNativeSelection(opts)).toEqual(
+      acquired.metadata
+    );
+    await refuses(async () => acquired.assertFresh(opts));
+    await refuses(async () => acquired.resolveValues());
+  });
+}
+
+for (const kind of ["added", "removed"] as const) {
+  test(`private env revision detects ${kind} optional layers`, async () => {
+    const p = await project();
+    await layer(p, "hack.env.default.yaml", {});
+    const filename = "hack.env.qa.local.yaml";
+    if (kind === "removed") {
+      await layer(p, filename, {});
+    }
+    const opts = selection(p, { overlay: "qa" });
+    const acquired = await acquireProjectEnvForNativeExecution(opts);
+    if (kind === "added") {
+      await layer(p, filename, {});
+    } else {
+      await fs.rm(join(p, ".hack", filename));
+    }
+    expect(await resolveProjectEnvMetadataForNativeSelection(opts)).toEqual(
+      acquired.metadata
+    );
+    await refuses(async () => acquired.assertFresh(opts));
+  });
+}
+
+for (const index of [0, 1, 2, 3, 4, 5]) {
+  test(`private env revision binds raw bytes for selected worktree layer ${index}`, async () => {
+    const { primary, checkout } = await linked();
+    const layers = [
+      [checkout, "hack.env.default.yaml"],
+      [checkout, "hack.env.qa.yaml"],
+      [primary, "hack.env.local.yaml"],
+      [primary, "hack.env.qa.local.yaml"],
+      [checkout, "hack.env.local.yaml"],
+      [checkout, "hack.env.qa.local.yaml"],
+    ] as const;
+    for (const [p, filename] of layers) {
+      await layer(p, filename, { global: { VALUE: "same" } });
+    }
+    const opts = selection(checkout, { overlay: "qa" });
+    const acquired = await acquireProjectEnvForNativeExecution(opts);
+    const target = layers[index];
+    if (!target) {
+      throw new Error("Missing fixture layer");
+    }
+    await fs.appendFile(join(target[0], ".hack", target[1]), "\n");
+    expect(await resolveProjectEnvMetadataForNativeSelection(opts)).toEqual(
+      acquired.metadata
+    );
+    await refuses(async () => acquired.assertFresh(opts));
+  });
+}
+
+test("private env revision binds tracked-local compatibility inputs and their absence", async () => {
+  const { primary } = await linked();
+  await layer(primary, "hack.env.local.yaml", {}, "local");
+  await git(primary, ["add", "--force", ".hack/hack.env.local.yaml"]);
+  const opts = selection(primary);
+  const acquired = await acquireProjectEnvForNativeExecution(opts);
+  await layer(primary, "hack.env.default.local.yaml", {});
+  await refuses(async () => acquired.assertFresh(opts));
+});
+
+test("private env revision binds exact overlay, inheritance, roots and target selections", async () => {
+  const p = await project();
+  const other = await project("other");
+  const opts = selection(p, {
+    hostTargets: { includeDefault: true, workloadNames: ["web"] },
+  });
+  const acquired = await acquireProjectEnvForNativeExecution(opts);
+  for (const current of [
+    { ...opts, projectRoot: other },
+    { ...opts, overlay: "qa" },
+    { ...opts, inheritLocal: false },
+    { ...opts, declaredWorkloadNames: ["web", "job"] },
+    { ...opts, hostTargets: { includeDefault: false, workloadNames: ["web"] } },
+    { ...opts, hostTargets: { includeDefault: true, workloadNames: ["job"] } },
+  ]) {
+    await refuses(async () => acquired.assertFresh(current));
+  }
+});
+
+test("private env revision detects inherited root exclusion even when effective metadata is identical", async () => {
+  const { primary, checkout } = await linked();
+  await layer(primary, "hack.env.local.yaml", { global: { VALUE: "same" } });
+  await layer(checkout, "hack.env.local.yaml", { global: { VALUE: "same" } });
+  const opts = selection(checkout);
+  const acquired = await acquireProjectEnvForNativeExecution(opts);
+  process.env.CI = "true";
+  expect(await resolveProjectEnvMetadataForNativeSelection(opts)).toEqual(
+    acquired.metadata
+  );
+  await refuses(async () => acquired.assertFresh(opts));
+});
+
+test("private env capability snapshots caller arrays and never shares mutable binding state", async () => {
+  const p = await project();
+  await layer(p, "hack.env.default.yaml", { global: { VALUE: "same" } });
+  const names = ["web"];
+  const hosts = ["web"];
+  const opts = selection(p, {
+    declaredWorkloadNames: names,
+    hostTargets: { includeDefault: false, workloadNames: hosts },
+  });
+  const acquired = await acquireProjectEnvForNativeExecution(opts);
+  names.splice(0, 1, "job");
+  hosts.splice(0, 1, "job");
+  expect(Object.keys((await acquired.resolveValues()).workloadEnv)).toEqual([
+    "web",
+  ]);
+  await refuses(async () => acquired.assertFresh(opts));
+});
+
+test("private env acquisition and freshness remain key-free and decryption-free", async () => {
+  const p = await project();
+  await fs.mkdir(join(p, PROJECT_ENV_KEY_FILENAME));
+  await layer(p, "hack.env.default.yaml", {
+    global: { SECRET: { secure: SENTINEL } },
+  });
+  const opts = selection(p);
+  const acquired = await acquireProjectEnvForNativeExecution(opts);
+  expect(acquired.metadata.effectiveMetadata.global?.SECRET?.secret).toBe(true);
+  await acquired.assertFresh(opts);
+  expect(JSON.stringify(acquired)).not.toContain(SENTINEL);
+  await refuses(async () => acquired.resolveValues());
+});
+
+test("private env revision rechecks after key resolution before returning decrypted values", async () => {
+  const p = await project();
+  await fs.writeFile(join(p, PROJECT_ENV_KEY_FILENAME), KEY);
+  await layer(p, "hack.env.default.yaml", {
+    global: { SECRET: await encrypted() },
+  });
+  const opts = selection(p);
+  const acquired = await acquireProjectEnvForNativeExecution(opts);
+  const closed = interceptDescriptor(join(p, PROJECT_ENV_KEY_FILENAME), () =>
+    fs.appendFile(join(p, ".hack/hack.env.default.yaml"), "\n")
+  );
+  await refuses(async () => acquired.resolveValues());
+  expect(closed()).toBe(1);
+});
+
+for (const kind of [
+  "malformed",
+  "symlink",
+  "oversized",
+  "cancelled",
+] as const) {
+  test(`private env recheck retains ${kind} redaction and cancellation`, async () => {
+    const p = await project();
+    await layer(p, "hack.env.default.yaml", {});
+    const opts = selection(p);
+    const acquired = await acquireProjectEnvForNativeExecution(opts);
+    const path = join(p, ".hack/hack.env.default.yaml");
+    if (kind === "cancelled") {
+      const controller = new AbortController();
+      const closed = interceptDescriptor(path, async () => {
+        controller.abort(SENTINEL);
+      });
+      await expect(
+        acquired.assertFresh({ ...opts, signal: controller.signal })
+      ).rejects.toMatchObject({ code: "E_COMPILER_CANCELLED" });
+      expect(closed()).toBe(1);
+      return;
+    }
+    if (kind === "symlink") {
+      await fs.rm(path);
+      await fs.symlink(join(root, SENTINEL), path);
+    } else {
+      await fs.writeFile(
+        path,
+        kind === "oversized"
+          ? "x".repeat(1024 * 1024 + 1)
+          : `invalid: [${SENTINEL}`
+      );
+    }
+    await refuses(async () => acquired.assertFresh(opts));
+  });
+}
+
+test("private env revision ignores layers outside explicit selection", async () => {
+  const p = await project();
+  const opts = selection(p);
+  const acquired = await acquireProjectEnvForNativeExecution(opts);
+  await layer(p, "hack.env.qa.yaml", { global: { VALUE: SENTINEL } });
+  await acquired.assertFresh(opts);
+  expect((await acquired.resolveValues()).globalEnv).toEqual({});
 });

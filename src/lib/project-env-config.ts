@@ -1031,6 +1031,23 @@ export type NativeProjectEnvResolvedConfig = NativeProjectEnvMetadata & {
   };
 };
 
+/** Private in-process execution capability; only its names-only metadata is serializable. */
+export type NativeProjectEnvExecutionAcquisition = {
+  readonly metadata: NativeProjectEnvMetadata;
+  readonly resolveValues: (opts?: {
+    readonly signal?: AbortSignal;
+  }) => Promise<NativeProjectEnvResolvedConfig>;
+  readonly assertFresh: (
+    selection: NativeProjectEnvSelectionOptions
+  ) => Promise<void>;
+};
+
+function nativeEnvRevisionError(): Error {
+  return new Error(
+    "Cannot use native managed env values: selected inputs changed or could not be rechecked; values omitted."
+  );
+}
+
 function nativeEnvValuesError(): Error {
   return new Error(
     "Cannot resolve native managed env values: selected inputs or decryption key are missing, invalid, unreadable, unstable or oversized; values omitted."
@@ -1130,14 +1147,27 @@ function checkNativeEnvCancellation(signal?: AbortSignal): void {
   }
 }
 
+/** Only the managed-env owner may observe these private acquired bytes. */
+type NativeEnvAcquisitionObserver = (input: {
+  readonly projectRoot: string;
+  readonly filename: string;
+  readonly bytes: Uint8Array | undefined;
+}) => void;
+
 async function readNativeEnvLayer(opts: {
   readonly projectRoot: string;
   readonly filename: string;
   readonly environment: string;
   readonly signal?: AbortSignal;
+  readonly onAcquired?: NativeEnvAcquisitionObserver;
 }): Promise<ProjectEnvConfig | null> {
   const bytes = await acquireNativeManagedEnvFile(opts);
   checkNativeEnvCancellation(opts.signal);
+  opts.onAcquired?.({
+    projectRoot: opts.projectRoot,
+    filename: opts.filename,
+    bytes,
+  });
   if (bytes === undefined) {
     return null;
   }
@@ -1165,10 +1195,16 @@ function parseNativeEnvLayer(opts: {
 async function readNativeLocalBase(opts: {
   readonly projectRoot: string;
   readonly signal?: AbortSignal;
+  readonly onAcquired?: NativeEnvAcquisitionObserver;
 }): Promise<ProjectEnvConfig | null> {
   const bytes = await acquireNativeManagedEnvFile({
     ...opts,
     filename: "hack.env.local.yaml",
+  });
+  opts.onAcquired?.({
+    projectRoot: opts.projectRoot,
+    filename: "hack.env.local.yaml",
+    bytes,
   });
   if (bytes === undefined) {
     return null;
@@ -1198,7 +1234,8 @@ async function readNativeLocalBase(opts: {
  * Only requested host baselines are allocated, under a combined output budget.
  */
 async function readNativeProjectEnvSelection(
-  opts: NativeProjectEnvSelectionOptions
+  opts: NativeProjectEnvSelectionOptions,
+  onAcquired?: NativeEnvAcquisitionObserver
 ) {
   checkNativeEnvCancellation(opts.signal);
   const overlayName = opts.overlay;
@@ -1241,6 +1278,7 @@ async function readNativeProjectEnvSelection(
       ),
       environment: envName ?? "default",
       signal: opts.signal,
+      onAcquired,
     });
   };
   const base = await read(projectRoot, null, false);
@@ -1253,12 +1291,13 @@ async function readNativeProjectEnvSelection(
       ? await readNativeLocalBase({
           projectRoot: primaryRoot,
           signal: opts.signal,
+          onAcquired,
         })
       : null,
     primaryRoot && overlayName !== null
       ? await read(primaryRoot, overlayName, true)
       : null,
-    await readNativeLocalBase({ projectRoot, signal: opts.signal }),
+    await readNativeLocalBase({ projectRoot, signal: opts.signal, onAcquired }),
     overlayName === null ? null : await read(projectRoot, overlayName, true),
   ];
   const merged = mergeProjectEnvConfigLayers({
@@ -1343,7 +1382,27 @@ export async function resolveProjectEnvConfigForNativeSelection(
   opts: NativeProjectEnvSelectionOptions
 ): Promise<NativeProjectEnvResolvedConfig> {
   try {
-    const selected = await readNativeProjectEnvSelection(opts);
+    return await resolveNativeProjectEnvValues({
+      selected: await readNativeProjectEnvSelection(opts),
+      signal: opts.signal,
+    });
+  } catch (error: unknown) {
+    if (
+      error instanceof NativeConfigCompilerError &&
+      error.code === "E_COMPILER_CANCELLED"
+    ) {
+      throw error;
+    }
+    throw nativeEnvValuesError();
+  }
+}
+
+async function resolveNativeProjectEnvValues(opts: {
+  readonly selected: Awaited<ReturnType<typeof readNativeProjectEnvSelection>>;
+  readonly signal?: AbortSignal;
+}): Promise<NativeProjectEnvResolvedConfig> {
+  try {
+    const { selected } = opts;
     const scopes = new Map(
       selected.projection.serviceTargets.map((target) => [
         target.serviceName,
@@ -1460,6 +1519,159 @@ export async function resolveProjectEnvConfigForNativeSelection(
       throw error;
     }
     throw nativeEnvValuesError();
+  }
+}
+
+function snapshotNativeEnvSelection(
+  opts: NativeProjectEnvSelectionOptions
+): NativeProjectEnvSelectionOptions {
+  const declaredWorkloadNames = Object.freeze([...opts.declaredWorkloadNames]);
+  const targets = validateNativeHostTargets(
+    opts.hostTargets,
+    declaredWorkloadNames
+  );
+  return Object.freeze({
+    projectRoot: resolve(opts.projectRoot),
+    overlay: opts.overlay,
+    inheritLocal: opts.inheritLocal,
+    declaredWorkloadNames,
+    signal: opts.signal,
+    ...(targets === undefined
+      ? {}
+      : {
+          hostTargets: Object.freeze({
+            includeDefault: targets.includeDefault,
+            workloadNames: Object.freeze([...targets.workloadNames]),
+          }),
+        }),
+  });
+}
+
+/** Fingerprints remain inside this owner; no digest is placed on a public object. */
+function nativeEnvRevisionRecorder() {
+  const revision = createHash("sha256");
+  const onAcquired: NativeEnvAcquisitionObserver = ({
+    projectRoot,
+    filename,
+    bytes,
+  }) => {
+    revision
+      .update(JSON.stringify([projectRoot, filename, bytes?.length ?? null]))
+      .update("\0");
+    if (bytes !== undefined) {
+      revision.update(bytes);
+    }
+    revision.update("\0");
+  };
+  const finish = (
+    selection: NativeProjectEnvSelectionOptions,
+    selected: Awaited<ReturnType<typeof readNativeProjectEnvSelection>>
+  ) => {
+    revision.update(
+      JSON.stringify({
+        projectRoot: selected.projectRoot,
+        primaryRoot: selected.primaryRoot,
+        overlay: selection.overlay,
+        inheritLocal: selection.inheritLocal,
+        declaredWorkloadNames: selection.declaredWorkloadNames,
+        hostTargets: selection.hostTargets ?? null,
+      })
+    );
+    return revision.digest("hex");
+  };
+  return { onAcquired, finish };
+}
+
+/** Freeze only owner-created acyclic metadata/value objects, never caller inputs. */
+function freezeNativeEnvOwnedValue(value: unknown): void {
+  if (!(isRecord(value) || Array.isArray(value))) {
+    return;
+  }
+  for (const entry of Object.values(value)) {
+    freezeNativeEnvOwnedValue(entry);
+  }
+  Object.freeze(value);
+}
+
+function readonlyNativeEnvMetadata(
+  metadata: NativeProjectEnvMetadata
+): NativeProjectEnvMetadata {
+  const result = structuredClone(metadata);
+  freezeNativeEnvOwnedValue(result);
+  return result;
+}
+
+function redactNativeEnvRevisionError(error: unknown): Error {
+  return error instanceof NativeConfigCompilerError &&
+    error.code === "E_COMPILER_CANCELLED"
+    ? error
+    : nativeEnvRevisionError();
+}
+
+/**
+ * Acquire one private env generation for metadata planning and later value delivery.
+ * Raw bytes, missing-file presence and selected roots/targets are bound privately;
+ * metadata and values come from the same bounded acquisition. Methods are omitted
+ * from enumeration and JSON. Call assertFresh with the current validated selection
+ * immediately before each effect. Rechecks do not freeze concurrent external editors.
+ */
+export async function acquireProjectEnvForNativeExecution(
+  opts: NativeProjectEnvSelectionOptions
+): Promise<NativeProjectEnvExecutionAcquisition> {
+  try {
+    const selection = snapshotNativeEnvSelection(opts);
+    const recorded = nativeEnvRevisionRecorder();
+    const selected = await readNativeProjectEnvSelection(
+      selection,
+      recorded.onAcquired
+    );
+    const revision = recorded.finish(selection, selected);
+    const assertFresh = async (current: NativeProjectEnvSelectionOptions) => {
+      try {
+        const currentSelection = snapshotNativeEnvSelection(current);
+        const rechecked = nativeEnvRevisionRecorder();
+        const currentInputs = await readNativeProjectEnvSelection(
+          currentSelection,
+          rechecked.onAcquired
+        );
+        if (rechecked.finish(currentSelection, currentInputs) !== revision) {
+          throw nativeEnvRevisionError();
+        }
+      } catch (error: unknown) {
+        throw redactNativeEnvRevisionError(error);
+      }
+    };
+    const resolveValues = async (valueOpts?: {
+      readonly signal?: AbortSignal;
+    }) => {
+      const signal = valueOpts?.signal ?? selection.signal;
+      try {
+        await assertFresh({ ...selection, signal });
+        const resolved = await resolveNativeProjectEnvValues({
+          selected,
+          signal,
+        });
+        await assertFresh({ ...selection, signal });
+        const result = {
+          ...resolved,
+          ...readonlyNativeEnvMetadata(selected.metadata),
+        };
+        freezeNativeEnvOwnedValue(result);
+        return result;
+      } catch (error: unknown) {
+        throw redactNativeEnvRevisionError(error);
+      }
+    };
+    const acquisition = {
+      metadata: readonlyNativeEnvMetadata(selected.metadata),
+      resolveValues,
+      assertFresh,
+    };
+    Object.defineProperty(acquisition, "resolveValues", { enumerable: false });
+    Object.defineProperty(acquisition, "assertFresh", { enumerable: false });
+    return Object.freeze(acquisition);
+  } catch (error: unknown) {
+    throw redactNativeEnvRevisionError(error);
   }
 }
 

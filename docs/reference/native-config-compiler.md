@@ -473,6 +473,14 @@ compiler metadata, plans, reports and diagnostics. This API does not provide an
 atomic admission or freshness fence, and its tests do not establish execution
 acceptance.
 
+Private execution acquisition can bind metadata and later value delivery to the
+same acquired layer bytes. Its non-enumerable methods retain a private revision
+and recheck exact selection, selected roots, raw bytes and missing-file presence
+before and after decryption. Callers must recheck again immediately before each
+effect with the current validated selection. No revision or secret-derived hash
+enters compiler reports or public plans. Rechecking does not freeze external
+editors or establish runtime execution acceptance.
+
 The sidecar `plan` operation accepts the original `resolve` request fields plus
 `env_metadata:{metadata_version:1,overlay:null|string,overlay_exists:boolean,
 workloads:{NAME:{KEY:{scope:string,secret:boolean}}},inactive_scopes:string[]}`.

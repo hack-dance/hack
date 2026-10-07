@@ -328,6 +328,62 @@ fn missing_extra_nul_and_oversized_private_values_refuse_without_echo() {
 }
 
 #[test]
+fn private_delivery_budget_matches_json_without_serializing_in_adapter() {
+    for value in ["plain", "quote\"slash\\", "\n\t\u{1}", "unicode-字"] {
+        assert_eq!(
+            json_string_bytes(value),
+            serde_json::to_vec(value).unwrap().len()
+        );
+    }
+    let mut project = basic();
+    project["services"]["web"]["environment"] = json!({"TOKEN":{"env_ref":"TOKEN"}});
+    let metadata = json!({"web":{"TOKEN":{"scope":"web","secret":true}}});
+    let mut values = BTreeMap::from([(
+        "web".into(),
+        BTreeMap::from([("TOKEN".into(), "x".repeat(32 * 1024 - 12))]),
+    )]);
+    let exact = lower(&project, metadata.clone(), &values).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&exact.managed_environment["web"])
+            .unwrap()
+            .len(),
+        32 * 1024
+    );
+    values
+        .get_mut("web")
+        .unwrap()
+        .get_mut("TOKEN")
+        .unwrap()
+        .push('x');
+    refusal(
+        lower(&project, metadata, &values),
+        "native_graph_environment",
+    );
+}
+
+#[test]
+fn graph_names_remain_exact_and_invalid_targets_refuse_before_driver_effects() {
+    for (name, dependency, code) in [
+        (".alias", None, "graph_service"),
+        ("../alias", None, "graph_service"),
+        ("web", Some("missing"), "graph_dependency"),
+        ("web", Some("web"), "graph_cycle"),
+    ] {
+        let dependencies = dependency.map_or_else(BTreeMap::new, |name| {
+            BTreeMap::from([(name.into(), Condition::Started)])
+        });
+        let result = Graph::from_services(BTreeMap::from([(
+            name.into(),
+            Service {
+                dependencies,
+                ready: Condition::Started,
+            },
+        )]));
+        assert_eq!(result.unwrap_err().code, code);
+    }
+}
+
+#[test]
 fn explicit_shell_empty_entrypoint_and_process_omissions_survive() {
     let omitted = lower(&basic(), json!({"web":{}}), &BTreeMap::new()).unwrap();
     assert!(omitted.workloads["web"].command.is_none());
@@ -392,6 +448,13 @@ fn unsupported_intent_is_never_dropped() {
     build["services"]["web"] = json!({"build":{"context":"."}});
     refusal(
         lower(&build, json!({"web":{}}), &empty),
+        "native_graph_subset",
+    );
+    let mut endpoint = basic();
+    endpoint["services"]["web"]["environment"] =
+        json!({"API":{"endpoint":{"kind":"service","name":"web","port":8080,"protocol":"http"}}});
+    refusal(
+        lower(&endpoint, json!({"web":{}}), &empty),
         "native_graph_subset",
     );
     for field in [

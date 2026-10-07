@@ -6,12 +6,7 @@
       "a.web": {
         "image": "fixture/web:1",
         "command": {
-          "exec": [
-            "/usr/bin/web",
-            "$literal",
-            "${KEEP}",
-            "two words"
-          ]
+          "exec": ["/usr/bin/web", "$literal", "${KEEP}", "two words"]
         },
         "entrypoint": {
           "exec": []
@@ -30,10 +25,7 @@
         "readiness": {
           "kind": "exec",
           "command": {
-            "exec": [
-              "/usr/bin/check",
-              "$literal"
-            ]
+            "exec": ["/usr/bin/check", "$literal"]
           },
           "interval": "1s",
           "timeout": "100ms",
@@ -54,44 +46,22 @@
     }
   },
   "native": {
-    "command": [
-      "/usr/bin/web",
-      "$literal",
-      "${KEEP}",
-      "two words"
-    ],
+    "command": ["/usr/bin/web", "$literal", "${KEEP}", "two words"],
     "entrypoint": [],
     "environment": {
       "MESSAGE": "$literal"
     },
-    "health_test": [
-      "CMD",
-      "/usr/bin/check",
-      "$literal"
-    ],
-    "job_command": [
-      "/bin/sh",
-      "-c",
-      "printf '%s' '$literal'"
-    ]
+    "health_test": ["CMD", "/usr/bin/check", "$literal"],
+    "job_command": ["/bin/sh", "-c", "printf '%s' '$literal'"]
   },
   "compose": {
-    "command": [
-      "/usr/bin/web",
-      "$$literal",
-      "$${KEEP}",
-      "two words"
-    ],
+    "command": ["/usr/bin/web", "$$literal", "$${KEEP}", "two words"],
     "entrypoint": [],
     "environment": {
       "MESSAGE": "$$literal"
     },
     "healthcheck": {
-      "test": [
-        "CMD",
-        "/usr/bin/check",
-        "$$literal"
-      ],
+      "test": ["CMD", "/usr/bin/check", "$$literal"],
       "interval": "1000ms",
       "timeout": "100ms",
       "retries": 3
@@ -101,11 +71,7 @@
         "condition": "service_completed_successfully"
       }
     },
-    "job_command": [
-      "/bin/sh",
-      "-c",
-      "printf '%s' '$$literal'"
-    ]
+    "job_command": ["/bin/sh", "-c", "printf '%s' '$$literal'"]
   },
   "plan": {
     "plan_version": 1,
@@ -125,12 +91,7 @@
       "a.web": {
         "image": "fixture/web:1",
         "command": {
-          "exec": [
-            "/usr/bin/web",
-            "$literal",
-            "${KEEP}",
-            "two words"
-          ]
+          "exec": ["/usr/bin/web", "$literal", "${KEEP}", "two words"]
         },
         "entrypoint": {
           "exec": []
@@ -151,10 +112,7 @@
         "readiness": {
           "kind": "exec",
           "command": {
-            "exec": [
-              "/usr/bin/check",
-              "$literal"
-            ]
+            "exec": ["/usr/bin/check", "$literal"]
           },
           "interval": "1000ms",
           "timeout": "100ms",

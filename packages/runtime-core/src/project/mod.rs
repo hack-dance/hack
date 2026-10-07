@@ -8,6 +8,7 @@ mod generated;
 mod hostname_change;
 pub mod inputs;
 pub mod live_source;
+#[cfg(feature = "native-config-plan")]
 pub mod native;
 pub mod registry;
 pub mod snapshot;

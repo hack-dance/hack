@@ -1,10 +1,12 @@
 # Hack runtime core
 
-`project::native::compile` is an experimental, pure adapter from the native
-configuration compiler's metadata planning request to dependency IR and ephemeral
+The opt-in `native-config-plan` feature exposes `project::native::compile`, an
+experimental, pure adapter from the native configuration compiler's metadata
+planning request to dependency IR and ephemeral
 workload inputs. It calls the compiler in-process and performs no filesystem,
-provider, image acquisition or receipt effects. The path dependency requires the
-repository's pinned Rust 1.97.1; the runtime package now declares that same minimum.
+provider, image acquisition or receipt effects. This feature's compiler path
+dependency requires the repository's pinned Rust 1.97.1. The default runtime
+package keeps its declared Rust 1.85 minimum; enabling the adapter requires Rust 1.97.1.
 
 The adapter accepts at most 32 selected image-only services/jobs, exec readiness,
 explicit exec/shell commands, entrypoint clearing, init, exact shutdown intent and
@@ -25,6 +27,9 @@ endpoints, host effects, HTTP/TCP readiness and automatic restart explicitly ref
 No backend consumes this adapter yet. Native input provenance, image availability,
 source/storage ownership, provider admission and installed execution/recovery remain
 separate qualification gates. Existing Compose plans and receipts retain their formats.
+
+Run its pure regressions with
+`cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --features native-config-plan project::native::tests`.
 
 The optional `shared-mcp` feature builds `hack-mcp-adapter`, an experimental native
 stdio relay for the explicit shared MCP socket backend. Build it with

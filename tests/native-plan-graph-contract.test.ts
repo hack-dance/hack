@@ -11,9 +11,7 @@ test("NC03 rendering shares the native graph core contract with exactly one doll
     )
   ).json();
   if (
-    !isRecord(fixture) ||
-    !isRecord(fixture.plan) ||
-    !isRecord(fixture.compose)
+    !(isRecord(fixture) && isRecord(fixture.plan) && isRecord(fixture.compose))
   ) {
     throw new Error("Invalid shared native graph fixture");
   }
@@ -28,12 +26,15 @@ test("NC03 rendering shares the native graph core contract with exactly one doll
   });
   const web = result.document.services["a.web"];
   const seed = result.document.services["z.seed"];
-  expect(web?.command).toEqual(fixture.compose.command);
-  expect(web?.entrypoint).toEqual(fixture.compose.entrypoint);
-  expect(web?.environment).toEqual(fixture.compose.environment);
-  expect(web?.healthcheck).toEqual(fixture.compose.healthcheck);
-  expect(web?.depends_on).toEqual(fixture.compose.depends_on);
-  expect(seed?.command).toEqual(fixture.compose.job_command);
+  const actual: unknown = {
+    command: web?.command,
+    entrypoint: web?.entrypoint,
+    environment: web?.environment,
+    healthcheck: web?.healthcheck,
+    depends_on: web?.depends_on,
+    job_command: seed?.command,
+  };
+  expect(actual).toEqual(fixture.compose);
   expect(seed?.restart).toBe("no");
   expect(Object.keys(result.document.services)).toEqual(["a.web", "z.seed"]);
 });

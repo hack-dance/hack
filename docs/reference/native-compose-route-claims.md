@@ -26,7 +26,8 @@ only newly published claims whose exact inode and content remain proven. Existin
 same-owner claims remain, and adoption requires their durable prior attempt.
 If rendering, generation publication or freshness fails after acquisition but
 before effects, `rollback(attempt)` accepts only that live unarmed preparation.
-It records durable aborted intent and removes only newly acquired exact claims;
+It records exact deletion intent before durable aborted intent and then removes
+only newly acquired exact claims;
 adopted claims remain. Reopened, armed, completed and retained attempts refuse.
 
 The returned attempt carries a private reference with attempt and generation IDs
@@ -35,6 +36,10 @@ reservation pins every acquired claim before returning. Persist this reference i
 the private generated-document metadata; never put these anchors in engine labels
 or public logs. `reopen(reference)` validates the saved reference and claims for
 saved operations without gaining live completion authority.
+Issued attempts, references, anchors and hostname arrays are frozen. Live
+capabilities bind their originally issued reference separately from caller input;
+retargeting an object cannot complete another attempt. Operation options and proof
+callbacks are captured before the first asynchronous check.
 
 Before starting **any** engine effect, call `markEffectsPossible(attempt)`. It
 synchronizes an append-only armed marker. The caller must hold the existing

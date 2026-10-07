@@ -229,6 +229,36 @@ function referenceValid(value: unknown): value is NativeComposeRouteReference {
     anchorValid(value.reservation)
   );
 }
+function snapshotReference(
+  value: NativeComposeRouteReference
+): NativeComposeRouteReference {
+  if (!referenceValid(value)) {
+    refuse();
+  }
+  return Object.freeze({
+    attemptId: value.attemptId,
+    generationIdentity: value.generationIdentity,
+    intent: Object.freeze({
+      dev: value.intent.dev,
+      ino: value.intent.ino,
+      hash: value.intent.hash,
+    }),
+    reservation: Object.freeze({
+      dev: value.reservation.dev,
+      ino: value.reservation.ino,
+      hash: value.reservation.hash,
+    }),
+  });
+}
+function freezeAttempt(
+  attempt: NativeComposeRouteAttempt
+): NativeComposeRouteAttempt {
+  return Object.freeze({
+    reference: snapshotReference(attempt.reference),
+    hostnames: Object.freeze([...attempt.hostnames]),
+    phase: attempt.phase,
+  });
+}
 function parse(text: string): unknown {
   try {
     return JSON.parse(text) as unknown;
@@ -449,21 +479,27 @@ export async function openNativeComposeRouteClaims(opts: {
 }): Promise<NativeComposeRouteClaims> {
   const directories: HeldDirectory[] = [];
   const immutable = new Map<string, Anchor>();
-  const live = new WeakMap<NativeComposeRouteAttempt, readonly Entry[]>();
+  const live = new WeakMap<
+    NativeComposeRouteAttempt,
+    {
+      readonly reference: NativeComposeRouteReference;
+      readonly added: readonly Entry[];
+    }
+  >();
   let closed = false;
-  const binding = Object.freeze({
-    engineId: opts.binding.engineId,
-    proxyId: opts.binding.proxyId,
-    networkId: opts.binding.networkId,
-  });
-  const owner = Object.freeze({
-    composeProject: opts.owner.composeProject,
-    ownerToken: opts.owner.ownerToken,
-  });
   try {
     if (!(bindingValid(opts.binding) && ownerValid(opts.owner))) {
       refuse();
     }
+    const binding = Object.freeze({
+      engineId: opts.binding.engineId,
+      proxyId: opts.binding.proxyId,
+      networkId: opts.binding.networkId,
+    });
+    const owner = Object.freeze({
+      composeProject: opts.owner.composeProject,
+      ownerToken: opts.owner.ownerToken,
+    });
     const root = resolve(opts.root);
     const parent = dirname(root);
     const ancestors: string[] = [];
@@ -819,7 +855,7 @@ export async function openNativeComposeRouteClaims(opts: {
       if (!journal.reservationAnchor) {
         refuse();
       }
-      return {
+      return freezeAttempt({
         reference: {
           attemptId: journal.intent.attemptId,
           generationIdentity: journal.intent.generationIdentity,
@@ -828,7 +864,7 @@ export async function openNativeComposeRouteClaims(opts: {
         },
         hostnames: journal.intent.claims.map((claim) => claim.hostname),
         phase: phase(journal),
-      };
+      });
     };
     const find = (
       records: readonly Journal[],
@@ -845,21 +881,23 @@ export async function openNativeComposeRouteClaims(opts: {
       }
       return found;
     };
-    const mark = async (attempt: NativeComposeRouteAttempt, kind: string) => {
-      const records = await journals();
-      const record = find(records, attempt.reference);
-      await activeEntries(records);
-      if (!live.has(attempt)) {
+    const capability = (attempt: NativeComposeRouteAttempt) => {
+      const result = live.get(attempt);
+      if (!(result && equal(result.reference, attempt.reference))) {
         refuse("E_NATIVE_COMPOSE_ROUTE_RETAINED");
       }
-      await publish(
-        join(attemptsRoot, attempt.reference.attemptId, `${kind}.json`),
-        {
-          version: 1,
-          intentHash: record.intentAnchor.hash,
-          reservationHash: record.reservationAnchor?.hash,
-        }
-      );
+      return result;
+    };
+    const mark = async (attempt: NativeComposeRouteAttempt, kind: string) => {
+      const { reference } = capability(attempt);
+      const records = await journals();
+      const record = find(records, reference);
+      await activeEntries(records);
+      await publish(join(attemptsRoot, reference.attemptId, `${kind}.json`), {
+        version: 1,
+        intentHash: record.intentAnchor.hash,
+        reservationHash: record.reservationAnchor?.hash,
+      });
     };
     const guard = async <T>(run: () => Promise<T>): Promise<T> => {
       try {
@@ -914,7 +952,10 @@ export async function openNativeComposeRouteClaims(opts: {
       }
       return entries;
     };
-    const rollback = async (attemptId: string, added: readonly Entry[]) => {
+    const recordRollback = async (
+      attemptId: string,
+      added: readonly Entry[]
+    ) => {
       if (added.length === 0) {
         return;
       }
@@ -924,6 +965,8 @@ export async function openNativeComposeRouteClaims(opts: {
         owner,
         entries: added,
       });
+    };
+    const removeEntries = async (added: readonly Entry[]) => {
       for (const entry of added) {
         await exactUnlink(claimPath(entry.claim.hostname), {
           text: JSON.stringify(entry.claim),
@@ -931,10 +974,45 @@ export async function openNativeComposeRouteClaims(opts: {
         });
       }
     };
+    const resumedRetirements = async (
+      retired: Map<string, Entry>,
+      keep: Set<string>
+    ): Promise<Entry[]> => {
+      const result: Entry[] = [];
+      for (const entry of retired.values()) {
+        if (keep.has(entry.claim.hostname)) {
+          continue;
+        }
+        const actual = await optional(claimPath(entry.claim.hostname));
+        if (!actual) {
+          continue;
+        }
+        const claim = validateClaim(parse(actual.text));
+        // A new owner/token may legitimately claim an already removed hostname.
+        // A surviving original token never authorizes an altered inode/content.
+        if (
+          claim.claimToken !== entry.claim.claimToken ||
+          !ownerEqual(claim.owner, owner)
+        ) {
+          continue;
+        }
+        if (
+          !equal(actual, {
+            text: JSON.stringify(entry.claim),
+            anchor: entry.anchor,
+          })
+        ) {
+          refuse();
+        }
+        result.push(entry);
+      }
+      return result;
+    };
     return {
       acquire: (options) =>
         guard(async () => {
-          if (!TOKEN.test(options.generationIdentity)) {
+          const generationIdentity = options.generationIdentity;
+          if (!TOKEN.test(generationIdentity)) {
             refuse();
           }
           const names = hostnames(options.hostnames);
@@ -945,7 +1023,7 @@ export async function openNativeComposeRouteClaims(opts: {
           const intent: Intent = {
             version: 1,
             attemptId,
-            generationIdentity: options.generationIdentity,
+            generationIdentity,
             binding,
             owner,
             claims,
@@ -963,23 +1041,27 @@ export async function openNativeComposeRouteClaims(opts: {
               join(path, "reserved.json"),
               reserved
             );
-            const attempt: NativeComposeRouteAttempt = {
+            const attempt = freezeAttempt({
               reference: {
                 attemptId,
-                generationIdentity: options.generationIdentity,
+                generationIdentity,
                 intent: intentRead.anchor,
                 reservation: reservedRead.anchor,
               },
               hostnames: names,
               phase: "reserved",
-            };
-            live.set(attempt, added);
+            });
+            live.set(attempt, {
+              reference: snapshotReference(attempt.reference),
+              added,
+            });
             await activeEntries(await journals());
             return attempt;
           } catch (error) {
             // No effects can have occurred: reservation has not returned. Never
             // remove adopted claims, foreign claims, or a changed newly written inode.
-            await rollback(attemptId, added);
+            await recordRollback(attemptId, added);
+            await removeEntries(added);
             const reservationRead = await optional(join(path, "reserved.json"));
             await publish(join(path, "aborted.json"), {
               version: 1,
@@ -991,15 +1073,17 @@ export async function openNativeComposeRouteClaims(opts: {
         }),
       reopen: (reference) =>
         guard(async () => {
+          const snapshot = snapshotReference(reference);
           const records = await journals();
-          const result = asAttempt(find(records, reference));
+          const result = asAttempt(find(records, snapshot));
           await activeEntries(records);
           return result;
         }),
       markEffectsPossible: (attempt) =>
         guard(async () => {
+          const { reference } = capability(attempt);
           const records = await journals();
-          const record = find(records, attempt.reference);
+          const record = find(records, reference);
           if (
             record.aborted ||
             record.armed ||
@@ -1015,10 +1099,15 @@ export async function openNativeComposeRouteClaims(opts: {
         }),
       complete: (options) =>
         guard(async () => {
+          const { attempt, assertTransition } = options;
+          const { reference } = capability(attempt);
+          if (typeof assertTransition !== "function") {
+            refuse();
+          }
           const records = await journals();
-          const record = find(records, options.attempt.reference);
+          const record = find(records, reference);
           if (
-            !(live.has(options.attempt) && record.armed) ||
+            !record.armed ||
             record.aborted ||
             record.complete ||
             record.retained
@@ -1026,12 +1115,13 @@ export async function openNativeComposeRouteClaims(opts: {
             refuse("E_NATIVE_COMPOSE_ROUTE_RETAINED");
           }
           await activeEntries(records);
-          await options.assertTransition();
-          await mark(options.attempt, "complete");
+          await assertTransition();
+          await mark(attempt, "complete");
         }),
       retain: (attempt) =>
         guard(async () => {
-          const record = find(await journals(), attempt.reference);
+          const { reference } = capability(attempt);
+          const record = find(await journals(), reference);
           if (record.aborted || record.complete || record.retained) {
             refuse();
           }
@@ -1039,10 +1129,9 @@ export async function openNativeComposeRouteClaims(opts: {
         }),
       rollback: (attempt) =>
         guard(async () => {
-          const record = find(await journals(), attempt.reference);
-          const added = live.get(attempt);
+          const { reference, added } = capability(attempt);
+          const record = find(await journals(), reference);
           if (
-            !added ||
             record.aborted ||
             record.armed ||
             record.complete ||
@@ -1051,12 +1140,17 @@ export async function openNativeComposeRouteClaims(opts: {
             refuse("E_NATIVE_COMPOSE_ROUTE_RETAINED");
           }
           await activeEntries(await journals());
+          await recordRollback(reference.attemptId, added);
           await mark(attempt, "aborted");
-          await rollback(attempt.reference.attemptId, added);
+          await removeEntries(added);
         }),
       release: (options) =>
         guard(async () => {
           const keep = new Set(hostnames(options.keepHostnames ?? []));
+          const assertAbsent = options.assertAbsent;
+          if (typeof assertAbsent !== "function") {
+            refuse();
+          }
           const records = await journals();
           if (
             records.some(
@@ -1070,24 +1164,15 @@ export async function openNativeComposeRouteClaims(opts: {
             .filter((entry) => !keep.has(entry.claim.hostname))
             .sort((a, b) => a.claim.hostname.localeCompare(b.claim.hostname));
           // Resume only exact, previously journaled deletion intent, after fresh proof.
-          for (const entry of current.retired.values()) {
-            if (keep.has(entry.claim.hostname)) {
-              continue;
-            }
-            const actual = await optional(claimPath(entry.claim.hostname));
-            if (
-              actual &&
-              equal(actual, {
-                text: JSON.stringify(entry.claim),
-                anchor: entry.anchor,
-              }) &&
-              !entries.some((value) => equal(value, entry))
-            ) {
+          for (const entry of await resumedRetirements(current.retired, keep)) {
+            if (!entries.some((value) => equal(value, entry))) {
               entries.push(entry);
             }
           }
-          await options.assertAbsent({
-            hostnames: entries.map((entry) => entry.claim.hostname),
+          await assertAbsent({
+            hostnames: Object.freeze(
+              entries.map((entry) => entry.claim.hostname)
+            ),
             binding,
             owner,
           });

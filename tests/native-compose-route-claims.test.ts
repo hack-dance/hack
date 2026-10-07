@@ -356,6 +356,185 @@ test("reset owner nonce for same Compose instance cannot adopt previous claims",
   });
 });
 
+test("live reference retarget cannot complete or release a reopened unknown armed attempt", async () => {
+  const root = await fixture();
+  const original = await store(root);
+  const unknown = await acquire(original);
+  await original.markEffectsPossible(unknown);
+  const reopened = await store(root);
+  const fresh = await acquire(reopened, [HOST, "fresh.fixture.hack.local"]);
+  Reflect.set(fresh, "reference", unknown.reference);
+  let proofCalls = 0;
+  await expect(
+    reopened.complete({
+      attempt: fresh,
+      assertTransition: async () => {
+        proofCalls += 1;
+      },
+    })
+  ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_ROUTE_RETAINED" });
+  expect(proofCalls).toBe(0);
+  expect((await reopened.reopen(unknown.reference)).phase).toBe("armed");
+  await expect(
+    reopened.release({
+      assertAbsent: async () => {
+        proofCalls += 1;
+      },
+    })
+  ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_ROUTE_RETAINED" });
+  expect(proofCalls).toBe(0);
+  expect(await Bun.file(claimPath(root)).exists()).toBe(true);
+});
+
+test("operation options are captured before await and issued attempts are deeply immutable", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const options = { hostnames: [HOST], generationIdentity: GENERATION };
+  const pending = result.acquire(options);
+  options.generationIdentity = "d".repeat(32);
+  options.hostnames.push("late.fixture.hack.local");
+  const attempt = await pending;
+  expect(attempt.reference.generationIdentity).toBe(GENERATION);
+  expect(attempt.hostnames).toEqual([HOST]);
+  expect(Object.isFrozen(attempt)).toBe(true);
+  expect(Object.isFrozen(attempt.reference)).toBe(true);
+  expect(Object.isFrozen(attempt.reference.intent)).toBe(true);
+  expect(Object.isFrozen(attempt.reference.reservation)).toBe(true);
+  expect(Object.isFrozen(attempt.hostnames)).toBe(true);
+  await result.markEffectsPossible(attempt);
+  let first = 0;
+  let replacement = 0;
+  const completion = {
+    attempt,
+    assertTransition: async () => {
+      first += 1;
+    },
+  };
+  const completing = result.complete(completion);
+  completion.assertTransition = async () => {
+    replacement += 1;
+  };
+  await completing;
+  expect(first).toBe(1);
+  expect(replacement).toBe(0);
+  const release = {
+    assertAbsent: async () => {
+      first += 1;
+    },
+  };
+  const releasing = result.release(release);
+  release.assertAbsent = async () => {
+    replacement += 1;
+  };
+  await releasing;
+  expect(first).toBe(2);
+  expect(replacement).toBe(0);
+});
+
+test("invalid runtime binding/owner shapes stay inside the fixed redacted refusal boundary", async () => {
+  const root = await fixture();
+  for (const value of [
+    { root: join(root, "compose-routing"), owner: OWNER, binding: null },
+    { root: join(root, "compose-routing"), owner: null, binding: BINDING },
+    {
+      root: join(root, "compose-routing"),
+      owner: OWNER,
+      binding: { ...BINDING, secret: "synthetic-private-canary" },
+    },
+  ]) {
+    await expect(
+      Reflect.apply(openNativeComposeRouteClaims, undefined, [value])
+    ).rejects.toMatchObject({
+      name: "NativeComposeRouteClaimError",
+      code: "E_NATIVE_COMPOSE_ROUTE_STATE",
+    });
+  }
+});
+
+test("interrupted deletion intent refuses replacement of the original claim inode before fresh proof", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  await complete(result, await acquire(result));
+  const original = fs.unlink;
+  const spy = spyOn(fs, "unlink").mockImplementation(async (path) => {
+    if (String(path) === claimPath(root)) {
+      throw new Error("interrupted exact unlink");
+    }
+    return await original(path);
+  });
+  try {
+    await expect(
+      result.release({ assertAbsent: async () => {} })
+    ).rejects.toThrow();
+  } finally {
+    spy.mockRestore();
+  }
+  const text = await Bun.file(claimPath(root)).text();
+  await fs.rename(claimPath(root), `${claimPath(root)}.old`);
+  await fs.writeFile(claimPath(root), text, { mode: 0o600 });
+  let proofs = 0;
+  await expect(
+    result.release({
+      assertAbsent: async () => {
+        proofs += 1;
+      },
+    })
+  ).rejects.toThrow("values omitted");
+  expect(proofs).toBe(0);
+  expect(await Bun.file(claimPath(root)).text()).toBe(text);
+});
+
+test("interrupted rollback before deletion-intent publication never hides its exact new claims", async () => {
+  const root = await fixture();
+  const current = await store(root);
+  await complete(current, await acquire(current));
+  const old = await Bun.file(claimPath(root)).text();
+  const foreignHost = "foreign.fixture.hack.local";
+  await acquire(await store(root, OTHER), [foreignHost]);
+  const foreign = await Bun.file(claimPath(root, foreignHost)).text();
+  const newHost = "new.fixture.hack.local";
+  const module = new URL(
+    "../src/lib/native-compose-route-claims.ts",
+    import.meta.url
+  ).href;
+  const child = spawn(`
+    import {spyOn} from "bun:test";
+    import * as fs from "node:fs/promises";
+    import {openNativeComposeRouteClaims} from ${JSON.stringify(module)};
+    const root = ${JSON.stringify(root)};
+    const store = await openNativeComposeRouteClaims({root: root + "/compose-routing", binding: ${JSON.stringify(BINDING)}, owner: ${JSON.stringify(OWNER)}});
+    const attempt = await store.acquire({hostnames:[${JSON.stringify(HOST)},${JSON.stringify(newHost)}], generationIdentity:${JSON.stringify(GENERATION)}});
+    const original = fs.open;
+    spyOn(fs, "open").mockImplementation(async (...args) => {
+      if (String(args[0]).includes("/releases/") && String(args[0]).endsWith(".tmp")) {
+        await Bun.write(root + "/rollback-barrier", JSON.stringify(attempt.reference));
+        await Bun.sleep(60_000);
+      }
+      return await original(...args);
+    });
+    await store.rollback(attempt);
+  `);
+  await waitForFile(join(root, "rollback-barrier"));
+  child.kill("SIGKILL");
+  await child.exited;
+  const reopened = await store(root);
+  const saved = await reopened.reopen(
+    await Bun.file(join(root, "rollback-barrier")).json()
+  );
+  expect(["reserved", "aborted"]).toContain(saved.phase);
+  let observed: readonly string[] = [];
+  await reopened.release({
+    keepHostnames: [HOST],
+    assertAbsent: async ({ hostnames }) => {
+      observed = hostnames;
+    },
+  });
+  expect(observed).toEqual([newHost]);
+  expect(await Bun.file(claimPath(root, newHost)).exists()).toBe(false);
+  expect(await Bun.file(claimPath(root)).text()).toBe(old);
+  expect(await Bun.file(claimPath(root, foreignHost)).text()).toBe(foreign);
+}, 10_000);
+
 test("armed interrupted process retains claims; reopened snapshot cannot clear it", async () => {
   const root = await fixture();
   const module = new URL(

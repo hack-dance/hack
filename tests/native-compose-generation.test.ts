@@ -136,6 +136,103 @@ async function rejected(effect: Promise<unknown>, code: string) {
   await expect(effect).rejects.toMatchObject({ code });
 }
 
+test("finite host intent is private, durable before effects, and cleared after verified completion", async () => {
+  const owner = await store(await fixture());
+  await owner.withMutation(async (mutation) => {
+    expect(
+      await mutation.runBeforeHooks({
+        assertFresh: async () => {},
+        effect: async () => {
+          const saved = await owner.loadCurrent();
+          expect(saved.generation).toBeNull();
+          expect(saved.beforeHooksPending).toBe(true);
+          const receipt = JSON.parse(await Bun.file(receiptPath(owner)).text());
+          expect(Object.keys(receipt.beforeHooks)).toEqual(["token"]);
+          expect(receipt.beforeHooks.token).toMatch(/^[a-f0-9]{32}$/);
+          return { outcome: "complete", value: 17 };
+        },
+      })
+    ).toEqual({ outcome: "complete", value: 17 });
+  });
+  expect((await owner.loadCurrent()).beforeHooksPending).toBe(false);
+});
+
+test("uncertain host completion survives reopen, blocks publication and replay, and retaining down cannot clear it", async () => {
+  const root = await fixture();
+  const owner = await store(root);
+  const generation = await activate(owner);
+  await owner.withMutation(async (mutation) => {
+    await mutation.runBeforeHooks({
+      assertFresh: async () => {},
+      effect: async () => ({ outcome: "uncertain", value: 1 }),
+    });
+    await rejected(publish(mutation), "E_NATIVE_COMPOSE_UNCERTAIN");
+    await rejected(
+      mutation.runBeforeHooks({
+        assertFresh: async () => {},
+        effect: async () => {
+          throw new Error("replayed");
+        },
+      }),
+      "E_NATIVE_COMPOSE_UNCERTAIN"
+    );
+    await rejected(
+      mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => {
+          throw new Error("started");
+        },
+      }),
+      "E_NATIVE_COMPOSE_UNCERTAIN"
+    );
+  });
+  const saved = await store(root, null, "saved");
+  expect((await saved.loadCurrent()).beforeHooksPending).toBe(true);
+  await saved.withMutation(async (mutation) => {
+    await mutation.runEffect({
+      generation: (await saved.loadCurrent()).generation ?? generation,
+      operation: "down",
+      assertOwned: async () => {},
+      effect: async () => ({ outcome: "complete", value: 0 }),
+    });
+  });
+  const after = await saved.loadCurrent();
+  expect(after.stopped).toBe(true);
+  expect(after.beforeHooksPending).toBe(true);
+});
+
+test("host exception and freshness failure after journaling preserve redacted uncertainty", async () => {
+  for (const mode of ["effect", "freshness"] as const) {
+    const owner = await store(await fixture());
+    let checks = 0;
+    let effects = 0;
+    await owner.withMutation(async (mutation) => {
+      await rejected(
+        mutation.runBeforeHooks({
+          assertFresh: async () => {
+            if (++checks === 2 && mode === "freshness") {
+              throw new Error("synthetic-private-value");
+            }
+          },
+          effect: async () => {
+            effects++;
+            throw new Error("synthetic-private-value");
+          },
+        }),
+        "E_NATIVE_COMPOSE_UNCERTAIN"
+      );
+    });
+    expect(effects).toBe(mode === "effect" ? 1 : 0);
+    expect((await owner.loadCurrent()).beforeHooksPending).toBe(true);
+    expect(await Bun.file(receiptPath(owner)).text()).not.toContain(
+      "synthetic-private-value"
+    );
+  }
+});
+
 test("random reservation precedes render; exact immutable document and private receipts survive reopen", async () => {
   const root = await fixture();
   const owner = await store(root);
@@ -768,12 +865,12 @@ test("mixed inputs and symlinked checkout refuse without creating managed state"
   expect(await readdir(join(root, ".hack"))).toEqual(["hack.project.json"]);
 });
 
-async function interruptedWriter(root: string) {
+async function interruptedWriter(root: string, hooks = false) {
   const source = join(
     import.meta.dir,
     "../src/lib/native-compose-generation.ts"
   );
-  const program = [
+  const engineProgram = [
     `import { openNativeComposeGenerationStore } from ${JSON.stringify(source)};`,
     "const owner = await openNativeComposeGenerationStore({ projectRoot: process.env.NC03_FIXTURE_ROOT, instance: null });",
     "await owner.withMutation(async (m) => {",
@@ -785,6 +882,15 @@ async function interruptedWriter(root: string) {
     "await new Promise(() => { setInterval(() => {}, 60000); });",
     'return { outcome: "complete", value: 0 }; }}); });',
   ].join("\n");
+  const hookProgram = [
+    `import { openNativeComposeGenerationStore } from ${JSON.stringify(source)};`,
+    "const owner = await openNativeComposeGenerationStore({ projectRoot: process.env.NC03_FIXTURE_ROOT, instance: null });",
+    "await owner.withMutation(async (m) => { await m.runBeforeHooks({ assertFresh: async () => {}, effect: async () => {",
+    'process.stdout.write("pending\\n");',
+    "await new Promise(() => { setInterval(() => {}, 60000); });",
+    'return { outcome: "complete", value: 0 }; }}); });',
+  ].join("\n");
+  const program = hooks ? hookProgram : engineProgram;
   const child = Bun.spawn([process.execPath, "--eval", program], {
     stdin: "ignore",
     stdout: "pipe",
@@ -807,6 +913,30 @@ async function interruptedWriter(root: string) {
   }
   return child;
 }
+
+test("SIGKILL before a hook PID is published leaves durable intent that dead-lock recovery cannot replay", async () => {
+  const root = await fixture();
+  const child = await interruptedWriter(root, true);
+  child.kill("SIGKILL");
+  await child.exited;
+  const saved = await store(root, null, "saved");
+  await saved.recoverInterruptedLock();
+  const owner = await store(root);
+  const current = await owner.loadCurrent();
+  expect(current.generation).toBeNull();
+  expect(current.beforeHooksPending).toBe(true);
+  await owner.withMutation(async (mutation) => {
+    await rejected(
+      mutation.runBeforeHooks({
+        assertFresh: async () => {},
+        effect: async () => {
+          throw new Error("must not replay");
+        },
+      }),
+      "E_NATIVE_COMPOSE_UNCERTAIN"
+    );
+  });
+});
 
 test("SIGKILL leaves durable intent; explicit same-boot dead-owner recovery unblocks retaining stop", async () => {
   const root = await fixture();

@@ -9,6 +9,7 @@ import {
 import {
   acquireProjectEnvForNativeExecution,
   type NativeProjectEnvSelectionOptions,
+  selectProjectEnvValuesForNativeExecutionTarget,
 } from "./project-env-config.ts";
 
 function refused(): never {
@@ -145,6 +146,24 @@ export async function acquireNativeComposeInputs(opts: {
       })
     );
   };
+  const resolveHostValues = async (name: string) => {
+    const reports = planned.environment_plan.host;
+    if (!(reports && Object.hasOwn(reports, name))) {
+      return refused();
+    }
+    const report = reports[name];
+    if (!report) {
+      return refused();
+    }
+    const values = await env.resolveValues({ signal });
+    await assertFresh();
+    return selectProjectEnvValuesForNativeExecutionTarget({
+      resolved: values,
+      target: "host",
+      workloadName:
+        report.env_target.kind === "workload" ? report.env_target.name : null,
+    });
+  };
   // Symbolic planning is serializable; private execution receipts and delivery
   // capabilities are deliberately absent from JSON/spread/public diagnostics.
   return Object.freeze(
@@ -154,11 +173,13 @@ export async function acquireNativeComposeInputs(opts: {
         readonly inputRevision: string;
         readonly assertFresh: typeof assertFresh;
         readonly resolveManagedValues: typeof resolveManagedValues;
+        readonly resolveHostValues: typeof resolveHostValues;
       },
       {
         inputRevision: { value: revision },
         assertFresh: { value: assertFresh },
         resolveManagedValues: { value: resolveManagedValues },
+        resolveHostValues: { value: resolveHostValues },
       }
     )
   );

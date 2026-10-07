@@ -1,0 +1,509 @@
+{
+  "$defs": {
+    "Access": {
+      "enum": [
+        "read-only",
+        "read-write"
+      ],
+      "type": "string"
+    },
+    "Build": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "type": "string"
+        },
+        "dockerfile": {
+          "default": "Dockerfile",
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "context"
+      ],
+      "type": "object"
+    },
+    "Command": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "exec": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "exec"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "shell": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "shell"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Dependency": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "condition": {
+              "$ref": "#/$defs/ServiceCondition"
+            },
+            "service": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "service",
+            "condition"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "condition": {
+              "$ref": "#/$defs/JobCondition"
+            },
+            "job": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "job",
+            "condition"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EnvironmentSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "default_overlay": {
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "EnvironmentValue": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "literal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "literal"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "default": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "env_ref": {
+              "pattern": "^[A-Z_][A-Z0-9_]*$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "env_ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "unset": {
+              "$ref": "#/$defs/True"
+            }
+          },
+          "required": [
+            "unset"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "JobCondition": {
+      "enum": [
+        "completed"
+      ],
+      "type": "string"
+    },
+    "Mount": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "access": {
+              "$ref": "#/$defs/Access"
+            },
+            "source": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "target",
+            "access"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "access": {
+              "$ref": "#/$defs/Access"
+            },
+            "storage": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "storage",
+            "target",
+            "access"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Readiness": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "$ref": "#/$defs/Command"
+            },
+            "interval": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "exec",
+              "type": "string"
+            },
+            "retries": {
+              "format": "uint32",
+              "maximum": 4294967295,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "timeout": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "command",
+            "interval",
+            "timeout",
+            "retries"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "interval": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "http",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "retries": {
+              "format": "uint32",
+              "maximum": 4294967295,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "timeout": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "port",
+            "path",
+            "interval",
+            "timeout",
+            "retries"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "interval": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "tcp",
+              "type": "string"
+            },
+            "port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "retries": {
+              "format": "uint32",
+              "maximum": 4294967295,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "timeout": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "port",
+            "interval",
+            "timeout",
+            "retries"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ServiceCondition": {
+      "enum": [
+        "started",
+        "ready"
+      ],
+      "type": "string"
+    },
+    "Source": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/SourceMode",
+          "default": "host-mounted"
+        },
+        "root": {
+          "default": ".",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SourceMode": {
+      "enum": [
+        "host-mounted"
+      ],
+      "type": "string"
+    },
+    "Storage": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/StorageKind"
+        },
+        "scope": {
+          "$ref": "#/$defs/StorageScope"
+        }
+      },
+      "required": [
+        "kind",
+        "scope"
+      ],
+      "type": "object"
+    },
+    "StorageKind": {
+      "enum": [
+        "persistent"
+      ],
+      "type": "string"
+    },
+    "StorageScope": {
+      "enum": [
+        "worktree"
+      ],
+      "type": "string"
+    },
+    "True": {
+      "const": true,
+      "type": "boolean"
+    },
+    "Workload": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "not": {
+            "required": [
+              "build"
+            ]
+          },
+          "required": [
+            "image"
+          ]
+        },
+        {
+          "not": {
+            "required": [
+              "image"
+            ]
+          },
+          "required": [
+            "build"
+          ]
+        }
+      ],
+      "properties": {
+        "build": {
+          "$ref": "#/$defs/Build"
+        },
+        "command": {
+          "$ref": "#/$defs/Command"
+        },
+        "depends_on": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Dependency"
+          },
+          "type": "array"
+        },
+        "environment": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EnvironmentValue"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "image": {
+          "type": "string"
+        },
+        "mounts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Mount"
+          },
+          "type": "array"
+        },
+        "profiles": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "readiness": {
+          "$ref": "#/$defs/Readiness"
+        },
+        "working_directory": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "environment": {
+      "$ref": "#/$defs/EnvironmentSelection",
+      "default": {}
+    },
+    "jobs": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Workload"
+      },
+      "default": {},
+      "type": "object"
+    },
+    "name": {
+      "type": "string"
+    },
+    "profiles": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "format": "uint32",
+      "maximum": 1,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "services": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Workload"
+      },
+      "default": {},
+      "type": "object"
+    },
+    "source": {
+      "$ref": "#/$defs/Source",
+      "default": {
+        "mode": "host-mounted",
+        "root": "."
+      }
+    },
+    "storage": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Storage"
+      },
+      "default": {},
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "name"
+  ],
+  "title": "Project",
+  "type": "object"
+}

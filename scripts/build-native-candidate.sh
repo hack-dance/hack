@@ -78,6 +78,13 @@ if [ -n "$version" ]; then
 else
   bun build index.ts --compile --outfile "$out/hack-cli"
 fi
+bun scripts/build-config-compiler.ts
+cp dist/hack-config-compiler "$out/hack-config-compiler"
+cp packages/config-compiler/generated/hack.project.schema.json "$out/hack.project.schema.json"
+chmod 755 "$out/hack-config-compiler"
+chmod 600 "$out/hack.project.schema.json"
+/usr/bin/codesign --force --sign - --preserve-metadata=entitlements,flags,runtime "$out/hack-config-compiler"
+/usr/bin/codesign --verify --strict "$out/hack-config-compiler"
 # Bun appends the compiled program to its runtime. Re-sign those final bytes;
 # preserve runtime metadata rather than trusting the embedded runtime's signature.
 /usr/bin/codesign --force --sign - --preserve-metadata=entitlements,flags,runtime "$out/hack-cli"
@@ -109,6 +116,7 @@ fi
   else
     shasum -a 256 hack-native hack-relay-guest hack-cli hack-v5 provider-pins.json README.md > SHA256SUMS
   fi
+  shasum -a 256 hack-config-compiler hack.project.schema.json >> SHA256SUMS
   shasum -a 256 mcp/*/manifest.json mcp/*/hack-mcp-adapter mcp/*/hack-mcp-owner mcp/*/hack-mcp-backend >> SHA256SUMS
 )
 echo "Candidate bundle: $out"

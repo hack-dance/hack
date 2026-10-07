@@ -16,6 +16,7 @@ mise exec -- scripts/build-native-candidate.sh /absolute/new/hack-native-bundle
 
 The destination must not exist. The bundle contains `hack-native`, the static Linux
 ARM64 `hack-relay-guest`, compiled normal CLI `hack-cli`, the `hack-v5` entrypoint,
+the compiled `hack-config-compiler` and generated `hack.project.schema.json`,
 provider pins, this guide, `SHA256SUMS`, and one content-addressed shared MCP bundle
 under `mcp/BUNDLE_ID/`. Its manifest and native adapter, owner, and compiled backend
 are included in the outer checksums. The relay uses
@@ -29,7 +30,7 @@ For versioned candidate packages, channel rules and publishing gates are describ
 in the [prerelease guide](https://github.com/hack-dance/hack/blob/next/docs/guides/prereleases.md),
 and the separate `hack-next` installation path is described in the
 [candidate installer guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md).
-The build re-signs the final compiled frontend and MCP backend with local ad-hoc signatures and
+The build re-signs the compiled frontend, config compiler, and MCP backend with local ad-hoc signatures and
 strictly verifies all macOS executables before generating checksums. This checks
 code integrity; an ad-hoc signature does not establish a publisher identity or
 provide Apple notarization. Verify `SHA256SUMS` after copying the complete bundle.
@@ -37,6 +38,14 @@ provide Apple notarization. Verify `SHA256SUMS` after copying the complete bundl
 selections, set `artifact` to this bundled file's absolute path and
 `artifact_sha256` to its entry in `SHA256SUMS`; the runtime verifies it again before
 delivery. The `native-stream-relay` feature does not replace this dependency relay.
+
+The compiler and generated schema stay beside `hack-cli` as one checksummed pair.
+Packaging and installation refuse a partial, changed, or aliased pair. The compiler
+is executable; the schema is private data. Older bundles without either file remain
+installable and selectable. An existing channel with an older retained installer
+must explicitly run `upgrade-manager` with the reviewed installer before selecting
+a bundle with the new pair, or use a fresh channel root. This upgrades the manager;
+it does not migrate the retained runtime homes.
 
 Shared MCP remains opt-in. Select the verified nested bundle with the existing
 installer; substitute `--cursor` or `--codex` as needed:

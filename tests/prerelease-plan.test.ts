@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CONFIG_COMPILER_PAYLOAD,
   createPrereleasePlan,
   PRERELEASE_PAYLOAD,
   packagePrerelease,
@@ -502,6 +503,86 @@ async function fixture(root: string) {
   return bundle;
 }
 
+async function compilerFixture(bundle: string) {
+  await writeFile(
+    join(bundle, "hack-config-compiler"),
+    "synthetic compiler\n",
+    { mode: 0o755 }
+  );
+  await chmod(join(bundle, "hack-config-compiler"), 0o755);
+  await writeFile(join(bundle, "hack.project.schema.json"), "{}\n", {
+    mode: 0o600,
+  });
+  await chmod(join(bundle, "hack.project.schema.json"), 0o600);
+  await Bun.write(
+    join(bundle, "SHA256SUMS"),
+    await renderChecksums({
+      root: bundle,
+      names: [...PRERELEASE_PAYLOAD, ...CONFIG_COMPILER_PAYLOAD],
+    })
+  );
+}
+
+test("packages the optional compiler/schema pair beside the CLI", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-compiler-package-"));
+  try {
+    const bundle = await fixture(root);
+    await compilerFixture(bundle);
+    const plan = createPrereleasePlan(input);
+    const output = join(root, "assets");
+    await packagePrerelease({ plan, bundle, output });
+    expect(
+      (await archiveMembers(join(output, plan.archive)))
+        .map((entry) => entry.name)
+        .sort()
+    ).toEqual(
+      [...PRERELEASE_PAYLOAD, ...CONFIG_COMPILER_PAYLOAD, "SHA256SUMS"].sort()
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const name of CONFIG_COMPILER_PAYLOAD) {
+  for (const corruption of [
+    "missing",
+    "tampered",
+    "symlink",
+    "hardlink",
+    "mode",
+  ] as const) {
+    test(`refuses ${corruption} compiler payload ${name}`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "hack-compiler-refusal-"));
+      try {
+        const bundle = await fixture(root);
+        await compilerFixture(bundle);
+        const path = join(bundle, name);
+        if (corruption === "missing") {
+          await rm(path);
+        } else if (corruption === "tampered") {
+          await Bun.write(path, "changed");
+        } else if (corruption === "mode") {
+          await chmod(path, 0o777);
+        } else if (corruption === "symlink") {
+          await rm(path);
+          await symlink("hack-cli", path);
+        } else {
+          await link(path, join(root, "alias"));
+        }
+        await expect(
+          packagePrerelease({
+            plan: createPrereleasePlan(input),
+            bundle,
+            output: join(root, "refused"),
+          })
+        ).rejects.toThrow();
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
 /** Python exposes AppleDouble entries that macOS tar's own listing hides. */
 async function archiveMembers(archive: string) {
   const listing = Bun.spawn(
@@ -661,7 +742,12 @@ test("packages a verified MCP selection with exact nested checksums and inventor
     });
     const nested = await nativeCandidateMcpPayload(bundle);
     expect(nested).toHaveLength(4);
-    const names = [...PRERELEASE_PAYLOAD, ...nested];
+    await compilerFixture(bundle);
+    const names = [
+      ...PRERELEASE_PAYLOAD,
+      ...CONFIG_COMPILER_PAYLOAD,
+      ...nested,
+    ];
     await Bun.write(
       join(bundle, "SHA256SUMS"),
       await renderChecksums({ root: bundle, names })

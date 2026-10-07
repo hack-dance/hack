@@ -490,7 +490,7 @@ hack branch open <name> [options]
 
 ## `hack config`
 
-Read/write hack.config.json values
+Read/write legacy config or validate an explicit native project file
 
 ### Usage
 
@@ -504,6 +504,7 @@ hack config <subcommand> [options]
 | --- | --- |
 | `hack config get <key>` | Read a value from hack.config.json |
 | `hack config set <key> <value>` | Update a value in hack.config.json |
+| `hack config validate` | Validate an explicit native project file without starting workloads |
 
 ### Options
 
@@ -564,6 +565,29 @@ hack config set <key> <value> [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--global` | Read/write global ~/.hack/hack.config.json |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack config validate`
+
+Validate an explicit native project file without starting workloads
+
+### Usage
+
+```bash
+hack config validate [options]
+```
+
+Uses the matching bundled Rust compiler. This experimental command does not discover a project, resolve secrets, or adopt native configuration for runtime commands.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--file <path>` | Required native project JSON file |
+| `--profile <names>` | Comma-separated declared native profiles |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

@@ -51,6 +51,9 @@ jobs:
           bunx ultracite check scripts/check-native-host-plan-cli.ts tests/native-host-plan-transport.test.ts src/lib/native-host-plan-protocol.ts
           bun test tests/native-host-plan-transport.test.ts
           bun scripts/check-native-host-plan-cli.ts
+          bunx ultracite check scripts/check-native-routing-plan-cli.ts src/lib/native-routing-plan-protocol.ts src/lib/native-routing-inputs.ts tests/native-routing-plan-transport.test.ts tests/native-routing-inputs.test.ts tests/native-routing-input-race.test.ts tests/native-routing-project.test.ts
+          bun test tests/native-routing-plan-transport.test.ts tests/native-routing-inputs.test.ts tests/native-routing-input-race.test.ts tests/native-routing-project.test.ts
+          bun scripts/check-native-routing-plan-cli.ts
 
   state-models:
     name: Runtime state models

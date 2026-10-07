@@ -291,5 +291,133 @@
         "overlay": "qa"
       }
     }
+  },
+  {
+    "name": "routing domain",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "routes": {
+        "domain": "custom.test"
+      }
+    }
+  },
+  {
+    "name": "routing empty routes",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "routes": {}
+    }
+  },
+  {
+    "name": "routing empty open",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "open": {}
+    }
+  },
+  {
+    "name": "routing dev",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "open": {
+        "prefer": "dev"
+      }
+    }
+  },
+  {
+    "name": "routing auto",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "open": {
+        "prefer": "auto"
+      }
+    }
+  },
+  {
+    "name": "routing null domain",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "routes": {
+        "domain": null
+      }
+    }
+  },
+  {
+    "name": "routing unknown route origin",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "routes": {
+        "origin": "https://other.test"
+      }
+    }
+  },
+  {
+    "name": "routing null routes",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "routes": null
+    }
+  },
+  {
+    "name": "routing array routes",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "routes": []
+    }
+  },
+  {
+    "name": "routing null prefer",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "open": {
+        "prefer": null
+      }
+    }
+  },
+  {
+    "name": "routing bad prefer",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "open": {
+        "prefer": "unknown"
+      }
+    }
+  },
+  {
+    "name": "routing null open",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "open": null
+    }
+  },
+  {
+    "name": "routing array open",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "open": []
+    }
+  },
+  {
+    "name": "routing unknown open",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "open": {
+        "extra": true
+      }
+    }
   }
 ]

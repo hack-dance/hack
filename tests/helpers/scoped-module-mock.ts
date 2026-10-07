@@ -17,7 +17,36 @@ interface ModuleMockState {
   readonly wrappers: Map<string, unknown>;
 }
 
-const statesByResolvedPath = new Map<string, ModuleMockState>();
+const statesByResolvedPath = new Map<string, Promise<ModuleMockState>>();
+
+/**
+ * Capture once, including concurrent registrations. Overrides that delegate to a
+ * real implementation must use this snapshot rather than reimporting a live
+ * module namespace that another test file may already have mocked.
+ */
+function moduleState(resolvedPath: string): Promise<ModuleMockState> {
+  const existing = statesByResolvedPath.get(resolvedPath);
+  if (existing) {
+    return existing;
+  }
+  const pending = import(resolvedPath).then((namespace: ModuleExports) => ({
+    real: captureExportValues(namespace),
+    registrations: [],
+    wrappers: new Map<string, unknown>(),
+  }));
+  statesByResolvedPath.set(resolvedPath, pending);
+  return pending;
+}
+
+/** Obtain the captured builtin implementation, bypassing all scoped dispatch wrappers. */
+export async function readUnmockedFsPromisesExport<
+  Key extends keyof typeof import("node:fs/promises"),
+>(key: Key): Promise<typeof import("node:fs/promises")[Key]> {
+  const state = await moduleState("node:fs/promises");
+  // The snapshot came from this exact builtin; its static export signature is
+  // retained here, not inferred from the possibly patched live namespace.
+  return state.real[key] as typeof import("node:fs/promises")[Key];
+}
 
 export interface ScopedModuleMock {
   /** Enables this file's overrides. Call from beforeAll in the owning test file. */
@@ -53,16 +82,7 @@ export async function registerScopedModuleMock(opts: {
     ? opts.specifier
     : Bun.resolveSync(opts.specifier, dirname(opts.importerPath));
 
-  let state = statesByResolvedPath.get(resolvedPath);
-  if (!state) {
-    const namespace = (await import(resolvedPath)) as ModuleExports;
-    state = {
-      real: captureExportValues(namespace),
-      registrations: [],
-      wrappers: new Map(),
-    };
-    statesByResolvedPath.set(resolvedPath, state);
-  }
+  const state = await moduleState(resolvedPath);
 
   const registration: OverrideRegistration = {
     overrides: opts.overrides,

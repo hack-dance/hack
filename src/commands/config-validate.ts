@@ -22,7 +22,7 @@ const spec = defineCommand({
     "Validate native configuration and selected local overlays without starting workloads",
   group: "Project",
   description:
-    "Uses the matching bundled Rust compiler. Without --file, discovers a native project and resolves permitted worktree-local overlay settings. --file validates only the explicit document. Neither mode reads env values, writes state, or starts workloads.",
+    "Uses the matching bundled Rust compiler. Without --file, discovers a native project and resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. Neither mode reads env values, writes state, or starts workloads.",
   options: [
     defineOption({
       name: "file",
@@ -38,6 +38,13 @@ const spec = defineCommand({
       long: "--profile",
       valueHint: "<names>",
       description: "Comma-separated declared native profiles",
+    } as const),
+    defineOption({
+      name: "domain",
+      type: "string",
+      long: "--domain",
+      valueHint: "<suffix>",
+      description: "Select the generated native routing domain suffix",
     } as const),
     optPath,
     optEnv,
@@ -56,10 +63,12 @@ export const configValidateCommand = withHandler(
     }
     if (
       file !== undefined &&
-      (args.options.path !== undefined || args.options.env !== undefined)
+      (args.options.path !== undefined ||
+        args.options.env !== undefined ||
+        args.options.domain !== undefined)
     ) {
       throw new CliUsageError(
-        "--file validates one document and cannot be combined with --path or --env."
+        "--file validates one document and cannot be combined with --path or --env or --domain."
       );
     }
     const profiles = args.options.profile
@@ -78,6 +87,7 @@ export const configValidateCommand = withHandler(
           ? await validateNativeProject({
               startDir: resolve(ctx.cwd, args.options.path ?? "."),
               profiles,
+              explicitDomain: args.options.domain,
               explicitOverlay:
                 args.options.env === "base" ? null : args.options.env,
               signal: controller.signal,
@@ -130,6 +140,12 @@ function renderValidationResult(opts: {
       const local = result.local_resolution;
       process.stdout.write(
         `Selected env: ${local.overlay ?? "base"} (${local.origin}). Local resolution hash: ${local.resolution_hash}\n`
+      );
+    }
+    if ("routing_resolution" in result && result.routing_resolution) {
+      const routing = result.routing_resolution;
+      process.stdout.write(
+        `Routing preview: ${routing.open_origin}. Domain: ${routing.domain} (${routing.domain_origin}). DNS and TLS are not checked.\n`
       );
     }
   } else {

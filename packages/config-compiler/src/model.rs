@@ -48,6 +48,22 @@ pub struct Project {
     #[schemars(with = "crate::host::HostConfig")]
     #[ts(optional, type = "HostConfig")]
     pub host: Option<crate::host::HostConfig>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "crate::routing::Routes")]
+    #[ts(optional, type = "Routes")]
+    pub routes: Option<crate::routing::Routes>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "crate::routing::OpenConfig")]
+    #[ts(optional, type = "OpenConfig")]
+    pub open: Option<crate::routing::OpenConfig>,
 }
 
 fn enabled() -> bool {
@@ -346,6 +362,13 @@ pub struct Plan {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "HostConfig")]
     pub host: Option<crate::host::HostConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "Routes")]
+    pub routes: Option<crate::routing::Routes>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "OpenConfig")]
+    pub open: Option<crate::routing::OpenConfig>,
+
     pub selected_profiles: Vec<String>,
     pub storage: BTreeMap<String, Storage>,
     pub services: BTreeMap<String, Workload>,

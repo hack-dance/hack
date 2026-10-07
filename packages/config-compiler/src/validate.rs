@@ -193,6 +193,9 @@ pub fn lower(mut project: Project, profiles: &[String], at: &At) -> Result<Plan,
         )?;
     }
     project.host = project.host.filter(|host| !host.empty());
+    if let Some(routes) = &mut project.routes {
+        crate::routing::normalize(routes, &project.services.keys().cloned().collect(), at)?;
+    }
     project.services.retain(|_, w| active(w));
     project.jobs.retain(|_, w| active(w));
     for workload in project
@@ -209,6 +212,8 @@ pub fn lower(mut project: Project, profiles: &[String], at: &At) -> Result<Plan,
         environment: project.environment,
         worktree: project.worktree,
         host: project.host,
+        routes: project.routes,
+        open: project.open,
         selected_profiles: selected,
         storage: project.storage,
         services: project.services,

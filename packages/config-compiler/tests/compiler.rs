@@ -87,7 +87,7 @@ fn versions_unknown_fields_nulls_and_mixed_forms_refuse() {
     v["schema_version"] = json!(2);
     bad(&v, "unsupported_version");
     v = base();
-    v["routes"] = json!({});
+    v["networks"] = json!({});
     bad(&v, "unknown_field");
     v = base();
     v["services"]["web"]["backend_options"] = json!({});

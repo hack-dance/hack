@@ -17,14 +17,17 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { HackCliError } from "../src/lib/cli-result.ts";
-import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
+import {
+  readUnmockedFsPromisesExport,
+  registerScopedModuleMock,
+} from "./helpers/scoped-module-mock.ts";
 
 type AcquisitionChange = "replace" | "rewrite" | "parent" | "denied";
 let root: string;
 let targetFile: string | null = null;
 let change: AcquisitionChange = "replace";
 let closedFiles = 0;
-const { open: realOpen } = await import("node:fs/promises");
+const realOpen = await readUnmockedFsPromisesExport("open");
 
 const fileMock = await registerScopedModuleMock({
   importerPath: import.meta.path,

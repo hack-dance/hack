@@ -4,6 +4,7 @@ pub mod host;
 mod json;
 pub mod local;
 pub mod model;
+pub mod routing;
 mod shape;
 mod validate;
 pub use json::MAX_INPUT_BYTES;
@@ -64,6 +65,15 @@ fn diagnostic_message(code: &str) -> &'static str {
         "invalid_path" => "The path must use the required portable relative or absolute form.",
         "unknown_env_target" => "The host environment target must name a declared workload.",
         "invalid_singleton" => "Singleton ports must be distinct nonzero ports.",
+        "invalid_domain" => "Use canonical DNS labels without wildcards or trailing dots.",
+        "invalid_origin" => "Use an HTTP origin without credentials, path, query or fragment.",
+        "invalid_route" => "The route requires a valid service port and hostname.",
+        "unknown_route_service" => "The route must target a declared service.",
+        "unknown_route_alias" => "The selected OAuth alias must be declared.",
+        "route_collision" => "Declared routes or aliases resolve to the same origin.",
+        "missing_open_alias" => {
+            "Alias open preference requires an explicitly selected OAuth alias."
+        }
         "unknown_profile" => "The profile must be declared by the project.",
         "duplicate_workload" => "Services and jobs must have distinct names.",
         "unknown_dependency" => {
@@ -254,6 +264,18 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
         host::HostSingleton::decl(&cfg),
         host::HostConflict::decl(&cfg),
         host::HostEnvTargets::decl(&cfg),
+        routing::Routes::decl(&cfg),
+        routing::RouteAlias::decl(&cfg),
+        routing::HttpRoute::decl(&cfg),
+        routing::HttpProtocol::decl(&cfg),
+        routing::OpenConfig::decl(&cfg),
+        routing::OpenPreference::decl(&cfg),
+        routing::LocalRoutes::decl(&cfg),
+        routing::LocalOpen::decl(&cfg),
+        routing::DomainOrigin::decl(&cfg),
+        routing::OpenPreferenceOrigin::decl(&cfg),
+        routing::ResolvedHttpRoute::decl(&cfg),
+        routing::RoutingResolution::decl(&cfg),
         WorktreePolicy::decl(&cfg),
         SourceMode::decl(&cfg),
         Source::decl(&cfg),
@@ -300,5 +322,5 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
 }
 
 pub fn protocol() -> Value {
-    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1})
+    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1})
 }

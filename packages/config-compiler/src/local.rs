@@ -37,6 +37,22 @@ pub struct LocalConfig {
     #[serde(default)]
     #[ts(optional, as = "Option<LocalEnvironment>")]
     pub environment: LocalEnvironment,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "crate::routing::LocalRoutes")]
+    #[ts(optional, type = "LocalRoutes")]
+    pub routes: Option<crate::routing::LocalRoutes>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "crate::routing::LocalOpen")]
+    #[ts(optional, type = "LocalOpen")]
+    pub open: Option<crate::routing::LocalOpen>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, TS)]
@@ -70,6 +86,40 @@ pub struct ResolveRequest {
     #[schemars(with = "Option<String>", regex(pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$"))]
     #[ts(optional = nullable, as = "Option<String>")]
     pub explicit_overlay: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "String")]
+    #[ts(optional, type = "string")]
+    pub global_domain: Option<String>,
+
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "String")]
+    #[ts(optional, type = "string")]
+    pub explicit_domain: Option<String>,
+
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "String")]
+    #[ts(optional, type = "string")]
+    pub branch: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "bool")]
+    #[ts(optional, type = "boolean")]
+    pub routing_probe: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, JsonSchema, TS)]
@@ -117,6 +167,12 @@ pub enum ResolveResult {
         #[ts(optional, type = "HostEnvTargets")]
         host_env_targets: Option<crate::host::HostEnvTargets>,
         local_resolution: LocalResolution,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "RoutingResolution")]
+        routing_resolution: Option<Box<crate::routing::RoutingResolution>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "true")]
+        routing_inputs_required: Option<bool>,
     },
     Failure {
         #[ts(type = "1")]
@@ -170,9 +226,10 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(
         with_role(role, diagnostic_at(&document.positions, code, &pointer))
     })
 }
-struct ParsedLocal {
-    config: LocalConfig,
+pub(crate) struct ParsedLocal {
+    pub(crate) config: LocalConfig,
     overlay_location: ResolveDiagnostic,
+    pub(crate) positions: std::collections::BTreeMap<String, (usize, usize)>,
 }
 fn read_local(text: &str, role: DocumentRole) -> Result<ParsedLocal, ResolveDiagnostic> {
     let document = json::parse(text.as_bytes()).map_err(|d| with_role(role, d))?;
@@ -194,7 +251,23 @@ fn read_local(text: &str, role: DocumentRole) -> Result<ParsedLocal, ResolveDiag
     if document.value.get("environment").is_some() {
         crate::shape::object(&document, "/environment").map_err(|d| with_role(role, d))?;
     }
+    for key in ["routes", "open"] {
+        if document.value.get(key).is_some() {
+            crate::shape::object(&document, &format!("/{key}")).map_err(|d| with_role(role, d))?;
+        }
+    }
     let local: LocalConfig = decode(&document, role)?;
+    if local
+        .routes
+        .as_ref()
+        .and_then(|routes| routes.domain.as_ref())
+        .is_some_and(|domain| !crate::routing::domain(domain))
+    {
+        return Err(with_role(
+            role,
+            diagnostic_at(&document.positions, "invalid_domain", "/routes/domain"),
+        ));
+    }
     if local
         .environment
         .default_overlay
@@ -221,6 +294,7 @@ fn read_local(text: &str, role: DocumentRole) -> Result<ParsedLocal, ResolveDiag
                 "/environment/default_overlay",
             ),
         ),
+        positions: document.positions,
     })
 }
 
@@ -240,6 +314,8 @@ pub fn resolve(bytes: &[u8], profiles: &[String]) -> ResolveResult {
             semantic_hash: resolved.compiled.semantic_hash,
             declared_workloads: resolved.compiled.declared_workloads,
             local_resolution: resolved.local_resolution,
+            routing_resolution: resolved.routing_resolution.map(Box::new),
+            routing_inputs_required: resolved.routing_inputs_required,
         },
         Err(diagnostic) => ResolveResult::Failure {
             transport_version: 1,
@@ -252,6 +328,8 @@ pub(crate) struct Resolved {
     pub(crate) compiled: crate::Compiled,
     pub(crate) local_resolution: LocalResolution,
     pub(crate) overlay_location: ResolveDiagnostic,
+    pub(crate) routing_resolution: Option<crate::routing::RoutingResolution>,
+    pub(crate) routing_inputs_required: Option<bool>,
 }
 fn resolve_inner(bytes: &[u8], profiles: &[String]) -> Result<Resolved, ResolveDiagnostic> {
     let document = json::parse_with_limit(bytes, MAX_REQUEST_BYTES)
@@ -278,6 +356,30 @@ pub(crate) fn resolve_document(
     }
     crate::shape::object(&document, "").map_err(|d| with_role(DocumentRole::Request, d))?;
     let request: ResolveRequest = decode(&document, DocumentRole::Request)?;
+    for (pointer, value) in [
+        ("/global_domain", &request.global_domain),
+        ("/explicit_domain", &request.explicit_domain),
+    ] {
+        if value
+            .as_ref()
+            .is_some_and(|domain| !crate::routing::domain(domain))
+        {
+            return Err(with_role(
+                DocumentRole::Request,
+                diagnostic_at(&document.positions, "invalid_domain", pointer),
+            ));
+        }
+    }
+    if request
+        .branch
+        .as_ref()
+        .is_some_and(|branch| !crate::routing::label(branch))
+    {
+        return Err(with_role(
+            DocumentRole::Request,
+            diagnostic_at(&document.positions, "invalid_name", "/branch"),
+        ));
+    }
     let documents = [
         (DocumentRole::Project, Some(request.project.as_str())),
         (DocumentRole::PrimaryLocal, request.primary_local.as_deref()),
@@ -363,9 +465,26 @@ pub(crate) fn resolve_document(
             diagnostic_at(&document.positions, "missing_overlay", "/explicit_overlay"),
         );
     }
+    let routing_context = crate::routing::Context {
+        compiled: &compiled,
+        request: &request,
+        primary: primary.as_ref(),
+        checkout: checkout.as_ref(),
+        overlay: &overlay,
+    };
+    let routing_active = crate::routing::required(&routing_context);
+    let routing_inputs_required =
+        (request.routing_probe == Some(true) && routing_active).then_some(true);
+    let routing_resolution = if request.routing_probe == Some(true) {
+        None
+    } else {
+        crate::routing::resolve(routing_context)?
+    };
     #[derive(Serialize)]
     struct ResolutionInputs<'a> {
         resolve_version: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        routing_inputs: Option<crate::routing::InputGeneration<'a>>,
         semantic_hash: &'a str,
         primary_local: Option<&'a LocalConfig>,
         checkout_local: Option<&'a LocalConfig>,
@@ -374,6 +493,11 @@ pub(crate) fn resolve_document(
     }
     let encoded = serde_json::to_vec(&ResolutionInputs {
         resolve_version: 1,
+        routing_inputs: routing_active.then_some(crate::routing::InputGeneration {
+            global_domain: &request.global_domain,
+            explicit_domain: &request.explicit_domain,
+            branch: &request.branch,
+        }),
         semantic_hash,
         primary_local: primary.as_ref().map(|input| &input.config),
         checkout_local: checkout.as_ref().map(|input| &input.config),
@@ -396,6 +520,8 @@ pub(crate) fn resolve_document(
         compiled,
         local_resolution,
         overlay_location,
+        routing_resolution,
+        routing_inputs_required,
     })
 }
 

@@ -31,8 +31,8 @@ are rejected. Each document is limited to 1 MiB, their combined decoded size to
 3 MiB, and the encoded request to 20 MiB. All JSON parsing has a depth budget of 64.
 These are parser resource bounds, not runtime workload limits.
 
-A local document permits only `schema_version: 1` and optional `environment`,
-which permits only `default_overlay`. Omission inherits, `null` selects base,
+A local document permits `schema_version: 1` and optional `environment`,
+`routes`, and `open`. Environment permits only `default_overlay`. Omission inherits, `null` selects base,
 and a string selects a canonical overlay matching `[a-z0-9]+(?:-[a-z0-9]+)*`.
 No normalization silently changes names.
 
@@ -204,3 +204,69 @@ bindings. This may refuse near-limit reports before their final encoding reaches
 project location. The bound prevents input-to-output amplification and is shared
 across workload and host reporting; it is not a process-count or runtime-resource
 limit. No metadata-derived hash or managed value is exposed by the budget.
+
+
+## Typed routing and domain planning
+
+The protocol advertises `routing_plan_version: 1`. Optional project `routes`
+contains `domain`, `origin`, named `aliases`, `oauth_alias`, and an `http` map
+(default empty). Each HTTP entry requires a declared service, a port from 1–65535,
+and `hostname`; `protocol` defaults to `http` and also accepts `https`. Hostname
+`project` uses the project origin; other canonical relative DNS labels prefix its
+hostname. Jobs cannot receive HTTP routes. All declarations, including inactive
+services, are validated before profile filtering. The portable plan retains every
+route; the resolved routing report contains only selected services.
+
+An alias has exactly one of `{domain: "example.test"}` or
+`{origin: "http://localhost:3000"}`. `oauth_alias` explicitly selects a declared
+alias. Optional project `open.prefer` is `auto` (default), `alias`, or `dev`.
+`auto` uses the explicitly selected OAuth alias when present, otherwise the project
+origin. `alias` without that selection refuses during resolution; `dev` uses the
+project origin. This describes navigation intent, not OAuth-provider acceptance.
+
+Local `routes` permits only optional `domain`; local `open` permits only optional
+`prefer`. Null is invalid and empty objects inherit. Resolve and plan requests add
+optional `global_domain`, `explicit_domain`, and `branch`. Domain precedence is
+explicit request, checkout local, inherited primary local, project, global, then
+`hack.local`. Open preference precedence is checkout local, inherited primary local,
+project, then `auto`. Every supplied document is validated, including shadowed or
+opted-out primary settings. Generated project and domain-alias origins are
+`https://[branch.]project.domain`; explicit origins are never rewritten. Branch
+must be one canonical DNS label. Project names need that DNS grammar only when
+used in generated origins.
+
+Domain suffixes use lowercase ASCII DNS labels and require two or more labels,
+except the supported `hack` suffix. Decimal or hexadecimal numeric final labels,
+underscores, wildcard labels and trailing dots refuse. Relative route hostnames
+have their own DNS-label grammar. Explicit origins accept only HTTP or HTTPS,
+normalize hostname case and default ports, and permit localhost, strict IPv4 and
+bracketed IPv6. Credentials, paths (including `/`), query, fragment, whitespace,
+control characters and legacy numeric-IP forms refuse. IPv6 is normalized to
+compressed hexadecimal form. A relative route cannot prefix an IP origin.
+Duplicate normalized project/alias origins and route expansions refuse, even for
+inactive services or projects with no HTTP entries.
+
+Routing becomes active when authored or effective local routing/open settings,
+or any domain/branch request input, is present. Successful resolve and plan then
+add `routing_resolution`: effective domain and its source, project origin, alias
+origins, selected OAuth alias or null, open preference and its source, open origin,
+optional branch, and selected route origins with alias expansions. Supplied domain
+and branch choices enter the separate resolution hash, not the authored semantic
+hash. Existing calls without routing inputs preserve their previous output and
+hashes. Empty authored routing/open objects explicitly enable routing defaults.
+
+Resolve alone supports `routing_probe: true` for an acquisition pass. It validates
+original documents and static routing references but defers origin expansion and
+context-dependent collisions until the caller acquires the global domain and
+verified branch. Active routing returns `routing_inputs_required: true` instead
+of `routing_resolution`; inactive routing returns neither field. The probe flag
+never enters a hash. Plan refuses the probe field, including `false`; a probe is
+not a completed routing plan. Consumers must perform the final normal resolution.
+
+Routing expansion counts output space before allocating repeated route/alias
+entries, using the same conservative 8 MiB response safety budget as environment
+planning. Environment planning reserves the routing report before copying symbolic
+bindings. Oversized expansion returns fixed redacted `plan_too_large`; this is an
+input-amplification bound, not a runtime route or workload capacity limit. This
+package does not register DNS, acquire certificates, bind ports, configure proxies,
+open browsers or claim that an origin is reachable.

@@ -8,7 +8,7 @@ import {
 } from "./git-worktree.ts";
 import { isRecord } from "./guards.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
-import { readProjectConfig } from "./project.ts";
+import { readProjectConfig, sanitizeBranchSlug } from "./project.ts";
 
 /** Keep runner exclusions independent of either configuration format's policy parser. */
 export function shouldInheritPrimaryLocalInputs(opts: {
@@ -83,6 +83,126 @@ export async function resolveVerifiedPrimaryWorktreeRoot(opts: {
     throw worktreeVerificationError();
   }
 }
+
+/** Derive a read-only linked-worktree namespace under the existing collision convention. */
+export async function resolveVerifiedNativeBranch(opts: {
+  readonly projectRoot: string;
+  readonly autoBranch: boolean;
+  readonly signal?: AbortSignal;
+}): Promise<string | undefined> {
+  try {
+    throwIfCancelled(opts.signal);
+    if (!shouldInheritPrimaryLocalInputs({ inheritLocal: opts.autoBranch })) {
+      return undefined;
+    }
+    const projectRoot = resolve(opts.projectRoot);
+    if ((await realpath(projectRoot)) !== projectRoot) {
+      throw worktreeVerificationError();
+    }
+    const primary = await resolveVerifiedPrimaryWorktreeRoot({
+      projectRoot,
+      signal: opts.signal,
+    });
+    if (primary === null) {
+      return undefined;
+    }
+    const before = await readGitCheckoutIdentity({
+      projectRoot,
+      signal: opts.signal,
+    });
+    if (!before) {
+      throw worktreeVerificationError();
+    }
+    const admin = await lstat(before.gitDir);
+    const common = await lstat(before.commonDir);
+    const marker = await lstat(resolve(projectRoot, ".git"));
+    const read = (args: readonly string[]) =>
+      readGitInspection({ projectRoot, args, signal: opts.signal });
+    const branch = await read(["symbolic-ref", "--quiet", "HEAD"]);
+    const listing = await read(["worktree", "list", "--porcelain", "-z"]);
+    if (
+      !(branch?.startsWith("refs/heads/") && branch.endsWith("\n")) ||
+      branch.trimEnd().includes("\n") ||
+      listing === null
+    ) {
+      throw worktreeVerificationError();
+    }
+    const ref = branch.trimEnd();
+    const entries = listing
+      .split("\0\0")
+      .filter(Boolean)
+      .map((entry) => {
+        const fields = entry.split("\0");
+        const roots = fields.filter((field) => field.startsWith("worktree "));
+        const branches = fields.filter((field) => field.startsWith("branch "));
+        if (roots.length !== 1 || branches.length > 1) {
+          throw worktreeVerificationError();
+        }
+        return { root: roots[0]?.slice(9), branch: branches[0]?.slice(7) };
+      });
+    const selected = entries.filter((entry) => entry.root === projectRoot);
+    if (selected.length !== 1 || selected[0]?.branch !== ref) {
+      throw worktreeVerificationError();
+    }
+    const names = entries.flatMap((entry) =>
+      entry.branch?.startsWith("refs/heads/") ? [entry.branch.slice(11)] : []
+    );
+    const raw = ref.slice(11);
+    const derive = (name: string) => {
+      const slug = sanitizeBranchSlug(name);
+      const collision = names.some(
+        (other) => other !== name && sanitizeBranchSlug(other) === slug
+      );
+      return collision
+        ? `${slug}-${new Bun.CryptoHasher("sha1").update(name).digest("hex").slice(0, 4)}`
+        : slug;
+    };
+    const slug = derive(raw);
+    if (
+      !NATIVE_BRANCH_DNS_LABEL.test(slug) ||
+      slug.length > 63 ||
+      names.some((other) => other !== raw && derive(other) === slug)
+    ) {
+      throw worktreeVerificationError();
+    }
+    const after = await readGitCheckoutIdentity({
+      projectRoot,
+      signal: opts.signal,
+    });
+    const markerAfter = await lstat(resolve(projectRoot, ".git"));
+    const adminAfter = await lstat(before.gitDir);
+    const commonAfter = await lstat(before.commonDir);
+    if (
+      !(before && after) ||
+      before.gitDir !== after.gitDir ||
+      before.commonDir !== after.commonDir ||
+      admin.dev !== adminAfter.dev ||
+      admin.ino !== adminAfter.ino ||
+      common.dev !== commonAfter.dev ||
+      common.ino !== commonAfter.ino ||
+      marker.dev !== markerAfter.dev ||
+      marker.ino !== markerAfter.ino ||
+      marker.ctimeMs !== markerAfter.ctimeMs ||
+      (await read(["symbolic-ref", "--quiet", "HEAD"])) !== branch ||
+      (await read(["worktree", "list", "--porcelain", "-z"])) !== listing ||
+      (await resolveVerifiedPrimaryWorktreeRoot({
+        projectRoot,
+        signal: opts.signal,
+      })) !== primary
+    ) {
+      throw worktreeVerificationError();
+    }
+    throwIfCancelled(opts.signal);
+    return slug;
+  } catch (error: unknown) {
+    if (error instanceof NativeConfigCompilerError) {
+      throw error;
+    }
+    throw worktreeVerificationError();
+  }
+}
+
+const NATIVE_BRANCH_DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
 type GitCheckoutIdentity = {
   readonly gitDir: string;

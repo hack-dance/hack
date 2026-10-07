@@ -580,7 +580,7 @@ Validate native configuration and selected local overlays without starting workl
 hack config validate [options]
 ```
 
-Uses the matching bundled Rust compiler. Without --file, discovers a native project and resolves permitted worktree-local overlay settings. --file validates only the explicit document. Neither mode reads env values, writes state, or starts workloads.
+Uses the matching bundled Rust compiler. Without --file, discovers a native project and resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. Neither mode reads env values, writes state, or starts workloads.
 
 ### Options
 
@@ -588,6 +588,7 @@ Uses the matching bundled Rust compiler. Without --file, discovers a native proj
 | --- | --- |
 | `--file <path>` | Validate only this native project JSON file, without discovery or local overrides |
 | `--profile <names>` | Comma-separated declared native profiles |
+| `--domain <suffix>` | Select the generated native routing domain suffix |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
 | `--json` | Output JSON (machine-readable) |
@@ -605,13 +606,14 @@ Inspect native environment binding completeness without decrypting or starting w
 hack config plan [options]
 ```
 
-Resolves the native project and permitted local env selection, then inspects managed-env names, winning scopes and secret flags. Managed YAML is parsed by its existing owner; keys and values are never decrypted or returned. Required unresolved refs return a nonzero exit. This experimental report does not establish runtime admission or enable native execution; use config validate for validation without managed-document reads.
+Resolves the native project, permitted local env selection and routing preview, then inspects managed-env names, winning scopes and secret flags. Managed YAML is parsed by its existing owner; keys and values are never decrypted or returned. Required unresolved refs return a nonzero exit. This experimental report does not establish runtime admission or enable native execution; use config validate for validation without managed-document reads.
 
 ### Options
 
 | Option | Description |
 | --- | --- |
 | `--profile <names>` | Comma-separated declared native profiles |
+| `--domain <suffix>` | Select the generated native routing domain suffix |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
 | `--json` | Output JSON (machine-readable) |

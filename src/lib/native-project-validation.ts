@@ -11,12 +11,15 @@ import {
   acquireNativeLocalInputs,
   acquireNativeProjectInput,
 } from "./native-project-inputs.ts";
+import { acquireNativeGlobalDomain } from "./native-routing-inputs.ts";
 import { resolveProjectEnvMetadataForNativeSelection } from "./project-env-config.ts";
+import { resolveVerifiedNativeBranch } from "./worktree-local-config.ts";
 
 type NativeProjectSelection = {
   readonly startDir: string;
   readonly profiles?: readonly string[];
   readonly explicitOverlay?: string | null;
+  readonly explicitDomain?: string;
   readonly signal?: AbortSignal;
 };
 
@@ -78,6 +81,7 @@ export async function planNativeProject(
     ...opts,
     input: prepared.input,
     ...prepared.locals,
+    ...prepared.routingInputs,
     envMetadata: {
       metadata_version: 1,
       overlay: metadata.overlay,
@@ -98,7 +102,9 @@ export async function planNativeProject(
     result.ok &&
     (result.semantic_hash !== resolved.semantic_hash ||
       result.local_resolution.resolution_hash !==
-        resolved.local_resolution.resolution_hash)
+        resolved.local_resolution.resolution_hash ||
+      JSON.stringify(result.routing_resolution) !==
+        JSON.stringify(resolved.routing_resolution))
   ) {
     throw new NativeConfigCompilerError(
       "E_COMPILER_RESPONSE",
@@ -123,6 +129,7 @@ async function prepareNativeProject(
     signal: opts.signal,
     requireLocalResolution: true,
     requireEnvPlanning: opts.requireEnvPlanning,
+    requireRoutingPlanning: opts.explicitDomain !== undefined,
   });
   if (!compiled.ok) {
     const result: NativeConfigResolveResult = {
@@ -132,7 +139,7 @@ async function prepareNativeProject(
         document: "project" as const,
       })),
     };
-    return { ...project, result, locals: {} };
+    return { ...project, result, locals: {}, routingInputs: {} };
   }
   const worktree = compiled.plan.worktree;
   if (!isRecord(worktree) || typeof worktree.inherit_local !== "boolean") {
@@ -146,26 +153,58 @@ async function prepareNativeProject(
     inheritLocal: worktree.inherit_local,
     signal: opts.signal,
   });
-  const result = await resolveNativeConfig({
+  const resolveInputs = {
     input: project.input,
     ...locals,
     profiles: opts.profiles,
     explicitOverlay: opts.explicitOverlay,
+    explicitDomain: opts.explicitDomain,
     signal: opts.signal,
     requireEnvPlanning: opts.requireEnvPlanning,
     requireHostPlanning:
       opts.requireEnvPlanning && compiled.host_env_targets !== undefined,
+    requireRoutingPlanning:
+      opts.explicitDomain !== undefined ||
+      Object.hasOwn(compiled.plan, "routes") ||
+      Object.hasOwn(compiled.plan, "open"),
+  };
+  const checkResolvedIdentity = (result: NativeConfigResolveResult) => {
+    if (
+      result.ok &&
+      (result.semantic_hash !== compiled.semantic_hash ||
+        JSON.stringify(result.host_env_targets) !==
+          JSON.stringify(compiled.host_env_targets))
+    ) {
+      throw new NativeConfigCompilerError(
+        "E_COMPILER_RESPONSE",
+        "Native local resolution changed the authored identity or host targets."
+      );
+    }
+  };
+  let result = await resolveNativeConfig({
+    ...resolveInputs,
+    probeRoutingInputs: true,
   });
-  if (
-    result.ok &&
-    (result.semantic_hash !== compiled.semantic_hash ||
-      JSON.stringify(result.host_env_targets) !==
-        JSON.stringify(compiled.host_env_targets))
-  ) {
-    throw new NativeConfigCompilerError(
-      "E_COMPILER_RESPONSE",
-      "Native local resolution changed the authored identity or host targets."
-    );
+  checkResolvedIdentity(result);
+  let routingInputs: {
+    readonly globalDomain?: string;
+    readonly branch?: string;
+  } = {};
+  if (result.ok && result.routing_inputs_required === true) {
+    routingInputs = {
+      globalDomain: await acquireNativeGlobalDomain({ signal: opts.signal }),
+      branch: await resolveVerifiedNativeBranch({
+        projectRoot: project.projectRoot,
+        autoBranch: result.local_resolution.auto_branch,
+        signal: opts.signal,
+      }),
+    };
+    result = await resolveNativeConfig({
+      ...resolveInputs,
+      ...routingInputs,
+      requireRoutingPlanning: true,
+    });
   }
-  return { ...project, result, locals };
+  checkResolvedIdentity(result);
+  return { ...project, result, locals, routingInputs };
 }

@@ -168,7 +168,7 @@ export async function assertNativeComposeOwned(
 ): Promise<NativeComposeOwnershipObservation> {
   try {
     validateOptions(opts);
-    const probe = createProbe(opts);
+    const probe = createNativeComposeProbe(opts);
     const expected = {
       container: new Set(
         opts.expectedServices.map(
@@ -418,8 +418,9 @@ function batches(resources: readonly Inventory[]): Inventory[][] {
   return result;
 }
 
-function createProbe(
-  opts: NativeComposeOwnershipOptions
+/** Shared bounded, redacted Docker read boundary; callers supply only fixed inspection commands. */
+export function createNativeComposeProbe(
+  opts: Pick<NativeComposeOwnershipOptions, "signal" | "timeoutMs">
 ): (args: readonly string[]) => Promise<string> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   requireValue(

@@ -209,7 +209,37 @@ fn exercise(late_exit: bool) {
     }
     let normalized = fs::read(&journal).unwrap();
     assert_eq!(state::read::<Value>(&journal).unwrap()["complete"], true);
-    graph::recover_live_owner(&candidate, &runs[0], &expected).unwrap();
+    if let Some(binary) = std::env::var_os("HACK_LOCAL_TEST_NATIVE") {
+        assert!(Path::new(&binary).is_absolute());
+        let output = Command::new(binary)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("HOME", std::env::var_os("HOME").unwrap())
+            .arg("--candidate-root")
+            .arg(&candidate.checkout)
+            .args([
+                "graph",
+                "recover-live-owner",
+                "--run-id",
+                &runs[0],
+                "--expect-receipt",
+                &expected,
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "candidate CLI refused: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()["phase"],
+            "stopped-data-retained"
+        );
+    } else {
+        graph::recover_live_owner(&candidate, &runs[0], &expected).unwrap();
+    }
     assert_eq!(fs::read(&journal).unwrap(), normalized);
     assert_eq!(
         graph::inspect(&candidate, &runs[0]).unwrap().receipt.phase,
@@ -238,12 +268,13 @@ fn exercise(late_exit: bool) {
             graph::inspect(&candidate, run).unwrap().receipt.phase,
             "removed"
         );
+        audit_removed(&candidate, run);
     }
 }
 
 fn stop_owned_helper(candidate: &Candidate, slot: u8, assignment: &graph::bridges::Assignment) {
     {
-        let engine = graph::Engine::connect_cleanup(&candidate).unwrap();
+        let engine = graph::Engine::connect_cleanup(candidate).unwrap();
         assert!(
             graph::relay::normalization_selection(&engine, slot, assignment)
                 .unwrap()
@@ -269,5 +300,53 @@ fn stop_owned_helper(candidate: &Candidate, slot: u8, assignment: &graph::bridge
                 .unwrap()
                 .is_some()
         );
+    }
+}
+
+/// Read-only post-test audit; caller selects one exact removed synthetic run.
+#[test]
+#[ignore = "Explicit owned synthetic graph run/home; no allocation or cleanup effects"]
+fn removed_fixture_has_no_engine_resources_or_selected_guest_helpers() {
+    audit_removed(&candidate(), &run());
+}
+fn audit_removed(candidate: &Candidate, run: &str) {
+    let snapshot = graph::inspect(candidate, run).unwrap();
+    assert_eq!(snapshot.receipt.phase, "removed");
+    assert!(!snapshot.observations.is_empty());
+    assert!(
+        snapshot
+            .observations
+            .values()
+            .all(|v| v["state"] == "absent")
+    );
+    assert!(
+        graph::inspect_bridges(candidate, run).unwrap()["slots"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+    let root = graph::directory(candidate, run).unwrap();
+    let journal: Value = state::read(&root.join("live-owner-bridge-normalization.json")).unwrap();
+    assert_eq!(journal["complete"], true);
+    assert_eq!(journal["original"]["run"], run);
+    let engine = graph::Engine::connect_cleanup(candidate).unwrap();
+    for (slot, assignment) in journal["inventory"].as_object().unwrap() {
+        let allocation = assignment["reservation"].as_str().unwrap();
+        assert!(graph::hex(allocation, 32));
+        let proof = &journal["targets"][slot];
+        let (pid, start) = if let Some(proof) = proof.as_str() {
+            let fields: Vec<_> = proof.split(' ').collect();
+            assert_eq!(fields.len(), 8);
+            assert_eq!(fields[0], "relay-normalization-exited-v1");
+            assert!(fields[1].parse::<u32>().unwrap() > 1);
+            assert!(fields[2].parse::<u64>().unwrap() > 0);
+            (fields[1], fields[2])
+        } else {
+            assert!(assignment["relay"].is_null());
+            ("0", "0")
+        };
+        assert_eq!(engine.guest().execute_cleanup(
+            r#"set -efu; root=/run/hack-local/graph-relays/$1; test ! -e "$root"; test ! -L "$root"; if test "$2" != 0 && test -e "/proc/$2/stat"; then born=$(sed 's/.*) //' "/proc/$2/stat" | awk '{print $20}'); phase=$(sed 's/.*) //' "/proc/$2/stat" | cut -d' ' -f1); test "$born" != "$3" || test "$phase" = Z; fi; printf verified"#,
+            &[allocation,pid,start]).unwrap(),"verified");
     }
 }

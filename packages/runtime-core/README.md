@@ -224,6 +224,11 @@ application authentication, dependency listeners, browser routing, or publicatio
 The two ignored tests under
 `foreground::native_test::same_boot_absent_relay::bridge_normalization` use the same
 300-second external watchdog and a caller-owned capacity-two development pool.
+Set `HACK_LOCAL_TEST_NATIVE` to the absolute current `hack-native` binary to run
+the final positive recovery through its public CLI. The read-only ignored
+`removed_fixture_has_no_engine_resources_or_selected_guest_helpers` child audits
+an exact `HACK_LOCAL_GRAPH_RUN` afterward, including engine absence and the
+selected guest process identities.
 Their pinned image additionally supplies BusyBox `httpd`; the target has two
 HTTP-probed services on an internal network. They qualify an exited bridge plus a
 never-launched reservation, and separately a second originally live bridge that

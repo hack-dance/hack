@@ -965,6 +965,18 @@ struct Pending {
     wake: Arc<UnixStream>,
     armed: bool,
 }
+impl Pending {
+    /// A received refusal is authoritative: it must not cancel still-pending
+    /// fences. Only an uncertain acknowledgement keeps cancellation armed.
+    fn acknowledge_completion(
+        &mut self,
+        reply: Result<Result<(), CandidateError>, mpsc::RecvTimeoutError>,
+    ) -> Result<(), CandidateError> {
+        let result = reply.map_err(|_| refused())?;
+        self.armed = false;
+        result
+    }
+}
 fn wake(mut stream: &UnixStream) {
     loop {
         match stream.write(&[1]) {
@@ -1230,7 +1242,8 @@ impl ManagedOwner {
     }
     /// Activate a same-graph replacement batch in one reactor turn. Every slot is
     /// validated before any admission opens; cancellation/lost replies refence and
-    /// retire the entire batch. Caller must commit the complete receipt first.
+    /// retire the entire batch. A delivered refusal preserves pending fences.
+    /// Caller must commit the complete receipt first.
     pub(crate) fn complete_rebinds(&self, fences: &[SlotFence]) -> Result<(), CandidateError> {
         if let [fence] = fences {
             return self.complete_rebind(fence);
@@ -1252,11 +1265,7 @@ impl ManagedOwner {
             Arc::clone(&pending.canceled),
             reply,
         ))?;
-        let result = receiver.recv_timeout(BUDGET).map_err(|_| refused())?;
-        if result.is_ok() {
-            pending.armed = false;
-        }
-        result
+        pending.acknowledge_completion(receiver.recv_timeout(BUDGET))
     }
     /// Explicit abort also supports a just-completed fence for multi-slot commit
     /// failure, provided no newer targets/operation intervened. No old grant revives.
@@ -1321,6 +1330,87 @@ mod tests {
             runtime: [1; 16],
             boot: [2; 16],
         }
+    }
+    #[test]
+    fn received_completion_refusal_does_not_cancel_when_guard_drops_first() {
+        let (wake, mut observer) = UnixStream::pair().unwrap();
+        let wake = Arc::new(wake);
+        observer.set_nonblocking(true).unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let mut pending = Pending {
+            canceled: Arc::clone(&canceled),
+            wake: Arc::clone(&wake),
+            armed: true,
+        };
+        let (reply, receiver) = mpsc::sync_channel(1);
+        reply.send(Err(refused())).unwrap();
+        assert!(
+            pending
+                .acknowledge_completion(receiver.recv_timeout(Duration::ZERO))
+                .is_err()
+        );
+        // Force the caller's guard to drop before the reactor observes cancellation.
+        drop(pending);
+        assert!(
+            !canceled.load(Ordering::Acquire),
+            "a delivered refusal must preserve the pending fences"
+        );
+        let mut byte = [0];
+        assert_eq!(
+            observer.read(&mut byte).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+    #[test]
+    fn received_completion_success_disarms_but_missing_replies_cancel() {
+        for outcome in [Some(Ok(())), None] {
+            let (wake, mut observer) = UnixStream::pair().unwrap();
+            let wake = Arc::new(wake);
+            observer.set_nonblocking(true).unwrap();
+            let canceled = Arc::new(AtomicBool::new(false));
+            let mut pending = Pending {
+                canceled: Arc::clone(&canceled),
+                wake: Arc::clone(&wake),
+                armed: true,
+            };
+            let (reply, receiver) = mpsc::sync_channel(1);
+            let received = outcome.is_some();
+            if let Some(result) = outcome {
+                reply.send(result).unwrap();
+            }
+            let result = pending.acknowledge_completion(receiver.recv_timeout(Duration::ZERO));
+            assert_eq!(result.is_ok(), received);
+            drop(pending);
+            assert_eq!(canceled.load(Ordering::Acquire), !received);
+            let mut byte = [0];
+            if received {
+                assert_eq!(
+                    observer.read(&mut byte).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+            } else {
+                assert_eq!(observer.read(&mut byte).unwrap(), 1);
+            }
+        }
+        let (wake, mut observer) = UnixStream::pair().unwrap();
+        let wake = Arc::new(wake);
+        observer.set_nonblocking(true).unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let mut pending = Pending {
+            canceled: Arc::clone(&canceled),
+            wake: Arc::clone(&wake),
+            armed: true,
+        };
+        let (reply, receiver) = mpsc::sync_channel(1);
+        drop(reply);
+        assert!(
+            pending
+                .acknowledge_completion(receiver.recv_timeout(Duration::ZERO))
+                .is_err()
+        );
+        drop(pending);
+        assert!(canceled.load(Ordering::Acquire));
+        assert_eq!(observer.read(&mut [0]).unwrap(), 1);
     }
     #[test]
     fn control_only_owner_has_real_lifecycle_without_transport_slots() {

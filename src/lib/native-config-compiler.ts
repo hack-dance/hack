@@ -9,6 +9,11 @@ import {
   parseNativeEnvironmentPlan,
   parseNativeEnvMetadata,
 } from "./native-env-plan-protocol.ts";
+import {
+  type NativeHostEnvTargets,
+  nativeHostSelectionMatches,
+  parseNativeHostTargets,
+} from "./native-host-plan-protocol.ts";
 
 export const NATIVE_CONFIG_INPUT_LIMIT = 1024 * 1024;
 const OUTPUT_LIMIT = 8 * 1024 * 1024;
@@ -61,6 +66,7 @@ export type NativeConfigCompileResult =
       readonly plan: Readonly<Record<string, unknown>>;
       readonly semantic_hash: string;
       readonly declared_workloads?: NativeDeclaredWorkloads;
+      readonly host_env_targets?: NativeHostEnvTargets;
     }
   | {
       readonly transport_version: 1;
@@ -139,6 +145,7 @@ export async function compileNativeConfig(opts: {
   readonly signal?: AbortSignal;
   readonly requireLocalResolution?: boolean;
   readonly requireEnvPlanning?: boolean;
+  readonly requireHostPlanning?: boolean;
 }): Promise<NativeConfigCompileResult> {
   if (opts.input.byteLength > NATIVE_CONFIG_INPUT_LIMIT) {
     throw failure(
@@ -151,6 +158,7 @@ export async function compileNativeConfig(opts: {
     ...request,
     requireLocalResolution: opts.requireLocalResolution,
     requireEnvPlanning: opts.requireEnvPlanning,
+    requireHostPlanning: opts.requireHostPlanning,
   });
   const response = await invokeCompiler({
     ...request,
@@ -178,6 +186,7 @@ export async function resolveNativeConfig(opts: {
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
   readonly requireEnvPlanning?: boolean;
+  readonly requireHostPlanning?: boolean;
 }): Promise<NativeConfigResolveResult> {
   const input = encodeResolveRequest(opts);
   const request = compilerRequest(opts);
@@ -185,6 +194,7 @@ export async function resolveNativeConfig(opts: {
     ...request,
     requireLocalResolution: true,
     requireEnvPlanning: opts.requireEnvPlanning,
+    requireHostPlanning: opts.requireHostPlanning,
   });
   const response = await invokeCompiler({
     ...request,
@@ -279,6 +289,7 @@ export async function planNativeConfig(
     ...request,
     requireLocalResolution: true,
     requireEnvPlanning: true,
+    requireHostPlanning: metadata.host !== undefined,
   });
   const response = await invokeCompiler({
     ...request,
@@ -305,6 +316,13 @@ export async function planNativeConfig(
       plan: parsed.plan,
       declared: parsed.declared_workloads,
       environmentPlan,
+    }) ||
+    !nativeHostSelectionMatches({
+      plan: parsed.plan,
+      declared: parsed.declared_workloads,
+      targets: parsed.host_env_targets,
+      report: environmentPlan.host,
+      requireReport: true,
     }) ||
     response.exitCode !== (environmentPlan.complete ? 0 : 1)
   ) {
@@ -437,6 +455,7 @@ async function checkProtocol(opts: {
   readonly signal?: AbortSignal;
   readonly requireLocalResolution?: boolean;
   readonly requireEnvPlanning?: boolean;
+  readonly requireHostPlanning?: boolean;
 }): Promise<void> {
   const handshake = await invokeCompiler({ ...opts, args: ["--protocol"] });
   const protocol = parseControlJson(handshake.output);
@@ -447,6 +466,7 @@ async function checkProtocol(opts: {
     protocol.authored_version !== 1 ||
     protocol.plan_version !== 1 ||
     (opts.requireEnvPlanning && protocol.env_plan_version !== 1) ||
+    (opts.requireHostPlanning && protocol.host_env_plan_version !== 1) ||
     (opts.requireLocalResolution &&
       (protocol.resolve_version !== 1 || protocol.local_version !== 1))
   ) {
@@ -715,12 +735,18 @@ function parseCompileValue(opts: {
         "Native compiler returned an invalid workload namespace."
       );
     }
+    const hostTargets = parseHostNamespace({
+      value,
+      plan: value.plan,
+      declared,
+    });
     return {
       transport_version: 1,
       ok: true,
       plan: value.plan,
       semantic_hash: value.semantic_hash,
       ...(declared === undefined ? {} : { declared_workloads: declared }),
+      ...(hostTargets === undefined ? {} : { host_env_targets: hostTargets }),
     };
   }
   if (
@@ -736,6 +762,31 @@ function parseCompileValue(opts: {
     "E_COMPILER_RESPONSE",
     "Native configuration compiler returned an invalid result."
   );
+}
+
+function parseHostNamespace(opts: {
+  readonly value: Record<string, unknown>;
+  readonly plan: Readonly<Record<string, unknown>>;
+  readonly declared: NativeDeclaredWorkloads | undefined;
+}): NativeHostEnvTargets | undefined {
+  const targets =
+    opts.value.host_env_targets === undefined
+      ? undefined
+      : parseNativeHostTargets(opts.value.host_env_targets);
+  if (
+    targets === null ||
+    !nativeHostSelectionMatches({
+      plan: opts.plan,
+      declared: opts.declared,
+      targets,
+    })
+  ) {
+    throw failure(
+      "E_COMPILER_RESPONSE",
+      "Native compiler returned an invalid host target namespace."
+    );
+  }
+  return targets;
 }
 
 function parseDiagnostic(value: unknown): NativeConfigDiagnostic {

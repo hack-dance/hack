@@ -62,5 +62,46 @@ pub(crate) fn project(document: &json::Document) -> Result<(), Diagnostic> {
             }
         }
     }
+    optional_object(document, "/host")?;
+    for phase in ["up", "down"] {
+        optional_object(document, &format!("/host/{phase}"))?;
+        for stage in ["before", "after"] {
+            let pointer = format!("/host/{phase}/{stage}");
+            if let Some(items) = document.value.pointer(&pointer).and_then(Value::as_array) {
+                for index in 0..items.len() {
+                    host_invocation(document, &format!("{pointer}/{index}"))?;
+                }
+            }
+        }
+    }
+    if let Some(processes) = document
+        .value
+        .pointer("/host/processes")
+        .and_then(Value::as_object)
+    {
+        for name in processes.keys() {
+            host_invocation(document, &json::child("/host/processes", name))?;
+        }
+    }
+    Ok(())
+}
+
+fn host_invocation(document: &json::Document, pointer: &str) -> Result<(), Diagnostic> {
+    object(document, pointer)?;
+    for field in ["command", "env_target", "singleton"] {
+        optional_object(document, &json::child(pointer, field))?;
+    }
+    if let Some(environment) = document
+        .value
+        .pointer(&format!("{pointer}/environment"))
+        .and_then(Value::as_object)
+    {
+        for name in environment.keys() {
+            object(
+                document,
+                &json::child(&format!("{pointer}/environment"), name),
+            )?;
+        }
+    }
     Ok(())
 }

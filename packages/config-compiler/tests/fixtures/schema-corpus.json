@@ -1327,5 +1327,695 @@
         }
       }
     }
+  },
+  {
+    "name": "host empty",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {}
+    }
+  },
+  {
+    "name": "host hook",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "up": {
+          "before": [
+            {
+              "name": "prepare",
+              "command": {
+                "exec": ["true"]
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "host process",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host all stages",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "up": {
+          "after": [
+            {
+              "name": "prepare",
+              "command": {
+                "exec": ["true"]
+              }
+            }
+          ]
+        },
+        "down": {
+          "before": [
+            {
+              "name": "clean",
+              "command": {
+                "exec": ["true"]
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "host ports min max",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "singleton": {
+              "ports": [1, 65535]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host root null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": null
+    }
+  },
+  {
+    "name": "host up null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "up": null
+      }
+    }
+  },
+  {
+    "name": "host down null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "down": null
+      }
+    }
+  },
+  {
+    "name": "host process null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": null
+        }
+      }
+    }
+  },
+  {
+    "name": "host hook null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "up": {
+          "before": [null]
+        }
+      }
+    }
+  },
+  {
+    "name": "host env_target null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "env_target": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host command null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host singleton null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "singleton": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host environment directive null",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "environment": {
+              "KEY": null
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host root array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": []
+    }
+  },
+  {
+    "name": "host up array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "up": []
+      }
+    }
+  },
+  {
+    "name": "host down array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "down": []
+      }
+    }
+  },
+  {
+    "name": "host process array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": []
+        }
+      }
+    }
+  },
+  {
+    "name": "host hook array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "up": {
+          "before": [[]]
+        }
+      }
+    }
+  },
+  {
+    "name": "host env_target array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "env_target": []
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host command array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": []
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host singleton array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "singleton": []
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host environment directive array",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "environment": {
+              "KEY": []
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host unknown root",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "extra": {}
+      }
+    }
+  },
+  {
+    "name": "host unknown phase",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "up": {
+          "during": []
+        }
+      }
+    }
+  },
+  {
+    "name": "host hook name missing",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "up": {
+          "before": [
+            {
+              "command": {
+                "exec": ["true"]
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "host process name forbidden",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "name": "watch"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host host target extras",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "env_target": {
+              "kind": "host",
+              "name": "web"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host unknown target kind",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "env_target": {
+              "kind": "remote"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host workload target name missing",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "env_target": {
+              "kind": "workload"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host startup unknown",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "startup": "manual"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host exit unknown",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "exit": "restart"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host hook singleton forbidden",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "up": {
+          "before": [
+            {
+              "name": "prepare",
+              "command": {
+                "exec": ["true"]
+              },
+              "singleton": {
+                "ports": [80]
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "host restart forbidden",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "restart": true
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host readiness forbidden",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "readiness": {}
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host ports empty",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "singleton": {
+              "ports": []
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host ports zero",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "singleton": {
+              "ports": [0]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host ports overflow",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "singleton": {
+              "ports": [65536]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host ports duplicate",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "singleton": {
+              "ports": [80, 80]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host ports string",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "singleton": {
+              "ports": ["80"]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "host singleton conflict unknown",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "host": {
+        "processes": {
+          "watch": {
+            "command": {
+              "exec": ["true"]
+            },
+            "singleton": {
+              "ports": [80],
+              "on_conflict": "ignore"
+            }
+          }
+        }
+      }
+    }
   }
 ]

@@ -142,3 +142,65 @@ The process exits `1` for incomplete bindings even when `ok: true`, and `0` only
 for a complete metadata plan. Completeness is not runtime admission: this operation
 cannot decrypt, verify secret availability, apply config, run hooks, or start a
 workload. No metadata-derived or secret-derived hash is added to the portable plan.
+
+## Typed host intent and environment targets
+
+Optional project `host` contains `up` and `down` hooks and named `processes`.
+Each hook phase has ordered `before` and `after` arrays. Hooks require a canonical
+`name` and explicit `command: {exec: [...]}` or `{shell: "..."}`. Processes use
+the map key as their name and require the same command forms. Names must be unique
+across all host stages and processes, but occupy a separate namespace from services
+and jobs. Hook order is preserved in the plan and semantic hash.
+
+Every hook/process has optional `cwd` (default `.`), `environment` (the existing
+tagged directives) and `env_target` (default `{kind: "host"}`). Cwd is relative to
+the checkout root, normalized, and cannot escape through `..` or absolute paths.
+Explicit `{kind: "workload", name: "declared-service-or-job"}` selects an existing
+workload's host environment, including inactive profile declarations. Matching a
+host process name to a workload gives no implicit environment scope. Names such as
+`global` and `host` remain ordinary identities in the host entry namespace.
+
+Processes support `startup: "up"` and `exit: "stop_on_down"` only, both defaulted.
+An optional process `singleton` declares a nonempty unique set of ports 1–65535
+and `on_conflict: "fail" | "adopt"` (default `fail`). Port order is normalized.
+These declarations are intent only: no process is run, port checked, or process
+adopted. A later runtime owner must prove adoption eligibility. Hook singletons,
+restart policies, readiness and other unsupported fields refuse.
+
+Normalized host plans materialize defaults. Empty host declarations normalize to
+omission and preserve the previous hostless plan and semantic hash. A nonempty host
+adds `host_env_targets: {include_default, workloads}` to compile, resolve and plan
+success envelopes. This Rust-derived projection has sorted unique workload targets;
+it is omitted for hostless projects. Protocol capability `host_env_plan_version: 1`
+must be present before requesting host owner metadata.
+
+Environment metadata gains optional `host: {default?, workloads}`. `default` is
+required exactly when generic host targeting is requested; `workloads` must contain
+exactly the projected target names, with no extra targets. Every map contains only
+key names and winning `{scope, secret}` metadata. Generic host accepts global and
+generic host scopes; an explicit workload target accepts global, its owning workload
+scope, and generic host scope. When a workload named `host` is declared, generic
+host override disappears: default accepts only global, and each workload target
+accepts only global and its owning name. Inactive workload declarations participate
+in this rule. Unknown fields, null objects, arrays and malformed metadata refuse.
+
+`environment_plan.host` maps unique hook/process names to `{env_target, bindings}`
+and is omitted when there are no host entries. Host binding shares the immutable
+baseline and literal/default/reference/unset rules used for workloads. A generic
+host reference cannot read another workload's metadata. Missing-reference and
+collision diagnostics retain original project pointers, including ordered hook
+indices. Host metadata never enters semantic or resolution hashes. A complete
+metadata plan still does not qualify secret delivery, process supervision, singleton
+ownership, shutdown, runtime execution or application readiness.
+
+Environment planning enforces a shared 8 MiB serialized-response safety budget.
+It reserves portable plan, namespace, local-resolution and envelope space first,
+then counts symbolic baseline bytes once per metadata target and charges each
+workload/host copy before allocating its binding map. New directives and diagnostics
+are charged before insertion. Counting does not allocate a serialized expanded
+report. Charges are conservative and are not refunded for overwritten/unset
+bindings. This may refuse near-limit reports before their final encoding reaches
+8 MiB; refusal is the fixed redacted `plan_too_large` diagnostic at the original
+project location. The bound prevents input-to-output amplification and is shared
+across workload and host reporting; it is not a process-count or runtime-resource
+limit. No metadata-derived hash or managed value is exposed by the budget.

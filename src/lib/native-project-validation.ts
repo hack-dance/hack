@@ -55,6 +55,14 @@ export async function planNativeProject(
       overlay: resolved.local_resolution.overlay,
       inheritLocal: resolved.local_resolution.inherit_local,
       declaredWorkloadNames: Object.keys(declared),
+      ...(resolved.host_env_targets === undefined
+        ? {}
+        : {
+            hostTargets: {
+              includeDefault: resolved.host_env_targets.include_default,
+              workloadNames: resolved.host_env_targets.workloads,
+            },
+          }),
       signal: opts.signal,
     });
   } catch (error: unknown) {
@@ -81,6 +89,9 @@ export async function planNativeProject(
         ])
       ),
       inactive_scopes: metadata.unknownScopes,
+      ...(metadata.hostMetadata === undefined
+        ? {}
+        : { host: metadata.hostMetadata }),
     },
   });
   if (
@@ -142,6 +153,19 @@ async function prepareNativeProject(
     explicitOverlay: opts.explicitOverlay,
     signal: opts.signal,
     requireEnvPlanning: opts.requireEnvPlanning,
+    requireHostPlanning:
+      opts.requireEnvPlanning && compiled.host_env_targets !== undefined,
   });
+  if (
+    result.ok &&
+    (result.semantic_hash !== compiled.semantic_hash ||
+      JSON.stringify(result.host_env_targets) !==
+        JSON.stringify(compiled.host_env_targets))
+  ) {
+    throw new NativeConfigCompilerError(
+      "E_COMPILER_RESPONSE",
+      "Native local resolution changed the authored identity or host targets."
+    );
+  }
   return { ...project, result, locals };
 }

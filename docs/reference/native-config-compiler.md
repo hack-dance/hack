@@ -107,11 +107,80 @@ backslashes and drive syntax. Lexical `.` and repeated separators normalize; no
 filesystem or symlink resolution occurs. Working directories and mount targets
 must be absolute POSIX container paths without `..`.
 
-Routes, shutdown/restart policies, host hooks/processes, endpoint references,
+Routes, container shutdown/restart policies, endpoint references,
 network/security/resources, cache protocols, backend options, arbitrary extensions,
 and local settings other than environment selection are not yet implemented. They refuse rather than being
 silently dropped. This foundation does not replace the full native contract or
 qualify a migrated advanced project.
+
+## Host declarations
+
+The optional `host` namespace declares ordered lifecycle hooks and named processes:
+
+```json
+{
+  "schema_version": 1,
+  "name": "example",
+  "services": { "web": { "image": "example/web:1" } },
+  "host": {
+    "up": {
+      "before": [{
+        "name": "prepare",
+        "command": { "exec": ["./scripts/prepare"] },
+        "cwd": "."
+      }]
+    },
+    "processes": {
+      "tunnel": {
+        "command": { "shell": "./scripts/tunnel" },
+        "env_target": { "kind": "workload", "name": "web" },
+        "environment": { "TOKEN": { "env_ref": "TOKEN" } }
+      }
+    }
+  }
+}
+```
+
+`host.up` and `host.down` accept `before`/`after` arrays. Each hook requires a
+canonical `name` and explicit `command`; array order is preserved. `host.processes`
+is a map of canonical names to process declarations with required commands. Names
+must be unique across all hooks and processes, in a namespace separate from
+services/jobs. Commands use the same explicit exec/shell forms as workloads.
+`cwd` defaults to `.` and is lexically normalized relative to the project checkout,
+not `source.root`, `.hack` or the caller's working directory. No filesystem lookup
+or process execution occurs.
+
+A process's `startup` defaults to `up` and `exit` to `stop_on_down`; these are the
+only supported values in this slice. They preserve lifecycle intent in the plan,
+without enabling a controller. Optional process `singleton` requires nonempty,
+unique ports in 1–65,535, normalized as a sorted set, and `on_conflict` of `fail`
+(default) or `adopt`. Adoption still requires the existing lifecycle owner's
+ownership proof at execution. Hook singleton settings, restart/readiness policies
+and additional startup/exit policies currently refuse.
+
+Each hook/process has `env_target` of `{kind:"host"}` (the omitted default) or
+`{kind:"workload",name:"declared-service-or-job"}`. An explicit workload target may
+name an inactive declaration; it selects env ownership and does not enable that
+workload. Matching host and workload names confers no implicit env scope. Unknown
+targets and per-reference scope overrides refuse. Each entry's `environment`
+accepts the same literal/default/env_ref/unset directives as workloads. There is
+no per-process managed store scope. Local settings cannot inject host commands.
+
+The compiler omits an empty host namespace from the normalized plan; hostless
+plans keep their existing serialized identity. Validation preserves symbolic refs
+without reading managed files. Explicit planning checks each host entry against
+its selected owner's immutable baseline. Generic host selection uses global plus
+host overrides; a workload target uses global plus that workload plus host
+overrides, with the existing layer-first precedence. If any declared workload is
+named `host`, including an inactive service/job, that scope belongs to the workload:
+generic selection then uses global only and other workload targets receive no
+generic host override. All target maps share the bounded metadata budget.
+
+The environment report adds `host:{NAME:{env_target,bindings}}`, separate from its
+`workloads` map. Required refs and remapping collisions report the original host
+declaration pointer. No managed values or ciphertext enter the report or either
+portable identity. This is offline planning; execution, post-hook generation
+checks, secret delivery and locked adoption remain later integration work.
 
 ## Protocol and diagnostics
 
@@ -138,10 +207,12 @@ authored public literals and commands. Those values are intentionally visible;
 diagnostic redaction does not turn the plan into a secret-safe storage format.
 
 - `hack-config-compiler --protocol` emits
-  `{"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1}`.
+  `{"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1}`.
   Project-aware validation requires local resolution capabilities; explicit
   metadata planning additionally requires `env_plan_version:1`. Older matching
   compilers can still serve their supported validation modes.
+  Host planning requires `host_env_plan_version:1` before acquiring host metadata;
+  hostless env-plan-v1 compilers remain supported.
 - `hack-config-compiler compile [--profile NAME]...` reads one UTF-8 JSON document
   from stdin through EOF. Input is limited to 1 MiB and 64 nested containers. These
   are parser safety bounds, not container resource or workload-count limits.
@@ -152,6 +223,9 @@ diagnostic redaction does not turn the plan into a secret-safe storage format.
   one-based line/byte-column. Semantic errors use the nearest authored value's
   location; errors for a missing property or CLI-selected profile may point to its
   containing object. Input contents and parser excerpts never appear in messages.
+  Host declarations additionally produce `host_env_targets:{include_default,
+  workloads:[...]}`, a names-only owner selection derived in Rust. It is separate
+  from the authored identity and includes explicit targets from inactive workloads.
 - Invalid invocation exits 2 with fixed usage on stderr and no JSON on stdout.
 - `hack-config-compiler resolve [--profile NAME]...` reads a versioned request:
   `{request_version:1,project:"original JSON text",primary_local?:"original JSON text",checkout_local?:"original JSON text",explicit_overlay?:null|string}`.
@@ -208,6 +282,17 @@ workloads:{NAME:{KEY:{scope:string,secret:boolean}}},inactive_scopes:string[]}`.
 Every declared workload must appear, including inactive ones. Unknown fields,
 target names, invalid scopes and mismatched selections refuse. Serialized metadata
 is limited to 1 MiB in addition to the existing document and encoded-request bounds.
+For host declarations, metadata additionally includes
+`host:{default?:{KEY:{scope,secret}},workloads:{TARGET:{KEY:{scope,secret}}}}`.
+The default map is present exactly when requested, and workload maps exactly match
+`host_env_targets.workloads`, including empty maps. Extra target authority refuses.
+The compiler shares an 8 MiB output safety budget across the complete planning
+envelope. It charges symbolic baselines before cloning them for each invocation,
+plus authored directives and diagnostics before report growth. Accounting is
+conservative and does not refund overwritten or removed entries. Oversized
+expansion refuses with a fixed `plan_too_large` diagnostic at the original project
+pointer. This bounds report memory; it does not cap project resources or workload
+counts.
 
 ## Local settings and worktrees
 

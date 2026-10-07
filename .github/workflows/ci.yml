@@ -48,6 +48,9 @@ jobs:
           bunx ultracite check scripts/check-native-env-plan-cli.ts tests/native-env-plan-transport.test.ts tests/native-env-metadata.test.ts
           bun test tests/native-env-plan-transport.test.ts tests/native-env-metadata.test.ts tests/project-env-config.test.ts tests/project-env-metadata.test.ts
           bun scripts/check-native-env-plan-cli.ts
+          bunx ultracite check scripts/check-native-host-plan-cli.ts tests/native-host-plan-transport.test.ts src/lib/native-host-plan-protocol.ts
+          bun test tests/native-host-plan-transport.test.ts
+          bun scripts/check-native-host-plan-cli.ts
 
   state-models:
     name: Runtime state models

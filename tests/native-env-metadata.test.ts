@@ -510,3 +510,296 @@ test("host-only many-key input stays within the guest output budget across many 
     result.effectiveMetadata.host
   );
 });
+
+function hostMetadata(
+  projectRoot: string,
+  opts: {
+    readonly overlay?: string | null;
+    readonly inheritLocal?: boolean;
+    readonly declaredWorkloadNames?: readonly string[];
+    readonly includeDefault?: boolean;
+    readonly workloadNames?: readonly string[];
+  } = {}
+) {
+  return resolveProjectEnvMetadataForNativeSelection({
+    projectRoot,
+    overlay: opts.overlay ?? null,
+    inheritLocal: opts.inheritLocal ?? true,
+    declaredWorkloadNames: opts.declaredWorkloadNames ?? [
+      "web",
+      "job",
+      "inactive",
+    ],
+    hostTargets: {
+      includeDefault: opts.includeDefault ?? true,
+      workloadNames: opts.workloadNames ?? ["web"],
+    },
+  });
+}
+
+test("host selection is optional and preserves exact empty/default/requested workload presence", async () => {
+  const p = await project();
+  expect(await metadata(p)).not.toHaveProperty("hostMetadata");
+  expect((await hostMetadata(p)).hostMetadata).toEqual({
+    default: {},
+    workloads: { web: {} },
+  });
+  expect(
+    (await hostMetadata(p, { includeDefault: false, workloadNames: [] }))
+      .hostMetadata
+  ).toEqual({ workloads: {} });
+  expect(
+    (
+      await hostMetadata(p, {
+        includeDefault: false,
+        workloadNames: ["job", "inactive"],
+      })
+    ).hostMetadata
+  ).toEqual({ workloads: { job: {}, inactive: {} } });
+});
+
+test("host default and workload baselines follow layered specificity, tombstones and reintroduction", async () => {
+  const p = await project();
+  await layer(p, "hack.env.default.yaml", {
+    global: { WIN: "", DELETE: secure, EMPTY: "" },
+    web: { WIN: secure, WEB: secure },
+    job: { JOB: secure },
+    inactive: { INACTIVE: secure },
+    host: { WIN: "", HOST: secure },
+    "shell-process": { PRIVATE_SCOPE: secure },
+  });
+  await layer(p, "hack.env.qa.yaml", {
+    global: { WIN: secure },
+    host: { DELETE: null, EMPTY: null },
+  });
+  await layer(p, "hack.env.qa.local.yaml", {
+    global: { EMPTY: "" },
+    web: { DELETE: "" },
+  });
+  const base = await hostMetadata(p);
+  expect(base.hostMetadata?.default?.WIN).toEqual({
+    scope: "host",
+    secret: false,
+  });
+  expect(base.hostMetadata?.workloads.web?.WIN).toEqual({
+    scope: "host",
+    secret: false,
+  });
+  const result = await hostMetadata(p, {
+    overlay: "qa",
+    workloadNames: ["web", "job", "inactive"],
+  });
+  expect(result.hostMetadata?.default?.WIN).toEqual({
+    scope: "global",
+    secret: true,
+  });
+  expect(result.hostMetadata?.default?.DELETE).toBeUndefined();
+  expect(result.hostMetadata?.workloads.web?.DELETE).toEqual({
+    scope: "web",
+    secret: false,
+  });
+  expect(result.hostMetadata?.workloads.web?.EMPTY).toEqual({
+    scope: "global",
+    secret: false,
+  });
+  expect(result.hostMetadata?.workloads.job?.JOB).toEqual({
+    scope: "job",
+    secret: true,
+  });
+  expect(result.hostMetadata?.workloads.inactive?.INACTIVE).toEqual({
+    scope: "inactive",
+    secret: true,
+  });
+  expect(result.hostMetadata?.default?.WEB).toBeUndefined();
+  expect(result.hostMetadata?.workloads.web?.PRIVATE_SCOPE).toBeUndefined();
+  expect(result.unknownScopes).toEqual(["shell-process"]);
+  expect(JSON.stringify(result)).not.toContain(SENTINEL);
+});
+
+test("a host-named declared workload disables generic host injection even when not requested", async () => {
+  const p = await project();
+  await layer(p, "hack.env.default.yaml", {
+    global: { WIN: "" },
+    web: { WIN: secure },
+    host: { WIN: "", HOST: secure },
+  });
+  const names = ["web", "host", "inactive-job"];
+  const result = await hostMetadata(p, {
+    declaredWorkloadNames: names,
+    workloadNames: ["web", "inactive-job"],
+  });
+  expect(result.hostMetadata?.default).toEqual({
+    WIN: { scope: "global", secret: false },
+  });
+  expect(result.hostMetadata?.workloads.web).toEqual({
+    WIN: { scope: "web", secret: true },
+  });
+  expect(result.hostMetadata?.workloads["inactive-job"]).toEqual({
+    WIN: { scope: "global", secret: false },
+  });
+  const selected = await hostMetadata(p, {
+    declaredWorkloadNames: names,
+    workloadNames: ["host"],
+  });
+  expect(selected.hostMetadata?.workloads.host?.HOST).toEqual({
+    scope: "host",
+    secret: true,
+  });
+});
+
+test("host metadata observes all six real worktree layers and explicit base selection", async () => {
+  const { primary, checkout } = await linked();
+  await layer(checkout, "hack.env.default.yaml", {
+    host: { BASE: "", WIN: secure },
+  });
+  await layer(checkout, "hack.env.qa.yaml", {
+    global: { OVERLAY: "", WIN: "" },
+  });
+  await layer(primary, "hack.env.local.yaml", {
+    host: { PRIMARY: "", WIN: secure },
+  });
+  await layer(primary, "hack.env.qa.local.yaml", {
+    global: { PRIMARY_OVERLAY: "", WIN: "" },
+  });
+  await layer(checkout, "hack.env.local.yaml", {
+    host: { CURRENT: "", WIN: secure },
+  });
+  await layer(checkout, "hack.env.qa.local.yaml", {
+    global: { CURRENT_OVERLAY: "", WIN: "" },
+  });
+  const result = await hostMetadata(checkout, { overlay: "qa" });
+  expect(result.hostMetadata?.default?.WIN).toEqual({
+    scope: "global",
+    secret: false,
+  });
+  expect(result.hostMetadata?.workloads.web).toEqual(
+    result.hostMetadata?.default
+  );
+  expect(Object.keys(result.hostMetadata?.default ?? {}).sort()).toEqual([
+    "BASE",
+    "CURRENT",
+    "CURRENT_OVERLAY",
+    "OVERLAY",
+    "PRIMARY",
+    "PRIMARY_OVERLAY",
+    "WIN",
+  ]);
+  const base = await hostMetadata(checkout);
+  expect(base.hostMetadata?.default?.WIN).toEqual({
+    scope: "host",
+    secret: true,
+  });
+  expect(base.hostMetadata?.default?.PRIMARY_OVERLAY).toBeUndefined();
+  expect(base.hostMetadata?.default?.CURRENT_OVERLAY).toBeUndefined();
+  for (const exclusion of ["optout", "ci", "slim"]) {
+    if (exclusion === "ci") {
+      process.env.CI = "true";
+    }
+    if (exclusion === "slim") {
+      Reflect.deleteProperty(process.env, "CI");
+      process.env.HACK_EXECUTION_MODE = "slim";
+    }
+    const excluded = await hostMetadata(checkout, {
+      overlay: "qa",
+      inheritLocal: exclusion !== "optout",
+    });
+    expect(excluded.hostMetadata?.default?.PRIMARY).toBeUndefined();
+    expect(excluded.hostMetadata?.default?.PRIMARY_OVERLAY).toBeUndefined();
+    expect(excluded.hostMetadata?.default?.CURRENT).toEqual({
+      scope: "host",
+      secret: false,
+    });
+  }
+});
+
+test("unknown, duplicate, noncanonical and malformed host requests refuse without disclosure", async () => {
+  const p = await project();
+  await layer(p, "hack.env.default.yaml", {
+    "shell-process": { PRIVATE_SCOPE: secure },
+  });
+  for (const hostTargets of [
+    { includeDefault: true, workloadNames: ["shell-process"] },
+    { includeDefault: true, workloadNames: ["web", "web"] },
+    { includeDefault: true, workloadNames: ["../secret"] },
+    { includeDefault: true, workloadNames: ["Web"] },
+    { includeDefault: true, workloadNames: ["a".repeat(64)] },
+    { includeDefault: SENTINEL, workloadNames: [] },
+    { includeDefault: false, workloadNames: SENTINEL },
+    { includeDefault: false, workloadNames: [null] },
+    null,
+  ]) {
+    await refuses(() =>
+      Reflect.apply(resolveProjectEnvMetadataForNativeSelection, undefined, [
+        {
+          projectRoot: p,
+          overlay: null,
+          inheritLocal: false,
+          declaredWorkloadNames: ["web"],
+          hostTargets,
+        },
+      ])
+    );
+  }
+});
+
+test("host requests retain input redaction and cancellation without decrypting", async () => {
+  const p = await project();
+  await layer(p, "hack.env.default.yaml", { host: { SECRET: secure } });
+  expect((await hostMetadata(p)).hostMetadata?.default?.SECRET?.secret).toBe(
+    true
+  );
+  await writeFile(join(p, ".hack/hack.env.qa.yaml"), `invalid: [${SENTINEL}`);
+  await refuses(() => hostMetadata(p, { overlay: "qa" }));
+  const signal = AbortSignal.abort(SENTINEL);
+  await expect(
+    resolveProjectEnvMetadataForNativeSelection({
+      projectRoot: p,
+      overlay: null,
+      inheritLocal: false,
+      declaredWorkloadNames: ["web"],
+      hostTargets: { includeDefault: true, workloadNames: ["web"] },
+      signal,
+    })
+  ).rejects.toMatchObject({ code: "E_COMPILER_CANCELLED" });
+});
+
+test("only requested host baselines expand and combined guest plus host output is bounded", async () => {
+  const p = await project();
+  const names = Array.from({ length: 300 }, (_, index) => `workload-${index}`);
+  await layer(p, "hack.env.default.yaml", {
+    host: Object.fromEntries(
+      Array.from({ length: 4000 }, (_, index) => [`HOST_${index}`, secure])
+    ),
+  });
+  const selected = await hostMetadata(p, {
+    declaredWorkloadNames: names,
+    workloadNames: [names[0] ?? "workload-0"],
+    includeDefault: false,
+  });
+  expect(Object.keys(selected.hostMetadata?.workloads ?? {})).toEqual([
+    "workload-0",
+  ]);
+  expect(
+    Object.keys(selected.hostMetadata?.workloads["workload-0"] ?? {})
+  ).toHaveLength(4000);
+  expect(Buffer.byteLength(JSON.stringify(selected))).toBeLessThan(1024 * 1024);
+  await refuses(() =>
+    hostMetadata(p, { declaredWorkloadNames: names, workloadNames: names })
+  );
+  // Guest metadata alone fits; adding the selected host baselines must share its budget.
+  await layer(p, "hack.env.default.yaml", {
+    global: Object.fromEntries(
+      Array.from({ length: 2500 }, (_, index) => [`KEY_${index}`, ""])
+    ),
+  });
+  const fewNames = ["one", "two", "three", "four"];
+  expect(
+    Buffer.byteLength(JSON.stringify(await metadata(p, null, false, fewNames)))
+  ).toBeLessThan(1024 * 1024);
+  await refuses(() =>
+    hostMetadata(p, {
+      declaredWorkloadNames: fewNames,
+      workloadNames: fewNames,
+    })
+  );
+});

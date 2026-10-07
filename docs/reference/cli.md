@@ -507,6 +507,7 @@ hack config <subcommand> [options]
 | `hack config set <key> <value>` | Update a value in hack.config.json |
 | `hack config validate` | Validate native configuration and selected local overlays without starting workloads |
 | `hack config plan` | Inspect native environment binding completeness without decrypting or starting workloads |
+| `hack config import` | Preview a bounded legacy config and Compose conversion without writes |
 
 ### Options
 
@@ -617,6 +618,29 @@ Resolves the native project, permitted local env selection and routing preview, 
 | `--domain <suffix>` | Select the generated native routing domain suffix |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack config import`
+
+Preview a bounded legacy config and Compose conversion without writes
+
+### Usage
+
+```bash
+hack config import [options]
+```
+
+Requires --dry-run. Inspects the exact .hack/hack.config.json and docker-compose.yml pair, reports field mappings/refusals, and validates complete private candidates in memory. Does not export a draft, adopt resources, read keys or change project selection.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--dry-run` | Preview only; adoption and draft export are unavailable |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

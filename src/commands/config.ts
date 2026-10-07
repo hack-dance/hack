@@ -29,6 +29,7 @@ import {
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
 import { logger } from "../ui/logger.ts";
+import { configImportCommand } from "./config-import.ts";
 import { configPlanCommand } from "./config-plan.ts";
 import { configValidateCommand } from "./config-validate.ts";
 
@@ -212,6 +213,7 @@ export const configCommand = defineCommand({
     withHandler(configSetSpec, handleConfigSet),
     configValidateCommand,
     configPlanCommand,
+    configImportCommand,
   ],
 } as const);
 

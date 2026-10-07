@@ -28,6 +28,11 @@ again at mutation boundaries, but this is not atomic protection against concurre
 external edits. Locked adoption belongs to a later integration step.
 `hack env get` retains its fixed redacted failure message and empty stdout.
 
+The separate [read-only import preview](native-config-import.md) accepts a strict
+image-only subset of the exact legacy JSON/Compose pair. Complete private candidates
+are validated here in memory; import/adoption writes and resource transfer remain
+unavailable.
+
 The standalone `packages/config-compiler` Rust package has no dependency on the
 native runtime, virtualization, Docker, or platform provider APIs. It uses the
 repository's pinned Rust 1.97.1 and committed Cargo lockfile when building. The

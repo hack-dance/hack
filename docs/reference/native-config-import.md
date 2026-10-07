@@ -87,3 +87,8 @@ NC04 adoption remains open. Locked publication, input-family transition, local a
 linked-worktree policy, unsupported intent conversion, existing resource ownership,
 volume reuse and recovery require separate implementation and acceptance.
 A successful preview is neither execution admission nor application acceptance.
+
+The separate private [legacy Compose binding prerequisite](native-compose-adoption.md)
+can verify qualified existing instance and named-volume identities without changing
+configuration or resources. It does not expand this command's conversion subset
+or complete the adoption transaction.

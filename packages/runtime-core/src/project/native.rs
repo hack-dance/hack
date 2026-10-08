@@ -3,11 +3,16 @@ use super::execution::{Condition, Graph, Service};
 use crate::CandidateError;
 use hack_config_compiler::{
     WorkloadKind,
-    environment::{EnvironmentBinding, PlanResult},
+    environment::{EnvironmentBinding, EnvironmentPlan, PlanResult},
     local::LocalResolution,
-    model::{Command, Dependency, Readiness, ServiceCondition, Source, Workload, WorktreePolicy},
+    model::{
+        Command, Dependency, EnvironmentValue, Plan, Readiness, ServiceCondition, Source, Workload,
+        WorktreePolicy,
+    },
     process::{Entrypoint, Restart, ShutdownSignal},
 };
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Caller-selected private values keyed by workload, then the compiler binding's source key.
@@ -27,6 +32,7 @@ pub struct CompileOptions<'a> {
 /// No source ownership, image availability, backend capability or runtime admission is implied.
 pub struct NativeInputs {
     pub semantic_hash: String,
+    pub environment_policy_hash: String,
     pub local_resolution: LocalResolution,
     pub source: Source,
     pub worktree: WorktreePolicy,
@@ -35,6 +41,48 @@ pub struct NativeInputs {
     pub workloads: BTreeMap<String, WorkloadInputs>,
     /// Destination keys only; values cannot enter public engine configuration or receipts.
     pub managed_environment: ManagedValues,
+}
+
+/// Public compiler identity only. Managed values and executable text are excluded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewIdentity {
+    pub semantic_hash: String,
+    pub local_resolution_hash: String,
+    pub environment_policy_hash: String,
+    pub selected_profiles: Vec<String>,
+}
+impl NativeInputs {
+    pub fn review_identity(&self) -> ReviewIdentity {
+        ReviewIdentity {
+            semantic_hash: self.semantic_hash.clone(),
+            local_resolution_hash: self.local_resolution.resolution_hash.clone(),
+            environment_policy_hash: self.environment_policy_hash.clone(),
+            selected_profiles: self.selected_profiles.clone(),
+        }
+    }
+}
+
+fn policy_hash(plan: &Plan, bindings: &EnvironmentPlan) -> Result<String, CandidateError> {
+    #[derive(Serialize)]
+    struct Policy<'a> {
+        directives: BTreeMap<&'a str, &'a BTreeMap<String, EnvironmentValue>>,
+        bindings: &'a EnvironmentPlan,
+    }
+    let policy = Policy {
+        directives: plan
+            .services
+            .iter()
+            .chain(plan.jobs.iter())
+            .map(|(name, workload)| (name.as_str(), &workload.environment))
+            .collect(),
+        bindings,
+    };
+    let bytes = serde_json::to_vec(&policy).map_err(|_| private_refused())?;
+    let mut hash = Sha256::new();
+    hash.update(b"hack.native-environment-policy/v1\0");
+    hash.update(bytes);
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 /// Authored process and public environment, not a provider create request or durable plan.
@@ -189,13 +237,43 @@ fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, Candi
 /// plan are sent through the compiler. Errors never disclose authored or private text.
 /// Provider entry points do not consume this result; execution/replay remain later gates.
 pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateError> {
+    compile_inputs(
+        options.request,
+        options.profiles,
+        Some(options.managed_values),
+    )
+}
+
+/// Review the same supported typed subset without acquiring private values.
+/// Preparation must recompile with the exact managed selection and compare this identity.
+pub fn review(request: &[u8], profiles: &[String]) -> Result<ReviewIdentity, CandidateError> {
+    compile_inputs(request, profiles, None).map(|inputs| inputs.review_identity())
+}
+
+#[cfg(test)]
+thread_local! {
+    // Count copies, never retain or report private contents. Each test owns its thread.
+    static PRIVATE_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn copy_private(value: &str) -> String {
+    #[cfg(test)]
+    PRIVATE_COPIES.with(|copies| copies.set(copies.get() + 1));
+    value.into()
+}
+
+fn compile_inputs(
+    request: &[u8],
+    profiles: &[String],
+    managed_values: Option<&ManagedValues>,
+) -> Result<NativeInputs, CandidateError> {
     let PlanResult::Success {
         plan,
         semantic_hash,
         local_resolution,
         environment_plan,
         ..
-    } = hack_config_compiler::environment::plan(options.request, options.profiles)
+    } = hack_config_compiler::environment::plan(request, profiles)
     else {
         return Err(CandidateError::new(
             "native_graph_compile",
@@ -205,6 +283,7 @@ pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateErr
     if !environment_plan.complete || !environment_plan.diagnostics.is_empty() {
         return Err(private_refused());
     }
+    let environment_policy_hash = policy_hash(&plan, &environment_plan)?;
     if !plan.storage.is_empty()
         || plan.routes.is_some()
         || plan.open.is_some()
@@ -218,7 +297,8 @@ pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateErr
     }
     let mut graph = BTreeMap::new();
     let mut workloads = BTreeMap::new();
-    let mut managed_environment = BTreeMap::new();
+    // Validate every fallible workload/binding/graph condition before copying any
+    // private value. A later refusal must not leave partially accumulated copies.
     for (kind, selected) in [
         (WorkloadKind::Service, plan.services),
         (WorkloadKind::Job, plan.jobs),
@@ -252,31 +332,34 @@ pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateErr
                 .workloads
                 .get(&name)
                 .ok_or_else(private_refused)?;
-            let private = options.managed_values.get(&name);
+            let private = managed_values.and_then(|values| values.get(&name));
             let mut source_keys = BTreeSet::new();
-            let mut destinations = BTreeMap::new();
+            let mut managed_count = 0;
             let mut private_bytes = 2;
             for (destination, binding) in bindings {
                 match binding {
                     EnvironmentBinding::Managed { key, .. } => {
                         source_keys.insert(key);
+                        managed_count += 1;
+                        if managed_count > 256 {
+                            return Err(private_refused());
+                        }
+                        if managed_values.is_none() {
+                            continue;
+                        }
                         let value = private
                             .and_then(|values| values.get(key))
                             .ok_or_else(private_refused)?;
-                        if value.len() > 32 * 1024
-                            || value.contains('\0')
-                            || destinations.len() == 256
-                        {
+                        if value.len() > 32 * 1024 || value.contains('\0') {
                             return Err(private_refused());
                         }
                         private_bytes += destination.len()
                             + 3
                             + json_string_bytes(value)
-                            + usize::from(!destinations.is_empty());
+                            + usize::from(managed_count > 1);
                         if private_bytes > 32 * 1024 {
                             return Err(private_refused());
                         }
-                        destinations.insert(destination.clone(), value.clone());
                     }
                     EnvironmentBinding::Literal { value }
                     | EnvironmentBinding::Default { value } => {
@@ -290,9 +373,6 @@ pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateErr
             if private.is_some_and(|values| values.keys().collect::<BTreeSet<_>>() != source_keys) {
                 return Err(private_refused());
             }
-            if !destinations.is_empty() {
-                managed_environment.insert(name.clone(), destinations);
-            }
             graph.insert(
                 name.clone(),
                 Service {
@@ -303,20 +383,38 @@ pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateErr
             workloads.insert(name, inputs);
         }
     }
-    if options
-        .managed_values
-        .keys()
-        .any(|name| !workloads.contains_key(name))
+    if managed_values.is_some_and(|values| values.keys().any(|name| !workloads.contains_key(name)))
     {
         return Err(private_refused());
     }
+    let graph = Graph::from_services(graph)?;
+    // No ordinary error path remains after the first copy. The borrowed source
+    // map and owning compiler bindings cannot change between validation and copy.
+    let mut managed_environment = BTreeMap::new();
+    if let Some(selected) = managed_values {
+        for name in workloads.keys() {
+            let destinations: BTreeMap<_, _> = environment_plan.workloads[name]
+                .iter()
+                .filter_map(|(destination, binding)| match binding {
+                    EnvironmentBinding::Managed { key, .. } => {
+                        Some((destination.clone(), copy_private(&selected[name][key])))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !destinations.is_empty() {
+                managed_environment.insert(name.clone(), destinations);
+            }
+        }
+    }
     Ok(NativeInputs {
         semantic_hash,
+        environment_policy_hash,
         local_resolution,
         source: plan.source,
         worktree: plan.worktree,
         selected_profiles: plan.selected_profiles,
-        graph: Graph::from_services(graph)?,
+        graph,
         workloads,
         managed_environment,
     })

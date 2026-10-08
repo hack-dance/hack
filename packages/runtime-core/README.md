@@ -26,6 +26,34 @@ bounded to 32 KiB and 256 destination keys per workload; process argv is bounded
 to 4096 arguments and 64 KiB. Build/acquisition policy, mounts, storage, routing,
 endpoints, host effects, HTTP/TCP readiness and automatic restart explicitly refuse.
 
+`project::native::review` validates the same subset without acquiring private values.
+Its hash-only identity includes the authored semantic hash, local-resolution hash,
+selected profiles and a separate versioned environment-policy hash. That policy hash
+comes from the compiler's selected directives and resolved public bindings, including
+managed source keys/scopes and typed endpoints; private values never enter it. Endpoint
+execution still refuses. Compilation returns the same identity so a future native
+admission boundary can compare fresh inputs with the reviewed selection.
+
+`provider::native_input` adds a separate versioned native preparation boundary. Its
+review binds compiler identity to the explicit project/branch namespace and attempt
+ID. Preparation recompiles before comparing that review, keeps private values in the
+existing bounded `PendingEnvironment` delivery handles, and retains one ingress
+deadline of at most 300 seconds. It never stages a guest or renews credentials.
+
+Hash-only v2 preparation artifacts live under
+`run/native-inputs/<namespace>/<run>/input.json`. They are private, bounded to 8 KiB,
+published once with synchronized state helpers and limited to 64 retained attempts
+per namespace under an operation lock. A missing/unsafe/aliased/oversized/interrupted
+artifact, unknown or duplicate fields, wrong kind/version or stale review refuses;
+no artifact is repaired, overwritten or treated as provider ownership. Reads are
+nonblocking and cannot reacquire private values. Compose v1 graph receipts, enrollment
+and frontend run mappings keep their existing paths and byte contracts.
+
+A future native execution consumer must verify the selected authored input and
+namespace, image/source/provider admission and effect-time deadline, integrate active
+native runs into common capacity/inventory, and implement tagged native ownership and
+recovery. These preparation artifacts carry no resource ownership or replay authority.
+
 No backend consumes this adapter yet. Native input provenance, image availability,
 source/storage ownership, provider admission and installed execution/recovery remain
 separate qualification gates. Existing Compose plans and receipts retain their formats.

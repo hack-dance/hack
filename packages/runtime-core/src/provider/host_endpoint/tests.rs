@@ -451,7 +451,7 @@ fn replacement_between_precheck_and_connect_receives_no_payload() {
     assert_eq!(result.unwrap_err().code, "host_endpoint_identity");
     let replacement = replacement.unwrap();
     replacement.set_nonblocking(true).unwrap();
-    let (mut peer, _) = replacement.accept().unwrap();
+    let mut peer = accept_pending(&replacement);
     peer.set_nonblocking(false).unwrap();
     peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
     let mut data = Vec::new();

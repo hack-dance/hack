@@ -31,6 +31,32 @@ fn basic() -> Value {
     json!({"schema_version":1,"name":"fixture","services":{"web":{"image":"fixture/web:1"}}})
 }
 
+#[test]
+fn source_root_subset_refuses_review_before_any_private_copy() {
+    let metadata = json!({"web":{"TOKEN":{"scope":"global","secret":true}}});
+    let values = BTreeMap::from([(
+        "web".into(),
+        BTreeMap::from([("TOKEN".into(), "synthetic-private-source-root".into())]),
+    )]);
+    let mut project = basic();
+    project["source"] = json!({"root":".","mode":"host-mounted"});
+    let bytes = request(&project, metadata.clone());
+    let original = values.clone();
+    PRIVATE_COPIES.with(|copies| copies.set(0));
+    let inputs = lower(&project, metadata.clone(), &values).unwrap();
+    assert_eq!(inputs.source.root, ".");
+    assert_eq!(PRIVATE_COPIES.with(std::cell::Cell::get), 1);
+    assert!(review(&bytes, &[]).is_ok());
+
+    project["source"]["root"] = json!("subdir");
+    let error = review(&request(&project, metadata.clone()), &[]).unwrap_err();
+    assert_eq!(error.code, "native_graph_subset");
+    PRIVATE_COPIES.with(|copies| copies.set(0));
+    refusal(lower(&project, metadata, &values), "native_graph_subset");
+    assert_eq!(PRIVATE_COPIES.with(std::cell::Cell::get), 0);
+    assert_eq!(values, original);
+}
+
 fn refusal(result: Result<NativeInputs, CandidateError>, code: &str) {
     let error = match result {
         Ok(_) => panic!("expected refusal"),

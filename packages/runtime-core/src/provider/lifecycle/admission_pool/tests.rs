@@ -86,7 +86,7 @@ impl Pool {
         let provider = artifact::root(&candidate);
         state::private_directory(&provider).unwrap();
         let binary = provider.join("smolvm-bin");
-        fs::copy("/bin/sleep", &binary).unwrap();
+        crate::provider::test_executable::sleeping_executable(&binary);
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
 
         let mut owner = Owner::create(

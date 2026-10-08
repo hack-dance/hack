@@ -123,8 +123,10 @@ their combinations with this first build proof refuse, as do profiles, readiness
 managed/generated inputs, typed locals and literal-dollar build paths.
 
 Included context files, the Dockerfile, optional root and Dockerfile-specific
-ignore files, and their safe filesystem identities are privately pinned. A
-Dockerfile-specific ignore file takes precedence, while presence and bytes of
+ignore files, and their safe filesystem identities are privately pinned. The
+names-only private env/local layout refusal precedes the context walk and is
+rechecked afterwards; known private material added mid-walk is never opened as
+an included file. A Dockerfile-specific ignore file takes precedence, while presence and bytes of
 both files remain bound. The pinned `@balena/dockerignore` Moby port handles only
 the qualified case-sensitive grammar: literal normalized paths, `!` negation,
 bare `**`, blank lines and comments. Other globs, escapes, BOMs and ambiguous

@@ -4,6 +4,7 @@ import { lstat, opendir, realpath } from "node:fs/promises";
 import { join, posix, resolve } from "node:path";
 import { isRecord } from "./guards.ts";
 import { legacyComposeBuildIgnore } from "./native-compose-adoption-build-ignore.ts";
+import { legacyComposeAdoptionLayoutSupported } from "./native-compose-adoption-contract.ts";
 import {
   type NativeConfigImportInputs,
   privateNativeConfigImportSourceProof,
@@ -72,6 +73,30 @@ function refuse(): never {
 }
 function check(signal?: AbortSignal) {
   if (signal?.aborted) {
+    refuse();
+  }
+}
+function refusePrivateMaterial(root: string, path: string) {
+  const relative = posix.relative(root, path);
+  if (
+    [".env", ".hack/.env", ".hack/hack.local.json"].includes(relative) ||
+    /^\.hack\/hack\.env(?:\.|$)/.test(relative)
+  ) {
+    refuse();
+  }
+}
+async function requireLayout(opts: {
+  readonly root: string;
+  readonly candidate: unknown;
+  readonly signal?: AbortSignal;
+}) {
+  if (
+    !(await legacyComposeAdoptionLayoutSupported({
+      projectRoot: opts.root,
+      candidate: opts.candidate,
+      signal: opts.signal,
+    }))
+  ) {
     refuse();
   }
 }
@@ -238,6 +263,7 @@ async function captureContext(opts: {
   const ancestors = new Map<string, Identity>();
   const checks: (() => Promise<void>)[] = [];
   async function pinDirectory(path: string) {
+    refusePrivateMaterial(root, path);
     const before = await directory(path, signal);
     const relative = posix.relative(root, path) || ".";
     const held = ancestors.get(relative);
@@ -267,6 +293,9 @@ async function captureContext(opts: {
       await pinDirectory(parent);
     }
     const path = join(base, relative);
+    // A known private input added after the names-only precheck must never be
+    // opened as context material. The final layout check still refuses drift.
+    refusePrivateMaterial(root, path);
     const read = optional
       ? await optionalFile(path, signal)
       : await readNativeConfigImportSourceFile({ path, signal });
@@ -430,14 +459,18 @@ export async function acquireLegacyComposeBuildSource(opts: {
   readonly source: Source;
   readonly signal?: AbortSignal;
 }) {
-  const { source, signal } = opts;
   try {
+    const { source, signal } = opts;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      refuse();
+    }
     privateNativeConfigImportSourceProof(source);
     const candidate = mapLegacyNativeRetainedBasicBuild(source).candidate;
     if (!candidate) {
       refuse();
     }
     selectedBuilds(candidate);
+    await requireLayout({ root: source.projectRoot, candidate, signal });
     await source.assertFresh({ signal });
     const proof = await capture({
       root: source.projectRoot,
@@ -450,6 +483,11 @@ export async function acquireLegacyComposeBuildSource(opts: {
           signal && current?.signal
             ? AbortSignal.any([signal, current.signal])
             : (current?.signal ?? signal);
+        await requireLayout({
+          root: source.projectRoot,
+          candidate,
+          signal: selected,
+        });
         await source.assertFresh({ signal: selected });
         if (
           JSON.stringify(
@@ -463,6 +501,11 @@ export async function acquireLegacyComposeBuildSource(opts: {
           refuse();
         }
         await source.assertFresh({ signal: selected });
+        await requireLayout({
+          root: source.projectRoot,
+          candidate,
+          signal: selected,
+        });
       } catch {
         refuse();
       }
@@ -504,6 +547,7 @@ export async function assertSavedLegacyComposeBuildSource(opts: {
       refuse();
     }
     await checkOwner();
+    await requireLayout({ root: projectRoot, candidate, signal });
     if (
       JSON.stringify(
         await capture({ root: projectRoot, candidate, signal })
@@ -512,6 +556,7 @@ export async function assertSavedLegacyComposeBuildSource(opts: {
       refuse();
     }
     await checkOwner();
+    await requireLayout({ root: projectRoot, candidate, signal });
   } catch {
     refuse();
   }

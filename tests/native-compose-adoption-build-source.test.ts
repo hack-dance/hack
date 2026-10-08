@@ -72,6 +72,47 @@ async function red(pending: Promise<unknown>) {
     expect(JSON.stringify(error)).not.toContain(CANARY);
   }
 }
+async function linkedSource() {
+  async function git(args: readonly string[]) {
+    const child = Bun.spawn(["/usr/bin/git", "-C", root, ...args], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: {
+        ...process.env,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+      },
+    });
+    if ((await child.exited) !== 0) {
+      throw new Error("Synthetic linked source setup refused; values omitted.");
+    }
+  }
+  await git(["init", "--quiet", "-b", "main"]);
+  await git(["add", ".hack", "Dockerfile", ".dockerignore", "src"]);
+  await git([
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
+    "commit",
+    "--quiet",
+    "-m",
+    "fixture",
+  ]);
+  const checkout = join(root, "linked");
+  await git(["worktree", "add", "--quiet", "-b", "linked", checkout]);
+  const source = await acquireLegacyAdoptionSourceInputs({
+    projectRoot: checkout,
+    allowLinkedWorktree: true,
+  });
+  if (!source.ok) {
+    throw new Error("Synthetic linked source setup refused; values omitted.");
+  }
+  return source;
+}
 
 test("retained pure intent does not broaden either image-only baseline API", () => {
   const inputs = { configText: '{"name":"fixture"}', composeText };
@@ -280,6 +321,87 @@ test("explicit build policy refuses before any included context file is opened",
   if (!source.ok) {
     throw new Error("Synthetic source setup refused; values omitted.");
   }
+  const read = spyOn(importInputs, "readNativeConfigImportSourceFile");
+  try {
+    await red(acquireLegacyComposeBuildSource({ source }));
+    expect(read).not.toHaveBeenCalled();
+  } finally {
+    read.mockRestore();
+  }
+});
+test.each([
+  ".env",
+  ".hack/.env",
+  ".hack/hack.env.default.yaml",
+  ".hack/hack.local.json",
+])("unsupported private layout %s refuses before any context/private material opens", async (relative) => {
+  const source = await acquireLegacyAdoptionSourceInputs({ projectRoot: root });
+  if (!source.ok) {
+    throw new Error("Synthetic source setup refused; values omitted.");
+  }
+  await writeFile(join(root, relative), CANARY);
+  const read = spyOn(importInputs, "readNativeConfigImportSourceFile");
+  try {
+    await red(acquireLegacyComposeBuildSource({ source }));
+    expect(read).not.toHaveBeenCalled();
+  } finally {
+    read.mockRestore();
+  }
+});
+test("new unsupported private inputs refuse saved read before context acquisition", async () => {
+  const captured = await acquire();
+  await writeFile(join(root, ".env"), CANARY);
+  const read = spyOn(importInputs, "readNativeConfigImportSourceFile");
+  try {
+    await red(
+      assertSavedLegacyComposeBuildSource({
+        projectRoot: root,
+        configText: '{"name":"fixture"}',
+        composeText,
+        proof: captured.proof,
+        checkOwner: async () => {},
+      })
+    );
+    expect(read).not.toHaveBeenCalled();
+  } finally {
+    read.mockRestore();
+  }
+});
+test("private material appearing after the layout check cannot be opened as an included context file", async () => {
+  await writeFile(
+    join(root, ".dockerignore"),
+    ".git\n.hack/.internal\n.hack/.branch\n.hack/hack.config.json\n.hack/docker-compose.yml\n.hack/hack.project.json\n"
+  );
+  const source = await acquireLegacyAdoptionSourceInputs({ projectRoot: root });
+  if (!source.ok) {
+    throw new Error("Synthetic source setup refused; values omitted.");
+  }
+  const original = importInputs.readNativeConfigImportSourceFile;
+  const paths: string[] = [];
+  const read = spyOn(
+    importInputs,
+    "readNativeConfigImportSourceFile"
+  ).mockImplementation(async (opts) => {
+    paths.push(opts.path);
+    if (opts.path === join(root, "Dockerfile")) {
+      await writeFile(join(root, ".env"), CANARY);
+    }
+    return await original(opts);
+  });
+  try {
+    await red(acquireLegacyComposeBuildSource({ source }));
+    expect(paths).toContain(join(root, "Dockerfile"));
+    expect(paths).not.toContain(join(root, ".env"));
+  } finally {
+    read.mockRestore();
+  }
+});
+test.each([
+  ".hack/hack.env.default.local.yaml",
+  ".hack/hack.local.json",
+])("inherited primary %s refuses before context/private reads", async (relative) => {
+  const source = await linkedSource();
+  await writeFile(join(root, relative), CANARY);
   const read = spyOn(importInputs, "readNativeConfigImportSourceFile");
   try {
     await red(acquireLegacyComposeBuildSource({ source }));

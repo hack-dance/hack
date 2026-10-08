@@ -72,6 +72,7 @@ test("version9 prepares/switches/starts/stops/rolls back the original model iden
     if (!active) {
       throw new Error("missing synthetic active generation");
     }
+    expect(active.report.adoption_generation_version).toBe(9);
     expect(await h.operation(store, active, "start")).toBe(0);
     expect(await h.operation(store, active, "stop")).toBe(0);
     await store.rollback();

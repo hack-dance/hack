@@ -56,7 +56,7 @@ export function completedJobFixtureSources(opts: {
     image: opts.image,
     pull_policy: "never",
     entrypoint: [],
-    command: ["/bin/sh", "-c", program.replaceAll("$", "$$")],
+    command: ["/bin/sh", "-c", program.replaceAll("$", () => "$$")],
     environment,
     // Shadow the image-declared VOLUME; all storage is the exact admitted named volume.
     volumes: ["data:/var/lib/postgresql/data:ro"],

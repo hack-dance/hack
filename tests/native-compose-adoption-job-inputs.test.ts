@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mapLegacyNativeCompletedJobAdoptionBaseline } from "../src/lib/native-config-import-plan.ts";
+import { planLegacyComposeAdoption } from "../src/lib/native-compose-adoption-plan.ts";
+import { legacyComposeRetainedPlan } from "../src/lib/native-compose-adoption-readiness.ts";
+import { literalComposeArg } from "../src/lib/native-config-import-argv.ts";
+import { mapLegacyNativeStorageAdoption } from "../src/lib/native-config-import-plan.ts";
 import {
   COMPLETED_JOB_APP_PROGRAM,
   completedJobFixtureProgram,
@@ -22,12 +25,27 @@ describe("maintained completed-job authored fixture", () => {
       auto_branch: false,
       inherit_local: false,
     });
-    const mapped = mapLegacyNativeCompletedJobAdoptionBaseline({
+    const inputs = {
       configText: JSON.stringify(source.config),
       composeText: JSON.stringify(source.compose),
-    });
+    };
+    const mapped = mapLegacyNativeStorageAdoption(inputs);
     expect(mapped.report.complete).toBe(true);
     expect(mapped.candidate).toHaveProperty("jobs.seed");
+    expect(mapped.candidate).toHaveProperty("jobs.seed.command.exec", [
+      "/bin/sh",
+      "-c",
+      completedJobFixtureProgram("alpha-seed"),
+    ]);
+    expect(mapped.candidate).toHaveProperty("services.app.command.exec", [
+      "/bin/sh",
+      "-c",
+      COMPLETED_JOB_APP_PROGRAM,
+    ]);
+    expect(legacyComposeRetainedPlan(mapped.candidate).requiresV7).toBe(true);
+    const planned = planLegacyComposeAdoption(inputs);
+    expect(planned.report.supported).toBe(true);
+    expect(planned.intent?.services).toEqual(["app", "db", "seed"]);
     expect(Object.hasOwn(source.config, "dev_host")).toBe(false);
     expect(source.compose.services.seed.labels).toEqual({
       "hack.service.one-shot": "true",
@@ -87,14 +105,19 @@ describe("maintained completed-job authored fixture", () => {
       marker: "alpha-seed",
     });
     expect(source.compose.services.seed.entrypoint).toEqual([]);
-    expect(source.compose.services.seed.command).toEqual([
+    expect(source.compose.services.seed.command.slice(0, 2)).toEqual([
       "/bin/sh",
       "-c",
-      program.replaceAll("$", "$$"),
     ]);
-    expect(source.compose.services.seed.command[2]?.replaceAll("$$", "$")).toBe(
+    expect(source.compose.services.seed.command[2]).not.toBe(program);
+    expect(literalComposeArg(source.compose.services.seed.command[2])).toBe(
       program
     );
+    expect(literalComposeArg(source.compose.services.app.command[2])).toBe(
+      COMPLETED_JOB_APP_PROGRAM
+    );
+    // The original replacement-string spelling is a negative control: JS consumes its $$ escape.
+    expect(literalComposeArg(program.replaceAll("$", "$$"))).toBeUndefined();
   });
 
   test.each([

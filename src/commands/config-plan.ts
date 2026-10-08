@@ -62,7 +62,11 @@ export const configPlanCommand = withHandler(spec, async ({ ctx, args }) => {
       signal: controller.signal,
     });
     renderPlan({ result, json: args.options.json === true });
-    return result.ok && result.environment_plan.complete ? 0 : 1;
+    return result.ok &&
+      result.environment_plan.complete &&
+      result.file_plan?.complete !== false
+      ? 0
+      : 1;
   } catch (error: unknown) {
     const failure =
       error instanceof NativeConfigCompilerError ||
@@ -102,6 +106,11 @@ function renderPlan(opts: {
     return;
   }
   const envPlan = result.environment_plan;
+  if (result.file_plan) {
+    process.stdout.write(
+      `Native file bindings are ${result.file_plan.complete ? "complete" : "incomplete"}. File material is not read by this report.\n`
+    );
+  }
   process.stdout.write(
     `Native environment bindings are ${envPlan.complete ? "complete" : "incomplete"}. Semantic hash: ${result.semantic_hash}\n`
   );
@@ -114,7 +123,11 @@ function renderPlan(opts: {
       `Routing preview: ${routing.open_origin}. Domain: ${routing.domain} (${routing.domain_origin}). DNS and TLS are not checked.\n`
     );
   }
-  for (const diagnostic of [...envPlan.warnings, ...envPlan.diagnostics]) {
+  for (const diagnostic of [
+    ...envPlan.warnings,
+    ...envPlan.diagnostics,
+    ...(result.file_plan?.diagnostics ?? []),
+  ]) {
     renderDiagnostic(diagnostic);
   }
 }

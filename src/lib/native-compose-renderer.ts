@@ -50,6 +50,8 @@ const PLAN_FIELDS = {
   selected_profiles: true,
   storage: true,
   networks: true,
+  configs: true,
+  secrets: true,
   services: true,
   jobs: true,
 } satisfies Record<keyof Plan, true>;
@@ -415,6 +417,10 @@ function unsupportedOwners(
   plan: Record<string, unknown>,
   beforeHooksOwned: boolean
 ): void {
+  assert(
+    !(Object.hasOwn(plan, "configs") || Object.hasOwn(plan, "secrets")),
+    "E_COMPOSE_FILE_OWNER"
+  );
   if (Object.hasOwn(plan, "host")) {
     if (beforeHooksOwned) {
       selectNativeComposeBeforeHooks(plan);

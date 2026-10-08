@@ -287,12 +287,31 @@ fn compile_inputs(
             "Native compiler metadata planning failed; values omitted.",
         ));
     };
+    // Presence remains unqualified even when definitions are empty or grants inactive.
+    // The owning compiler has enforced its request and authored-document bounds before
+    // this raw scan. Inspect original presence before hashes or private copies, because
+    // normalization can omit empty definitions and inactive grants.
+    if serde_json::from_slice::<serde_json::Value>(request)
+        .ok()
+        .and_then(|request| {
+            request
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .and_then(|source| serde_json::from_str::<serde_json::Value>(&source).ok())
+        .is_some_and(|source| source.get("configs").is_some() || source.get("secrets").is_some())
+    {
+        return Err(refused());
+    }
     if !environment_plan.complete || !environment_plan.diagnostics.is_empty() {
         return Err(private_refused());
     }
     refuse_authored_network_intent(request)?;
     let environment_policy_hash = policy_hash(&plan, &environment_plan)?;
     if !plan.storage.is_empty()
+        || !plan.configs.is_empty()
+        || !plan.secrets.is_empty()
         || plan.routes.is_some()
         || plan.open.is_some()
         || plan.host_bindings.is_some()

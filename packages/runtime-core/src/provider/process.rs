@@ -12,6 +12,10 @@ pub struct Captured {
 }
 
 pub fn capture(command: &mut Command, timeout: Duration) -> Result<Captured, CandidateError> {
+    #[cfg(all(test, target_os = "macos"))]
+    let diagnostic = command.get_program() == std::ffi::OsStr::new("/usr/sbin/lsof")
+        && std::env::var_os("HACK_TEST_OWNED_LSOF_DIAGNOSTIC").as_deref()
+            == Some(std::ffi::OsStr::new("1"));
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -36,9 +40,25 @@ pub fn capture(command: &mut Command, timeout: Duration) -> Result<Captured, Can
     let out = std::thread::spawn(move || drain(stdout));
     let err = std::thread::spawn(move || drain(stderr));
     let start = Instant::now();
+    #[cfg(all(test, target_os = "macos"))]
+    if diagnostic {
+        eprintln!(
+            "owned-disk-check stage=started pid={} budget_ms={}",
+            child.id(),
+            timeout.as_millis()
+        );
+    }
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                #[cfg(all(test, target_os = "macos"))]
+                if diagnostic {
+                    eprintln!(
+                        "owned-disk-check stage=reaped pid={} elapsed_ms={} status={status}",
+                        child.id(),
+                        start.elapsed().as_millis()
+                    );
+                }
                 // Do not join: detached provider helpers may inherit pipe descriptors.
                 // A helper retaining output is treated as uncertain, with a bounded wait.
                 while (!out.is_finished() || !err.is_finished()) && start.elapsed() < timeout {
@@ -61,8 +81,19 @@ pub fn capture(command: &mut Command, timeout: Duration) -> Result<Captured, Can
             Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
                 // Only the unreaped direct child is signalled; no PID-file or process-group kill.
-                let _ = child.kill();
-                let _ = child.wait();
+                let killed = child.kill();
+                let waited = child.wait();
+                #[cfg(all(test, target_os = "macos"))]
+                if diagnostic {
+                    eprintln!(
+                        "owned-disk-check stage=deadline pid={} elapsed_ms={} kill_ok={} reaped={waited:?}",
+                        child.id(),
+                        start.elapsed().as_millis(),
+                        killed.is_ok()
+                    );
+                }
+                #[cfg(not(all(test, target_os = "macos")))]
+                let _ = (killed, waited);
                 return Err(CandidateError::new(
                     "provider_timeout_uncertain",
                     "Provider request timed out. Detached effects may remain; inspect before retry.",

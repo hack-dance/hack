@@ -21,6 +21,7 @@ import {
   prepareNativeComposeSavedRunRouting,
   readNativeComposeRouteMetadata,
   releaseNativeComposeSavedRoutes,
+  verifyNativeComposeSavedRoutesAbsent,
 } from "../src/lib/native-compose-route-owner.ts";
 import { NativeComposeRoutingError } from "../src/lib/native-compose-routing.ts";
 import type { NativeRoutingResolution } from "../src/lib/native-routing-plan-protocol.ts";
@@ -778,4 +779,80 @@ test("ordinary unrouted projects do not select ingress or open route state", asy
   expect(result).toBeNull();
   expect(checks.events).toEqual([]);
   expect(await Bun.file(join(root, "compose-routing")).exists()).toBe(false);
+});
+
+test.each([
+  "complete",
+  "ingress",
+  "inventory",
+  "proxy",
+] as const)("non-retiring saved route absence %s keeps exact hostname claim held", async (proof) => {
+  const owner = await prepare(fixture());
+  await complete(owner);
+  const checks = probes();
+  if (proof === "ingress") {
+    checks.loseIngress();
+  }
+  if (proof === "inventory") {
+    checks.collideInventory();
+  }
+  if (proof === "proxy") {
+    checks.staleProxy();
+  }
+  const verify = verifyNativeComposeSavedRoutesAbsent({
+    owner: OWNER,
+    saved: [{ generationId: GENERATION, document: owner.document }],
+    deadline: Date.now() + 5000,
+    io: checks.io,
+  });
+  if (proof === "complete") {
+    await verify;
+    expect(checks.events).toEqual([
+      "ingress-recheck",
+      "inventory-absent",
+      "proxy-absent-fixture.dev.test",
+    ]);
+  } else {
+    await expect(verify).rejects.toThrow();
+  }
+  await expect(
+    (await claims(OTHER)).acquire({
+      hostnames: ["fixture.dev.test"],
+      generationIdentity: NEXT,
+    })
+  ).rejects.toThrow();
+});
+
+test("non-retiring saved stop proof respects a foreign handoff of a retired previous hostname", async () => {
+  const original = await prepare(fixture());
+  await complete(original);
+  const next = await prepare(fixture("next.test", NEXT), probes(), [
+    { generationId: GENERATION, document: original.document },
+  ]);
+  await complete(next);
+  const foreign = await claims(OTHER);
+  const handoff = await foreign.acquire({
+    hostnames: ["fixture.dev.test"],
+    generationIdentity: "e".repeat(32),
+  });
+  const checks = probes();
+  await verifyNativeComposeSavedRoutesAbsent({
+    owner: OWNER,
+    saved: [{ generationId: NEXT, document: next.document }],
+    deadline: Date.now() + 5000,
+    io: checks.io,
+  });
+  expect(checks.events).toEqual([
+    "ingress-recheck",
+    "inventory-absent",
+    "proxy-absent-fixture.next.test",
+  ]);
+  expect((await foreign.reopen(handoff.reference)).phase).toBe("reserved");
+  await expect(
+    foreign.acquire({
+      hostnames: ["fixture.next.test"],
+      generationIdentity: "f".repeat(32),
+    })
+  ).rejects.toThrow();
+  await foreign.rollback(handoff);
 });

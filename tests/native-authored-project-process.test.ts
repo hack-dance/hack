@@ -433,27 +433,80 @@ test("startup deadline cancels pending authentication before publication and awa
     controlDelayMs: 3000,
     fastControlBoundary: true,
   });
+  // Preserve uncertain phase evidence even if the operation or test never settles.
+  roots.splice(roots.indexOf(opts.projectRoot), 1);
   let published = false;
+  let receiptObserved = false;
+  let ownedExitCode: number | undefined;
+  let nativeFailureObserved = false;
+  let failure: unknown;
   const start = performance.now();
-  await expect(
-    serveNativeAuthoredProjectGraph({
-      ...opts,
-      startupTimeoutMs: 200,
-      onReady: async () => {
-        published = true;
-      },
-    })
-  ).rejects.toThrow("canceled");
-  expect(performance.now() - start).toBeLessThan(1500);
-  expect(published).toBe(false);
-  expect(
-    await Bun.file(
-      join(opts.projectRoot, "authenticated-status-started")
-    ).text()
-  ).toBe("status");
-  expect(
-    await Bun.file(join(opts.projectRoot, "cleanup-complete")).text()
-  ).toBe("cleaned");
+  await serveNativeAuthoredProjectGraph({
+    ...opts,
+    startupTimeoutMs: 200,
+    onReceipt: () => {
+      receiptObserved = true;
+      return undefined;
+    },
+    onExitDiagnostic: (diagnostic) => {
+      ownedExitCode = diagnostic.exitCode;
+      nativeFailureObserved = diagnostic.nativeCode !== undefined;
+    },
+    onReady: async () => {
+      published = true;
+    },
+  }).catch((error: unknown) => {
+    failure = error;
+  });
+  const elapsedMs = performance.now() - start;
+  let ownerEntered = false;
+  let statusEntered = false;
+  let cleanupObserved = false;
+  try {
+    ownerEntered =
+      (await Bun.file(join(opts.projectRoot, "fast-owner-entered"))
+        .text()
+        .catch(() => undefined)) === "entered";
+    statusEntered =
+      (await Bun.file(join(opts.projectRoot, "authenticated-status-started"))
+        .text()
+        .catch(() => undefined)) === "status";
+    cleanupObserved =
+      (await Bun.file(join(opts.projectRoot, "cleanup-complete"))
+        .text()
+        .catch(() => undefined)) === "cleaned";
+    if (process.env.HACK_NATIVE_STARTUP_FIXTURE_DIAGNOSTIC === "1") {
+      console.error(
+        JSON.stringify({
+          kind: "native-startup-fixture-observation",
+          elapsedMs,
+          receiptObserved,
+          ownedExitCode: ownedExitCode ?? null,
+          nativeFailureObserved,
+          ownerEntered,
+          statusEntered,
+          cleanupObserved,
+        })
+      );
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toContain("canceled");
+    expect(elapsedMs).toBeLessThan(1500);
+    expect(published).toBe(false);
+    expect(statusEntered).toBe(true);
+    expect(cleanupObserved).toBe(true);
+  } finally {
+    if (
+      ownerEntered &&
+      statusEntered &&
+      cleanupObserved &&
+      receiptObserved &&
+      ownedExitCode === 0 &&
+      !nativeFailureObserved
+    ) {
+      roots.push(opts.projectRoot);
+    }
+  }
 });
 
 test("status descendant-held pipes cannot outlive startup admission or owned cleanup", async () => {

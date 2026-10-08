@@ -719,13 +719,10 @@ export async function recoverNativeAuthoredProject(opts: {
           }
         };
         if (!saved) {
-          return await mutation.withLock(async (mutationLease) => {
-            try {
-              return await mutationRun(mutationLease);
-            } finally {
-              await releaseMutation(mutationLease);
-            }
-          });
+          return await mutation.withFreshRecoveryLock(
+            { release: releaseMutation },
+            mutationRun
+          );
         }
         return await mutation.withPreparedRecoveryLock(
           {
@@ -762,13 +759,10 @@ export async function recoverNativeAuthoredProject(opts: {
         }
       };
       if (!saved) {
-        return await recovery.withLock(async (lease) => {
-          try {
-            return await primaryRun(lease);
-          } finally {
-            await releasePrimary(lease);
-          }
-        });
+        return await recovery.withFreshRecoveryLock(
+          { release: releasePrimary },
+          primaryRun
+        );
       }
       return await recovery.withPreparedRecoveryLock(
         {

@@ -599,3 +599,68 @@ test("reserved takeover refuses live candidates and same-byte replaced pending i
     }
   }
 }, 30_000);
+
+test("fresh recovery release failure retains each exact owner until a dead-owner retry", async () => {
+  for (const guard of ["mutation", "lease"] as const) {
+    const current = await fixture();
+    await current.kill();
+    const witness = join(current.root, `fresh-release-${guard}`);
+    const program = [
+      "import {spyOn} from 'bun:test'; import * as files from 'node:fs/promises';",
+      `import {recoverNativeAuthoredProject} from ${JSON.stringify(join(import.meta.dir, "../src/backends/native-authored-project-recovery.ts"))};`,
+      `const paths=${JSON.stringify(current.paths)}, guard=${JSON.stringify(guard)}, witness=${JSON.stringify(witness)};`,
+      "const open=files.open;let rejected=false,cleanupCalls=0;",
+      "spyOn(files,'open').mockImplementation(async(...args)=>{",
+      "if(!rejected&&args[0]===paths.intent+'.pending'&&await Bun.file(paths.intent).exists()){",
+      "const record=(await Bun.file(paths.intent).json()).record;",
+      "if(record.phase==='complete'&&record.mutation_releasing===(guard==='lease')){rejected=true;throw new Error('Fixed release publication refusal.');}",
+      "}return Reflect.apply(open,files,args);});",
+      `const selection=${JSON.stringify(current.selection)},result=${JSON.stringify(current.result)};`,
+      `try{await recoverNativeAuthoredProject({scope:${JSON.stringify(current.scope)},runtime:${JSON.stringify(current.options.runtime)},timeoutMs:30000,request:async opts=>{`,
+      "if(opts.args[2]==='recovery-selection'){return selection;}if(opts.args[2]==='recover-live-owner'){cleanupCalls++;return result;}",
+      "return {receipt:result.receipt,observations:{web:null}};}});throw new Error('Unexpected recovery success.');}",
+      "catch{if(!rejected){throw new Error('Release boundary not observed.');}}",
+      "await Bun.write(witness,JSON.stringify({rejected,cleanupCalls}));",
+    ].join("\n");
+    const child = Bun.spawn([process.execPath, "--eval", program], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR },
+    });
+    fixtures.push({ root: current.root, child });
+    const deadline = performance.now() + 5000;
+    while (!(await Bun.file(witness).exists())) {
+      if (child.exitCode !== null || performance.now() >= deadline) {
+        throw new Error("Owned fresh recovery did not reach release refusal.");
+      }
+      await Bun.sleep(10);
+    }
+    expect(await child.exited).toBe(0);
+    expect(await Bun.file(witness).json()).toEqual({
+      rejected: true,
+      cleanupCalls: 1,
+    });
+    const record = JSON.parse(
+      await Bun.file(current.paths.intent).text()
+    ).record;
+    expect(record.phase).toBe("complete");
+    expect(
+      record[guard === "lease" ? "lease_releasing" : "mutation_releasing"]
+    ).toBe(false);
+    const owner =
+      guard === "lease"
+        ? join(current.paths.recovery, "owner")
+        : join(
+            current.paths.dir,
+            `${basename(current.paths.ready, ".json")}.lock`,
+            "owner"
+          );
+    expect((await lstat(owner)).ino).toBe(record[guard].file.ino);
+    expect(
+      (await recoverNativeAuthoredProject(current.options)).receipt.phase
+    ).toBe("removed");
+    expect(current.cleanupCalls()).toBe(0);
+    expect(await Bun.file(owner).exists()).toBe(false);
+  }
+}, 30_000);

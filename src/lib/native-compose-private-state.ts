@@ -560,7 +560,8 @@ export function createNativeComposePrivateMutationLock(opts: {
 }) {
   const { lockPath, recoveryPath, parent, check } = opts;
   const withLock = async <T>(
-    run: (lease: NativeComposeMutationLease) => Promise<T>
+    run: (lease: NativeComposeMutationLease) => Promise<T>,
+    beforeRetire?: (lease: NativeComposeMutationLease) => Promise<void>
   ) => {
     await check();
     await requireAbsentGuard(recoveryPath);
@@ -620,10 +621,16 @@ export function createNativeComposePrivateMutationLock(opts: {
       issued = lease;
       return await run(lease);
     } finally {
-      if (issued !== undefined) {
-        mutationLeases.delete(issued);
-      }
       try {
+        try {
+          if (issued !== undefined && beforeRetire !== undefined) {
+            await beforeRetire(issued);
+          }
+        } finally {
+          if (issued !== undefined) {
+            mutationLeases.delete(issued);
+          }
+        }
         await assertHeld();
         await unlink(ownerPath);
         await rmdir(lockPath);
@@ -1024,7 +1031,16 @@ export function createNativeComposePrivateMutationLock(opts: {
   };
 
   return {
-    withLock,
+    withLock: <T>(run: (lease: NativeComposeMutationLease) => Promise<T>) =>
+      withLock(run),
+    /** Fresh recovery issuance retains its exact owner if durable release fails.
+     * Existing generation callers keep the original unconditional finalizer. */
+    withFreshRecoveryLock: <T>(
+      opts: {
+        readonly release: (lease: NativeComposeMutationLease) => Promise<void>;
+      },
+      run: (lease: NativeComposeMutationLease) => Promise<T>
+    ) => withLock(run, opts.release),
     /** Stable-directory takeover for an exact durable successor/release protocol.
      * Unknown pending publications refuse; this never issues authority from data. */
     withPreparedRecoveryLock,

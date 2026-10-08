@@ -115,11 +115,18 @@ if(args[1]==="ls") {
  if(args[0]==="container" && await Bun.file(engine).exists()) {
   const doc=await Bun.file(engine).json();console.log(JSON.stringify({id:"c".repeat(64),name:doc.name+"-web-1",project:doc.name}));
  }
+ if(args[0]==="network" && await Bun.file(engine).exists()) {
+  const doc=await Bun.file(engine).json();console.log(JSON.stringify({id:"d".repeat(64),name:doc.name+"_default",project:doc.name}));
+ }
  process.exit(0);
 }
 if(args[0]==="container" && args[1]==="inspect" && await Bun.file(engine).exists()) {
  const doc=await Bun.file(engine).json();const labels=doc.services.web.labels;
- console.log(JSON.stringify({id:"c".repeat(64),name:"/"+doc.name+"-web-1",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],generation:labels["io.hack.native-config.generation"],service:"web",oneoff:"False",state:await Bun.file(root+"/unready").exists()?"exited":"running",exitCode:0,health:null}));process.exit(0);
+ console.log(JSON.stringify({id:"c".repeat(64),name:"/"+doc.name+"-web-1",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],generation:labels["io.hack.native-config.generation"],service:"web",oneoff:"False",state:await Bun.file(root+"/unready").exists()?"exited":"running",exitCode:0,health:null,networks:{[doc.name+"_default"]:{NetworkID:"d".repeat(64),Aliases:[doc.name+"-web-1","web"]}}}));process.exit(0);
+}
+if(args[0]==="network" && args[1]==="inspect" && await Bun.file(engine).exists()) {
+ const doc=await Bun.file(engine).json();const labels=doc.networks.default.labels;
+ console.log(JSON.stringify({id:"d".repeat(64),name:doc.name+"_default",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],driver:"bridge",internal:false,containers:{["c".repeat(64)]:{}}}));process.exit(0);
 }
 process.exit(99);
 `

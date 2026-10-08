@@ -415,7 +415,7 @@ type Context = {
 };
 async function assertRetainedBuildSource(opts: {
   readonly ctx: Context;
-  readonly meta: Manifest;
+  readonly meta: SavedManifest;
   readonly configText: string;
   readonly composeText: string;
 }) {
@@ -433,6 +433,16 @@ async function assertRetainedBuildSource(opts: {
     signal: opts.ctx.signal,
     checkOwner: opts.ctx.check,
   });
+}
+function requireSavedReceiptVersion(meta: SavedManifest, current: Receipt) {
+  if (
+    (meta.adoption_generation_version === 5) !==
+      (current.adoption_receipt_version === 5) ||
+    (meta.adoption_generation_version === 9) !==
+      (current.adoption_receipt_version === 9)
+  ) {
+    refuse();
+  }
 }
 async function readInputs(
   ctx: Context,
@@ -508,14 +518,7 @@ async function readInputs(
       refuse();
     }
     if (!preparing) {
-      const currentReceipt = await publicationState(ctx);
-      if (
-        (meta.adoption_generation_version === 5) !==
-          (currentReceipt.adoption_receipt_version === 5) ||
-        basic !== (currentReceipt.adoption_receipt_version === 9)
-      ) {
-        refuse();
-      }
+      requireSavedReceiptVersion(meta, await publicationState(ctx));
     }
     const observed = await inspectLegacyComposeAdoptionResources({
       root: ctx.root,

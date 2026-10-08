@@ -1,0 +1,579 @@
+import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  loadNativeAuthoredProjectRun,
+  withNativeAuthoredProjectAdmission,
+} from "../src/backends/native-authored-project-run.ts";
+import {
+  NativeAuthoredProjectStartError,
+  serveNativeAuthoredProject,
+} from "../src/backends/native-authored-project-start.ts";
+import { restoreEnv } from "./helpers/env.ts";
+
+const roots: string[] = [];
+const run = "a".repeat(32);
+const CANARY = "synthetic-private-native-start-canary";
+const KEYS = [
+  "HACK_HOME",
+  "HACK_GLOBAL_CONFIG_PATH",
+  "HACK_CONFIG_COMPILER_BINARY",
+  "HACK_ENV_SECRET_KEY",
+  "CI",
+  "HACK_EXECUTION_MODE",
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+] as const;
+let saved: Record<string, string | undefined> | undefined;
+afterEach(async () => {
+  if (saved) {
+    for (const key of KEYS) {
+      restoreEnv(key, saved[key]);
+    }
+  }
+  saved = undefined;
+  await Promise.all(
+    roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
+  );
+});
+
+type FixtureOptions = {
+  readonly planFailure?: boolean;
+  readonly foreignPlan?: boolean;
+  readonly failedStatus?: boolean;
+  readonly changeDuringStatus?: boolean;
+  readonly changeDuringPlan?: boolean;
+  readonly noManaged?: boolean;
+  readonly cleanup?: "removed" | "live" | "missing" | "foreign-id";
+};
+
+/** Fake compiler/engine transport; real managed inputs, admission, process and storage owners. */
+async function fixture(options: FixtureOptions = {}) {
+  // Optional effect-free integration uses the real compiler and native planner;
+  // execution/status/cleanup remain this file's separately controlled fake driver.
+  const realCompiler = process.env.HACK_TEST_NATIVE_COMPILER;
+  const realPlanner = process.env.HACK_TEST_NATIVE_PLANNER;
+  if ((realCompiler === undefined) !== (realPlanner === undefined)) {
+    throw new Error(
+      "Real compiler integration requires both explicit test binaries."
+    );
+  }
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-authored-start-"))
+  );
+  roots.push(root);
+  const projectRoot = join(root, "project");
+  const projectDir = join(projectRoot, ".hack");
+  const nativeHome = join(root, "candidate");
+  await mkdir(projectRoot, { mode: 0o700 });
+  await mkdir(projectDir, { mode: 0o700 });
+  await mkdir(nativeHome, { mode: 0o700 });
+  saved = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
+  for (const key of KEYS) {
+    Reflect.deleteProperty(process.env, key);
+  }
+  process.env.HACK_HOME = join(root, "home");
+  process.env.CI = "1";
+  process.env.HACK_EXECUTION_MODE = "ci";
+  const source = {
+    schema_version: 1,
+    name: "fixture",
+    profiles: ["debug"],
+    services: {
+      web: {
+        image: `sha256:${"3".repeat(64)}`,
+        environment:
+          options.noManaged === true
+            ? {
+                TOKEN: { unset: true },
+                DROP: { unset: true },
+                PUBLIC: { literal: "$EXACT" },
+              }
+            : {
+                TOKEN: { unset: true },
+                RENAMED: { env_ref: "TOKEN" },
+                DROP: { unset: true },
+              },
+      },
+      off: { image: `sha256:${"3".repeat(64)}`, profiles: ["debug"] },
+    },
+  };
+  await writeFile(
+    join(projectDir, "hack.project.json"),
+    JSON.stringify(source)
+  );
+  const envFile = join(projectDir, "hack.env.default.yaml");
+  await writeFile(
+    envFile,
+    JSON.stringify({
+      version: 1,
+      environment: "default",
+      secretsprovider: "project_key",
+      values: { global: { TOKEN: CANARY, DROP: "unselected-private-value" } },
+    })
+  );
+  const compiler = join(root, "compiler");
+  await writeFile(
+    compiler,
+    `#!${process.execPath}
+const protocol={transport_version:1,authored_version:1,plan_version:1,resolve_version:1,local_version:1,env_plan_version:1,routing_plan_version:1,host_env_plan_version:1};
+if(process.argv[2]==='--protocol'){console.log(JSON.stringify(protocol));process.exit(0)}
+const operation=process.argv[2];const raw=await Bun.stdin.text();const request=operation==='compile'?{}:JSON.parse(raw);
+const source=${JSON.stringify(source)};
+const plan={plan_version:1,name:'fixture',selected_profiles:[],services:{web:source.services.web},jobs:{},worktree:{inherit_local:true,auto_branch:false}};
+const result={transport_version:1,ok:true,semantic_hash:'c'.repeat(64),declared_workloads:{web:'service',off:'service'},plan};
+if(operation!=='compile'){
+ result.local_resolution={overlay:request.explicit_overlay??null,origin:request.explicit_overlay===undefined?'project':'explicit',auto_branch:false,inherit_local:true,resolution_hash:'d'.repeat(64)};
+ if(request.branch!==undefined)result.routing_resolution={domain:'hack.local',domain_origin:'default',branch:request.branch,project_origin:'https://'+request.branch+'.fixture.hack.local',aliases:{},oauth_alias:null,open_preference:'auto',open_preference_origin:'default',open_origin:'https://'+request.branch+'.fixture.hack.local',routes:{}};
+}
+if(operation==='plan')result.environment_plan={plan_version:1,overlay:request.env_metadata.overlay,overlay_exists:request.env_metadata.overlay_exists,complete:true,workloads:{web:${options.noManaged === true ? "{PUBLIC:{kind:'literal',value:'$EXACT'}}" : "{RENAMED:{kind:'managed',key:'TOKEN',scope:'global',secret:false}}"}},warnings:[],diagnostics:[]};
+console.log(JSON.stringify(result));
+`
+  );
+  await chmod(compiler, 0o700);
+  process.env.HACK_CONFIG_COMPILER_BINARY = realCompiler ?? compiler;
+  const binary = join(root, "native");
+  const journal = join(root, "journal.json");
+  const calls = join(root, "calls.jsonl");
+  const delivery = join(root, "delivery.json");
+  const digest = createHash("sha256").update(CANARY).digest("hex");
+  await writeFile(
+    binary,
+    `#!${process.execPath}
+import {appendFile,readFile,readdir,writeFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';import {join} from 'node:path';
+const args=process.argv.slice(2);const action=args[4];await appendFile(${JSON.stringify(calls)},JSON.stringify(args)+'\\n');
+const journal=${JSON.stringify(journal)};
+const root=${JSON.stringify(join(projectDir, ".internal", "native-authored-runs"))};
+if(action==='plan'||action==='serve'){
+ const path=args[args.indexOf('--source-file')+1];const input=JSON.parse(await readFile(path,'utf8'));
+ const provenance={version:1,kind:'native',namespace:'b'.repeat(64),run:input.run,input:{semantic_hash:'c'.repeat(64),local_resolution_hash:'d'.repeat(64),environment_policy_hash:'e'.repeat(64),selected_profiles:[]}};
+ const review={provenance,review_id:createHash('sha256').update('hack.native-graph-review/v1\\0').update(JSON.stringify(provenance)).digest('hex')};
+ const planner=${JSON.stringify(realPlanner)};
+ if(planner!==undefined){
+  const child=Bun.spawn([planner,'--candidate-root',args[1],'graph','native','plan','--source-file',path,'--json'],{env:{PATH:'/nonexistent'},stdin:'ignore',stdout:'pipe',stderr:'pipe'});
+  const timer=setTimeout(()=>child.kill('SIGKILL'),10_000);
+  try{
+   const [stdout,stderr,code]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);
+   if(code!==0||stdout.length>65536||stderr.length>65536)throw Error('real native plan refused');
+   const actual=JSON.parse(stdout);Object.assign(provenance,actual.provenance);review.review_id=actual.review_id;
+ }finally{clearTimeout(timer);if(child.exitCode===null){child.kill('SIGKILL');await child.exited}}
+ }
+ if(${options.foreignPlan === true}&&action==='plan'){
+  provenance.input.semantic_hash='9'.repeat(64);
+  review.review_id=createHash('sha256').update('hack.native-graph-review/v1\\0').update(JSON.stringify(provenance)).digest('hex');
+ }
+ if(action==='plan'){
+  if(${options.planFailure === true}){console.error(JSON.stringify({code:'native_graph_compile',message:'private-rejected-plan-detail'}));process.exit(2)}
+  if(${options.changeDuringPlan === true})await appendFile(${JSON.stringify(envFile)},'\\n');
+  console.log(JSON.stringify(review));process.exit(0);
+ }
+ const start=(await readdir(root)).find(name=>name.endsWith('.start.json'));
+ if(!start||JSON.parse(await readFile(join(root,start),'utf8')).record.review.review_id!==review.review_id)throw Error('missing admitted intent');
+ if(args.includes('--environment-stdin')){
+  const input=JSON.parse(await Bun.stdin.text());const services=input.services;
+  const keys=Object.fromEntries(Object.entries(services).map(([name,values])=>[name,Object.keys(values).sort()]));
+  const digests=Object.fromEntries(Object.entries(services).map(([name,values])=>[name,Object.fromEntries(Object.entries(values).map(([key,value])=>[key,createHash('sha256').update(value).digest('hex')]))]));
+  await writeFile(${JSON.stringify(delivery)},JSON.stringify({version:input.version,kind:input.kind,review:input.review,run:input.run,lifetime_seconds:input.lifetime_seconds,keys,digests,expectedDigest:${JSON.stringify(digest)}}));
+ }
+ const receipt={version:2,kind:'native-graph-runtime',owner:'f'.repeat(32),boot:'00000000-0000-0000-0000-000000000001',review,phase:'ready-observed',readiness:{web:'started'},resources:{'network:default':{kind:'network',key:'default',name:'hkn-'+input.run+'-network-0',id:'1'.repeat(64),image:null,phase:'created',outbound:true},'container:web':{kind:'container',key:'web',name:'hkn-'+input.run+'-container-0',id:'2'.repeat(64),image:'sha256:'+ '3'.repeat(64),phase:'started',networks:['default']}}};
+ const finish=async()=>{
+  if(${JSON.stringify(options.cleanup ?? "removed")}!=='live'){
+   receipt.phase='removed';for(const resource of Object.values(receipt.resources))resource.phase='removed';
+  }
+  if(${JSON.stringify(options.cleanup)}==='foreign-id')receipt.resources['container:web'].id='9'.repeat(64);
+  await writeFile(journal,JSON.stringify(receipt));await writeFile(${JSON.stringify(join(root, "owner-exited"))},'owned');process.exit(0);
+ };
+ process.on('SIGTERM',finish);await writeFile(journal,JSON.stringify(receipt));
+ console.log(JSON.stringify({version:2,kind:'native-graph-foreground-ready',run:input.run,review:review.review_id,receipt}));
+ for(let index=0;index<200;index++){
+  const mapping=(await readdir(root)).find(name=>name.endsWith('.json')&&!name.endsWith('.start.json')&&!name.endsWith('.source.json'));
+  if(mapping){await Bun.sleep(30);await finish()}await Bun.sleep(10);
+ }
+ await finish();
+}else{
+ if(action==='inspect'&&${JSON.stringify(options.cleanup)}==='missing'){console.error(JSON.stringify({code:'graph_owner_recovery',message:'private-missing-journal-detail'}));process.exit(2)}
+ const receipt=JSON.parse(await readFile(journal,'utf8'));
+ const observations={web:receipt.phase==='removed'?null:{state:'running',health:'none'}};
+ if(action==='control'){
+  if(${options.changeDuringStatus === true})await appendFile(${JSON.stringify(envFile)},'\\n');
+  if(${options.failedStatus === true})observations.web={state:'dead'};
+  console.log(JSON.stringify({version:2,kind:'native-graph-control-reply',run:receipt.review.provenance.run,review:receipt.review.review_id,result:{outcome:'status',snapshot:{receipt,observations}}}));
+ }else console.log(JSON.stringify({receipt,observations}));
+}
+`
+  );
+  await chmod(binary, 0o700);
+  const scope = { projectRoot, projectDir, nativeHome, branch: "main" };
+  return {
+    root,
+    scope,
+    runtime: { binary, home: nativeHome },
+    calls,
+    delivery,
+  };
+}
+
+async function artifacts(scope: Awaited<ReturnType<typeof fixture>>["scope"]) {
+  return (
+    await readdir(join(scope.projectDir, ".internal", "native-authored-runs"))
+  ).filter((name) => name.endsWith(".json"));
+}
+async function failure(
+  value: Promise<unknown>,
+  outcome: "not-started" | "removed" | "retained"
+) {
+  const error: unknown = await value.catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(NativeAuthoredProjectStartError);
+  expect(error).toHaveProperty("outcome", outcome);
+  expect(String(error)).not.toContain(CANARY);
+  expect(JSON.stringify(error)).not.toContain(CANARY);
+  return error;
+}
+const macTest = process.platform === "darwin" ? test : test.skip;
+
+macTest(
+  "native frontend holds admission through exact ready publication and Removed retirement",
+  async () => {
+    const selected = await fixture();
+    let ready = 0;
+    const code = await serveNativeAuthoredProject({
+      ...selected,
+      run,
+      startupTimeoutMs: 10_000,
+      onReady: (mapping) => {
+        ready += 1;
+        expect(Object.isFrozen(mapping.record.receipt.resources)).toBe(true);
+        expect(mapping.record.receipt.review.provenance.run).toBe(run);
+        return undefined;
+      },
+    });
+    expect(code).toBe(0);
+    expect(ready).toBe(1);
+    expect(await loadNativeAuthoredProjectRun(selected.scope)).toBeNull();
+    expect(await artifacts(selected.scope)).toEqual([]);
+    expect(await readdir(selected.scope.nativeHome)).toEqual([]);
+    const delivery = await Bun.file(selected.delivery).json();
+    expect(delivery.kind).toBe("native-graph-environment");
+    expect(delivery.version).toBe(2);
+    expect(delivery.run).toBe(run);
+    expect(delivery.keys).toEqual({ web: ["TOKEN"] });
+    expect(delivery.digests).toEqual({
+      web: { TOKEN: delivery.expectedDigest },
+    });
+    expect(delivery.lifetime_seconds).toBeGreaterThan(0);
+    expect(delivery.lifetime_seconds).toBeLessThan(10);
+    expect(await Bun.file(selected.calls).text()).not.toContain(CANARY);
+  }
+);
+
+for (const option of ["planFailure", "foreignPlan"] as const) {
+  macTest(
+    `native frontend ${option} refuses before reservation or private delivery`,
+    async () => {
+      const selected = await fixture({ [option]: true });
+      await failure(
+        serveNativeAuthoredProject({
+          ...selected,
+          run,
+          startupTimeoutMs: 10_000,
+        }),
+        "not-started"
+      );
+      expect(await artifacts(selected.scope)).toEqual([]);
+      expect(await Bun.file(selected.delivery).exists()).toBe(false);
+      expect(await Bun.file(selected.calls).text()).not.toContain('"serve"');
+    }
+  );
+}
+
+for (const option of ["failedStatus", "changeDuringStatus"] as const) {
+  macTest(
+    `native frontend ${option} refuses ready publication and authenticates cleanup`,
+    async () => {
+      const selected = await fixture({ [option]: true });
+      let ready = false;
+      await failure(
+        serveNativeAuthoredProject({
+          ...selected,
+          run,
+          startupTimeoutMs: 10_000,
+          onReady: () => {
+            ready = true;
+            return undefined;
+          },
+        }),
+        "removed"
+      );
+      expect(ready).toBe(false);
+      expect(await artifacts(selected.scope)).toEqual([]);
+      expect(await Bun.file(join(selected.root, "owner-exited")).exists()).toBe(
+        true
+      );
+    }
+  );
+}
+
+for (const cleanup of ["live", "missing", "foreign-id"] as const) {
+  macTest(
+    `native frontend ${cleanup} cleanup cannot retire ready mapping or startup intent`,
+    async () => {
+      const selected = await fixture({ cleanup });
+      await failure(
+        serveNativeAuthoredProject({
+          ...selected,
+          run,
+          startupTimeoutMs: 10_000,
+        }),
+        "retained"
+      );
+      expect(await loadNativeAuthoredProjectRun(selected.scope)).not.toBeNull();
+      expect(await artifacts(selected.scope)).toHaveLength(3);
+      await failure(
+        serveNativeAuthoredProject({
+          ...selected,
+          run: "9".repeat(32),
+          startupTimeoutMs: 10_000,
+        }),
+        "retained"
+      );
+      const calls = (await Bun.file(selected.calls).text())
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(
+        calls.filter((args: string[]) => args.includes("serve"))
+      ).toHaveLength(1);
+    }
+  );
+}
+
+macTest(
+  "native frontend cancellation awaits owned cleanup after ready publication",
+  async () => {
+    const selected = await fixture();
+    const signal = new AbortController();
+    let ready = false;
+    await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        signal: signal.signal,
+        startupTimeoutMs: 10_000,
+        onReady: () => {
+          ready = true;
+          signal.abort();
+          return undefined;
+        },
+      }),
+      "removed"
+    );
+    expect(ready).toBe(true);
+    expect(await artifacts(selected.scope)).toEqual([]);
+    expect(await Bun.file(join(selected.root, "owner-exited")).exists()).toBe(
+      true
+    );
+  }
+);
+
+macTest(
+  "native frontend admission blocks a second consumer across the ready callback",
+  async () => {
+    const selected = await fixture();
+    const entered = Promise.withResolvers<void>();
+    const first = serveNativeAuthoredProject({
+      ...selected,
+      run,
+      startupTimeoutMs: 10_000,
+      onReady: () => {
+        entered.resolve();
+        return undefined;
+      },
+    });
+    await entered.promise;
+    await expect(
+      withNativeAuthoredProjectAdmission(selected.scope, () =>
+        Promise.resolve()
+      )
+    ).rejects.toThrow("unsafe");
+    await first;
+    await withNativeAuthoredProjectAdmission(selected.scope, (admission) =>
+      admission.assertHeld()
+    );
+  }
+);
+
+test("invalid or pre-canceled native frontend selection has no input or runtime effects", async () => {
+  const selected = await fixture();
+  const signal = AbortSignal.abort();
+  await failure(
+    serveNativeAuthoredProject({
+      ...selected,
+      run,
+      signal,
+      startupTimeoutMs: 10_000,
+    }),
+    "not-started"
+  );
+  await failure(
+    serveNativeAuthoredProject({
+      ...selected,
+      run: "invalid",
+      startupTimeoutMs: 10_000,
+    }),
+    "not-started"
+  );
+  expect(await Bun.file(selected.calls).exists()).toBe(false);
+  expect(await Bun.file(selected.delivery).exists()).toBe(false);
+  expect(await readdir(selected.scope.projectDir)).not.toContain(".internal");
+});
+
+macTest(
+  "private source selection failure after reservation retains intent without spawning the consumer",
+  async () => {
+    const selected = await fixture({ changeDuringPlan: true });
+    await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+      }),
+      "retained"
+    );
+    expect(await artifacts(selected.scope)).toHaveLength(2);
+    expect(await loadNativeAuthoredProjectRun(selected.scope)).toBeNull();
+    expect(await Bun.file(selected.delivery).exists()).toBe(false);
+    expect(await Bun.file(selected.calls).text()).not.toContain('"serve"');
+  }
+);
+
+macTest(
+  "compiler-selected literal-only environment does not acquire private delivery",
+  async () => {
+    const selected = await fixture({ noManaged: true });
+    expect(
+      await serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+      })
+    ).toBe(0);
+    expect(await Bun.file(selected.delivery).exists()).toBe(false);
+    expect(await artifacts(selected.scope)).toEqual([]);
+  }
+);
+
+macTest(
+  "native frontend keeps the original startup deadline through input acquisition",
+  async () => {
+    const selected = await fixture();
+    const started = performance.now();
+    await failure(
+      serveNativeAuthoredProject({ ...selected, run, startupTimeoutMs: 50 }),
+      "not-started"
+    );
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(await Bun.file(selected.calls).exists()).toBe(false);
+    expect(await Bun.file(selected.delivery).exists()).toBe(false);
+  }
+);
+
+macTest(
+  "caller selection mutation cannot redirect an admitted native frontend",
+  async () => {
+    const selected = await fixture();
+    const input = {
+      ...selected,
+      runtime: { ...selected.runtime },
+      scope: { ...selected.scope },
+      run,
+      startupTimeoutMs: 10_000,
+    };
+    const pending = serveNativeAuthoredProject(input);
+    input.runtime.binary = join(selected.root, "missing");
+    input.runtime.home = join(selected.root, "different");
+    input.scope.nativeHome = input.runtime.home;
+    input.scope.branch = "different";
+    input.run = "9".repeat(32);
+    expect(await pending).toBe(0);
+    const calls = await Bun.file(selected.calls).text();
+    expect(calls).toContain(selected.runtime.home);
+    expect(calls).not.toContain(input.runtime.home);
+    expect(await artifacts(selected.scope)).toEqual([]);
+  }
+);
+
+macTest(
+  "untyped asynchronous ready observation refuses and consumes private rejection",
+  async () => {
+    const selected = await fixture();
+    const completed = Promise.withResolvers<void>();
+    const callback = async () => {
+      await Bun.sleep(10);
+      completed.resolve();
+      throw new Error(CANARY);
+    };
+    await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+        onReady: callback as unknown as () => undefined,
+      }),
+      "removed"
+    );
+    await completed.promise;
+    await Bun.sleep(0);
+    expect(await artifacts(selected.scope)).toEqual([]);
+  }
+);
+
+macTest(
+  "asynchronous exit observation cannot leak diagnostics or replace confirmed cleanup",
+  async () => {
+    const selected = await fixture();
+    const completed = Promise.withResolvers<void>();
+    expect(
+      await serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+        onExitDiagnostic: async () => {
+          await Bun.sleep(10);
+          completed.resolve();
+          throw new Error(CANARY);
+        },
+      })
+    ).toBe(0);
+    await completed.promise;
+    await Bun.sleep(0);
+    expect(await artifacts(selected.scope)).toEqual([]);
+  }
+);
+
+if (process.platform !== "darwin") {
+  test("unsupported native frontend platform refuses before compiler inputs or provider work", async () => {
+    const selected = await fixture();
+    await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+      }),
+      "not-started"
+    );
+    expect(await readdir(selected.scope.projectDir)).not.toContain(".internal");
+    expect(await Bun.file(selected.calls).exists()).toBe(false);
+  });
+}

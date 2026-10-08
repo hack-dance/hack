@@ -277,7 +277,7 @@ try {
     "local settings cannot inject host commands"
   );
   await rm(join(checkout, ".hack/hack.local.json"));
-  const runtime = await invoke(["up", "--json"], checkout, {
+  const runtime = await invoke(["up", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
   });
   assert(
@@ -285,7 +285,7 @@ try {
       (runtime.stdout + runtime.stderr).includes(
         "E_NATIVE_PROJECT_UNSUPPORTED"
       ),
-    "explicit native VM backend remains fenced"
+    "unsupported native detached up refuses before input or runtime work"
   );
   assert(
     !(await Bun.file(marker).exists()) &&

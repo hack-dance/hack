@@ -16,6 +16,49 @@ pinned artifact. Each check has a 120-second timeout, 512 MiB Java heap, two wor
 and bounded output; temporary TLC metadata is removed after success or failure.
 No credentials or running VM are needed.
 
+## Proposed native file-material retirement
+
+`native-file-material/Material.tla` checks a proposed private file owner; that owner
+and its Compose delivery callback are **not implemented or enabled**. The model
+starts after one uncertain startup has durably published its generation/reference
+and two immutable material members. Generation completion, retirement intent,
+each member unlink and the final retired marker are separate steps. One crash can
+occur between any two effect or commit steps. Hook uncertainty, child uncertainty
+and source availability give eight initial states. The positive configuration
+explores **3,926 distinct states** (13,416 generated, maximum depth 18).
+
+Eight guard-removal controls distinguish the proposed obligations: retain the
+pending generation until all material retires; require owned-container absence,
+known hooks and known children before deletion; refuse substituted saved anchors;
+recheck ownership and pending intent after the finalizer; and refuse missing live
+material without a previously recorded retirement intent. Two further controls
+deliberately violate reachability predicates at safe completion: one after a crash
+between member deletions, the other with unavailable authored source. These are
+required counterexamples, so the positive model cannot pass by disabling cleanup
+or requiring a fresh source to perform saved stop recovery. Each negative requires
+TLC exit 12, its named invariant and complete witness in the same state.
+
+| Model action | Existing boundary or required future owner behavior |
+| --- | --- |
+| `Recover` / `StopContainers` | The generation mutation owner retains the exact saved pending/current generation and stops owned resources. Saved stop does not acquire authored files or decrypt values. |
+| `BeginRetirement` | The future material owner must sync an exact member/inode retirement intent before the first unlink. Missing live material cannot establish this authority. |
+| `DeleteMember` / `MarkRetired` | The future owner must recheck absence, immutable reference, mutation authority and uncertainty before each deletion; per-member progress and the retired marker survive interruption. |
+| `ResumeRetired` | The future owner must reopen the exact durable intent/marker, without reconstructing a reference from orphan directories or recreating deleted material. |
+| `CommitStop` | `native-compose-generation.ts` already provides `beforeComplete` followed by fresh generation, ownership and pending checks. The future material finalizer must use this boundary; it is currently unwired. |
+| `DriftAnchor` / `DriftOwner` / `DriftPending` | Independent substitution during an await must cause refusal, including after retirement and before the generation receipt commits. |
+
+The model summarizes exact root, receipt, lease, token and device/inode identities
+by version 1; version 2 is a substitution that the saved reference cannot adopt.
+It treats persisted writes and individual unlinks as atomic, and summarizes fresh
+whole-owner container absence as one boolean. It does not model acquisition,
+source descriptors, fsync durability, byte bounds, binary/empty material, encryption,
+actual inode reuse, mode/UID/GID, Docker mount projection, arbitrary simultaneous
+external container creation, replacement of a live generation, repeated crashes,
+or uncertain-child containment. No fairness or eventual cleanup is asserted.
+The owner implementation still needs ordinary identity, partial-retirement,
+freshness and recovery regressions plus a compiled synthetic engine fixture.
+This design check does not qualify material delivery or whole NC03 acceptance.
+
 ## Native Compose routing stop recovery
 
 `native-route-stop/Stop.tla` checks the generation receipt and hostname claims as

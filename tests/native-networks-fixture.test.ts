@@ -1,7 +1,20 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  chmod,
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readlink,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   nativeNetworkFixtureAttachmentMatches,
   nativeNetworkFixtureCreateArgs,
@@ -10,8 +23,138 @@ import {
   nativeNetworkFixtureProtocolMatches,
   nativeNetworkFixtureVolumeMatches,
   nativeNetworkFixtureVolumeSelectionMatches,
+  provisionNativeNetworkFixtureComposePlugin,
   runNativeNetworkFixtureCommand,
 } from "./e2e/native-config-networks-acceptance.ts";
+
+async function withPluginFixture(
+  run: (opts: {
+    path: string;
+    expectedHash: string;
+    dockerConfig: string;
+  }) => Promise<void>
+): Promise<void> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "fixture-plugin-")));
+  try {
+    const path = join(root, "installed-compose");
+    const dockerConfig = join(root, "docker-config");
+    const source = "#!/bin/sh\nprintf '%s\\n' '2.40.3'\n";
+    await writeFile(path, source, { mode: 0o700 });
+    await mkdir(dockerConfig, { mode: 0o700 });
+    await writeFile(join(dockerConfig, "config.json"), "{}\n", { mode: 0o600 });
+    await run({
+      path,
+      expectedHash: createHash("sha256").update(source).digest("hex"),
+      dockerConfig,
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test("private Compose registration uses only the pinned canonical binary and preserves empty auth config", async () => {
+  await withPluginFixture(async (opts) => {
+    const pin = await provisionNativeNetworkFixtureComposePlugin(opts);
+    const installed = join(opts.dockerConfig, "cli-plugins", "docker-compose");
+    expect(pin.path).toBe(opts.path);
+    expect(pin.sha256).toBe(opts.expectedHash);
+    expect(pin.registeredPath).toBe(installed);
+    expect((await lstat(installed)).isSymbolicLink()).toBe(true);
+    expect(await readlink(installed)).toBe(opts.path);
+    expect(await readFile(join(opts.dockerConfig, "config.json"), "utf8")).toBe(
+      "{}\n"
+    );
+  });
+});
+
+test("private Compose plugin registration preserves multicall basename dispatch", async () => {
+  await withPluginFixture(async (opts) => {
+    const source =
+      '#!/bin/sh\ncase "$0" in */docker-compose) printf "%s\\n" "5.1.2" ;; *) exit 23 ;; esac\n';
+    await writeFile(opts.path, source);
+    const plugin = await provisionNativeNetworkFixtureComposePlugin({
+      ...opts,
+      expectedHash: createHash("sha256").update(source).digest("hex"),
+    });
+    const execute = (path: string) =>
+      runNativeNetworkFixtureCommand({
+        argv: [path, "version", "--short"],
+        cwd: dirname(opts.path),
+        env: { PATH: "/usr/bin:/bin" },
+        captures: join(dirname(opts.path), "captures"),
+      });
+    expect((await execute(plugin.path)).exitCode).toBe(23);
+    const observed = await execute(plugin.registeredPath);
+    expect(observed.exitCode).toBe(0);
+    expect(observed.stdout).toBe("5.1.2\n");
+  });
+});
+
+test("Compose registration refuses a wrong binary hash before creating a plugin directory", async () => {
+  await withPluginFixture(async (opts) => {
+    await expect(
+      provisionNativeNetworkFixtureComposePlugin({
+        ...opts,
+        expectedHash: "f".repeat(64),
+      })
+    ).rejects.toThrow("identity/hash qualification failed");
+    expect(
+      await Bun.file(join(opts.dockerConfig, "cli-plugins")).exists()
+    ).toBe(false);
+  });
+});
+
+test.each([
+  "symlink",
+  "hardlink",
+])("Compose registration refuses an unqualified %s executable", async (kind) => {
+  await withPluginFixture(async (opts) => {
+    const path = `${opts.path}-alias`;
+    if (kind === "symlink") {
+      await symlink(opts.path, path);
+    } else {
+      await link(opts.path, path);
+    }
+    await expect(
+      provisionNativeNetworkFixtureComposePlugin({ ...opts, path })
+    ).rejects.toThrow("Fixture artifact");
+    expect(
+      await Bun.file(join(opts.dockerConfig, "cli-plugins")).exists()
+    ).toBe(false);
+  });
+});
+
+test.each([
+  "symlink",
+  "permissions",
+])("Compose registration refuses unsafe private-config %s", async (kind) => {
+  await withPluginFixture(async (opts) => {
+    let dockerConfig = opts.dockerConfig;
+    if (kind === "symlink") {
+      dockerConfig = `${dockerConfig}-alias`;
+      await symlink(opts.dockerConfig, dockerConfig);
+    } else {
+      await chmod(dockerConfig, 0o755);
+    }
+    await expect(
+      provisionNativeNetworkFixtureComposePlugin({ ...opts, dockerConfig })
+    ).rejects.toThrow("canonical private fixture config");
+    expect(
+      await Bun.file(join(opts.dockerConfig, "cli-plugins")).exists()
+    ).toBe(false);
+  });
+});
+
+test("Compose registration refuses an existing plugin path and preserves its bytes", async () => {
+  await withPluginFixture(async (opts) => {
+    const path = join(opts.dockerConfig, "cli-plugins");
+    await writeFile(path, "unowned-plugin-path");
+    await expect(
+      provisionNativeNetworkFixtureComposePlugin(opts)
+    ).rejects.toThrow();
+    expect(await readFile(path, "utf8")).toBe("unowned-plugin-path");
+  });
+});
 
 const PROJECT = "com.docker.compose.project";
 const INSTANCE = "io.hack.native-config.instance";

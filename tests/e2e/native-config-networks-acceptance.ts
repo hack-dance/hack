@@ -2,7 +2,15 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { constants } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
-import { chmod, lstat, mkdir, open, realpath } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  open,
+  readlink,
+  realpath,
+  symlink,
+} from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { Readable } from "node:stream";
 import type {
@@ -383,10 +391,83 @@ async function artifact(path: string, expected: string) {
         digest(await file.readFile()) === expected,
       "Fixture artifact identity/hash qualification failed"
     );
+    const after = await file.stat();
+    const named = await lstat(path);
+    requireValue(
+      named.isFile() &&
+        !named.isSymbolicLink() &&
+        [after, named].every(
+          (value) =>
+            value.dev === info.dev &&
+            value.ino === info.ino &&
+            value.nlink === 1 &&
+            value.size === info.size &&
+            value.mtimeMs === info.mtimeMs &&
+            value.ctimeMs === info.ctimeMs
+        ),
+      "Fixture artifact changed during qualification"
+    );
     return { path, sha256: expected, dev: info.dev, ino: info.ino };
   } finally {
     await file.close();
   }
+}
+
+/** Register only the explicitly pinned installed plugin in this owned empty Docker config. Never copy caller config/auth. */
+export async function provisionNativeNetworkFixtureComposePlugin(opts: {
+  readonly path: string;
+  readonly expectedHash: string;
+  readonly dockerConfig: string;
+}) {
+  const plugin = await artifact(opts.path, opts.expectedHash);
+  const directory = await lstat(opts.dockerConfig);
+  requireValue(
+    directory.isDirectory() &&
+      !directory.isSymbolicLink() &&
+      directory.uid === process.getuid?.() &&
+      (directory.mode & 0o777) === 0o700 &&
+      (await realpath(opts.dockerConfig)) === opts.dockerConfig,
+    "Compose plugin requires the canonical private fixture config"
+  );
+  const plugins = join(opts.dockerConfig, "cli-plugins");
+  await mkdir(plugins, { mode: 0o700 });
+  const pluginDirectory = await lstat(plugins);
+  requireValue(
+    pluginDirectory.isDirectory() &&
+      !pluginDirectory.isSymbolicLink() &&
+      pluginDirectory.uid === process.getuid?.() &&
+      (pluginDirectory.mode & 0o777) === 0o700 &&
+      (await realpath(plugins)) === plugins,
+    "Compose plugin registration directory is unsafe"
+  );
+  const installed = join(plugins, "docker-compose");
+  await symlink(plugin.path, installed);
+  const named = await lstat(installed);
+  requireValue(
+    named.isSymbolicLink() &&
+      (await readlink(installed)) === plugin.path &&
+      (await realpath(installed)) === plugin.path,
+    "Compose plugin registration changed"
+  );
+  const latest = await artifact(plugin.path, plugin.sha256);
+  const config = await lstat(opts.dockerConfig);
+  const finalPlugins = await lstat(plugins);
+  requireValue(
+    latest.dev === plugin.dev &&
+      latest.ino === plugin.ino &&
+      config.dev === directory.dev &&
+      config.ino === directory.ino &&
+      config.uid === process.getuid?.() &&
+      (config.mode & 0o777) === 0o700 &&
+      finalPlugins.dev === pluginDirectory.dev &&
+      finalPlugins.ino === pluginDirectory.ino &&
+      finalPlugins.uid === process.getuid?.() &&
+      (finalPlugins.mode & 0o777) === 0o700 &&
+      (await realpath(plugins)) === plugins &&
+      (await realpath(opts.dockerConfig)) === opts.dockerConfig,
+    "Compose plugin owner or binary changed before admission"
+  );
+  return { ...plugin, registeredPath: installed };
 }
 
 const SERVER = [
@@ -864,9 +945,17 @@ async function qualifyArtifacts(
   const revision = process.env.HACK_E2E_NETWORK_SOURCE_REVISION;
   const cliHash = process.env.HACK_E2E_NETWORK_CLI_SHA256;
   const compilerHash = process.env.HACK_E2E_NETWORK_COMPILER_SHA256;
+  const pluginPath = process.env.HACK_E2E_COMPOSE_PLUGIN_PATH;
+  const pluginHash = process.env.HACK_E2E_COMPOSE_PLUGIN_SHA256;
   requireValue(
-    binary && revision && REVISION.test(revision) && cliHash && compilerHash,
-    "Network acceptance requires explicit source revision and compiled artifact SHA256 pins"
+    binary &&
+      revision &&
+      REVISION.test(revision) &&
+      cliHash &&
+      compilerHash &&
+      pluginPath &&
+      pluginHash,
+    "Network acceptance requires explicit source revision and CLI/compiler/Compose plugin pins"
   );
   const cli = await artifact(resolve(binary), cliHash);
   const compiler = await artifact(
@@ -911,6 +1000,7 @@ async function qualifyArtifacts(
     revision,
     cli,
     compiler,
+    composePlugin: await artifact(pluginPath, pluginHash),
     fixtureHash: digest(
       await Bun.file(import.meta.path)
         .arrayBuffer()
@@ -992,6 +1082,27 @@ export const nativeConfigNetworksScenario: Scenario = {
       });
     };
     const manifest = await qualifyArtifacts(ctx, execute);
+    const composePlugin = await provisionNativeNetworkFixtureComposePlugin({
+      path: manifest.composePlugin.path,
+      expectedHash: manifest.composePlugin.sha256,
+      dockerConfig,
+    });
+    requireValue(
+      composePlugin.dev === manifest.composePlugin.dev &&
+        composePlugin.ino === manifest.composePlugin.ino,
+      "Compose plugin changed between artifact and private registration checks"
+    );
+    const pluginVersion = await execute([
+      composePlugin.registeredPath,
+      "version",
+      "--short",
+    ]);
+    resultOk(pluginVersion);
+    const composeVersion = pluginVersion.stdout.trim();
+    requireValue(
+      /^v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?$/.test(composeVersion),
+      "Compose plugin version is not a canonical version response"
+    );
     const docker: Docker = async (args) => {
       const result = await execute([engine, ...args]);
       resultOk(result);
@@ -1014,7 +1125,10 @@ export const nativeConfigNetworksScenario: Scenario = {
       (await docker(["info", "--format", "{{.OSType}}"])) === "linux",
       "Fixture requires a Linux engine"
     );
-    await docker(["compose", "version"]);
+    requireValue(
+      (await docker(["compose", "version", "--short"])) === composeVersion,
+      "Private Docker config must discover the exact pinned Compose plugin"
+    );
     const image = await docker([
       "image",
       "inspect",
@@ -1090,7 +1204,7 @@ export const nativeConfigNetworksScenario: Scenario = {
     const qualificationPath = join(ctx.tempRoot, "network-qualification.json");
     await Bun.write(
       qualificationPath,
-      `${JSON.stringify({ ...manifest, images: { bun: image, caddy: caddyImage }, limits: { milliseconds: SCENARIO_TIMEOUT, cleanupMilliseconds: CLEANUP_TIMEOUT, commandMilliseconds: COMMAND_TIMEOUT, outputBytes: OUTPUT_LIMIT, peakContainers: 13, ownedBridges: 6, ownedVolumes: 3 }, inputs: checkouts.map((checkout) => ({ root: checkout.root, authoredHash: digest(checkout.text) })) })}\n`
+      `${JSON.stringify({ ...manifest, composePlugin: { ...composePlugin, version: composeVersion }, images: { bun: image, caddy: caddyImage }, limits: { milliseconds: SCENARIO_TIMEOUT, cleanupMilliseconds: CLEANUP_TIMEOUT, commandMilliseconds: COMMAND_TIMEOUT, outputBytes: OUTPUT_LIMIT, peakContainers: 13, ownedBridges: 6, ownedVolumes: 3 }, inputs: checkouts.map((checkout) => ({ root: checkout.root, authoredHash: digest(checkout.text) })) })}\n`
     );
     await chmod(qualificationPath, 0o600);
     const volumePins = new Map<string, NativeNetworkFixtureVolume>();

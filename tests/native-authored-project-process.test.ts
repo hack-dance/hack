@@ -525,12 +525,24 @@ test("startup deadline refuses publication and settles its observed startup pref
       // command, owner-only, or a trapped owner whose Ready frame is unread.
       // These cannot claim pending authentication or publication authority.
       expect(statusEntered).toBe(false);
-      expect(failureMessage).toBe(
-        "Native graph startup was interrupted or failed; inspect owned state before retrying."
-      );
-      expect(ownedExitCode).toBe(cleanupObserved ? 0 : 143);
-      if (cleanupObserved) {
+      if (
+        failureMessage ===
+        "Native graph readiness identity is invalid or canceled."
+      ) {
+        // A complete buffered frame can cross the deadline before the
+        // pre-callback fence admits it to onReceipt. The TERM trap was installed
+        // before that frame, but no status or ready publication was admitted.
         expect(ownerEntered).toBe(true);
+        expect(cleanupObserved).toBe(true);
+        expect(ownedExitCode).toBe(0);
+      } else {
+        expect(failureMessage).toBe(
+          "Native graph startup was interrupted or failed; inspect owned state before retrying."
+        );
+        expect(ownedExitCode).toBe(cleanupObserved ? 0 : 143);
+        if (cleanupObserved) {
+          expect(ownerEntered).toBe(true);
+        }
       }
     }
   } finally {

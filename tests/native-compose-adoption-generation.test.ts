@@ -664,7 +664,10 @@ boundedTest.each([
         }
         expect(rejection.code).toBe("E_CONFIG_INVALID");
         expect(rejection.detail).toEqual({
-          legacy_adoption_refusal: { stage: "ordered-observation", reason },
+          legacy_adoption_refusal: {
+            stage: "ordered-observation",
+            reason: reason === "probe" ? "probe-child" : reason,
+          },
         });
         expect(
           JSON.stringify({

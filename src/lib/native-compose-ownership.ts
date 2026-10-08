@@ -144,6 +144,34 @@ type FailureCode =
   | "E_NATIVE_COMPOSE_PROBE_TIMEOUT"
   | "E_NATIVE_COMPOSE_PROBE_CANCELLED"
   | "E_NATIVE_COMPOSE_PROBE_BUDGET";
+/** Closed owner-issued facts only; no argv, output, exit code or arbitrary error properties. */
+export type NativeComposeProbeFailure =
+  | "operation"
+  | "child"
+  | "timeout"
+  | "cancel"
+  | "budget"
+  | "capture"
+  | "decode";
+const probeFailures = new WeakMap<object, NativeComposeProbeFailure>();
+
+/** Copies, prototypes and caller-created errors cannot acquire an observed probe classification. */
+export function nativeComposeProbeFailure(
+  error: unknown
+): NativeComposeProbeFailure | undefined {
+  return typeof error === "object" && error !== null
+    ? probeFailures.get(error)
+    : undefined;
+}
+
+function probeRefused(
+  code: FailureCode,
+  failure: NativeComposeProbeFailure
+): never {
+  const error = new NativeComposeOwnershipError(code);
+  probeFailures.set(error, failure);
+  throw error;
+}
 /** Never retain command arguments, raw inspect output, labels, or daemon diagnostics. */
 export class NativeComposeOwnershipError extends Error {
   readonly code: FailureCode;
@@ -1008,22 +1036,29 @@ export function createNativeComposeProbe(
   opts: Pick<NativeComposeOwnershipOptions, "signal" | "timeoutMs">
 ): (args: readonly string[]) => Promise<string> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  requireValue(
-    Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60_000
-  );
+  if (
+    !(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60_000)
+  ) {
+    probeRefused("E_NATIVE_COMPOSE_OWNERSHIP", "operation");
+  }
   const deadline = Date.now() + timeoutMs;
   let remainingOutput = OUTPUT_LIMIT;
   checkInterruption(opts.signal, false);
-  const binary = findExecutableInPath("docker");
+  let binary: string | null;
+  try {
+    binary = findExecutableInPath("docker");
+  } catch {
+    probeRefused("E_NATIVE_COMPOSE_PROBE", "operation");
+  }
   if (!binary) {
-    refuse("E_NATIVE_COMPOSE_PROBE");
+    probeRefused("E_NATIVE_COMPOSE_PROBE", "operation");
   }
   const environment = { ...process.env };
   return async (args) => {
     checkInterruption(opts.signal, false);
     const remainingTime = deadline - Date.now();
     if (remainingTime <= 0) {
-      refuse("E_NATIVE_COMPOSE_PROBE_TIMEOUT");
+      probeRefused("E_NATIVE_COMPOSE_PROBE_TIMEOUT", "timeout");
     }
     let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
     const ownsProcessGroup = process.platform !== "win32";
@@ -1036,7 +1071,7 @@ export function createNativeComposeProbe(
         env: environment,
       });
     } catch {
-      refuse("E_NATIVE_COMPOSE_PROBE");
+      probeRefused("E_NATIVE_COMPOSE_PROBE", "operation");
     }
     const io = new AbortController();
     const observeCpu = beginNativeCpuChild(child, "docker");
@@ -1071,13 +1106,20 @@ export function createNativeComposeProbe(
       settled = true;
       checkInterruption(opts.signal, timedOut);
       if (exitCode !== 0) {
-        refuse("E_NATIVE_COMPOSE_PROBE");
+        probeRefused("E_NATIVE_COMPOSE_PROBE", "child");
       }
       remainingOutput -= bytes.byteLength;
-      return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        probeRefused("E_NATIVE_COMPOSE_PROBE", "decode");
+      }
     } catch (error: unknown) {
       checkInterruption(opts.signal, timedOut);
-      throw error;
+      if (nativeComposeProbeFailure(error)) {
+        throw error;
+      }
+      probeRefused("E_NATIVE_COMPOSE_PROBE", "capture");
     } finally {
       clearTimeout(timer);
       opts.signal?.removeEventListener("abort", stop);
@@ -1087,11 +1129,15 @@ export function createNativeComposeProbe(
         diagnostics,
         child.exited,
       ]);
-      observeCpu(
-        completion[2].status === "fulfilled" ? completion[2].value : undefined
-      );
+      observeCpu(probeExitCode(completion[2]));
     }
   };
+}
+
+function probeExitCode(
+  result: PromiseSettledResult<number>
+): number | undefined {
+  return result.status === "fulfilled" ? result.value : undefined;
 }
 
 function checkInterruption(
@@ -1099,10 +1145,10 @@ function checkInterruption(
   timedOut: boolean
 ): void {
   if (signal?.aborted) {
-    refuse("E_NATIVE_COMPOSE_PROBE_CANCELLED");
+    probeRefused("E_NATIVE_COMPOSE_PROBE_CANCELLED", "cancel");
   }
   if (timedOut) {
-    refuse("E_NATIVE_COMPOSE_PROBE_TIMEOUT");
+    probeRefused("E_NATIVE_COMPOSE_PROBE_TIMEOUT", "timeout");
   }
 }
 
@@ -1149,7 +1195,7 @@ async function readBounded(
       }
       size += chunk.value.byteLength;
       if (size > limit) {
-        refuse("E_NATIVE_COMPOSE_PROBE_BUDGET");
+        probeRefused("E_NATIVE_COMPOSE_PROBE_BUDGET", "budget");
       }
       chunks.push(chunk.value);
     }

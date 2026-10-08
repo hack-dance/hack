@@ -7,7 +7,17 @@ export type LegacyComposeOrderedRefusal =
         | "timestamp"
         | "restart-policy"
         | "membership"
-        | "probe";
+        | "probe"
+        | "probe-operation"
+        | "probe-child"
+        | "probe-timeout"
+        | "probe-cancel"
+        | "probe-budget"
+        | "probe-capture"
+        | "probe-decode"
+        | "probe-json"
+        | "probe-row"
+        | "probe-unknown";
     }
   | {
       readonly stage: "ordered-scheduler";
@@ -33,9 +43,23 @@ type SchedulerReason = Extract<
 >["reason"];
 
 function observationReason(value: unknown): value is ObservationReason {
-  return ["shape", "timestamp", "restart-policy", "membership", "probe"].some(
-    (reason) => value === reason
-  );
+  return [
+    "shape",
+    "timestamp",
+    "restart-policy",
+    "membership",
+    "probe",
+    "probe-operation",
+    "probe-child",
+    "probe-timeout",
+    "probe-cancel",
+    "probe-budget",
+    "probe-capture",
+    "probe-decode",
+    "probe-json",
+    "probe-row",
+    "probe-unknown",
+  ].some((reason) => value === reason);
 }
 function schedulerReason(value: unknown): value is SchedulerReason {
   return [

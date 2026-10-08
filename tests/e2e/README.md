@@ -63,10 +63,18 @@ guest Docker worker completion or recursively inventory unrelated child groups.
 
 Retained ordered-command failures may include a fixed `legacy_adoption_refusal`
 stage/reason in the JSON error detail. Observer categories distinguish malformed
-shape, timestamp, restart policy, membership and probe failure; scheduler
+shape, timestamp, restart policy and membership. Probe reasons separately identify
+operation admission/discovery/spawn, nonzero child exit, timeout, cancellation,
+I/O budget, capture failure, UTF-8 decoding, JSON parsing, non-object row and unknown
+failure. The legacy `probe` reason remains accepted for historical diagnostic
+compatibility; newly observed unknown errors use `probe-unknown`. These classifications
+come from the probe owner's weak association and fixed parse boundaries, never
+arbitrary error properties. Scheduler
 categories distinguish selection, deadline, attempts, job failure, readiness and
 completion authority. They never include daemon output, resource IDs, SQL or env
 values. Unknown ownership errors retain their existing fixed generic refusal.
+The earlier `ordered-observation/probe` live failure does not establish which of
+these newly distinguished seams failed; it remains preserved as unresolved evidence.
 The disabled job restart codec accepts both `no` and the empty daemon spelling,
 with zero retries still required. This is an independent compatibility correction,
 not an established explanation for the earlier live startup refusal. Compose

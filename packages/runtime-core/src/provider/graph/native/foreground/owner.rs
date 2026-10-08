@@ -174,6 +174,11 @@ impl Pin {
         Ok(())
     }
     pub(super) fn load(candidate: &Candidate, run: &str) -> Result<Self, CandidateError> {
+        let pin = Self::read(candidate, run)?;
+        pin.verify()?;
+        Ok(pin)
+    }
+    fn read(candidate: &Candidate, run: &str) -> Result<Self, CandidateError> {
         let root = root(candidate, run)?;
         state::check_private_directory(&root).map_err(|_| refused())?;
         let file = fs::symlink_metadata(root.join("owner.json")).map_err(|_| refused())?;
@@ -193,7 +198,6 @@ impl Pin {
             bytes,
             file: id(&file),
         };
-        pin.verify()?;
         Ok(pin)
     }
     pub(super) fn review(&self) -> &native_input::Review {
@@ -220,6 +224,21 @@ impl Pin {
         Ok(())
     }
     pub(super) fn verify(&self) -> Result<(), CandidateError> {
+        self.verify_files()?;
+        let expected = &self.record.process;
+        // SAFETY: geteuid has no preconditions; same-user peer authority remains native.
+        if expected.uid != unsafe { libc::geteuid() } {
+            return Err(refused());
+        }
+        identity::verify(
+            expected,
+            &identity::observe(expected.pid).map_err(|_| refused())?,
+            &expected.executable,
+            expected.uid,
+        )
+        .map_err(|_| refused())
+    }
+    fn verify_files(&self) -> Result<(), CandidateError> {
         self.verify_host_boot()?;
         state::check_private_directory(&self.root).map_err(|_| refused())?;
         let parent = fs::symlink_metadata(&self.root).map_err(|_| refused())?;
@@ -240,18 +259,7 @@ impl Pin {
         {
             return Err(refused());
         }
-        let expected = &self.record.process;
-        // SAFETY: geteuid has no preconditions; same-user peer authority remains native.
-        if expected.uid != unsafe { libc::geteuid() } {
-            return Err(refused());
-        }
-        identity::verify(
-            expected,
-            &identity::observe(expected.pid).map_err(|_| refused())?,
-            &expected.executable,
-            expected.uid,
-        )
-        .map_err(|_| refused())
+        Ok(())
     }
     pub(super) fn connect(&self) -> Result<UnixStream, CandidateError> {
         self.verify()?;
@@ -262,6 +270,170 @@ impl Pin {
             .map_err(|_| refused())?;
         self.verify()?;
         Ok(stream)
+    }
+}
+
+/// Exact value-free publication bytes and inode, retained by a durable recovery intent.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RecoverySelection {
+    bytes: String,
+    file: (u64, u64),
+}
+impl RecoverySelection {
+    pub(super) fn fingerprint(&self) -> String {
+        format!("{:x}", Sha256::digest(self.bytes.as_bytes()))
+    }
+    fn record(&self, candidate: &Candidate, run: &str) -> Result<(Record, u64), CandidateError> {
+        if self.bytes.is_empty() || self.bytes.len() > 8192 {
+            return Err(refused());
+        }
+        let (record, boot) = decode(self.bytes.as_bytes())?;
+        let boot = boot.ok_or_else(refused)?;
+        record
+            .review
+            .validate(record.review.scope())
+            .map_err(|_| refused())?;
+        // SAFETY: geteuid has no preconditions; private state remains same-user.
+        if record.version != 3
+            || record.candidate != candidate.checkout
+            || record.review.scope().run != run
+            || record.process.uid != unsafe { libc::geteuid() }
+            || crate::provider::host_filesystem::host_boot_micros().ok() != Some(boot)
+        {
+            return Err(refused());
+        }
+        Ok((record, boot))
+    }
+}
+/// Recovery keeps gate → original run lock for its entire lease. Ordinary live
+/// Pin and DirectGuard remain strict and grant no dead-publication authority.
+pub(super) struct RecoveryLease<'a> {
+    candidate: &'a Candidate,
+    run: &'a str,
+    root: PathBuf,
+    gate: super::super::super::publication_gate::Guard,
+    lock: state::Lock,
+    selection: RecoverySelection,
+}
+impl<'a> RecoveryLease<'a> {
+    pub(super) fn acquire(
+        candidate: &'a Candidate,
+        run: &'a str,
+        saved: Option<RecoverySelection>,
+        socket_retirement_admitted: bool,
+        owner_retirement_admitted: bool,
+    ) -> Result<Self, CandidateError> {
+        let gate = super::super::super::publication_gate::Guard::acquire_existing(candidate)?;
+        let root = root(candidate, run)?;
+        let lock = state::Lock::acquire_existing(&root)?;
+        let selection = match saved {
+            Some(value) => value,
+            None => {
+                let pin = Pin::read(candidate, run)?;
+                if pin.host_boot_micros.is_none() {
+                    return Err(refused());
+                }
+                RecoverySelection {
+                    bytes: String::from_utf8(pin.bytes).map_err(|_| refused())?,
+                    file: pin.file,
+                }
+            }
+        };
+        let lease = Self {
+            candidate,
+            run,
+            root,
+            gate,
+            lock,
+            selection,
+        };
+        lease.verify(socket_retirement_admitted, owner_retirement_admitted)?;
+        Ok(lease)
+    }
+    pub(super) fn selected(&self) -> &RecoverySelection {
+        &self.selection
+    }
+    pub(super) fn review(&self) -> Result<native_input::Review, CandidateError> {
+        self.selection
+            .record(self.candidate, self.run)
+            .map(|(record, _)| record.review)
+    }
+    pub(super) fn host_boot_micros(&self) -> Result<u64, CandidateError> {
+        self.selection
+            .record(self.candidate, self.run)
+            .map(|(_, boot)| boot)
+    }
+    fn archive_path(&self, socket: bool) -> PathBuf {
+        let fingerprint = self.selection.fingerprint();
+        self.root.join(if socket {
+            format!("control-{}.retired.sock", &fingerprint[..24])
+        } else {
+            format!("owner-{}.retired.json", &fingerprint[..24])
+        })
+    }
+    fn selected_path(
+        &self,
+        socket: bool,
+        admitted: bool,
+        expected: (u64, u64),
+    ) -> Result<(PathBuf, bool), CandidateError> {
+        let original = self
+            .root
+            .join(if socket { "control.sock" } else { "owner.json" });
+        let archived = self.archive_path(socket);
+        let (path, original) = match (exists(&original)?, exists(&archived)?) {
+            (true, false) => (original, true),
+            (false, true) if admitted => (archived, false),
+            _ => return Err(refused()),
+        };
+        let metadata = fs::symlink_metadata(&path).map_err(|_| refused())?;
+        if !private(&metadata)
+            || id(&metadata) != expected
+            || (socket && !metadata.file_type().is_socket())
+            || (!socket && (!metadata.is_file() || metadata.nlink() != 1))
+        {
+            return Err(refused());
+        }
+        Ok((path, original))
+    }
+    /// Return which original paths remain. Retired paths require a pre-existing
+    /// durable phase; missing both original and archive always refuses.
+    pub(super) fn verify(
+        &self,
+        socket_admitted: bool,
+        owner_admitted: bool,
+    ) -> Result<(bool, bool), CandidateError> {
+        self.gate.verify(self.candidate)?;
+        let (record, _) = self.selection.record(self.candidate, self.run)?;
+        state::check_private_directory(&self.root).map_err(|_| refused())?;
+        if id(&fs::symlink_metadata(&self.root).map_err(|_| refused())?) != record.parent
+            || self.lock.identity()? != record.lock
+            || identity::alive(record.process.pid).map_err(|_| refused())?
+        {
+            return Err(refused());
+        }
+        super::super::super::host_pin_recovery::exact_lock_path(&self.root, &self.lock)?;
+        let (socket, socket_original) = self.selected_path(true, socket_admitted, record.socket)?;
+        let (owner, owner_original) =
+            self.selected_path(false, owner_admitted, self.selection.file)?;
+        if socket_original && !owner_original
+            || native_input::read_file(&owner, 8192)? != self.selection.bytes.as_bytes()
+        {
+            return Err(refused());
+        }
+        transport::no_listener(&socket)?;
+        if self.selected_path(true, socket_admitted, record.socket)? != (socket, socket_original)
+            || self.selected_path(false, owner_admitted, self.selection.file)?
+                != (owner.clone(), owner_original)
+            || native_input::read_file(&owner, 8192)? != self.selection.bytes.as_bytes()
+            || identity::alive(record.process.pid).map_err(|_| refused())?
+        {
+            return Err(refused());
+        }
+        self.selection.record(self.candidate, self.run)?;
+        self.gate.verify(self.candidate)?;
+        Ok((socket_original, owner_original))
     }
 }
 

@@ -4,6 +4,7 @@ use crate::provider::graph::foreground::{signals, transport};
 use serde::{Deserialize, Serialize};
 use std::{cell::Cell, io::Write};
 mod owner;
+pub mod recovery;
 pub(super) use owner::DirectGuard;
 #[cfg(test)]
 mod tests;

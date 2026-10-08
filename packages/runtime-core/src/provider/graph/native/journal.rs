@@ -104,6 +104,20 @@ impl Receipt {
     pub fn resources(&self) -> &BTreeMap<String, Resource> {
         &self.resources
     }
+    #[cfg(target_os = "macos")]
+    pub(super) fn require_recovery_ready(&self) -> Result<(), CandidateError> {
+        self.validate(self.review.scope().run, &self.owner)?;
+        if self.phase != Phase::ReadyObserved
+            || self.failure.is_some()
+            || self
+                .resources
+                .values()
+                .any(|resource| resource.id.is_none())
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
     pub(super) fn preparing(
         config: &Configuration,
         owner: &str,
@@ -340,6 +354,33 @@ pub(super) fn read_control(
         return Err(refused());
     }
     Ok(receipt)
+}
+/// Retain original bytes for explicit recovery selectors without reconstructing
+/// a digest from another wire projection. Pending state remains a refusal.
+#[cfg(target_os = "macos")]
+pub(super) fn read_recovery(
+    candidate: &Candidate,
+    review: &native_input::Review,
+) -> Result<(Receipt, PathBuf, String), CandidateError> {
+    use std::os::unix::fs::MetadataExt;
+    let receipt = read_control(candidate, review)?;
+    let root = directory(candidate, review.scope().run)?;
+    let path = root.join("state.json");
+    let before = fs::symlink_metadata(&path).map_err(|_| refused())?;
+    let bytes = native_input::read_file(&path, LIMIT)?;
+    let after = fs::symlink_metadata(&path).map_err(|_| refused())?;
+    let current: Receipt = serde_json::from_slice(&bytes).map_err(|_| refused())?;
+    if (before.dev(), before.ino()) != (after.dev(), after.ino())
+        || serde_json::to_vec(&current).map_err(|_| refused())?
+            != serde_json::to_vec(&receipt).map_err(|_| refused())?
+    {
+        return Err(refused());
+    }
+    Ok((
+        receipt,
+        root,
+        String::from_utf8(bytes).map_err(|_| refused())?,
+    ))
 }
 fn load_validated(
     candidate: &Candidate,

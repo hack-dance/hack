@@ -11,6 +11,21 @@ pub(crate) struct Guard {
 }
 
 impl Guard {
+    /// Selection/recovery observes an existing publication gate without creating authority.
+    #[cfg(all(target_os = "macos", feature = "native-config-plan"))]
+    pub(crate) fn acquire_existing(candidate: &Candidate) -> Result<Self, CandidateError> {
+        let root = candidate.state_root.join("run/graph-publication-gate");
+        let lock = state::Lock::acquire_existing(&root)?;
+        let metadata = fs::symlink_metadata(&root).map_err(state::io)?;
+        let guard = Self {
+            root,
+            directory: (metadata.dev(), metadata.ino()),
+            lock,
+        };
+        guard.verify(candidate)?;
+        Ok(guard)
+    }
+
     pub(crate) fn acquire(candidate: &Candidate) -> Result<Self, CandidateError> {
         let root = candidate.state_root.join("run/graph-publication-gate");
         let lock = state::Lock::acquire(&root)?;

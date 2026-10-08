@@ -630,3 +630,92 @@ test("captured cancellation cannot be replaced by a later fresh signal", async (
   const pid = Number(await readFile(started, "utf8"));
   expect(() => process.kill(pid, 0)).toThrow();
 });
+const malformedArguments: readonly {
+  readonly label: string;
+  readonly value: unknown;
+}[] = [
+  { label: "null", value: null },
+  { label: "undefined", value: undefined },
+  { label: "missing root", value: {} },
+  { label: "nonstring root", value: { projectRoot: { private: CANARY } } },
+  {
+    label: "throwing root",
+    value: {
+      get projectRoot() {
+        throw new Error(CANARY);
+      },
+    },
+  },
+  {
+    label: "invalid signal",
+    value: {
+      projectRoot: "/",
+      signal: {
+        get aborted() {
+          throw new Error(CANARY);
+        },
+      },
+    },
+  },
+];
+for (const { label, value } of malformedArguments) {
+  test(`malformed runtime acquisition argument remains redacted: ${label}`, async () => {
+    // Reflect exercises the untyped runtime boundary without weakening API types.
+    await refusal(
+      Reflect.apply(acquireLegacyComposeAdoptionBinding, undefined, [value]),
+      "E_LEGACY_COMPOSE_BINDING_INPUT"
+    );
+    expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+  });
+  test(`malformed runtime freshness argument remains redacted: ${label}`, async () => {
+    const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+    const count = (await commands()).length;
+    await refusal(
+      Reflect.apply(acquired.assertFresh, undefined, [value]),
+      "E_LEGACY_COMPOSE_BINDING_INPUT"
+    );
+    expect((await commands()).length).toBe(count);
+  });
+}
+test("private source owner redacts malformed argument and getter diagnostics", async () => {
+  const source = await acquireNativeConfigImportInputs({ projectRoot });
+  if (!source.ok) {
+    throw new Error("fixture source refused");
+  }
+  for (const current of [
+    null,
+    {
+      get signal() {
+        throw new Error(CANARY);
+      },
+    },
+    { signal: CANARY },
+  ]) {
+    const pending = Reflect.apply(source.assertFresh, undefined, [current]);
+    await expect(pending).rejects.toThrow("values omitted");
+    try {
+      await pending;
+    } catch (error: unknown) {
+      expect(String(error)).not.toContain(CANARY);
+    }
+  }
+  for (const opts of [
+    null,
+    {
+      get projectRoot() {
+        throw new Error(CANARY);
+      },
+    },
+    { projectRoot, signal: CANARY },
+  ]) {
+    const pending = Reflect.apply(acquireNativeConfigImportInputs, undefined, [
+      opts,
+    ]);
+    await expect(pending).rejects.toThrow("values omitted");
+    try {
+      await pending;
+    } catch (error: unknown) {
+      expect(String(error)).not.toContain(CANARY);
+    }
+  }
+});

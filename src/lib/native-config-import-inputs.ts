@@ -274,13 +274,23 @@ async function acquireInputs(opts: {
     composeText: decoder.decode(compose.bytes),
     projectRoot: root,
     assertFresh: async (current?: { readonly signal?: AbortSignal }) => {
-      cancelled(signal);
-      const currentSignal = current?.signal;
-      const recheckSignal =
-        signal && currentSignal
-          ? AbortSignal.any([signal, currentSignal])
-          : (currentSignal ?? signal);
+      let recheckSignal = signal;
       try {
+        cancelled(signal);
+        if (current !== undefined && !isRecord(current)) {
+          throw failure();
+        }
+        const currentSignal = current?.signal;
+        if (
+          currentSignal !== undefined &&
+          !(currentSignal instanceof AbortSignal)
+        ) {
+          throw failure();
+        }
+        recheckSignal =
+          signal && currentSignal
+            ? AbortSignal.any([signal, currentSignal])
+            : (currentSignal ?? signal);
         await recheckInputs({
           root,
           config,
@@ -313,9 +323,22 @@ export async function acquireNativeConfigImportInputs(opts: {
   readonly projectRoot: string;
   readonly signal?: AbortSignal;
 }): Promise<NativeConfigImportInputs> {
-  const projectRoot = opts.projectRoot;
-  const signal = opts.signal;
+  let signal: AbortSignal | undefined;
   try {
+    if (!isRecord(opts)) {
+      throw failure();
+    }
+    const projectRoot = opts.projectRoot;
+    const suppliedSignal = opts.signal;
+    if (
+      typeof projectRoot !== "string" ||
+      !projectRoot.length ||
+      projectRoot.includes("\0") ||
+      (suppliedSignal !== undefined && !(suppliedSignal instanceof AbortSignal))
+    ) {
+      throw failure();
+    }
+    signal = suppliedSignal;
     return await acquireInputs({ projectRoot, signal });
   } catch (error: unknown) {
     redactFailure(error, signal);

@@ -126,6 +126,22 @@ function absolute(value: unknown): value is string {
 function routing() {
   return ROUTING.map((key) => process.env[key]);
 }
+function selection(value: unknown) {
+  if (!isRecord(value)) {
+    refuse("E_LEGACY_COMPOSE_BINDING_INPUT");
+  }
+  const projectRoot = value.projectRoot;
+  const signal = value.signal;
+  if (
+    typeof projectRoot !== "string" ||
+    !projectRoot.length ||
+    projectRoot.includes("\0") ||
+    (signal !== undefined && !(signal instanceof AbortSignal))
+  ) {
+    refuse("E_LEGACY_COMPOSE_BINDING_INPUT");
+  }
+  return { root: resolve(projectRoot), signal };
+}
 
 async function inventory(opts: {
   readonly kind: Kind;
@@ -527,11 +543,13 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
 }): Promise<LegacyComposeAdoptionBinding> {
-  const root = resolve(input.projectRoot);
-  const signal = input.signal;
-  const timeoutMs = input.timeoutMs;
-  const route = JSON.stringify(routing());
+  let signal: AbortSignal | undefined;
   try {
+    const selected = selection(input);
+    const root = selected.root;
+    signal = selected.signal;
+    const timeoutMs = input.timeoutMs;
+    const route = JSON.stringify(routing());
     cancelled(signal);
     const source = await acquireNativeConfigImportInputs({
       projectRoot: root,
@@ -554,13 +572,15 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
       readonly projectRoot: string;
       readonly signal?: AbortSignal;
     }) => {
-      const currentRoot = resolve(current.projectRoot);
-      const suppliedSignal = current.signal;
-      const currentSignal =
-        signal && suppliedSignal
-          ? AbortSignal.any([signal, suppliedSignal])
-          : (suppliedSignal ?? signal);
+      let currentSignal = signal;
       try {
+        const selectedCurrent = selection(current);
+        const currentRoot = selectedCurrent.root;
+        const suppliedSignal = selectedCurrent.signal;
+        currentSignal =
+          signal && suppliedSignal
+            ? AbortSignal.any([signal, suppliedSignal])
+            : (suppliedSignal ?? signal);
         cancelled(signal);
         cancelled(currentSignal);
         if (currentRoot !== root || JSON.stringify(routing()) !== route) {

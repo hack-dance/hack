@@ -11,6 +11,7 @@ import {
   jsonPrivate,
   keys,
   NativeComposeGenerationError,
+  parsePrivateJson,
   privateDirectory,
   privateIgnore,
   readPrivate,
@@ -58,6 +59,166 @@ export type NativeComposeReservation = {
   readonly identity: NativeComposeIdentity;
   readonly generationId: string;
 };
+
+/** Opaque live authority. Copies of public identities or this empty object do not qualify. */
+export type NativeComposeMaterialAuthority = Readonly<Record<never, never>>;
+type MaterialSelection = {
+  readonly phase: "prepare" | "source" | "inspect" | "effect" | "retire";
+  readonly reservation?: NativeComposeReservation;
+  readonly generation?: NativeComposeGeneration;
+};
+/** Private binding: never serialize it into a public report, label or receipt. */
+export type NativeComposeMaterialBinding = {
+  readonly identity: NativeComposeIdentity;
+  readonly generationId: string;
+  readonly checkout: CheckoutAnchor;
+  readonly receipt: {
+    readonly dev: number;
+    readonly ino: number;
+    readonly hash: string;
+  };
+  readonly lease: {
+    readonly token: string;
+    readonly directory: { readonly dev: number; readonly ino: number };
+    readonly owner: { readonly dev: number; readonly ino: number };
+  };
+  readonly generation: GenerationAnchor | null;
+  readonly documentHash: string | null;
+  readonly currentGenerationId: string | null;
+  readonly pendingGenerationId: string | null;
+  readonly pendingToken: string | null;
+};
+const materialAuthorities = new WeakMap<
+  object,
+  (selection: MaterialSelection) => Promise<NativeComposeMaterialBinding>
+>();
+const materialActions = new WeakMap<
+  object,
+  <T>(run: () => Promise<T>) => Promise<T>
+>();
+/** The generation lease remains held until owned material work has settled, even after revocation. */
+export async function runNativeComposeMaterialAction<T>(opts: {
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly run: () => Promise<T>;
+}): Promise<T> {
+  const action = materialActions.get(opts.authority);
+  if (!action) {
+    return refuse();
+  }
+  return await action(opts.run);
+}
+function frozenCheckout(anchor: CheckoutAnchor): CheckoutAnchor {
+  return Object.freeze({
+    ...anchor,
+    projectDirectory: Object.freeze({ ...anchor.projectDirectory }),
+    gitMarker:
+      anchor.gitMarker === null ? null : Object.freeze({ ...anchor.gitMarker }),
+  });
+}
+function frozenGeneration(anchor: GenerationAnchor): GenerationAnchor {
+  return Object.freeze({
+    ...anchor,
+    manifest: Object.freeze({ ...anchor.manifest }),
+  });
+}
+function receiptReferencesGeneration(
+  state: Receipt,
+  anchor: GenerationAnchor
+): boolean {
+  return [state.current, state.pending].some(
+    (value) =>
+      value !== null &&
+      value.generationId === anchor.generationId &&
+      value.manifestHash === anchor.manifestHash &&
+      value.manifest.dev === anchor.manifest.dev &&
+      value.manifest.ino === anchor.manifest.ino
+  );
+}
+function materialEffectAllowed(
+  phase: MaterialSelection["phase"],
+  operation: NativeComposeOperation | null,
+  state: Receipt,
+  generationId: string
+): boolean {
+  if (phase === "inspect") {
+    return true;
+  }
+  if (state.beforeHooks !== null || state.pending === null) {
+    return false;
+  }
+  const startup = operation === "up" || operation === "restart";
+  if (phase === "effect") {
+    return startup && state.pending.generationId === generationId;
+  }
+  return (
+    phase === "retire" &&
+    (operation === "down" ||
+      (startup &&
+        state.current?.generationId === generationId &&
+        state.pending.generationId !== generationId))
+  );
+}
+function materialPreparation(opts: {
+  readonly selection: MaterialSelection;
+  readonly state: Receipt;
+  readonly saved: boolean;
+  readonly liveAfterHook: boolean;
+  readonly reservations: WeakSet<NativeComposeReservation>;
+}): { readonly generationId: string; readonly anchor: null } {
+  const { selection, state } = opts;
+  if (
+    opts.saved ||
+    selection.generation !== undefined ||
+    !selection.reservation ||
+    !opts.reservations.has(selection.reservation) ||
+    (state.pending !== null &&
+      (selection.phase !== "source" ||
+        state.pending.generationId !== selection.reservation.generationId)) ||
+    (state.beforeHooks !== null && !opts.liveAfterHook)
+  ) {
+    return refuse();
+  }
+  return { generationId: selection.reservation.generationId, anchor: null };
+}
+function materialDocumentHash(
+  selection: MaterialSelection,
+  known: WeakMap<NativeComposeGeneration, Manifest>
+): string | null {
+  if (selection.generation === undefined) {
+    return null;
+  }
+  return known.get(selection.generation)?.documentHash ?? refuse();
+}
+function materialSourceHookAllowed(
+  selection: MaterialSelection,
+  state: Receipt,
+  operation: NativeComposeOperation | null,
+  pending: Receipt["pending"]
+): boolean {
+  return (
+    selection.phase === "source" &&
+    state.beforeHooks?.phase === "after" &&
+    (operation === "up" || operation === "restart") &&
+    pending !== null &&
+    JSON.stringify(state.pending) === JSON.stringify(pending)
+  );
+}
+/** Check the actual generation-store mutation, including revocation and kernel-lock identity. */
+export async function assertNativeComposeMaterialAuthority(
+  opts: MaterialSelection & {
+    readonly authority: NativeComposeMaterialAuthority;
+  }
+): Promise<NativeComposeMaterialBinding> {
+  const { authority, ...selection } = opts;
+  if (typeof authority !== "object" || authority === null) {
+    return refuse();
+  }
+  const assert = materialAuthorities.get(authority);
+  if (!assert) {
+    return refuse();
+  }
+  return await assert(selection);
+}
 
 export type NativeComposeOperation = "up" | "restart" | "run" | "down";
 export type NativeComposePending = {
@@ -523,6 +684,8 @@ function completedReceipt(
 }
 
 export type NativeComposeMutation = {
+  /** Nonenumerable, live only within this withMutation invocation. */
+  readonly materialAuthority: NativeComposeMaterialAuthority;
   /** Journal finite host effects before spawning. Unknown completion permanently fences replay. */
   runBeforeHooks<T>(opts: {
     readonly assertFresh: () => Promise<void>;
@@ -763,18 +926,37 @@ export async function openNativeComposeGenerationStore(opts: {
     };
     const ownedIdentity =
       opts.mode === "saved" ? await initialize() : await withLock(initialize);
+    let mutationReceipt: {
+      readonly dev: number;
+      readonly ino: number;
+      readonly text: string;
+    } | null = null;
     const receipt = async () => {
       await check();
+      const read = await readPrivate(receiptPath, RECEIPT_LIMIT);
       const result = parseReceipt(
-        await jsonPrivate(receiptPath),
+        parsePrivateJson(read.text),
         ownedIdentity,
         checkoutAnchor
       );
       await check();
       return result;
     };
+    const assertMutationReceipt = async () => {
+      if (mutationReceipt === null) {
+        return;
+      }
+      const read = await readPrivate(receiptPath, RECEIPT_LIMIT);
+      if (
+        !sameFile(read.info, mutationReceipt) ||
+        read.text !== mutationReceipt.text
+      ) {
+        refuse();
+      }
+    };
     const save = async (state: Receipt) => {
       await receipt();
+      await assertMutationReceipt();
       const temporary = join(instanceRoot, `${token()}.receipt.tmp`);
       const text = JSON.stringify(state);
       const stagedInfo = await writeExclusive(temporary, text);
@@ -784,7 +966,11 @@ export async function openNativeComposeGenerationStore(opts: {
       if (!sameFile(staged.info, stagedInfo) || staged.text !== text) {
         refuse();
       }
+      await assertMutationReceipt();
       await rename(temporary, receiptPath);
+      if (mutationReceipt !== null) {
+        mutationReceipt = { dev: stagedInfo.dev, ino: stagedInfo.ino, text };
+      }
       await directories[4]?.file.sync();
       await receipt();
     };
@@ -974,14 +1160,40 @@ export async function openNativeComposeGenerationStore(opts: {
       async withMutation<T>(
         run: (mutation: NativeComposeMutation) => Promise<T>
       ) {
-        return await withLock(async () => {
+        return await withLock(async (lease) => {
+          const guarded = await readPrivate(receiptPath, RECEIPT_LIMIT);
+          parseReceipt(
+            parsePrivateJson(guarded.text),
+            ownedIdentity,
+            checkoutAnchor
+          );
+          mutationReceipt = {
+            dev: guarded.info.dev,
+            ino: guarded.info.ino,
+            text: guarded.text,
+          };
           let active = true;
+          let effectOperation: NativeComposeOperation | null = null;
+          let activePending: Receipt["pending"] = null;
+          const materialReservations = new WeakSet<NativeComposeReservation>();
+          const materialAuthority = Object.freeze({});
+          const materialWork = new Set<Promise<unknown>>();
           let actionDone: Promise<void> | null = null;
           const requireActive = () => {
             if (!active) {
               refuse();
             }
           };
+          materialActions.set(materialAuthority, async (run) => {
+            requireActive();
+            const work = run();
+            materialWork.add(work);
+            try {
+              return await work;
+            } finally {
+              materialWork.delete(work);
+            }
+          });
           const runAction = async <T>(action: () => Promise<T>): Promise<T> => {
             requireActive();
             if (actionDone !== null) {
@@ -1000,6 +1212,105 @@ export async function openNativeComposeGenerationStore(opts: {
               actionDone = null;
             }
           };
+          const selectMaterialGeneration = async (
+            selection: MaterialSelection,
+            state: Receipt
+          ) => {
+            if (["prepare", "source"].includes(selection.phase)) {
+              return materialPreparation({
+                selection,
+                state,
+                saved: opts.mode === "saved",
+                liveAfterHook: materialSourceHookAllowed(
+                  selection,
+                  state,
+                  effectOperation,
+                  activePending
+                ),
+                reservations: materialReservations,
+              });
+            }
+            if (
+              !selection.generation ||
+              selection.reservation !== undefined ||
+              !["inspect", "effect", "retire"].includes(selection.phase)
+            ) {
+              return refuse();
+            }
+            await verifyGeneration(selection.generation);
+            const anchor = knownAnchor(selection.generation);
+            if (
+              !(
+                receiptReferencesGeneration(state, anchor) &&
+                materialEffectAllowed(
+                  selection.phase,
+                  effectOperation,
+                  state,
+                  selection.generation.generationId
+                )
+              )
+            ) {
+              return refuse();
+            }
+            if (
+              selection.phase !== "inspect" &&
+              (activePending === null ||
+                JSON.stringify(state.pending) !== JSON.stringify(activePending))
+            ) {
+              return refuse();
+            }
+            return { generationId: selection.generation.generationId, anchor };
+          };
+          materialAuthorities.set(materialAuthority, async (selection) => {
+            requireActive();
+            await lease.assertHeld();
+            const read = await readPrivate(receiptPath, RECEIPT_LIMIT);
+            if (
+              mutationReceipt === null ||
+              !sameFile(read.info, mutationReceipt) ||
+              read.text !== mutationReceipt.text
+            ) {
+              return refuse();
+            }
+            const state = parseReceipt(
+              parsePrivateJson(read.text),
+              ownedIdentity,
+              checkoutAnchor
+            );
+            const { generationId, anchor } = await selectMaterialGeneration(
+              selection,
+              state
+            );
+            await lease.assertHeld();
+            const latest = await readPrivate(receiptPath, RECEIPT_LIMIT);
+            requireActive();
+            if (
+              !sameFile(read.info, latest.info) ||
+              read.text !== latest.text
+            ) {
+              return refuse();
+            }
+            return Object.freeze({
+              identity: ownedIdentity,
+              generationId,
+              checkout: frozenCheckout(checkoutAnchor),
+              receipt: Object.freeze({
+                dev: read.info.dev,
+                ino: read.info.ino,
+                hash: hash(read.text),
+              }),
+              lease: Object.freeze({
+                token: lease.token,
+                directory: lease.directory,
+                owner: lease.owner,
+              }),
+              generation: anchor === null ? null : frozenGeneration(anchor),
+              documentHash: materialDocumentHash(selection, known),
+              currentGenerationId: state.current?.generationId ?? null,
+              pendingGenerationId: state.pending?.generationId ?? null,
+              pendingToken: state.pending?.token ?? null,
+            });
+          });
           const checkEffect = async <T>(
             input: NativeComposeEffectOptions<T>
           ) => {
@@ -1077,6 +1388,7 @@ export async function openNativeComposeGenerationStore(opts: {
             return result;
           };
           const mutation: NativeComposeMutation = {
+            materialAuthority,
             async runBeforeHooks<T>(input: {
               readonly assertFresh: () => Promise<void>;
               readonly effect: () => Promise<{
@@ -1126,6 +1438,7 @@ export async function openNativeComposeGenerationStore(opts: {
                 generationId: token(),
               });
               reservations.add(reservation);
+              materialReservations.add(reservation);
               return reservation;
             },
             async publish(input) {
@@ -1204,6 +1517,8 @@ export async function openNativeComposeGenerationStore(opts: {
                     ? { ...anchor, token: token(), operation: input.operation }
                     : { ...state.pending, recoveryToken: token() };
                 await save({ ...state, pending });
+                effectOperation = input.operation;
+                activePending = pending;
                 try {
                   await checkEffect(input);
                   const result = await input.effect();
@@ -1212,17 +1527,28 @@ export async function openNativeComposeGenerationStore(opts: {
                   throw new NativeComposeGenerationError(
                     "E_NATIVE_COMPOSE_UNCERTAIN"
                   );
+                } finally {
+                  effectOperation = null;
+                  activePending = null;
                 }
               });
             },
           };
+          Object.defineProperty(mutation, "materialAuthority", {
+            enumerable: false,
+          });
+          Object.freeze(mutation);
           try {
             return await run(mutation);
           } finally {
             active = false;
+            materialAuthorities.delete(materialAuthority);
+            materialActions.delete(materialAuthority);
             if (actionDone !== null) {
               await actionDone;
             }
+            await Promise.allSettled(materialWork);
+            mutationReceipt = null;
           }
         });
       },

@@ -14,6 +14,7 @@ import {
   openLegacyComposeAdoptedGenerationStore,
 } from "../lib/native-compose-adoption-generation.ts";
 import { previewLegacyComposeAdoption } from "../lib/native-compose-adoption-preview.ts";
+import { requireNativeComposeBackend } from "../lib/native-compose-selection.ts";
 import { run } from "../lib/shell.ts";
 
 const spec = defineCommand({
@@ -116,7 +117,8 @@ async function adoptPrepared(
           {
             cwd: opts.projectRoot,
             stdin: "ignore",
-            stdout: "stderr",
+            stdout: "ignore",
+            stderr: "ignore",
             timeoutMs: resolveComposeStartupTimeoutMs(),
             forwardSignals: true,
           }
@@ -178,6 +180,7 @@ async function apply(opts: {
 }
 
 export const configAdoptCommand = withHandler(spec, async ({ ctx, args }) => {
+  requireNativeComposeBackend({ backend: process.env.HACK_RUNTIME_BACKEND });
   if (args.options.stop && args.options.rollback) {
     throw new CliUsageError("Use --stop separately from --rollback.");
   }

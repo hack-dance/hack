@@ -8,7 +8,8 @@ export async function runWithTerminalGroup(opts: {
   readonly command: readonly string[];
   readonly cwd?: string;
   readonly env: Record<string, string>;
-  readonly stdout?: "inherit" | "stderr";
+  readonly stdout?: RunOptions["stdout"];
+  readonly stderr?: RunOptions["stderr"];
   readonly stdin?: RunOptions["stdin"];
   readonly timeoutMs?: number;
   readonly onSpawn?: RunOptions["onSpawn"];
@@ -40,8 +41,8 @@ export async function runWithTerminalGroup(opts: {
     cwd: opts.cwd,
     env: opts.env,
     stdin: opts.stdin ?? "inherit",
-    stdout: opts.stdout === "stderr" ? 2 : "inherit",
-    stderr: "inherit",
+    stdout: opts.stdout === "stderr" ? 2 : (opts.stdout ?? "inherit"),
+    stderr: opts.stderr ?? "inherit",
     ipc(message: unknown) {
       if (
         typeof message !== "object" ||

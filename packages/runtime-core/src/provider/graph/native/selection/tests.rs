@@ -267,11 +267,13 @@ fn selection_cannot_transfer_candidate_or_extend_ingress_deadline() {
     let other = Fixture::new();
     selection_refused(selected.assert_fresh(&other.candidate));
     let mut selected = select(&fixture.candidate, fixture.options()).unwrap();
-    let original = selected.remaining().unwrap();
+    // Compare the stored same-clock deadline. Separate conservative conversions
+    // to Instant deduct different sampling intervals and need not be equal.
+    let original = selected.deadline.nanos();
     selected
         .restrict_deadline(Instant::now() + Duration::from_secs(120))
         .unwrap();
-    assert!(selected.remaining().unwrap() <= original);
+    assert!(selected.deadline.nanos() <= original);
     let shorter = Instant::now() + Duration::from_millis(100);
     selected.restrict_deadline(shorter).unwrap();
     assert!(selected.remaining().unwrap() <= shorter);

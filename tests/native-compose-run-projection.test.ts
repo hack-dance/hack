@@ -415,6 +415,31 @@ test("forged projection identity and wrong operation refuse without effects", as
   expect((await owner.loadCurrent()).pending).toBeNull();
 });
 
+test("read-only projection fence requires held mutation authority and exact known identity", async () => {
+  const { owner, generation } = await generationFixture();
+  const checks: (() => Promise<void>)[] = [];
+  await owner.withMutation(async (mutation) => {
+    const projection = await mutation.publishRunProjection({
+      generation,
+      service: "web",
+      assertFresh: async () => {},
+    });
+    await mutation.assertRunProjection(projection);
+    await expect(
+      mutation.assertRunProjection({ ...projection })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+    checks.push(() => mutation.assertRunProjection(projection));
+  });
+  const expiredCheck = checks[0];
+  if (!expiredCheck) {
+    throw new Error("Held projection fence missing");
+  }
+  await expect(expiredCheck()).rejects.toMatchObject({
+    code: "E_NATIVE_COMPOSE_STATE",
+  });
+  expect((await owner.loadCurrent()).pending).toBeNull();
+});
+
 test("delivery tampering during engine ownership observation refuses before intent and spawn", async () => {
   const { owner, generation } = await generationFixture();
   let effects = 0;

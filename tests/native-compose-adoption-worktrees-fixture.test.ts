@@ -1,12 +1,18 @@
 import { expect, spyOn, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createNativeComposeProbe } from "../src/lib/native-compose-ownership.ts";
 import {
+  assertAdoptionBridgeObservation,
+  assertAdoptionEndpointObservation,
+  assertAdoptionForeignCanaryObservation,
   assertAdoptionWorkerArgv,
   cleanupOwnedAdoptionFixture,
   createAdoptionFixtureProbe,
+  FOREIGN_CANARY_FORMAT,
+  FOREIGN_CANARY_MOUNTINFO_SCRIPT,
+  inspectAdoptionBridge,
   nativeComposeAdoptionWorktreesScenario,
   ownedAdoptionFixtureObservation,
   waitForAdoptionFixtureSql,
@@ -394,6 +400,390 @@ test("logical resource mismatches and shortened network IDs never authorize clea
       kind: "volume",
       row: { ...rows.volume, storage: "foreign" },
     })
+  ).toThrow(REFUSAL);
+});
+
+test("owned bridge fixture cleanup binds exact logical name and internal bridge policy", () => {
+  const custom = { ...instance, ownedNetwork: true as const };
+  const selected = {
+    ...rows.network,
+    name: `${instance.name}_private`,
+    logical: "private",
+    driver: "bridge",
+    scope: "local",
+    internal: true,
+  };
+  expect(
+    ownedAdoptionFixtureObservation({
+      instance: custom,
+      kind: "network",
+      row: selected,
+    })
+  ).toEqual({ id, createdAt });
+  for (const changed of [
+    { name: `${instance.name}_default` },
+    { logical: "default" },
+    { driver: "overlay" },
+    { scope: "swarm" },
+    { internal: false },
+  ]) {
+    expect(() =>
+      ownedAdoptionFixtureObservation({
+        instance: custom,
+        kind: "network",
+        row: { ...selected, ...changed },
+      })
+    ).toThrow(REFUSAL);
+  }
+});
+
+test("owned bridge observation refuses foreign membership and policy", () => {
+  const custom = { ...instance, ownedNetwork: true as const };
+  const selected = {
+    id,
+    name: `${instance.name}_private`,
+    logical: "private",
+    driver: "bridge",
+    scope: "local",
+    internal: true,
+    members: [id],
+  };
+  expect(() =>
+    assertAdoptionBridgeObservation({
+      instance: custom,
+      id,
+      members: [id],
+      row: selected,
+    })
+  ).not.toThrow();
+  for (const changed of [
+    { members: [] },
+    { members: [id, "b".repeat(64)] },
+    { internal: false },
+    { name: `${instance.name}_default` },
+    { id: "c".repeat(64) },
+  ]) {
+    expect(() =>
+      assertAdoptionBridgeObservation({
+        instance: custom,
+        id,
+        members: [id],
+        row: { ...selected, ...changed },
+      })
+    ).toThrow(REFUSAL);
+  }
+});
+
+test("owned bridge inspection requests the logical Compose label consumed by the policy oracle", async () => {
+  const custom = { ...instance, ownedNetwork: true as const };
+  let inspected = 0;
+  await inspectAdoptionBridge({
+    instance: custom,
+    id,
+    members: [id],
+    probe: async (args) => {
+      inspected++;
+      expect(args.slice(0, 3)).toEqual(["network", "inspect", "--format"]);
+      expect(args.at(-1)).toBe(id);
+      const format = args[3];
+      expect(format).toContain('index .Labels "com.docker.compose.network"');
+      return JSON.stringify({
+        id,
+        name: `${instance.name}_private`,
+        ...(format?.includes('index .Labels "com.docker.compose.network"')
+          ? { logical: "private" }
+          : {}),
+        driver: "bridge",
+        scope: "local",
+        internal: true,
+        members: [id],
+      });
+    },
+  });
+  expect(inspected).toBe(1);
+});
+
+test("foreign bridge canary pins its distinct owner, network and tmpfs without a data volume", () => {
+  const pin = {
+    id,
+    name: `${instance.name}-foreign-canary`,
+    created: createdAt,
+    image: `sha256:${"b".repeat(64)}`,
+    project: `${instance.name}-foreign`,
+    task: instance.name,
+    networkId: "c".repeat(64),
+    networkName: `${instance.name}_private`,
+  };
+  const row = {
+    id,
+    name: `/${pin.name}`,
+    created: createdAt,
+    image: pin.image,
+    project: pin.project,
+    task: pin.task,
+    native: null,
+    state: "running",
+    running: true,
+    pid: 123,
+    startedAt: "2026-10-08T12:00:00Z",
+    networkMode: pin.networkId,
+    readOnlyRootfs: true,
+    publishAllPorts: false,
+    portBindings: null,
+    runtimePorts: null,
+    configuredTmpfs: {
+      "/var/lib/postgresql/data": "rw,noexec,nosuid,nodev,mode=700",
+    },
+    hostBinds: null,
+    hostMounts: null,
+    volumesFrom: null,
+    imageVolumes: { "/var/lib/postgresql/data": {} },
+    networks: [{ name: pin.networkName, id: pin.networkId }],
+    mounts: [{ type: "tmpfs", target: "/var/lib/postgresql/data" }],
+  };
+  expect(FOREIGN_CANARY_FORMAT).toContain(
+    '{{json (index .HostConfig "Tmpfs")}}'
+  );
+  expect(FOREIGN_CANARY_FORMAT).toContain(
+    '{{json (index .HostConfig "Mounts")}}'
+  );
+  expect(FOREIGN_CANARY_FORMAT).toContain("{{json .Config.Volumes}}");
+  expect(FOREIGN_CANARY_FORMAT).toContain(
+    "{{json .HostConfig.PublishAllPorts}}"
+  );
+  expect(FOREIGN_CANARY_FORMAT).toContain("{{json .NetworkSettings.Ports}}");
+  expect(FOREIGN_CANARY_FORMAT).toContain(".Mounts");
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({ pin, state: "running", row })
+  ).not.toThrow();
+  // Docker can omit --tmpfs from Mounts even after start; mountinfo is checked separately.
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state: "running",
+      row: { ...row, mounts: [] },
+    })
+  ).not.toThrow();
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state: "running",
+      row: { ...row, runtimePorts: { "5432/tcp": null } },
+    })
+  ).not.toThrow();
+  const created = {
+    ...row,
+    state: "created",
+    running: false,
+    pid: 0,
+    startedAt: "0001-01-01T00:00:00Z",
+    networks: [{ name: pin.networkName, id: "" }],
+    mounts: [],
+  };
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state: "created",
+      row: created,
+    })
+  ).not.toThrow();
+  const exited = {
+    ...row,
+    state: "exited",
+    running: false,
+    pid: 0,
+    networks: [{ name: pin.networkName, id: "" }],
+  };
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state: "exited",
+      row: exited,
+    })
+  ).not.toThrow();
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state: "exited",
+      row: { ...exited, mounts: [] },
+    })
+  ).not.toThrow();
+  // Docker reports configured tmpfs in CREATED state before it appears in active Mounts.
+  for (const changed of [
+    { mounts: row.mounts },
+    { configuredTmpfs: null },
+    { configuredTmpfs: { "/var/lib/postgresql/data": "rw" } },
+    { hostBinds: ["/host/data:/var/lib/postgresql/data"] },
+    { hostMounts: [{ Type: "bind", Target: "/var/lib/postgresql/data" }] },
+    { volumesFrom: ["foreign"] },
+    { imageVolumes: {} },
+    { portBindings: { "5432/tcp": [{ HostPort: "15432" }] } },
+    { runtimePorts: { "5432/tcp": [{ HostPort: "15432" }] } },
+    { publishAllPorts: true },
+    { readOnlyRootfs: false },
+    { startedAt: row.startedAt },
+    { startedAt: "0001-01-01T12:00:00Z" },
+    { running: true },
+    { pid: 42 },
+  ]) {
+    expect(() =>
+      assertAdoptionForeignCanaryObservation({
+        pin,
+        state: "created",
+        row: { ...created, ...changed },
+      })
+    ).toThrow(REFUSAL);
+  }
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state: "exited",
+      row: {
+        ...exited,
+        mounts: [{ type: "bind", target: "/var/lib/postgresql/data" }],
+      },
+    })
+  ).toThrow(REFUSAL);
+  for (const changed of [
+    { project: instance.name },
+    { task: "different-fixture" },
+    { image: `sha256:${"d".repeat(64)}` },
+    { native: "1" },
+    { networkMode: "e".repeat(64) },
+    { networks: [{ name: pin.networkName, id: "e".repeat(64) }] },
+    { networks: [...row.networks, { name: "foreign", id: pin.networkId }] },
+    { mounts: [{ type: "volume", target: "/var/lib/postgresql/data" }] },
+    { state: "exited" },
+    { startedAt: "not-a-docker-timestamp" },
+    { runtimePorts: { "5432/tcp": [{ HostPort: "15432" }] } },
+  ]) {
+    expect(() =>
+      assertAdoptionForeignCanaryObservation({
+        pin,
+        state: "running",
+        row: { ...row, ...changed },
+      })
+    ).toThrow(REFUSAL);
+  }
+});
+
+test("running canary requires a unique exact-target kernel tmpfs mount", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hack-canary-mountinfo-"));
+  const path = join(directory, "mountinfo");
+  try {
+    expect(
+      FOREIGN_CANARY_MOUNTINFO_SCRIPT.split("/proc/self/mountinfo")
+    ).toHaveLength(2);
+    const quoted = `'${path.replaceAll("'", "'\\''")}'`;
+    const script = FOREIGN_CANARY_MOUNTINFO_SCRIPT.replace(
+      "done < /proc/self/mountinfo",
+      `done < ${quoted}`
+    );
+    const run = async (lines: string) => {
+      await writeFile(path, lines, { mode: 0o600 });
+      const child = Bun.spawnSync(["/bin/sh", "-c", script], {
+        env: { PATH: "/usr/bin:/bin" },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      return {
+        code: child.exitCode,
+        stdout: new TextDecoder().decode(child.stdout),
+        stderr: new TextDecoder().decode(child.stderr),
+      };
+    };
+    const target = "/var/lib/postgresql/data";
+    const tmpfs = `42 21 0:51 / ${target} rw,nosuid,nodev,noexec - tmpfs tmpfs rw\n`;
+    expect(await run(tmpfs)).toEqual({
+      code: 0,
+      stdout: "tmpfs-ok\n",
+      stderr: "",
+    });
+    expect(
+      await run(`42 21 0:51 / ${target} rw shared:12 - tmpfs tmpfs rw\n`)
+    ).toEqual({ code: 0, stdout: "tmpfs-ok\n", stderr: "" });
+    for (const lines of [
+      `42 21 0:51 / ${target} rw - ext4 /dev/vda rw\n`,
+      `42 21 0:51 / ${target} rw - ext4 tmpfs - tmpfs rw\n`,
+      `42 21 0:51 / ${target}-other rw - tmpfs tmpfs rw\n`,
+      `${tmpfs}${tmpfs}`,
+      "42 21 0:51 / /other rw - tmpfs tmpfs rw\n",
+    ]) {
+      const result = await run(lines);
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe("");
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("running original requires exact bridge ID and static aliases; stopped alias loss stays bounded", () => {
+  const custom = { ...instance, ownedNetwork: true as const };
+  const selected = {
+    id,
+    running: true,
+    networks: [
+      {
+        name: `${instance.name}_private`,
+        id,
+        aliases: [`${instance.name}-db-1`, "db", "db-reader"],
+      },
+    ],
+  };
+  const verify = (row: unknown, running = true) =>
+    assertAdoptionEndpointObservation({
+      instance: custom,
+      networkId: id,
+      container: { id, service: "db" },
+      running,
+      row,
+    });
+  expect(() => verify(selected)).not.toThrow();
+  const originalEndpoint = selected.networks[0];
+  if (!originalEndpoint) {
+    throw new Error("Fixture endpoint missing");
+  }
+  for (const endpoint of [
+    { ...originalEndpoint, id: "c".repeat(64) },
+    { ...originalEndpoint, aliases: ["db", "db-reader"] },
+    {
+      ...originalEndpoint,
+      aliases: [...originalEndpoint.aliases, "foreign"],
+    },
+    { ...originalEndpoint, name: `${instance.name}_default` },
+  ]) {
+    expect(() => verify({ ...selected, networks: [endpoint] })).toThrow(
+      REFUSAL
+    );
+  }
+  expect(() =>
+    verify({
+      ...selected,
+      networks: [{ ...selected.networks[0], aliases: null }],
+    })
+  ).toThrow(REFUSAL);
+  expect(() =>
+    verify(
+      {
+        ...selected,
+        running: false,
+        networks: [{ ...selected.networks[0], aliases: null }],
+      },
+      false
+    )
+  ).not.toThrow();
+  expect(() =>
+    verify(
+      {
+        ...selected,
+        running: false,
+        networks: [{ ...selected.networks[0], aliases: ["foreign"] }],
+      },
+      false
+    )
   ).toThrow(REFUSAL);
 });
 

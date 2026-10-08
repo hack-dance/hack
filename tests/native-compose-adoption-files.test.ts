@@ -464,3 +464,39 @@ test("issued private non-enumerable source fields survive both retained-file map
     },
   });
 });
+
+test("file8 preparation stays a distinct closed family from the canonical owned bridge", () => {
+  const composeText = JSON.stringify({
+    name: "fixture",
+    networks: { private: { internal: true } },
+    configs: { settings: { file: "../material/config" } },
+    volumes: { data: { name: "fixture_data" } },
+    services: {
+      app: {
+        image: "fixture:pinned",
+        networks: ["private"],
+        configs: ["settings"],
+        volumes: ["data:/data"],
+      },
+    },
+  });
+  const source = { configText: '{"name":"fixture"}', composeText };
+  for (const mapped of [
+    mapLegacyNativeRetainedFileAdoptionBaseline(source),
+    mapLegacyNativeRetainedFileStorage(source),
+  ]) {
+    expect(mapped.candidate).toBeUndefined();
+    expect(mapped.report.complete).toBe(false);
+    expect(mapped.report.fields).toContainEqual(
+      expect.objectContaining({
+        pointer: "/networks",
+        status: "refused",
+        code: "retained_file_network_unsupported",
+      })
+    );
+  }
+  const planned = planLegacyComposeRetainedFileAdoption(source);
+  expect(planned.report.supported).toBe(false);
+  expect(planned.intent).toBeUndefined();
+  expect(JSON.stringify(planned)).not.toContain("material/config");
+});

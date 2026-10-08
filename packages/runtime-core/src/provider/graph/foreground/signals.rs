@@ -13,12 +13,18 @@ extern "C" fn notified(_: libc::c_int) {
 pub(super) fn startup_pending() -> bool {
     PENDING.load(Ordering::Acquire)
 }
-pub(super) struct Events {
+pub(in crate::provider::graph) struct Events {
     queue: OwnedFd,
     previous: Vec<(i32, libc::sigaction)>,
 }
 impl Events {
-    pub fn new(publication: &Publication) -> Result<Self, CandidateError> {
+    pub(super) fn new(publication: &Publication) -> Result<Self, CandidateError> {
+        Self::new_descriptor(publication.descriptor())
+    }
+    /// Caller retains the exact listener for the entire signal queue lifetime.
+    pub(in crate::provider::graph) fn new_descriptor(
+        listener: BorrowedFd<'_>,
+    ) -> Result<Self, CandidateError> {
         if OWNED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
@@ -49,7 +55,7 @@ impl Events {
             udata: std::ptr::null_mut(),
         };
         let changes = [
-            change(publication.fd() as usize, libc::EVFILT_READ),
+            change(listener.as_raw_fd() as usize, libc::EVFILT_READ),
             change(libc::SIGTERM as usize, libc::EVFILT_SIGNAL),
             change(libc::SIGINT as usize, libc::EVFILT_SIGNAL),
         ];

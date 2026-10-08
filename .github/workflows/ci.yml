@@ -304,11 +304,13 @@ jobs:
         run: bun run privacy:check
       - name: Quality checks (Turbo)
         run: bun run turbo:check
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Prepare matching compiler for private file owner tests
+        run: bun run build:config-compiler
       - name: Tests (Turbo)
         run: bun run turbo:test
       - name: Build CLI
         run: bun run build
-      - uses: dtolnay/rust-toolchain@1.97.1
       - name: Build release smoke (no tests)
         run: bun run build:release --skip-tests --no-clean --out=dist/release-ci
 

@@ -149,6 +149,92 @@ async function waitForPid(path: string): Promise<number> {
   return pid;
 }
 
+async function waitForCompilerAbsent(opts: {
+  readonly pid: number;
+  readonly deadline: number;
+  readonly checkPresent?: (pid: number) => unknown;
+}): Promise<void> {
+  const checkPresent = opts.checkPresent ?? ((pid) => process.kill(pid, 0));
+  while (true) {
+    try {
+      checkPresent(opts.pid);
+    } catch (error) {
+      if (isRecord(error) && error.code === "ESRCH") {
+        return;
+      }
+      throw error;
+    }
+    if (performance.now() >= opts.deadline) {
+      throw new Error("Synthetic compiler remains alive after cancellation");
+    }
+    await Bun.sleep(10);
+  }
+}
+
+test("compiler absence proof waits for a signal peer after wrapper exit", async () => {
+  const pidPath = join(directory, "peer-pid");
+  const signalPath = join(directory, "peer-signal");
+  const releasePath = join(directory, "peer-release");
+  const body = `process.once('SIGTERM',async()=>{await Bun.write(${JSON.stringify(signalPath)},'received'); const deadline=performance.now()+5000; while (!(await Bun.file(${JSON.stringify(releasePath)}).exists()) && performance.now()<deadline) await Bun.sleep(10); process.exit(await Bun.file(${JSON.stringify(releasePath)}).exists()?143:1);}); await Bun.write(${JSON.stringify(pidPath)},String(process.pid)); await Bun.sleep(10000);`;
+  const peer = Bun.spawn([process.execPath, "--no-env-file", "-e", body], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  children.push(peer);
+  const pid = await waitForPid(pidPath);
+  const wrapper = Bun.spawn(
+    [process.execPath, "--no-env-file", "-e", "process.exit(143)"],
+    { stdin: "ignore", stdout: "pipe", stderr: "pipe" }
+  );
+  children.push(wrapper);
+  expect(await wrapper.exited).toBe(143);
+  peer.kill("SIGTERM");
+  const deadline = performance.now() + 5000;
+  while (!(await Bun.file(signalPath).exists())) {
+    if (performance.now() >= deadline) {
+      throw new Error("Synthetic signal peer did not receive cancellation");
+    }
+    await Bun.sleep(10);
+  }
+  expect(process.kill(pid, 0)).toBe(true);
+  const absent = waitForCompilerAbsent({ pid, deadline });
+  await Bun.write(releasePath, "release");
+  expect(await peer.exited).toBe(143);
+  await absent;
+  expect(() => process.kill(pid, 0)).toThrow();
+}, 15_000);
+
+test("compiler absence proof refuses a signal peer that remains alive", async () => {
+  const peer = Bun.spawn(
+    [process.execPath, "--no-env-file", "-e", "await Bun.sleep(10000)"],
+    { stdin: "ignore", stdout: "pipe", stderr: "pipe" }
+  );
+  children.push(peer);
+  await expect(
+    waitForCompilerAbsent({ pid: peer.pid, deadline: performance.now() + 50 })
+  ).rejects.toThrow("remains alive");
+  expect(process.kill(peer.pid, 0)).toBe(true);
+});
+
+test.each([
+  "EPERM",
+  "EIO",
+])("compiler absence proof refuses unknown presence after %s", async (code) => {
+  const error = Object.assign(new Error("Cannot establish process absence"), {
+    code,
+  });
+  await expect(
+    waitForCompilerAbsent({
+      pid: process.pid,
+      deadline: performance.now() + 5000,
+      checkPresent: () => {
+        throw error;
+      },
+    })
+  ).rejects.toBe(error);
+});
+
 test("timeout reaps the owned compiler and never emits its output", async () => {
   const pidPath = join(directory, "pid");
   const binary = await compiler({
@@ -337,7 +423,7 @@ test.each([
 test.each([
   "SIGINT",
   "SIGTERM",
-] as const)("owned foreground suite group cancellation %s refuses launch and reaps compiler", async (signal) => {
+] as const)("owned foreground suite group cancellation %s refuses launch and confirms compiler absence", async (signal) => {
   await suiteFixture();
   const { binary, pidPath, releasePath } = await gatedCompiler();
   const child = Bun.spawn([process.execPath, "--no-env-file", "run", "test"], {
@@ -353,6 +439,7 @@ test.each([
   });
   children.push(child);
   const pid = await waitForPid(pidPath);
+  const drainDeadline = performance.now() + 5000;
   process.kill(process.platform === "win32" ? child.pid : -child.pid, signal);
   await Bun.write(releasePath, "release");
   const [_stdout, stderr, exit] = await Promise.all([
@@ -361,6 +448,9 @@ test.each([
     child.exited,
   ]);
   expect(exit, stderr).not.toBe(0);
+  // The preflight owns a separate compiler group; wrapper exit is not its exit.
+  // Require actual absence within the existing synthetic-process observation budget.
+  await waitForCompilerAbsent({ pid, deadline: drainDeadline });
   expect(() => process.kill(pid, 0)).toThrow();
   expect(await Bun.file(join(directory, "suite-launched")).exists()).toBe(
     false

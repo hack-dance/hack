@@ -1258,6 +1258,7 @@ export async function openNativeComposeGenerationStore(opts: {
       if (input.beforeComplete) {
         await input.beforeComplete();
         await verifyGeneration(input.generation);
+        await input.assertOwned();
         latest = await receipt();
         if (JSON.stringify(latest.pending) !== JSON.stringify(pending)) {
           refuse();

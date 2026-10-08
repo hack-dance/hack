@@ -21,6 +21,29 @@ const FOREIGN = {
   composeProject: "foreign-command-fixture",
   ownerToken: "e".repeat(32),
 };
+const CADDY_READ = [
+  "exec",
+  BINDING.proxyId,
+  "curl",
+  "--disable",
+  "--silent",
+  "--show-error",
+  "--fail",
+  "--proxy",
+  "",
+  "--noproxy",
+  "*",
+  "--proto",
+  "=http",
+  "--max-time",
+  "10",
+  "--max-redirs",
+  "0",
+  "--write-out",
+  "\n%{http_code}",
+  "--url",
+  "http://127.0.0.1:2019/config/apps/http/servers",
+];
 const roots: string[] = [];
 const children: Bun.Subprocess<"ignore", "pipe", "pipe">[] = [];
 afterEach(async () => {
@@ -37,7 +60,14 @@ afterEach(async () => {
 
 /** Substitute compiler transport and Docker observation; all command owners and private stores are real. */
 async function fixture(
-  mode: "ordinary" | "source-drift" | "proxy-drift" = "ordinary"
+  mode:
+    | "ordinary"
+    | "source-drift"
+    | "proxy-drift"
+    | "hook-source-drift"
+    | "hook-proxy-drift"
+    | "hook-route-change"
+    | "proxy-reader-missing" = "ordinary"
 ) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-routing-command-"))
@@ -57,6 +87,30 @@ async function fixture(
   );
   const input = composeFixture();
   input.plan.worktree = { auto_branch: false, inherit_local: true };
+  const hooks = mode.startsWith("hook-");
+  if (hooks) {
+    const update =
+      mode === "hook-route-change"
+        ? 'const source=await Bun.file(".hack/hack.project.json").json();source.routes={domain:"renamed.test"};await Bun.write(".hack/hack.project.json",JSON.stringify(source));'
+        : "";
+    input.plan.host = {
+      up: {
+        before: [
+          {
+            name: "before-routing",
+            command: {
+              exec: [
+                process.execPath,
+                "-e",
+                `${update}await Bun.write("hook-complete","complete");`,
+              ],
+            },
+            env_target: { kind: "host" },
+          },
+        ],
+      },
+    };
+  }
   input.plan.routes = {
     domain: "dev.test",
     aliases: {},
@@ -92,19 +146,33 @@ async function fixture(
   await Bun.write(
     join(root, "compiler"),
     `#!${process.execPath}
+import { appendFileSync, existsSync } from "node:fs";
+const root = ${JSON.stringify(root)}, mode = ${JSON.stringify(mode)}, hooks = ${JSON.stringify(hooks)};
 const operation = process.argv[2];
 if (operation === "--protocol") {
-  console.log(JSON.stringify({ transport_version: 1, authored_version: 1, plan_version: 1, resolve_version: 1, local_version: 1, env_plan_version: 1, routing_plan_version: 1 }));
+  console.log(JSON.stringify({ transport_version: 1, authored_version: 1, plan_version: 1, resolve_version: 1, local_version: 1, env_plan_version: 1, host_env_plan_version: 1, routing_plan_version: 1 }));
 } else {
   const raw = await Bun.stdin.text();
   const request = operation === "compile" ? {} : JSON.parse(raw);
   const result = { transport_version: 1, ok: true, semantic_hash: "a".repeat(64), declared_workloads: { web: "service" }, plan: ${JSON.stringify(input.plan)} };
+  const afterHook = existsSync(root + "/hook-complete");
+  const resolution = ${JSON.stringify(resolution)};
+  if (mode === "hook-route-change" && afterHook) {
+    result.plan.routes.domain = "renamed.test";
+    resolution.domain = "renamed.test";
+    resolution.project_origin = resolution.open_origin = resolution.routes.app.origin = "https://fixture.renamed.test";
+  }
+  appendFileSync(root + "/compiler-requests", JSON.stringify({operation, afterHook, domain: resolution.domain}) + "\\n");
+  if (hooks) result.host_env_targets = {include_default: true, workloads: []};
   if (operation !== "compile") {
     result.local_resolution = { overlay: null, origin: "project", auto_branch: false, inherit_local: true, resolution_hash: "b".repeat(64) };
     if (request.routing_probe === true) result.routing_inputs_required = true;
-    else result.routing_resolution = ${JSON.stringify(resolution)};
+    else result.routing_resolution = resolution;
   }
-  if (operation === "plan") result.environment_plan = { plan_version: 1, overlay: null, overlay_exists: false, complete: true, workloads: { web: {} }, warnings: [], diagnostics: [] };
+  if (operation === "plan") {
+    result.environment_plan = { plan_version: 1, overlay: null, overlay_exists: false, complete: true, workloads: { web: {} }, warnings: [], diagnostics: [] };
+    if (hooks) result.environment_plan.host = {"before-routing": {env_target: {kind: "host"}, bindings: {}}};
+  }
   console.log(JSON.stringify(result));
 }
 `
@@ -117,7 +185,19 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 const root = ${JSON.stringify(root)}, mode = ${JSON.stringify(mode)}, binding = ${JSON.stringify(BINDING)};
 const args = process.argv.slice(2);
 appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
-if (args[0] === "compose" || args[0] === "exec" || ["rm", "stop", "start", "create", "remove"].includes(args[1])) {
+if (args[0] === "exec") {
+  if (JSON.stringify(args) !== ${JSON.stringify(JSON.stringify(CADDY_READ))}) {
+    writeFileSync(root + "/engine-effect", "unexpected exec"); process.exit(98);
+  }
+  if (mode === "proxy-reader-missing") { console.error("private-command-canary"); process.exit(127); }
+  process.stdout.write(JSON.stringify({ srv0: { listen: [":443"], tls_connection_policies: [{}], routes: [
+    { match: [{host: ["control.fixture.test"]}], handle: [{handler: "subroute", routes: [
+      {handle: [{handler: "reverse_proxy", upstreams: [{dial: "172.29.0.3:3000"}]}], terminal: true}
+    ]}], terminal: true }
+  ] } }) + "\\n200");
+  process.exit(0);
+}
+if (args[0] === "compose" || ["rm", "stop", "start", "create", "remove"].includes(args[1])) {
   writeFileSync(root + "/engine-effect", "unexpected engine effect"); process.exit(98);
 }
 const format = args[args.indexOf("--format") + 1] ?? "";
@@ -125,8 +205,8 @@ if (args[0] === "info") {
   const counter = root + "/info-count";
   const count = existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0;
   writeFileSync(counter, String(count + 1));
-  if (mode === "source-drift" && count === 0) appendFileSync(${JSON.stringify(source)}, "\\n \\n");
-  console.log(JSON.stringify(mode === "proxy-drift" && count >= 2 ? "replaced-engine" : binding.engineId));
+  if (["source-drift", "hook-source-drift"].includes(mode) && count === 0) appendFileSync(${JSON.stringify(source)}, "\\n \\n");
+  console.log(JSON.stringify(["proxy-drift", "hook-proxy-drift"].includes(mode) && count >= 6 ? "replaced-engine" : binding.engineId));
 } else if (args[0] === "network" && args[1] === "inspect") {
   console.log(JSON.stringify({ id: binding.networkId, name: "hack-dev" }));
 } else if (args[0] === "container" && args[1] === "ls") {
@@ -202,6 +282,14 @@ test("foreign hostname claims refuse the startup command before Docker mutation"
     });
     const output = await invoke(root, ["up", "--detach", "--json"]);
     expect(output).toContain("routing admission");
+    expect(output).not.toContain("E_NATIVE_COMPOSE_PROXY_ACCESS");
+    const commands: string[][] = (
+      await readFile(join(root, "commands"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(commands).toContainEqual(CADDY_READ);
     expect((await foreign.reopen(attempt.reference)).phase).toBe("reserved");
     await foreign.rollback(attempt);
   } finally {
@@ -212,16 +300,37 @@ test("foreign hostname claims refuse the startup command before Docker mutation"
 test.each([
   "source-drift",
   "proxy-drift",
+  "hook-source-drift",
+  "hook-proxy-drift",
 ] as const)("startup %s refuses before the engine child and rolls back new claims", async (mode) => {
   const root = await fixture(mode);
   const output = await invoke(root, ["up", "--detach", "--json"]);
   expect(output).toContain("E_CONFIG_INVALID");
+  expect(output).not.toContain("E_NATIVE_COMPOSE_PROXY_ACCESS");
   const commands: string[][] = (await readFile(join(root, "commands"), "utf8"))
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
   expect(commands.some((args) => args[0] === "info")).toBe(true);
   expect(commands.some((args) => args[0] === "compose")).toBe(false);
+  expect(commands).toContainEqual(CADDY_READ);
+  if (mode.startsWith("hook-")) {
+    expect(await Bun.file(join(root, "hook-complete")).text()).toBe("complete");
+    const requests = (await Bun.file(join(root, "compiler-requests")).text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(requests).toContainEqual({
+      operation: "plan",
+      afterHook: false,
+      domain: "dev.test",
+    });
+    expect(requests).toContainEqual({
+      operation: "plan",
+      afterHook: true,
+      domain: "dev.test",
+    });
+  }
   const foreign = await openNativeComposeRouteClaims({
     root: join(root, "home", "compose-routing"),
     binding: BINDING,
@@ -236,4 +345,51 @@ test.each([
   } finally {
     await foreign.close();
   }
+}, 20_000);
+
+test("completed hook route changes use fresh hostname claims before any engine effect", async () => {
+  const root = await fixture("hook-route-change");
+  const foreign = await openNativeComposeRouteClaims({
+    root: join(root, "home", "compose-routing"),
+    binding: BINDING,
+    owner: FOREIGN,
+  });
+  try {
+    const occupied = await foreign.acquire({
+      hostnames: ["fixture.renamed.test"],
+      generationIdentity: "f".repeat(32),
+    });
+    const output = await invoke(root, ["up", "--detach", "--json"]);
+    expect(output).toContain("routing admission");
+    expect(output).not.toContain("E_NATIVE_COMPOSE_PROXY_ACCESS");
+    expect(await Bun.file(join(root, "hook-complete")).text()).toBe("complete");
+    const requests = (await Bun.file(join(root, "compiler-requests")).text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(requests).toContainEqual({
+      operation: "plan",
+      afterHook: true,
+      domain: "renamed.test",
+    });
+    const available = await foreign.acquire({
+      hostnames: ["fixture.dev.test"],
+      generationIdentity: "d".repeat(32),
+    });
+    await foreign.rollback(available);
+    expect((await foreign.reopen(occupied.reference)).phase).toBe("reserved");
+    await foreign.rollback(occupied);
+  } finally {
+    await foreign.close();
+  }
+}, 20_000);
+
+test("missing fixed Caddy reader preserves the actionable public refusal", async () => {
+  const root = await fixture("proxy-reader-missing");
+  const output = await invoke(root, ["up", "--detach", "--json"]);
+  expect(output).toContain("E_NATIVE_COMPOSE_PROXY_ACCESS");
+  expect(output).toContain("hack global install");
+  expect(output).toContain("hack doctor --fix");
+  expect(output).toContain("retaining caddy_data");
+  expect(output).not.toContain("routing admission or verification failed");
 }, 20_000);

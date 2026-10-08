@@ -136,6 +136,7 @@ async function savedFixture(
         operation: "up",
         assertFresh: async () => {},
         assertOwned: async () => {},
+        ...(routing ? { beforeComplete: () => routing.complete() } : {}),
         effect: async () => {
           await routing?.markEffectsPossible();
           if (outcome === "complete") {
@@ -144,9 +145,6 @@ async function savedFixture(
           return { outcome, value: 0 };
         },
       });
-      if (outcome === "complete") {
-        await routing?.complete();
-      }
     } finally {
       await routing?.close();
     }
@@ -269,8 +267,29 @@ test.each([
 test.each([
   "complete",
   "uncertain",
+  "interrupted-hook",
 ] as const)("saved routed stop after %s startup runs before retained-claims diagnostics", async (outcome) => {
-  const { root } = await savedFixture(outcome, true);
+  const { root } = await savedFixture(
+    outcome === "uncertain" ? "uncertain" : "complete",
+    true
+  );
+  if (outcome === "interrupted-hook") {
+    const hookOwner = await openNativeComposeGenerationStore({
+      projectRoot: root,
+      instance: null,
+      mode: "prepare",
+    });
+    try {
+      await hookOwner.withMutation((mutation) =>
+        mutation.runBeforeHooks({
+          assertFresh: async () => {},
+          effect: async () => ({ outcome: "uncertain", value: 143 }),
+        })
+      );
+    } finally {
+      await hookOwner.close();
+    }
+  }
   await Bun.write(
     join(root, "docker"),
     `#!${process.execPath}
@@ -314,9 +333,18 @@ process.exit(0);
     stderr = new Response(child.stderr).text();
   expect(await child.exited).toBe(1);
   const outputs = await Promise.all([stdout, stderr]);
-  expect(outputs.join("")).toContain("Owned native Compose containers stopped");
+  expect(outputs.join("")).toContain(
+    outcome === "interrupted-hook"
+      ? "Retained engine resources stopped"
+      : "Owned native Compose containers stopped"
+  );
   expect(outputs.join("")).not.toContain("private-routing-canary");
   expect(outputs.join("")).not.toContain("invalid authored input");
+  if (outcome === "interrupted-hook") {
+    expect(outputs.join("")).toContain("E_LIFECYCLE_FAILED");
+    expect(outputs.join("")).toContain("Routing claims are retained");
+    expect(outputs.join("")).toContain("host hook");
+  }
   expect(await Bun.file(join(root, "owned-stop")).text()).toBe("complete");
   const commands: string[][] = (await readFile(join(root, "commands"), "utf8"))
     .trim()
@@ -342,6 +370,7 @@ process.exit(0);
     const current = await saved.loadCurrent();
     expect(current.stopped).toBe(true);
     expect(current.pending).toBeNull();
+    expect(current.beforeHooksPending).toBe(outcome === "interrupted-hook");
   } finally {
     await saved.close();
   }

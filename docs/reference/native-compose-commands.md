@@ -156,7 +156,8 @@ acquired by that live preparation.
 Startup writes pending engine intent before spawning. After the child is reaped,
 Hack verifies workload and active-route readiness, then checks the owned generation
 and pending intent again. Route claims complete inside a finalizer before the
-generation's completed receipt is written. A finalizer failure retains pending
+generation's completed receipt is written. Hack rechecks the generation, engine
+ownership and pending intent after the finalizer. A finalizer failure retains pending
 engine uncertainty and prevents a ready report. The two private stores do not have
 an atomic commit: a crash after claim completion but before receipt publication
 still leaves the pending generation for explicit owned stop recovery. Fresh absence

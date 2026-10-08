@@ -750,6 +750,7 @@ async function prepareCommand(opts: {
         ) {
           return invalid();
         }
+        let routingCompleted = false;
         const result = await mutation.runEffect({
           generation,
           operation,
@@ -761,9 +762,18 @@ async function prepareCommand(opts: {
           },
           assertOwned: async () => {
             await assertNativeComposeOwned(selection);
-            await routing?.assertBeforeEffects();
+            if (!routingCompleted) {
+              await routing?.assertBeforeEffects();
+            }
           },
-          ...(routing ? { beforeComplete: () => routing.complete() } : {}),
+          ...(routing
+            ? {
+                beforeComplete: async () => {
+                  await routing.complete();
+                  routingCompleted = true;
+                },
+              }
+            : {}),
           effect: async () => {
             if (operation === "run") {
               return await runOneOff({

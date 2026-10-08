@@ -38,7 +38,7 @@ PromoteCandidate ==
     /\ stage \in {"pending", "reserved"} /\ Matches /\ alive
     /\ pending # 0 /\ (EnforceReservation => savedNext = pending)
     /\ owner' = pending /\ pending' = 0 /\ stage' = "promoted"
-    /\ unsafePromotion' = unsafePromotion \/ savedNext # pending
+    /\ unsafePromotion' = (unsafePromotion \/ savedNext # pending)
     /\ UNCHANGED <<fresh, directory, savedOwner, savedNext, release,
                     active, alive, attempts, history, resources, binding,
                     unsafeAbsence, unsafeEffect>>
@@ -58,7 +58,7 @@ AdvanceResources ==
     /\ (EnforceAuthority => Issued) /\ (EnforceBinding => Matches)
     /\ progress' = progress + 1
     /\ ready' = (IF progress = 1 THEN FALSE ELSE ready)
-    /\ unsafeEffect' = unsafeEffect \/ ~Issued \/ ~Matches
+    /\ unsafeEffect' = (unsafeEffect \/ ~Issued \/ ~Matches)
     /\ UNCHANGED <<fresh, publication, process, history, binding,
                     unsafePromotion, unsafeAbsence>>
 ArmRelease ==
@@ -70,7 +70,7 @@ RemoveOwner ==
     /\ stage \in {"leased", "releasing"} /\ Issued /\ Matches
     /\ (EnforceRelease => release)
     /\ owner' = 0 /\ active' = FALSE /\ stage' = "empty"
-    /\ unsafeAbsence' = unsafeAbsence \/ ~release
+    /\ unsafeAbsence' = (unsafeAbsence \/ ~release)
     /\ UNCHANGED <<fresh, directory, pending, savedOwner, savedNext, release,
                     alive, attempts, history, resources, binding,
                     unsafePromotion, unsafeEffect>>

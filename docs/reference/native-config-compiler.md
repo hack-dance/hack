@@ -93,6 +93,26 @@ versions refuse; omitted fields retain their documented defaults.
   bypass managed secret handling. The registered `native-config-build` fixture
   covers existing basic-build fidelity and these refusals. It does not qualify
   the full advanced-build contract or builder-cache reclamation.
+
+  Native Compose execution lowers this basic subset to direct `docker buildx
+  build` argv under its existing generation mutation journal. Literal context and
+  Dockerfile paths are decoded once from the private Compose document, with no
+  shell or Bake expression evaluation. The single generated execution document
+  substitutes owned image tags and an internal `never` policy for build sources;
+  authored image-only policies remain unchanged. A private `x-hack-native-build`
+  extension retains escaped build declarations in the generation's immutable
+  hash and saved-command comparison. Compose `up` also uses `--no-build`;
+  Compose `run` receives no unsupported no-build flag and cannot rebuild this
+  image-only document. Omitted policy builds a missing generated image; `build` rebuilds
+  it using the builder's normal cache and FROM pull behavior. The generated image
+  tag follows Compose's `<project>-<workload>:latest` convention; image and build
+  remain mutually exclusive in authored configuration. `run` includes only its
+  selected workload and transitive dependencies. Existing generated tags must
+  carry the exact native owner, instance and workload image labels before reuse
+  or replacement. Unlabelled images from earlier candidates require explicit
+  migration; they are never silently adopted or pruned. Failed or cancelled
+  builds retain pending recovery state. This changes build dispatch, not the
+  accepted advanced options or any qualified performance result.
 - Optional `pull_policy` is a canonical string: image-only workloads accept
   `always`, `never` or `missing`; build-only workloads accept `build`. The names
   follow [Compose's pull policies](https://docs.docker.com/reference/compose-file/services/#pull_policy):

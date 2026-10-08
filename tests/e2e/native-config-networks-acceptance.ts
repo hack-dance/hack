@@ -115,6 +115,20 @@ function object(text: string): Record<string, unknown> {
 function own(value: Record<string, unknown>, name: string): unknown {
   return Object.hasOwn(value, name) ? value[name] : undefined;
 }
+
+/** The mutation owner redacts admission failures to this fixed state error. */
+export function nativeNetworkFixtureStateRefused(value: unknown): boolean {
+  if (!isRecord(value) || own(value, "ok") !== false) {
+    return false;
+  }
+  const error = own(value, "error");
+  return (
+    isRecord(error) &&
+    own(error, "code") === "E_CONFIG_INVALID" &&
+    own(error, "message") ===
+      "Native Compose state is unsafe or changed; values omitted. Inspect owned state before recovery."
+  );
+}
 function sameNames(value: unknown, expected: readonly string[]): boolean {
   return (
     Array.isArray(value) &&
@@ -1719,13 +1733,31 @@ export const nativeConfigNetworksScenario: Scenario = {
         created: canaryValue.Created,
       };
       await docker(["container", "start", canaryId]);
+      const activeCanary = await inspect(docker, "container", canaryId);
+      const occupiedBridge = await inspect(docker, "network", outbound.id);
+      requireValue(
+        activeCanary.Id === canaryId &&
+          activeCanary.Created === canary.created &&
+          isRecord(activeCanary.State) &&
+          activeCanary.State.Status === "running" &&
+          occupiedBridge.Id === outbound.id &&
+          isRecord(occupiedBridge.Containers) &&
+          Object.hasOwn(occupiedBridge.Containers, canaryId),
+        "Foreign endpoint must be running on the pinned bridge before admission"
+      );
       const foreign = await raw(primary, ["up", "--detach", "--json"]);
       resultOk(foreign, 1);
+      const foreignState = await saved(primary.root);
+      const foreignSnapshot = await observe(primary);
       requireValue(
-        foreign.combined.includes("ownership") &&
-          (await saved(primary.root)).state.pending === null &&
-          JSON.stringify(await observe(primary)) ===
-            JSON.stringify(originalSnapshot),
+        nativeNetworkFixtureStateRefused(object(foreign.stdout)),
+        "Foreign endpoint must produce the fixed redacted state refusal"
+      );
+      requireValue(
+        foreignState.state.pending === null &&
+          foreignState.generation.generationId ===
+            original.generation.generationId &&
+          JSON.stringify(foreignSnapshot) === JSON.stringify(originalSnapshot),
         "Foreign endpoint must refuse without mutating owned saved state"
       );
       await continuity();

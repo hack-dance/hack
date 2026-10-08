@@ -24,11 +24,38 @@ import {
   nativeNetworkFixtureProtocolMatches,
   nativeNetworkFixtureRefusalDiagnostic,
   nativeNetworkFixtureShim,
+  nativeNetworkFixtureStateRefused,
   nativeNetworkFixtureVolumeMatches,
   nativeNetworkFixtureVolumeSelectionMatches,
   provisionNativeNetworkFixtureComposePlugin,
   runNativeNetworkFixtureCommand,
 } from "./e2e/native-config-networks-acceptance.ts";
+
+test("foreign endpoint admission requires the structured redacted state error", () => {
+  const message =
+    "Native Compose state is unsafe or changed; values omitted. Inspect owned state before recovery.";
+  expect(
+    nativeNetworkFixtureStateRefused({
+      ok: false,
+      error: { code: "E_CONFIG_INVALID", message },
+    })
+  ).toBe(true);
+  for (const value of [
+    null,
+    message,
+    { ok: true, error: { code: "E_CONFIG_INVALID", message } },
+    { ok: false, error: { code: "E_STARTUP_INCOMPLETE", message } },
+    { ok: false, error: { code: "E_CONFIG_INVALID", message: "ownership" } },
+    {
+      ok: false,
+      error: { code: "E_CONFIG_INVALID", message: `${message} extra` },
+    },
+    { ok: false, error: { code: "E_CONFIG_INVALID" } },
+    { ok: false, error: null },
+  ]) {
+    expect(nativeNetworkFixtureStateRefused(value)).toBe(false);
+  }
+});
 
 test("refusal failure evidence distinguishes its fixed stage and both original checks", () => {
   const result = nativeNetworkFixtureRefusalDiagnostic({

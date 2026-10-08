@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, rename, unlink } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
 import {
@@ -20,6 +20,7 @@ import {
   token,
   writeExclusive,
 } from "./native-compose-private-state.ts";
+import { projectNativeComposeOneOff } from "./native-compose-run-projection.ts";
 import { inspectProjectInputsAtRoot } from "./project-input-selection.ts";
 import { resolveVerifiedPrimaryWorktreeRoot } from "./worktree-local-config.ts";
 
@@ -59,6 +60,32 @@ export type NativeComposeReservation = {
   readonly generationId: string;
 };
 
+export type NativeComposeRunProjection = {
+  readonly generation: NativeComposeGeneration;
+  readonly projectionId: string;
+  readonly service: string;
+  readonly composeFile: string;
+};
+type ProjectionAnchor = {
+  readonly projectionId: string;
+  readonly manifestHash: string;
+  readonly manifest: FileIdentity;
+};
+type ProjectionManifest = {
+  readonly version: 1;
+  readonly identity: NativeComposeIdentity;
+  readonly generationId: string;
+  readonly projectionId: string;
+  readonly service: string;
+  readonly source: GenerationAnchor;
+  readonly documentHash: string;
+  readonly document: FileIdentity;
+};
+type PendingReceipt = NativeComposePending &
+  GenerationAnchor & {
+    readonly projection?: ProjectionAnchor;
+  };
+
 export type NativeComposeOperation = "up" | "restart" | "run" | "down";
 export type NativeComposePending = {
   readonly token: string;
@@ -82,7 +109,7 @@ type Receipt = {
   readonly checkout: CheckoutAnchor;
   readonly current: GenerationAnchor | null;
   readonly stopped: boolean;
-  readonly pending: (NativeComposePending & GenerationAnchor) | null;
+  readonly pending: PendingReceipt | null;
   /** No command, PID, environment, or content fingerprint. Interrupted finite hooks never replay. */
   readonly beforeHooks: HostHookIntent | null;
 };
@@ -140,14 +167,14 @@ function anchorValid(
     Number.isSafeInteger(value.manifest.ino)
   );
 }
-function pendingValid(
-  value: unknown
-): value is NativeComposePending & GenerationAnchor {
+function pendingValid(value: unknown): value is PendingReceipt {
   return (
     isRecord(value) &&
     [
       "generationId,manifest,manifestHash,operation,token",
       "generationId,manifest,manifestHash,operation,recoveryToken,token",
+      "generationId,manifest,manifestHash,operation,projection,token",
+      "generationId,manifest,manifestHash,operation,projection,recoveryToken,token",
     ].includes(Object.keys(value).sort().join()) &&
     anchorValid(value) &&
     typeof value.token === "string" &&
@@ -155,7 +182,25 @@ function pendingValid(
     ["up", "restart", "run", "down"].includes(String(value.operation)) &&
     (!Object.hasOwn(value, "recoveryToken") ||
       (typeof value.recoveryToken === "string" &&
-        TOKEN.test(value.recoveryToken)))
+        TOKEN.test(value.recoveryToken))) &&
+    (!Object.hasOwn(value, "projection") ||
+      (value.operation === "run" && projectionAnchorValid(value.projection)))
+  );
+}
+function projectionAnchorValid(value: unknown): value is ProjectionAnchor {
+  return (
+    isRecord(value) &&
+    keys(value, "manifest,manifestHash,projectionId") &&
+    typeof value.projectionId === "string" &&
+    TOKEN.test(value.projectionId) &&
+    typeof value.manifestHash === "string" &&
+    HASH.test(value.manifestHash) &&
+    isRecord(value.manifest) &&
+    keys(value.manifest, "dev,ino") &&
+    typeof value.manifest.dev === "number" &&
+    Number.isSafeInteger(value.manifest.dev) &&
+    typeof value.manifest.ino === "number" &&
+    Number.isSafeInteger(value.manifest.ino)
   );
 }
 function beforeHooksValid(
@@ -417,6 +462,8 @@ export type NativeComposeEffectOptions<T> = {
   readonly assertFresh?: () => Promise<void>;
   readonly assertOwned: () => Promise<void>;
   readonly recoverPending?: boolean;
+  /** Store-derived immutable one-off delivery, verified before/after run effects. */
+  readonly projection?: NativeComposeRunProjection;
   /**
    * Finalize dependent ownership after a reaped, verified complete effect and fresh
    * pending/ownership checks, before publishing the completed generation receipt.
@@ -466,6 +513,9 @@ function admitEffect<T>(
     input.operation !== "up" &&
     input.operation !== "restart"
   ) {
+    refuse();
+  }
+  if (input.projection !== undefined && input.operation !== "run") {
     refuse();
   }
   if (input.operation !== "down" && state.beforeHooks !== null) {
@@ -536,6 +586,12 @@ export type NativeComposeMutation = {
   }>;
   reserveGeneration(): NativeComposeReservation;
   publish(opts: PublishOptions): Promise<NativeComposeGeneration>;
+  /** Derive inside this mutation owner; arbitrary Compose overrides are never accepted. */
+  publishRunProjection(opts: {
+    readonly generation: NativeComposeGeneration;
+    readonly service: string;
+    readonly assertFresh: () => Promise<void>;
+  }): Promise<NativeComposeRunProjection>;
   /** Only a caller-verified complete postcondition clears intent; engine exit alone is insufficient. */
   runEffect<T>(opts: NativeComposeEffectOptions<T>): Promise<{
     readonly outcome: "complete" | "uncertain";
@@ -791,6 +847,13 @@ export async function openNativeComposeGenerationStore(opts: {
     const known = new WeakMap<NativeComposeGeneration, Manifest>();
     const anchors = new WeakMap<NativeComposeGeneration, GenerationAnchor>();
     const reservations = new WeakSet<NativeComposeReservation>();
+    const projections = new WeakMap<
+      NativeComposeRunProjection,
+      {
+        readonly manifest: ProjectionManifest;
+        readonly anchor: ProjectionAnchor;
+      }
+    >();
     const load = async (
       generationId: string,
       expected?: GenerationAnchor
@@ -867,6 +930,96 @@ export async function openNativeComposeGenerationStore(opts: {
       }
       return anchor;
     };
+    const readGenerationDocument = async (
+      generation: NativeComposeGeneration
+    ) => {
+      await verifyGeneration(generation);
+      const manifest = known.get(generation);
+      if (!manifest) {
+        return refuse();
+      }
+      const read = await readPrivate(
+        generation.composeFile,
+        NATIVE_COMPOSE_DOCUMENT_LIMIT
+      );
+      if (
+        !sameFile(read.info, manifest.document) ||
+        hash(read.text) !== manifest.documentHash
+      ) {
+        refuse();
+      }
+      let value: unknown;
+      try {
+        value = JSON.parse(read.text) as unknown;
+      } catch {
+        return refuse();
+      }
+      if (
+        !(
+          isRecord(value) &&
+          documentOwned(value, {
+            identity: ownedIdentity,
+            generationId: generation.generationId,
+          })
+        )
+      ) {
+        return refuse();
+      }
+      await check();
+      return Object.freeze(value);
+    };
+    const verifyProjection = async (
+      projection: NativeComposeRunProjection,
+      generation: NativeComposeGeneration
+    ) => {
+      const owned = projections.get(projection);
+      if (!owned || projection.generation !== generation) {
+        return refuse();
+      }
+      await verifyGeneration(generation);
+      const held = await holdDirectory(dirname(projection.composeFile), true);
+      try {
+        const manifestRead = await readPrivate(
+          join(held.path, "manifest.json"),
+          RECEIPT_LIMIT
+        );
+        if (
+          !sameFile(manifestRead.info, owned.anchor.manifest) ||
+          hash(manifestRead.text) !== owned.anchor.manifestHash ||
+          manifestRead.text !== JSON.stringify(owned.manifest) ||
+          JSON.stringify(owned.manifest.source) !==
+            JSON.stringify(knownAnchor(generation))
+        ) {
+          refuse();
+        }
+        const read = await readPrivate(
+          projection.composeFile,
+          NATIVE_COMPOSE_DOCUMENT_LIMIT
+        );
+        if (
+          !sameFile(read.info, owned.manifest.document) ||
+          hash(read.text) !== owned.manifest.documentHash
+        ) {
+          refuse();
+        }
+        await recheckDirectories([held]);
+        await check();
+      } finally {
+        await held.file.close();
+      }
+    };
+    const requireFinalPending = (
+      latest: Receipt,
+      pending: Receipt["pending"],
+      operation: NativeComposeOperation
+    ) => {
+      if (
+        JSON.stringify(latest.pending) !== JSON.stringify(pending) ||
+        (operation !== "down" && latest.beforeHooks !== null)
+      ) {
+        refuse();
+      }
+    };
     const finalizeEffect = async <T>(
       input: NativeComposeEffectOptions<T>,
       pending: Receipt["pending"],
@@ -876,28 +1029,24 @@ export async function openNativeComposeGenerationStore(opts: {
         await assertFresh(input.assertFresh);
       }
       await verifyGeneration(input.generation);
+      if (input.projection) {
+        await verifyProjection(input.projection, input.generation);
+      }
       await input.assertOwned();
       let latest = await receipt();
-      if (
-        JSON.stringify(latest.pending) !== JSON.stringify(pending) ||
-        (input.operation !== "down" && latest.beforeHooks !== null)
-      ) {
-        refuse();
-      }
+      requireFinalPending(latest, pending, input.operation);
       if (input.beforeComplete) {
         await input.beforeComplete();
         if (input.assertFresh) {
           await assertFresh(input.assertFresh);
         }
         await verifyGeneration(input.generation);
+        if (input.projection) {
+          await verifyProjection(input.projection, input.generation);
+        }
         await input.assertOwned();
         latest = await receipt();
-        if (
-          JSON.stringify(latest.pending) !== JSON.stringify(pending) ||
-          (input.operation !== "down" && latest.beforeHooks !== null)
-        ) {
-          refuse();
-        }
+        requireFinalPending(latest, pending, input.operation);
       }
       await save(completedReceipt(latest, anchor, input.operation));
     };
@@ -934,42 +1083,7 @@ export async function openNativeComposeGenerationStore(opts: {
               manifest: state.pending.manifest,
             });
       },
-      async readGenerationDocument(generation) {
-        await verifyGeneration(generation);
-        const manifest = known.get(generation);
-        if (!manifest) {
-          return refuse();
-        }
-        const read = await readPrivate(
-          generation.composeFile,
-          NATIVE_COMPOSE_DOCUMENT_LIMIT
-        );
-        if (
-          !sameFile(read.info, manifest.document) ||
-          hash(read.text) !== manifest.documentHash
-        ) {
-          refuse();
-        }
-        let value: unknown;
-        try {
-          value = JSON.parse(read.text) as unknown;
-        } catch {
-          return refuse();
-        }
-        if (
-          !(
-            isRecord(value) &&
-            documentOwned(value, {
-              identity: ownedIdentity,
-              generationId: generation.generationId,
-            })
-          )
-        ) {
-          return refuse();
-        }
-        await check();
-        return Object.freeze(value);
-      },
+      readGenerationDocument,
       recoverInterruptedLock,
       async withMutation<T>(
         run: (mutation: NativeComposeMutation) => Promise<T>
@@ -1000,14 +1114,22 @@ export async function openNativeComposeGenerationStore(opts: {
               actionDone = null;
             }
           };
+          const fenceEffectInputs = async <T>(
+            input: NativeComposeEffectOptions<T>
+          ) => {
+            await verifyGeneration(input.generation);
+            if (input.projection) {
+              await verifyProjection(input.projection, input.generation);
+            }
+            if (input.assertFresh) {
+              await assertFresh(input.assertFresh);
+            }
+          };
           const checkEffect = async <T>(
             input: NativeComposeEffectOptions<T>
           ) => {
             requireActive();
-            await verifyGeneration(input.generation);
-            if (input.assertFresh) {
-              await assertFresh(input.assertFresh);
-            }
+            await fenceEffectInputs(input);
             try {
               await input.assertOwned();
             } catch (error) {
@@ -1016,6 +1138,9 @@ export async function openNativeComposeGenerationStore(opts: {
               }
               refuse();
             }
+            // Engine observations can be slow. Fence the actual delivery again
+            // after them, immediately before intent publication or effect entry.
+            await fenceEffectInputs(input);
             await check();
             requireActive();
           };
@@ -1076,7 +1201,125 @@ export async function openNativeComposeGenerationStore(opts: {
             await finalizeEffect(input, pending, anchor);
             return result;
           };
+          const effectPending = <T>(
+            state: Receipt,
+            input: NativeComposeEffectOptions<T>,
+            anchor: GenerationAnchor
+          ): PendingReceipt => {
+            if (state.pending !== null) {
+              return { ...state.pending, recoveryToken: token() };
+            }
+            const pending = {
+              ...anchor,
+              token: token(),
+              operation: input.operation,
+            };
+            if (input.projection) {
+              return {
+                ...pending,
+                projection:
+                  projections.get(input.projection)?.anchor ?? refuse(),
+              };
+            }
+            return pending;
+          };
           const mutation: NativeComposeMutation = {
+            async publishRunProjection(options) {
+              const captured = Object.freeze({ ...options });
+              return await runAction(async () => {
+                if (
+                  opts.mode === "saved" ||
+                  (await receipt()).pending !== null
+                ) {
+                  throw new NativeComposeGenerationError(
+                    "E_NATIVE_COMPOSE_UNCERTAIN"
+                  );
+                }
+                await assertFresh(captured.assertFresh);
+                const document = await readGenerationDocument(
+                  captured.generation
+                );
+                const json = JSON.stringify(
+                  projectNativeComposeOneOff({
+                    document,
+                    generationId: captured.generation.generationId,
+                    service: captured.service,
+                  })
+                );
+                if (Buffer.byteLength(json) > NATIVE_COMPOSE_DOCUMENT_LIMIT) {
+                  refuse();
+                }
+                const opened: HeldDirectory[] = [];
+                try {
+                  const generationRoot = await holdDirectory(
+                    dirname(captured.generation.composeFile),
+                    true
+                  );
+                  opened.push(generationRoot);
+                  const projectionRoot = await privateDirectory(
+                    join(generationRoot.path, "oneoffs")
+                  );
+                  opened.push(projectionRoot);
+                  const projectionId = token();
+                  const held = await privateDirectory(
+                    join(projectionRoot.path, projectionId)
+                  );
+                  opened.push(held);
+                  const composeFile = join(held.path, "compose.json");
+                  const written = await writeExclusive(composeFile, json);
+                  const manifest: ProjectionManifest = {
+                    version: 1,
+                    identity: ownedIdentity,
+                    generationId: captured.generation.generationId,
+                    projectionId,
+                    service: captured.service,
+                    source: knownAnchor(captured.generation),
+                    documentHash: hash(json),
+                    document: { dev: written.dev, ino: written.ino },
+                  };
+                  const manifestJson = JSON.stringify(manifest);
+                  const writtenManifest = await writeExclusive(
+                    join(held.path, "manifest.json"),
+                    manifestJson
+                  );
+                  await synchronizeDirectories([
+                    held,
+                    projectionRoot,
+                    generationRoot,
+                  ]);
+                  await recheckDirectories([
+                    held,
+                    projectionRoot,
+                    generationRoot,
+                  ]);
+                  await assertFresh(captured.assertFresh);
+                  requireActive();
+                  const projection = Object.freeze({
+                    generation: captured.generation,
+                    projectionId,
+                    service: captured.service,
+                    composeFile,
+                  });
+                  projections.set(projection, {
+                    manifest,
+                    anchor: {
+                      projectionId,
+                      manifestHash: hash(manifestJson),
+                      manifest: {
+                        dev: writtenManifest.dev,
+                        ino: writtenManifest.ino,
+                      },
+                    },
+                  });
+                  await verifyProjection(projection, captured.generation);
+                  return projection;
+                } finally {
+                  await Promise.all(
+                    opened.map((directory) => directory.file.close())
+                  );
+                }
+              });
+            },
             async runBeforeHooks<T>(input: {
               readonly assertFresh: () => Promise<void>;
               readonly effect: () => Promise<{
@@ -1199,10 +1442,7 @@ export async function openNativeComposeGenerationStore(opts: {
                 admitEffect(input, state, opts.mode);
                 await checkEffect(input);
                 const anchor = knownAnchor(input.generation);
-                const pending: NativeComposePending & GenerationAnchor =
-                  state.pending === null
-                    ? { ...anchor, token: token(), operation: input.operation }
-                    : { ...state.pending, recoveryToken: token() };
+                const pending = effectPending(state, input, anchor);
                 await save({ ...state, pending });
                 try {
                   await checkEffect(input);

@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import {
+  lstat,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { NativeComposeIngressBinding } from "../src/lib/native-compose-ingress.ts";
@@ -11,6 +18,7 @@ import {
 import {
   type NativeComposeRoutingOwner,
   prepareNativeComposeRouteOwner,
+  prepareNativeComposeSavedRunRouting,
   readNativeComposeRouteMetadata,
   releaseNativeComposeSavedRoutes,
 } from "../src/lib/native-compose-route-owner.ts";
@@ -198,6 +206,102 @@ async function complete(owner: NativeComposeRoutingOwner) {
   await owner.complete({ deadline: Date.now() + 5000 });
   await owner.close();
 }
+
+async function claimFiles() {
+  const paths = await readdir(join(root, "compose-routing"), {
+    recursive: true,
+  });
+  const files = await Promise.all(
+    paths.sort().map(async (path) => {
+      const full = join(root, "compose-routing", path);
+      const info = await lstat(full);
+      return info.isFile()
+        ? [path, info.dev, info.ino, await readFile(full, "utf8")]
+        : null;
+    })
+  );
+  return files.filter((value) => value !== null);
+}
+
+test("warm run observes completed saved claims and active routes without mutating ownership", async () => {
+  const input = fixture();
+  const checks = probes();
+  const prepared = await prepare(input, checks);
+  await complete(prepared);
+  const before = await claimFiles();
+  const warm = await prepareNativeComposeSavedRunRouting({
+    owner: OWNER,
+    generationId: GENERATION,
+    document: prepared.document,
+    io: checks.io,
+  });
+  expect(warm).not.toBeNull();
+  try {
+    await warm?.assertContinuity({ deadline: Date.now() + 5000 });
+    await warm?.assertContinuity({ deadline: Date.now() + 5000 });
+    expect(await claimFiles()).toEqual(before);
+    expect(checks.events.slice(-3)).toEqual([
+      "ingress-recheck",
+      `inventory-${GENERATION}`,
+      `proxy-${GENERATION}-`,
+    ]);
+  } finally {
+    await warm?.close();
+  }
+});
+
+test.each([
+  "ingress",
+  "inventory",
+  "proxy",
+] as const)("warm run refuses %s drift on saved route continuity", async (kind) => {
+  const input = fixture();
+  const checks = probes();
+  const prepared = await prepare(input, checks);
+  await complete(prepared);
+  const warm = await prepareNativeComposeSavedRunRouting({
+    owner: OWNER,
+    generationId: GENERATION,
+    document: prepared.document,
+    io: checks.io,
+  });
+  try {
+    await warm?.assertContinuity({ deadline: Date.now() + 5000 });
+    if (kind === "ingress") {
+      checks.loseIngress();
+    } else if (kind === "inventory") {
+      checks.collideInventory();
+    } else {
+      checks.staleProxy();
+    }
+    await expect(
+      warm?.assertContinuity({ deadline: Date.now() + 5000 })
+    ).rejects.toBeInstanceOf(NativeComposeRoutingError);
+  } finally {
+    await warm?.close();
+  }
+});
+
+test("warm run refuses an uncertain saved route attempt and does not repair or reacquire it", async () => {
+  const input = fixture();
+  const prepared = await prepare(input);
+  await prepared.markEffectsPossible();
+  const before = await claimFiles();
+  const warm = await prepareNativeComposeSavedRunRouting({
+    owner: OWNER,
+    generationId: GENERATION,
+    document: prepared.document,
+    io: probes().io,
+  });
+  try {
+    await expect(
+      warm?.assertContinuity({ deadline: Date.now() + 5000 })
+    ).rejects.toBeInstanceOf(NativeComposeRoutingError);
+    expect(await claimFiles()).toEqual(before);
+  } finally {
+    await warm?.close();
+  }
+});
 
 test("private route metadata binds the generation, proof targets and immutable claim reference", async () => {
   const input = fixture();

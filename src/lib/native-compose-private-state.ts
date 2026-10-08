@@ -32,8 +32,11 @@ export type NativeComposeMutationLease = {
   readonly token: string;
   readonly directory: { readonly dev: number; readonly ino: number };
   readonly owner: { readonly dev: number; readonly ino: number };
+  /** Private copied owner/inode metadata; this snapshot alone is not a lease. */
+  readonly selection: NativeComposeInterruptedLockSelection;
   readonly assertHeld: () => Promise<void>;
 };
+const mutationLeases = new WeakSet<NativeComposeMutationLease>();
 type LockOwner = {
   readonly version: 1;
   readonly token: string;
@@ -585,14 +588,18 @@ export function createNativeComposePrivateMutationLock(opts: {
       ownerInfo = await writeExclusive(ownerPath, lockToken);
       await lock.file.sync();
       await assertHeld();
-      return await run(
-        Object.freeze({
-          token: lockOwner.token,
-          directory: Object.freeze({ dev: lock.info.dev, ino: lock.info.ino }),
-          owner: Object.freeze({ dev: ownerInfo.dev, ino: ownerInfo.ino }),
-          assertHeld,
-        })
-      );
+      const lease = Object.freeze({
+        token: lockOwner.token,
+        directory: Object.freeze({ dev: lock.info.dev, ino: lock.info.ino }),
+        owner: Object.freeze({ dev: ownerInfo.dev, ino: ownerInfo.ino }),
+        selection: interruptedSelection(lock, {
+          info: ownerInfo,
+          text: lockToken,
+        }),
+        assertHeld,
+      });
+      mutationLeases.add(lease);
+      return await run(lease);
     } finally {
       try {
         await assertHeld();
@@ -732,6 +739,82 @@ export function createNativeComposePrivateMutationLock(opts: {
     recoverSelectedInterruptedLock(value: unknown) {
       const expected = parseNativeComposeInterruptedLockSelection(value);
       return recoverInterruptedLock(expected);
+    },
+    /** Retain the actual named recovery lease through caller-owned durable retirement.
+     * Expected owner absence is legal only after the caller committed its exact
+     * retirement intent. Neither a selector nor a fabricated lease grants this API. */
+    retireSelectedUnderRecoveryLease(opts: {
+      readonly selected: unknown;
+      readonly lease: NativeComposeMutationLease;
+      readonly allowOwnerAbsent?: boolean;
+    }) {
+      const expected = parseNativeComposeInterruptedLockSelection(
+        opts.selected
+      );
+      const lease = opts.lease;
+      const allowOwnerAbsent = opts.allowOwnerAbsent ?? false;
+      if (!mutationLeases.has(lease) || typeof allowOwnerAbsent !== "boolean") {
+        return refuse();
+      }
+      return (async () => {
+        await lease.assertHeld();
+        const recovery = await holdDirectory(recoveryPath, true);
+        try {
+          if (!sameFile(recovery.info, lease.directory)) {
+            return refuse();
+          }
+          const verify = async () => {
+            await lease.assertHeld();
+            await check();
+            await recheckDirectories([recovery]);
+          };
+          await verify();
+          const lock = await holdDirectory(lockPath, true);
+          try {
+            if (!sameFile(lock.info, expected.directory)) {
+              return refuse();
+            }
+            const ownerPath = join(lockPath, "owner");
+            await requireDeadOwner(expected.owner);
+            await verify();
+            await recheckDirectories([lock]);
+            const names = await readdir(lockPath);
+            if (
+              JSON.stringify(names) !== '["owner"]' &&
+              !(allowOwnerAbsent && names.length === 0)
+            ) {
+              return refuse();
+            }
+            const current = await readPrivate(
+              ownerPath,
+              LOCK_OWNER_LIMIT
+            ).catch((error: unknown) => {
+              if (allowOwnerAbsent && hasCode(error, "ENOENT")) {
+                return undefined;
+              }
+              throw error;
+            });
+            if (current !== undefined) {
+              requireInterruptedSelection(
+                expected,
+                interruptedSelection(lock, current)
+              );
+              await unlink(ownerPath);
+            }
+            await verify();
+            await recheckDirectories([lock]);
+            if ((await readdir(lockPath)).length !== 0) {
+              return refuse();
+            }
+            await rmdir(lockPath);
+            await parent?.file.sync();
+          } finally {
+            await lock.file.close();
+          }
+        } finally {
+          await recovery.file.close();
+        }
+      })();
     },
   };
 }

@@ -243,3 +243,125 @@ test("private dead-lock selectors close nested fields and do not admit another h
     current.lock.recoverSelectedInterruptedLock(original)
   ).rejects.toThrow();
 });
+
+test("durable frontend retirement retains the issued named recovery lease and refuses a copied or foreign lease", async () => {
+  const current = await fixture();
+  await current.kill();
+  const selected = await current.lock.selectInterruptedLock();
+  const parent = await holdDirectory(current.root, true);
+  try {
+    const owner = (name: string) =>
+      createNativeComposePrivateMutationLock({
+        lockPath: join(current.root, name),
+        recoveryPath: join(current.root, `${name}.recovery`),
+        parent,
+        check: () => recheckDirectories([parent]),
+      });
+    await owner("foreign").withLock(async (lease) => {
+      await expect(
+        current.lock.retireSelectedUnderRecoveryLease({ selected, lease })
+      ).rejects.toThrow();
+      expect(await readdir(join(current.root, "held"))).toEqual(["owner"]);
+    });
+    await owner("recovering").withLock(async (lease) => {
+      expect(() =>
+        current.lock.retireSelectedUnderRecoveryLease({
+          selected,
+          lease: { ...lease },
+        })
+      ).toThrow();
+      await current.lock.retireSelectedUnderRecoveryLease({ selected, lease });
+      await lease.assertHeld();
+      expect((await readdir(current.root)).includes("held")).toBe(false);
+      expect(await readdir(join(current.root, "recovering"))).toEqual([
+        "owner",
+      ]);
+    });
+    expect(await readdir(current.root)).toEqual(["ready"]);
+  } finally {
+    await parent.file.close();
+  }
+});
+
+test("owned recovery lease permits missing owner only at caller's committed retirement phase", async () => {
+  const current = await fixture();
+  await current.kill();
+  const selected = await current.lock.selectInterruptedLock();
+  const parent = await holdDirectory(current.root, true);
+  try {
+    const recovery = createNativeComposePrivateMutationLock({
+      lockPath: join(current.root, "recovering"),
+      recoveryPath: join(current.root, "recovering.recovery"),
+      parent,
+      check: () => recheckDirectories([parent]),
+    });
+    await recovery.withLock(async (lease) => {
+      await unlink(join(current.root, "held/owner"));
+      await expect(
+        current.lock.retireSelectedUnderRecoveryLease({ selected, lease })
+      ).rejects.toThrow();
+      expect(await readdir(join(current.root, "held"))).toEqual([]);
+      await current.lock.retireSelectedUnderRecoveryLease({
+        selected,
+        lease,
+        allowOwnerAbsent: true,
+      });
+      await lease.assertHeld();
+    });
+    expect(await readdir(current.root)).toEqual(["ready"]);
+  } finally {
+    await parent.file.close();
+  }
+});
+
+test("held recovery retirement refuses guard loss during its dead-process inspection", async () => {
+  let changed = false;
+  const current = await fixture(() => {
+    if (changed) {
+      throw new Error("Retained caller authority changed.");
+    }
+    return Promise.resolve();
+  });
+  await current.kill();
+  const selected = await current.lock.selectInterruptedLock();
+  const parent = await holdDirectory(current.root, true);
+  try {
+    const recovery = createNativeComposePrivateMutationLock({
+      lockPath: join(current.root, "recovering"),
+      recoveryPath: join(current.root, "recovering.recovery"),
+      parent,
+      check: () => recheckDirectories([parent]),
+    });
+    await recovery.withLock(async (lease) => {
+      const actual = Bun.spawn;
+      const intercept = spyOn(Bun, "spawn").mockImplementation((...args) => {
+        const command = args[0];
+        if (
+          Array.isArray(command) &&
+          command[0] === "/bin/ps" &&
+          command[2] === String(current.child.pid)
+        ) {
+          changed = true;
+        }
+        const child: ReturnType<typeof Bun.spawn> = Reflect.apply(
+          actual,
+          Bun,
+          args
+        );
+        return child;
+      });
+      try {
+        await expect(
+          current.lock.retireSelectedUnderRecoveryLease({ selected, lease })
+        ).rejects.toThrow();
+        expect(changed).toBe(true);
+        expect(await readdir(join(current.root, "held"))).toEqual(["owner"]);
+        await lease.assertHeld();
+      } finally {
+        intercept.mockRestore();
+      }
+    });
+  } finally {
+    await parent.file.close();
+  }
+});

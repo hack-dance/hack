@@ -11,11 +11,39 @@ pub struct Captured {
     pub stderr: Vec<u8>,
 }
 
+#[cfg(all(test, target_os = "macos"))]
+static DISK_CHECK_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(test, target_os = "macos"))]
+static DISK_CHECK_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(test, target_os = "macos"))]
+struct DiskCheckDiagnostic;
+#[cfg(all(test, target_os = "macos"))]
+impl DiskCheckDiagnostic {
+    fn enter() -> Self {
+        use std::sync::atomic::Ordering::SeqCst;
+        let count = DISK_CHECK_CALLS.fetch_add(1, SeqCst) + 1;
+        DISK_CHECK_PEAK.fetch_max(count, SeqCst);
+        Self
+    }
+    fn counts() -> (usize, usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        (DISK_CHECK_CALLS.load(SeqCst), DISK_CHECK_PEAK.load(SeqCst))
+    }
+}
+#[cfg(all(test, target_os = "macos"))]
+impl Drop for DiskCheckDiagnostic {
+    fn drop(&mut self) {
+        DISK_CHECK_CALLS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 pub fn capture(command: &mut Command, timeout: Duration) -> Result<Captured, CandidateError> {
     #[cfg(all(test, target_os = "macos"))]
     let diagnostic = command.get_program() == std::ffi::OsStr::new("/usr/sbin/lsof")
         && std::env::var_os("HACK_TEST_OWNED_LSOF_DIAGNOSTIC").as_deref()
             == Some(std::ffi::OsStr::new("1"));
+    #[cfg(all(test, target_os = "macos"))]
+    let _active_check = diagnostic.then(DiskCheckDiagnostic::enter);
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -43,9 +71,10 @@ pub fn capture(command: &mut Command, timeout: Duration) -> Result<Captured, Can
     #[cfg(all(test, target_os = "macos"))]
     if diagnostic {
         eprintln!(
-            "owned-disk-check stage=started pid={} budget_ms={}",
+            "owned-disk-check stage=started pid={} budget_ms={} active_peak={:?}",
             child.id(),
-            timeout.as_millis()
+            timeout.as_millis(),
+            DiskCheckDiagnostic::counts()
         );
     }
     loop {
@@ -54,9 +83,10 @@ pub fn capture(command: &mut Command, timeout: Duration) -> Result<Captured, Can
                 #[cfg(all(test, target_os = "macos"))]
                 if diagnostic {
                     eprintln!(
-                        "owned-disk-check stage=reaped pid={} elapsed_ms={} status={status}",
+                        "owned-disk-check stage=reaped pid={} elapsed_ms={} status={status} active_peak={:?}",
                         child.id(),
-                        start.elapsed().as_millis()
+                        start.elapsed().as_millis(),
+                        DiskCheckDiagnostic::counts()
                     );
                 }
                 // Do not join: detached provider helpers may inherit pipe descriptors.
@@ -86,10 +116,11 @@ pub fn capture(command: &mut Command, timeout: Duration) -> Result<Captured, Can
                 #[cfg(all(test, target_os = "macos"))]
                 if diagnostic {
                     eprintln!(
-                        "owned-disk-check stage=deadline pid={} elapsed_ms={} kill_ok={} reaped={waited:?}",
+                        "owned-disk-check stage=deadline pid={} elapsed_ms={} kill_ok={} reaped={waited:?} active_peak={:?}",
                         child.id(),
                         start.elapsed().as_millis(),
-                        killed.is_ok()
+                        killed.is_ok(),
+                        DiskCheckDiagnostic::counts()
                     );
                 }
                 #[cfg(not(all(test, target_os = "macos")))]

@@ -448,7 +448,7 @@ boundedTest.each(["start", "restart", "stop"] as const)(
         await readFile(join(root, "fixture.json"), "utf8")
       );
       expect(observed).toMatchObject({
-        container: [{ id: ID }, { id: job }, { id: app }],
+        container: [{ id: ID }, { id: app }, { id: job }],
         volume: [{ id: VOLUME, createdAt: CREATED }],
         jobs: { [job]: { attempts: operation === "stop" ? 0 : 1 } },
         states: {

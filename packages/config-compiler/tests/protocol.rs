@@ -78,6 +78,39 @@ fn profile_selection_uses_explicit_repeatable_arguments() {
 }
 
 #[test]
+fn exercise_profile_omits_inactive_readback_service_from_compiled_plan() {
+    let input = serde_json::json!({
+        "schema_version": 1,
+        "name": "fixture",
+        "profiles": ["exercise", "readback"],
+        "services": {
+            "graceful": {"image": "fixture:1", "profiles": ["exercise"]},
+            "forced": {"image": "fixture:1", "profiles": ["exercise"]},
+            "reaper": {"image": "fixture:1", "profiles": ["exercise"]},
+            "retry": {"image": "fixture:1", "profiles": ["exercise"]},
+            "observer": {"image": "fixture:1", "profiles": ["readback"]}
+        }
+    });
+    let result = run(
+        &["compile", "--profile", "exercise"],
+        input.to_string().as_bytes(),
+    );
+    assert!(result.status.success());
+    let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(value["ok"], true);
+    assert_eq!(
+        value["plan"]["selected_profiles"],
+        serde_json::json!(["exercise"])
+    );
+    let selected = value["plan"]["services"].as_object().unwrap();
+    assert_eq!(selected.len(), 4);
+    for service in ["graceful", "forced", "reaper", "retry"] {
+        assert!(selected.contains_key(service));
+    }
+    assert!(!selected.contains_key("observer"));
+}
+
+#[test]
 fn resolve_binary_preserves_profiles_and_reports_document_roles() {
     let project = r#"{"schema_version":1,"name":"example","profiles":["dev"],"jobs":{"init":{"image":"init:1","profiles":["dev"]}}}"#;
     let request = serde_json::json!({"request_version":1,"project":project,"checkout_local":r#"{"schema_version":1,"environment":{"default_overlay":null}}"#});

@@ -2,7 +2,6 @@ import { openNativeComposeGenerationStore } from "../../src/lib/native-compose-g
 import { createNativeComposeProbe } from "../../src/lib/native-compose-ownership.ts";
 
 const SERVICES = ["graceful", "forced", "reaper", "retry"] as const;
-const SAVED_SERVICES = [...SERVICES, "observer"] as const;
 const ID = /^[a-f0-9]{64}$/;
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const ENGINE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
@@ -510,7 +509,7 @@ export async function captureNativeProcessPolicyStartupDiagnostic(opts: {
         typeof serviceMap === "object" &&
         !Array.isArray(serviceMap) &&
         exactNames(pending.profiles, ["exercise"]) &&
-        exactNames(Object.keys(serviceMap), SAVED_SERVICES) &&
+        exactNames(Object.keys(serviceMap), SERVICES) &&
         networkMap !== null &&
         typeof networkMap === "object" &&
         !Array.isArray(networkMap) &&
@@ -520,14 +519,12 @@ export async function captureNativeProcessPolicyStartupDiagnostic(opts: {
         !Array.isArray(defaultNetwork) &&
         (defaultNetwork as Row).name ===
           `${store.identity.composeProject}_default` &&
-        Object.entries(serviceMap).every(
-          ([name, item]) =>
+        Object.values(serviceMap).every(
+          (item) =>
             item !== null &&
             typeof item === "object" &&
             !Array.isArray(item) &&
-            exactNames((item as Row).profiles, [
-              name === "observer" ? "readback" : "exercise",
-            ]) &&
+            exactNames((item as Row).profiles, ["exercise"]) &&
             !Object.hasOwn(item, "networks")
         )
       )

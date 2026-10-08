@@ -35,6 +35,7 @@ function fixture(
     readonly changedReceipt?: boolean;
     readonly failProbe?: boolean;
     readonly networkProject?: string;
+    readonly includeInactiveObserver?: boolean;
   } = {}
 ) {
   const pending = {
@@ -56,13 +57,14 @@ function fixture(
     composeFile: "/fixture/compose.yaml",
     profiles: ["exercise"],
   };
+  const serviceMap: Record<string, unknown> = Object.fromEntries(
+    services.map((name) => [name, { image, profiles: ["exercise"] }])
+  );
+  if (opts.includeInactiveObserver) {
+    serviceMap.observer = { image, profiles: ["readback"] };
+  }
   const document = {
-    services: {
-      ...Object.fromEntries(
-        services.map((name) => [name, { image, profiles: ["exercise"] }])
-      ),
-      observer: { image, profiles: ["readback"] },
-    },
+    services: serviceMap,
     networks: { default: { name: bridge } },
   };
   let stateReads = 0;
@@ -266,6 +268,7 @@ test("state drift is reported while stale receipts and foreign names refuse", as
     fixture({ pendingOperation: "down" }),
     fixture({ changedReceipt: true }),
     fixture({ networkProject: "foreign" }),
+    fixture({ includeInactiveObserver: true }),
     fixture({
       mutate: (_scan, rows) => {
         rows[0]!.project = "foreign";
@@ -310,6 +313,29 @@ test("malicious observation text is reduced to fixed booleans and unknown state"
   expect(report.first.services[0]?.ownerMatch).toBe(false);
   expect(report.first.services[0]?.aliasesMatch).toBe(false);
   expect(JSON.stringify(report)).not.toContain(canary);
+});
+
+test("inactive readback observer cannot appear in selected exercise saved document", async () => {
+  const selected = fixture({ includeInactiveObserver: true });
+  const outcome = await recordKnownUncertainProcessPolicyStartup({
+    result: uncertain,
+    projectRoot: "/fixture",
+    expectedEngineId: engine,
+    capture: (opts) =>
+      captureNativeProcessPolicyStartupDiagnostic({
+        ...opts,
+        dependencies: selected.dependencies,
+      }),
+    record: async () => {
+      throw new Error("must not record");
+    },
+  });
+  expect(outcome).toEqual({
+    status: "unavailable",
+    stage: "saved-document",
+    reason: "diagnostic_saved_topology",
+  });
+  expect(selected.commands).toHaveLength(0);
 });
 
 test("malformed state shapes and negative restart counts cannot escape fixed output", async () => {

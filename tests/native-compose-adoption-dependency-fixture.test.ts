@@ -145,6 +145,44 @@ test("dependency forwarder accepts only canonical original or receipt-anchored s
   ).toBe(true);
 });
 
+test("combined bridge and health forwarder accepts only the binding owner's exact alias inspection", async () => {
+  const source = await readFile(
+    new URL("../src/lib/native-compose-adoption-binding.ts", import.meta.url),
+    "utf8"
+  );
+  const template = source.match(
+    /container:\s*\{\s*list:\s*`[^`]+`,\s*inspect:\s*`([^`]+)`/s
+  )?.[1];
+  expect(template).toBeDefined();
+  const ordinary = template
+    ?.replaceAll("${PROJECT}", "com.docker.compose.project")
+    .replaceAll("${VERSION}", "io.hack.native-config.version");
+  const custom = ordinary?.replace(
+    '"id":{{json $n.NetworkID}}}',
+    '"id":{{json $n.NetworkID}},"aliases":{{json $n.Aliases}}}'
+  );
+  expect(custom).toBeDefined();
+  expect(custom).not.toBe(ordinary);
+  expect(
+    adoptionDependencyReadAllowed({
+      ...readScope,
+      args: ["container", "inspect", "--format", custom ?? "", db],
+    })
+  ).toBe(true);
+  expect(
+    adoptionDependencyReadAllowed({
+      ...readScope,
+      args: ["container", "inspect", "--format", custom ?? "", "e".repeat(64)],
+    })
+  ).toBe(false);
+  expect(
+    adoptionDependencyReadAllowed({
+      ...readScope,
+      args: ["container", "inspect", "--format", `${custom}PRIVATE`, db],
+    })
+  ).toBe(false);
+});
+
 for (const [name, args] of [
   ["Compose up", [...composePrefix, originalCompose, "up", "--detach"]],
   ["Compose down", [...composePrefix, originalCompose, "down"]],

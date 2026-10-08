@@ -21,7 +21,7 @@ fn handshake_and_compile_need_no_environment_or_host_tools() {
     let protocol: Value = serde_json::from_slice(&handshake.stdout).unwrap();
     assert_eq!(
         protocol,
-        serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1,"endpoint_plan_version":1,"process_plan_version":1,"acquisition_plan_version":1})
+        serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1,"endpoint_plan_version":1,"process_plan_version":1,"acquisition_plan_version":1,"network_plan_version":1})
     );
     let result = run(&["compile"], br#"{"schema_version":1,"name":"example"}"#);
     assert!(result.status.success());
@@ -75,6 +75,39 @@ fn profile_selection_uses_explicit_repeatable_arguments() {
         serde_json::json!(["dev", "test"])
     );
     assert!(value["plan"]["jobs"]["check"].is_object());
+}
+
+#[test]
+fn exercise_profile_omits_inactive_readback_service_from_compiled_plan() {
+    let input = serde_json::json!({
+        "schema_version": 1,
+        "name": "fixture",
+        "profiles": ["exercise", "readback"],
+        "services": {
+            "graceful": {"image": "fixture:1", "profiles": ["exercise"]},
+            "forced": {"image": "fixture:1", "profiles": ["exercise"]},
+            "reaper": {"image": "fixture:1", "profiles": ["exercise"]},
+            "retry": {"image": "fixture:1", "profiles": ["exercise"]},
+            "observer": {"image": "fixture:1", "profiles": ["readback"]}
+        }
+    });
+    let result = run(
+        &["compile", "--profile", "exercise"],
+        input.to_string().as_bytes(),
+    );
+    assert!(result.status.success());
+    let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(value["ok"], true);
+    assert_eq!(
+        value["plan"]["selected_profiles"],
+        serde_json::json!(["exercise"])
+    );
+    let selected = value["plan"]["services"].as_object().unwrap();
+    assert_eq!(selected.len(), 4);
+    for service in ["graceful", "forced", "reaper", "retry"] {
+        assert!(selected.contains_key(service));
+    }
+    assert!(!selected.contains_key("observer"));
 }
 
 #[test]

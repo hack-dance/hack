@@ -71,7 +71,7 @@ else {
     docker,
     `#!${process.execPath}
 import {appendFile} from "node:fs/promises";
-const root=${JSON.stringify(root)};const args=process.argv.slice(2);const image=root+"/image";const engine=root+"/engine";
+const root=${JSON.stringify(root)};const args=process.argv.slice(2);const image=root+"/image";const engine=root+"/engine";const network=root+"/network";
 await appendFile(root+"/requests",JSON.stringify(args)+"\\n");
 if(args[0]==="info") {console.log(JSON.stringify("fixture-engine:1"));process.exit(0);}
 if(args[0]==="image") {
@@ -87,18 +87,24 @@ if(args[0]==="compose") {
  const doc=await Bun.file(args[args.indexOf("-f")+1]).json();const web=doc.services.web;
  const built=Object.hasOwn(doc,"x-hack-native-build");
  if(web.build!==undefined || (built ? web.image!==doc.name+"-web:latest" || web.pull_policy!=="never" || !(await Bun.file(image).exists()) : web.image!=="cached:fixture" || web.pull_policy!==undefined)) process.exit(92);
- if(args.includes("up")) {if(args.includes("--no-build")!==built) process.exit(93);await Bun.write(engine,JSON.stringify({doc,oneoff:false}));process.exit(0);}
- if(args.includes("run")) {if(args.includes("--no-build")) process.exit(94);await Bun.write(engine,JSON.stringify({doc,oneoff:true,name:args[args.indexOf("--name")+1]}));process.exit(0);}
+ if(args.includes("up")) {if(args.includes("--no-build")!==built) process.exit(93);await Bun.write(engine,JSON.stringify({doc,oneoff:false}));await Bun.write(network,JSON.stringify(doc));process.exit(0);}
+ if(args.includes("run")) {if(args.includes("--no-build")) process.exit(94);await Bun.write(engine,JSON.stringify({doc,oneoff:true,name:args[args.indexOf("--name")+1]}));await Bun.write(network,JSON.stringify(doc));process.exit(0);}
  process.exit(95);
 }
 if(args[0]==="container" && args[1]==="rm") {await Bun.file(engine).delete();process.exit(0);}
 if(args[1]==="ls") {
  if(args[0]==="container" && await Bun.file(engine).exists()) {const value=await Bun.file(engine).json();console.log(JSON.stringify({id:"c".repeat(64),name:value.oneoff?value.name:value.doc.name+"-web-1",project:value.doc.name}));}
+ if(args[0]==="network" && await Bun.file(network).exists()) {const doc=await Bun.file(network).json();console.log(JSON.stringify({id:"d".repeat(64),name:doc.name+"_default",project:doc.name}));}
  process.exit(0);
 }
 if(args[0]==="container" && args[1]==="inspect") {
  const value=await Bun.file(engine).json();const labels=value.doc.services.web.labels;
- console.log(JSON.stringify({id:"c".repeat(64),name:"/"+(value.oneoff?value.name:value.doc.name+"-web-1"),project:value.doc.name,version:"1",instance:value.doc.name,owner:labels["io.hack.native-config.owner"],generation:labels["io.hack.native-config.generation"],service:"web",oneoff:value.oneoff?"True":"False",state:value.oneoff?"exited":"running",exitCode:0,health:null}));process.exit(0);
+ const name=value.oneoff?value.name:value.doc.name+"-web-1";
+ console.log(JSON.stringify({id:"c".repeat(64),name:"/"+name,project:value.doc.name,version:"1",instance:value.doc.name,owner:labels["io.hack.native-config.owner"],generation:labels["io.hack.native-config.generation"],service:"web",oneoff:value.oneoff?"True":"False",state:value.oneoff?"exited":"running",exitCode:0,health:null,networks:{[value.doc.name+"_default"]:{NetworkID:"d".repeat(64),Aliases:value.oneoff?[name]:[name,"web"]}}}));process.exit(0);
+}
+if(args[0]==="network" && args[1]==="inspect") {
+ const doc=await Bun.file(network).json();const labels=doc.networks.default.labels;
+ console.log(JSON.stringify({id:"d".repeat(64),name:doc.name+"_default",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],driver:"bridge",internal:false,containers:await Bun.file(engine).exists()?{["c".repeat(64)]:{}}:{}}));process.exit(0);
 }
 process.exit(99);
 `
@@ -227,4 +233,39 @@ test("source native image-only up preserves its exact startup argv", async () =>
     "-d",
     "--remove-orphans",
   ]);
+}, 30_000);
+
+test("unchanged build up reuses its projected generation and owned image while rechecking readiness", async () => {
+  const root = await fixture();
+  expect((await invoke(root, "up")).code).toBe(0);
+  const before = await Bun.file(join(root, "engine")).json();
+  expect(
+    before.doc.services.web.labels["io.hack.native-config.generation"]
+  ).toMatch(/^[a-f0-9]{32}$/);
+  expect(before.doc.services.web.build).toBeUndefined();
+  expect(before.doc["x-hack-native-build"].workloads.web.build.context).toBe(
+    `${root}/literal-\u0024\u0024{AMBIENT}`
+  );
+  const previousRequests = (await Bun.file(join(root, "requests")).text())
+    .trim()
+    .split("\n");
+  expect((await invoke(root, "up")).code).toBe(0);
+  expect(await Bun.file(join(root, "engine")).json()).toEqual(before);
+  const requests: string[][] = (await Bun.file(join(root, "requests")).text())
+    .trim()
+    .split("\n")
+    .map((row) => JSON.parse(row));
+  expect(requests.filter((args) => args[0] === "buildx")).toHaveLength(1);
+  expect(
+    requests.filter((args) => args[0] === "compose" && args.includes("up"))
+  ).toHaveLength(2);
+  const warmRequests = requests.slice(previousRequests.length);
+  expect(
+    warmRequests.some(
+      (args) => args[0] === "container" && args[1] === "inspect"
+    )
+  ).toBe(true);
+  expect(
+    warmRequests.some((args) => args[0] === "network" && args[1] === "inspect")
+  ).toBe(true);
 }, 30_000);

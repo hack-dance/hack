@@ -12,7 +12,8 @@ selected services, jobs, and dependencies. Expected volume names and logical
 storage keys, and the default network name, come from the saved immutable generated
 documents. The stable random owner token comes from the verified private instance
 receipt, and every resource must match its `io.hack.native-config.owner` label. A
-reset receipt cannot adopt resources from an earlier owner token. An omitted persistent selection means no such resource is expected.
+reset receipt cannot adopt resources from an earlier owner token. Recorded persistent
+storage remains selected even if a later declaration removes its mount.
 Caller input is an internal execution contract; authored labels do not authorize
 ownership.
 
@@ -23,23 +24,29 @@ by their project label. Every selected container must carry version `1`, the exa
 runtime identity, a selected generation ID, and a known Compose service label.
 Persistent resources must carry version `1`, the exact runtime identity, and the
 exact declared name; volumes must also match their logical storage label. Missing
-resources are valid during fresh startup. A foreign same-name resource, a stale
+resources are valid during genuinely cold startup. A retained volume must exist
+and match its saved `CreatedAt` value in addition to name and ownership labels.
+A foreign same-name resource, a stale
 generation, an unknown service, a malformed reply, or uncertain inspection refuses.
 
 Docker queries request only structured IDs, names, fixed ownership labels, and
 container state, exit code, health status, and one-off status. They never request
 `Config.Env`, image values, health logs, or complete inspect objects. Returned
 observations contain only validated workload IDs, names, generation IDs and states,
-volume names/storage keys, and network IDs/names. Container names omit Docker's
+volume names/storage keys/birth timestamps, and network IDs/names. Container names omit Docker's
 inspect-only leading slash. Callers can distinguish current and proposed
 generations and bind a one-off result to its exact owned name before applying
 readiness or cleanup decisions. Failures discard daemon output and diagnostics.
 
 Containers and networks are inspected by full immutable IDs. Docker volumes expose
 names rather than immutable engine IDs. The selected inventory is checked again
-after inspection, so additions, removals, renames, and project-label conflicts
-refuse. This is not an atomic engine transaction: another Docker client can change
-resources after the last observation, or replace a volume under the same name.
+after inspection, including a second selected-volume inspection that compares
+name, storage key and reported creation timestamp. Additions, removals, renames,
+project-label conflicts or changed birth metadata refuse. This is not an atomic
+engine transaction: another Docker client can change resources after the last
+observation. Identical names, labels and timestamps do not establish unique
+physical identity or content continuity; an ordinary same-second replacement
+may be indistinguishable. A persistent content witness remains a separate gate.
 The caller must recheck at its effect boundary and retain explicit recovery for
 uncertain outcomes.
 

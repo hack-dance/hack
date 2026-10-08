@@ -19,6 +19,8 @@ const PENDING = "b".repeat(32);
 const ID = "c".repeat(64);
 const NETWORK_ID = "d".repeat(64);
 const VOLUME = "hack-21-hack-fixture-instance-4-data";
+const CREATED = "2026-10-08T00:00:00.123456789Z";
+const REBORN = "2026-10-08T00:00:01.123456789Z";
 const CANARY = "synthetic-private-env-image-canary";
 const options: NativeComposeOwnershipOptions = {
   composeProject: PROJECT,
@@ -86,7 +88,12 @@ if (action === "ls") {
  if (fixture.mode === "restart-member-transition" && kind === "network" && count > 0) {
    rows[0].containers[${JSON.stringify(ID)}] = {};
  }
- for (const id of selected) { const row = rows.find(row => row.id === id); if (!row) process.exit(1); console.log(JSON.stringify(row)); }
+ const order = fixture.mode === "volume-order" && kind === "volume" && count > 0 ? [...selected].reverse() : selected;
+ for (const id of order) { const row = rows.find(row => row.id === id); if (!row) process.exit(1); console.log(JSON.stringify(row)); }
+ if (fixture.mode === "volume-rebirth" && kind === "volume" && count === 0) {
+   fixture.volume[0].createdAt = ${JSON.stringify(REBORN)};
+   writeFileSync(root + "/fixture.json", JSON.stringify(fixture));
+ }
 }
 `
   );
@@ -129,6 +136,7 @@ function owned(): Fixture {
         instance: PROJECT,
         owner: OWNER,
         storage: "data",
+        createdAt: CREATED,
       },
     ],
     network: [
@@ -300,7 +308,7 @@ test("owned resources yield only bounded readiness observations and exact read-o
         oneoff: false,
       },
     ],
-    volumes: [{ name: VOLUME, storage: "data" }],
+    volumes: [{ name: VOLUME, storage: "data", createdAt: CREATED }],
     networks: [{ id: NETWORK_ID, name: `${PROJECT}_default` }],
   });
   for (const args of await commands()) {
@@ -334,7 +342,7 @@ test("fully completed real queries never signal an exited process group", async 
     expect((await assertNativeComposeOwned(options)).containers).toHaveLength(
       1
     );
-    expect(await commands()).toHaveLength(11);
+    expect(await commands()).toHaveLength(12);
     expect(signals).not.toHaveBeenCalled();
   } finally {
     signals.mockRestore();
@@ -504,6 +512,7 @@ test("persistent storage must match exact generated name and logical storage own
       instance: PROJECT,
       owner: OWNER,
       storage: "wrong",
+      createdAt: CREATED,
     },
   ];
   await prepare(fixture);
@@ -511,6 +520,92 @@ test("persistent storage must match exact generated name and logical storage own
   await prepare(owned());
   await expectRefusal({ ...options, expectedVolumes: [] });
   await expectRefusal({ ...options, expectedNetwork: "another-default" });
+});
+test("retained volume policy requires exact presence and birth while cold inventory stays admissible", async () => {
+  const retained: NativeComposeOwnershipOptions = {
+    ...options,
+    expectedVolumes: [
+      { name: VOLUME, storage: "data", mustExist: true, createdAt: CREATED },
+    ],
+  };
+  await prepare(owned());
+  expect((await assertNativeComposeOwned(retained)).volumes).toEqual([
+    { name: VOLUME, storage: "data", createdAt: CREATED },
+  ]);
+  await prepare({});
+  await expectRefusal(retained);
+  // Legacy history can require presence without inventing a prior birth.
+  await expectRefusal({
+    ...options,
+    expectedVolumes: [{ name: VOLUME, storage: "data", mustExist: true }],
+  });
+  expect((await assertNativeComposeOwned(options)).volumes).toEqual([]);
+  const replaced = owned();
+  const volume = replaced.volume?.[0];
+  if (!volume) {
+    throw new Error("Missing volume fixture");
+  }
+  volume.createdAt = REBORN;
+  await prepare(replaced);
+  await expectRefusal(retained);
+});
+test.each([
+  null,
+  "",
+  "0",
+  CANARY,
+  "2026-10-08 00:00:00",
+])("volume creation facts refuse malformed %j without exposing values", async (createdAt) => {
+  const fixture = owned();
+  const volume = fixture.volume?.[0];
+  if (!volume) {
+    throw new Error("Missing volume fixture");
+  }
+  volume.createdAt = createdAt;
+  await prepare(fixture);
+  await expectRefusal();
+});
+test("a same-name same-label volume replacement between inspections refuses before effect authority", async () => {
+  await prepare({ ...owned(), mode: "volume-rebirth" });
+  await expectRefusal({
+    ...options,
+    expectedVolumes: [
+      { name: VOLUME, storage: "data", mustExist: true, createdAt: CREATED },
+    ],
+  });
+});
+test("stable volume births tolerate reordered complete inspect rows", async () => {
+  const fixture = owned();
+  const volume = fixture.volume?.[0];
+  if (!volume) {
+    throw new Error("Missing volume fixture");
+  }
+  fixture.volume = [
+    volume,
+    {
+      ...volume,
+      id: `${VOLUME}-archive`,
+      name: `${VOLUME}-archive`,
+      storage: "archive",
+    },
+  ];
+  fixture.mode = "volume-order";
+  await prepare(fixture);
+  const result = await assertNativeComposeOwned({
+    ...options,
+    expectedVolumes: [
+      { name: VOLUME, storage: "data", createdAt: CREATED },
+      { name: `${VOLUME}-archive`, storage: "archive", createdAt: CREATED },
+    ],
+  });
+  expect(
+    [...result.volumes].sort((left, right) =>
+      left.name.localeCompare(right.name)
+    )
+  ).toEqual([
+    { name: VOLUME, storage: "data", createdAt: CREATED },
+    { name: `${VOLUME}-archive`, storage: "archive", createdAt: CREATED },
+  ]);
 });
 test("vanished resources and changed selected inventory refuse without retry or mutation", async () => {
   for (const mode of ["vanished", "inventory-change"]) {

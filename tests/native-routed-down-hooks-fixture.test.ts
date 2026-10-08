@@ -1,6 +1,14 @@
 import { expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createNativeComposeProbe } from "../src/lib/native-compose-ownership.ts";
@@ -69,9 +77,9 @@ console.log("linux");
       await window.capture(async (docker) => (await docker(args)).trim())
     ).toBe("linux");
     wallClock.mockReturnValue(30_000);
-    await expect(window.capture(async (docker) => docker(args))).rejects.toThrow(
-      "proof window expired"
-    );
+    await expect(
+      window.capture(async (docker) => docker(args))
+    ).rejects.toThrow("proof window expired");
     expect(() => window.assertOpen()).toThrow("proof window expired");
     expect((await readFile(commands, "utf8")).trim().split("\n")).toHaveLength(
       4
@@ -120,7 +128,9 @@ test("routed observations use remaining outer time and never accept late or fail
     createProbe: () => () => Promise.resolve("synthetic-observation"),
   });
   const refusal = new Error("synthetic capture failed");
-  await expect(failed.capture(() => Promise.reject(refusal))).rejects.toBe(refusal);
+  await expect(failed.capture(() => Promise.reject(refusal))).rejects.toBe(
+    refusal
+  );
 });
 test("routed env authoring works after the native marker and preserves the actual env freshness fence", async () => {
   const created = await mkdtemp(join(tmpdir(), "native-routed-down-env-"));

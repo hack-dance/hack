@@ -616,7 +616,9 @@ export async function runNativeRoutedDownHook(
     });
   }
   for (const sibling of capsule.siblings) {
-    const actual = await window.capture((docker) => observe(sibling, docker, true));
+    const actual = await window.capture((docker) =>
+      observe(sibling, docker, true)
+    );
     if (
       !nativeRoutedDownPhaseMatches({
         expected: sibling,
@@ -628,7 +630,9 @@ export async function runNativeRoutedDownHook(
         "Sibling route/data ownership changed during routed stop"
       );
     }
-    await window.capture((docker) => routesLive(actual, docker, window.deadline));
+    await window.capture((docker) =>
+      routesLive(actual, docker, window.deadline)
+    );
   }
   if (
     !nativeRoutedDownClaimsMatch({

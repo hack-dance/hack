@@ -1,4 +1,13 @@
-import { chmod, lstat, mkdir, open, readdir, realpath, stat } from "node:fs/promises";
+import {
+  appendFile,
+  chmod,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  realpath,
+  stat,
+} from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { isRecord } from "../../src/lib/guards.ts";
 import { findExecutableInPath } from "../../src/lib/shell.ts";
@@ -17,15 +26,18 @@ type Kind = (typeof KINDS)[number];
 export const processPolicyInitialTraceFormats = {
   container: {
     list: '{"id":{{json .ID}},"name":{{json .Names}},"project":{{json (.Label "com.docker.compose.project")}}}',
-    inspect: '{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"version":{{json (index .Config.Labels "io.hack.native-config.version")}},"instance":{{json (index .Config.Labels "io.hack.native-config.instance")}},"owner":{{json (index .Config.Labels "io.hack.native-config.owner")}},"generation":{{json (index .Config.Labels "io.hack.native-config.generation")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"state":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}null{{end}},"networks":{{json .NetworkSettings.Networks}}}',
+    inspect:
+      '{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"version":{{json (index .Config.Labels "io.hack.native-config.version")}},"instance":{{json (index .Config.Labels "io.hack.native-config.instance")}},"owner":{{json (index .Config.Labels "io.hack.native-config.owner")}},"generation":{{json (index .Config.Labels "io.hack.native-config.generation")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"state":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}null{{end}},"networks":{{json .NetworkSettings.Networks}}}',
   },
   volume: {
     list: '{"id":{{json .Name}},"name":{{json .Name}},"project":{{json (.Label "com.docker.compose.project")}}}',
-    inspect: '{"id":{{json .Name}},"name":{{json .Name}},"project":{{json (index .Labels "com.docker.compose.project")}},"version":{{json (index .Labels "io.hack.native-config.version")}},"instance":{{json (index .Labels "io.hack.native-config.instance")}},"owner":{{json (index .Labels "io.hack.native-config.owner")}},"storage":{{json (index .Labels "io.hack.native-config.storage")}},"createdAt":{{json .CreatedAt}}}',
+    inspect:
+      '{"id":{{json .Name}},"name":{{json .Name}},"project":{{json (index .Labels "com.docker.compose.project")}},"version":{{json (index .Labels "io.hack.native-config.version")}},"instance":{{json (index .Labels "io.hack.native-config.instance")}},"owner":{{json (index .Labels "io.hack.native-config.owner")}},"storage":{{json (index .Labels "io.hack.native-config.storage")}},"createdAt":{{json .CreatedAt}}}',
   },
   network: {
     list: '{"id":{{json .ID}},"name":{{json .Name}},"project":{{json (.Label "com.docker.compose.project")}}}',
-    inspect: '{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Labels "com.docker.compose.project")}},"version":{{json (index .Labels "io.hack.native-config.version")}},"instance":{{json (index .Labels "io.hack.native-config.instance")}},"owner":{{json (index .Labels "io.hack.native-config.owner")}},"driver":{{json .Driver}},"internal":{{json .Internal}},"containers":{{json .Containers}}}',
+    inspect:
+      '{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Labels "com.docker.compose.project")}},"version":{{json (index .Labels "io.hack.native-config.version")}},"instance":{{json (index .Labels "io.hack.native-config.instance")}},"owner":{{json (index .Labels "io.hack.native-config.owner")}},"driver":{{json .Driver}},"internal":{{json .Internal}},"containers":{{json .Containers}}}',
   },
 } as const;
 
@@ -65,8 +77,18 @@ export function processPolicyInitialTraceQuery(args: readonly string[]): {
     : null;
 }
 
-type FilePin = { readonly dev: number; readonly ino: number; readonly size: number; readonly mtimeMs: number; readonly ctimeMs: number };
-type BinaryPin = FilePin & { readonly path: string; readonly entry: string; readonly entryIdentity: FilePin };
+type FilePin = {
+  readonly dev: number;
+  readonly ino: number;
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly ctimeMs: number;
+};
+type BinaryPin = FilePin & {
+  readonly path: string;
+  readonly entry: string;
+  readonly entryIdentity: FilePin;
+};
 type ForwarderOptions = {
   readonly directory: string;
   readonly binary: BinaryPin;
@@ -74,7 +96,8 @@ type ForwarderOptions = {
 export type ProcessPolicyInitialTraceQuery = {
   readonly token: string;
   readonly startedAt: number;
-  readonly startedNs: string;
+  readonly startOrder: number;
+  readonly reapOrder: number;
   readonly reapedAt: number;
   readonly args: readonly string[];
   readonly stdout: string;
@@ -91,18 +114,32 @@ async function writePrivate(path: string, value: unknown): Promise<void> {
 }
 
 /** Fixture-only forwarding preserves original bytes/exit and performs no extra Docker query. */
-export async function runProcessPolicyInitialTraceForwarder(opts: ForwarderOptions): Promise<number> {
+export async function runProcessPolicyInitialTraceForwarder(
+  opts: ForwarderOptions
+): Promise<number> {
   const args = process.argv.slice(2);
   const entry = await lstat(opts.binary.entry);
   const current = await stat(opts.binary.path);
-  if (!current.isFile() || current.dev !== opts.binary.dev || current.ino !== opts.binary.ino || current.size !== opts.binary.size || current.mtimeMs !== opts.binary.mtimeMs || current.ctimeMs !== opts.binary.ctimeMs || entry.dev !== opts.binary.entryIdentity.dev || entry.ino !== opts.binary.entryIdentity.ino || entry.size !== opts.binary.entryIdentity.size || entry.mtimeMs !== opts.binary.entryIdentity.mtimeMs || entry.ctimeMs !== opts.binary.entryIdentity.ctimeMs || await realpath(opts.binary.entry) !== opts.binary.path) {
+  if (
+    !current.isFile() ||
+    current.dev !== opts.binary.dev ||
+    current.ino !== opts.binary.ino ||
+    current.size !== opts.binary.size ||
+    current.mtimeMs !== opts.binary.mtimeMs ||
+    current.ctimeMs !== opts.binary.ctimeMs ||
+    entry.dev !== opts.binary.entryIdentity.dev ||
+    entry.ino !== opts.binary.entryIdentity.ino ||
+    entry.size !== opts.binary.entryIdentity.size ||
+    entry.mtimeMs !== opts.binary.entryIdentity.mtimeMs ||
+    entry.ctimeMs !== opts.binary.entryIdentity.ctimeMs ||
+    (await realpath(opts.binary.entry)) !== opts.binary.path
+  ) {
     throw new Error(REFUSAL);
   }
   const query = processPolicyInitialTraceQuery(args);
   const composeUp = args[0] === "compose" && args.includes("up");
   const token = crypto.randomUUID().replaceAll("-", "");
   const startedAt = Date.now();
-  const startedNs = process.hrtime.bigint().toString();
   const path = join(opts.directory, `${token}.json`);
   let recorded = true;
   const record = async (suffix: string, value: unknown): Promise<void> => {
@@ -115,8 +152,27 @@ export async function runProcessPolicyInitialTraceForwarder(opts: ForwarderOptio
       recorded = false;
     }
   };
+  const event = async (name: "start" | "reap"): Promise<void> => {
+    try {
+      const path = join(opts.directory, "events.jsonl");
+      if ((await stat(path)).size > 1024 * 1024) {
+        throw new Error(REFUSAL);
+      }
+      await appendFile(path, `${JSON.stringify({ token, event: name })}\n`, {
+        mode: 0o600,
+      });
+    } catch {
+      recorded = false;
+    }
+  };
   if (query || composeUp) {
-    await record("start", { token, startedAt, startedNs, kind: query?.kind ?? "compose-up", action: query?.action ?? "effect" });
+    await record("start", {
+      token,
+      startedAt,
+      kind: query?.kind ?? "compose-up",
+      action: query?.action ?? "effect",
+    });
+    await event("start");
   }
   const child = Bun.spawn([opts.binary.entry, ...args], {
     stdin: "inherit",
@@ -124,8 +180,16 @@ export async function runProcessPolicyInitialTraceForwarder(opts: ForwarderOptio
     stderr: "inherit",
   });
   let reaped = false;
-  const onInterrupt = (): void => { if (!reaped) { child.kill("SIGINT"); } };
-  const onTerminate = (): void => { if (!reaped) { child.kill("SIGTERM"); } };
+  const onInterrupt = (): void => {
+    if (!reaped) {
+      child.kill("SIGINT");
+    }
+  };
+  const onTerminate = (): void => {
+    if (!reaped) {
+      child.kill("SIGTERM");
+    }
+  };
   process.on("SIGINT", onInterrupt);
   process.on("SIGTERM", onTerminate);
   const exited = child.exited.then((code) => {
@@ -142,7 +206,9 @@ export async function runProcessPolicyInitialTraceForwarder(opts: ForwarderOptio
       try {
         while (true) {
           const read = await reader.read();
-          if (read.done) { break; }
+          if (read.done) {
+            break;
+          }
           await Bun.write(Bun.stdout, read.value);
           bytes += read.value.byteLength;
           if (bytes <= LIMIT) {
@@ -155,17 +221,31 @@ export async function runProcessPolicyInitialTraceForwarder(opts: ForwarderOptio
     }
     const exitCode = await exited;
     const reapedAt = Date.now();
-    const reapedNs = process.hrtime.bigint().toString();
     if (query && bytes <= LIMIT) {
       try {
-        const stdout = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
-        await record("reply", { token, startedAt, startedNs, reapedAt, args, stdout, exitCode });
+        const stdout = new TextDecoder("utf-8", { fatal: true }).decode(
+          Buffer.concat(chunks)
+        );
+        await record("reply", {
+          token,
+          startedAt,
+          reapedAt,
+          args,
+          stdout,
+          exitCode,
+        });
       } catch {
         recorded = false;
       }
     }
     if (query || composeUp) {
-      await record("reap", { token, reapedAt, reapedNs, exitCode, recorded: recorded && (!query || bytes <= LIMIT) });
+      await record("reap", {
+        token,
+        reapedAt,
+        exitCode,
+        recorded: recorded && (!query || bytes <= LIMIT),
+      });
+      await event("reap");
     }
     return exitCode;
   } finally {
@@ -175,9 +255,11 @@ export async function runProcessPolicyInitialTraceForwarder(opts: ForwarderOptio
 }
 
 /** The initial up alone gets this shim; cleanup and later diagnostic probes keep the original PATH. */
-export async function prepareProcessPolicyInitialTrace(opts: { readonly directory: string }) {
+export async function prepareProcessPolicyInitialTrace(opts: {
+  readonly directory: string;
+}) {
   const selected = findExecutableInPath("docker");
-  if (!selected || !isAbsolute(selected)) {
+  if (!(selected && isAbsolute(selected))) {
     throw new Error(REFUSAL);
   }
   const path = await realpath(selected);
@@ -189,44 +271,124 @@ export async function prepareProcessPolicyInitialTrace(opts: { readonly director
   await mkdir(opts.directory, { mode: 0o700 });
   const replies = join(opts.directory, "replies");
   await mkdir(replies, { mode: 0o700 });
+  await (await open(join(replies, "events.jsonl"), "wx", 0o600)).close();
   const executable = join(opts.directory, "docker");
   const forwarder: ForwarderOptions = {
     directory: replies,
-    binary: { path, entry: selected, entryIdentity: { dev: entry.dev, ino: entry.ino, size: entry.size, mtimeMs: entry.mtimeMs, ctimeMs: entry.ctimeMs }, dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs },
+    binary: {
+      path,
+      entry: selected,
+      entryIdentity: {
+        dev: entry.dev,
+        ino: entry.ino,
+        size: entry.size,
+        mtimeMs: entry.mtimeMs,
+        ctimeMs: entry.ctimeMs,
+      },
+      dev: info.dev,
+      ino: info.ino,
+      size: info.size,
+      mtimeMs: info.mtimeMs,
+      ctimeMs: info.ctimeMs,
+    },
   };
-  await Bun.write(executable, `#!${process.execPath} --no-env-file\nimport {runProcessPolicyInitialTraceForwarder} from ${JSON.stringify(import.meta.path)};\nprocess.exit(await runProcessPolicyInitialTraceForwarder(${JSON.stringify(forwarder)}));\n`);
+  await Bun.write(
+    executable,
+    `#!${process.execPath} --no-env-file\nimport {runProcessPolicyInitialTraceForwarder} from ${JSON.stringify(import.meta.path)};\nprocess.exit(await runProcessPolicyInitialTraceForwarder(${JSON.stringify(forwarder)}));\n`
+  );
   await chmod(executable, 0o700);
-  return { path: `${opts.directory}:${process.env.PATH ?? ""}`, directory: replies };
+  return {
+    path: `${opts.directory}:${process.env.PATH ?? ""}`,
+    directory: replies,
+  };
+}
+
+function eventOrder(text: string) {
+  if (!text.endsWith("\n")) {
+    throw new Error(REFUSAL);
+  }
+  const starts = new Map<string, number>();
+  const reaps = new Map<string, number>();
+  for (const [index, line] of text.trimEnd().split("\n").entries()) {
+    const value: unknown = JSON.parse(line);
+    if (
+      !(
+        isRecord(value) &&
+        Object.keys(value).sort().join() === "event,token" &&
+        typeof value.token === "string" &&
+        TOKEN.test(value.token)
+      )
+    ) {
+      throw new Error(REFUSAL);
+    }
+    if (value.event === "start" && !starts.has(value.token)) {
+      starts.set(value.token, index);
+    } else if (
+      value.event === "reap" &&
+      starts.has(value.token) &&
+      !reaps.has(value.token)
+    ) {
+      reaps.set(value.token, index);
+    } else {
+      throw new Error(REFUSAL);
+    }
+  }
+  if (starts.size !== reaps.size) {
+    throw new Error(REFUSAL);
+  }
+  return { starts, reaps };
 }
 
 /** Private replies are never returned by the public log summary. Missing/truncated pairs refuse replay. */
-export async function readProcessPolicyInitialTrace(directory: string): Promise<{
+export async function readProcessPolicyInitialTrace(
+  directory: string
+): Promise<{
   readonly queries: readonly ProcessPolicyInitialTraceQuery[];
-  readonly upStartedNs: string;
-  readonly upReapedNs: string;
+  readonly upStartOrder: number;
+  readonly upReapOrder: number;
 }> {
   const names = await readdir(directory);
-  if (names.length > MAX_QUERIES * 3) {
+  if (names.length > MAX_QUERIES * 3 + 1) {
     throw new Error(REFUSAL);
   }
+  // Bun's hrtime origin is per process. One short append record per event binds
+  // distinct children to a shared order; wall timestamps cannot choose that order.
+  // Incomplete/interleaved journals or overlapping read acquisitions refuse.
+  const eventPath = join(directory, "events.jsonl");
+  if ((await stat(eventPath)).size > 1024 * 1024) {
+    throw new Error(REFUSAL);
+  }
+  const { starts, reaps } = eventOrder(await Bun.file(eventPath).text());
   const rows: ProcessPolicyInitialTraceQuery[] = [];
-  const effects: { startedNs: string; reapedNs: string }[] = [];
+  const effects: { startOrder: number; reapOrder: number }[] = [];
   let total = 0;
   for (const name of names.filter((value) => value.endsWith(".json.start"))) {
     const token = name.slice(0, -".json.start".length);
     if (!TOKEN.test(token)) {
       throw new Error(REFUSAL);
     }
+    const startOrder = starts.get(token);
+    const reapOrder = reaps.get(token);
+    if (startOrder === undefined || reapOrder === undefined) {
+      throw new Error(REFUSAL);
+    }
     const start: unknown = await Bun.file(join(directory, name)).json();
-    const reap: unknown = await Bun.file(join(directory, `${token}.json.reap`)).json();
-    if (!(isRecord(start) && isRecord(reap) && reap.recorded === true && start.token === token && reap.token === token)) {
+    const reap: unknown = await Bun.file(
+      join(directory, `${token}.json.reap`)
+    ).json();
+    if (
+      !(
+        isRecord(start) &&
+        isRecord(reap) &&
+        reap.recorded === true &&
+        start.token === token &&
+        reap.token === token
+      )
+    ) {
       throw new Error(REFUSAL);
     }
     if (start.kind === "compose-up") {
-      if (!(typeof start.startedNs === "string" && /^[0-9]{1,24}$/.test(start.startedNs) && typeof reap.reapedNs === "string" && /^[0-9]{1,24}$/.test(reap.reapedNs) && BigInt(reap.reapedNs) >= BigInt(start.startedNs))) {
-        throw new Error(REFUSAL);
-      }
-      effects.push({ startedNs: start.startedNs, reapedNs: reap.reapedNs });
+      effects.push({ startOrder, reapOrder });
       continue;
     }
     const path = join(directory, `${token}.json.reply`);
@@ -236,21 +398,62 @@ export async function readProcessPolicyInitialTrace(directory: string): Promise<
       throw new Error(REFUSAL);
     }
     const row: unknown = await Bun.file(path).json();
-    if (!(isRecord(row) && row.token === token && Number.isFinite(row.startedAt) && Number.isFinite(row.reapedAt) && typeof row.startedAt === "number" && typeof row.reapedAt === "number" && row.reapedAt >= row.startedAt && typeof row.startedNs === "string" && /^[0-9]{1,24}$/.test(row.startedNs) && row.startedNs === start.startedNs && row.startedAt === start.startedAt && row.reapedAt === reap.reapedAt && row.exitCode === reap.exitCode && Array.isArray(row.args) && row.args.every((value: unknown) => typeof value === "string") && processPolicyInitialTraceQuery(row.args) && typeof row.stdout === "string" && Number.isInteger(row.exitCode) && typeof row.exitCode === "number" && row.exitCode >= 0 && row.exitCode <= 255)) {
+    if (
+      !(
+        isRecord(row) &&
+        row.token === token &&
+        Number.isFinite(row.startedAt) &&
+        Number.isFinite(row.reapedAt) &&
+        typeof row.startedAt === "number" &&
+        typeof row.reapedAt === "number" &&
+        row.reapedAt >= row.startedAt &&
+        row.startedAt === start.startedAt &&
+        row.reapedAt === reap.reapedAt &&
+        row.exitCode === reap.exitCode &&
+        Array.isArray(row.args) &&
+        row.args.every((value: unknown) => typeof value === "string") &&
+        processPolicyInitialTraceQuery(row.args) &&
+        typeof row.stdout === "string" &&
+        Number.isInteger(row.exitCode) &&
+        typeof row.exitCode === "number" &&
+        row.exitCode >= 0 &&
+        row.exitCode <= 255
+      )
+    ) {
       throw new Error(REFUSAL);
     }
-    rows.push({ token, startedAt: row.startedAt, startedNs: row.startedNs, reapedAt: row.reapedAt, args: row.args, stdout: row.stdout, exitCode: row.exitCode });
+    rows.push({
+      token,
+      startedAt: row.startedAt,
+      startOrder,
+      reapOrder,
+      reapedAt: row.reapedAt,
+      args: row.args,
+      stdout: row.stdout,
+      exitCode: row.exitCode,
+    });
   }
-  if (names.length !== rows.length * 3 + effects.length * 2) {
+  if (
+    names.length !== rows.length * 3 + effects.length * 2 + 1 ||
+    starts.size !== rows.length + effects.length
+  ) {
     throw new Error(REFUSAL);
   }
-  rows.sort((left, right) => BigInt(left.startedNs) < BigInt(right.startedNs) ? -1 : 1);
-  if (new Set(rows.map((row) => row.startedNs)).size !== rows.length) {
-    throw new Error(REFUSAL);
+  rows.sort((left, right) => left.startOrder - right.startOrder);
+  for (let index = 1; index < rows.length; index++) {
+    const previous = rows[index - 1];
+    const current = rows[index];
+    if (!(previous && current) || previous.reapOrder >= current.startOrder) {
+      throw new Error(REFUSAL);
+    }
   }
   const effect = effects[0];
   if (effects.length !== 1 || !effect || rows.length === 0) {
     throw new Error(REFUSAL);
   }
-  return { queries: rows, upStartedNs: effect.startedNs, upReapedNs: effect.reapedNs };
+  return {
+    queries: rows,
+    upStartOrder: effect.startOrder,
+    upReapOrder: effect.reapOrder,
+  };
 }

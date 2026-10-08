@@ -719,13 +719,10 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
       const initialTrace = await prepareProcessPolicyInitialTrace({
         directory: join(ctx.tempRoot, "initial-process-policy-trace"),
       });
-      const initialUp = await raw([
-        "--profile",
-        "exercise",
-        "up",
-        "--detach",
-        "--json",
-      ], { PATH: initialTrace.path });
+      const initialUp = await raw(
+        ["--profile", "exercise", "up", "--detach", "--json"],
+        { PATH: initialTrace.path }
+      );
       if (isKnownUncertainProcessPolicyStartup(initialUp)) {
         try {
           const replay = await summarizeProcessPolicyInitialTrace({
@@ -733,9 +730,13 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
             projectRoot: root,
             replayRoot: join(ctx.tempRoot, "initial-process-policy-replay"),
           });
-          ctx.log(`fixed-field original-query replay: ${JSON.stringify(replay)}`);
+          ctx.log(
+            `fixed-field original-query replay: ${JSON.stringify(replay)}`
+          );
         } catch {
-          stage("fixed-field original-query replay unavailable; no cause inferred");
+          stage(
+            "fixed-field original-query replay unavailable; no cause inferred"
+          );
         }
       }
       const diagnostic = await recordKnownUncertainProcessPolicyStartup({

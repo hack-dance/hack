@@ -122,13 +122,22 @@ Stopped user proxy containers and the network are preserved and checked unchange
 HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=native-config-routing
 ```
 
-The isolated proxy publishes no host ports and uses private bind directories instead
+The isolated proxy publishes no host ports and uses private tmpfs mounts instead
 of anonymous data/config volumes. Requests run inside the captured proxy with exact
 hostname resolution and its verified public root CA, without an insecure or
 app-local fallback. The scenario checks primary and OAuth alias origins, two linked
 worktrees, primary domain replacement, down/up, sibling and proxy canaries, and
-foreign hostname admission before engine effects. It retires native routes and
-claims before removing only its exact owned proxy. This proves same-engine Caddy
+foreign hostname admission before engine effects. The same required scenario also
+combines finite down hooks with live routing: before sees its exact retained data
+and CA-valid TLS routes; after sees its own container/network/dispatch absence while
+its claims remain held. A known after-hook exit 17 keeps the stop pending and claims
+held until explicit saved recovery skips the hooks. A later successful stop retires
+only the primary claims. Both modes check unchanged sibling container/network IDs,
+generation, data, volume creation and TLS routes; managed-env drift refuses before
+hooks or teardown. Unknown hook completion is covered by the separate generation
+regressions; this fixture does not create an unrecoverable orphan to simulate it.
+It retires native routes and claims before removing only its exact owned proxy.
+This proves same-engine Caddy
 routing and fixture CA TLS; host DNS, system trust and browser access remain separate
 acceptance gates. If owned teardown is incomplete, the scenario fails and retains
 both fixture roots and a private identity receipt for recovery. Successful cleanup

@@ -246,8 +246,21 @@ may still return its saved origin; this does not assert application reachability
 authored contents or decrypt the current environment. Profile and overlay changes
 require `up` or `restart`; an existing `run` also refuses inputs that differ from
 its retained generation. Saved operations hold a lease and check engine ownership
-before acting. Process cancellation forwards signals and releases the lease after
-the child is reaped.
+before acting. Process cancellation forwards signals to the owned host Compose
+attachment and releases its lease after that child is reaped. This does not prove
+that a guest `exec` process stopped: direct host SIGINT can detach the client while
+the command continues inside its container. PTY Ctrl-C travels through the terminal
+attachment and has different guest signal behavior. These paths follow Compose's
+[exec attachment contract](https://docs.docker.com/reference/cli/docker/compose/exec/).
+Hack does not kill a guessed guest PID or automatically stop the application on
+client cancellation. Explicit owned `down` stops the containing instance while
+retaining persistent data.
+
+`ps.pending` describes journaled engine mutations, not guest exec sessions. A
+cancelled `exec` can therefore have no pending engine operation even when its guest
+completion is unknown. An interrupted `run` retains its exact one-off and pending
+operation when cancelled ownership checks cannot prove completion; use explicit
+`down --recover` instead of retrying the command.
 
 Generation identity is distinct from persistent worktree storage identity.
 `down` removes owned containers and networks while retaining persistent volumes.

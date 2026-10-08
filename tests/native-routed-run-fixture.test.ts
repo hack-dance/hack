@@ -151,6 +151,8 @@ test("fixture volume cleanup requires its declared physical name, storage and va
     ).toBe(false);
   }
   const pin = { name: value.name, createdAt: value.createdAt };
+  expect(nativeRoutingFixtureVolumeSelectionMatches([], pin)).toBe(false);
+  expect(nativeRoutingFixtureVolumeSelectionMatches([], undefined)).toBe(true);
   expect(nativeRoutingFixtureVolumeSelectionMatches([value.name], pin)).toBe(
     true
   );

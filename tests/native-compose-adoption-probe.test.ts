@@ -77,6 +77,16 @@ if(mode==="decode") {await Bun.write(Bun.stdout,new Uint8Array([255]));process.e
 if(mode==="json") {console.log(${JSON.stringify(CANARY)});process.exit(0);}
 if(mode==="row") {console.log("[]");process.exit(0);}
 const row={id:${JSON.stringify(ID)},running:false,paused:false,status:"exited",health:"",exitCode:0,startedAt:"2026-10-08T00:00:01Z",finishedAt:"2026-10-08T00:00:02Z",restartPolicy:"no",maximumRetryCount:0};
+if(mode.startsWith("format-")) {
+ if(mode==="format-health") row.health="healthy";
+ const health=${JSON.stringify('{{with (index .State "Health")}}{{json .Status}}{{else}}""{{end}}')};
+ const fields={".Id":"id",".State.Running":"running",".State.Paused":"paused",".State.Status":"status",".State.ExitCode":"exitCode",".State.StartedAt":"startedAt",".State.FinishedAt":"finishedAt",".HostConfig.RestartPolicy.Name":"restartPolicy",".HostConfig.RestartPolicy.MaximumRetryCount":"maximumRetryCount"};
+ let rendered=args[3].replace(health,JSON.stringify(row.health)).replace(/\\{\\{json ([^}]+)\\}\\}/g,(_,path)=>{if(!Object.hasOwn(fields,path)){writeFileSync(root+"/mutation","unsupported format");process.exit(99);}return JSON.stringify(row[fields[path]]);});
+ if(rendered.includes("{{") || rendered.includes("}}")) {writeFileSync(root+"/mutation","unrendered format");process.exit(99);}
+ if(mode==="format-unterminated") rendered=rendered.slice(0,-1);
+ writeFileSync(root+"/format-rendered",rendered);
+ console.log(rendered);process.exit(0);
+}
 if(mode==="shape") delete row.health;
 if(mode==="timestamp") row.startedAt=${JSON.stringify(CANARY)};
 if(mode==="restart-policy") row.restartPolicy=${JSON.stringify(CANARY)};
@@ -261,6 +271,43 @@ test("valid decoded row still traverses the closed job codec", async () => {
     restartPolicy: "no",
     exitCode: 0,
   });
+});
+
+for (const [value, health] of [
+  ["format-no-health", ""],
+  ["format-health", "healthy"],
+] as const) {
+  test(`shipping inspect format renders a closed job row with ${value}`, async () => {
+    await mode(value);
+    const expected = {
+      id: ID,
+      running: false,
+      paused: false,
+      status: "exited",
+      health,
+      exitCode: 0,
+      startedAt: "2026-10-08T00:00:01Z",
+      finishedAt: "2026-10-08T00:00:02Z",
+      restartPolicy: "no",
+      maximumRetryCount: 0,
+    } as const;
+    expect(await inspectLegacyComposeJobStates({ binding })).toEqual([
+      expected,
+    ]);
+    expect(
+      JSON.parse(await readFile(join(root, "format-rendered"), "utf8"))
+    ).toEqual(expected);
+    expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
+  });
+}
+
+test("unterminated shipping-format output refuses as probe-json without weakening the codec", async () => {
+  await mode("format-unterminated");
+  publicRefusal(
+    await rejection(() => inspectLegacyComposeJobStates({ binding })),
+    "probe-json"
+  );
+  expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
 });
 
 test("operation admission and spawn failure remain distinct from child failure", async () => {

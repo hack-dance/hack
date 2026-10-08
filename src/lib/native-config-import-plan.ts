@@ -133,6 +133,12 @@ function mappingFields(
   };
 }
 
+type NativeImportPurpose =
+  | "preview"
+  | "adoption-baseline"
+  | "completed-job-adoption"
+  | "storage-adoption";
+
 /**
  * Closed, pure conversion. Every raw field starts refused until explicitly mapped.
  * Completeness here describes mapping coverage; the preview owner separately requires
@@ -141,11 +147,7 @@ function mappingFields(
 function mapLegacyNativeInput(opts: {
   readonly configText: string;
   readonly composeText: string;
-  readonly purpose:
-    | "preview"
-    | "adoption-baseline"
-    | "completed-job-adoption"
-    | "storage-adoption";
+  readonly purpose: NativeImportPurpose;
 }): NativeImportPlan {
   const config = parseImportDocument({
     text: opts.configText,
@@ -216,7 +218,7 @@ function mapOwnedNetwork(
   opts: Pick<MappingContext, "candidate" | "mark" | "refuse"> & {
     readonly project: unknown;
     readonly compose: Record<string, unknown>;
-    readonly purpose: "preview" | "adoption-baseline" | "storage-adoption";
+    readonly purpose: NativeImportPurpose;
   }
 ): void {
   if (typeof opts.project !== "string") {

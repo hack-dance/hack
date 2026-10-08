@@ -44,6 +44,12 @@ join that ingress. Hack verifies the exact engine, proxy and network before effe
 admits every selected hostname through private cooperative claims, and refuses
 observed foreign Caddy site collisions. Startup also checks Caddy's active route
 configuration against the ready generation's exact owned upstream addresses.
+When Caddy's stored admin config omits a policy added by automatic HTTPS,
+Hack also verifies a HEAD request for each selected HTTPS origin inside that
+exact proxy, using Caddy's live local root and hostname verification. It discards
+the response, follows no redirects, and rechecks dispatch and ownership afterward.
+Listening on port 443 alone does not satisfy this check. See
+[Caddy's automatic HTTPS contract](https://caddyserver.com/docs/automatic-https).
 Rendering labels or receiving a successful Compose exit does not prove routing.
 This path does not start or repair global services, change DNS, install trust, or
 open a browser. Arbitrary external Docker writers are outside the cooperative

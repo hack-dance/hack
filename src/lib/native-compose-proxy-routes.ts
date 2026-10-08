@@ -8,6 +8,7 @@ import { createNativeComposeProbe } from "./native-compose-ownership.ts";
 import { NativeComposeRoutingError } from "./native-compose-routing.ts";
 
 const ID = /^[a-f0-9]{64}$/;
+const HTTP_STATUS = /^[1-5][0-9]{2}$/;
 const INSPECT =
   '{"id":{{json .Id}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"owner":{{json (index .Config.Labels "io.hack.native-config.owner")}},"instance":{{json (index .Config.Labels "io.hack.native-config.instance")}},"generation":{{json (index .Config.Labels "io.hack.native-config.generation")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"running":{{json .State.Running}},"network":{{with (index .NetworkSettings.Networks "hack-dev")}}{{json .NetworkID}}{{else}}null{{end}},"ip":{{with (index .NetworkSettings.Networks "hack-dev")}}{{json .IPAddress}}{{else}}null{{end}}}';
 
@@ -28,7 +29,7 @@ type Proxy = {
 type Activity = HostScope & { readonly proxy?: Proxy };
 type ServerProjection = {
   readonly listen: readonly string[];
-  readonly tls: boolean | null;
+  readonly tls: boolean | "automatic" | null;
   readonly activities: readonly Activity[];
 };
 type HostScope = {
@@ -286,8 +287,23 @@ function collectHandlers(
   }
 }
 
-function frontendTls(value: unknown): boolean | null {
-  if (value === undefined || (Array.isArray(value) && value.length === 0)) {
+function frontendTls(server: Record<string, unknown>): ServerProjection["tls"] {
+  const value = server.tls_connection_policies;
+  if (value === undefined) {
+    const automatic = server.automatic_https;
+    if (automatic === undefined) {
+      return "automatic";
+    }
+    if (
+      !isRecord(automatic) ||
+      (automatic.disable !== undefined &&
+        typeof automatic.disable !== "boolean")
+    ) {
+      return null;
+    }
+    return automatic.disable === true ? false : "automatic";
+  }
+  if (Array.isArray(value) && value.length === 0) {
     return false;
   }
   return Array.isArray(value) &&
@@ -298,10 +314,17 @@ function frontendTls(value: unknown): boolean | null {
     : null;
 }
 
-function frontendListener(server: ServerProjection, origin: URL): boolean {
+function frontendListener(
+  server: ServerProjection,
+  origin: URL,
+  allowAutomaticTls = false
+): boolean {
   const port = origin.protocol === "https:" ? 443 : 80;
   return (
-    server.tls === (origin.protocol === "https:") &&
+    (server.tls === (origin.protocol === "https:") ||
+      (server.tls === "automatic" &&
+        (origin.protocol === "http:" ||
+          (allowAutomaticTls && origin.protocol === "https:")))) &&
     server.listen.some((address) =>
       [`:${port}`, `0.0.0.0:${port}`, `[::]:${port}`].includes(address)
     )
@@ -347,6 +370,14 @@ export function nativeComposeProxyRoutesMatch(opts: {
   readonly expected: readonly ExpectedRoute[];
   readonly absentHostnames: readonly string[];
 }): boolean {
+  return projectedRoutesMatch(opts, false);
+}
+
+/** Automatic TLS is only a candidate until the IO wrapper verifies the live certificate. */
+function projectedRoutesMatch(
+  opts: Parameters<typeof nativeComposeProxyRoutesMatch>[0],
+  allowAutomaticTls: boolean
+): boolean {
   if (!isRecord(opts.servers)) {
     return refused();
   }
@@ -366,7 +397,7 @@ export function nativeComposeProxyRoutesMatch(opts: {
     }
     servers.push({
       listen: server.listen === undefined ? [] : hostStrings(server.listen),
-      tls: frontendTls(server.tls_connection_policies),
+      tls: frontendTls(server),
       activities: result.activities,
     });
   }
@@ -398,7 +429,7 @@ export function nativeComposeProxyRoutesMatch(opts: {
     }
     for (const origin of origins) {
       const candidates = servers.filter((server) =>
-        frontendListener(server, origin)
+        frontendListener(server, origin, allowAutomaticTls)
       );
       // Multiple listeners can dispatch the same origin differently. Require exactly one proven path.
       const server = candidates[0];
@@ -412,6 +443,84 @@ export function nativeComposeProxyRoutesMatch(opts: {
     }
   }
   return true;
+}
+
+function automaticHttpsOrigins(
+  servers: unknown,
+  expected: readonly ExpectedRoute[]
+): readonly string[] {
+  if (!isRecord(servers)) {
+    return refused();
+  }
+  const projected = Object.values(servers).map((server) => {
+    if (!isRecord(server)) {
+      return refused();
+    }
+    return {
+      listen: server.listen === undefined ? [] : hostStrings(server.listen),
+      tls: frontendTls(server),
+      activities: [],
+    };
+  });
+  return [...new Set(expected.flatMap((route) => route.origins))]
+    .filter((text) => {
+      const origin = new URL(text);
+      return (
+        origin.protocol === "https:" &&
+        projected.some(
+          (server) =>
+            server.tls === "automatic" && frontendListener(server, origin, true)
+        )
+      );
+    })
+    .sort();
+}
+
+async function verifyAutomaticHttps(opts: {
+  readonly binding: NativeComposeIngressBinding;
+  readonly origins: readonly string[];
+  readonly signal: AbortSignal;
+}): Promise<void> {
+  for (const origin of opts.origins) {
+    const url = new URL(origin);
+    const probe = createNativeComposeProbe({ signal: opts.signal });
+    // A HEAD response proves the certificate and hostname without retaining app data.
+    // Configured route/listener/upstream proof remains mandatory; :443 alone is insufficient.
+    const status = await probe([
+      "exec",
+      opts.binding.proxyId,
+      "curl",
+      "--disable",
+      "--silent",
+      "--show-error",
+      "--proxy",
+      "",
+      "--noproxy",
+      "*",
+      "--proto",
+      "=https",
+      "--head",
+      "--output",
+      "/dev/null",
+      "--max-redirs",
+      "0",
+      "--connect-timeout",
+      "2",
+      "--max-time",
+      "5",
+      "--cacert",
+      "/data/caddy/pki/authorities/local/root.crt",
+      "--resolve",
+      `${url.hostname}:443:127.0.0.1`,
+      "--write-out",
+      "%{http_code}",
+      "--url",
+      `${origin}/`,
+    ]);
+    if (!HTTP_STATUS.test(status)) {
+      return refused();
+    }
+  }
 }
 
 function containerIds(text: string): string[] {
@@ -549,11 +658,33 @@ export async function assertNativeComposeProxyRoutes(opts: {
     const readActive = async () => {
       // Fixed GET inside the exact verified proxy. Nothing is published and no admin mutation occurs.
       const servers = await readActiveProxy(selected);
-      return nativeComposeProxyRoutesMatch({
+      const projection = {
         servers,
         expected,
         absentHostnames: selected.absentHostnames,
-      });
+      };
+      if (!projectedRoutesMatch(projection, true)) {
+        return false;
+      }
+      const origins = automaticHttpsOrigins(servers, expected);
+      if (!origins.length) {
+        return true;
+      }
+      try {
+        await verifyAutomaticHttps({
+          binding: selected.binding,
+          origins,
+          signal,
+        });
+      } catch {
+        return false;
+      }
+      // Caddy adds automatic TLS at provisioning time, outside its stored admin JSON.
+      // Re-read the selected dispatch after probing; a changed route cannot inherit the proof.
+      return projectedRoutesMatch(
+        { ...projection, servers: await readActiveProxy(selected) },
+        true
+      );
     };
     while (Date.now() < selected.deadline && !signal.aborted) {
       if (await readActive()) {

@@ -277,6 +277,15 @@ test("frontend listener and TLS must serve the selected origin, independently of
   ).toBe(true);
 });
 
+test("a config-only projection never infers automatic TLS from a 443 listener", () => {
+  const servers = config();
+  const server: Record<string, unknown> = servers.srv0;
+  server.tls_connection_policies = undefined;
+  expect(
+    nativeComposeProxyRoutesMatch({ servers, expected, absentHostnames: [] })
+  ).toBe(false);
+});
+
 test("an earlier responder, middleware, conditional or terminal route cannot shadow the expected proxy", () => {
   for (const earlier of [
     {

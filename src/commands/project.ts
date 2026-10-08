@@ -1284,7 +1284,7 @@ async function maybePromptLegacyProjectEnvMigration(opts: {
   return migrated.legacyDetected;
 }
 
-async function resolveModernComposeEnvOverrides(opts: {
+export async function resolveModernComposeEnvOverrides(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly targetServices: readonly string[];
   readonly allServiceNames: readonly string[];
@@ -2967,7 +2967,7 @@ async function resolveBranchComposeFiles(opts: {
   return [opts.project.composeFile, overridePath];
 }
 
-async function resolveRuntimeHostMetadataOverride(opts: {
+export async function resolveRuntimeHostMetadataOverride(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly composeFiles: readonly string[];
   readonly branch: string | null;

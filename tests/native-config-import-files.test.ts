@@ -263,6 +263,103 @@ test("converted build jobs publish every explicit file grant with native job pro
   expect(Object.isFrozen(result.candidate?.jobs)).toBe(true);
 });
 
+function networkJobFileSource() {
+  const source = jobFileSource();
+  return {
+    ...source,
+    networks: { private: { driver: "bridge", internal: true } },
+    services: {
+      app: {
+        ...source.services.app,
+        networks: { private: { aliases: ["application"] } },
+      },
+      initialize: {
+        ...source.services.initialize,
+        networks: { private: { aliases: ["initializer"] } },
+      },
+    },
+  };
+}
+
+test("owned bridge mapping and explicit job file grants preserve both pipelines and retained-purpose fences", () => {
+  const source = networkJobFileSource();
+  const before = JSON.stringify(source);
+  const result = mapped(source);
+  expect(result.report.complete).toBe(true);
+  expect(result.candidate).toMatchObject({
+    networks: { private: { internal: true } },
+    services: { app: { networks: { private: { aliases: ["application"] } } } },
+    jobs: {
+      initialize: {
+        build: { context: ".", dockerfile: "Dockerfile", target: "prepare" },
+        networks: { private: { aliases: ["initializer"] } },
+        mounts: [
+          { config: "settings", target: "/settings", mode: "0444" },
+          { secret: "token", target: "/run/secrets/renamed", mode: "0444" },
+        ],
+      },
+    },
+  });
+  for (const [pointer, target, code] of [
+    [
+      "/services/initialize/networks/private/aliases/0",
+      "/jobs/initialize/networks",
+      "owned_bridge_attachment",
+    ],
+    [
+      "/services/initialize/configs/0",
+      "/jobs/initialize/mounts/0",
+      "compose_linux_file_grant_policy",
+    ],
+    [
+      "/services/initialize/build/context",
+      "/jobs/initialize/build/context",
+      "compose_build_context_rebased",
+    ],
+  ]) {
+    expect(result.report.fields).toContainEqual(
+      expect.objectContaining({
+        document: "compose",
+        pointer,
+        target,
+        code,
+        status: "normalized",
+      })
+    );
+  }
+  const inputs = { configText: CONFIG, composeText: before };
+  for (const [retained, pointer, code] of [
+    [
+      mapLegacyNativeAdoptionBaseline(inputs),
+      "/services/initialize",
+      "completed_job_adoption_unqualified",
+    ],
+    [
+      mapLegacyNativeStorageAdoption(inputs),
+      "/networks",
+      "owned_bridge_jobs_unsupported",
+    ],
+  ] as const) {
+    refused(retained);
+    expect(retained.report.fields).toContainEqual(
+      expect.objectContaining({
+        pointer: "/services/initialize/configs/0",
+        status: "refused",
+        code: "unsupported_field",
+      })
+    );
+    expect(retained.report.fields).toContainEqual(
+      expect.objectContaining({
+        pointer,
+        status: "refused",
+        code,
+      })
+    );
+  }
+  expect(JSON.stringify(source)).toBe(before);
+  expect(JSON.stringify(result)).not.toContain(CANARY);
+});
+
 test("inactive job grants and job restrictions remain closed across preview purposes", () => {
   const source = jobFileSource();
   refused(
@@ -1090,6 +1187,49 @@ test.skipIf(!BINARY)(
       },
     });
     expect(compiled.plan.services).not.toHaveProperty("initialize");
+    expect(JSON.stringify(result)).not.toContain(CANARY);
+  }
+);
+
+test.skipIf(!BINARY)(
+  "matching compiler preserves owned bridge and explicit file grants for selected and inactive build jobs",
+  async () => {
+    const result = mapped(networkJobFileSource());
+    expect(result.report.complete).toBe(true);
+    for (const profiles of [[], ["later"]]) {
+      const compiled = await compileNativeConfig({
+        input: new TextEncoder().encode(JSON.stringify(result.candidate)),
+        profiles,
+        binary: BINARY,
+      });
+      expect(compiled.ok).toBe(true);
+      if (!compiled.ok) {
+        throw new Error("Compiled combined bridge/file job fixture refused");
+      }
+      expect(compiled.plan.networks).toEqual({ private: { internal: true } });
+      if (profiles.length === 0) {
+        expect(compiled.plan.jobs).not.toHaveProperty("initialize");
+        expect(compiled.plan.services).not.toHaveProperty("app");
+      } else {
+        expect(compiled.plan.jobs).toMatchObject({
+          initialize: {
+            networks: { private: { aliases: ["initializer"] } },
+            mounts: [
+              { config: "settings", mode: "0444" },
+              { secret: "token", mode: "0444" },
+            ],
+            build: {
+              context: ".",
+              dockerfile: "Dockerfile",
+              target: "prepare",
+            },
+          },
+        });
+        expect(compiled.plan.services).toMatchObject({
+          app: { networks: { private: { aliases: ["application"] } } },
+        });
+      }
+    }
     expect(JSON.stringify(result)).not.toContain(CANARY);
   }
 );

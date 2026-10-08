@@ -12,9 +12,11 @@ import {
   createAdoptionFixtureProbe,
   FOREIGN_CANARY_FORMAT,
   FOREIGN_CANARY_MOUNTINFO_SCRIPT,
+  guardedAdoptionCanaryCleanup,
   inspectAdoptionBridge,
   nativeComposeAdoptionWorktreesScenario,
   ownedAdoptionFixtureObservation,
+  runWithFixtureCleanup,
   waitForAdoptionFixtureSql,
 } from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
 
@@ -62,6 +64,35 @@ const rows = {
     createdAt,
   },
 };
+
+test("combined bridge-health failure keeps original cleanup fenced while foreign-canary retirement is pending", async () => {
+  const gate = { pending: false };
+  let removals = 0;
+  let secondaryFailures = 0;
+  const cleanup = guardedAdoptionCanaryCleanup(gate, async () => {
+    removals++;
+  });
+  const originalFailure = new Error("synthetic first-run failure");
+  await expect(
+    runWithFixtureCleanup({
+      run: async () => {
+        gate.pending = true;
+        throw originalFailure;
+      },
+      cleanup,
+      secondaryFailure: () => {
+        secondaryFailures++;
+      },
+    })
+  ).rejects.toBe(originalFailure);
+  expect(removals).toBe(0);
+  expect(secondaryFailures).toBe(1);
+  await expect(cleanup()).rejects.toThrow(REFUSAL);
+  expect(removals).toBe(0);
+  gate.pending = false;
+  await cleanup();
+  expect(removals).toBe(1);
+});
 
 const literalArgv = {
   id,

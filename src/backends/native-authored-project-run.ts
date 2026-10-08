@@ -25,6 +25,7 @@ import {
 
 const LIMIT = 64 * 1024;
 const CONTROL = /\p{Cc}/u;
+const HEX64 = /^[a-f0-9]{64}$/;
 export type NativeAuthoredProjectRunScope = {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -70,6 +71,35 @@ function selected(value: unknown): NativeAuthoredProjectRun {
 function digest(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
+function selectedFile(value: unknown): NativeAuthoredProjectRunSelection {
+  if (
+    !(
+      isRecord(value) &&
+      keys(value, "identity,record") &&
+      isRecord(value.identity) &&
+      keys(value.identity, "dev,ino,sha256")
+    )
+  ) {
+    return refused();
+  }
+  const identity = value.identity;
+  if (
+    typeof identity.dev !== "number" ||
+    !Number.isSafeInteger(identity.dev) ||
+    identity.dev < 0 ||
+    typeof identity.ino !== "number" ||
+    !Number.isSafeInteger(identity.ino) ||
+    identity.ino < 1 ||
+    typeof identity.sha256 !== "string" ||
+    !HEX64.test(identity.sha256)
+  ) {
+    return refused();
+  }
+  return {
+    record: selected(value.record),
+    identity: { dev: identity.dev, ino: identity.ino, sha256: identity.sha256 },
+  };
+}
 function validBranch(branch: string | null): boolean {
   return (
     branch === null ||
@@ -106,10 +136,16 @@ async function storeDirectory(
   return await holdDirectory(path, privateRoot);
 }
 async function storage<T>(
-  opts: NativeAuthoredProjectRunScope,
+  input: NativeAuthoredProjectRunScope,
   create: boolean,
   action: (store: Store | undefined) => Promise<T>
 ): Promise<T> {
+  const opts = {
+    projectRoot: input.projectRoot,
+    projectDir: input.projectDir,
+    nativeHome: input.nativeHome,
+    branch: input.branch,
+  };
   const held: HeldDirectory[] = [];
   try {
     const projectRoot = await realpath(opts.projectRoot);
@@ -285,7 +321,7 @@ export async function removeNativeAuthoredProjectRun(
     readonly cleaned: NativeAuthoredReceipt;
   }
 ): Promise<void> {
-  const expected = selected(opts.expected.record);
+  const expected = selectedFile(opts.expected);
   const cleaned = parseNativeAuthoredReceipt(opts.cleaned);
   if (
     cleaned.phase !== "removed" ||
@@ -293,7 +329,7 @@ export async function removeNativeAuthoredProjectRun(
       (resource) => resource.phase !== "removed"
     ) ||
     nativeAuthoredReceiptBinding(cleaned) !==
-      nativeAuthoredReceiptBinding(expected.receipt)
+      nativeAuthoredReceiptBinding(expected.record.receipt)
   ) {
     return refused();
   }
@@ -303,7 +339,7 @@ export async function removeNativeAuthoredProjectRun(
     }
     await store.withLock(async () => {
       const current = await read(store);
-      if (JSON.stringify(current) !== JSON.stringify(opts.expected)) {
+      if (JSON.stringify(current) !== JSON.stringify(expected)) {
         return refused();
       }
       await store.check();

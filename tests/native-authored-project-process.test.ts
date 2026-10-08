@@ -523,13 +523,17 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
       ) {
         await Bun.sleep(25);
       }
-      if (!absent()) {
+      const completion = await Bun.file(
+        join(opts.projectRoot, "keeper-complete")
+      )
+        .text()
+        .catch(() => undefined);
+      const keeperAbsent = absent();
+      if (completion !== "exited" || !keeperAbsent) {
         roots.splice(roots.indexOf(opts.projectRoot), 1);
       }
-      expect(
-        await Bun.file(join(opts.projectRoot, "keeper-complete")).text()
-      ).toBe("exited");
-      expect(absent()).toBe(true);
+      expect(completion).toBe("exited");
+      expect(keeperAbsent).toBe(true);
     }
   }
 }, 6000);

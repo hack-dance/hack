@@ -178,7 +178,13 @@ function mapLegacyNativeInput(opts: {
   const context = { config: config.value, candidate, mark, refuse };
   mapOverlay(context);
   mapWorktree(context);
-  mapServices({ source: compose.value.services, candidate, mark, refuse, jobPreview: opts.purpose !== "adoption-baseline" });
+  mapServices({
+    source: compose.value.services,
+    candidate,
+    mark,
+    refuse,
+    jobPreview: opts.purpose !== "adoption-baseline",
+  });
   if (opts.purpose === "storage-adoption") {
     mapStorageCandidate({
       config: config.value,
@@ -863,6 +869,18 @@ function refuseUndeclaredJobTargets(
   }
 }
 
+function refuseUnqualifiedJobAdoption(
+  opts: Pick<MappingContext, "refuse"> & {
+    readonly job: boolean;
+    readonly jobPreview: boolean;
+    readonly pointer: string;
+  }
+) {
+  if (opts.job && !opts.jobPreview) {
+    opts.refuse("compose", opts.pointer, "completed_job_adoption_unqualified");
+  }
+}
+
 function mapServices(
   opts: Pick<MappingContext, "mark" | "refuse" | "candidate"> & {
     readonly source: unknown;
@@ -893,7 +911,12 @@ function mapServices(
         jobs: jobNames,
       });
       (job ? jobs : services)[name] = workload;
-      if (job && !opts.jobPreview) opts.refuse("compose", pointer, "completed_job_adoption_unqualified");
+      refuseUnqualifiedJobAdoption({
+        job,
+        jobPreview: opts.jobPreview,
+        pointer,
+        refuse: opts.refuse,
+      });
       refuseUndeclaredJobTargets({
         ...opts,
         services: opts.source,

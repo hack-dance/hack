@@ -202,18 +202,37 @@ test("omitted job restart remains absent; empty image-default entrypoint/command
 
 test("job plus named-volume planning refuses before engine binding despite lossless symbolic conversion", () => {
   const services = graph();
-  const source = { name: "fixture", services: { ...services, db: { ...services.db, volumes: ["data:/database"] } }, volumes: { data: { name: "fixture-data" } } };
-  const opts = { configText: '{"name":"fixture"}', composeText: JSON.stringify(source) };
+  const source = {
+    name: "fixture",
+    services: {
+      ...services,
+      db: { ...services.db, volumes: ["data:/database"] },
+    },
+    volumes: { data: { name: "fixture-data" } },
+  };
+  const opts = {
+    configText: '{"name":"fixture"}',
+    composeText: JSON.stringify(source),
+  };
   const spawn = spyOn(Bun, "spawn");
   try {
     expect(mapLegacyNativeStorageAdoption(opts).report.complete).toBe(true);
     const planned = planLegacyComposeAdoption(opts);
     expect(planned.report.supported).toBe(false);
     expect(planned.intent).toBeUndefined();
-    expect(planned.report.fields).toContainEqual(expect.objectContaining({ document: "compose", pointer: "/services/initialize", status: "refused", code: "completed_job_adoption_unqualified" }));
+    expect(planned.report.fields).toContainEqual(
+      expect.objectContaining({
+        document: "compose",
+        pointer: "/services/initialize",
+        status: "refused",
+        code: "completed_job_adoption_unqualified",
+      })
+    );
     expect(JSON.stringify(planned)).not.toContain(CANARY);
     expect(spawn).not.toHaveBeenCalled();
-  } finally { spawn.mockRestore(); }
+  } finally {
+    spawn.mockRestore();
+  }
 });
 
 test("pure named mount mapping includes jobs and keeps original logical storage identity", () => {

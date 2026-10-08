@@ -124,6 +124,36 @@ fn versions_unknown_fields_nulls_and_mixed_forms_refuse() {
     }
 }
 #[test]
+fn isolation_and_device_intent_cannot_hide_in_unselected_services_or_jobs() {
+    for kind in ["services", "jobs"] {
+        for field in ["isolation", "devices"] {
+            for inactive in [false, true] {
+                let mut v = base();
+                v["profiles"] = json!(["optional"]);
+                let mut workload = json!({"image":"example/worker:1"});
+                workload[field] = json!({"value":"private-device-contract-canary"});
+                if inactive {
+                    workload["profiles"] = json!(["optional"]);
+                }
+                v[kind]["unsupported"] = workload;
+                let r = result(&v);
+                assert_eq!(r["ok"], false, "{r}");
+                assert_eq!(r["diagnostics"].as_array().unwrap().len(), 1);
+                assert_eq!(r["diagnostics"][0]["code"], "unknown_field");
+                assert_eq!(
+                    r["diagnostics"][0]["pointer"],
+                    format!("/{kind}/unsupported/{field}")
+                );
+                assert!(!r.to_string().contains("private-device-contract-canary"));
+                assert!(
+                    r.get("plan").is_none(),
+                    "Unsupported intent produced a plan"
+                );
+            }
+        }
+    }
+}
+#[test]
 fn command_and_image_build_contracts() {
     let mut v = base();
     v["services"]["web"]["build"] = json!({"context":"."});

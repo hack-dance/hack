@@ -99,6 +99,7 @@ async function fixture(
     readonly control?: unknown;
     readonly controlDelayMs?: number;
     readonly controlFailure?: boolean;
+    readonly controlKeeper?: boolean;
     readonly ownerExits?: boolean;
     readonly splitReady?: boolean;
     readonly padding?: string;
@@ -118,6 +119,14 @@ async function fixture(
     appendFileSync("calls", JSON.stringify(args) + "\\n");
     if (args.includes("control")) {
       await Bun.write("authenticated-status-started", "status");
+      if (${opts.controlKeeper ?? false}) {
+        const keeper = Bun.spawn([process.execPath, "-e", 'await Bun.sleep(2000); await Bun.write("keeper-complete", "exited");'], {
+          stdin: "ignore", stdout: "inherit", stderr: "inherit", detached: true,
+        });
+        keeper.unref();
+        await Bun.write("keeper-pid", String(keeper.pid));
+        console.error("synthetic-private-keeper-detail");
+      }
       await Bun.sleep(${opts.controlDelayMs ?? 0});
       if (${opts.controlFailure ?? false}) {
         console.error(JSON.stringify({code:"graph_owner_recovery",message:"synthetic-private-control-detail"}));
@@ -336,6 +345,119 @@ test("startup deadline cancels pending authentication before publication and awa
   expect(
     await Bun.file(join(opts.projectRoot, "cleanup-complete")).text()
   ).toBe("cleaned");
+});
+
+test("status descendant-held pipes cannot outlive startup admission or owned cleanup", async () => {
+  const opts = await fixture({ controlKeeper: true });
+  let published = false;
+  let failure = "";
+  const start = performance.now();
+  try {
+    await serveNativeAuthoredProjectGraph({
+      ...opts,
+      startupTimeoutMs: 200,
+      onReady: async () => {
+        published = true;
+      },
+    });
+  } catch (error) {
+    failure = String(error);
+  }
+  try {
+    expect(performance.now() - start).toBeLessThan(1500);
+    expect(failure).toContain("canceled");
+    expect(failure).not.toContain("synthetic-private-keeper-detail");
+    expect(published).toBe(false);
+    expect(
+      await Bun.file(join(opts.projectRoot, "cleanup-complete")).text()
+    ).toBe("cleaned");
+    const keeper = Number(
+      await Bun.file(join(opts.projectRoot, "keeper-pid")).text()
+    );
+    expect(() => process.kill(keeper, 0)).not.toThrow();
+    expect(
+      await Bun.file(join(opts.projectRoot, "keeper-complete")).exists()
+    ).toBe(false);
+  } finally {
+    // The stand-in descendant exits itself; retain its fixture until completion.
+    const deadline = performance.now() + 4000;
+    while (
+      !(await Bun.file(join(opts.projectRoot, "keeper-complete")).exists()) &&
+      performance.now() < deadline
+    ) {
+      await Bun.sleep(25);
+    }
+    expect(
+      await Bun.file(join(opts.projectRoot, "keeper-complete")).text()
+    ).toBe("exited");
+  }
+}, 6000);
+
+test.each([
+  { state: "created" },
+  { state: "dead" },
+  { state: "running", health: "starting" },
+  { state: "running", health: "unhealthy" },
+  { state: "exited", code: 1 },
+  { state: "exited", code: 0 },
+])("durable ready phase cannot publish from a failed current readiness observation", async (observation) => {
+  const wire = status();
+  const opts = await fixture({
+    control: {
+      ...wire,
+      result: {
+        ...wire.result,
+        snapshot: {
+          ...wire.result.snapshot,
+          observations: { web: observation },
+        },
+      },
+    },
+  });
+  let published = false;
+  await expect(
+    serveNativeAuthoredProjectGraph({
+      ...opts,
+      onReady: async () => {
+        published = true;
+        await Bun.write(join(opts.projectRoot, "finish-request"), "finish");
+      },
+    })
+  ).rejects.toThrow("invalid");
+  expect(published).toBe(false);
+  expect(
+    await Bun.file(join(opts.projectRoot, "cleanup-complete")).text()
+  ).toBe("cleaned");
+});
+
+test.each([
+  "started",
+  "completed",
+])("Rust %s readiness preserves a successfully exited job", async (condition) => {
+  const bound = { ...receipt(), readiness: { web: condition } };
+  const wire = status();
+  const opts = await fixture({
+    ready: { ...ready(), receipt: bound },
+    control: {
+      ...wire,
+      result: {
+        ...wire.result,
+        snapshot: {
+          receipt: bound,
+          observations: { web: { state: "exited", code: 0 } },
+        },
+      },
+    },
+  });
+  expect(
+    await serveNativeAuthoredProjectGraph({
+      ...opts,
+      onReady: async (_bound, assertRunning) => {
+        assertRunning();
+        await Bun.write(join(opts.projectRoot, "finish-request"), "finish");
+      },
+    })
+  ).toBe(0);
 });
 
 test("publication guard refuses cancellation during caller input checks", async () => {

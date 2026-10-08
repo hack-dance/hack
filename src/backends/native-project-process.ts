@@ -134,10 +134,11 @@ export async function serveNativeAuthoredProjectGraph(
         ],
         timeoutMs: 45_000,
         signal: ownerSignal,
+        boundNativeStatusDrain: true,
       });
       const current = parseNativeAuthoredControl(status, receipt, "status");
       const assertRunning = () => {
-        if (interrupted() || current.receipt.phase !== "ready-observed") {
+        if (interrupted() || !nativeSnapshotReady(current)) {
           throw new Error(
             "Native graph readiness identity is invalid or canceled."
           );
@@ -147,6 +148,36 @@ export async function serveNativeAuthoredProjectGraph(
       await opts.onReady(current.receipt, assertRunning);
     },
   });
+}
+
+/** Match the admitted Rust readiness conditions without starting a monitoring loop. */
+function nativeSnapshotReady(
+  current: ReturnType<typeof parseNativeAuthoredControl>
+): boolean {
+  return (
+    current.receipt.phase === "ready-observed" &&
+    current.receipt.failure === undefined &&
+    Object.entries(current.receipt.readiness).every(([name, condition]) => {
+      const observation = current.observations?.[name];
+      if (
+        !observation ||
+        observation.state === "dead" ||
+        (observation.state === "running" && observation.health === "unhealthy")
+      ) {
+        return false;
+      }
+      if (condition === "healthy") {
+        return (
+          observation.state === "running" && observation.health === "healthy"
+        );
+      }
+      const completed =
+        observation.state === "exited" && observation.code === 0;
+      return condition === "completed"
+        ? completed
+        : observation.state === "running" || completed;
+    })
+  );
 }
 
 async function serveGraphProcess(

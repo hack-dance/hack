@@ -140,7 +140,9 @@ reading private stdin or using the provider. These explicit candidate commands
 do not activate ordinary native `hack up`.
 
 The Bun native-source process adapter validates this separate wire format and
-authenticates status before its readiness callback. Cancellation or owner exit
+authenticates status and checks its admitted readiness conditions before the
+readiness callback. The selected status request bounds draining after its owned
+child exits, even if descendants retain output pipes. Cancellation or owner exit
 during that handshake prevents publication and waits for owned process shutdown.
 The caller must still recheck selected input before publication and inspect the
 durable native journal after exit; process completion alone does not prove cleanup.

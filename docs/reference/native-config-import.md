@@ -80,6 +80,10 @@ receipt, launch or recreate a container, transfer ownership, or qualify applicat
 migration. Job-aware retained lifecycle and two-worktree data acceptance remain
 separate work.
 
+Retained resource planning uses its own closed adoption baseline and refuses jobs
+before acquiring existing engine resource bindings, even when pure conversion
+can preserve a job's named mounts. Symbolic conversion is not an ownership grant.
+
 Custom-network job combinations remain refused; no static-bridge import or
 retained network authority is added by this completed-job conversion.
 

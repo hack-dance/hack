@@ -4,7 +4,7 @@ import {
 } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
-  mapLegacyNativeImport,
+  mapLegacyNativeAdoptionBaseline,
 } from "./native-config-import-plan.ts";
 import {
   type LegacyComposeStorageIntent,
@@ -63,7 +63,7 @@ export function planLegacyComposeAdoption(opts: {
   readonly configText: string;
   readonly composeText: string;
 }): LegacyComposeAdoptionPlan {
-  const baseline = mapLegacyNativeImport(opts);
+  const baseline = mapLegacyNativeAdoptionBaseline(opts);
   const config = parseImportDocument({
     text: opts.configText,
     document: "config",

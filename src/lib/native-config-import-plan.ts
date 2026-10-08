@@ -139,7 +139,7 @@ function mappingFields(
 function mapLegacyNativeInput(opts: {
   readonly configText: string;
   readonly composeText: string;
-  readonly storageAdoption: boolean;
+  readonly purpose: "preview" | "adoption-baseline" | "storage-adoption";
 }): NativeImportPlan {
   const config = parseImportDocument({
     text: opts.configText,
@@ -178,8 +178,8 @@ function mapLegacyNativeInput(opts: {
   const context = { config: config.value, candidate, mark, refuse };
   mapOverlay(context);
   mapWorktree(context);
-  mapServices({ source: compose.value.services, candidate, mark, refuse });
-  if (opts.storageAdoption) {
+  mapServices({ source: compose.value.services, candidate, mark, refuse, jobPreview: opts.purpose !== "adoption-baseline" });
+  if (opts.purpose === "storage-adoption") {
     mapStorageCandidate({
       config: config.value,
       compose: compose.value,
@@ -223,8 +223,16 @@ export function mapLegacyNativeImport(opts: {
   return mapLegacyNativeInput({
     configText: opts.configText,
     composeText: opts.composeText,
-    storageAdoption: false,
+    purpose: "preview",
   });
+}
+
+/** Retained resource planning must not inherit preview-only job authority. */
+export function mapLegacyNativeAdoptionBaseline(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({ ...opts, purpose: "adoption-baseline" });
 }
 
 /** Private static candidate with the same closed mappings plus strictly qualified local named storage. No ownership grant. */
@@ -235,7 +243,7 @@ export function mapLegacyNativeStorageAdoption(opts: {
   return mapLegacyNativeInput({
     configText: opts.configText,
     composeText: opts.composeText,
-    storageAdoption: true,
+    purpose: "storage-adoption",
   });
 }
 
@@ -858,6 +866,7 @@ function refuseUndeclaredJobTargets(
 function mapServices(
   opts: Pick<MappingContext, "mark" | "refuse" | "candidate"> & {
     readonly source: unknown;
+    readonly jobPreview: boolean;
   }
 ) {
   if (!(isRecord(opts.source) && Object.keys(opts.source).length)) {
@@ -884,6 +893,7 @@ function mapServices(
         jobs: jobNames,
       });
       (job ? jobs : services)[name] = workload;
+      if (job && !opts.jobPreview) opts.refuse("compose", pointer, "completed_job_adoption_unqualified");
       refuseUndeclaredJobTargets({
         ...opts,
         services: opts.source,

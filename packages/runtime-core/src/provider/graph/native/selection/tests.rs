@@ -60,6 +60,34 @@ impl Drop for Fixture {
 fn basic() -> Value {
     json!({"schema_version":1,"name":"fixture","services":{"web":{"image":format!("sha256:{}","a".repeat(64)),"command":{"exec":["/bin/echo","authored-canary","$RAW"]}}}})
 }
+
+#[test]
+fn tagged_source_wire_is_disjoint_and_its_snapshot_remains_bound_before_preparation() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("source.json");
+    let valid = json!({"version":2,"kind":"native-graph-source","project":fixture.project,"branch":"feature-one","run":"b".repeat(32),"profiles":[],"overlay":"inherit","env_metadata":{"metadata_version":1,"overlay":null,"overlay_exists":false,"workloads":{"web":{}},"inactive_scopes":[]}});
+    fs::write(&path, valid.to_string()).unwrap();
+    let selected = Source::read(&path)
+        .unwrap()
+        .select(&fixture.candidate, fixture.options().deadline)
+        .unwrap();
+    let direct = select(&fixture.candidate, fixture.options()).unwrap();
+    assert_eq!(selected.review().review_id(), direct.review().review_id());
+    fs::write(&path, format!("{valid}\n")).unwrap();
+    selection_refused(selected.prepare(&fixture.candidate, &native::ManagedValues::new()));
+    for (key, value) in [
+        ("version", json!(1)),
+        ("kind", json!("normalized-compose")),
+        ("normalized_compose_sha256", json!("c".repeat(64))),
+        ("values", json!("synthetic-private")),
+        ("overlay", Value::Null),
+    ] {
+        let mut bad = valid.clone();
+        bad[key] = value;
+        fs::write(&path, bad.to_string()).unwrap();
+        selection_refused(Source::read(&path));
+    }
+}
 fn metadata(workloads: Value) -> EnvMetadata {
     serde_json::from_value(json!({"metadata_version":1,"overlay":null,"overlay_exists":false,"workloads":workloads,"inactive_scopes":[]})).unwrap()
 }
@@ -239,8 +267,14 @@ fn selection_cannot_transfer_candidate_or_extend_ingress_deadline() {
     let other = Fixture::new();
     selection_refused(selected.assert_fresh(&other.candidate));
     let mut selected = select(&fixture.candidate, fixture.options()).unwrap();
-    selected.deadline =
-        Deadline::from_instant(Instant::now() + Duration::from_millis(100)).unwrap();
+    let original = selected.remaining().unwrap();
+    selected
+        .restrict_deadline(Instant::now() + Duration::from_secs(120))
+        .unwrap();
+    assert!(selected.remaining().unwrap() <= original);
+    let shorter = Instant::now() + Duration::from_millis(100);
+    selected.restrict_deadline(shorter).unwrap();
+    assert!(selected.remaining().unwrap() <= shorter);
     std::thread::sleep(Duration::from_millis(120));
     assert_eq!(
         selected

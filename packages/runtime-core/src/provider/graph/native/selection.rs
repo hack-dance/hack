@@ -6,6 +6,7 @@ use crate::{
     provider::{native_input, private_deadline::Deadline},
 };
 use hack_config_compiler::environment::{EnvMetadata, EnvPlanRequest};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, Metadata, OpenOptions},
@@ -62,6 +63,93 @@ impl Content {
 struct Document {
     content: Content,
     digest: [u8; 32],
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum SourceKind {
+    NativeGraphSource,
+}
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum Overlay {
+    #[default]
+    Inherit,
+    Base,
+    Named(String),
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceInput {
+    version: u32,
+    kind: SourceKind,
+    project: PathBuf,
+    #[serde(default)]
+    branch: Option<String>,
+    run: String,
+    #[serde(default)]
+    profiles: Vec<String>,
+    #[serde(default)]
+    overlay: Overlay,
+    env_metadata: EnvMetadata,
+}
+/// Tagged public native-source selection, with no Compose or private-value fields.
+pub struct Source {
+    path: PathBuf,
+    snapshot: Document,
+    input: SourceInput,
+}
+impl Source {
+    /// Read a stable, bounded, unaliased regular envelope; authored selection remains compiler-owned.
+    pub fn read(path: &Path) -> Result<Self, CandidateError> {
+        if !path.is_absolute() {
+            return Err(refused());
+        }
+        let (snapshot, text) = document(path, true)?;
+        let input: SourceInput =
+            serde_json::from_str(&text.ok_or_else(refused)?).map_err(|_| refused())?;
+        if input.version != 2
+            || !matches!(input.kind, SourceKind::NativeGraphSource)
+            || !super::hex(&input.run, 32)
+        {
+            return Err(refused());
+        }
+        Ok(Self {
+            path: path.into(),
+            snapshot: snapshot.ok_or_else(refused)?,
+            input,
+        })
+    }
+    pub fn run_id(&self) -> &str {
+        &self.input.run
+    }
+    /// Retain the envelope snapshot alongside compiler-owned authored selection and deadline.
+    pub fn select(
+        self,
+        candidate: &Candidate,
+        deadline: Instant,
+    ) -> Result<Selected, CandidateError> {
+        let explicit_overlay = match self.input.overlay {
+            Overlay::Inherit => None,
+            Overlay::Base => Some(None),
+            Overlay::Named(name) => Some(Some(name)),
+        };
+        let mut selected = select(
+            candidate,
+            Options {
+                project: &self.input.project,
+                branch: self.input.branch.as_deref(),
+                run: &self.input.run,
+                profiles: &self.input.profiles,
+                explicit_overlay,
+                metadata: self.input.env_metadata,
+                deadline,
+            },
+        )?;
+        selected.source = Some((self.path, self.snapshot));
+        selected.assert_fresh(candidate)?;
+        Ok(selected)
+    }
 }
 
 fn directory(path: &Path) -> Result<Identity, CandidateError> {
@@ -195,6 +283,7 @@ pub struct Options<'a> {
 
 /// Opaque, ephemeral authored selection. No Debug/Serialize or raw request getter.
 pub struct Selected {
+    source: Option<(PathBuf, Document)>,
     candidate_root: PathBuf,
     root: PathBuf,
     branch: Option<String>,
@@ -218,9 +307,20 @@ impl Selected {
     pub fn remaining(&self) -> Result<Instant, CandidateError> {
         self.deadline.to_instant()
     }
+    /// Shorten the existing ingress deadline after bounded private descriptor consumption.
+    /// A later supplied deadline cannot renew this selection.
+    pub fn restrict_deadline(&mut self, deadline: Instant) -> Result<(), CandidateError> {
+        self.deadline = Deadline::from_instant(self.remaining()?.min(deadline))?;
+        Ok(())
+    }
     /// Read-only recheck; no atomic multi-file snapshot or editor exclusion is claimed.
     pub fn assert_fresh(&self, candidate: &Candidate) -> Result<(), CandidateError> {
         self.remaining()?;
+        if let Some((path, snapshot)) = &self.source {
+            if document(path, true)?.0.as_ref() != Some(snapshot) {
+                return Err(refused());
+            }
+        }
         family(&self.root)?;
         let workspace = candidate
             .plan_with_branch(&self.root, self.branch.as_deref())
@@ -358,6 +458,7 @@ pub fn select(candidate: &Candidate, options: Options<'_>) -> Result<Selected, C
         inputs.review_identity(),
     )?;
     let selected = Selected {
+        source: None,
         candidate_root: candidate.state_root.clone(),
         root: root.to_owned(),
         branch: options.branch.map(str::to_owned),

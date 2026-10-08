@@ -128,7 +128,9 @@ function composeDependencies(
     }
     result.push({
       service,
-      condition: dependencyCondition(edge.condition),
+      condition: dependencyCondition(
+        Object.hasOwn(edge, "condition") ? edge.condition : undefined
+      ),
     });
   }
   return result;

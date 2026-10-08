@@ -10,6 +10,10 @@ import {
   mapLegacyNativeImport,
   mapLegacyNativeStorageAdoption,
 } from "../src/lib/native-config-import-plan.ts";
+import {
+  legacyComposeCompletedJobTargets,
+  mapLegacyComposeDependencies,
+} from "../src/lib/native-config-import-readiness.ts";
 
 const CANARY = "synthetic-private-completed-job-value";
 const BINARY = process.env.HACK_TEST_NATIVE_COMPILER_BINARY;
@@ -468,6 +472,112 @@ test("canonical standalone jobs still refuse an inactive started consumer", () =
       (field) => field.pointer === "/services/inactive/depends_on"
     )
   ).toMatchObject({ code: "mixed_job_service_dependency", status: "refused" });
+});
+
+test("first-pass roles require authored own fields without invoking inherited getters", () => {
+  let reads = 0;
+  const prototype = Object.defineProperties(
+    {},
+    {
+      labels: {
+        get() {
+          reads += 1;
+          return { "hack.service.one-shot": "true" };
+        },
+      },
+      depends_on: {
+        get() {
+          reads += 1;
+          return { done: { condition: "service_completed_successfully" } };
+        },
+      },
+    }
+  );
+  const inherited = Object.assign(Object.create(prototype), {
+    image: "fixture:1",
+  });
+  expect([...legacyComposeJobNames({ inherited })]).toEqual([]);
+  expect(reads).toBe(0);
+  const own = Object.assign(Object.create(prototype), {
+    image: "fixture:1",
+  });
+  Object.defineProperty(own, "labels", {
+    value: { "hack.service.one-shot": "true" },
+    enumerable: true,
+  });
+  Object.defineProperty(own, "depends_on", {
+    value: { done: { condition: "service_completed_successfully" } },
+    enumerable: true,
+  });
+  expect([...legacyComposeJobNames({ own })]).toEqual(["own", "done"]);
+  expect(reads).toBe(0);
+});
+
+test("omitted edge condition is started even with an inherited completed getter", () => {
+  let reads = 0;
+  const prototype = Object.defineProperty({}, "condition", {
+    get() {
+      reads += 1;
+      return "service_completed_successfully";
+    },
+  });
+  const inherited = Object.create(prototype);
+  expect(legacyComposeCompletedJobTargets({ done: inherited })).toEqual([]);
+  expect(mapLegacyComposeDependencies({ done: inherited })).toEqual([
+    { service: "done", condition: "started" },
+  ]);
+  expect(reads).toBe(0);
+  const own = Object.defineProperty(Object.create(prototype), "condition", {
+    value: "service_completed_successfully",
+    enumerable: true,
+  });
+  expect(legacyComposeCompletedJobTargets({ done: own })).toEqual(["done"]);
+  expect(
+    mapLegacyComposeDependencies({ done: own }, new Set(["done"]))
+  ).toEqual([{ job: "done", condition: "completed" }]);
+  expect(reads).toBe(0);
+});
+
+test("parsed declarations do not acquire roles from Object.prototype getters", () => {
+  let reads = 0;
+  const previous = Object.getOwnPropertyDescriptors(Object.prototype);
+  try {
+    Object.defineProperty(Object.prototype, "labels", {
+      configurable: true,
+      get() {
+        reads += 1;
+        return { "hack.service.one-shot": "true" };
+      },
+    });
+    Object.defineProperty(Object.prototype, "depends_on", {
+      configurable: true,
+      get() {
+        reads += 1;
+        return { absent: { condition: "service_completed_successfully" } };
+      },
+    });
+    const result = map({ app: { image: "fixture:1" } });
+    expect(result.report.complete).toBe(true);
+    expect(result.candidate).toEqual({
+      schema_version: 1,
+      name: "fixture",
+      services: { app: { image: "fixture:1" } },
+    });
+    expect(reads).toBe(0);
+  } finally {
+    for (const key of ["labels", "depends_on"]) {
+      const descriptor = Object.hasOwn(previous, key)
+        ? previous[key]
+        : undefined;
+      if (descriptor) {
+        Object.defineProperty(Object.prototype, key, descriptor);
+      } else {
+        Reflect.deleteProperty(Object.prototype, key);
+      }
+    }
+  }
+  expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(previous);
+  expect(reads).toBe(0);
 });
 
 test("positive mapping does not activate retained-job adoption or change v5 meaning", () => {

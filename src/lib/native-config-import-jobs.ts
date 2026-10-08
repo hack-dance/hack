@@ -25,11 +25,16 @@ export function legacyComposeJobNames(
     if (!isRecord(value)) {
       continue;
     }
-    if (legacyComposeOneShotMarker(value.labels)) {
+    if (
+      Object.hasOwn(value, "labels") &&
+      legacyComposeOneShotMarker(value.labels)
+    ) {
       jobs.add(name);
     }
-    for (const target of legacyComposeCompletedJobTargets(value.depends_on)) {
-      jobs.add(target);
+    if (Object.hasOwn(value, "depends_on")) {
+      for (const target of legacyComposeCompletedJobTargets(value.depends_on)) {
+        jobs.add(target);
+      }
     }
   }
   return jobs;

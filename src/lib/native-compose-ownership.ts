@@ -641,11 +641,7 @@ function validateEndpointIdentity(opts: {
       return;
     }
   } else if (absentOwnedRecovery) {
-    requireValue(
-      endpoint.NetworkID === undefined ||
-        endpoint.NetworkID === "" ||
-        (typeof endpoint.NetworkID === "string" && ID.test(endpoint.NetworkID))
-    );
+    requireValue(endpoint.NetworkID === undefined || endpoint.NetworkID === "");
     if (endpoint.Aliases === undefined || endpoint.Aliases === null) {
       return;
     }

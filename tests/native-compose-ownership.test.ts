@@ -708,6 +708,20 @@ test("explicit down recovery can inspect stopped known containers after their ow
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
 });
 
+test("absent owned bridge recovery refuses an unbound nonempty network ID", async () => {
+  for (const aliases of [null, [`${PROJECT}-web-1`, "web", "db-query"]]) {
+    const { fixture, selection, container } = customOwned();
+    container.state = "exited";
+    container.networks = {
+      [CUSTOM]: { NetworkID: "f".repeat(64), Aliases: aliases },
+    };
+    fixture.network = [];
+    await prepare(fixture);
+    await expectRefusal({ ...selection, recovery: "down" });
+  }
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
 test("ownership options are captured before awaits so caller alias and generation mutations cannot retarget proof", async () => {
   const { fixture, selection } = customOwned();
   await prepare(fixture);

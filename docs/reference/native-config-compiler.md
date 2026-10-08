@@ -61,6 +61,9 @@ wrapper retains its configured absolute installation path.
 
 ## Supported authored core
 
+The pure compiler also accepts [named file inputs](native-config-files.md), with
+separate metadata-only file bindings. Material delivery remains unqualified.
+
 `schema_version` must be `1`; `name` is required. Services, jobs, storage, profiles
 and project environment selection default to empty. Source defaults to
 `{"root":".","mode":"host-mounted"}`. Unknown fields, explicit nulls and unsupported

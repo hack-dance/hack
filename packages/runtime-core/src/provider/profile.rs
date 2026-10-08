@@ -43,6 +43,21 @@ impl Profile {
             Self::Development => (u64::from(self.memory_mib()) + 4096) * 1024 * 1024,
         }
     }
+    pub(super) fn provider_memory_budget_bytes(self) -> u64 {
+        (u64::from(self.memory_mib()) + 2048) * 1024 * 1024
+    }
+    pub(super) fn operating_host_reserve_bytes(
+        self,
+        pressure: super::admission::MemoryPressureState,
+    ) -> u64 {
+        if self == Self::Development && pressure == super::admission::MemoryPressureState::Warning {
+            // Keep the full provisional overhead + interactive-host reserve
+            // when macOS warns; the guest's allocation has already been charged.
+            self.minimum_free_memory_bytes() - u64::from(self.memory_mib()) * 1024 * 1024
+        } else {
+            2 * 1024 * 1024 * 1024
+        }
+    }
     pub fn qualification(self) -> &'static str {
         match self {
             Self::Research => "WU02-live-qualification-pending",

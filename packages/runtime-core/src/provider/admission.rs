@@ -9,6 +9,55 @@ pub const FREE_MEMORY_FLOOR: u64 = 16 * 1024 * 1024 * 1024;
 const RESEARCH_DISK_FLOOR_GIB: u64 = 100;
 const DEVELOPMENT_HOST_DISK_RESERVE_GIB: u64 = 16;
 
+/// The sysctl exports dispatch pressure masks, not XNU's internal pressure enum.
+/// Unknown/missing observations never authorize allocation or live effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemoryPressureState {
+    Normal,
+    Warning,
+    Critical,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct MemoryPressure {
+    pub memory_pressure_level: Option<u32>,
+    pub memory_pressure_state: MemoryPressureState,
+}
+
+impl MemoryPressure {
+    pub fn parse(text: &str) -> Self {
+        Self::from_level(text.trim().parse().ok())
+    }
+
+    pub fn from_level(level: Option<u32>) -> Self {
+        Self {
+            memory_pressure_level: level,
+            memory_pressure_state: match level {
+                Some(1) => MemoryPressureState::Normal,
+                Some(2) => MemoryPressureState::Warning,
+                Some(4) => MemoryPressureState::Critical,
+                _ => MemoryPressureState::Unknown,
+            },
+        }
+    }
+
+    fn admitted(self, profile: Profile) -> bool {
+        self == Self::from_level(self.memory_pressure_level)
+            && matches!(
+                (profile, self.memory_pressure_state),
+                (_, MemoryPressureState::Normal)
+                    | (Profile::Development, MemoryPressureState::Warning)
+            )
+    }
+}
+
+fn thermal_normal(text: &str) -> bool {
+    text.contains("No thermal warning level has been recorded")
+        && text.contains("No performance warning level has been recorded")
+}
+
 fn disk_floor_bytes(profile: Profile) -> u64 {
     let gib = match profile {
         Profile::Research => RESEARCH_DISK_FLOOR_GIB,
@@ -39,6 +88,9 @@ pub struct Admission {
     pub minimum_free_memory_bytes: u64,
     pub free_plus_file_cache_estimate_bytes: Option<u64>,
     pub memory_budget_basis: &'static str,
+    #[serde(flatten)]
+    pub memory_pressure: MemoryPressure,
+    /// Compatibility only: true means literally normal, never an admitted warning.
     pub memory_pressure_normal: bool,
     pub disk_free_bytes: Option<u64>,
     pub minimum_disk_free_bytes: u64,
@@ -107,7 +159,9 @@ pub fn parse_cache_headroom(text: &str) -> Result<u64, CandidateError> {
 pub struct OperatingSample {
     pub free_memory_bytes: u64,
     pub free_plus_file_cache_estimate_bytes: u64,
-    pub memory_pressure_normal: bool,
+    #[serde(flatten)]
+    pub memory_pressure: MemoryPressure,
+    pub thermal_normal: bool,
     pub swapouts: u64,
 }
 
@@ -121,6 +175,10 @@ pub fn operating_sample() -> Result<OperatingSample, CandidateError> {
             .args(["-n", "kern.memorystatus_vm_pressure_level"]),
         Duration::from_secs(3),
     )?;
+    let thermal = run(
+        clean_command(Path::new("/usr/bin/pmset")).args(["-g", "therm"]),
+        Duration::from_secs(3),
+    )?;
     let swapouts = text
         .lines()
         .find_map(|line| line.strip_prefix("Swapouts:"))
@@ -129,7 +187,8 @@ pub fn operating_sample() -> Result<OperatingSample, CandidateError> {
     Ok(OperatingSample {
         free_memory_bytes: parse_free_memory(&text)?,
         free_plus_file_cache_estimate_bytes: parse_cache_headroom(&text)?,
-        memory_pressure_normal: pressure.trim() == "1",
+        memory_pressure: MemoryPressure::parse(&pressure),
+        thermal_normal: thermal_normal(&thermal),
         swapouts,
     })
 }
@@ -140,23 +199,29 @@ pub fn validate_operating(
     footprint: u64,
     profile: Profile,
 ) -> Result<(), CandidateError> {
-    let budget = (u64::from(profile.memory_mib()) + 2048) * 1024 * 1024;
+    let budget = profile.provider_memory_budget_bytes();
     // A provider can exceed the provisional guest-plus-overhead estimate while
     // the host remains healthy. Require matching additional host headroom for
     // that excess instead of permanently fencing an already-running graph.
     let excess_footprint = footprint.saturating_sub(budget);
-    let headroom_floor = (2_u64 * 1024 * 1024 * 1024).saturating_add(excess_footprint);
+    let headroom_floor = profile
+        .operating_host_reserve_bytes(sample.memory_pressure.memory_pressure_state)
+        .saturating_add(excess_footprint);
     let headroom_failed = sample.free_plus_file_cache_estimate_bytes < headroom_floor;
-    let pressure_failed = !sample.memory_pressure_normal;
+    let pressure_failed = !sample.memory_pressure.admitted(profile);
     let swap_failed = sample.swapouts != baseline_swapouts;
-    if headroom_failed || pressure_failed || swap_failed {
+    let thermal_failed = !sample.thermal_normal;
+    if headroom_failed || pressure_failed || swap_failed || thermal_failed {
         // Fixed labels and numeric observations only: callers can safely classify
         // the failed predicates without capturing provider output or environment.
         return Err(CandidateError::new(
             "runtime_pressure",
             format!(
-                "Development effects paused: runtime_pressure headroom_failed={headroom_failed} pressure_failed={pressure_failed} swap_failed={swap_failed} headroom_bytes={} headroom_floor_bytes={headroom_floor} swapouts_baseline={baseline_swapouts} swapouts_current={} provider_footprint_bytes={footprint} provider_budget_bytes={budget} provider_excess_bytes={excess_footprint}. Inspect and stop owned capacity if pressure persists.",
-                sample.free_plus_file_cache_estimate_bytes, sample.swapouts,
+                "{profile:?} effects paused: runtime_pressure headroom_failed={headroom_failed} pressure_failed={pressure_failed} swap_failed={swap_failed} thermal_failed={thermal_failed} pressure_state={:?} pressure_level={:?} headroom_bytes={} headroom_floor_bytes={headroom_floor} swapouts_baseline={baseline_swapouts} swapouts_current={} provider_footprint_bytes={footprint} provider_budget_bytes={budget} provider_excess_bytes={excess_footprint}. Inspect and stop owned capacity if pressure persists.",
+                sample.memory_pressure.memory_pressure_state,
+                sample.memory_pressure.memory_pressure_level,
+                sample.free_plus_file_cache_estimate_bytes,
+                sample.swapouts,
             ),
         ));
     }
@@ -212,6 +277,7 @@ fn probe_with_disk_budget(
             "free-plus-file-cache-estimate"
         },
         memory_pressure_normal: false,
+        memory_pressure: MemoryPressure::from_level(None),
         disk_free_bytes: None,
         minimum_disk_free_bytes: disk_budget(profile, owned_live).0,
         disk_budget_basis: disk_budget(profile, owned_live).1,
@@ -238,7 +304,9 @@ fn probe_with_disk_budget(
             .args(["-n", "kern.memorystatus_vm_pressure_level"]),
         Duration::from_secs(3),
     )?;
-    result.memory_pressure_normal = pressure.trim() == "1";
+    result.memory_pressure = MemoryPressure::parse(&pressure);
+    result.memory_pressure_normal =
+        result.memory_pressure.memory_pressure_state == MemoryPressureState::Normal;
     let budget_memory = if profile == Profile::Development {
         let estimate = parse_cache_headroom(&memory)?;
         result.free_plus_file_cache_estimate_bytes = Some(estimate);
@@ -254,10 +322,10 @@ fn probe_with_disk_budget(
                 Profile::Development => "Free-plus-file-cache estimate is below the 10 GiB experimental development budget (6 GiB guest plus 4 GiB overhead/reserve).",
             }.into());
     }
-    if !result.memory_pressure_normal {
+    if !result.memory_pressure.admitted(profile) {
         result
             .reasons
-            .push("macOS memory pressure is not normal.".into());
+            .push("macOS memory pressure is not admitted for this profile.".into());
     }
     result.swapouts = memory
         .lines()
@@ -319,8 +387,7 @@ fn probe_with_disk_budget(
         clean_command(Path::new("/usr/bin/pmset")).args(["-g", "therm"]),
         Duration::from_secs(3),
     )?;
-    result.thermal_normal = thermal.contains("No thermal warning level has been recorded")
-        && thermal.contains("No performance warning level has been recorded");
+    result.thermal_normal = thermal_normal(&thermal);
     if !result.thermal_normal {
         result
             .reasons
@@ -342,29 +409,85 @@ pub fn sample_for(path: &Path, profile: Profile) -> Result<Vec<Admission>, Candi
 
 pub(super) fn sample_with(
     profile: Profile,
+    observe: impl FnMut() -> Result<Admission, CandidateError>,
+) -> Result<Vec<Admission>, CandidateError> {
+    sample_checked(profile, None, observe, std::thread::sleep)
+}
+
+/// The initial observation and a lease wait cannot hide a swapout counter change.
+pub(super) fn sample_after(
+    profile: Profile,
+    baseline_swapouts: Option<u64>,
+    observe: impl FnMut() -> Result<Admission, CandidateError>,
+) -> Result<Vec<Admission>, CandidateError> {
+    let baseline = baseline_swapouts.ok_or_else(|| {
+        CandidateError::new(
+            "admission_unavailable",
+            "Cannot observe the swapout baseline.",
+        )
+    })?;
+    sample_checked(profile, Some(baseline), observe, std::thread::sleep)
+}
+
+/// Development revalidates a full window after obtaining the startup lease,
+/// before creating an owner, disks, provider capacity, or any aliases.
+pub(super) fn recheck_after_lease(
+    profile: Profile,
+    samples: &[Admission],
+    observe: impl FnMut() -> Result<Admission, CandidateError>,
+) -> Result<Vec<Admission>, CandidateError> {
+    if profile == Profile::Research {
+        return Ok(Vec::new());
+    }
+    sample_after(
+        profile,
+        samples.last().and_then(|sample| sample.swapouts),
+        observe,
+    )
+}
+
+fn sample_checked(
+    profile: Profile,
+    mut baseline_swapouts: Option<u64>,
     mut observe: impl FnMut() -> Result<Admission, CandidateError>,
+    mut pause: impl FnMut(Duration),
 ) -> Result<Vec<Admission>, CandidateError> {
     let mut samples: Vec<Admission> = Vec::new();
     for index in 0..3 {
         let sample = observe()?;
-        if !sample.admitted || sample.profile != profile {
-            return Err(CandidateError::new(
-                "admission_rejected",
-                sample.reasons.join(" "),
-            ));
-        }
-        if samples
-            .first()
-            .is_some_and(|first| first.swapouts != sample.swapouts)
+        let headroom = match profile {
+            Profile::Research => sample.free_memory_bytes,
+            Profile::Development => sample.free_plus_file_cache_estimate_bytes,
+        };
+        // `admitted` remains a report field, not authority to reinterpret a
+        // legacy normal-only boolean or ignore an incomplete typed observation.
+        if !sample.admitted
+            || !sample.host_supported
+            || sample.profile != profile
+            || !sample.memory_pressure.admitted(profile)
+            || !sample.thermal_normal
+            || sample.swapouts.is_none()
+            || headroom.is_none_or(|bytes| bytes < profile.minimum_free_memory_bytes())
         {
             return Err(CandidateError::new(
                 "admission_rejected",
-                "Swapouts increased during admission.",
+                if sample.reasons.is_empty() {
+                    "A required startup resource observation is not admitted.".into()
+                } else {
+                    sample.reasons.join(" ")
+                },
             ));
         }
+        if baseline_swapouts.is_some() && baseline_swapouts != sample.swapouts {
+            return Err(CandidateError::new(
+                "admission_rejected",
+                "Swapouts changed during admission.",
+            ));
+        }
+        baseline_swapouts = sample.swapouts;
         samples.push(sample);
         if index < 2 {
-            std::thread::sleep(Duration::from_secs(if profile == Profile::Research {
+            pause(Duration::from_secs(if profile == Profile::Research {
                 15
             } else {
                 1
@@ -373,6 +496,9 @@ pub(super) fn sample_with(
     }
     Ok(samples)
 }
+
+#[cfg(test)]
+mod pressure_tests;
 
 #[cfg(test)]
 mod tests {
@@ -441,7 +567,8 @@ mod tests {
             let sample = OperatingSample {
                 free_memory_bytes: 0,
                 free_plus_file_cache_estimate_bytes: headroom,
-                memory_pressure_normal: normal,
+                memory_pressure: MemoryPressure::from_level(Some(if normal { 1 } else { 4 })),
+                thermal_normal: true,
                 swapouts,
             };
             let error =
@@ -452,7 +579,9 @@ mod tests {
             assert_eq!(
                 error.message,
                 format!(
-                    "Development effects paused: runtime_pressure {flags} headroom_bytes={headroom} headroom_floor_bytes={expected_floor} swapouts_baseline=42 swapouts_current={swapouts} provider_footprint_bytes={footprint} provider_budget_bytes=8589934592 provider_excess_bytes={expected_excess}. Inspect and stop owned capacity if pressure persists."
+                    "Development effects paused: runtime_pressure {flags} thermal_failed=false pressure_state={:?} pressure_level={:?} headroom_bytes={headroom} headroom_floor_bytes={expected_floor} swapouts_baseline=42 swapouts_current={swapouts} provider_footprint_bytes={footprint} provider_budget_bytes=8589934592 provider_excess_bytes={expected_excess}. Inspect and stop owned capacity if pressure persists.",
+                    sample.memory_pressure.memory_pressure_state,
+                    sample.memory_pressure.memory_pressure_level,
                 )
             );
         }
@@ -465,7 +594,8 @@ mod tests {
             let mut sample = OperatingSample {
                 free_memory_bytes: 0,
                 free_plus_file_cache_estimate_bytes: 2 * 1024 * 1024 * 1024,
-                memory_pressure_normal: true,
+                memory_pressure: MemoryPressure::from_level(Some(1)),
+                thermal_normal: true,
                 swapouts: u64::MAX,
             };
             assert!(validate_operating(&sample, u64::MAX, budget, profile).is_ok());
@@ -486,7 +616,8 @@ mod tests {
         let mut sample = OperatingSample {
             free_memory_bytes: 0,
             free_plus_file_cache_estimate_bytes: 6 * 1024 * 1024 * 1024,
-            memory_pressure_normal: true,
+            memory_pressure: MemoryPressure::from_level(Some(1)),
+            thermal_normal: true,
             swapouts: 42,
         };
         // The guest can consume its admitted allocation without needing a second full reservation.
@@ -507,7 +638,7 @@ mod tests {
         sample.free_plus_file_cache_estimate_bytes = 1024 * 1024 * 1024;
         assert!(validate_operating(&sample, 42, 0, Profile::Development).is_err());
         sample.free_plus_file_cache_estimate_bytes = 6 * 1024 * 1024 * 1024;
-        sample.memory_pressure_normal = false;
+        sample.memory_pressure = MemoryPressure::from_level(Some(4));
         assert!(validate_operating(&sample, 42, 0, Profile::Development).is_err());
     }
     #[test]

@@ -167,7 +167,9 @@ export function nativeRoutingFixtureVolumeSelectionMatches(
   resources: readonly string[],
   pin: VolumePin | undefined
 ): boolean {
-  return resources.length <= 1 && resources.every((name) => name === pin?.name);
+  return pin === undefined
+    ? resources.length === 0
+    : resources.length === 1 && resources[0] === pin.name;
 }
 
 function volumeSelection(

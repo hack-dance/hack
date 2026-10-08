@@ -212,11 +212,11 @@ export async function compileNativeConfig(opts: {
     requireAcquisitionPlanning:
       opts.requireAcquisitionPlanning ||
       authoredAcquisitionPlanningRequired(authoredInput),
+    requireFilePlanning:
+      opts.requireFilePlanning || authoredFilePlanningRequired(authoredInput),
     requireNetworkPlanning:
       opts.requireNetworkPlanning ||
       authoredNetworkPlanningRequired(authoredInput),
-    requireFilePlanning:
-      opts.requireFilePlanning || authoredFilePlanningRequired(authoredInput),
   });
   const response = await invokeCompiler({
     ...request,
@@ -313,11 +313,11 @@ export async function resolveNativeConfig(opts: {
     requireAcquisitionPlanning:
       opts.requireAcquisitionPlanning ||
       authoredAcquisitionPlanningRequired(authoredInput),
+    requireFilePlanning:
+      opts.requireFilePlanning || authoredFilePlanningRequired(authoredInput),
     requireNetworkPlanning:
       opts.requireNetworkPlanning ||
       authoredNetworkPlanningRequired(authoredInput),
-    requireFilePlanning:
-      opts.requireFilePlanning || authoredFilePlanningRequired(authoredInput),
   });
   const routingProbe =
     opts.probeRoutingInputs === true && capabilities.routingPlanning;
@@ -508,11 +508,11 @@ export async function planNativeConfig(
     requireAcquisitionPlanning:
       opts.requireAcquisitionPlanning ||
       authoredAcquisitionPlanningRequired(authoredInput),
+    requireFilePlanning:
+      opts.requireFilePlanning || authoredFilePlanningRequired(authoredInput),
     requireNetworkPlanning:
       opts.requireNetworkPlanning ||
       authoredNetworkPlanningRequired(authoredInput),
-    requireFilePlanning:
-      opts.requireFilePlanning || authoredFilePlanningRequired(authoredInput),
   });
   const response = await invokeCompiler({
     ...request,

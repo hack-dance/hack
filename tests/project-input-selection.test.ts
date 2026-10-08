@@ -15,6 +15,10 @@ import {
   updateProjectConfigBatch,
 } from "../src/lib/config.ts";
 import {
+  inspectLegacyComposeAdoptionSelection,
+  LegacyComposeAdoptionSelectionError,
+} from "../src/lib/native-compose-adoption-marker.ts";
+import {
   findProjectContext,
   findProjectContextAtRoot,
   findRepoRootForInit,
@@ -30,6 +34,25 @@ const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("adoption marker reconstructs fixed errors from a forged typed argument getter", async () => {
+  const canary = "synthetic-private-marker-diagnostic",
+    forged = new LegacyComposeAdoptionSelectionError();
+  forged.message = canary;
+  try {
+    await inspectLegacyComposeAdoptionSelection({
+      get projectRoot(): string {
+        throw forged;
+      },
+    });
+    throw new Error("unexpected adoption marker success");
+  } catch (error: unknown) {
+    expect(error).toBeInstanceOf(LegacyComposeAdoptionSelectionError);
+    expect(error).not.toBe(forged);
+    expect(String(error)).not.toContain(canary);
+    expect(JSON.stringify(error)).not.toContain(canary);
   }
 });
 

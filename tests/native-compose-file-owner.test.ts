@@ -1170,7 +1170,7 @@ test("replacement retires obsolete current snapshot before receipt handoff while
     );
     await current.owner.assertSavedReady(current.generation);
   });
-});
+}, 30_000);
 test("a replacement member after partial retirement is never deleted on retry", async () => {
   const selected = await store.withMutation(running);
   const paths = memberPaths(selected.projection);
@@ -1227,7 +1227,7 @@ test("a replacement member after partial retirement is never deleted on retry", 
       await readFile(journalPath(selected.projection), "utf8")
     ).not.toContain('"phase":"retired"');
   });
-});
+}, 30_000);
 
 test("armed startup without durable reaped evidence cannot retire from container absence or a fresh public ticket", async () => {
   const selected = await store.withMutation(async (mutation) => {

@@ -9,7 +9,7 @@ use std::{
 fn refused() -> CandidateError {
     CandidateError::new(
         "native_graph_arguments",
-        "Use graph native plan --source-file FILE, run --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300], or inspect|cleanup --run-id ID; optional --json. Native source and private envelopes require their exact kind/version; values omitted.",
+        "Use graph native plan --source-file FILE, run|serve --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300], inspect|cleanup --run-id ID, or control --run-id ID --action status|cleanup; optional --json. Foreground serve/control require macOS. Native source and private envelopes require their exact kind/version; values omitted.",
     )
 }
 fn hex(value: &str, len: usize) -> bool {
@@ -34,7 +34,8 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
                 private = true;
                 index += 1;
             }
-            key @ ("--source-file" | "--expect-review" | "--timeout-seconds" | "--run-id") => {
+            key @ ("--source-file" | "--expect-review" | "--timeout-seconds" | "--run-id"
+            | "--action") => {
                 let value = *args
                     .get(index + 1)
                     .filter(|value| !value.starts_with("--"))
@@ -45,6 +46,40 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
                 index += 2;
             }
             _ => return Err(refused()),
+        }
+    }
+    if *action == "control" {
+        if private || singles.len() != 2 {
+            return Err(refused());
+        }
+        let run = *singles
+            .get("--run-id")
+            .filter(|run| hex(run, 32))
+            .ok_or_else(refused)?;
+        let action = match singles.get("--action").copied() {
+            Some("status") => "status",
+            Some("cleanup") => "cleanup",
+            _ => return Err(refused()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            use hack_runtime_core::provider::graph::native::foreground::{Action, RequestOptions};
+            return native::foreground::request(
+                candidate,
+                RequestOptions {
+                    run,
+                    action: if action == "status" {
+                        Action::Status
+                    } else {
+                        Action::Cleanup
+                    },
+                },
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (run, action);
+            return Err(foreground_unavailable());
         }
     }
     if ["inspect", "cleanup"].contains(action) {
@@ -61,7 +96,10 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
             serde_json::to_value(native::cleanup(candidate, run)?).map_err(|_| refused())
         };
     }
-    if !["plan", "run"].contains(action) || singles.contains_key("--run-id") {
+    if !["plan", "run", "serve"].contains(action)
+        || singles.contains_key("--run-id")
+        || singles.contains_key("--action")
+    {
         return Err(refused());
     }
     let path = Path::new(singles.get("--source-file").ok_or_else(refused)?);
@@ -77,6 +115,10 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
                 || singles.contains_key("--timeout-seconds")))
     {
         return Err(refused());
+    }
+    #[cfg(not(target_os = "macos"))]
+    if *action == "serve" {
+        return Err(foreground_unavailable());
     }
     let started = Instant::now();
     let mut deadline = started
@@ -123,5 +165,18 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
         managed.as_ref().map_or(&empty, |managed| managed.values()),
     )?;
     drop(managed);
+    #[cfg(target_os = "macos")]
+    if *action == "serve" {
+        return serde_json::to_value(native::foreground::serve(candidate, prepared)?)
+            .map_err(|_| refused());
+    }
     serde_json::to_value(native::run(candidate, prepared)?).map_err(|_| refused())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn foreground_unavailable() -> CandidateError {
+    CandidateError::new(
+        "native_graph_foreground_unsupported",
+        "Native foreground ownership requires the supported macOS provider; no private descriptor or provider was used.",
+    )
 }

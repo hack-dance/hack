@@ -73,7 +73,13 @@ export type NativeComposeReservation = {
 /** Opaque live authority. Copies of public identities or this empty object do not qualify. */
 export type NativeComposeMaterialAuthority = Readonly<Record<never, never>>;
 type MaterialSelection = {
-  readonly phase: "prepare" | "source" | "inspect" | "effect" | "retire";
+  readonly phase:
+    | "prepare"
+    | "source"
+    | "inspect"
+    | "effect"
+    | "stop"
+    | "retire";
   readonly reservation?: NativeComposeReservation;
   readonly generation?: NativeComposeGeneration;
 };
@@ -152,6 +158,11 @@ function materialEffectAllowed(
 ): boolean {
   if (phase === "inspect") {
     return true;
+  }
+  // Stopping owned resources remains allowed with unknown hooks. This phase only
+  // journals a stop child; it cannot authorize material retirement.
+  if (phase === "stop") {
+    return operation === "down" && state.pending !== null;
   }
   if (state.beforeHooks !== null || state.pending === null) {
     return false;
@@ -1444,7 +1455,7 @@ export async function openNativeComposeGenerationStore(opts: {
             if (
               !selection.generation ||
               selection.reservation !== undefined ||
-              !["inspect", "effect", "retire"].includes(selection.phase)
+              !["inspect", "effect", "stop", "retire"].includes(selection.phase)
             ) {
               return refuse();
             }

@@ -39,6 +39,11 @@ test("source CLI orders down before, exact engine stop, after exec/shell; stoppe
     beforeHooksPending: false,
   });
   const compiler = await Bun.file(join(root, "compiler-requests")).text();
+  // Full private planning belongs to startup and finite phase/final boundaries,
+  // rather than each before/after ownership-observation freshness fence.
+  expect(
+    compiler.split("\n").filter((operation) => operation === "plan").length
+  ).toBeLessThanOrEqual(6);
   await Bun.write(join(root, ".hack/hack.project.json"), "malformed source");
   await Bun.write(join(root, ".hack/hack.env.default.yaml"), "malformed env");
   expect((await down(root)).code).toBe(0);

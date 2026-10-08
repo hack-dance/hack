@@ -144,7 +144,7 @@ export async function prepareNativeComposeDownHooks(opts: {
       })
     : undefined;
   let code: number | undefined;
-  const assertFresh = async () => {
+  const assertSelectionUnchanged = async () => {
     await inputs.assertFresh();
     const fresh = await acquire();
     sameSelection(fresh);
@@ -156,7 +156,7 @@ export async function prepareNativeComposeDownHooks(opts: {
     afterEngine: boolean
   ) => ({
     prepare: async () => {
-      await assertFresh();
+      await assertSelectionUnchanged();
       if (afterEngine) {
         await opts.assertAbsent();
       }
@@ -168,7 +168,10 @@ export async function prepareNativeComposeDownHooks(opts: {
     },
   });
   return {
-    assertFresh,
+    // The store fences exact source and env-owner bytes around every slow
+    // ownership probe. Reacquire the whole selection at phase/final boundaries.
+    assertFresh: inputs.assertFresh,
+    assertSelectionUnchanged,
     downHooks: {
       ...(before ? { before: phase(before, false) } : {}),
       ...(after ? { after: phase(after, true) } : {}),

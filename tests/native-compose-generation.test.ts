@@ -884,6 +884,70 @@ test("an unknown saved host phase refuses without clearing its durable intent", 
   expect(await Bun.file(path).text()).toBe(changed);
 });
 
+test.each([
+  { phase: "before", boundary: "effect" },
+  { phase: "after", boundary: "effect" },
+  { phase: "before", boundary: "finalizer" },
+  { phase: "after", boundary: "finalizer" },
+] as const)("startup refuses a new $phase intent at the $boundary completion boundary", async ({
+  phase,
+  boundary,
+}) => {
+  const owner = await store(await fixture());
+  let generationId = "";
+  const inject = async () => {
+    const receipt = await Bun.file(receiptPath(owner)).json();
+    receipt.beforeHooks = {
+      token: "e".repeat(32),
+      phase,
+      ...(phase === "after"
+        ? {
+            pendingToken: receipt.pending.token,
+            generationId,
+            operation: "up",
+          }
+        : {}),
+    };
+    await Bun.write(receiptPath(owner), JSON.stringify(receipt));
+  };
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    generationId = generation.generationId;
+    await rejected(
+      mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => {
+          if (boundary === "effect") {
+            await inject();
+          }
+          return { outcome: "complete", value: 0 };
+        },
+        ...(boundary === "finalizer"
+          ? {
+              afterHooks: {
+                prepare: async () => async () => ({
+                  outcome: "complete" as const,
+                  ready: true,
+                  value: 0,
+                }),
+              },
+              beforeComplete: inject,
+            }
+          : {}),
+      }),
+      "E_NATIVE_COMPOSE_UNCERTAIN"
+    );
+  });
+  const current = await owner.loadCurrent();
+  expect(current.generation).toBeNull();
+  expect(current.pending?.generationId).toBe(generationId);
+  expect(current.hostHookPhase).toBe(phase);
+  expect(current.beforeHooksPending).toBe(true);
+});
+
 test("random reservation precedes render; exact immutable document and private receipts survive reopen", async () => {
   const root = await fixture();
   const owner = await store(root);

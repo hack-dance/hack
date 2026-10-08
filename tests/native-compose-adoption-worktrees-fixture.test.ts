@@ -10,6 +10,7 @@ import {
   assertAdoptionWorkerArgv,
   cleanupOwnedAdoptionFixture,
   createAdoptionFixtureProbe,
+  FOREIGN_CANARY_FORMAT,
   inspectAdoptionBridge,
   nativeComposeAdoptionWorktreesScenario,
   ownedAdoptionFixtureObservation,
@@ -521,26 +522,109 @@ test("foreign bridge canary pins its distinct owner, network and tmpfs without a
     task: pin.task,
     native: null,
     state: "running",
+    running: true,
+    pid: 123,
+    startedAt: "2026-10-08T12:00:00Z",
     networkMode: pin.networkId,
+    readOnlyRootfs: true,
+    publishAllPorts: false,
+    portBindings: null,
+    configuredTmpfs: {
+      "/var/lib/postgresql/data": "rw,noexec,nosuid,nodev,mode=700",
+    },
+    hostBinds: null,
+    hostMounts: null,
+    volumesFrom: null,
+    imageVolumes: { "/var/lib/postgresql/data": {} },
     networks: [{ name: pin.networkName, id: pin.networkId }],
     mounts: [{ type: "tmpfs", target: "/var/lib/postgresql/data" }],
   };
+  expect(FOREIGN_CANARY_FORMAT).toContain("{{json .HostConfig.Tmpfs}}");
+  expect(FOREIGN_CANARY_FORMAT).toContain("{{json .Config.Volumes}}");
+  expect(FOREIGN_CANARY_FORMAT).not.toContain("index .HostConfig");
+  expect(FOREIGN_CANARY_FORMAT).toContain(".Mounts");
   expect(() =>
     assertAdoptionForeignCanaryObservation({ pin, state: "running", row })
   ).not.toThrow();
-  for (const state of ["created", "exited"] as const) {
+  const created = {
+    ...row,
+    state: "created",
+    running: false,
+    pid: 0,
+    startedAt: "0001-01-01T00:00:00Z",
+    networks: [{ name: pin.networkName, id: "" }],
+    mounts: [],
+  };
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state: "created",
+      row: created,
+    })
+  ).not.toThrow();
+  const exited = {
+    ...row,
+    state: "exited",
+    running: false,
+    pid: 0,
+    networks: [{ name: pin.networkName, id: "" }],
+  };
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state: "exited",
+      row: exited,
+    })
+  ).not.toThrow();
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state: "exited",
+      row: { ...exited, mounts: [] },
+    })
+  ).not.toThrow();
+  // Docker reports configured tmpfs in CREATED state before it appears in active Mounts.
+  for (const changed of [
+    { mounts: row.mounts },
+    { configuredTmpfs: null },
+    { configuredTmpfs: { "/var/lib/postgresql/data": "rw" } },
+    { hostBinds: ["/host/data:/var/lib/postgresql/data"] },
+    { hostMounts: [{ Type: "bind", Target: "/var/lib/postgresql/data" }] },
+    { volumesFrom: ["foreign"] },
+    { imageVolumes: {} },
+    { portBindings: { "5432/tcp": [{ HostPort: "15432" }] } },
+    { publishAllPorts: true },
+    { readOnlyRootfs: false },
+    { startedAt: row.startedAt },
+    { startedAt: "0001-01-01T12:00:00Z" },
+    { running: true },
+    { pid: 42 },
+  ]) {
     expect(() =>
       assertAdoptionForeignCanaryObservation({
         pin,
-        state,
-        row: {
-          ...row,
-          state,
-          networks: [{ name: pin.networkName, id: "" }],
-        },
+        state: "created",
+        row: { ...created, ...changed },
       })
-    ).not.toThrow();
+    ).toThrow(REFUSAL);
   }
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state: "running",
+      row: { ...row, mounts: [] },
+    })
+  ).toThrow(REFUSAL);
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state: "exited",
+      row: {
+        ...exited,
+        mounts: [{ type: "bind", target: "/var/lib/postgresql/data" }],
+      },
+    })
+  ).toThrow(REFUSAL);
   for (const changed of [
     { project: instance.name },
     { task: "different-fixture" },
@@ -552,6 +636,7 @@ test("foreign bridge canary pins its distinct owner, network and tmpfs without a
     { mounts: [{ type: "volume", target: "/var/lib/postgresql/data" }] },
     { mounts: [] },
     { state: "exited" },
+    { startedAt: "not-a-docker-timestamp" },
   ]) {
     expect(() =>
       assertAdoptionForeignCanaryObservation({

@@ -1168,7 +1168,7 @@ async function withholdPrimaryLocal(h: FixtureRuntime) {
 }
 
 const FOREIGN_CANARY_LABEL = "io.hack.nc04.foreign-canary";
-const FOREIGN_CANARY_FORMAT = `{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Image}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"task":{{json (index .Config.Labels "${FOREIGN_CANARY_LABEL}")}},"native":{{json (index .Config.Labels "io.hack.native-config.version")}},"state":{{json .State.Status}},"networkMode":{{json .HostConfig.NetworkMode}},"networks":[{{$first := true}}{{range $name,$n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}}}{{end}}],"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"target":{{json $m.Destination}}}{{end}}]}`;
+export const FOREIGN_CANARY_FORMAT = `{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Image}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"task":{{json (index .Config.Labels "${FOREIGN_CANARY_LABEL}")}},"native":{{json (index .Config.Labels "io.hack.native-config.version")}},"state":{{json .State.Status}},"running":{{json .State.Running}},"pid":{{json .State.Pid}},"startedAt":{{json .State.StartedAt}},"networkMode":{{json .HostConfig.NetworkMode}},"readOnlyRootfs":{{json .HostConfig.ReadonlyRootfs}},"publishAllPorts":{{json .HostConfig.PublishAllPorts}},"portBindings":{{json .HostConfig.PortBindings}},"configuredTmpfs":{{json .HostConfig.Tmpfs}},"hostBinds":{{json .HostConfig.Binds}},"hostMounts":{{json .HostConfig.Mounts}},"volumesFrom":{{json .HostConfig.VolumesFrom}},"imageVolumes":{{json .Config.Volumes}},"networks":[{{$first := true}}{{range $name,$n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}}}{{end}}],"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"target":{{json $m.Destination}}}{{end}}]}`;
 type ForeignCanaryPin = {
   readonly id: string;
   readonly name: string;
@@ -1179,6 +1179,96 @@ type ForeignCanaryPin = {
   readonly networkId: string;
   readonly networkName: string;
 };
+
+function canaryIdentityMatches(
+  row: Record<string, unknown>,
+  pin: ForeignCanaryPin
+) {
+  return (
+    row.id === pin.id &&
+    row.name === `/${pin.name}` &&
+    row.created === pin.created &&
+    row.image === pin.image &&
+    row.project === pin.project &&
+    row.task === pin.task &&
+    (row.native === null || row.native === "")
+  );
+}
+
+function canaryStateMatches(
+  row: Record<string, unknown>,
+  state: "created" | "running" | "exited"
+) {
+  const pid = row.pid;
+  const neverStarted = "0001-01-01T00:00:00Z";
+  return (
+    row.state === state &&
+    row.running === (state === "running") &&
+    typeof pid === "number" &&
+    Number.isSafeInteger(pid) &&
+    (state === "running" ? pid > 0 : pid === 0) &&
+    typeof row.startedAt === "string" &&
+    (state === "created"
+      ? row.startedAt === neverStarted
+      : CREATED.test(row.startedAt) && row.startedAt !== neverStarted)
+  );
+}
+
+function canaryStorageMatches(
+  row: Record<string, unknown>,
+  state: "created" | "running" | "exited"
+) {
+  const target = "/var/lib/postgresql/data";
+  const activeTmpfs = JSON.stringify([{ type: "tmpfs", target }]);
+  const mounts = JSON.stringify(row.mounts);
+  return (
+    isRecord(row.configuredTmpfs) &&
+    Object.keys(row.configuredTmpfs).length === 1 &&
+    row.configuredTmpfs[target] === "rw,noexec,nosuid,nodev,mode=700" &&
+    isRecord(row.imageVolumes) &&
+    Object.keys(row.imageVolumes).length === 1 &&
+    isRecord(row.imageVolumes[target]) &&
+    (state === "running"
+      ? mounts === activeTmpfs
+      : state === "created"
+        ? mounts === "[]"
+        : mounts === "[]" || mounts === activeTmpfs)
+  );
+}
+
+function absentOrEmptyArray(value: unknown) {
+  return value === null || (Array.isArray(value) && value.length === 0);
+}
+
+function canaryHostIsolationMatches(row: Record<string, unknown>) {
+  return (
+    row.readOnlyRootfs === true &&
+    row.publishAllPorts === false &&
+    (row.portBindings === null ||
+      (isRecord(row.portBindings) &&
+        Object.keys(row.portBindings).length === 0)) &&
+    absentOrEmptyArray(row.hostBinds) &&
+    absentOrEmptyArray(row.hostMounts) &&
+    absentOrEmptyArray(row.volumesFrom)
+  );
+}
+
+function canaryNetworkMatches(
+  row: Record<string, unknown>,
+  pin: ForeignCanaryPin,
+  state: "created" | "running" | "exited"
+) {
+  const endpoint = Array.isArray(row.networks) && row.networks[0];
+  return (
+    row.networkMode === pin.networkId &&
+    Array.isArray(row.networks) &&
+    row.networks.length === 1 &&
+    isRecord(endpoint) &&
+    endpoint.name === pin.networkName &&
+    (endpoint.id === pin.networkId ||
+      (state !== "running" && endpoint.id === ""))
+  );
+}
 
 /** The canary has a different project owner, one selected bridge, and no data volume. */
 export function assertAdoptionForeignCanaryObservation(opts: {
@@ -1192,29 +1282,14 @@ export function assertAdoptionForeignCanaryObservation(opts: {
   }
   const validPin =
     ID.test(pin.id) && IMAGE.test(pin.image) && CREATED.test(pin.created);
-  const endpoint = Array.isArray(row.networks) && row.networks[0];
-  if (
-    !validPin ||
-    row.id !== pin.id ||
-    row.name !== `/${pin.name}` ||
-    row.created !== pin.created ||
-    row.image !== pin.image ||
-    row.project !== pin.project ||
-    row.task !== pin.task ||
-    (row.native !== null && row.native !== "") ||
-    row.state !== state ||
-    row.networkMode !== pin.networkId ||
-    !Array.isArray(row.networks) ||
-    row.networks.length !== 1 ||
-    !isRecord(endpoint) ||
-    endpoint.name !== pin.networkName ||
-    !(
-      endpoint.id === pin.networkId ||
-      (state !== "running" && endpoint.id === "")
-    ) ||
-    JSON.stringify(row.mounts) !==
-      JSON.stringify([{ type: "tmpfs", target: "/var/lib/postgresql/data" }])
-  ) {
+  const selected =
+    validPin &&
+    canaryIdentityMatches(row, pin) &&
+    canaryStateMatches(row, state) &&
+    canaryStorageMatches(row, state) &&
+    canaryHostIsolationMatches(row) &&
+    canaryNetworkMatches(row, pin, state);
+  if (!selected) {
     refused();
   }
 }

@@ -30,6 +30,29 @@ each emitted query at its actual receipt state; a final receipt cannot authorize
 an earlier query retroactively. Missing interruption controls report fixed stage,
 exit and control flags without printing command output or authored values.
 
+The `native-compose-adoption-job-worktrees` Docker selector uses the current
+compiled CLI and matching compiler with cached `postgres:17.6-alpine`. The static
+default-bridge fixture has no published ports and never pulls. Two linked
+worktrees retain their original container/network IDs and volume creation identity
+through ordered adoption, down/up, restart and rollback. An explicitly declared
+job must have a fresh exact-ID start and exit zero before its dependent starts.
+SQL keeps the original seed separate from attempt, successful-attempt and dependent
+counters; the dependent must read the current successful attempt. Exit 17 and
+interrupted startup must preserve pending state without starting the dependent.
+Saved stop recovery never replays the job. Cleanup refuses unknown ownership and
+retains both roots if child settlement or exact retirement cannot be confirmed.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=native-compose-adoption-job-worktrees
+```
+
+This is a maintained acceptance gate, not a recorded live pass. It does not qualify
+generated/managed/typed-local input, profiles, custom networks, routes, files or
+builds with jobs. Fresh observed job completion plus dependent SQL readback does
+not guarantee exactly-once business effects or atomic exclusion of external Docker
+writers. Cancellation checks captured host child/pipe settlement; uncertain
+callbacks prevent teardown rather than being treated as canceled work.
+
 ## Command-path cache regressions
 
 `bun test tests/e2e/run-dependency-cache.test.ts` runs the real source CLI in

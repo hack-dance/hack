@@ -809,6 +809,42 @@ test("dry-run reports storage provenance and existing counts without state, sour
   expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
 });
 
+test("CLI adoption refuses other backends before probes, preparation or engine effects", async () => {
+  for (const flags of [[], ["--dry-run"], ["--stop"], ["--recover"]]) {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "../index.ts"),
+        "config",
+        "adopt",
+        "--path",
+        projectRoot,
+        ...flags,
+      ],
+      {
+        env: {
+          ...process.env,
+          HACK_RUNTIME_BACKEND: "native",
+          HACK_HOME: join(root, "isolated-home"),
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(code).not.toBe(0);
+    expect(stdout + stderr).toContain("Compose backend");
+    expect(stdout + stderr).not.toContain(CANARY);
+    expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+    expect(await Bun.file(stateRoot()).exists()).toBe(false);
+  }
+});
+
 test("upgraded discovery refuses an interrupted switch before ancestor selection or legacy writes", async () => {
   const { store } = await prepared();
   try {

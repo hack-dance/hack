@@ -2,7 +2,11 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertNativeComposeProxyRoutes } from "../src/lib/native-compose-proxy-routes.ts";
+import {
+  assertNativeComposeProxyAccess,
+  assertNativeComposeProxyRoutes,
+  NativeComposeProxyAccessError,
+} from "../src/lib/native-compose-proxy-routes.ts";
 import { NativeComposeRoutingError } from "../src/lib/native-compose-routing.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
@@ -19,6 +23,31 @@ const HOST = "app.v5.hack.gy";
 const OLD = "old.v5.hack.gy";
 const CANARY = "synthetic-private-active-proxy-canary";
 const ADMIN_GET = "http://127.0.0.1:2019/config/apps/http/servers";
+const ADMIN_COMMAND = [
+  "exec",
+  PROXY,
+  "curl",
+  "--disable",
+  "--silent",
+  "--show-error",
+  "--fail",
+  "--proxy",
+  "",
+  "--noproxy",
+  "*",
+  "--proto",
+  "=http",
+  "--max-time",
+  "10",
+  "--max-redirs",
+  "0",
+  "--write-out",
+  "\n%{http_code}",
+  "--url",
+  ADMIN_GET,
+] as const;
+const ACCESS_MESSAGE =
+  "Native Compose routing needs the verified live Caddy API reader. Refresh the global runtime template with hack global install or the guided hack doctor --fix repair, retaining caddy_data, before restarting it. Values omitted.";
 const BINDING = {
   engineId: ENGINE,
   networkId: NETWORK,
@@ -93,7 +122,7 @@ appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
 const f = JSON.parse(readFileSync(root + "/fixture.json", "utf8"));
 const [kind, action] = args;
 const permitted = kind === "exec"
- ? JSON.stringify(args) === JSON.stringify(["exec", ${JSON.stringify(PROXY)}, "wget", "-qO-", ${JSON.stringify(ADMIN_GET)}])
+ ? JSON.stringify(args) === JSON.stringify(${JSON.stringify(ADMIN_COMMAND)})
  : args.includes("--format") && (kind === "info" || (kind === "network" && action === "inspect") || (kind === "container" && ["ls", "inspect"].includes(action)));
 if (!permitted) { writeFileSync(root + "/mutated", "unexpected command"); process.exit(99); }
 function count(key) {
@@ -108,10 +137,12 @@ if (f.mode === "hang" || (f.mode === "wait" && !existsSync(root + "/started"))) 
 if (kind === "info") console.log(JSON.stringify(${JSON.stringify(ENGINE)}));
 else if (kind === "network") console.log(JSON.stringify({id: ${JSON.stringify(NETWORK)}, name: "hack-dev"}));
 else if (kind === "exec") {
+ if (f.mode === "access-hang") { writeFileSync(root + "/started", String(process.pid)); await Bun.sleep(60_000); }
  if (f.mode === "active-fail") { console.error(${JSON.stringify(CANARY)}); process.exit(23); }
  if (f.mode === "active-malformed") { console.log(${JSON.stringify(CANARY)}); process.exit(0); }
  const index = count("active-count");
- console.log(JSON.stringify(f.activeSnapshots?.[Math.min(index, f.activeSnapshots.length - 1)] ?? f.active ?? ${JSON.stringify(active())}));
+ const servers = f.activeSnapshots?.[Math.min(index, f.activeSnapshots.length - 1)] ?? f.active ?? ${JSON.stringify(active())};
+ process.stdout.write(f.rawOutput ?? JSON.stringify(servers) + String.fromCharCode(10) + (f.status ?? "200"));
 } else if (action === "ls" && args.includes("label=com.docker.compose.project=hack-dev-proxy")) {
  const replaced = f.mode === "replacement" && count("proxy-lists") >= 2;
  console.log(JSON.stringify(replaced ? ${JSON.stringify(REPLACEMENT)} : ${JSON.stringify(PROXY)}));
@@ -162,11 +193,52 @@ async function refusal(
   }
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
 }
+async function accessRefusal(
+  opts: Parameters<typeof assertNativeComposeProxyAccess>[0] = {
+    binding: BINDING,
+  }
+): Promise<void> {
+  let reachedProjectEffect = false;
+  try {
+    await assertNativeComposeProxyAccess(opts);
+    reachedProjectEffect = true;
+    throw new Error("Unexpected proxy access acceptance");
+  } catch (error: unknown) {
+    expect(error).toBeInstanceOf(NativeComposeProxyAccessError);
+    expect(error).toMatchObject({
+      code: "E_NATIVE_COMPOSE_PROXY_ACCESS",
+      name: "NativeComposeProxyAccessError",
+      message: ACCESS_MESSAGE,
+    });
+    expect(String(error)).not.toContain(CANARY);
+    expect(JSON.stringify(error)).not.toContain(CANARY);
+  }
+  expect(reachedProjectEffect).toBe(false);
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+}
 async function commands(): Promise<string[][]> {
   return (await readFile(join(root, "commands"), "utf8"))
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
+}
+async function readOnlyCommands(): Promise<string[][]> {
+  const observed = await commands();
+  expect(observed.flat()).not.toContain("wget");
+  for (const args of observed) {
+    if (args[0] === "exec") {
+      expect(args).toEqual([...ADMIN_COMMAND]);
+    } else {
+      expect(args.includes("--format")).toBe(true);
+      expect(
+        args[0] === "info" ||
+          (args[0] === "network" && args[1] === "inspect") ||
+          (args[0] === "container" && ["ls", "inspect"].includes(args[1] ?? ""))
+      ).toBe(true);
+    }
+  }
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+  return observed;
 }
 async function startedPid(): Promise<number> {
   const deadline = Date.now() + 2000;
@@ -184,10 +256,7 @@ test("proxy confirmation uses exact read-only GET and two current workload/upstr
   await assertNativeComposeProxyRoutes(options());
   const observed = await commands();
   const reads = observed.filter((args) => args[0] === "exec");
-  expect(reads).toEqual([
-    ["exec", PROXY, "wget", "-qO-", ADMIN_GET],
-    ["exec", PROXY, "wget", "-qO-", ADMIN_GET],
-  ]);
+  expect(reads).toEqual([[...ADMIN_COMMAND], [...ADMIN_COMMAND]]);
   expect(
     observed.filter(
       (args) =>
@@ -203,6 +272,86 @@ test("proxy confirmation uses exact read-only GET and two current workload/upstr
     expect(format).not.toContain("{{json .}}");
   }
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+test("curl completion must include exact 200 status; redirects and malformed suffixes refuse", async () => {
+  for (const fixture of [
+    { status: "204" },
+    { status: "301" },
+    { status: "302" },
+    { status: "307" },
+    { status: "401" },
+    { status: "500" },
+    { status: "0200" },
+    { status: "200\n" },
+    { status: `200 ${CANARY}` },
+    { rawOutput: JSON.stringify(active()) },
+    { rawOutput: `${JSON.stringify(active())}200` },
+    { rawOutput: "\n200" },
+    { rawOutput: "null\n200" },
+    { rawOutput: `${CANARY}\n200` },
+  ]) {
+    await prepare(fixture);
+    await refusal();
+  }
+  await readOnlyCommands();
+}, 10_000);
+test("proxy access preflight reads the exact live API without workload queries or mutation", async () => {
+  await prepare({
+    active: { srv0: { ...active().srv0, unselected_private: CANARY } },
+  });
+  expect(
+    await assertNativeComposeProxyAccess({ binding: BINDING })
+  ).toBeUndefined();
+  const observed = await readOnlyCommands();
+  expect(observed.filter((args) => args[0] === "exec")).toEqual([
+    [...ADMIN_COMMAND],
+  ]);
+  expect(observed.filter((args) => args[0] === "info")).toHaveLength(4);
+  for (const args of observed.filter((args) => args[1] === "ls")) {
+    expect(args).toContain("label=com.docker.compose.project=hack-dev-proxy");
+    expect(args).not.toContain(`label=com.docker.compose.project=${PROJECT}`);
+  }
+});
+test("proxy access failures stay fixed and redacted before the caller can perform project effects", async () => {
+  for (const fixture of [
+    { mode: "active-fail" },
+    { mode: "active-malformed" },
+    { mode: "replacement" },
+    { status: "301" },
+    { status: "403" },
+    { status: `200 ${CANARY}` },
+    { rawOutput: `${CANARY}\n200` },
+    { active: { srv0: { routes: CANARY } } },
+  ]) {
+    await prepare(fixture);
+    await accessRefusal();
+  }
+  await readOnlyCommands();
+}, 10_000);
+test("proxy access snapshots its binding before probing", async () => {
+  await prepare({ mode: "wait" });
+  const selected = { binding: { ...BINDING } };
+  const task = assertNativeComposeProxyAccess(selected);
+  await startedPid();
+  selected.binding.proxyId = REPLACEMENT;
+  selected.binding.proxyIp = "172.29.0.99";
+  await task;
+  await readOnlyCommands();
+});
+test("proxy access pre-abort spawns nothing and cancellation reaps the exact API reader", async () => {
+  const aborted = new AbortController();
+  aborted.abort();
+  await accessRefusal({ binding: BINDING, signal: aborted.signal });
+  expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+  await prepare({ mode: "access-hang" });
+  const controller = new AbortController();
+  const task = accessRefusal({ binding: BINDING, signal: controller.signal });
+  const pid = await startedPid();
+  controller.abort();
+  await task;
+  expect(() => process.kill(pid, 0)).toThrow();
+  const observed = await readOnlyCommands();
+  expect(observed.at(-1)).toEqual([...ADMIN_COMMAND]);
 });
 test("all exact current replica IPs must appear in the active proxy dial pool", async () => {
   await prepare({

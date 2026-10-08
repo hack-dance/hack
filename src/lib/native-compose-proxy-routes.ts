@@ -30,6 +30,78 @@ type HostScope = {
 type ExpectedRoute = NativeComposeProxyRoute & {
   readonly dials: readonly string[];
 };
+const ADMIN_URL = "http://127.0.0.1:2019/config/apps/http/servers";
+async function readActiveProxy(opts: {
+  readonly binding: NativeComposeIngressBinding;
+  readonly signal?: AbortSignal;
+}): Promise<unknown> {
+  const probe = createNativeComposeProbe({ signal: opts.signal });
+  const output = await probe([
+    "exec",
+    opts.binding.proxyId,
+    "curl",
+    "--disable",
+    "--silent",
+    "--show-error",
+    "--fail",
+    "--proxy",
+    "",
+    "--noproxy",
+    "*",
+    "--proto",
+    "=http",
+    "--max-time",
+    "10",
+    "--max-redirs",
+    "0",
+    "--write-out",
+    "\n%{http_code}",
+    "--url",
+    ADMIN_URL,
+  ]);
+  if (!output.endsWith("\n200")) {
+    return refused();
+  }
+  return JSON.parse(output.slice(0, -4));
+}
+
+export class NativeComposeProxyAccessError extends Error {
+  readonly code = "E_NATIVE_COMPOSE_PROXY_ACCESS";
+  constructor() {
+    super(
+      "Native Compose routing needs the verified live Caddy API reader. Refresh the global runtime template with hack global install or the guided hack doctor --fix repair, retaining caddy_data, before restarting it. Values omitted."
+    );
+    this.name = "NativeComposeProxyAccessError";
+  }
+}
+
+/** Verify live read access before any project effect; never repair or replace the proxy here. */
+export async function assertNativeComposeProxyAccess(opts: {
+  readonly binding: NativeComposeIngressBinding;
+  readonly signal?: AbortSignal;
+}): Promise<void> {
+  try {
+    const selected = {
+      binding: Object.freeze({ ...opts.binding }),
+      signal: opts.signal,
+    };
+    await observeNativeComposeIngress({
+      expected: selected.binding,
+      signal: selected.signal,
+    });
+    nativeComposeProxyRoutesMatch({
+      servers: await readActiveProxy(selected),
+      expected: [],
+      absentHostnames: [],
+    });
+    await observeNativeComposeIngress({
+      expected: selected.binding,
+      signal: selected.signal,
+    });
+  } catch {
+    throw new NativeComposeProxyAccessError();
+  }
+}
 function refused(): never {
   throw new NativeComposeRoutingError();
 }
@@ -344,17 +416,8 @@ export async function assertNativeComposeProxyRoutes(opts: {
     const probe = createNativeComposeProbe({ signal });
     let expected = await expectedRoutes({ ...selected, probe });
     const readActive = async () => {
-      const activeProbe = createNativeComposeProbe({ signal });
       // Fixed GET inside the exact verified proxy. Nothing is published and no admin mutation occurs.
-      const servers: unknown = JSON.parse(
-        await activeProbe([
-          "exec",
-          selected.binding.proxyId,
-          "wget",
-          "-qO-",
-          "http://127.0.0.1:2019/config/apps/http/servers",
-        ])
-      );
+      const servers = await readActiveProxy(selected);
       return nativeComposeProxyRoutesMatch({
         servers,
         expected,

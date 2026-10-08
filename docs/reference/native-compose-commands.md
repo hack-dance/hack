@@ -48,6 +48,14 @@ This path does not start or repair global services, change DNS, install trust, o
 open a browser. Arbitrary external Docker writers are outside the cooperative
 claim boundary; fresh inventory checks detect observed collisions.
 
+The global template uses the official `2.10.0-alpine` Caddy proxy variant, which
+includes curl for bounded, read-only checks of its live localhost admin API. The
+admin port is not published. An existing distroless proxy refuses this prerequisite
+before project effects. Refresh its saved template with `hack global install` or
+the guided `hack doctor --fix` repair, keeping `caddy_data`, then restart it.
+`hack global up` alone starts the saved template and does not upgrade that file.
+Native project startup never performs this global migration automatically.
+
 For projects without routing, `run` can start a cold project's dependencies.
 It gives the one-off container a
 fresh name, verifies its generation, service, stopped state and exact exit code,

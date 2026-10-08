@@ -6,7 +6,10 @@ import {
   type NativeComposeIngressBinding,
   observeNativeComposeIngress,
 } from "./native-compose-ingress.ts";
-import { assertNativeComposeProxyRoutes } from "./native-compose-proxy-routes.ts";
+import {
+  assertNativeComposeProxyAccess,
+  assertNativeComposeProxyRoutes,
+} from "./native-compose-proxy-routes.ts";
 import {
   type NativeComposeRouteAttempt,
   type NativeComposeRouteClaims,
@@ -366,7 +369,16 @@ export function readNativeComposeRouteMetadata(
 }
 
 const defaultIO = {
-  ingress: observeNativeComposeIngress,
+  ingress: async (
+    opts: Parameters<typeof observeNativeComposeIngress>[0] = {}
+  ) => {
+    const selected = await observeNativeComposeIngress(opts);
+    await assertNativeComposeProxyAccess({
+      binding: selected,
+      signal: opts.signal,
+    });
+    return selected;
+  },
   inventory: assertNativeComposeRouteInventory,
   proxy: assertNativeComposeProxyRoutes,
   claims: openNativeComposeRouteClaims,

@@ -153,6 +153,15 @@ attempt. Such claims prevent restart and hostname handoff; explicit route-owner
 recovery remains unimplemented. A pre-effect failure rolls back only claims newly
 acquired by that live preparation.
 
+Startup writes pending engine intent before spawning. After the child is reaped,
+Hack verifies workload and active-route readiness, then checks the owned generation
+and pending intent again. Route claims complete inside a finalizer before the
+generation's completed receipt is written. A finalizer failure retains pending
+engine uncertainty and prevents a ready report. The two private stores do not have
+an atomic commit: a crash after claim completion but before receipt publication
+still leaves the pending generation for explicit owned stop recovery. Fresh absence
+proof remains required before any remaining hostname claims can be released.
+
 ## Remaining coverage
 
 This slice explicitly refuses foreground or partial-service startup, non-plain

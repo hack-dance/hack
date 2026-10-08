@@ -778,6 +778,13 @@ export type NativeComposeEffectOptions<T> = {
   readonly assertFresh?: () => Promise<void>;
   readonly assertOwned: () => Promise<void>;
   readonly recoverPending?: boolean;
+  /**
+   * Finalize dependent ownership after a reaped, verified complete effect and fresh
+   * pending/ownership checks, before publishing the completed generation receipt.
+   * Failure preserves the uncertain pending generation; this is not a cross-store
+   * atomic commit, and the finalizer must retain its own crash recovery evidence.
+   */
+  readonly beforeComplete?: () => Promise<void>;
   readonly effect: () => Promise<{
     readonly outcome: "complete" | "uncertain";
     readonly value: T;
@@ -1244,9 +1251,17 @@ export async function openNativeComposeGenerationStore(opts: {
     ) => {
       await verifyGeneration(input.generation);
       await input.assertOwned();
-      const latest = await receipt();
+      let latest = await receipt();
       if (JSON.stringify(latest.pending) !== JSON.stringify(pending)) {
         refuse();
+      }
+      if (input.beforeComplete) {
+        await input.beforeComplete();
+        await verifyGeneration(input.generation);
+        latest = await receipt();
+        if (JSON.stringify(latest.pending) !== JSON.stringify(pending)) {
+          refuse();
+        }
       }
       await save(completedReceipt(latest, anchor, input.operation));
     };

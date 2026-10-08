@@ -13,6 +13,8 @@ const INSPECT =
 
 export type NativeComposeProxyRoute = {
   readonly hostnames: readonly string[];
+  /** Selected frontend origins, independent of the upstream transport protocol. */
+  readonly origins: readonly string[];
   readonly service: string;
   readonly port: number;
   readonly protocol: "http" | "https";
@@ -22,6 +24,12 @@ type Proxy = {
   readonly dials: readonly string[];
   readonly protocol: "http" | "https";
   readonly conditional: boolean;
+};
+type Activity = HostScope & { readonly proxy?: Proxy };
+type ServerProjection = {
+  readonly listen: readonly string[];
+  readonly tls: boolean | null;
+  readonly activities: readonly Activity[];
 };
 type HostScope = {
   readonly hosts: readonly string[];
@@ -124,35 +132,56 @@ function hostStrings(value: unknown): string[] {
   return [...value];
 }
 
-function proxyHandler(value: Record<string, unknown>, scope: HostScope): Proxy {
-  if (!Array.isArray(value.upstreams)) {
-    return refused();
+function proxyHandler(
+  value: Record<string, unknown>,
+  scope: HostScope
+): Proxy | null {
+  if (
+    Object.keys(value).some(
+      (key) => !["handler", "upstreams", "transport"].includes(key)
+    ) ||
+    !Array.isArray(value.upstreams) ||
+    !value.upstreams.length
+  ) {
+    return null;
   }
-  const dials = value.upstreams
-    .map((upstream) => {
-      if (!isRecord(upstream) || typeof upstream.dial !== "string") {
-        return refused();
-      }
-      return upstream.dial;
-    })
-    .sort();
+  const dials: string[] = [];
+  for (const upstream of value.upstreams) {
+    if (
+      !isRecord(upstream) ||
+      Object.keys(upstream).join() !== "dial" ||
+      typeof upstream.dial !== "string"
+    ) {
+      return null;
+    }
+    dials.push(upstream.dial);
+  }
   if (new Set(dials).size !== dials.length) {
-    return refused();
+    return null;
   }
   let protocol: "http" | "https" = "http";
   if (value.transport !== undefined) {
-    if (!isRecord(value.transport) || value.transport.protocol !== "http") {
-      return refused();
+    if (
+      !isRecord(value.transport) ||
+      value.transport.protocol !== "http" ||
+      Object.keys(value.transport).some(
+        (key) => !["protocol", "tls"].includes(key)
+      ) ||
+      (value.transport.tls !== undefined &&
+        (!isRecord(value.transport.tls) ||
+          Object.keys(value.transport.tls).length !== 0))
+    ) {
+      return null;
     }
     protocol = value.transport.tls === undefined ? "http" : "https";
   }
-  return { ...scope, dials, protocol };
+  return { ...scope, dials: dials.sort(), protocol };
 }
 
 function collectRoutes(
   value: unknown,
   inherited: HostScope,
-  output: { hosts: Set<string>; proxies: Proxy[] },
+  output: { hosts: Set<string>; activities: Activity[] },
   depth = 0
 ): void {
   if (!Array.isArray(value) || depth > 64) {
@@ -163,12 +192,25 @@ function collectRoutes(
       refused();
     }
     const scope = matchedHosts(route.match, inherited);
+    if (
+      route.group !== undefined ||
+      Object.keys(route).some(
+        (key) => !["match", "handle", "terminal"].includes(key)
+      )
+    ) {
+      // Group dispatch and unknown route controls can skip or alter the nominal handler path.
+      output.activities.push(scope);
+    }
     if (route.match !== undefined) {
       for (const hostname of scope.hosts) {
         output.hosts.add(hostname);
       }
     }
     collectHandlers(route.handle, scope, output, depth);
+    // A terminal matched route can stop dispatch even when its nested handlers did not respond.
+    if (route.terminal === true) {
+      output.activities.push(scope);
+    }
   }
 }
 
@@ -210,7 +252,7 @@ function intersectHosts(host: string, parents: readonly string[]): string[] {
 function collectHandlers(
   value: unknown,
   scope: HostScope,
-  output: { hosts: Set<string>; proxies: Proxy[] },
+  output: { hosts: Set<string>; activities: Activity[] },
   depth: number
 ): void {
   if (value === undefined) {
@@ -225,15 +267,78 @@ function collectHandlers(
     }
     if (handler.handler === "reverse_proxy") {
       const proxy = proxyHandler(handler, scope);
-      output.proxies.push(proxy);
-      for (const hostname of proxy.hosts) {
+      output.activities.push({ ...scope, ...(proxy ? { proxy } : {}) });
+      for (const hostname of scope.hosts) {
         output.hosts.add(hostname);
       }
     }
     if (handler.handler === "subroute") {
+      if (
+        Object.keys(handler).some((key) => !["handler", "routes"].includes(key))
+      ) {
+        output.activities.push(scope);
+      }
       collectRoutes(handler.routes, scope, output, depth + 1);
+    } else if (handler.handler !== "reverse_proxy") {
+      // Unknown middleware and responders may alter or terminate dispatch. They cannot prove a route.
+      output.activities.push(scope);
     }
   }
+}
+
+function frontendTls(value: unknown): boolean | null {
+  if (value === undefined || (Array.isArray(value) && value.length === 0)) {
+    return false;
+  }
+  return Array.isArray(value) &&
+    value.length === 1 &&
+    isRecord(value[0]) &&
+    Object.keys(value[0]).length === 0
+    ? true
+    : null;
+}
+
+function frontendListener(server: ServerProjection, origin: URL): boolean {
+  const port = origin.protocol === "https:" ? 443 : 80;
+  return (
+    server.tls === (origin.protocol === "https:") &&
+    server.listen.some((address) =>
+      [`:${port}`, `0.0.0.0:${port}`, `[::]:${port}`].includes(address)
+    )
+  );
+}
+
+function routeMatches(
+  server: ServerProjection,
+  route: ExpectedRoute,
+  hostname: string
+): boolean {
+  const candidates = server.activities
+    .map((activity, index) => ({ activity, index }))
+    .filter(
+      ({ activity }) =>
+        activity.proxy &&
+        activity.hosts.some((active) => covers(active, hostname))
+    );
+  if (candidates.length !== 1) {
+    return false;
+  }
+  const selected = candidates[0];
+  const proxy = selected?.activity.proxy;
+  if (!(selected && proxy)) {
+    return false;
+  }
+  return (
+    !proxy.conditional &&
+    proxy.hosts.includes(hostname) &&
+    proxy.protocol === route.protocol &&
+    proxy.dials.join() === [...route.dials].sort().join() &&
+    !server.activities
+      .slice(0, selected.index)
+      .some((activity) =>
+        activity.hosts.some((active) => covers(active, hostname))
+      )
+  );
 }
 
 /** Project only public host/dial policy in memory; raw active config is never returned or logged. */
@@ -245,11 +350,13 @@ export function nativeComposeProxyRoutesMatch(opts: {
   if (!isRecord(opts.servers)) {
     return refused();
   }
-  const result = { hosts: new Set<string>(), proxies: [] as Proxy[] };
+  const hosts = new Set<string>();
+  const servers: ServerProjection[] = [];
   for (const server of Object.values(opts.servers)) {
     if (!isRecord(server)) {
       return refused();
     }
+    const result = { hosts, activities: [] as Activity[] };
     if (server.routes !== undefined) {
       collectRoutes(
         server.routes,
@@ -257,25 +364,48 @@ export function nativeComposeProxyRoutesMatch(opts: {
         result
       );
     }
+    servers.push({
+      listen: server.listen === undefined ? [] : hostStrings(server.listen),
+      tls: frontendTls(server.tls_connection_policies),
+      activities: result.activities,
+    });
   }
   if (
     opts.absentHostnames.some((host) =>
-      [...result.hosts].some((active) => covers(active, host))
+      [...hosts].some((active) => covers(active, host))
     )
   ) {
     return false;
   }
   for (const route of opts.expected) {
-    for (const hostname of route.hostnames) {
-      const candidates = result.proxies.filter((proxy) =>
-        proxy.hosts.some((active) => covers(active, hostname))
+    const origins = route.origins.map((origin) => new URL(origin));
+    if (
+      !origins.length ||
+      origins.some(
+        (origin) =>
+          !["http:", "https:"].includes(origin.protocol) ||
+          origin.port ||
+          origin.username ||
+          origin.password ||
+          origin.pathname !== "/" ||
+          origin.search ||
+          origin.hash
+      ) ||
+      [...new Set(origins.map((origin) => origin.hostname))].sort().join() !==
+        [...route.hostnames].sort().join()
+    ) {
+      return false;
+    }
+    for (const origin of origins) {
+      const candidates = servers.filter((server) =>
+        frontendListener(server, origin)
       );
+      // Multiple listeners can dispatch the same origin differently. Require exactly one proven path.
+      const server = candidates[0];
       if (
         candidates.length !== 1 ||
-        candidates[0]?.conditional ||
-        !candidates[0]?.hosts.includes(hostname) ||
-        candidates[0]?.protocol !== route.protocol ||
-        candidates[0]?.dials.join() !== [...route.dials].sort().join()
+        !server ||
+        !routeMatches(server, route, origin.hostname)
       ) {
         return false;
       }
@@ -406,6 +536,7 @@ export async function assertNativeComposeProxyRoutes(opts: {
           Object.freeze({
             ...route,
             hostnames: Object.freeze([...route.hostnames]),
+            origins: Object.freeze([...route.origins]),
           })
         )
       ),

@@ -22,7 +22,10 @@ import {
   planNativeComposeRouting,
 } from "./native-compose-routing.ts";
 import type { NativeDeclaredWorkloads } from "./native-env-plan-protocol.ts";
-import { parseNativeRoutingResolution } from "./native-routing-plan-protocol.ts";
+import {
+  type NativeRoutingResolution,
+  parseNativeRoutingResolution,
+} from "./native-routing-plan-protocol.ts";
 
 const EXTENSION = "x-hack-native-routing";
 const TOKEN = /^[a-f0-9]{32}$/;
@@ -36,6 +39,7 @@ const CADDY_GROUP = /^caddy_\d+(?:\.|$)/;
 type Document = Readonly<Record<string, unknown>>;
 export type NativeComposeOwnedRoute = {
   readonly hostnames: readonly string[];
+  readonly origins: readonly string[];
   readonly service: string;
   readonly port: number;
   readonly protocol: "http" | "https";
@@ -47,6 +51,8 @@ export type NativeComposeRouteMetadata = {
   readonly reference: NativeComposeRouteReference;
   readonly hostnames: readonly string[];
   readonly routes: readonly NativeComposeOwnedRoute[];
+  /** Compiler-selected browser origin, retained with the immutable generation. */
+  readonly resolution: NativeRoutingResolution | null;
 };
 export type NativeComposeSavedRouteDocument = {
   readonly generationId: string;
@@ -186,7 +192,10 @@ function routes(value: unknown): readonly NativeComposeOwnedRoute[] {
   return Object.freeze(
     value.map((route) => {
       if (
-        !(isRecord(route) && exact(route, "hostnames,port,protocol,service")) ||
+        !(
+          isRecord(route) &&
+          exact(route, "hostnames,origins,port,protocol,service")
+        ) ||
         typeof route.service !== "string" ||
         !NAME.test(route.service) ||
         typeof route.port !== "number" ||
@@ -198,11 +207,17 @@ function routes(value: unknown): readonly NativeComposeOwnedRoute[] {
         return refused();
       }
       const hostnames = names(route.hostnames);
-      if (hostnames.length === 0) {
+      const origins = siteOrigins(route.origins);
+      if (
+        hostnames.length === 0 ||
+        [...new Set(origins.map(siteHostname))].sort().join() !==
+          hostnames.join()
+      ) {
         return refused();
       }
       return Object.freeze({
         hostnames,
+        origins,
         service: route.service,
         port: route.port,
         protocol: route.protocol,
@@ -230,6 +245,23 @@ function siteHostname(origin: string): string {
   return url.hostname;
 }
 
+function siteOrigins(value: unknown): readonly string[] {
+  if (
+    !(
+      Array.isArray(value) &&
+      value.length &&
+      value.every((origin) => typeof origin === "string")
+    ) ||
+    [...new Set(value)].sort().join() !== value.join()
+  ) {
+    return refused();
+  }
+  for (const origin of value) {
+    siteHostname(origin);
+  }
+  return Object.freeze([...value] as string[]);
+}
+
 function expectedSiteLabels(
   labels: Record<string, unknown>,
   selected: readonly NativeComposeOwnedRoute[]
@@ -243,8 +275,9 @@ function expectedSiteLabels(
     }
     const origins = sites.split(", ");
     if (
-      origins.length !== route.hostnames.length ||
-      origins.map(siteHostname).sort().join() !== route.hostnames.join()
+      origins.join() !== route.origins.join() ||
+      [...new Set(origins.map(siteHostname))].sort().join() !==
+        route.hostnames.join()
     ) {
       return refused();
     }
@@ -340,7 +373,7 @@ export function readNativeComposeRouteMetadata(
     if (
       !(
         isRecord(value) &&
-        exact(value, "binding,hostnames,reference,routes,version")
+        exact(value, "binding,hostnames,reference,resolution,routes,version")
       ) ||
       value.version !== 1
     ) {
@@ -348,6 +381,52 @@ export function readNativeComposeRouteMetadata(
     }
     const selected = routes(value.routes);
     const hostnames = names(value.hostnames);
+    const resolution =
+      value.resolution === null
+        ? null
+        : parseNativeRoutingResolution(value.resolution);
+    if (value.resolution !== null && !resolution) {
+      return refused();
+    }
+    if (resolution) {
+      if (
+        !selected.some((route) =>
+          route.origins.includes(resolution.open_origin)
+        )
+      ) {
+        return refused();
+      }
+      const resolved = Object.keys(resolution.routes)
+        .sort()
+        .map((name) => {
+          const route = resolution.routes[name];
+          if (!route) {
+            return refused();
+          }
+          return {
+            service: route.service,
+            port: route.port,
+            protocol: route.protocol,
+            origins: [route.origin, ...Object.values(route.aliases)].sort(),
+          };
+        });
+      if (
+        JSON.stringify(resolved) !==
+        JSON.stringify(
+          selected.map((route) => ({
+            service: route.service,
+            port: route.port,
+            protocol: route.protocol,
+            origins: route.origins,
+          }))
+        )
+      ) {
+        return refused();
+      }
+      freezePrivate(resolution);
+    } else if (selected.length > 0) {
+      return refused();
+    }
     if (
       activeHostnames(selected).some(
         (hostname) => !hostnames.includes(hostname)
@@ -362,6 +441,7 @@ export function readNativeComposeRouteMetadata(
       reference: reference(value.reference, opts.generationId),
       hostnames,
       routes: selected,
+      resolution,
     });
   } catch {
     return refused();
@@ -464,6 +544,9 @@ export async function prepareNativeComposeRouteOwner(input: {
   const resolution = planned
     ? parseNativeRoutingResolution(opts.resolution)
     : null;
+  if (resolution) {
+    freezePrivate(resolution);
+  }
   const selected = resolution
     ? Object.keys(resolution.routes)
         .sort()
@@ -476,10 +559,17 @@ export async function prepareNativeComposeRouteOwner(input: {
             service: route.service,
             port: route.port,
             protocol: route.protocol,
+            origins: Object.freeze(
+              [route.origin, ...Object.values(route.aliases)].sort()
+            ),
             hostnames: Object.freeze(
-              [route.origin, ...Object.values(route.aliases)]
-                .map((origin) => new URL(origin).hostname)
-                .sort()
+              [
+                ...new Set(
+                  [route.origin, ...Object.values(route.aliases)].map(
+                    (origin) => new URL(origin).hostname
+                  )
+                ),
+              ].sort()
             ),
           });
         })
@@ -525,6 +615,7 @@ export async function prepareNativeComposeRouteOwner(input: {
       reference: liveAttempt.reference,
       hostnames: liveAttempt.hostnames,
       routes: Object.freeze(selected),
+      resolution,
     });
     let verifiedDeadline: number | undefined;
     const keepHostnames = activeHostnames(selected);

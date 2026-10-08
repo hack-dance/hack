@@ -38,6 +38,7 @@ import {
   type NativeComposeOwnershipObservation,
   type NativeComposeOwnershipOptions,
 } from "./native-compose-ownership.ts";
+import { NativeComposeProxyAccessError } from "./native-compose-proxy-routes.ts";
 import {
   assertNativeComposeSupported,
   NativeComposeRenderError,
@@ -762,6 +763,7 @@ async function prepareCommand(opts: {
             await assertNativeComposeOwned(selection);
             await routing?.assertBeforeEffects();
           },
+          ...(routing ? { beforeComplete: () => routing.complete() } : {}),
           effect: async () => {
             if (operation === "run") {
               return await runOneOff({
@@ -789,7 +791,6 @@ async function prepareCommand(opts: {
               "Native Compose execution is incomplete; inspect saved state and use explicit owned stop recovery before retrying.",
           });
         }
-        await routing?.complete();
         if (options.json) {
           emitCliResult({
             result: okResult({
@@ -1006,52 +1007,59 @@ export async function tryNativeComposeCommand(
       await store.close();
     }
   } catch (error: unknown) {
-    if (error instanceof NativeComposeHostHookError) {
-      throw new HackCliError({
-        code: "E_NATIVE_PROJECT_UNSUPPORTED",
-        message: error.message,
-      });
-    }
-    if (
-      error instanceof NativeComposeGenerationError ||
-      error instanceof NativeComposeOwnershipError
-    ) {
-      throw new HackCliError({
-        code: "E_CONFIG_INVALID",
-        message: error.message,
-      });
-    }
-    if (error instanceof NativeComposeRenderError) {
-      throw new HackCliError({
-        code: "E_NATIVE_PROJECT_UNSUPPORTED",
-        message:
-          "Native Compose does not yet support this selected workload contract; no engine operation ran. Values omitted.",
-      });
-    }
-    if (
-      error instanceof NativeComposeRoutingError ||
-      error instanceof NativeComposeRouteClaimError
-    ) {
-      throw new HackCliError({
-        code: "E_CONFIG_INVALID",
-        message:
-          "Native Compose routing admission or verification failed; routing claims and owned state are preserved as required. Values omitted.",
-      });
-    }
-    if (
-      error instanceof HackCliError ||
-      error instanceof CliUsageError ||
-      error instanceof NativeConfigCompilerError
-    ) {
-      throw error;
-    }
-    throw new HackCliError({
-      code: "E_COMPOSE_FAILED",
-      message:
-        "Native Compose operation failed; saved ownership and persistent data are retained. Values omitted.",
-    });
+    return throwNativeComposeCommandError(error);
   } finally {
     process.off("SIGINT", cancel);
     process.off("SIGTERM", cancel);
   }
+}
+
+function throwNativeComposeCommandError(error: unknown): never {
+  if (error instanceof NativeComposeProxyAccessError) {
+    throw new HackCliError({ code: error.code, message: error.message });
+  }
+  if (error instanceof NativeComposeHostHookError) {
+    throw new HackCliError({
+      code: "E_NATIVE_PROJECT_UNSUPPORTED",
+      message: error.message,
+    });
+  }
+  if (
+    error instanceof NativeComposeGenerationError ||
+    error instanceof NativeComposeOwnershipError
+  ) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: error.message,
+    });
+  }
+  if (error instanceof NativeComposeRenderError) {
+    throw new HackCliError({
+      code: "E_NATIVE_PROJECT_UNSUPPORTED",
+      message:
+        "Native Compose does not yet support this selected workload contract; no engine operation ran. Values omitted.",
+    });
+  }
+  if (
+    error instanceof NativeComposeRoutingError ||
+    error instanceof NativeComposeRouteClaimError
+  ) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Native Compose routing admission or verification failed; routing claims and owned state are preserved as required. Values omitted.",
+    });
+  }
+  if (
+    error instanceof HackCliError ||
+    error instanceof CliUsageError ||
+    error instanceof NativeConfigCompilerError
+  ) {
+    throw error;
+  }
+  throw new HackCliError({
+    code: "E_COMPOSE_FAILED",
+    message:
+      "Native Compose operation failed; saved ownership and persistent data are retained. Values omitted.",
+  });
 }

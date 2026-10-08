@@ -217,11 +217,32 @@ test("private route metadata binds the generation, proof targets and immutable c
         protocol: "http",
         port: 3000,
         hostnames: ["fixture.dev.test"],
+        origins: ["https://fixture.dev.test"],
       },
     ],
   });
   expect(Object.isFrozen(saved)).toBe(true);
   expect(Object.isFrozen(saved?.reference.intent)).toBe(true);
+  expect(saved?.resolution).toEqual(input.resolution);
+  expect(Object.isFrozen(saved?.resolution)).toBe(true);
+  expect(Object.isFrozen(saved?.resolution?.routes)).toBe(true);
+  const delivered = owner.document["x-hack-native-routing"] as NonNullable<
+    typeof saved
+  >;
+  expect(Object.isFrozen(delivered.resolution)).toBe(true);
+  expect(Object.isFrozen(delivered.resolution?.routes.app)).toBe(true);
+  if (delivered.resolution?.routes.app) {
+    expect(
+      Reflect.set(
+        delivered.resolution.routes.app,
+        "origin",
+        "https://foreign.test"
+      )
+    ).toBe(false);
+    expect(delivered.resolution.routes.app.origin).toBe(
+      "https://fixture.dev.test"
+    );
+  }
   expect(JSON.stringify(input.document)).not.toContain("attemptId");
   expect(JSON.stringify(owner.document.services)).not.toContain("attemptId");
   expect(JSON.stringify(owner.document.services)).not.toContain(
@@ -257,6 +278,25 @@ test("saved metadata rejects extra fields, malformed anchors and a different gen
     },
     { ...metadata, routes: [{ ...metadata.routes[0], port: 3001 }] },
     { ...metadata, routes: [] },
+    {
+      ...metadata,
+      routes: [{ ...metadata.routes[0], origins: ["http://fixture.dev.test"] }],
+    },
+    { ...metadata, resolution: null },
+    {
+      ...metadata,
+      resolution: {
+        ...metadata.resolution,
+        open_origin: "https://foreign.test",
+      },
+    },
+    {
+      ...metadata,
+      resolution: {
+        ...metadata.resolution,
+        routes: { app: { ...metadata.resolution?.routes.app, port: 3001 } },
+      },
+    },
     { ...metadata, binding: { ...BINDING, proxyIp: "999.1.1.1" } },
   ]) {
     expect(() =>

@@ -74,6 +74,8 @@ function workload() {
 function active(hosts = [HOST], dials = ["172.29.0.3:3000"]) {
   return {
     srv0: {
+      listen: [":443"],
+      tls_connection_policies: [{}],
       routes: [
         {
           match: [{ host: hosts }],
@@ -97,6 +99,7 @@ function options() {
     routes: [
       {
         hostnames: [HOST],
+        origins: [`https://${HOST}`],
         service: "web",
         port: 3000,
         protocol: "http" as const,

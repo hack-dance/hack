@@ -317,8 +317,54 @@ export const nativeConfigComposeScenario: Scenario = {
       });
     }
     const projectPath = join(fixture.hackDir, "hack.project.json");
-    const projectText = `${JSON.stringify(authored({ name: fixture.name, bunImage, postgresImage }), null, 2)}\n`;
-    await Bun.write(projectPath, projectText);
+    const baseProject = authored({
+      name: fixture.name,
+      bunImage,
+      postgresImage,
+    });
+    const app = baseProject.services?.app;
+    const db = baseProject.services?.db;
+    if (!(app && db)) {
+      throw new Error("Authored transition fixture services are missing");
+    }
+    const renamed: Project = {
+      ...baseProject,
+      services: {
+        db,
+        "renamed-app": {
+          ...app,
+          environment: {
+            ...app.environment,
+            APP_ORIGIN: {
+              endpoint: {
+                kind: "service",
+                name: "renamed-app",
+                port: 3000,
+                protocol: "http",
+              },
+            },
+          },
+        },
+      },
+    };
+    const projectText = `${JSON.stringify(baseProject, null, 2)}\n`;
+    const initialProject: Project = {
+      ...baseProject,
+      services: {
+        ...baseProject.services,
+        retired: {
+          image: bunImage,
+          pull_policy: "never",
+          init: true,
+          restart: { kind: "no" },
+          command: { exec: ["bun", "-e", "setInterval(() => {}, 60000)"] },
+        },
+      },
+    };
+    await Bun.write(
+      projectPath,
+      `${JSON.stringify(initialProject, null, 2)}\n`
+    );
     expect({
       that: !(
         (await Bun.file(join(fixture.hackDir, "hack.config.json")).exists()) ||
@@ -425,9 +471,9 @@ export const nativeConfigComposeScenario: Scenario = {
         .split(/\s+/)
         .filter(Boolean);
     };
-    const snapshot = async (): Promise<Snapshot> => {
+    const snapshot = async (appService = "app"): Promise<Snapshot> => {
       const containers: Record<string, string> = {};
-      for (const service of ["app", "db", "initializer"]) {
+      for (const service of [appService, "db", "initializer"]) {
         const ids = (
           await docker([
             "ps",
@@ -515,10 +561,18 @@ export const nativeConfigComposeScenario: Scenario = {
     const probe = async (
       operation: "exec" | "run",
       expected: string | null,
-      write = false
+      write = false,
+      appService = "app"
     ): Promise<string> => {
       const script = `const r = await fetch(process.env.APP_ORIGIN, { method: ${JSON.stringify(write ? "POST" : "GET")}, ${write ? `body: ${JSON.stringify(expected)},` : ""} signal: AbortSignal.timeout(5000) }); if (!r.ok) process.exit(17); process.stdout.write(await r.text());`;
-      const result = await cli([operation, "app", "--", "bun", "-e", script]);
+      const result = await cli([
+        operation,
+        appService,
+        "--",
+        "bun",
+        "-e",
+        script,
+      ]);
       const response = object(result.stdout);
       expect({
         that:
@@ -744,6 +798,142 @@ export const nativeConfigComposeScenario: Scenario = {
         intruder = null;
       }
     };
+    const createIntruder = async (): Promise<void> => {
+      intruder = await docker([
+        "run",
+        "--detach",
+        "--pull=never",
+        "--label",
+        `${CANARY_OWNER}=${canary}`,
+        "--label",
+        `${COMPOSE_PROJECT}=${identity().composeProject}`,
+        "--label",
+        `${COMPOSE_SERVICE}=foreign`,
+        "--label",
+        `${OWNER}=${identity().ownerToken === "0".repeat(32) ? "f".repeat(32) : "0".repeat(32)}`,
+        "--network",
+        canary,
+        bunImage,
+        "bun",
+        "-e",
+        "setInterval(() => {}, 60000)",
+      ]);
+      await canaryOwned("container", intruder, identity().composeProject);
+    };
+    const projectContainers = async (): Promise<string[]> =>
+      (
+        await docker([
+          "ps",
+          "-aq",
+          "--no-trunc",
+          "--filter",
+          `label=${COMPOSE_PROJECT}=${identity().composeProject}`,
+        ])
+      )
+        .split(/\s+/)
+        .filter(Boolean)
+        .sort();
+    const transition = async (opts: {
+      readonly project: Project;
+      readonly removedService: string;
+      readonly marker: string;
+      readonly retained: Snapshot;
+      readonly appService?: string;
+    }): Promise<void> => {
+      const before = await projectContainers();
+      for (const id of before) {
+        await owned("container", id);
+      }
+      const states = async (ids: readonly string[]): Promise<string[]> =>
+        await Promise.all(
+          ids.map((id) =>
+            docker([
+              "inspect",
+              id,
+              "--format",
+              "{{.State.Status}} {{.State.ExitCode}} {{json .Config.Labels}}",
+            ])
+          )
+        );
+      const beforeStates = await states(before);
+      await Bun.write(
+        projectPath,
+        `${JSON.stringify(opts.project, null, 2)}\n`
+      );
+      await createIntruder();
+      if (!intruder) {
+        throw new Error("Foreign transition control is missing");
+      }
+      const foreign = intruder;
+      const denied = await raw(["up", "--detach", "--json"]);
+      expectExit({
+        result: denied,
+        codes: [1],
+        message:
+          "Workload transition must refuse a foreign project container before removing any orphan",
+      });
+      const denial = object(denied.stdout);
+      const afterDenied = (await projectContainers()).filter(
+        (id) => id !== foreign
+      );
+      expect({
+        that:
+          denial.ok === false &&
+          isRecord(denial.error) &&
+          denial.error.code === "E_CONFIG_INVALID" &&
+          JSON.stringify(afterDenied) === JSON.stringify(before) &&
+          JSON.stringify(await states(afterDenied)) ===
+            JSON.stringify(beforeStates) &&
+          (await docker([
+            "inspect",
+            foreign,
+            "--format",
+            "{{.State.Running}}",
+          ])) === "true",
+        message:
+          "Refused transition must preserve every native container and the foreign control",
+      });
+      await removeIntruder();
+      await cli(["up", "--detach", "--json"]);
+      expect({
+        that:
+          (await docker([
+            "ps",
+            "-aq",
+            "--filter",
+            `label=${COMPOSE_PROJECT}=${identity().composeProject}`,
+            "--filter",
+            `label=${COMPOSE_SERVICE}=${opts.removedService}`,
+          ])) === "",
+        message:
+          "Successful whole-project transition must remove the old workload container",
+      });
+      const observed = data(await cli(["ps", "--json"]));
+      const appService = opts.appService ?? "app";
+      expect({
+        that:
+          observed.pending === false &&
+          Array.isArray(observed.services) &&
+          observed.services.length === 3 &&
+          observed.services.every(
+            (entry) =>
+              isRecord(entry) &&
+              entry.oneoff === false &&
+              [appService, "db", "initializer"].includes(String(entry.service))
+          ),
+        message:
+          "Saved ps must accept only the successful new service/job generation",
+      });
+      const after = await snapshot(appService);
+      expect({
+        that:
+          after.volume === opts.retained.volume &&
+          after.createdAt === opts.retained.createdAt,
+        message: "Workload transition must retain the exact database volume",
+      });
+      await probe("exec", opts.marker, false, appService);
+      await checkSql(opts.marker);
+    };
     const cleanCanary = async (): Promise<void> => {
       await removeIntruder();
       for (const kind of ["container", "network", "volume"] as const) {
@@ -914,7 +1104,7 @@ export const nativeConfigComposeScenario: Scenario = {
           that:
             afterNonzero.pending === false &&
             Array.isArray(afterNonzero.services) &&
-            afterNonzero.services.length === 3 &&
+            afterNonzero.services.length === 4 &&
             afterNonzero.services.every(
               (entry) => isRecord(entry) && entry.oneoff === false
             ),
@@ -930,33 +1120,17 @@ export const nativeConfigComposeScenario: Scenario = {
         expect({
           that:
             Array.isArray(ps.services) &&
-            ps.services.length === 3 &&
+            ps.services.length === 4 &&
             ps.pending === false &&
             ps.stopped === false,
           message:
-            "Saved ps must observe both services and the completed job with no pending effect",
+            "Saved ps must observe all services and the completed job with no pending effect",
         });
 
-        intruder = await docker([
-          "run",
-          "--detach",
-          "--pull=never",
-          "--label",
-          `${CANARY_OWNER}=${canary}`,
-          "--label",
-          `${COMPOSE_PROJECT}=${identity().composeProject}`,
-          "--label",
-          `${COMPOSE_SERVICE}=foreign`,
-          "--label",
-          `${OWNER}=${identity().ownerToken === "0".repeat(32) ? "f".repeat(32) : "0".repeat(32)}`,
-          "--network",
-          canary,
-          bunImage,
-          "bun",
-          "-e",
-          "setInterval(() => {}, 60000)",
-        ]);
-        await canaryOwned("container", intruder, identity().composeProject);
+        await createIntruder();
+        if (!intruder) {
+          throw new Error("Foreign stop control is missing");
+        }
         const denied = await raw(["down", "--json"]);
         expectExit({
           result: denied,
@@ -987,6 +1161,37 @@ export const nativeConfigComposeScenario: Scenario = {
         });
         await removeIntruder();
 
+        await transition({
+          project: baseProject,
+          removedService: "retired",
+          marker,
+          retained: first,
+        });
+        await transition({
+          project: renamed,
+          removedService: "app",
+          appService: "renamed-app",
+          marker,
+          retained: first,
+        });
+        await cli(["down", "--json"]);
+        await cli(["up", "--detach", "--json"]);
+        const renamedRestored = await snapshot("renamed-app");
+        expect({
+          that:
+            renamedRestored.volume === first.volume &&
+            renamedRestored.createdAt === first.createdAt,
+          message:
+            "Stop/start after a rename must retain the same persistent volume",
+        });
+        await probe("exec", marker, false, "renamed-app");
+        await checkSql(marker);
+        await Bun.write(projectPath, projectText);
+        await cli(["up", "--detach", "--json"]);
+        const beforeRestart = await snapshot();
+        const beforeRestartBoot = await probe("exec", marker);
+        stage("owned workload removal/rename and retained SQL data verified");
+
         const restart = data(await cli(["restart", "--json"]));
         expect({
           that: restart.status === "ready",
@@ -997,8 +1202,8 @@ export const nativeConfigComposeScenario: Scenario = {
           that:
             restarted.volume === first.volume &&
             restarted.createdAt === first.createdAt &&
-            restarted.containers.app !== first.containers.app &&
-            (await probe("exec", marker)) !== firstBoot,
+            restarted.containers.app !== beforeRestart.containers.app &&
+            (await probe("exec", marker)) !== beforeRestartBoot,
           message:
             "Restart must replace the app process while retaining the exact database volume and value",
         });

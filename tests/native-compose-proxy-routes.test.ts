@@ -8,6 +8,7 @@ const DIAL = "172.29.0.3:3000";
 const expected = [
   {
     hostnames: [HOST, ALIAS],
+    origins: [`https://${HOST}`, `https://${ALIAS}`],
     service: "web",
     port: 3000,
     protocol: "http" as const,
@@ -17,6 +18,8 @@ const expected = [
 function config(dials = [DIAL], protocol: "http" | "https" = "http") {
   return {
     srv0: {
+      listen: [":443"],
+      tls_connection_policies: [{}],
       routes: [
         {
           match: [{ host: [HOST, ALIAS] }],
@@ -95,13 +98,13 @@ test("all replica upstreams must match and duplicated or dynamic dials refuse", 
       absentHostnames: [],
     })
   ).toBe(true);
-  expect(() =>
+  expect(
     nativeComposeProxyRoutesMatch({
       servers: config([DIAL, DIAL]),
       expected,
       absentHostnames: [],
     })
-  ).toThrow(NativeComposeRoutingError);
+  ).toBe(false);
   expect(
     nativeComposeProxyRoutesMatch({
       servers: config(["{http.request.host}:3000"]),
@@ -244,4 +247,174 @@ test("arbitrary nested objects and private canaries never become public diagnost
       expect(JSON.stringify(error)).not.toContain(canary);
     }
   }
+});
+
+test("frontend listener and TLS must serve the selected origin, independently of upstream HTTP", () => {
+  for (const change of [
+    { listen: [":8443"] },
+    { listen: ["127.0.0.1:443"] },
+    { listen: [":80"] },
+    { tls_connection_policies: [] },
+    { tls_connection_policies: [{ match: { sni: ["foreign.test"] } }] },
+    { tls_connection_policies: [{ drop: true }, {}] },
+  ]) {
+    const servers = config();
+    Object.assign(servers.srv0, change);
+    expect(
+      nativeComposeProxyRoutesMatch({ servers, expected, absentHostnames: [] })
+    ).toBe(false);
+  }
+  const http = config();
+  Object.assign(http.srv0, { listen: [":80"], tls_connection_policies: [] });
+  expect(
+    nativeComposeProxyRoutesMatch({
+      servers: http,
+      expected: [
+        { ...expected[0]!, origins: [`http://${HOST}`, `http://${ALIAS}`] },
+      ],
+      absentHostnames: [],
+    })
+  ).toBe(true);
+});
+
+test("an earlier responder, middleware, conditional or terminal route cannot shadow the expected proxy", () => {
+  for (const earlier of [
+    {
+      match: [{ host: [HOST] }],
+      handle: [{ handler: "static_response", status_code: 200 }],
+      terminal: true,
+    },
+    { handle: [{ handler: "static_response", status_code: 404 }] },
+    {
+      match: [{ host: [HOST], path: ["/private/*"] }],
+      handle: [{ handler: "file_server" }],
+    },
+    { match: [{ host: [HOST] }], handle: [], terminal: true },
+  ]) {
+    const servers = config();
+    (servers.srv0.routes as unknown[]).unshift(earlier);
+    expect(
+      nativeComposeProxyRoutesMatch({ servers, expected, absentHostnames: [] })
+    ).toBe(false);
+  }
+  for (const handler of ["static_response", "rewrite", "headers"]) {
+    const servers = config();
+    (servers.srv0.routes[0]!.handle[0]!.routes[0]!.handle as unknown[]).unshift(
+      { handler }
+    );
+    expect(
+      nativeComposeProxyRoutesMatch({ servers, expected, absentHostnames: [] })
+    ).toBe(false);
+  }
+});
+
+test("ordinary HTTP redirect and later fallback do not mask an exact HTTPS proxy path", () => {
+  const servers = config();
+  (servers.srv0.routes as unknown[]).push({
+    handle: [{ handler: "static_response", status_code: 404 }],
+  });
+  Object.assign(servers, {
+    redirect: {
+      listen: [":80"],
+      routes: [
+        {
+          match: [{ host: [HOST, ALIAS] }],
+          handle: [{ handler: "static_response", status_code: 308 }],
+        },
+      ],
+    },
+  });
+  expect(
+    nativeComposeProxyRoutesMatch({ servers, expected, absentHostnames: [] })
+  ).toBe(true);
+  const changed = config();
+  Object.assign(changed.srv0.routes[0]!.handle[0]!.routes[0]!.handle[0]!, {
+    handle_response: [
+      { routes: [{ handle: [{ handler: "static_response" }] }] },
+    ],
+  });
+  expect(
+    nativeComposeProxyRoutesMatch({
+      servers: changed,
+      expected,
+      absentHostnames: [],
+    })
+  ).toBe(false);
+});
+
+test("group dispatch and subroute overrides cannot masquerade as an unconditional generated route", () => {
+  const grouped = config();
+  Object.assign(grouped.srv0.routes[0]!, { group: "foreign-choice" });
+  expect(
+    nativeComposeProxyRoutesMatch({
+      servers: grouped,
+      expected,
+      absentHostnames: [],
+    })
+  ).toBe(false);
+  const overrides = config();
+  Object.assign(overrides.srv0.routes[0]!.handle[0]!, {
+    errors: { routes: [{ handle: [{ handler: "static_response" }] }] },
+  });
+  expect(
+    nativeComposeProxyRoutesMatch({
+      servers: overrides,
+      expected,
+      absentHostnames: [],
+    })
+  ).toBe(false);
+});
+
+test("unsupported TLS policies cannot stand in for a clear HTTP listener", () => {
+  const servers = config();
+  Object.assign(servers.srv0, {
+    listen: [":80"],
+    tls_connection_policies: [{ match: { sni: ["foreign.test"] } }],
+  });
+  expect(
+    nativeComposeProxyRoutesMatch({
+      servers,
+      expected: [
+        { ...expected[0]!, origins: [`http://${HOST}`, `http://${ALIAS}`] },
+      ],
+      absentHostnames: [],
+    })
+  ).toBe(false);
+});
+
+test("unrelated custom proxies stay opaque without blocking another project's proof or API preflight", () => {
+  const servers = config();
+  const foreign = {
+    match: [{ host: ["foreign.test"] }],
+    handle: [
+      {
+        handler: "reverse_proxy",
+        upstreams: [{ dial: "foreign:3000" }],
+        headers: { request: { set: { "X-Fixture": ["private-canary"] } } },
+        health_checks: { active: { uri: "/health" } },
+      },
+    ],
+  };
+  (servers.srv0.routes as unknown[]).unshift(foreign);
+  expect(
+    nativeComposeProxyRoutesMatch({
+      servers,
+      expected: [],
+      absentHostnames: [],
+    })
+  ).toBe(true);
+  expect(
+    nativeComposeProxyRoutesMatch({ servers, expected, absentHostnames: [] })
+  ).toBe(true);
+  foreign.match[0]!.host = [HOST];
+  expect(
+    nativeComposeProxyRoutesMatch({ servers, expected, absentHostnames: [] })
+  ).toBe(false);
+  expect(
+    nativeComposeProxyRoutesMatch({
+      servers,
+      expected: [],
+      absentHostnames: [HOST],
+    })
+  ).toBe(false);
 });

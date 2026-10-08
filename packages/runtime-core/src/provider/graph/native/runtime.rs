@@ -92,16 +92,24 @@ fn ownership(receipt: &Receipt, resource: &Resource, value: &Value) -> Result<()
             .unwrap_or_default()
             .trim_start_matches('/')
             != resource.name
-        || value["Image"].as_str() != resource.image.as_deref()
+        || (resource.kind == Kind::Container
+            && value["Image"].as_str() != resource.image.as_deref())
+        || (resource.kind == Kind::Network
+            && (value["Driver"] != "bridge" || value["Internal"] != !resource.outbound))
     {
         return Err(refused());
     }
     // Labels are checked separately from user process configuration and never authorize adoption.
+    let observed_labels = if resource.kind == Kind::Container {
+        &value["Config"]["Labels"]
+    } else {
+        &value["Labels"]
+    };
     if !expected
         .as_object()
         .expect("native labels")
         .iter()
-        .all(|(key, expected)| value["Config"]["Labels"].get(key) == Some(expected))
+        .all(|(key, expected)| observed_labels.get(key) == Some(expected))
     {
         return Err(refused());
     }
@@ -116,8 +124,14 @@ fn inspected<B: Backend>(
     let value = match backend.request(
         Method::GET,
         &format!(
-            "/v1.53/containers/{}/json",
-            resource.id.as_deref().unwrap_or(&resource.name)
+            "/v1.53/{}/{}{}",
+            resource.kind.collection(),
+            resource.id.as_deref().unwrap_or(&resource.name),
+            if resource.kind == Kind::Container {
+                "/json"
+            } else {
+                ""
+            }
         ),
         None,
     ) {
@@ -130,6 +144,8 @@ fn inspected<B: Backend>(
 }
 
 fn verify_config(
+    receipt: &Receipt,
+    service: &str,
     expected: &Value,
     environment: &BTreeMap<String, String>,
     actual: &Value,
@@ -137,6 +153,9 @@ fn verify_config(
     image_environment::verify(environment, &actual["Config"]["Env"])?;
     for (key, value) in expected.as_object().ok_or_else(refused)? {
         if key == "Env" {
+            continue;
+        }
+        if key == "NetworkingConfig" {
             continue;
         }
         let observed = if key == "HostConfig" {
@@ -148,11 +167,95 @@ fn verify_config(
             return Err(refused());
         }
     }
-    if !actual["NetworkSettings"]["Networks"]
+    verify_attachment(receipt, service, actual)
+}
+fn verify_attachment(
+    receipt: &Receipt,
+    service: &str,
+    actual: &Value,
+) -> Result<(), CandidateError> {
+    let network = receipt
+        .resources
+        .get("network:default")
+        .ok_or_else(refused)?;
+    let attachments = actual["NetworkSettings"]["Networks"]
         .as_object()
-        .is_some_and(|networks| networks.keys().all(|key| key == "none"))
+        .ok_or_else(refused)?;
+    let attached = attachments.get(&network.name).ok_or_else(refused)?;
+    let observed_id = attached["NetworkID"].as_str();
+    if attachments.len() != 1
+        || network.id.is_none()
+        || (observed_id != network.id.as_deref()
+            && !(actual["State"]["Running"] != true && observed_id == Some("")))
+        || !attached["Aliases"]
+            .as_array()
+            .is_some_and(|aliases| aliases.iter().any(|alias| alias == service))
     {
         return Err(refused());
+    }
+    Ok(())
+}
+
+// A network receipt grants no authority over an unknown endpoint. Recheck all
+// members before container effects and require a running container's exact endpoint.
+fn project_network<B: Backend>(
+    backend: &B,
+    receipt: &Receipt,
+    container: Option<&Value>,
+) -> Result<Value, CandidateError> {
+    let resource = receipt
+        .resources
+        .get("network:default")
+        .ok_or_else(refused)?;
+    if resource.id.is_none() || !["created", "remove-intent"].contains(&resource.phase.as_str()) {
+        return Err(refused());
+    }
+    let network = inspected(backend, receipt, resource)?.ok_or_else(refused)?;
+    network_members(receipt, &network, container)?;
+    Ok(network)
+}
+fn network_members(
+    receipt: &Receipt,
+    network: &Value,
+    container: Option<&Value>,
+) -> Result<(), CandidateError> {
+    let resource = receipt
+        .resources
+        .get("network:default")
+        .ok_or_else(refused)?;
+    let members = network["Containers"].as_object().ok_or_else(refused)?;
+    for (id, member) in members {
+        let owned = receipt
+            .resources
+            .values()
+            .find(|r| r.kind == Kind::Container && r.id.as_deref() == Some(id.as_str()))
+            .ok_or_else(refused)?;
+        if member["Name"].as_str() != Some(owned.name.as_str()) {
+            return Err(refused());
+        }
+    }
+    if let Some(container) = container.filter(|value| value["State"]["Running"] == true) {
+        let id = container["Id"].as_str().ok_or_else(refused)?;
+        let attachment = &container["NetworkSettings"]["Networks"][&resource.name];
+        let endpoint = attachment["EndpointID"]
+            .as_str()
+            .filter(|id| hex(id, 64))
+            .ok_or_else(refused)?;
+        let ip = attachment["IPAddress"].as_str().ok_or_else(refused)?;
+        let address = ip.parse::<std::net::Ipv4Addr>().map_err(|_| refused())?;
+        let member = members.get(id).ok_or_else(refused)?;
+        if address.is_unspecified()
+            || address.is_loopback()
+            || address.is_multicast()
+            || member["EndpointID"].as_str() != Some(endpoint)
+            || member["IPv4Address"]
+                .as_str()
+                .and_then(|value| value.split_once('/'))
+                .map(|(ip, _)| ip)
+                != Some(ip)
+        {
+            return Err(refused());
+        }
     }
     Ok(())
 }
@@ -179,6 +282,41 @@ impl<B: Backend> Session<'_, B> {
             .phase = phase.into();
         self.save()
     }
+    fn prepare_network(&mut self) -> Result<(), CandidateError> {
+        self.check_cancelled()?;
+        let key = "network:default";
+        let resource = self.receipt.resources.get(key).ok_or_else(refused)?.clone();
+        if resource.phase != "reserved"
+            || resource.id.is_some()
+            || inspected(&self.backend, &self.receipt, &resource)?.is_some()
+        {
+            return Err(refused());
+        }
+        self.receipt
+            .resources
+            .get_mut(key)
+            .ok_or_else(refused)?
+            .phase = "create-intent".into();
+        self.save()?;
+        self.check_cancelled()?;
+        let created = self.backend.request(Method::POST, "/v1.53/networks/create", Some(&json!({"Name":resource.name,"Driver":"bridge","Internal":!resource.outbound,"Labels":labels(&self.receipt.owner, &self.receipt.review, &resource)})))?;
+        let id = created["Id"]
+            .as_str()
+            .filter(|id| hex(id, 64))
+            .ok_or_else(refused)?
+            .to_owned();
+        let network = self.receipt.resources.get_mut(key).ok_or_else(refused)?;
+        network.id = Some(id);
+        network.phase = "created".into();
+        self.save()?;
+        if !project_network(&self.backend, &self.receipt, None)?["Containers"]
+            .as_object()
+            .is_some_and(|members| members.is_empty())
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
 }
 impl<B: Backend> Driver for Session<'_, B> {
     fn check_cancelled(&self) -> Result<(), CandidateError> {
@@ -187,6 +325,11 @@ impl<B: Backend> Driver for Session<'_, B> {
     fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
         match event {
             Event::StartIntent { service } => {
+                if self.receipt.resources["network:default"].phase == "reserved" {
+                    self.prepare_network()?;
+                } else {
+                    project_network(&self.backend, &self.receipt, None)?;
+                }
                 if self
                     .receipt
                     .resources
@@ -215,6 +358,7 @@ impl<B: Backend> Driver for Session<'_, B> {
     }
     fn start(&mut self, service: &str) -> Result<(), CandidateError> {
         self.check_cancelled()?;
+        project_network(&self.backend, &self.receipt, None)?;
         let key = format!("container:{service}");
         let resource = self.receipt.resources[&key].clone();
         if resource.phase != "create-intent"
@@ -248,6 +392,8 @@ impl<B: Backend> Driver for Session<'_, B> {
         let value = inspected(&self.backend, &self.receipt, &self.receipt.resources[&key])?
             .ok_or_else(refused)?;
         verify_config(
+            &self.receipt,
+            service,
             &self.configs[service],
             &self.expected_environment[service],
             &value,
@@ -255,6 +401,7 @@ impl<B: Backend> Driver for Session<'_, B> {
         self.reserve(service, "start-intent")?;
         self.check_cancelled()?;
         self.backend.verify_private(service)?;
+        project_network(&self.backend, &self.receipt, None)?;
         self.backend
             .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
         Ok(())
@@ -265,10 +412,13 @@ impl<B: Backend> Driver for Session<'_, B> {
         let resource = &self.receipt.resources[&format!("container:{service}")];
         let value = inspected(&self.backend, &self.receipt, resource)?.ok_or_else(refused)?;
         verify_config(
+            &self.receipt,
+            service,
             &self.configs[service],
             &self.expected_environment[service],
             &value,
         )?;
+        project_network(&self.backend, &self.receipt, Some(&value))?;
         observation(&value)
     }
 }
@@ -290,6 +440,7 @@ pub fn run(
     }
     selected.assert_fresh(candidate)?;
     let mut config = configuration(&input, engine.guest().incarnation())?;
+    check_network_intent(&engine, &config.resources)?;
     let private = input.private_services();
     // Stop observations require a whole-second bounded timeout even when authored intent omits it.
     for value in config.configs.values_mut() {
@@ -339,11 +490,13 @@ pub fn run(
             expected_environment: expected,
             environments,
         };
-        let result = execution::run(
-            &graph,
-            &mut session,
-            deadline.saturating_duration_since(Instant::now()),
-        );
+        let result = session.prepare_network().and_then(|()| {
+            execution::run(
+                &graph,
+                &mut session,
+                deadline.saturating_duration_since(Instant::now()),
+            )
+        });
         if let Err(error) = result {
             session.receipt.phase = Phase::FailedRetained;
             session.save()?;
@@ -388,13 +541,26 @@ pub struct Snapshot {
 }
 fn snapshot<B: Backend>(backend: &B, receipt: Receipt) -> Result<Snapshot, CandidateError> {
     let mut observations = BTreeMap::new();
-    for resource in receipt.resources.values() {
+    if receipt.phase == Phase::Removed {
+        if inspected(backend, &receipt, &receipt.resources["network:default"])?.is_some() {
+            return Err(refused());
+        }
+    } else {
+        project_network(backend, &receipt, None)?;
+    }
+    for resource in receipt
+        .resources
+        .values()
+        .filter(|r| r.kind == Kind::Container)
+    {
+        let observed = inspected(backend, &receipt, resource)?;
+        if let Some(value) = &observed {
+            verify_attachment(&receipt, &resource.key, value)?;
+            project_network(backend, &receipt, Some(value))?;
+        }
         observations.insert(
             resource.key.clone(),
-            inspected(backend, &receipt, resource)?
-                .as_ref()
-                .map(observation)
-                .transpose()?,
+            observed.as_ref().map(observation).transpose()?,
         );
     }
     Ok(Snapshot {
@@ -427,11 +593,31 @@ fn cleanup_using<B: Backend>(
     root: &Path,
 ) -> Result<(), CandidateError> {
     let mut prepared = BTreeMap::new();
+    let network = receipt
+        .resources
+        .get("network:default")
+        .ok_or_else(refused)?
+        .clone();
+    let network_present = inspected(backend, receipt, &network)?.is_some();
+    if network_present {
+        if network.id.is_none() {
+            return Err(refused());
+        }
+        project_network(backend, receipt, None)?;
+    }
     // All ownership and stop-state preflights complete before the first stop effect.
-    for (key, resource) in &receipt.resources {
+    for (key, resource) in receipt
+        .resources
+        .iter()
+        .filter(|(_, r)| r.kind == Kind::Container)
+    {
         if let Some(value) = inspected(backend, receipt, resource)? {
             if resource.id.is_none() {
                 return Err(refused());
+            }
+            if network_present {
+                verify_attachment(receipt, &resource.key, &value)?;
+                project_network(backend, receipt, Some(&value))?;
             }
             prepared.insert(
                 key.clone(),
@@ -479,8 +665,41 @@ fn cleanup_using<B: Backend>(
         journal::save(root, receipt)?;
     }
     for resource in receipt.resources.values_mut() {
-        resource.phase = "removed".into();
+        if resource.kind == Kind::Container {
+            resource.phase = "removed".into();
+        }
     }
+    if inspected(backend, receipt, &network)?.is_some() {
+        let actual = project_network(backend, receipt, None)?;
+        if !actual["Containers"]
+            .as_object()
+            .is_some_and(|members| members.is_empty())
+        {
+            return Err(refused());
+        }
+        receipt
+            .resources
+            .get_mut("network:default")
+            .ok_or_else(refused)?
+            .phase = "remove-intent".into();
+        journal::save(root, receipt)?;
+        backend.request(
+            Method::DELETE,
+            &format!(
+                "/v1.53/networks/{}",
+                network.id.as_deref().ok_or_else(refused)?
+            ),
+            None,
+        )?;
+        if inspected(backend, receipt, &network)?.is_some() {
+            return Err(refused());
+        }
+    }
+    receipt
+        .resources
+        .get_mut("network:default")
+        .ok_or_else(refused)?
+        .phase = "removed".into();
     receipt.phase = Phase::Removed;
     journal::save(root, receipt)
 }
@@ -523,8 +742,17 @@ fn reservations_using(
         if receipt.phase != Phase::ReadyObserved {
             return Err(refused());
         }
-        for resource in receipt.resources.values() {
+        let network =
+            inspect(&receipt, &receipt.resources["network:default"])?.ok_or_else(refused)?;
+        network_members(&receipt, &network, None)?;
+        for resource in receipt
+            .resources
+            .values()
+            .filter(|r| r.kind == Kind::Container)
+        {
             let value = inspect(&receipt, resource)?.ok_or_else(refused)?;
+            verify_attachment(&receipt, &resource.key, &value)?;
+            network_members(&receipt, &network, Some(&value))?;
             add(&value)?;
         }
     }

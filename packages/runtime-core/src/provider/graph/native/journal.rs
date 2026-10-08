@@ -97,16 +97,44 @@ impl Receipt {
             || !hex(owner, 32)
             || self.owner != owner
             || !crate::provider::environment_recovery::uuid(&self.boot)
-            || self.resources.len() > MAX_SERVICES
-            || self.readiness.len() != self.resources.len()
-            || self.terminal.len() > self.resources.len()
+            || self.readiness.len() > MAX_SERVICES
+            || self.readiness.len() + 1 != self.resources.len()
+            || self.terminal.len() > self.readiness.len()
             || self.failure.as_ref().is_some_and(|f| {
                 !self.readiness.contains_key(&f.service) || !f.observation.failed()
             })
         {
             return Err(refused());
         }
+        let network = self.resources.get("network:default").ok_or_else(refused)?;
+        if network.kind != Kind::Network
+            || network.key != "default"
+            || network.name != format!("hkn-{run}-network-0")
+            || network.image.is_some()
+            || network.routing.is_some()
+            || network.networks.is_some()
+            || !network.outbound
+            || network.cache.is_some()
+            || network.cache_provenance.is_some()
+            || network.id.as_ref().is_some_and(|id| !hex(id, 64))
+            || ![
+                "reserved",
+                "create-intent",
+                "created",
+                "uncertain",
+                "remove-intent",
+                "removed",
+            ]
+            .contains(&network.phase.as_str())
+            || (network.phase == "created" && network.id.is_none())
+            || (network.phase == "reserved" && network.id.is_some())
+        {
+            return Err(refused());
+        }
         let mut ids = BTreeSet::new();
+        if let Some(id) = &network.id {
+            ids.insert(id);
+        }
         for (index, (name, _)) in self.readiness.iter().enumerate() {
             let key = format!("container:{name}");
             let resource = self.resources.get(&key).ok_or_else(refused)?;
@@ -118,7 +146,7 @@ impl Receipt {
                     .as_deref()
                     .is_none_or(|image| !image_id(image))
                 || resource.routing.is_some()
-                || resource.networks.as_ref().is_none_or(|n| !n.is_empty())
+                || resource.networks.as_ref() != Some(&vec!["default".to_owned()])
                 || resource.outbound
                 || resource.cache.is_some()
                 || resource.cache_provenance.is_some()
@@ -164,10 +192,15 @@ impl Receipt {
         )
         .map_err(|_| refused())?;
         if self.phase == Phase::ReadyObserved
-            && self
-                .resources
-                .values()
-                .any(|r| r.phase != "started" || r.id.is_none())
+            && self.resources.values().any(|r| {
+                r.phase
+                    != if r.kind == Kind::Network {
+                        "created"
+                    } else {
+                        "started"
+                    }
+                    || r.id.is_none()
+            })
         {
             return Err(refused());
         }
@@ -176,7 +209,10 @@ impl Receipt {
         }
         for (key, terminal) in &self.terminal {
             let resource = self.resources.get(key).ok_or_else(refused)?;
-            if resource.id.as_deref() != Some(terminal.id.as_str()) || !hex(&terminal.id, 64) {
+            if resource.kind != Kind::Container
+                || resource.id.as_deref() != Some(terminal.id.as_str())
+                || !hex(&terminal.id, 64)
+            {
                 return Err(refused());
             }
         }

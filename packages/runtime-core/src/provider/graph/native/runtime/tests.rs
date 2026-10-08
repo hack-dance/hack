@@ -115,10 +115,13 @@ fn basic() -> Value {
 #[derive(Default)]
 struct FakeState {
     containers: BTreeMap<String, Value>,
+    networks: BTreeMap<String, Value>,
     effects: Vec<String>,
     fail_create: bool,
     fail_start: bool,
     fail_delete: bool,
+    fail_network_create: bool,
+    fail_network_after_apply: bool,
     staged: Vec<String>,
 }
 struct Fake {
@@ -139,6 +142,56 @@ impl Backend for Fake {
         body: Option<&Value>,
     ) -> Result<Value, CandidateError> {
         let mut state = self.state.borrow_mut();
+        if method == Method::GET && path.starts_with("/v1.53/networks/") {
+            let selected = path.strip_prefix("/v1.53/networks/").unwrap();
+            return state
+                .networks
+                .values()
+                .find(|value| value["Id"] == selected || value["Name"] == selected)
+                .cloned()
+                .ok_or_else(|| error("engine_not_found", "absent"));
+        }
+        if method == Method::POST && path == "/v1.53/networks/create" {
+            let receipt = self.receipt();
+            let resource = &receipt.resources["network:default"];
+            assert_eq!(resource.phase, "create-intent");
+            assert!(resource.id.is_none());
+            assert_eq!(receipt.phase, Phase::Preparing);
+            state.effects.push("create:network".into());
+            if state.fail_network_create {
+                return Err(error("fake_network_create_uncertain", "once"));
+            }
+            let body = body.unwrap();
+            assert_eq!(body["Internal"], false);
+            assert_eq!(body["Driver"], "bridge");
+            let id = "e".repeat(64);
+            let mut network = body.clone();
+            network["Id"] = json!(id);
+            network["Containers"] = json!({});
+            state.networks.insert(resource.name.clone(), network);
+            if state.fail_network_after_apply {
+                return Err(error("fake_network_create_uncertain", "applied once"));
+            }
+            return Ok(json!({"Id":id}));
+        }
+        if method == Method::DELETE && path.starts_with("/v1.53/networks/") {
+            let id = path.strip_prefix("/v1.53/networks/").unwrap();
+            let receipt = self.receipt();
+            assert_eq!(receipt.phase, Phase::RemovalIntent);
+            let resource = &receipt.resources["network:default"];
+            assert_eq!(resource.phase, "remove-intent");
+            assert_eq!(resource.id.as_deref(), Some(id));
+            assert!(state.containers.is_empty());
+            assert!(
+                state.networks[&resource.name]["Containers"]
+                    .as_object()
+                    .unwrap()
+                    .is_empty()
+            );
+            state.effects.push("delete:network".into());
+            state.networks.remove(&resource.name);
+            return Ok(Value::Null);
+        }
         if method == Method::GET {
             let name = path
                 .strip_prefix("/v1.53/containers/")
@@ -175,7 +228,12 @@ impl Backend for Fake {
             let id = format!("{:064x}", state.containers.len() + 1);
             let mut process = config.clone();
             process.as_object_mut().unwrap().remove("HostConfig");
-            let value = json!({"Id":id,"Name":format!("/{name}"),"Image":config["Image"],"Config":process,"HostConfig":config["HostConfig"],"NetworkSettings":{"Networks":{}},"State":{"Running":false,"Status":"created","Pid":0,"ExitCode":0,"OOMKilled":false,"Dead":false,"Paused":false,"Restarting":false}});
+            let network = &receipt.resources["network:default"];
+            assert_eq!(network.phase, "created");
+            assert_eq!(config["HostConfig"]["NetworkMode"], network.name);
+            let aliases = &config["NetworkingConfig"]["EndpointsConfig"][&network.name]["Aliases"];
+            assert_eq!(aliases, &json!([resource.key]));
+            let value = json!({"Id":id,"Name":format!("/{name}"),"Image":config["Image"],"Config":process,"HostConfig":config["HostConfig"],"NetworkSettings":{"Networks":{network.name.clone():{"NetworkID":"","Aliases":aliases}}},"State":{"Running":false,"Status":"created","Pid":0,"ExitCode":0,"OOMKilled":false,"Dead":false,"Paused":false,"Restarting":false}});
             state.containers.insert(name.into(), value);
             return Ok(json!({"Id":id}));
         }
@@ -201,6 +259,13 @@ impl Backend for Fake {
             } else {
                 json!({"Running":true,"Status":"running","Pid":1,"ExitCode":0,"OOMKilled":false,"Dead":false,"Paused":false,"Restarting":false,"Health":{"Status":"healthy"}})
             };
+            let network = &receipt.resources["network:default"];
+            let endpoint = "f".repeat(64);
+            let ip = "172.20.0.2";
+            value["NetworkSettings"]["Networks"][&network.name]["NetworkID"] = json!(network.id);
+            value["NetworkSettings"]["Networks"][&network.name]["EndpointID"] = json!(endpoint);
+            value["NetworkSettings"]["Networks"][&network.name]["IPAddress"] = json!(ip);
+            state.networks.get_mut(&network.name).unwrap()["Containers"][id] = json!({"Name":resource.name,"EndpointID":endpoint,"IPv4Address":format!("{ip}/16")});
             return Ok(Value::Null);
         }
         assert_eq!(method, Method::DELETE);
@@ -223,6 +288,9 @@ impl Backend for Fake {
             return Err(error("fake_delete_uncertain", "once"));
         }
         state.containers.remove(&resource.name);
+        for network in state.networks.values_mut() {
+            network["Containers"].as_object_mut().unwrap().remove(id);
+        }
         Ok(Value::Null)
     }
     fn stage(
@@ -274,7 +342,13 @@ fn real_compiler_job_dependency_and_readiness_drive_durable_native_effects_and_c
     assert_eq!(session.receipt.phase, Phase::ReadyObserved);
     assert_eq!(
         session.backend.state.borrow().effects,
-        vec!["create:z.seed", "start:z.seed", "create:web", "start:web"]
+        vec![
+            "create:network",
+            "create:z.seed",
+            "start:z.seed",
+            "create:web",
+            "start:web"
+        ]
     );
     assert_eq!(
         session.configs["web"]["Cmd"],
@@ -288,6 +362,11 @@ fn real_compiler_job_dependency_and_readiness_drive_durable_native_effects_and_c
     cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
     assert_eq!(session.receipt.phase, Phase::Removed);
     assert!(session.backend.state.borrow().containers.is_empty());
+    assert!(session.backend.state.borrow().networks.is_empty());
+    assert_eq!(
+        session.backend.state.borrow().effects.last().unwrap(),
+        "delete:network"
+    );
     assert_eq!(session.receipt.terminal.len(), 2);
     assert!(journal::reserve(&fixture.candidate, &session.receipt).is_err());
 }
@@ -310,6 +389,120 @@ fn create_and_start_uncertainty_are_retained_once_without_replay_or_adoption() {
         let count = session.backend.state.borrow().effects.len();
         assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
         assert_eq!(session.backend.state.borrow().effects.len(), count);
+    }
+}
+
+#[test]
+fn project_network_create_uncertainty_is_durable_and_never_replayed() {
+    for applied in [false, true] {
+        let fixture = Fixture::new(basic());
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        session.backend.state.borrow_mut().fail_network_create = !applied;
+        session.backend.state.borrow_mut().fail_network_after_apply = applied;
+        assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
+        let (retained, _) = journal::load(&fixture.candidate, RUN, OWNER, BOOT).unwrap();
+        assert_eq!(retained.resources["network:default"].phase, "create-intent");
+        assert!(retained.resources["network:default"].id.is_none());
+        assert_eq!(retained.resources["container:web"].phase, "reserved");
+        assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
+        assert_eq!(
+            session.backend.state.borrow().effects,
+            vec!["create:network"]
+        );
+        if applied {
+            assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
+            assert_eq!(
+                session.backend.state.borrow().effects,
+                vec!["create:network"]
+            );
+        }
+    }
+}
+
+#[test]
+fn foreign_or_changed_project_networks_refuse_cleanup_before_any_stop_or_delete() {
+    for field in ["owner", "driver", "internal", "member"] {
+        let fixture = Fixture::new(basic());
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        let name = session.receipt.resources["network:default"].name.clone();
+        {
+            let mut state = session.backend.state.borrow_mut();
+            let network = state.networks.get_mut(&name).unwrap();
+            match field {
+                "owner" => network["Labels"]["io.hack-local.owner"] = json!("d".repeat(32)),
+                "driver" => network["Driver"] = json!("host"),
+                "internal" => network["Internal"] = json!(true),
+                "member" => network["Containers"]["a".repeat(64)] = json!({"Name":"foreign"}),
+                _ => unreachable!(),
+            }
+        }
+        let before = session.backend.state.borrow().effects.len();
+        assert!(
+            cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err(),
+            "{field}"
+        );
+        assert_eq!(session.backend.state.borrow().effects.len(), before);
+        assert!(
+            snapshot(&session.backend, session.receipt.clone()).is_err(),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn changed_network_ids_aliases_extra_attachments_and_endpoint_addresses_refuse_observation_and_admission()
+ {
+    for field in ["id", "alias", "extra", "endpoint", "address"] {
+        let fixture = Fixture::new(basic());
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        let name = session.receipt.resources["container:web"].name.clone();
+        let network = session.receipt.resources["network:default"].name.clone();
+        {
+            let mut state = session.backend.state.borrow_mut();
+            let container = state.containers.get_mut(&name).unwrap();
+            let attached = &mut container["NetworkSettings"]["Networks"];
+            match field {
+                "id" => attached[&network]["NetworkID"] = json!("a".repeat(64)),
+                "alias" => attached[&network]["Aliases"] = json!(["foreign"]),
+                "extra" => attached["foreign"] = json!({}),
+                "endpoint" => attached[&network]["EndpointID"] = json!("a".repeat(64)),
+                "address" => attached[&network]["IPAddress"] = json!("172.20.0.99"),
+                _ => unreachable!(),
+            }
+        }
+        assert!(session.observe("web").is_err(), "{field}");
+        assert!(
+            snapshot(&session.backend, session.receipt.clone()).is_err(),
+            "{field}"
+        );
+        let mut counted = 0;
+        assert!(
+            reservations_using(
+                &fixture.candidate,
+                OWNER,
+                BOOT,
+                true,
+                |receipt, resource| inspected(&session.backend, receipt, resource),
+                |_| {
+                    counted += 1;
+                    Ok(())
+                }
+            )
+            .is_err(),
+            "{field}"
+        );
+        assert_eq!(counted, 0);
+        let before = session.backend.state.borrow().effects.len();
+        assert!(
+            cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err(),
+            "{field}"
+        );
+        assert_eq!(session.backend.state.borrow().effects.len(), before);
     }
 }
 

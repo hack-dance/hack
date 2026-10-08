@@ -114,7 +114,7 @@ Usage:
 Project commands and graph run/serve/serve-restore/source-compatibility/restart/restore accept --branch <canonical-lowercase-dns-label> to select an isolated namespace; omit it for the legacy project namespace. Carry the same selector through review, source publication, and graph admission.
 Normalized public input for project plan/capture/publish-source/verify-source and graph run/serve/serve-restore: --normalized-file <path> --expect-original <sha256> --expect-namespace <sha256>. Sync/enroll/restart/restore do not accept it. Stopped normalized graphs use graph restore-selection --run-id RUN --json, then graph serve-restore with the same run/plan, --expect-generation, and fresh serve dependency/environment/route selections.
 Build with: ./scripts/build-hack-local.sh
-Native graph commands require native-config-plan and are a bounded image-only isolated-network prerequisite; ordinary project DNS/outbound and frontend startup are not qualified.
+Native graph commands require native-config-plan and are a bounded image-only prerequisite with an owned outbound project network; actual network behavior and frontend startup are not qualified.
 Runtime commands affect only the candidate pool. Graph commands support a bounded pinned-image subset; full project up/exec/down remains unimplemented.
 The installed hack and its state are never used as a fallback.";
 

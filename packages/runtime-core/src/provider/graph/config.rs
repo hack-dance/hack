@@ -532,7 +532,7 @@ pub(super) fn prepare_delivery(
 
 /// Primary network preserves declaration order; every declared network receives
 /// the service DNS alias. An empty declaration is the already-validated none mode.
-fn network_config(
+pub(super) fn network_config(
     service: &str,
     networks: &[String],
     names: &BTreeMap<String, String>,

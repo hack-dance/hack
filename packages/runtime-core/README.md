@@ -58,7 +58,9 @@ recovery. These preparation artifacts carry no resource ownership or replay auth
 into public container configuration using the existing bounded container isolation.
 It preserves exact process/exec-readiness values and compiler job/dependency goals,
 requires immutable image IDs and the default source root, and adds distinct native
-input labels and resource names. Omitted image process/environment defaults remain
+input labels and resource names. One ordinary outbound project bridge supplies exact
+service/job DNS aliases, including dotted names, through the shared network lowerer.
+Omitted image process/environment defaults remain
 omitted; managed values remain in separate pending handles. Whole-second shutdown
 grace up to 30 seconds is represented exactly; fractional seconds refuse. This pure
 lowerer checks owner shape and deadline, never real guest ownership, image presence,
@@ -77,10 +79,14 @@ preserves the owning compiler's checkout-local semantics. This is read-only inpu
 selection and private preparation, with no durable enrollment or runtime ownership.
 
 `provider::graph::native::run` is an explicit library consumer for the bounded
-image-only subset. It retains the development guest mutation lease, verifies existing
-immutable images and shared graph/allocation capacity, and reserves a distinct v2
+image-only subset. It retains the development guest mutation lease, requires an
+admitted Internet or explicitly restricted outbound pool, verifies existing immutable
+images and shared graph/allocation capacity, and reserves a distinct v2
 `native-graph-runtime` journal in `run/native-graphs` before effects. Create/start
-intent is durable and never replayed or adopted. The same authored selection and
+intent is durable and never replayed or adopted. Network create intent precedes the
+first network effect; its immutable ID, labels, bridge driver and outbound policy
+are verified before container work. Containers bind the recorded network ID and exact
+service alias; running endpoints must match the owned network membership. The same authored selection and
 ingress deadline are checked before staging, creates, starts and observations.
 Omitted shutdown grace uses a bounded ten-second runtime default. Optional private
 delivery uses the existing static launcher and tmpfs through separate v2
@@ -88,8 +94,10 @@ delivery uses the existing static launcher and tmpfs through separate v2
 namespace, native review, run, workload and container without persisting values.
 
 Native `inspect` and `cleanup` require the original guest incarnation and boot,
-exact container labels, immutable IDs, names and images. Cleanup preflights every
-stop, retains terminal observations before deletes, and retires private payloads
+exact resource labels, immutable IDs, names and images. Foreign network members or
+changed network policy refuse before cleanup effects. Cleanup preflights every
+stop, retains terminal observations before deletes, removes the verified empty project
+network after containers, and retires private payloads
 only after the bound container is absent. Failed/uncertain attempts retain their
 reservations. Shared admission counts native and Compose attempts together; a build
 with native support accepts validated, fully removed same-owner history from an
@@ -102,9 +110,9 @@ The optional feature exposes this bounded consumer through a distinct public CLI
 `graph native plan --source-file FILE --json`, then
 `graph native run --source-file FILE --expect-review SHA --json`.
 `graph native inspect|cleanup --run-id RUN --json` use its v2 journal. These commands
-are explicit isolated-network prerequisites, not ordinary project startup: container
-networking is disabled. Normal native `hack up` must preserve project/service DNS
-and ordinary outbound access, which remain unimplemented by this consumer.
+are explicit image-only prerequisites, not ordinary project startup. Their project
+network does not publish ports or grant host-service access. Normal native `hack up`
+continues to require the full source/storage/routing/host and foreground-owner contract.
 
 The stable, absolute source file is a public v2 envelope with
 `kind: "native-graph-source"`, `project`, optional canonical `branch`, 32-hex `run`,
@@ -121,7 +129,7 @@ source files, arguments, stdout or journal records.
 
 The Bun project frontend does not select this consumer yet. Actual installed
 native execution, frontend ownership/cancellation, interrupted recovery and full
-network/source/storage/routing/host contracts remain separate qualification gates.
+network acceptance, source/storage/routing/host contracts remain separate qualification gates.
 
 Run its pure regressions with
 `cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --features native-config-plan project::native::tests`.

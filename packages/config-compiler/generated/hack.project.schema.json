@@ -626,6 +626,28 @@
         }
       ]
     },
+    "Network": {
+      "additionalProperties": false,
+      "properties": {
+        "internal": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "NetworkAttachment": {
+      "additionalProperties": false,
+      "properties": {
+        "aliases": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "OpenConfig": {
       "additionalProperties": false,
       "properties": {
@@ -1070,6 +1092,12 @@
           },
           "type": "array"
         },
+        "networks": {
+          "additionalProperties": {
+            "$ref": "#/$defs/NetworkAttachment"
+          },
+          "type": "object"
+        },
         "profiles": {
           "default": [],
           "items": {
@@ -1160,6 +1188,12 @@
     },
     "name": {
       "type": "string"
+    },
+    "networks": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Network"
+      },
+      "type": "object"
     },
     "open": {
       "$ref": "#/$defs/OpenConfig"

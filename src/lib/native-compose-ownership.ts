@@ -1,3 +1,4 @@
+import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
 import { findExecutableInPath } from "./shell.ts";
 
@@ -22,7 +23,7 @@ type Inventory = {
 const FORMATS = {
   container: {
     list: `{"id":{{json .ID}},"name":{{json .Names}},"project":{{json (.Label "${PROJECT_LABEL}")}}}`,
-    inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"version":{{json (index .Config.Labels "${PREFIX}.version")}},"instance":{{json (index .Config.Labels "${PREFIX}.instance")}},"owner":{{json (index .Config.Labels "${PREFIX}.owner")}},"generation":{{json (index .Config.Labels "${PREFIX}.generation")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"state":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}null{{end}}}`,
+    inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"version":{{json (index .Config.Labels "${PREFIX}.version")}},"instance":{{json (index .Config.Labels "${PREFIX}.instance")}},"owner":{{json (index .Config.Labels "${PREFIX}.owner")}},"generation":{{json (index .Config.Labels "${PREFIX}.generation")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"state":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}null{{end}},"networks":{{json .NetworkSettings.Networks}}}`,
   },
   volume: {
     // Docker volumes have a name, rather than an immutable engine object ID.
@@ -31,7 +32,7 @@ const FORMATS = {
   },
   network: {
     list: `{"id":{{json .ID}},"name":{{json .Name}},"project":{{json (.Label "${PROJECT_LABEL}")}}}`,
-    inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Labels "${PROJECT_LABEL}")}},"version":{{json (index .Labels "${PREFIX}.version")}},"instance":{{json (index .Labels "${PREFIX}.instance")}},"owner":{{json (index .Labels "${PREFIX}.owner")}}}`,
+    inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Labels "${PROJECT_LABEL}")}},"version":{{json (index .Labels "${PREFIX}.version")}},"instance":{{json (index .Labels "${PREFIX}.instance")}},"owner":{{json (index .Labels "${PREFIX}.owner")}},"driver":{{json .Driver}},"internal":{{json .Internal}},"containers":{{json .Containers}}}`,
   },
 } as const;
 
@@ -75,13 +76,64 @@ export type NativeComposeOwnershipOptions = {
     readonly name: string;
     readonly storage: string;
   }[];
+  /** Pre-topology version-one callers mean the owned outbound default bridge. */
   readonly expectedNetwork?: string;
+  readonly expectedNetworks?: readonly NativeComposeNetworkPolicy[];
+  readonly expectedWorkloadNetworks?: readonly NativeComposeWorkloadNetworks[];
+  /** Only saved down --recover may remove stopped/never-started owned containers with incomplete owned bridge endpoints. */
+  readonly recovery?: "down";
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
 };
 
+export type NativeComposeNetworkPolicy = {
+  readonly name: string;
+  readonly driver: "bridge";
+  readonly internal: boolean;
+};
+export type NativeComposeWorkloadNetworks = {
+  readonly generationId: string;
+  readonly service: string;
+  readonly networks: readonly {
+    readonly name: string;
+    readonly aliases: readonly string[];
+    /** Only the separately verified shared ingress is external. */
+    readonly externalId?: string;
+  }[];
+};
+
+function networkPolicies(
+  opts: NativeComposeOwnershipOptions
+): readonly NativeComposeNetworkPolicy[] {
+  return (
+    opts.expectedNetworks ??
+    (opts.expectedNetwork === undefined
+      ? []
+      : [{ name: opts.expectedNetwork, driver: "bridge", internal: false }])
+  );
+}
+
+function workloadNetworks(
+  opts: NativeComposeOwnershipOptions
+): readonly NativeComposeWorkloadNetworks[] {
+  return (
+    opts.expectedWorkloadNetworks ??
+    opts.generationIds.flatMap((generationId) =>
+      opts.expectedServices.map((service) => ({
+        generationId,
+        service,
+        networks:
+          opts.expectedNetwork === undefined
+            ? []
+            : [{ name: opts.expectedNetwork, aliases: [] }],
+      }))
+    )
+  );
+}
+
 type FailureCode =
   | "E_NATIVE_COMPOSE_OWNERSHIP"
+  | "E_NATIVE_COMPOSE_NETWORK_TRANSITION"
   | "E_NATIVE_COMPOSE_PROBE"
   | "E_NATIVE_COMPOSE_PROBE_TIMEOUT"
   | "E_NATIVE_COMPOSE_PROBE_CANCELLED"
@@ -94,6 +146,8 @@ export class NativeComposeOwnershipError extends Error {
       {
         E_NATIVE_COMPOSE_OWNERSHIP:
           "Native Compose resource ownership is missing, conflicting or changed; values omitted.",
+        E_NATIVE_COMPOSE_NETWORK_TRANSITION:
+          "Native Compose network topology changed. Run hack down for this instance before applying the change; values omitted.",
         E_NATIVE_COMPOSE_PROBE:
           "Native Compose ownership could not be inspected; values omitted.",
         E_NATIVE_COMPOSE_PROBE_TIMEOUT:
@@ -115,6 +169,37 @@ function requireValue(value: unknown): asserts value {
   if (!value) {
     refuse();
   }
+}
+
+/** Keep every active physical bridge and its policy until a verified down transition. */
+export function mergeNativeComposeNetworkPolicies(opts: {
+  readonly proposed: readonly NativeComposeNetworkPolicy[];
+  readonly retained: readonly (readonly NativeComposeNetworkPolicy[])[];
+  /** Down may inspect every saved name, never discard a conflicting saved policy. */
+  readonly retiring?: boolean;
+}): readonly NativeComposeNetworkPolicy[] {
+  const selected = new Map(
+    opts.proposed.map((network) => [network.name, network])
+  );
+  for (const policies of opts.retained) {
+    for (const previous of policies) {
+      const next = selected.get(previous.name);
+      if (!next && opts.retiring) {
+        selected.set(previous.name, previous);
+        continue;
+      }
+      if (
+        !(
+          next &&
+          next.driver === previous.driver &&
+          next.internal === previous.internal
+        )
+      ) {
+        return refuse("E_NATIVE_COMPOSE_NETWORK_TRANSITION");
+      }
+    }
+  }
+  return [...selected.values()].map((network) => ({ ...network }));
 }
 function hasKeys(
   value: Record<string, unknown>,
@@ -153,6 +238,51 @@ function validateOptions(opts: NativeComposeOwnershipOptions): void {
   requireValue(
     opts.expectedNetwork === undefined || NAME.test(opts.expectedNetwork)
   );
+  requireValue(
+    opts.expectedNetwork === undefined || opts.expectedNetworks === undefined
+  );
+  requireValue(
+    opts.expectedNetworks === undefined ||
+      opts.expectedWorkloadNetworks !== undefined
+  );
+  requireValue(opts.recovery === undefined || opts.recovery === "down");
+  const networks = new Set<string>();
+  for (const network of networkPolicies(opts)) {
+    requireValue(
+      NAME.test(network.name) &&
+        network.driver === "bridge" &&
+        typeof network.internal === "boolean" &&
+        !networks.has(network.name)
+    );
+    networks.add(network.name);
+  }
+  const workloads = new Set<string>();
+  for (const workload of workloadNetworks(opts)) {
+    const key = `${workload.generationId}\0${workload.service}`;
+    requireValue(
+      opts.generationIds.includes(workload.generationId) &&
+        opts.expectedServices.includes(workload.service) &&
+        !workloads.has(key)
+    );
+    workloads.add(key);
+    const names = new Set<string>();
+    for (const attachment of workload.networks) {
+      requireValue(
+        NAME.test(attachment.name) &&
+          !names.has(attachment.name) &&
+          attachment.aliases.every((alias) => SERVICE.test(alias)) &&
+          new Set(attachment.aliases).size === attachment.aliases.length
+      );
+      names.add(attachment.name);
+      requireValue(
+        attachment.externalId === undefined
+          ? networks.has(attachment.name)
+          : attachment.name === DEFAULT_INGRESS_NETWORK &&
+              ID.test(attachment.externalId) &&
+              attachment.aliases.length === 0
+      );
+    }
+  }
 }
 
 /**
@@ -164,10 +294,42 @@ function validateOptions(opts: NativeComposeOwnershipOptions): void {
  * effect boundary. No engine mutation, repair, admission or lifecycle is performed.
  */
 export async function assertNativeComposeOwned(
-  opts: NativeComposeOwnershipOptions
+  input: NativeComposeOwnershipOptions
 ): Promise<NativeComposeOwnershipObservation> {
   try {
-    validateOptions(opts);
+    validateOptions(input);
+    const opts: NativeComposeOwnershipOptions = {
+      ...input,
+      generationIds: [...input.generationIds],
+      expectedServices: [...input.expectedServices],
+      ...(input.expectedVolumes
+        ? {
+            expectedVolumes: input.expectedVolumes.map((volume) => ({
+              ...volume,
+            })),
+          }
+        : {}),
+      ...(input.expectedNetworks
+        ? {
+            expectedNetworks: input.expectedNetworks.map((network) => ({
+              ...network,
+            })),
+          }
+        : {}),
+      ...(input.expectedWorkloadNetworks
+        ? {
+            expectedWorkloadNetworks: input.expectedWorkloadNetworks.map(
+              (workload) => ({
+                ...workload,
+                networks: workload.networks.map((network) => ({
+                  ...network,
+                  aliases: [...network.aliases],
+                })),
+              })
+            ),
+          }
+        : {}),
+    };
     const probe = createNativeComposeProbe(opts);
     const expected = {
       container: new Set(
@@ -178,9 +340,7 @@ export async function assertNativeComposeOwned(
       volume: new Set(
         (opts.expectedVolumes ?? []).map((volume) => volume.name)
       ),
-      network: new Set(
-        opts.expectedNetwork === undefined ? [] : [opts.expectedNetwork]
-      ),
+      network: new Set(networkPolicies(opts).map((network) => network.name)),
     };
     const inventory = async (kind: Kind): Promise<Inventory[]> => {
       const output = await probe([
@@ -216,6 +376,8 @@ export async function assertNativeComposeOwned(
       containers: [],
       volumes: [],
       networks: [],
+      endpoints: new Map(),
+      members: new Map(),
     };
     const selected = new Map<Kind, Inventory[]>();
     for (const kind of ["container", "volume", "network"] as const) {
@@ -229,13 +391,41 @@ export async function assertNativeComposeOwned(
         observations,
       });
     }
+    validateTopology(opts, observations);
+    // Attachments can change without changing container or network object IDs.
+    // Recheck policy IDs, aliases and membership; this is not an IP/endpoint-incarnation fence.
+    const rechecked: MutableObservation = {
+      containers: [],
+      volumes: [],
+      networks: [],
+      endpoints: new Map(),
+      members: new Map(),
+    };
+    for (const kind of ["container", "network"] as const) {
+      await collectInspections({
+        kind,
+        resources: selected.get(kind) ?? [],
+        selection: opts,
+        probe,
+        observations: rechecked,
+      });
+    }
+    validateTopology(opts, rechecked);
+    requireValue(
+      JSON.stringify(topologySnapshot(observations)) ===
+        JSON.stringify(topologySnapshot(rechecked))
+    );
     for (const kind of ["container", "volume", "network"] as const) {
       requireValue(
         JSON.stringify(await inventory(kind)) ===
           JSON.stringify(selected.get(kind))
       );
     }
-    return observations;
+    return {
+      containers: rechecked.containers,
+      volumes: observations.volumes,
+      networks: rechecked.networks,
+    };
   } catch (error: unknown) {
     if (error instanceof NativeComposeOwnershipError) {
       throw error;
@@ -248,6 +438,8 @@ type MutableObservation = {
   containers: NativeComposeContainerObservation[];
   volumes: { name: string; storage: string }[];
   networks: { id: string; name: string }[];
+  endpoints: Map<string, Record<string, unknown>>;
+  members: Map<string, readonly string[]>;
 };
 async function collectInspections(input: {
   readonly kind: Kind;
@@ -288,6 +480,8 @@ async function collectInspections(input: {
       );
       if (kind === "container") {
         containers.push(containerObservation(row, opts));
+        requireValue(isRecord(row.networks));
+        observations.endpoints.set(resource.id, row.networks);
       } else if (kind === "volume") {
         requireValue(
           hasKeys(row, [
@@ -319,9 +513,23 @@ async function collectInspections(input: {
             "version",
             "instance",
             "owner",
+            "driver",
+            "internal",
+            "containers",
           ])
         );
-        requireValue(resource.name === opts.expectedNetwork);
+        const expected = networkPolicies(opts).find(
+          (network) => network.name === resource.name
+        );
+        requireValue(
+          expected !== undefined &&
+            row.driver === expected.driver &&
+            row.internal === expected.internal
+        );
+        requireValue(isRecord(row.containers));
+        const members = Object.keys(row.containers);
+        requireValue(members.every((id) => ID.test(id)));
+        observations.members.set(resource.name, members.sort());
         networks.push({ id: resource.id, name: resource.name });
       }
     }
@@ -346,6 +554,7 @@ function containerObservation(
       "state",
       "exitCode",
       "health",
+      "networks",
     ])
   );
   requireValue(
@@ -393,6 +602,163 @@ function containerObservation(
     exitCode: row.exitCode,
     health: row.health,
     oneoff: row.oneoff === "True" || row.oneoff === "true",
+  };
+}
+
+function endpointAliases(value: unknown): readonly string[] {
+  requireValue(
+    Array.isArray(value) &&
+      value.every((alias) => typeof alias === "string" && NAME.test(alias)) &&
+      new Set(value).size === value.length
+  );
+  return [...new Set(value as string[])].sort();
+}
+
+function validateEndpointIdentity(opts: {
+  readonly endpoint: Record<string, unknown>;
+  readonly id: string | undefined;
+  readonly expectedAliases: readonly string[];
+  readonly absentOwnedRecovery: boolean;
+  readonly createdOwnedRecovery: boolean;
+}): void {
+  const {
+    endpoint,
+    id,
+    expectedAliases,
+    absentOwnedRecovery,
+    createdOwnedRecovery,
+  } = opts;
+  if (createdOwnedRecovery) {
+    requireValue(
+      id !== undefined &&
+        (endpoint.NetworkID === undefined || endpoint.NetworkID === "")
+    );
+    if (
+      endpoint.Aliases === undefined ||
+      endpoint.Aliases === null ||
+      (Array.isArray(endpoint.Aliases) && endpoint.Aliases.length === 0)
+    ) {
+      return;
+    }
+  } else if (absentOwnedRecovery) {
+    requireValue(
+      endpoint.NetworkID === undefined ||
+        endpoint.NetworkID === "" ||
+        (typeof endpoint.NetworkID === "string" && ID.test(endpoint.NetworkID))
+    );
+    if (endpoint.Aliases === undefined || endpoint.Aliases === null) {
+      return;
+    }
+  } else {
+    requireValue(id !== undefined && endpoint.NetworkID === id);
+  }
+  requireValue(
+    JSON.stringify(endpointAliases(endpoint.Aliases)) ===
+      JSON.stringify(expectedAliases)
+  );
+}
+
+function validateTopology(
+  opts: NativeComposeOwnershipOptions,
+  observations: MutableObservation
+): void {
+  const policies = workloadNetworks(opts);
+  const owned = new Map(
+    observations.networks.map((network) => [network.name, network.id])
+  );
+  const containers = new Set(
+    observations.containers.map((container) => container.id)
+  );
+  for (const [name, members] of observations.members) {
+    requireValue(
+      members.every(
+        (id) =>
+          containers.has(id) &&
+          Object.hasOwn(observations.endpoints.get(id) ?? {}, name)
+      )
+    );
+  }
+  for (const container of observations.containers) {
+    const policy = policies.find(
+      (workload) =>
+        workload.generationId === container.generationId &&
+        workload.service === container.service
+    );
+    requireValue(policy !== undefined);
+    const endpoints = observations.endpoints.get(container.id);
+    requireValue(
+      endpoints !== undefined &&
+        hasKeys(
+          endpoints,
+          policy.networks.map((network) => network.name)
+        )
+    );
+    for (const attachment of policy.networks) {
+      const endpoint = endpoints[attachment.name];
+      requireValue(isRecord(endpoint));
+      const id = attachment.externalId ?? owned.get(attachment.name);
+      const expected = container.oneoff
+        ? [container.name]
+        : [
+            ...new Set([
+              container.name,
+              container.service,
+              ...attachment.aliases,
+            ]),
+          ].sort();
+      const absentOwnedRecovery =
+        opts.recovery === "down" &&
+        attachment.externalId === undefined &&
+        id === undefined &&
+        ["created", "exited", "dead", "removing"].includes(container.state);
+      validateEndpointIdentity({
+        endpoint,
+        id,
+        expectedAliases: expected,
+        absentOwnedRecovery,
+        createdOwnedRecovery:
+          opts.recovery === "down" &&
+          container.state === "created" &&
+          attachment.externalId === undefined &&
+          id !== undefined &&
+          (endpoint.NetworkID === undefined || endpoint.NetworkID === ""),
+      });
+      if (
+        attachment.externalId === undefined &&
+        (container.state === "running" ||
+          container.state === "paused" ||
+          container.state === "restarting")
+      ) {
+        requireValue(
+          observations.members.get(attachment.name)?.includes(container.id)
+        );
+      }
+    }
+  }
+}
+
+function topologySnapshot(observations: MutableObservation) {
+  return {
+    endpoints: [...observations.endpoints]
+      .map(([id, endpoints]) => [
+        id,
+        Object.entries(endpoints)
+          .map(([name, endpoint]) => {
+            requireValue(isRecord(endpoint));
+            return [
+              name,
+              endpoint.NetworkID,
+              endpoint.Aliases == null
+                ? null
+                : endpointAliases(endpoint.Aliases),
+            ];
+          })
+          .sort(([left], [right]) => String(left).localeCompare(String(right))),
+      ])
+      .sort(([left], [right]) => String(left).localeCompare(String(right))),
+    members: [...observations.members].sort(([left], [right]) =>
+      left.localeCompare(right)
+    ),
   };
 }
 

@@ -223,6 +223,17 @@ pub(crate) fn validate_project(
         if source_active && !target_active {
             return Err(at("inactive_endpoint_target", &usage.pointer));
         }
+        if matches!(&usage.reference, EndpointReference::Service { .. })
+            && let Some(source) = usage.workload.as_ref().and_then(|name| {
+                project
+                    .services
+                    .get(name)
+                    .or_else(|| project.jobs.get(name))
+            })
+            && !crate::network::share_network(source, service)
+        {
+            return Err(at("disconnected_endpoint_target", &usage.pointer));
+        }
     }
     Ok(())
 }

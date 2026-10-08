@@ -83,6 +83,11 @@ import {
   NativeComposeRenderError,
   renderNativeCompose,
 } from "./native-compose-renderer.ts";
+import {
+  mergeNativeComposeRetainedVolumes,
+  type NativeComposeRetainedVolume,
+  selectNativeComposeVolumePolicies,
+} from "./native-compose-retained-storage.ts";
 import { NativeComposeRouteClaimError } from "./native-compose-route-claims.ts";
 import {
   type NativeComposeRoutingOwner,
@@ -103,7 +108,6 @@ import {
   requireNativeComposeBackend,
   selectNativeComposeProject,
 } from "./native-compose-selection.ts";
-import { waitNativeComposeReady } from "./native-compose-wait-ready.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
 import { parseEnvConfigSelection } from "./project.ts";
@@ -192,6 +196,23 @@ function assertRoutedRunAvailable(
   }
 }
 
+function retainedStorageCapture() {
+  let storage: readonly NativeComposeRetainedVolume[] | null = null;
+  return {
+    captureStorage: () => storage ?? invalid(),
+    observeStorage(observed: NativeComposeOwnershipObservation) {
+      try {
+        storage = mergeNativeComposeRetainedVolumes({
+          retained: storage ?? [],
+          observed: observed.volumes,
+        });
+      } catch {
+        return invalid();
+      }
+    },
+  };
+}
+
 function routedRunEffectOwnership(opts: {
   readonly selection: NativeComposeOwnershipOptions;
   readonly generation: NativeComposeGeneration;
@@ -200,9 +221,12 @@ function routedRunEffectOwnership(opts: {
   readonly routing: NativeComposeSavedRunRouting;
 }) {
   let before: string | null = null;
+  const storage = retainedStorageCapture();
   return {
+    ...storage,
     assertOwned: async () => {
       const observed = await assertNativeComposeOwned(opts.selection);
+      storage.observeStorage(observed);
       if (
         !(
           ready(opts.document, observed, opts.generation) &&
@@ -251,9 +275,11 @@ function preparedEffectOwnership(opts: {
   readonly retireFiles?: () => Promise<void>;
 }) {
   let completed = false;
+  const storage = retainedStorageCapture();
   return {
+    ...storage,
     assertOwned: async () => {
-      await assertNativeComposeOwned(opts.selection);
+      storage.observeStorage(await assertNativeComposeOwned(opts.selection));
       if (completed) {
         await opts.assertFilesAfterCompletion?.();
       } else {
@@ -304,7 +330,14 @@ async function ownershipSelection(opts: {
     }
   }
   const services = new Set<string>();
-  const volumes = new Map<string, { storage: string; name: string }>();
+  const legacyStorage =
+    state.retainedStorage === null && state.generation
+      ? new Set(
+          volumeSelections(
+            await opts.store.readGenerationDocument(state.generation)
+          ).map((volume) => volume.name)
+        )
+      : new Set<string>();
   const topologies = documents
     .filter(
       ({ generation }) =>
@@ -360,21 +393,19 @@ async function ownershipSelection(opts: {
     for (const name of Object.keys(serviceMap(document))) {
       services.add(name);
     }
-    for (const selection of volumeSelections(document)) {
-      const existing = volumes.get(selection.name);
-      if (existing && existing.storage !== selection.storage) {
-        return invalid();
-      }
-      volumes.set(selection.name, selection);
-    }
   }
+  const expectedVolumes = selectNativeComposeVolumePolicies({
+    declared: documents.flatMap(({ document }) => volumeSelections(document)),
+    retained: state.retainedStorage ?? [],
+    legacyNames: legacyStorage,
+  });
   return {
     composeProject: opts.store.identity.composeProject,
     runtimeIdentity: opts.store.identity.composeProject,
     ownerToken: opts.store.identity.ownerToken,
     generationIds: [...new Set(generations.map((value) => value.generationId))],
     expectedServices: [...services],
-    expectedVolumes: [...volumes.values()],
+    expectedVolumes,
     expectedNetworks,
     expectedWorkloadNetworks,
     ...(opts.operation === "down" && opts.recover
@@ -420,14 +451,28 @@ async function waitReady(opts: {
   readonly ownership: NativeComposeOwnershipOptions;
   readonly deadline: number;
   readonly generation: NativeComposeGeneration;
+  readonly observeStorage: (
+    observed: NativeComposeOwnershipObservation
+  ) => void;
 }): Promise<NativeComposeOwnershipObservation | null> {
   const services = nativeComposeOnFailureServices(opts.document);
-  return await waitNativeComposeReady({
-    deadline: opts.deadline,
-    signal: opts.ownership.signal,
-    observe: () => observeNativeComposeStartupOwned(opts.ownership, services),
-    ready: (state) => ready(opts.document, state, opts.generation),
-  });
+  while (Date.now() < opts.deadline) {
+    const state = await observeNativeComposeStartupOwned(
+      opts.ownership,
+      services
+    );
+    if (state) {
+      opts.observeStorage(state);
+      if (ready(opts.document, state, opts.generation)) {
+        return state;
+      }
+    }
+    if (opts.ownership.signal?.aborted) {
+      return null;
+    }
+    await Bun.sleep(500);
+  }
+  return null;
 }
 function requireService(
   document: PrivateDocument,
@@ -606,6 +651,7 @@ async function savedCommand(opts: {
           operation: "down",
           recoverPending: options.recover === true && pending !== null,
           assertOwned,
+          captureStorage: prepared.captureStorage,
           assertFresh: hooks?.assertFresh,
           downHooks: hooks?.downHooks,
           beforeComplete: async () => {
@@ -777,8 +823,10 @@ async function prepareSavedStop(opts: {
   const current = await store.loadCurrent();
   const hasDownHooks = Object.hasOwn(document, "x-hack-native-down-hooks");
   let engineStopped = false;
+  let storage: readonly NativeComposeRetainedVolume[] | null = null;
   const assertOwned = async () => {
     const observed = await assertNativeComposeOwned(selection);
+    storage = observed.volumes;
     if (
       engineStopped &&
       (observed.containers.length !== 0 || observed.networks.length !== 0)
@@ -836,6 +884,7 @@ async function prepareSavedStop(opts: {
   }
   return {
     assertOwned,
+    captureStorage: () => storage ?? invalid(),
     assertAbsent,
     hooks,
     hasDownHooks,
@@ -909,6 +958,9 @@ async function runOneOff(opts: {
   readonly selection: NativeComposeOwnershipOptions;
   readonly base: RuntimeBaseOptions;
   readonly projection?: NativeComposeRunProjection;
+  readonly observeStorage: (
+    observed: NativeComposeOwnershipObservation
+  ) => void;
 }) {
   const { options, generation, document, selection, base, projection } = opts;
   const service = requireService(document, options.service);
@@ -933,6 +985,7 @@ async function runOneOff(opts: {
     }
   );
   const observed = await assertNativeComposeOwned(selection);
+  opts.observeStorage(observed);
   const completed = nativeComposeCompletedOneoff({
     observed,
     name,
@@ -959,6 +1012,7 @@ async function runOneOff(opts: {
     stdout: "stderr",
   });
   const after = await assertNativeComposeOwned(selection);
+  opts.observeStorage(after);
   return {
     value: code,
     outcome:
@@ -982,6 +1036,9 @@ async function startNativeComposeWorkloads(opts: {
   readonly assertOwned: () => Promise<void>;
   readonly builds: readonly NativeComposeBuildIntent[];
   readonly deadline: number;
+  readonly observeStorage: (
+    observed: NativeComposeOwnershipObservation
+  ) => void;
 }) {
   const {
     options,
@@ -1029,6 +1086,7 @@ async function startNativeComposeWorkloads(opts: {
           ownership: selection,
           deadline,
           generation,
+          observeStorage: opts.observeStorage,
         })
       : null;
   if (observed) {
@@ -1055,6 +1113,9 @@ async function executePreparedNativeWorkloads(opts: {
   readonly signal: AbortSignal;
   readonly assertFresh: () => Promise<void>;
   readonly assertOwned: () => Promise<void>;
+  readonly observeStorage: (
+    observed: NativeComposeOwnershipObservation
+  ) => void;
 }) {
   const deadline =
     opts.options.operation === "run"
@@ -1338,6 +1399,7 @@ async function executePreparedGeneration(opts: {
         projectRoot,
         signal,
         assertFresh,
+        observeStorage: ownership.observeStorage,
         assertOwned: async () => {
           await assertFresh();
           await ownership.assertOwned();

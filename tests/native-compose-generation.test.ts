@@ -24,6 +24,7 @@ import {
   openNativeComposeGenerationStore,
   readNativeComposeNetworkTopology,
 } from "../src/lib/native-compose-generation.ts";
+import type { NativeComposeRetainedVolume } from "../src/lib/native-compose-retained-storage.ts";
 import {
   type NativeComposeRouteClaims,
   openNativeComposeRouteClaims,
@@ -142,6 +143,403 @@ function receiptPath(owner: NativeComposeGenerationStore) {
 async function rejected(effect: Promise<unknown>, code: string) {
   await expect(effect).rejects.toMatchObject({ code });
 }
+
+const VOLUME_CREATED = "2026-10-08T00:00:00.123456789Z";
+const VOLUME_REBORN = "2026-10-08T00:00:01.123456789Z";
+function volumeFact(owner: NativeComposeGenerationStore) {
+  const project = owner.identity.composeProject;
+  return {
+    name: `hack-${project.length}-${project}-4-data`,
+    storage: "data",
+    createdAt: VOLUME_CREATED,
+  };
+}
+
+async function activateWithStorage(owner: NativeComposeGenerationStore) {
+  const volume = volumeFact(owner);
+  let observed: readonly NativeComposeRetainedVolume[] = [];
+  const generation = await owner.withMutation(async (mutation) => {
+    const published = await publish(mutation);
+    await mutation.runEffect({
+      generation: published,
+      operation: "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      captureStorage: () => observed,
+      effect: async () => {
+        observed = [volume];
+        return { outcome: "complete", value: 0 };
+      },
+    });
+    return published;
+  });
+  return { generation, volume };
+}
+
+test("captured physical storage survives reopen and completed down without public serialization", async () => {
+  const root = await fixture();
+  const owner = await store(root);
+  expect((await owner.loadCurrent()).retainedStorage).toBeNull();
+  const { generation, volume } = await activateWithStorage(owner);
+  const current = await owner.loadCurrent();
+  expect(current.retainedStorage).toEqual([volume]);
+  expect(Object.isFrozen(current.retainedStorage)).toBe(true);
+  expect(Object.isFrozen(current.retainedStorage?.[0])).toBe(true);
+  expect(JSON.stringify(current)).not.toContain("retainedStorage");
+  expect(JSON.stringify(current)).not.toContain(VOLUME_CREATED);
+  await owner.close();
+  const saved = await store(root, null, "saved");
+  const reopened = await saved.loadCurrent();
+  expect(reopened.retainedStorage).toEqual([volume]);
+  expect(reopened.generation?.generationId).toBe(generation.generationId);
+  if (!reopened.generation) {
+    throw new Error("Missing saved storage generation");
+  }
+  await saved.withMutation((mutation) =>
+    mutation.runEffect({
+      generation: reopened.generation ?? generation,
+      operation: "down",
+      assertOwned: async () => {},
+      captureStorage: () => [volume],
+      effect: async () => ({ outcome: "complete", value: 0 }),
+    })
+  );
+  const stopped = await saved.loadCurrent();
+  expect(stopped).toMatchObject({ stopped: true, pending: null });
+  expect(stopped.retainedStorage).toEqual([volume]);
+  expect(stopped.generation?.generationId).toBe(generation.generationId);
+});
+
+test("legacy v1 receipt captures existing storage durably before stop effects", async () => {
+  const root = await fixture();
+  const owner = await store(root);
+  await activate(owner);
+  await owner.close();
+  const saved = await store(root, null, "saved");
+  const current = await saved.loadCurrent();
+  expect(current.retainedStorage).toBeNull();
+  const generation = current.generation;
+  if (!generation) {
+    throw new Error("Missing legacy generation");
+  }
+  const volume = volumeFact(saved);
+  let effects = 0;
+  await saved.withMutation((mutation) =>
+    mutation.runEffect({
+      generation,
+      operation: "down",
+      assertOwned: async () => {},
+      captureStorage: () => [volume],
+      effect: async () => {
+        effects += 1;
+        expect((await saved.loadCurrent()).retainedStorage).toEqual([volume]);
+        return { outcome: "complete", value: 0 };
+      },
+    })
+  );
+  expect(effects).toBe(1);
+  expect((await saved.loadCurrent()).retainedStorage).toEqual([volume]);
+  expect(await Bun.file(receiptPath(saved)).json()).toMatchObject({
+    version: 2,
+    storage: [volume],
+  });
+});
+
+test.each([
+  "missing",
+  "reborn",
+] as const)("captured retained storage refuses %s facts before a new effect or intent", async (change) => {
+  const owner = await store(await fixture());
+  const { generation, volume } = await activateWithStorage(owner);
+  const before = await Bun.file(receiptPath(owner)).text();
+  let effects = 0;
+  await owner.withMutation(async (mutation) => {
+    const proposed = await publish(mutation);
+    await rejected(
+      mutation.runEffect({
+        generation: proposed,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        captureStorage: () =>
+          change === "missing" ? [] : [{ ...volume, createdAt: VOLUME_REBORN }],
+        effect: async () => {
+          effects += 1;
+          return { outcome: "complete", value: 0 };
+        },
+      }),
+      "E_NATIVE_COMPOSE_STATE"
+    );
+  });
+  expect(effects).toBe(0);
+  expect(await Bun.file(receiptPath(owner)).text()).toBe(before);
+  const current = await owner.loadCurrent();
+  expect(current.pending).toBeNull();
+  expect(current.generation?.generationId).toBe(generation.generationId);
+  expect(current.retainedStorage).toEqual([volume]);
+});
+
+test("capture before uncertain startup remains durable through source-free saved recovery", async () => {
+  const root = await fixture();
+  const owner = await store(root);
+  const volume = volumeFact(owner);
+  let generationId = "";
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    generationId = generation.generationId;
+    expect(
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        captureStorage: () => [volume],
+        effect: async () => {
+          expect((await owner.loadCurrent()).retainedStorage).toEqual([volume]);
+          return { outcome: "uncertain", value: 17 };
+        },
+      })
+    ).toEqual({ outcome: "uncertain", value: 17 });
+  });
+  await owner.close();
+  await writeFile(join(root, ".hack", "hack.project.json"), "invalid");
+  const saved = await store(root, null, "saved");
+  const pending = await saved.loadPending();
+  if (!pending) {
+    throw new Error("Missing storage recovery generation");
+  }
+  expect(pending.generationId).toBe(generationId);
+  expect((await saved.loadCurrent()).retainedStorage).toEqual([volume]);
+  await saved.withMutation((mutation) =>
+    mutation.runEffect({
+      generation: pending,
+      operation: "down",
+      recoverPending: true,
+      assertOwned: async () => {},
+      captureStorage: () => [volume],
+      effect: async () => ({ outcome: "complete", value: 0 }),
+    })
+  );
+  const recovered = await saved.loadCurrent();
+  expect(recovered).toMatchObject({ stopped: true, pending: null });
+  expect(recovered.retainedStorage).toEqual([volume]);
+});
+
+test("explicit pending recovery captures first observed storage before teardown", async () => {
+  const root = await fixture();
+  const owner = await store(root);
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    await mutation.runEffect({
+      generation,
+      operation: "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      effect: async () => ({ outcome: "uncertain", value: 1 }),
+    });
+  });
+  const saved = await store(root, null, "saved");
+  expect((await saved.loadCurrent()).retainedStorage).toBeNull();
+  const pending = await saved.loadPending();
+  if (!pending) {
+    throw new Error("Missing cold partial generation");
+  }
+  const volume = volumeFact(saved);
+  await saved.withMutation((mutation) =>
+    mutation.runEffect({
+      generation: pending,
+      operation: "down",
+      recoverPending: true,
+      assertOwned: async () => {},
+      captureStorage: () => [volume],
+      effect: async () => {
+        expect((await saved.loadCurrent()).retainedStorage).toEqual([volume]);
+        return { outcome: "complete", value: 0 };
+      },
+    })
+  );
+  expect((await saved.loadCurrent()).retainedStorage).toEqual([volume]);
+});
+
+test("an uncertain effect retains a newly verified post-effect volume birth", async () => {
+  const owner = await store(await fixture());
+  const volume = volumeFact(owner);
+  let engineFacts: readonly NativeComposeRetainedVolume[] = [];
+  let observed: readonly NativeComposeRetainedVolume[] = [];
+  const assertOwned = async () => {
+    observed = engineFacts;
+  };
+  let generationId = "";
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    generationId = generation.generationId;
+    expect(
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned,
+        captureStorage: () => observed,
+        effect: async () => {
+          engineFacts = [volume];
+          await assertOwned();
+          return { outcome: "uncertain", value: 17 };
+        },
+      })
+    ).toEqual({ outcome: "uncertain", value: 17 });
+  });
+  const current = await owner.loadCurrent();
+  expect(current.retainedStorage).toEqual([volume]);
+  expect(current.generation).toBeNull();
+  expect(current.pending?.generationId).toBe(generationId);
+});
+
+test("a thrown effect retains its latest verified volume birth without reporting ready", async () => {
+  const owner = await store(await fixture());
+  const volume = volumeFact(owner);
+  let engineFacts: readonly NativeComposeRetainedVolume[] = [];
+  let observed: readonly NativeComposeRetainedVolume[] = [];
+  const assertOwned = async () => {
+    observed = engineFacts;
+  };
+  let generationId = "";
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    generationId = generation.generationId;
+    await rejected(
+      mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned,
+        captureStorage: () => observed,
+        effect: async () => {
+          engineFacts = [volume];
+          await assertOwned();
+          throw new Error("synthetic-private-effect-canary");
+        },
+      }),
+      "E_NATIVE_COMPOSE_UNCERTAIN"
+    );
+  });
+  const current = await owner.loadCurrent();
+  expect(current.retainedStorage).toEqual([volume]);
+  expect(current.generation).toBeNull();
+  expect(current.pending?.generationId).toBe(generationId);
+  expect(await Bun.file(receiptPath(owner)).text()).not.toContain(
+    "synthetic-private-effect-canary"
+  );
+});
+
+test("a finalizer's rebirth observation cannot overwrite captured storage or complete readiness", async () => {
+  const owner = await store(await fixture());
+  const volume = volumeFact(owner);
+  let observed: readonly NativeComposeRetainedVolume[] = [];
+  let generationId = "";
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    generationId = generation.generationId;
+    await rejected(
+      mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        captureStorage: () => observed,
+        effect: async () => {
+          observed = [volume];
+          return { outcome: "complete", value: 0 };
+        },
+        beforeComplete: async () => {
+          expect((await owner.loadCurrent()).retainedStorage).toEqual([volume]);
+          observed = [{ ...volume, createdAt: VOLUME_REBORN }];
+        },
+      }),
+      "E_NATIVE_COMPOSE_UNCERTAIN"
+    );
+  });
+  const current = await owner.loadCurrent();
+  expect(current.generation).toBeNull();
+  expect(current.pending?.generationId).toBe(generationId);
+  expect(current.retainedStorage).toEqual([volume]);
+});
+
+test("identical-content receipt replacement during capture refuses before engine entry", async () => {
+  const owner = await store(await fixture());
+  const { generation, volume } = await activateWithStorage(owner);
+  const original = await Bun.file(receiptPath(owner)).text();
+  let effects = 0;
+  await owner.withMutation((mutation) =>
+    rejected(
+      mutation.runEffect({
+        generation,
+        operation: "restart",
+        assertFresh: async () => {},
+        assertOwned: async () => {
+          // Adversarial synthetic receipt seam: content parity is insufficient under a live owner.
+          const replacement = `${receiptPath(owner)}.replacement`;
+          await writeFile(replacement, original, { mode: 0o600 });
+          await rename(replacement, receiptPath(owner));
+        },
+        captureStorage: () => [volume],
+        effect: async () => {
+          effects += 1;
+          return { outcome: "complete", value: 0 };
+        },
+      }),
+      "E_NATIVE_COMPOSE_STATE"
+    )
+  );
+  expect(effects).toBe(0);
+  expect(await Bun.file(receiptPath(owner)).text()).toBe(original);
+  expect((await owner.loadCurrent()).retainedStorage).toEqual([volume]);
+});
+
+test.each([
+  "missing",
+  "null",
+  "duplicate",
+  "missing-birth",
+  "invalid-birth",
+  "extra-field",
+] as const)("version-two storage receipt refuses %s facts without rewriting it", async (change) => {
+  const owner = await store(await fixture());
+  await activate(owner);
+  const volume = volumeFact(owner);
+  // Existing synthetic-receipt tamper seam; no live managed journal is edited.
+  const value: Record<string, unknown> = await Bun.file(
+    receiptPath(owner)
+  ).json();
+  value.version = 2;
+  value.storage = [volume];
+  if (change === "missing") {
+    Reflect.deleteProperty(value, "storage");
+  } else if (change === "null") {
+    value.storage = null;
+  } else if (change === "duplicate") {
+    value.storage = [volume, volume];
+  } else if (change === "missing-birth") {
+    value.storage = [{ name: volume.name, storage: volume.storage }];
+  } else if (change === "invalid-birth") {
+    value.storage = [
+      { ...volume, createdAt: "synthetic-private-storage-canary" },
+    ];
+  } else {
+    value.storage = [{ ...volume, extra: "synthetic-private-storage-canary" }];
+  }
+  const changed = JSON.stringify(value);
+  await writeFile(receiptPath(owner), changed, { mode: 0o600 });
+  await rejected(owner.loadCurrent(), "E_NATIVE_COMPOSE_STATE");
+  let actions = 0;
+  await rejected(
+    owner.withMutation(async () => {
+      actions += 1;
+    }),
+    "E_NATIVE_COMPOSE_STATE"
+  );
+  expect(actions).toBe(0);
+  expect(await Bun.file(receiptPath(owner)).text()).toBe(changed);
+});
 
 async function routeStore(
   root: string,

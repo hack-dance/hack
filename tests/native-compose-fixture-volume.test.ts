@@ -10,7 +10,11 @@ const selection: NativeComposeOwnershipOptions = {
   expectedServices: ["app"],
   expectedVolumes: [{ name: "fixture_data", storage: "data" }],
 };
-const volume = { name: "fixture_data", storage: "data" };
+const volume = {
+  name: "fixture_data",
+  storage: "data",
+  createdAt: "2026-10-08T00:00:00Z",
+};
 const inspected = {
   ...volume,
   createdAt: "2026-10-08T00:00:00Z",

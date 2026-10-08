@@ -21,6 +21,11 @@ import {
   token,
   writeExclusive,
 } from "./native-compose-private-state.ts";
+import {
+  mergeNativeComposeRetainedVolumes,
+  type NativeComposeRetainedVolume,
+  nativeComposeRetainedVolumesValid,
+} from "./native-compose-retained-storage.ts";
 import { projectNativeComposeOneOff } from "./native-compose-run-projection.ts";
 
 // biome-ignore lint/performance/noBarrelFile: Preserve the generation store's public topology contract after the single-parser extraction.
@@ -291,7 +296,7 @@ type HostHookIntent =
       readonly operation: "down";
     };
 type Receipt = {
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly identity: NativeComposeIdentity;
   readonly checkout: CheckoutAnchor;
   readonly current: GenerationAnchor | null;
@@ -299,6 +304,8 @@ type Receipt = {
   readonly pending: PendingReceipt | null;
   /** No command, PID, environment, or content fingerprint. Interrupted finite hooks never replay. */
   readonly beforeHooks: HostHookIntent | null;
+  /** Version two records monotonic engine birth facts; old readers refuse this receipt. */
+  readonly storage?: readonly NativeComposeRetainedVolume[];
 };
 type FileIdentity = { readonly dev: number; readonly ino: number };
 type CheckoutAnchor = FileIdentity & {
@@ -461,12 +468,18 @@ function parseReceipt(
   if (
     !(
       isRecord(value) &&
-      (keys(value, "checkout,current,identity,pending,stopped,version") ||
-        keys(
-          value,
-          "beforeHooks,checkout,current,identity,pending,stopped,version"
-        )) &&
-      value.version === 1 &&
+      ((value.version === 1 &&
+        (keys(value, "checkout,current,identity,pending,stopped,version") ||
+          keys(
+            value,
+            "beforeHooks,checkout,current,identity,pending,stopped,version"
+          ))) ||
+        (value.version === 2 &&
+          keys(
+            value,
+            "beforeHooks,checkout,current,identity,pending,stopped,storage,version"
+          ) &&
+          nativeComposeRetainedVolumesValid(value.storage))) &&
       identityMatches(value.identity, identity) &&
       checkoutMatches(value.checkout, checkout) &&
       (value.current === null ||
@@ -480,14 +493,22 @@ function parseReceipt(
   ) {
     return refuse();
   }
+  let storage: readonly NativeComposeRetainedVolume[] | undefined;
+  if (value.version === 2) {
+    if (!nativeComposeRetainedVolumesValid(value.storage)) {
+      return refuse();
+    }
+    storage = value.storage;
+  }
   return {
-    version: 1,
+    version: value.version,
     identity,
     checkout,
     current: value.current,
     stopped: value.stopped,
     pending: value.pending,
     beforeHooks: normalizeHostIntent(value.beforeHooks),
+    ...(storage === undefined ? {} : { storage }),
   };
 }
 function checkoutMatches(value: unknown, expected: CheckoutAnchor): boolean {
@@ -657,6 +678,8 @@ export type NativeComposeEffectOptions<T> = {
   readonly operation: NativeComposeOperation;
   readonly assertFresh?: () => Promise<void>;
   readonly assertOwned: () => Promise<void>;
+  /** Reuse the exact preceding ownership observation; never perform extra probes here. */
+  readonly captureStorage?: () => readonly NativeComposeRetainedVolume[];
   readonly recoverPending?: boolean;
   /** Store-derived immutable one-off delivery, verified before/after run effects. */
   readonly projection?: NativeComposeRunProjection;
@@ -859,6 +882,8 @@ export type NativeComposeGenerationStore = {
     readonly pending: NativeComposePending | null;
     readonly beforeHooksPending: boolean;
     readonly hostHookPhase: HostHookIntent["phase"] | null;
+    /** Nonenumerable private provenance; null is an older receipt with no birth history. */
+    readonly retainedStorage: readonly NativeComposeRetainedVolume[] | null;
   }>;
   loadPending(): Promise<NativeComposeGeneration | null>;
   /** Private values: never serialize/log this object. Use within a saved-generation lease. */
@@ -1304,6 +1329,27 @@ export async function openNativeComposeGenerationStore(opts: {
         refuse();
       }
     };
+    const rememberStorage = async <T>(input: NativeComposeEffectOptions<T>) => {
+      if (!input.captureStorage) {
+        return;
+      }
+      const state = await receipt();
+      let storage: readonly NativeComposeRetainedVolume[];
+      try {
+        storage = mergeNativeComposeRetainedVolumes({
+          retained: state.storage ?? [],
+          observed: input.captureStorage(),
+        });
+      } catch {
+        return refuse();
+      }
+      if (
+        storage.length &&
+        JSON.stringify(storage) !== JSON.stringify(state.storage)
+      ) {
+        await save({ ...state, version: 2, storage });
+      }
+    };
     const finalizeEffect = async <T>(
       input: NativeComposeEffectOptions<T>,
       pending: Receipt["pending"],
@@ -1317,6 +1363,7 @@ export async function openNativeComposeGenerationStore(opts: {
         await verifyProjection(input.projection, input.generation);
       }
       await input.assertOwned();
+      await rememberStorage(input);
       let latest = await receipt();
       requireFinalPending(
         latest,
@@ -1334,6 +1381,7 @@ export async function openNativeComposeGenerationStore(opts: {
           await verifyProjection(input.projection, input.generation);
         }
         await input.assertOwned();
+        await rememberStorage(input);
         latest = await receipt();
         requireFinalPending(
           latest,
@@ -1356,7 +1404,7 @@ export async function openNativeComposeGenerationStore(opts: {
       identity: ownedIdentity,
       async loadCurrent() {
         const state = await receipt();
-        return {
+        const result = {
           generation:
             state.current === null
               ? null
@@ -1365,7 +1413,15 @@ export async function openNativeComposeGenerationStore(opts: {
           pending: publicPending(state.pending),
           beforeHooksPending: state.beforeHooks !== null,
           hostHookPhase: state.beforeHooks?.phase ?? null,
+          retainedStorage: state.storage
+            ? mergeNativeComposeRetainedVolumes({
+                retained: [],
+                observed: state.storage,
+              })
+            : null,
         };
+        Object.defineProperty(result, "retainedStorage", { enumerable: false });
+        return result;
       },
       async loadPending() {
         const state = await receipt();
@@ -1551,6 +1607,7 @@ export async function openNativeComposeGenerationStore(opts: {
             await fenceEffectInputs(input);
             try {
               await input.assertOwned();
+              await rememberStorage(input);
             } catch (error) {
               if (error instanceof NativeComposeGenerationError) {
                 throw error;
@@ -1602,6 +1659,9 @@ export async function openNativeComposeGenerationStore(opts: {
             result: Awaited<ReturnType<NativeComposeEffectOptions<T>["effect"]>>
           ) => {
             if (result.outcome !== "complete") {
+              // Preserve an already verified observation without probing an
+              // uncertain child or clearing its pending effect intent.
+              await rememberStorage(input);
               return result;
             }
             const hooks = input.afterHooks ?? input.downHooks?.after;
@@ -1901,9 +1961,13 @@ export async function openNativeComposeGenerationStore(opts: {
               const input = Object.freeze({ ...options, downHooks });
               return await runAction(async () => {
                 requireActive();
-                const state = await receipt();
+                let state = await receipt();
                 admitEffect(input, state, opts.mode);
                 await checkEffect(input);
+                // Ownership can publish newly observed births. Never overwrite them
+                // with the pre-observation receipt when arming the effect intent.
+                state = await receipt();
+                admitEffect(input, state, opts.mode);
                 const anchor = knownAnchor(input.generation);
                 const pending = effectPending(state, input, anchor);
                 await save({ ...state, pending });
@@ -1917,9 +1981,16 @@ export async function openNativeComposeGenerationStore(opts: {
                   const result = await input.effect();
                   return await finishEffect(input, pending, anchor, result);
                 } catch {
-                  throw new NativeComposeGenerationError(
+                  const failure = new NativeComposeGenerationError(
                     "E_NATIVE_COMPOSE_UNCERTAIN"
                   );
+                  try {
+                    await rememberStorage(input);
+                  } catch {
+                    // Storage publication failure cannot clear engine uncertainty.
+                    throw failure;
+                  }
+                  throw failure;
                 } finally {
                   effectOperation = null;
                   activePending = null;

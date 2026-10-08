@@ -82,6 +82,14 @@ The returned `document` and `json` contain the same escaped representation. The
 execution owner must use normal Compose interpolation rather than requesting
 `--no-interpolate`, which would change this encoding's interpretation.
 
+File config/secret grants have a separate material boundary. Effect-free preflight
+validates the complete compiler file plan and read-only mode `0444` subset without
+reading or staging bytes. Final rendering requires the exact live file owner's
+projection, bound to this plan, environment plan, reservation and checkout. Copied
+paths or projections refuse. The renderer appends the owner's already-encoded
+read-only binds once and retains its immutable reference in a private extension;
+the raw filesystem reference is never interpreted as a Compose mount string.
+
 ## Ownership and remaining refusals
 
 The caller supplies a stable Compose-compatible `runtimeIdentity` and random

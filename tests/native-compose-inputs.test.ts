@@ -10,11 +10,14 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { YAML } from "bun";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { isRecord } from "../src/lib/guards.ts";
-import { acquireNativeComposeInputs } from "../src/lib/native-compose-inputs.ts";
+import {
+  acquireNativeComposeFilePlanningInputs,
+  acquireNativeComposeInputs,
+} from "../src/lib/native-compose-inputs.ts";
 import { acquireNativeExecutionInputs } from "../src/lib/native-execution-inputs.ts";
 import {
   type ProjectEnvStoredValue,
@@ -47,6 +50,9 @@ const KEYS = [
 ] as const;
 const CANARY = "private-synthetic-compose-input-canary";
 const KEY = "synthetic-compose-key-never-real-credentials";
+const realCompiler = resolve(
+  process.env.HACK_CONFIG_COMPILER_BINARY ?? "dist/hack-config-compiler"
+);
 const SOURCE = {
   schema_version: 1,
   name: "fixture",
@@ -300,6 +306,49 @@ test("shared execution owner exposes the exact immutable compiler metadata witho
   await layer("hack.env.default.yaml", { global: { TOKEN: "changed" } });
   await refuses(acquired.assertFresh());
   await refuses(acquired.resolveManagedValues());
+});
+
+test("shared input owner keeps graph file refusal before env acquisition while Compose plans without reading material", async () => {
+  process.env.HACK_CONFIG_COMPILER_BINARY = realCompiler;
+  await writeFile(
+    join(projectRoot, ".hack/hack.project.json"),
+    JSON.stringify({
+      schema_version: 1,
+      name: "file-policy-control",
+      worktree: { inherit_local: false, auto_branch: false },
+      configs: { settings: { file: "missing-settings.bin" } },
+      services: {
+        web: {
+          image: "fixture",
+          mounts: [
+            {
+              config: "settings",
+              target: "/etc/settings",
+              access: "read-only",
+            },
+          ],
+        },
+      },
+    })
+  );
+  await writeFile(join(projectRoot, ".hack/hack.env.default.yaml"), "{invalid");
+  await expect(
+    acquireNativeExecutionInputs({ projectRoot })
+  ).rejects.toMatchObject({ code: "E_NATIVE_PROJECT_UNSUPPORTED" });
+  await layer("hack.env.default.yaml", { global: { TOKEN: CANARY } });
+  const planned = await acquireNativeComposeFilePlanningInputs({ projectRoot });
+  expect(planned.result.file_plan?.complete).toBe(true);
+  expect(planned.metadata.workloads.web).toEqual({
+    TOKEN: { scope: "global", secret: false },
+  });
+  expect(Object.keys(planned)).toEqual(["result"]);
+  expect(JSON.stringify(planned)).not.toContain(CANARY);
+  expect(
+    await Bun.file(join(projectRoot, "missing-settings.bin")).exists()
+  ).toBe(false);
+  await planned.assertFresh();
+  await layer("hack.env.default.yaml", { global: { TOKEN: "changed" } });
+  await refuses(planned.assertFresh());
 });
 
 test("explicit native compiler branch stays captured and avoids implicit routing discovery", async () => {

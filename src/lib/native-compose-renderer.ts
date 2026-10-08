@@ -6,6 +6,11 @@ import type {
   Workload,
 } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "./guards.ts";
+import {
+  type NativeComposeFileProjection,
+  nativeComposeFileProjectionMatches,
+} from "./native-compose-file-owner.ts";
+import { NATIVE_COMPOSE_FILES_EXTENSION } from "./native-compose-file-state.ts";
 import { selectNativeComposeBeforeHooks } from "./native-compose-host-contract.ts";
 import {
   NativeComposeNetworkError,
@@ -27,6 +32,11 @@ import {
   type NativeEnvironmentPlan,
   parseNativeEnvironmentPlan,
 } from "./native-env-plan-protocol.ts";
+import {
+  type NativeFilePlan,
+  nativeFilePlanIsValid,
+  nativeFilePlanningRequired,
+} from "./native-file-plan-protocol.ts";
 import { nativeProcessPlanIsValid } from "./native-process-plan-protocol.ts";
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
@@ -85,6 +95,7 @@ type RenderContext = {
   readonly networks: NativeComposeNetworks;
   readonly profiles: readonly string[];
   readonly routing: NativeComposeRouting | null;
+  readonly files?: NativeFilePlan;
 };
 type PreparedCompose = {
   readonly context: RenderContext;
@@ -132,6 +143,9 @@ export type NativeComposeInputs = {
   readonly generationIdentity: string;
   readonly routingResolution?: unknown;
   readonly declaredWorkloads?: NativeDeclaredWorkloads;
+  readonly filePlan?: NativeFilePlan;
+  /** Actual private owner projection, already encoded once for literal Compose delivery. */
+  readonly fileProjection?: NativeComposeFileProjection;
   /** The command owner journals and executes the supported finite before-hook sequence. */
   readonly beforeHooksOwned?: boolean;
 };
@@ -158,6 +172,19 @@ export function renderNativeCompose(
   }
 ): PrivateNativeComposeRender {
   const prepared = prepare(opts);
+  if (prepared.context.files) {
+    assert(
+      opts.fileProjection &&
+        nativeComposeFileProjectionMatches({
+          ...opts,
+          projection: opts.fileProjection,
+          filePlan: opts.filePlan,
+        }),
+      "E_COMPOSE_FILE_OWNER"
+    );
+  } else {
+    assert(opts.fileProjection === undefined, "E_COMPOSE_FILE_OWNER");
+  }
   const privateValues = managedValues(opts.managedValues, prepared.names);
   const rendered = renderSelected(prepared, privateValues);
   const resourceLabels = {
@@ -182,10 +209,21 @@ export function renderNativeCompose(
   const document = {
     name: opts.runtimeIdentity,
     services: Object.fromEntries(
-      Object.entries(rendered).map(([name, fields]) => [
-        name,
-        escapedObject(fields),
-      ])
+      Object.entries(rendered).map(([name, fields]) => {
+        const selected = escapedObject(fields);
+        const binds = opts.fileProjection?.workloads[name];
+        if (binds?.length) {
+          assert(
+            selected.volumes === undefined || Array.isArray(selected.volumes),
+            "E_COMPOSE_MOUNT"
+          );
+          selected.volumes = [
+            ...(selected.volumes ?? []),
+            ...binds.map((bind) => ({ ...bind, bind: { ...bind.bind } })),
+          ];
+        }
+        return [name, selected];
+      })
     ),
     volumes,
     networks: {
@@ -196,6 +234,9 @@ export function renderNativeCompose(
           }
         : {}),
     },
+    ...(opts.fileProjection
+      ? { [NATIVE_COMPOSE_FILES_EXTENSION]: opts.fileProjection.reference }
+      : {}),
   };
   return {
     renderVersion: 1,
@@ -230,7 +271,8 @@ function prepare(opts: NativeComposeInputs): PreparedCompose {
     resolution: opts.routingResolution,
     declared: opts.declaredWorkloads,
   });
-  unsupportedOwners(plan, opts.beforeHooksOwned === true);
+  const files = filePlanning(opts, plan);
+  unsupportedOwners(plan, opts.beforeHooksOwned === true, files !== undefined);
   const services = workloadMap(plan.services);
   const jobs = workloadMap(plan.jobs);
   assert(
@@ -283,6 +325,7 @@ function prepare(opts: NativeComposeInputs): PreparedCompose {
     networks,
     profiles,
     routing,
+    files,
   };
   return { context, env, names: allNames, sourceRoot };
 }
@@ -413,12 +456,39 @@ function settings(plan: Record<string, unknown>): void {
   );
 }
 
+function filePlanning(
+  opts: NativeComposeInputs,
+  plan: Record<string, unknown>
+): NativeFilePlan | undefined {
+  if (!nativeFilePlanningRequired(plan)) {
+    assert(opts.filePlan === undefined, "E_COMPOSE_FILE_OWNER");
+    return undefined;
+  }
+  assert(
+    nativeFilePlanIsValid({ plan, declared: opts.declaredWorkloads }) &&
+      opts.filePlan?.complete === true &&
+      opts.filePlan.plan_version === 1,
+    "E_COMPOSE_FILE_OWNER"
+  );
+  for (const workloads of [plan.services, plan.jobs]) {
+    assert(isRecord(workloads), "E_COMPOSE_NAMESPACE");
+    assert(
+      Object.values(workloads).every(
+        (workload) => isRecord(workload) && !Object.hasOwn(workload, "build")
+      ),
+      "E_COMPOSE_FILE_OWNER"
+    );
+  }
+  return opts.filePlan;
+}
 function unsupportedOwners(
   plan: Record<string, unknown>,
-  beforeHooksOwned: boolean
+  beforeHooksOwned: boolean,
+  filePlanning: boolean
 ): void {
   assert(
-    !(Object.hasOwn(plan, "configs") || Object.hasOwn(plan, "secrets")),
+    filePlanning ||
+      !(Object.hasOwn(plan, "configs") || Object.hasOwn(plan, "secrets")),
     "E_COMPOSE_FILE_OWNER"
   );
   if (Object.hasOwn(plan, "host")) {
@@ -612,7 +682,11 @@ function renderWorkload(opts: {
   if (profiles.length > 0) {
     output.profiles = profiles;
   }
-  const mounts = renderMounts(optionalField(workload, "mounts", []), context);
+  const mounts = renderMounts({
+    value: optionalField(workload, "mounts", []),
+    context,
+    name: opts.name,
+  });
   if (mounts.length > 0) {
     output.volumes = mounts;
   }
@@ -743,16 +817,42 @@ function processPolicy(
   }
 }
 
-function renderMounts(value: unknown, context: RenderContext): JsonObject[] {
+function renderMounts(opts: {
+  readonly value: unknown;
+  readonly context: RenderContext;
+  readonly name: string;
+}): JsonObject[] {
+  const { value, context, name } = opts;
   assert(Array.isArray(value), "E_COMPOSE_MOUNT");
   const targets = new Set<string>();
-  return value.map((entry) => {
+  return value.flatMap((entry) => {
     const mount = record(entry);
     assert(
       canonicalAbsolute(mount.target) && !targets.has(mount.target),
       "E_COMPOSE_MOUNT"
     );
     targets.add(mount.target);
+    if (Object.hasOwn(mount, "config") || Object.hasOwn(mount, "secret")) {
+      const kind = Object.hasOwn(mount, "config") ? "config" : "secret";
+      closed(mount, [kind, "target", "access", "mode"]);
+      assert(
+        context.files && mount.access === "read-only" && mount.mode === "0444",
+        "E_COMPOSE_FILE_OWNER"
+      );
+      assert(
+        context.files.workloads[name]?.some(
+          (file) =>
+            file.kind === kind &&
+            file.name === mount[kind] &&
+            file.target === mount.target &&
+            file.mode === "0444" &&
+            file.uid === undefined &&
+            file.gid === undefined
+        ),
+        "E_COMPOSE_FILE_OWNER"
+      );
+      return [];
+    }
     assert(
       mount.access === "read-only" || mount.access === "read-write",
       "E_COMPOSE_MOUNT"

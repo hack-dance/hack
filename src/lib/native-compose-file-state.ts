@@ -40,7 +40,13 @@ export type NativeComposeFileManifest = {
 };
 export type FileJournalRecord =
   | {
-      readonly phase: "armed" | "reaped" | "retiring" | "rollback";
+      readonly phase:
+        | "armed"
+        | "reaped"
+        | "stop-armed"
+        | "stop-reaped"
+        | "retiring"
+        | "rollback";
       readonly binding: NativeComposeMaterialBinding;
       readonly members: readonly string[];
     }
@@ -48,12 +54,30 @@ export type FileJournalRecord =
 export type FileJournalState = {
   readonly armed: boolean;
   readonly reaped: boolean;
+  readonly stopBinding: NativeComposeMaterialBinding | null;
+  readonly stopReaped: boolean;
   readonly intent: Extract<
     FileJournalRecord,
-    { readonly phase: "armed" | "reaped" | "retiring" | "rollback" }
+    {
+      readonly phase:
+        | "armed"
+        | "reaped"
+        | "stop-armed"
+        | "stop-reaped"
+        | "retiring"
+        | "rollback";
+    }
   > | null;
   readonly retired: boolean;
 };
+export function nativeComposeFileChildrenKnown(
+  state: FileJournalState
+): boolean {
+  return (
+    (!state.armed || state.reaped) &&
+    (state.stopBinding === null || state.stopReaped)
+  );
+}
 export function freezeNativeComposeFileState(value: unknown): void {
   if (typeof value === "object" && value !== null) {
     for (const child of Object.values(value)) {
@@ -335,6 +359,8 @@ export function parseNativeComposeFileJournal(
   let state: FileJournalState = {
     armed: false,
     reaped: false,
+    stopBinding: null,
+    stopReaped: false,
     intent: null,
     retired: false,
   };
@@ -349,11 +375,14 @@ function advanceJournal(input: {
   readonly opts: JournalOptions;
 }): FileJournalState {
   const { state, value, opts } = input;
-  if (state.retired || !isRecord(value)) {
+  if (!isRecord(value)) {
     return refuseNativeComposeFile();
   }
   if (value.phase === "retired") {
-    if (!validRetiredRecord(value, state.intent, opts.digest)) {
+    if (
+      state.retired ||
+      !validRetiredRecord(value, state.intent, opts.digest)
+    ) {
       return refuseNativeComposeFile();
     }
     return { ...state, retired: true };
@@ -363,7 +392,11 @@ function advanceJournal(input: {
     manifest: opts.manifest,
     binding: opts.binding,
   });
-  if (state.intent !== null) {
+  const stop = advanceStop(state, record);
+  if (stop) {
+    return stop;
+  }
+  if (state.intent !== null || state.retired) {
     return refuseNativeComposeFile();
   }
   switch (record.phase) {
@@ -383,7 +416,7 @@ function advanceJournal(input: {
       }
       return { ...state, intent: record };
     case "retiring":
-      if (state.armed && !state.reaped) {
+      if (!nativeComposeFileChildrenKnown(state)) {
         return refuseNativeComposeFile();
       }
       return { ...state, intent: record };
@@ -391,13 +424,43 @@ function advanceJournal(input: {
       return refuseNativeComposeFile();
   }
 }
+function advanceStop(
+  state: FileJournalState,
+  record: Exclude<FileJournalRecord, { readonly phase: "retired" }>
+): FileJournalState | null {
+  if (record.phase === "stop-armed") {
+    if (state.stopBinding !== null && !state.stopReaped) {
+      return refuseNativeComposeFile();
+    }
+    return { ...state, stopBinding: record.binding, stopReaped: false };
+  }
+  if (record.phase === "stop-reaped") {
+    if (
+      state.stopBinding === null ||
+      state.stopReaped ||
+      !sameNativeComposeFileState(state.stopBinding, record.binding)
+    ) {
+      return refuseNativeComposeFile();
+    }
+    return { ...state, stopReaped: true };
+  }
+  return null;
+}
 function parseIntent(opts: {
   readonly value: Record<string, unknown>;
   readonly manifest: NativeComposeFileManifest;
   readonly binding: NativeComposeMaterialBinding;
 }): Extract<
   FileJournalRecord,
-  { readonly phase: "armed" | "reaped" | "retiring" | "rollback" }
+  {
+    readonly phase:
+      | "armed"
+      | "reaped"
+      | "stop-armed"
+      | "stop-reaped"
+      | "retiring"
+      | "rollback";
+  }
 > {
   const value = opts.value;
   if (
@@ -435,10 +498,18 @@ function parseIntent(opts: {
 }
 function intentPhase(
   value: unknown
-): value is "armed" | "reaped" | "retiring" | "rollback" {
+): value is
+  | "armed"
+  | "reaped"
+  | "stop-armed"
+  | "stop-reaped"
+  | "retiring"
+  | "rollback" {
   return (
     value === "armed" ||
     value === "reaped" ||
+    value === "stop-armed" ||
+    value === "stop-reaped" ||
     value === "retiring" ||
     value === "rollback"
   );

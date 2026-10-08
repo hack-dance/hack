@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertNativeComposeFileSubset } from "./native-compose-file-subset.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { authoredFilePlanningRequired } from "./native-file-plan-protocol.ts";
 import {
@@ -71,14 +72,35 @@ export function nativeExecutionSourceRevision(
  * CLI report or engine labels. Rechecking detects changes; it does not freeze
  * unrelated editors or provide an atomic snapshot across files.
  */
-export async function acquireNativeExecutionInputs(opts: {
+type NativeExecutionInputSelection = {
   readonly projectRoot: string;
   readonly profiles?: readonly string[];
   readonly explicitOverlay?: string | null;
   readonly explicitDomain?: string;
   readonly compilerBranch?: string;
   readonly signal?: AbortSignal;
+};
+
+/** Graph inputs always refuse raw file intent before environment acquisition. */
+export function acquireNativeExecutionInputs(
+  opts: NativeExecutionInputSelection
+) {
+  return acquireInputs({ selection: opts, filePolicy: "refuse" });
+}
+
+/** Symbolic file planning for the qualified Compose material owner only. */
+export function acquireNativeExecutionFilePlanningInputs(
+  opts: NativeExecutionInputSelection
+) {
+  return acquireInputs({ selection: opts, filePolicy: "plan" });
+}
+
+async function acquireInputs(input: {
+  readonly selection: NativeExecutionInputSelection;
+  readonly filePolicy: "refuse" | "plan";
 }) {
+  const opts = input.selection;
+  const filePolicy = input.filePolicy;
   const projectRoot = opts.projectRoot;
   const signal = opts.signal;
   const selection: NativeProjectSelection = {
@@ -97,10 +119,13 @@ export async function acquireNativeExecutionInputs(opts: {
   }
   const resolved = prepared.result;
   if (authoredFilePlanningRequired(prepared.input)) {
-    throw new NativeConfigCompilerError(
-      "E_NATIVE_PROJECT_UNSUPPORTED",
-      "Native file inputs require a qualified private material owner. No private values, hooks or engine operations ran. Values omitted."
-    );
+    if (filePolicy === "refuse") {
+      throw new NativeConfigCompilerError(
+        "E_NATIVE_PROJECT_UNSUPPORTED",
+        "Native file inputs require a qualified private material owner. No private values, hooks or engine operations ran. Values omitted."
+      );
+    }
+    assertNativeComposeFileSubset(prepared.input);
   }
   const declared = resolved.declared_workloads;
   if (!declared) {

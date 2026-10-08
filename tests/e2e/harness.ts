@@ -90,6 +90,8 @@ export type Scenario = {
   readonly summary: string;
   /** Retain disposable source and isolated-home evidence after failed ownership cleanup. */
   readonly preserveFixtureOnFailure?: boolean;
+  /** Recovery controls that intentionally retain uncertain state require explicit selection. */
+  readonly requiresExplicitSelection?: boolean;
   readonly run: (ctx: ScenarioContext) => Promise<void>;
 };
 
@@ -698,7 +700,7 @@ export function selectScenarios(opts: {
   return opts.scenarios.filter((scenario) =>
     opts.only && opts.only.length > 0
       ? opts.only.includes(scenario.name)
-      : scenario.tier !== "host-ingress"
+      : scenario.tier !== "host-ingress" && !scenario.requiresExplicitSelection
   );
 }
 

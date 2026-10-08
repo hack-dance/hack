@@ -257,7 +257,7 @@ test("unsupported build proof rejects unrelated diagnostics or accidental execut
   const execution = {
     ok: false,
     error: {
-      code: "E_UNEXPECTED",
+      code: "E_CONFIG_INVALID",
       message:
         "Native execution inputs are invalid or changed; prepare a fresh generation. Values omitted.",
     },
@@ -286,6 +286,12 @@ test("unsupported build proof rejects unrelated diagnostics or accidental execut
     expect(() => verify(changed, execution)).toThrow();
   }
   expect(() => verify(compiler, { ok: true })).toThrow();
+  expect(() =>
+    verify(compiler, {
+      ...execution,
+      error: { ...execution.error, code: "E_UNEXPECTED" },
+    })
+  ).toThrow();
   expect(() =>
     verify(compiler, {
       ...execution,

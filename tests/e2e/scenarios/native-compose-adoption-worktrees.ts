@@ -2,6 +2,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  open,
   readFile,
   rename,
   writeFile,
@@ -814,6 +815,32 @@ function createFixtureRuntime(
         query,
       ])
     ).trim();
+  const aliasSql = async (instance: Instance) =>
+    (
+      await probe([
+        "container",
+        "exec",
+        container(instance, "worker"),
+        "psql",
+        "-h",
+        "db-reader",
+        "-U",
+        "postgres",
+        "-d",
+        "fixture",
+        "-At",
+        "-c",
+        "SELECT value FROM marker WHERE id=1",
+      ])
+    ).trim();
+  const assertAliasSql = async (instance: Instance) => {
+    if (
+      instance.ownedNetwork &&
+      (await aliasSql(instance)) !== instance.marker
+    ) {
+      refused();
+    }
+  };
   const waitReady = async (instance: Instance) => {
     await waitForAdoptionFixtureSql({
       read: () => sql(instance, "SELECT 1"),
@@ -874,6 +901,7 @@ function createFixtureRuntime(
       refused();
     }
     await assertTopology(instance, true);
+    await assertAliasSql(instance);
     await checkWorkerArgv(instance);
     await checkHealthcheck(instance);
     if (instance.sourceMode === "canonical-generated") {
@@ -1137,6 +1165,293 @@ async function withholdPrimaryLocal(h: FixtureRuntime) {
   }
 
   return { localPath, localOriginal };
+}
+
+const FOREIGN_CANARY_LABEL = "io.hack.nc04.foreign-canary";
+const FOREIGN_CANARY_FORMAT = `{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Image}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"task":{{json (index .Config.Labels "${FOREIGN_CANARY_LABEL}")}},"native":{{json (index .Config.Labels "io.hack.native-config.version")}},"state":{{json .State.Status}},"networkMode":{{json .HostConfig.NetworkMode}},"networks":[{{$first := true}}{{range $name,$n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}}}{{end}}],"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"target":{{json $m.Destination}}}{{end}}]}`;
+type ForeignCanaryPin = {
+  readonly id: string;
+  readonly name: string;
+  readonly created: string;
+  readonly image: string;
+  readonly project: string;
+  readonly task: string;
+  readonly networkId: string;
+  readonly networkName: string;
+};
+
+/** The canary has a different project owner, one selected bridge, and no data volume. */
+export function assertAdoptionForeignCanaryObservation(opts: {
+  readonly pin: ForeignCanaryPin;
+  readonly state: "created" | "running" | "exited";
+  readonly row: unknown;
+}) {
+  const { pin, row, state } = opts;
+  if (!isRecord(row)) {
+    refused();
+  }
+  const validPin =
+    ID.test(pin.id) && IMAGE.test(pin.image) && CREATED.test(pin.created);
+  const endpoint = Array.isArray(row.networks) && row.networks[0];
+  if (
+    !validPin ||
+    row.id !== pin.id ||
+    row.name !== `/${pin.name}` ||
+    row.created !== pin.created ||
+    row.image !== pin.image ||
+    row.project !== pin.project ||
+    row.task !== pin.task ||
+    (row.native !== null && row.native !== "") ||
+    row.state !== state ||
+    row.networkMode !== pin.networkId ||
+    !Array.isArray(row.networks) ||
+    row.networks.length !== 1 ||
+    !isRecord(endpoint) ||
+    endpoint.name !== pin.networkName ||
+    !(
+      endpoint.id === pin.networkId ||
+      (state !== "running" && endpoint.id === "")
+    ) ||
+    JSON.stringify(row.mounts) !==
+      JSON.stringify([{ type: "tmpfs", target: "/var/lib/postgresql/data" }])
+  ) {
+    refused();
+  }
+}
+
+async function foreignCanaryRefusal(
+  h: FixtureRuntime,
+  gate: { pending: boolean }
+) {
+  const first = h.first;
+  if (!first.ownedNetwork || gate.pending) {
+    refused();
+  }
+  await h.check(first);
+  await h.check(h.second);
+  const baseline = h.anchors.get(first);
+  const bridge = baseline?.resources.network[0];
+  if (
+    !baseline ||
+    baseline.resources.network.length !== 1 ||
+    baseline.resources.container.length !== 2 ||
+    !bridge ||
+    !ID.test(bridge.id)
+  ) {
+    refused();
+  }
+  const name = `${first.name}-foreign-canary`;
+  const task = first.name;
+  const project = `${first.name}-foreign`;
+  const image = await h.probe([
+    "container",
+    "inspect",
+    "--format",
+    "{{.Image}}",
+    h.container(first, "db"),
+  ]);
+  if (!IMAGE.test(image)) {
+    refused();
+  }
+  const byName = await h.probe([
+    "container",
+    "ls",
+    "--all",
+    "--no-trunc",
+    "--filter",
+    `name=^/${name}$`,
+    "--format",
+    "{{.ID}}",
+  ]);
+  const byTask = await h.probe([
+    "container",
+    "ls",
+    "--all",
+    "--no-trunc",
+    "--filter",
+    `label=${FOREIGN_CANARY_LABEL}=${task}`,
+    "--format",
+    "{{.ID}}",
+  ]);
+  if (byName || byTask) {
+    refused();
+  }
+  const proofRoot = join(h.ctx.tempRoot, "foreign-canary-proof");
+  await mkdir(proofRoot, { mode: 0o700 });
+  const record = async (filename: string, value: unknown) => {
+    const handle = await open(join(proofRoot, filename), "wx", 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(value)}\n`);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    const directory = await open(proofRoot, "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  };
+  await record("intent.json", {
+    engine: h.engineId,
+    bridge: bridge.id,
+    source: baseline.source,
+    name,
+    task,
+    project,
+    image,
+  });
+  gate.pending = true;
+  let pin: ForeignCanaryPin | undefined;
+  let stage: "created" | "running" = "created";
+  const inspect = async (state: "created" | "running" | "exited") => {
+    if (!pin) {
+      refused();
+    }
+    await requirePreparedEngine(h);
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state,
+      row: object(
+        await h.probe([
+          "container",
+          "inspect",
+          "--format",
+          FOREIGN_CANARY_FORMAT,
+          pin.id,
+        ])
+      ),
+    });
+  };
+  const retire = async () => {
+    if (!pin) {
+      refused();
+    }
+    await inspect(stage);
+    if (stage === "running") {
+      await h.effect(["container", "stop", "--time", "5", pin.id]);
+      await inspect("exited");
+    }
+    await h.effect(["container", "rm", pin.id]);
+    await requirePreparedEngine(h);
+    if (
+      await h.probe([
+        "container",
+        "ls",
+        "--all",
+        "--no-trunc",
+        "--filter",
+        `label=${FOREIGN_CANARY_LABEL}=${task}`,
+        "--format",
+        "{{.ID}}",
+      ])
+    ) {
+      refused();
+    }
+    await record("retired.json", { id: pin.id, created: pin.created });
+    gate.pending = false;
+  };
+  try {
+    const created = await h.effect([
+      "container",
+      "create",
+      "--pull=never",
+      "--name",
+      name,
+      "--network",
+      bridge.id,
+      "--label",
+      `${PROJECT_LABEL}=${project}`,
+      "--label",
+      `${FOREIGN_CANARY_LABEL}=${task}`,
+      "--read-only",
+      "--tmpfs",
+      "/var/lib/postgresql/data:rw,noexec,nosuid,nodev,mode=700",
+      "--entrypoint",
+      "/bin/sh",
+      image,
+      "-c",
+      "while true; do sleep 1; done",
+    ]);
+    const id = created.stdout.trim();
+    if (!ID.test(id)) {
+      refused();
+    }
+    const createdAt = await h.probe([
+      "container",
+      "inspect",
+      "--format",
+      "{{.Created}}",
+      id,
+    ]);
+    if (!CREATED.test(createdAt)) {
+      refused();
+    }
+    const selectedPin = {
+      id,
+      name,
+      created: createdAt,
+      image,
+      project,
+      task,
+      networkId: bridge.id,
+      networkName: fixtureNetworkName(first),
+    };
+    await record("selected.json", selectedPin);
+    pin = selectedPin;
+    await inspect("created");
+    await h.effect(["container", "start", id]);
+    stage = "running";
+    await inspect("running");
+    await inspectAdoptionBridge({
+      instance: first,
+      id: bridge.id,
+      members: [...baseline.resources.container.map((row) => row.id), id],
+      probe: h.probe,
+    });
+    const before = JSON.stringify(await h.resources(first));
+    const sourceBefore = await source(first);
+    const sqlBefore = await h.sql(first, "SELECT value FROM marker WHERE id=1");
+    await requirePreparedEngine(h);
+    const denied = refusedPreview(
+      await h.cli(first, ["config", "adopt", "--dry-run", "--stop", "--json"])
+    );
+    await requirePreparedEngine(h);
+    if (
+      object(denied.stdout).complete !== false ||
+      before !== JSON.stringify(baseline.resources) ||
+      before !== JSON.stringify(await h.resources(first)) ||
+      sourceBefore !== baseline.source ||
+      sourceBefore !== (await source(first)) ||
+      sqlBefore !== first.marker ||
+      sqlBefore !== (await h.sql(first, "SELECT value FROM marker WHERE id=1"))
+    ) {
+      refused();
+    }
+    await h.assertNoState(first);
+    await h.check(h.second);
+    await inspect("running");
+    await inspectAdoptionBridge({
+      instance: first,
+      id: bridge.id,
+      members: [...baseline.resources.container.map((row) => row.id), id],
+      probe: h.probe,
+    });
+  } finally {
+    if (pin && gate.pending) {
+      await retire();
+    }
+  }
+  await h.check(first);
+  await h.check(h.second);
+  const restored = successful(
+    await h.cli(first, ["config", "adopt", "--dry-run", "--stop", "--json"])
+  );
+  if (object(restored.stdout).complete !== true) {
+    refused();
+  }
+  await h.assertNoState(first);
 }
 async function interruptFirstStop(h: FixtureRuntime) {
   const { ctx, engine, first, container, cli } = h;
@@ -1732,6 +2047,7 @@ async function runLiteralWorktrees(
   const h = createFixtureRuntime(
     await prepareFixtureInputs(ctx, { stringArgv, ownedNetwork })
   );
+  const foreignCanary = { pending: false };
   await runWithFixtureCleanup({
     run: async () => {
       for (const instance of [h.first, h.second]) {
@@ -1739,6 +2055,9 @@ async function runLiteralWorktrees(
       }
       await checkInheritedRefusal(h);
       const local = await withholdPrimaryLocal(h);
+      if (ownedNetwork) {
+        await foreignCanaryRefusal(h, foreignCanary);
+      }
       await interruptFirstStop(h);
       await recoverFirstAndRollback(h);
       await adoptSecondAndRollback(h);
@@ -1753,8 +2072,16 @@ async function runLiteralWorktrees(
         "two linked original SQL volumes, retained IDs, partial-stop recovery and isolated rollback verified"
       );
     },
-    cleanup: () =>
-      cleanupOwnedAdoptionFixture({ ...h, instances: [h.first, h.second] }),
+    cleanup: async () => {
+      // An ambiguous canary create or retirement must preserve the original data.
+      if (foreignCanary.pending) {
+        refused();
+      }
+      await cleanupOwnedAdoptionFixture({
+        ...h,
+        instances: [h.first, h.second],
+      });
+    },
     secondaryFailure: () =>
       ctx.log("secondary exact-owned cleanup failed; retain fixture evidence"),
   });
@@ -1786,7 +2113,7 @@ export const nativeComposeAdoptionNetworkWorktreesScenario: Scenario = {
   tier: "docker",
   preserveFixtureOnFailure: true,
   summary:
-    "one authored internal bridge and aliases retain original IDs and linked SQL through adoption and rollback",
+    "owned internal bridges retain original IDs, alias DNS and linked SQL; a foreign member refuses before adoption",
   run: (ctx) => runLiteralWorktrees(ctx, false, true),
 };
 

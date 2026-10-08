@@ -6,6 +6,7 @@ import { createNativeComposeProbe } from "../src/lib/native-compose-ownership.ts
 import {
   assertAdoptionBridgeObservation,
   assertAdoptionEndpointObservation,
+  assertAdoptionForeignCanaryObservation,
   assertAdoptionWorkerArgv,
   cleanupOwnedAdoptionFixture,
   createAdoptionFixtureProbe,
@@ -498,6 +499,68 @@ test("owned bridge inspection requests the logical Compose label consumed by the
     },
   });
   expect(inspected).toBe(1);
+});
+
+test("foreign bridge canary pins its distinct owner, network and tmpfs without a data volume", () => {
+  const pin = {
+    id,
+    name: `${instance.name}-foreign-canary`,
+    created: createdAt,
+    image: `sha256:${"b".repeat(64)}`,
+    project: `${instance.name}-foreign`,
+    task: instance.name,
+    networkId: "c".repeat(64),
+    networkName: `${instance.name}_private`,
+  };
+  const row = {
+    id,
+    name: `/${pin.name}`,
+    created: createdAt,
+    image: pin.image,
+    project: pin.project,
+    task: pin.task,
+    native: null,
+    state: "running",
+    networkMode: pin.networkId,
+    networks: [{ name: pin.networkName, id: pin.networkId }],
+    mounts: [{ type: "tmpfs", target: "/var/lib/postgresql/data" }],
+  };
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({ pin, state: "running", row })
+  ).not.toThrow();
+  for (const state of ["created", "exited"] as const) {
+    expect(() =>
+      assertAdoptionForeignCanaryObservation({
+        pin,
+        state,
+        row: {
+          ...row,
+          state,
+          networks: [{ name: pin.networkName, id: "" }],
+        },
+      })
+    ).not.toThrow();
+  }
+  for (const changed of [
+    { project: instance.name },
+    { task: "different-fixture" },
+    { image: `sha256:${"d".repeat(64)}` },
+    { native: "1" },
+    { networkMode: "e".repeat(64) },
+    { networks: [{ name: pin.networkName, id: "e".repeat(64) }] },
+    { networks: [...row.networks, { name: "foreign", id: pin.networkId }] },
+    { mounts: [{ type: "volume", target: "/var/lib/postgresql/data" }] },
+    { mounts: [] },
+    { state: "exited" },
+  ]) {
+    expect(() =>
+      assertAdoptionForeignCanaryObservation({
+        pin,
+        state: "running",
+        row: { ...row, ...changed },
+      })
+    ).toThrow(REFUSAL);
+  }
 });
 
 test("running original requires exact bridge ID and static aliases; stopped alias loss stays bounded", () => {

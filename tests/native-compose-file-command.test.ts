@@ -17,6 +17,69 @@ import {
   spawnFiles,
 } from "./helpers/native-compose-files.ts";
 
+test.each([
+  "resources",
+  "logging",
+  "build-secrets",
+] as const)("real compiler %s refusal uses the fixed input error before engine and hook effects", async (field) => {
+  const unsupported =
+    field === "build-secrets"
+      ? {
+          build: { context: ".", secrets: { value: FILE_CANARY } },
+          profiles: ["inactive"],
+        }
+      : { image: "synthetic/reader:1", [field]: { value: FILE_CANARY } };
+  const namespace = field === "build-secrets" ? "jobs" : "services";
+  const source = {
+    schema_version: 1,
+    name: "input-refusal",
+    services: { reader: { image: "synthetic/reader:1" } },
+    [namespace]: {
+      ...(namespace === "services"
+        ? { reader: { image: "synthetic/reader:1" } }
+        : {}),
+      unsupported,
+    },
+  };
+  const fixture = await fileCommandFixture(source);
+  const hook = join(fixture.parent, "hook-called");
+  await Bun.write(
+    join(fixture.root, ".hack/hack.project.json"),
+    JSON.stringify({
+      ...source,
+      host: {
+        up: {
+          before: [
+            {
+              name: "must-not-run",
+              command: {
+                exec: [
+                  process.execPath,
+                  "-e",
+                  `await Bun.write(${JSON.stringify(hook)},"called")`,
+                ],
+              },
+            },
+          ],
+        },
+      },
+    })
+  );
+  const result = await invokeFiles(fixture);
+  expect(result.code).not.toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    ok: false,
+    error: {
+      code: "E_CONFIG_INVALID",
+      message:
+        "Native execution inputs are invalid or changed; prepare a fresh generation. Values omitted.",
+    },
+  });
+  expect(result.stdout + result.stderr).not.toContain(FILE_CANARY);
+  expect(await Bun.file(join(fixture.parent, "requests")).exists()).toBe(false);
+  expect(await Bun.file(hook).exists()).toBe(false);
+});
+
 function sources(document: unknown): string[] {
   if (
     !(

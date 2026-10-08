@@ -310,7 +310,7 @@ export function verifyUnsupportedNativeProcessPolicy(opts: {
       isRecord(execution) &&
       execution.ok === false &&
       isRecord(execution.error) &&
-      execution.error.code === "E_UNEXPECTED" &&
+      execution.error.code === "E_CONFIG_INVALID" &&
       execution.error.message === EXECUTION_INPUT_REFUSAL,
     message: "Native execution must return its fixed redacted input refusal",
   });

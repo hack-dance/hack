@@ -285,7 +285,7 @@ export function verifyUnsupportedNativeBuild(opts: {
       isRecord(execution) &&
       execution.ok === false &&
       isRecord(execution.error) &&
-      execution.error.code === "E_UNEXPECTED" &&
+      execution.error.code === "E_CONFIG_INVALID" &&
       execution.error.message === INPUT_REFUSAL,
     message: "Build execution must return the fixed redacted input refusal",
   });

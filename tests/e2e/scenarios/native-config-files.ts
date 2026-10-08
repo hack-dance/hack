@@ -186,6 +186,54 @@ async function saved(root: string) {
   }
 }
 type Saved = Awaited<ReturnType<typeof saved>>;
+/** Private evidence only; this observation grants no material mutation authority. */
+export async function observeNativeFileFixtureMembers(
+  paths: readonly string[]
+) {
+  const selected = [...paths];
+  const result: {
+    readonly dev: number;
+    readonly ino: number;
+    readonly nlink: number;
+    readonly size: number;
+    readonly mode: number;
+    readonly digest: string;
+  }[] = [];
+  for (const path of selected) {
+    const before = await lstat(path);
+    requireValue(
+      before.isFile() &&
+        !before.isSymbolicLink() &&
+        before.nlink === 1 &&
+        before.size <= 1024 * 1024 &&
+        before.mode % 512 === 0o444
+    );
+    const bytes = new Uint8Array(
+      await Bun.file(path)
+        .slice(0, before.size + 1)
+        .arrayBuffer()
+    );
+    const after = await lstat(path);
+    requireValue(
+      after.isFile() &&
+        before.dev === after.dev &&
+        before.ino === after.ino &&
+        before.nlink === after.nlink &&
+        before.size === after.size &&
+        before.mode === after.mode &&
+        bytes.byteLength === before.size
+    );
+    result.push({
+      dev: before.dev,
+      ino: before.ino,
+      nlink: before.nlink,
+      size: before.size,
+      mode: before.mode,
+      digest: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+    });
+  }
+  return result;
+}
 function privateOutput(result: CliResult, selected?: Saved) {
   requireValue(!result.combined.includes(TOKEN_VALUE));
   if (selected) {
@@ -556,6 +604,8 @@ export const nativeConfigFileUnknownStopScenario: Scenario = {
     const fixture = await setup(ctx);
     ready(await fixture.invoke(fixture.root, ["up", "--detach", "--json"]));
     const selected = await verify(fixture, fixture.root, BINARY);
+    const memberPaths = selected.members.map((member) => member.source);
+    const originalMembers = await observeNativeFileFixtureMembers(memberPaths);
     const executable = Bun.which("docker");
     requireValue(executable !== null);
     const realDocker = await realpath(executable),
@@ -612,9 +662,10 @@ export const nativeConfigFileUnknownStopScenario: Scenario = {
           JSON.stringify(selected.reference) &&
         (await readFile(journalPath, "utf8")) === journal
     );
-    for (const member of selected.members) {
-      requireValue((await lstat(member.source)).mode % 512 === 0o444);
-    }
+    requireValue(
+      JSON.stringify(await observeNativeFileFixtureMembers(memberPaths)) ===
+        JSON.stringify(originalMembers)
+    );
     requireValue(
       JSON.stringify(await inventory(fixture.docker)) ===
         JSON.stringify(fixture.baseline)

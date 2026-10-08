@@ -129,8 +129,13 @@ admission, not an external identity anchor from before that capture. After a
 durable intent, the saved inode and digest refuse replacement. Cleanup progress
 retains the original Ready selectors and exact inventory. Pending writes refuse;
 retired paths require the intent's preceding phase and unchanged archived inode.
-This library selector creates no intent, connects no provider and has no CLI or
-frontend recovery activation.
+`graph native recovery-selection --run-id ID --json` exposes only the closed
+selection: run, original value-free Ready receipt, raw receipt/owner hashes and
+native host boot time. The receipt contains review hashes, workload readiness,
+resource IDs/images/networks and terminal observations; it contains no environment
+keys/values, command argv, source bytes or publication process/path metadata. The
+selector creates no intent and connects no provider. It grants no cleanup or
+frontend recovery authority.
 
 Guarded native cleanup checks its retained authority before and after every
 engine observation, removal request and admitted stop batch, including failed

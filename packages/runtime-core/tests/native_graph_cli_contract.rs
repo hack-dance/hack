@@ -420,6 +420,52 @@ fn public_native_control_requires_exact_action_and_never_adopts_absent_owner() {
     }
 }
 
+#[test]
+fn public_native_recovery_selection_is_closed_read_only_and_never_creates_missing_authority() {
+    let fixture = Fixture::new();
+    let run = "b".repeat(32);
+    let output = fixture.invoke(&[
+        "graph",
+        "native",
+        "recovery-selection",
+        "--run-id",
+        &run,
+        "--json",
+    ]);
+    assert!(!output.status.success());
+    #[cfg(target_os = "macos")]
+    assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_live_owner_recovery"));
+    #[cfg(not(target_os = "macos"))]
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("native_graph_foreground_unsupported")
+    );
+    fixture.assert_no_state();
+    for extra in [
+        vec!["--environment-stdin"],
+        vec!["--source-file", fixture.source_path()],
+        vec!["--action", "cleanup"],
+        vec!["--expect-review", "private-selection-canary"],
+        vec!["--timeout-seconds", "1"],
+        vec!["--run-id", &run],
+    ] {
+        let mut args = vec![
+            "graph",
+            "native",
+            "recovery-selection",
+            "--run-id",
+            &run,
+            "--json",
+        ];
+        args.extend(extra);
+        let output = fixture.invoke(&args);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_arguments"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-selection-canary"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("private-selection-canary"));
+        fixture.assert_no_state();
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn public_native_serve_refuses_platform_before_private_descriptor_or_source_read() {

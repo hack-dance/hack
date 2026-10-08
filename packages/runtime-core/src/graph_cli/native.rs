@@ -9,7 +9,7 @@ use std::{
 fn refused() -> CandidateError {
     CandidateError::new(
         "native_graph_arguments",
-        "Use graph native plan --source-file FILE, run|serve --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300], inspect|cleanup --run-id ID, or control --run-id ID --action status|cleanup; optional --json. Foreground serve/control require macOS. Native source and private envelopes require their exact kind/version; values omitted.",
+        "Use graph native plan --source-file FILE, run|serve --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300], inspect|cleanup|recovery-selection --run-id ID, or control --run-id ID --action status|cleanup; optional --json. Foreground serve/control and read-only recovery selection require macOS. Native source and private envelopes require their exact kind/version; values omitted.",
     )
 }
 fn hex(value: &str, len: usize) -> bool {
@@ -46,6 +46,25 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
                 index += 2;
             }
             _ => return Err(refused()),
+        }
+    }
+    if *action == "recovery-selection" {
+        if private || singles.len() != 1 {
+            return Err(refused());
+        }
+        let run = *singles
+            .get("--run-id")
+            .filter(|run| hex(run, 32))
+            .ok_or_else(refused)?;
+        #[cfg(target_os = "macos")]
+        {
+            return serde_json::to_value(native::foreground::recovery::select(candidate, run)?)
+                .map_err(|_| refused());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = run;
+            return Err(foreground_unavailable());
         }
     }
     if *action == "control" {

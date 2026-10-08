@@ -55,11 +55,23 @@ impl Fixture {
         }
     }
     fn ready(&self) -> Receipt {
+        let private = self.root.join("private-canary").exists();
         let metadata: EnvMetadata = serde_json::from_value(json!({
             "metadata_version":1,"overlay":null,"overlay_exists":false,
-            "workloads":{"web":{}},"inactive_scopes":[]
+            "workloads":{"web": if private {json!({"SELECTOR_SOURCE_KEY_CANARY":{"scope":"web","secret":true}})} else {json!({})}},"inactive_scopes":[]
         }))
         .unwrap();
+        let values = if private {
+            BTreeMap::from([(
+                "web".into(),
+                BTreeMap::from([(
+                    "SELECTOR_SOURCE_KEY_CANARY".into(),
+                    "selector-private-value-canary".into(),
+                )]),
+            )])
+        } else {
+            BTreeMap::new()
+        };
         let prepared = selection::select(
             &self.candidate,
             selection::Options {
@@ -73,9 +85,15 @@ impl Fixture {
             },
         )
         .unwrap()
-        .prepare(&self.candidate, &BTreeMap::new())
+        .prepare(&self.candidate, &values)
         .unwrap();
         let config = configuration(prepared.input(), OWNER).unwrap();
+        if private {
+            let public = config.containers()["web"].to_string();
+            assert!(public.contains("selector-argv-canary"));
+            assert!(public.contains("selector-literal-canary"));
+            assert!(!public.contains("selector-private-value-canary"));
+        }
         let mut receipt =
             Receipt::preparing(&config, OWNER, "12345678-abcd-abcd-abcd-123456789abc").unwrap();
         receipt.phase = Phase::ReadyObserved;
@@ -244,6 +262,84 @@ fn dead_complete_publication_selects_original_raw_hash_without_creating_authorit
             .len(),
         7
     );
+}
+
+#[cfg(feature = "environment-launcher")]
+#[test]
+fn selection_json_excludes_real_compiler_argv_environment_keys_values_and_owner_bytes() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join("private-canary"), b"fixture").unwrap();
+    fs::write(
+        fixture.root.join("project/.hack/hack.project.json"),
+        json!({
+            "schema_version":1,"name":"selector","services":{"web":{
+                "image":format!("sha256:{}", "d".repeat(64)),
+                "command":{"exec":["/bin/echo","selector-argv-canary","$EXACT"]},
+                "environment":{
+                    "SELECTOR_LITERAL_KEY_CANARY":{"literal":"selector-literal-canary"},
+                    "SELECTOR_DEST_KEY_CANARY":{"env_ref":"SELECTOR_SOURCE_KEY_CANARY"}
+                }
+            }}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fixture.dead();
+    let intent = fixture.intent();
+    assert!(
+        serde_json::to_string(&intent.publication)
+            .unwrap()
+            .contains(fixture.root.to_str().unwrap())
+    );
+    fixture.store(&intent);
+    let selected = select(&fixture.candidate, RUN).unwrap();
+    let wire = serde_json::to_value(&selected).unwrap();
+    let text = wire.to_string();
+    for canary in [
+        "selector-argv-canary",
+        "$EXACT",
+        "selector-literal-canary",
+        "selector-private-value-canary",
+        "SELECTOR_LITERAL_KEY_CANARY",
+        "SELECTOR_DEST_KEY_CANARY",
+        "SELECTOR_SOURCE_KEY_CANARY",
+        fixture.root.to_str().unwrap(),
+        "command",
+        "environment",
+        "process",
+        "publication",
+        "original",
+    ] {
+        assert!(
+            !text.contains(canary),
+            "selection leaked protected compiler/owner material"
+        );
+    }
+    assert_eq!(
+        wire.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [
+            "host_boot_micros",
+            "kind",
+            "owner_sha256",
+            "receipt",
+            "receipt_sha256",
+            "run",
+            "version"
+        ]
+    );
+    assert_eq!(wire["receipt"]["phase"], "ready-observed");
+    assert_eq!(
+        wire["receipt"]["resources"]["container:web"]["id"],
+        selected.receipt.resources["container:web"]
+            .id
+            .as_deref()
+            .unwrap()
+    );
+    assert!(!fixture.candidate.state_root.join("run/smolvm").exists());
 }
 
 #[test]

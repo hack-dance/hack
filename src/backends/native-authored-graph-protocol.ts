@@ -554,17 +554,41 @@ export function parseNativeAuthoredControl(
   if (
     action !== "status" ||
     !fields(result, ["outcome", "snapshot"]) ||
-    result.outcome !== "status" ||
-    !fields(result.snapshot, ["receipt", "observations"]) ||
-    !isRecord(result.snapshot.observations)
+    result.outcome !== "status"
   ) {
     return refused();
   }
-  const receipt = parseNativeAuthoredReceipt(result.snapshot.receipt);
-  const observations = result.snapshot.observations;
+  return parseNativeAuthoredSnapshot({
+    value: result.snapshot,
+    expectedReview: expected.review,
+    admitted: expected,
+  });
+}
+
+/** A direct native inspection remains runtime-authenticated; this parser binds its exact review and optional admitted membership. */
+export function parseNativeAuthoredSnapshot(opts: {
+  readonly value: unknown;
+  readonly expectedReview: NativeAuthoredReview;
+  readonly admitted?: NativeAuthoredReceipt;
+}): {
+  readonly receipt: NativeAuthoredReceipt;
+  readonly observations: Readonly<Record<string, Observation | null>>;
+} {
+  const value = opts.value;
   if (
-    nativeAuthoredReceiptBinding(receipt) !==
-      nativeAuthoredReceiptBinding(expected) ||
+    !(
+      fields(value, ["receipt", "observations"]) && isRecord(value.observations)
+    )
+  ) {
+    return refused();
+  }
+  const receipt = parseNativeAuthoredReceipt(value.receipt);
+  const observations = value.observations;
+  if (
+    JSON.stringify(receipt.review) !== JSON.stringify(opts.expectedReview) ||
+    (opts.admitted !== undefined &&
+      nativeAuthoredReceiptBinding(receipt) !==
+        nativeAuthoredReceiptBinding(opts.admitted)) ||
     Object.keys(observations).sort(utf8Order).join("\0") !==
       Object.keys(receipt.readiness).sort(utf8Order).join("\0")
   ) {

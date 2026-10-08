@@ -108,6 +108,159 @@ test("bounded native status draining cannot select another action or legacy comm
   }
 });
 
+test("native authored read draining admits only exact public plan and inspect requests", async () => {
+  const runtime = await fixture();
+  for (const args of [
+    [
+      "graph",
+      "native",
+      "plan",
+      "--source-file",
+      join(runtime.home, "source.json"),
+      "--json",
+    ],
+    ["graph", "native", "inspect", "--run-id", "a".repeat(32), "--json"],
+  ]) {
+    expect(
+      await invokeNativeRuntime({
+        runtime,
+        cwd: runtime.home,
+        args,
+        boundNativeAuthoredReadDrain: true,
+      })
+    ).toMatchObject({ args: ["--candidate-root", runtime.home, ...args] });
+  }
+  const absent = {
+    home: "/absent-native-read-home",
+    binary: "/absent-native-read-binary",
+  };
+  for (const args of [
+    ["graph", "native", "plan", "--source-file", "relative", "--json"],
+    ["graph", "native", "inspect", "--run-id", "../foreign", "--json"],
+    ["graph", "native", "cleanup", "--run-id", "a".repeat(32), "--json"],
+    ["graph", "inspect", "--run-id", "a".repeat(32), "--json"],
+    [
+      "graph",
+      "native",
+      "inspect",
+      "--run-id",
+      "a".repeat(32),
+      "--json",
+      "--json",
+    ],
+  ]) {
+    await expect(
+      invokeNativeRuntime({
+        runtime: absent,
+        cwd: absent.home,
+        args,
+        boundNativeAuthoredReadDrain: true,
+      })
+    ).rejects.toThrow("budget");
+  }
+  await expect(
+    invokeNativeRuntime({
+      runtime: absent,
+      cwd: absent.home,
+      args: [
+        "graph",
+        "native",
+        "inspect",
+        "--run-id",
+        "a".repeat(32),
+        "--json",
+      ],
+      privateInput: new Uint8Array([1]),
+      boundNativeAuthoredReadDrain: true,
+    })
+  ).rejects.toThrow("budget");
+});
+
+test.each([
+  "exit",
+  "abort",
+] as const)("authored read %s finishes while a descendant retains stdout and stderr", async (mode) => {
+  const runtime = await fixture();
+  const holding = join(runtime.home, "holding");
+  const heartbeat = join(runtime.home, "heartbeat");
+  const finished = join(runtime.home, "finished");
+  const keeper = `import {writeFileSync} from 'node:fs';
+writeFileSync(${JSON.stringify(holding)},'holding');
+for(let n=0;n<40;n++){writeFileSync(${JSON.stringify(heartbeat)},String(n));await Bun.sleep(50);}
+writeFileSync(${JSON.stringify(finished)},'finished');`;
+  await Bun.write(
+    runtime.binary,
+    `#!${process.execPath}
+import {spawn} from 'node:child_process';
+spawn(${JSON.stringify(process.execPath)},['--eval',${JSON.stringify(keeper)}],{detached:true,stdio:['ignore',1,2]}).unref();
+const deadline=performance.now()+1500;
+while(!(await Bun.file(${JSON.stringify(holding)}).exists())&&performance.now()<deadline)await Bun.sleep(10);
+if(!(await Bun.file(${JSON.stringify(holding)}).exists()))process.exit(2);
+console.log(JSON.stringify({ready:true}));
+${mode === "abort" ? "await Bun.sleep(60_000);" : "process.exit(0);"}
+`
+  );
+  const controller = new AbortController();
+  const started = performance.now();
+  const request = invokeNativeRuntime({
+    runtime,
+    cwd: runtime.home,
+    args: ["graph", "native", "inspect", "--run-id", "a".repeat(32), "--json"],
+    timeoutMs: 5000,
+    signal: controller.signal,
+    boundNativeAuthoredReadDrain: true,
+  });
+  void request.catch(() => undefined);
+  let failed: unknown;
+  let completed = false;
+  try {
+    if (mode === "abort") {
+      while (
+        !(await Bun.file(holding).exists()) &&
+        performance.now() - started < 1500
+      ) {
+        await Bun.sleep(10);
+      }
+      expect(await Bun.file(holding).exists()).toBe(true);
+      controller.abort();
+      await expect(request).rejects.toThrow("canceled");
+    } else {
+      expect(await request).toEqual({ ready: true });
+    }
+    expect(performance.now() - started).toBeLessThan(1500);
+    expect(await Bun.file(finished).exists()).toBe(false);
+    const before = Number(await Bun.file(heartbeat).text());
+    await Bun.sleep(150);
+    expect(Number(await Bun.file(heartbeat).text())).toBeGreaterThan(before);
+  } catch (error: unknown) {
+    failed = error;
+  } finally {
+    controller.abort();
+    await request.catch(() => undefined);
+    const deadline = performance.now() + 4000;
+    while (
+      !(await Bun.file(finished).exists()) &&
+      performance.now() < deadline
+    ) {
+      await Bun.sleep(10);
+    }
+    completed = await Bun.file(finished).exists();
+    if (!completed) {
+      roots.splice(roots.indexOf(runtime.home), 1);
+    }
+  }
+  if (!completed) {
+    throw new AggregateError(
+      failed === undefined ? [] : [failed],
+      "owned keeper completion is unconfirmed; fixture retained"
+    );
+  }
+  if (failed !== undefined) {
+    throw failed;
+  }
+  expect(await Bun.file(finished).text()).toBe("finished");
+});
+
 test("managed input uses stdin with EOF and is absent from argv and inherited env", async () => {
   const runtime = await fixture();
   const prior = process.env.HACK_RUNTIME_CLIENT_CANARY;

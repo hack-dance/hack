@@ -461,6 +461,35 @@ test("malformed admission arguments refuse without exposing their values", async
   );
 });
 
+test("runtime construction cannot forge factory-issued managed admission", async () => {
+  const opened = spyOn(fs, "open");
+  try {
+    const context = {
+      source: { projectRoot: root, assertFresh: async () => {} },
+      primary: null,
+      selection: {
+        projectRoot: root,
+        overlay: null,
+        inheritLocal: false,
+        declaredWorkloadNames: ["web"],
+      },
+      ci: process.env.CI,
+      mode: process.env.HACK_EXECUTION_MODE,
+    };
+    for (const token of [
+      undefined,
+      Symbol("legacy-adoption-managed-admission"),
+    ]) {
+      await refuses(async () =>
+        Reflect.construct(LegacyAdoptionManagedEnvAdmission, [context, token])
+      );
+    }
+    expect(opened.mock.calls).toHaveLength(0);
+  } finally {
+    opened.mockRestore();
+  }
+});
+
 test("supported unselected overlay is not parsed or decrypted", async () => {
   await writeFile(join(root, ".hack/hack.env.unselected.yaml"), CANARY);
   const source = await admission();

@@ -16,6 +16,8 @@ import {
 } from "./worktree-local-config.ts";
 
 const MANAGED_SUFFIX = /(?:\.local)?\.yaml$/;
+const CONSTRUCTION_TOKEN = Symbol("legacy-adoption-managed-admission");
+const ownedAdmissions = new WeakSet<object>();
 
 type Source = Extract<NativeConfigImportInputs, { readonly ok: true }>;
 type Context = {
@@ -54,8 +56,12 @@ function redact(error: unknown): never {
 export class LegacyAdoptionManagedEnvAdmission {
   readonly #context: Context;
 
-  private constructor(context: Context) {
+  private constructor(context: Context, token: symbol) {
+    if (token !== CONSTRUCTION_TOKEN) {
+      refuse();
+    }
     this.#context = Object.freeze(context);
+    ownedAdmissions.add(this);
     Object.freeze(this);
   }
 
@@ -117,7 +123,10 @@ export class LegacyAdoptionManagedEnvAdmission {
         ci: process.env.CI,
         mode: process.env.HACK_EXECUTION_MODE,
       };
-      const admission = new LegacyAdoptionManagedEnvAdmission(context);
+      const admission = new LegacyAdoptionManagedEnvAdmission(
+        context,
+        CONSTRUCTION_TOKEN
+      );
       await admission.assertRoot(selection);
       return admission;
     } catch (error: unknown) {
@@ -126,6 +135,9 @@ export class LegacyAdoptionManagedEnvAdmission {
   }
 
   get selection(): NativeProjectEnvSelectionOptions {
+    if (!ownedAdmissions.has(this)) {
+      refuse();
+    }
     return this.#context.selection;
   }
 
@@ -134,6 +146,9 @@ export class LegacyAdoptionManagedEnvAdmission {
     readonly signal?: AbortSignal;
   }): Promise<void> {
     try {
+      if (!ownedAdmissions.has(this)) {
+        refuse();
+      }
       const context = this.#context;
       if (
         !isRecord(opts) ||
@@ -230,4 +245,13 @@ export class LegacyAdoptionManagedEnvAdmission {
       }
     }
   }
+}
+
+/** Runtime identity guard: TypeScript constructor privacy alone grants no authority. */
+export function isOwnedLegacyAdoptionManagedEnvAdmission(
+  input: unknown
+): input is LegacyAdoptionManagedEnvAdmission {
+  return (
+    typeof input === "object" && input !== null && ownedAdmissions.has(input)
+  );
 }

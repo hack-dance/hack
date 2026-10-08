@@ -260,6 +260,44 @@ test("same JSON at a replacement inode cannot be retired using the previous sele
   expect(await load(opts)).toEqual(current);
 });
 
+test.each([
+  "replace",
+  "mutate",
+])("caller %s cannot substitute a newer selection during stale retirement", async (change) => {
+  const scope = await fixture();
+  const old = await save({ ...scope, record: record() });
+  await remove({ ...scope, expected: old, cleaned: cleaned() });
+  const current = await save({ ...scope, record: record("9".repeat(32)) });
+  const opts = {
+    ...scope,
+    expected: { record: old.record, identity: { ...old.identity } },
+    cleaned: cleaned(),
+  };
+  const pending = remove(opts);
+  if (change === "replace") {
+    opts.expected = {
+      record: current.record,
+      identity: { ...current.identity },
+    };
+  } else {
+    opts.expected.record = current.record;
+    Object.assign(opts.expected.identity, current.identity);
+  }
+  await expect(pending).rejects.toThrow("unsafe");
+  expect(await load(scope)).toEqual(current);
+});
+
+test("caller scope replacement cannot redirect publication after admission begins", async () => {
+  const scope = await fixture();
+  const other = await fixture();
+  const opts = { ...scope, record: record() };
+  const pending = save(opts);
+  Object.assign(opts, other);
+  const published = await pending;
+  expect(await load(scope)).toEqual(published);
+  expect(await load(other)).toBeNull();
+});
+
 test("changed candidate or project directory identity refuses before artifact retirement", async () => {
   for (const selected of ["nativeHome", "projectDir"] as const) {
     const opts = await fixture();

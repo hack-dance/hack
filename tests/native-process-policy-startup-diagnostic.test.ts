@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { expectExit } from "./e2e/harness.ts";
 import {
   captureNativeProcessPolicyStartupDiagnostic,
   isKnownUncertainProcessPolicyStartup,
@@ -197,7 +198,7 @@ test("only exact uncertain startup opts into read-only diagnostic", async () => 
         effects += 1;
       },
     })
-  ).toBe("not-applicable");
+  ).toEqual({ status: "not-applicable" });
   expect(effects).toBe(0);
 });
 
@@ -350,7 +351,11 @@ test("diagnostic and recording errors cannot replace original failed startup", a
       recorded += 1;
     },
   });
-  expect(status).toBe("unavailable");
+  expect(status).toEqual({
+    status: "unavailable",
+    stage: "first-scan",
+    reason: "external_store_or_probe",
+  });
   expect(recorded).toBe(0);
   expect(uncertain.exitCode).toBe(1);
   expect(JSON.stringify(status)).not.toContain("secret");
@@ -369,5 +374,46 @@ test("diagnostic and recording errors cannot replace original failed startup", a
         throw new Error("secret file failure");
       },
     })
-  ).toBe("unavailable");
+  ).toEqual({
+    status: "unavailable",
+    stage: "record",
+    reason: "external_store_or_probe",
+  });
+});
+
+test("own failed predicate is allowlisted while original startup still fails", async () => {
+  const selected = fixture({ pendingOperation: "down" });
+  const outcome = await recordKnownUncertainProcessPolicyStartup({
+    result: uncertain,
+    projectRoot: "/fixture",
+    expectedEngineId: engine,
+    capture: (opts) =>
+      captureNativeProcessPolicyStartupDiagnostic({
+        ...opts,
+        dependencies: selected.dependencies,
+      }),
+    record: async () => {
+      throw new Error("must not record");
+    },
+  });
+  expect(outcome).toEqual({
+    status: "unavailable",
+    stage: "saved-selection",
+    reason: "diagnostic_pending_selection",
+  });
+  expect(uncertain.exitCode).toBe(1);
+  expect(selected.commands).toHaveLength(0);
+  expect(() =>
+    expectExit({
+      result: {
+        ...uncertain,
+        command: "hack --profile exercise up --detach --json",
+        stderr: "",
+        combined: uncertain.stdout,
+        durationMs: 1,
+      },
+      codes: [0],
+      message: "Native --profile must succeed",
+    })
+  ).toThrow("expected exit 0, got 1");
 });

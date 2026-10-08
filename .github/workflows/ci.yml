@@ -270,6 +270,8 @@ jobs:
           bun run build:config-compiler
       - name: Verify literal argv through real compiler and Compose normalization
         run: HACK_TEST_COMPOSE_CONFIG=1 bun test tests/native-compose-renderer-config.test.ts --test-name-pattern '^legacy dollar-pair argv matches real compiler plan and Compose normalization$'
+      - name: Verify Compose string argv through real compiler and Compose normalization
+        run: HACK_TEST_COMPOSE_CONFIG=1 bun test tests/native-compose-renderer-config.test.ts --test-name-pattern '^(Compose string words match real compiler and renderer exec argv for selected profiles|raw unpaired dollars cannot become accepted pairs after Compose word splitting)$'
       - name: Run local and Docker E2E
         env:
           HACK_E2E_CLI_BIN: ${{ github.workspace }}/dist/hack

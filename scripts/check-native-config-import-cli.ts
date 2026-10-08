@@ -40,10 +40,21 @@ const workloads = {
     working_dir: "/app",
     environment: { TOKEN: canary, EMPTY: "" },
   },
+  string: {
+    image: "example/string:1",
+    command: '  /bin/echo  "two words" "" a\\ b $$HOME  ',
+    entrypoint: "",
+  },
+  defaults: {
+    image: "example/defaults:1",
+    command: null,
+    entrypoint: null,
+  },
   inactive: {
     image: "example/optional:1",
     profiles: ["qa"],
     entrypoint: ["optional", "$$HOME"],
+    command: "echo 'later word' $$INACTIVE",
     environment: [`TOKEN=${canary}`],
   },
 };
@@ -75,6 +86,12 @@ try {
   const inactive = (
     preview.candidate.services as Record<string, Record<string, unknown>>
   ).inactive;
+  const string = (
+    preview.candidate.services as Record<string, Record<string, unknown>>
+  ).string;
+  const defaults = (
+    preview.candidate.services as Record<string, Record<string, unknown>>
+  ).defaults;
   assert(
     JSON.stringify(selected?.command) ===
       JSON.stringify({
@@ -83,6 +100,24 @@ try {
       JSON.stringify(inactive?.entrypoint) ===
         JSON.stringify({ exec: ["optional", "$HOME"] }),
     "real compiler accepts literal dollar argv in selected and inactive services"
+  );
+  assert(
+    JSON.stringify(string?.command) ===
+      JSON.stringify({
+        exec: ["/bin/echo", "two words", "", "a b", "$HOME"],
+      }) &&
+      JSON.stringify(string?.entrypoint) === JSON.stringify({ exec: [] }) &&
+      JSON.stringify(inactive?.command) ===
+        JSON.stringify({ exec: ["echo", "later word", "$INACTIVE"] }) &&
+      !Object.hasOwn(defaults ?? {}, "command") &&
+      !Object.hasOwn(defaults ?? {}, "entrypoint") &&
+      preview.report.fields.some(
+        (field) =>
+          field.pointer === "/services/string/command" &&
+          field.status === "normalized" &&
+          field.code === "compose_string_exec_argv"
+      ),
+    "real compiler accepts bounded Compose string words and preserves explicit image defaults"
   );
   assert(
     !JSON.stringify(preview).includes(canary),
@@ -116,6 +151,44 @@ try {
   );
   const usage = await cli([]);
   assert(usage.exit !== 0 && usage.report.ok === false, "non-dry-run refuses");
+  await Bun.write(
+    join(authoredDir, "docker-compose.yml"),
+    JSON.stringify({
+      name: "fixture",
+      services: {
+        web: { image: "example/web:1", command: "echo a && true" },
+      },
+    })
+  );
+  const ambiguousString = await cli(["--dry-run"]);
+  assert(
+    ambiguousString.exit !== 0 &&
+      fields(ambiguousString.report).some(
+        (field) =>
+          field.pointer === "/services/web/command" &&
+          field.code === "invalid_or_ambiguous_value"
+      ),
+    "unquoted shell control syntax refuses before adoption or compiler fallback"
+  );
+  await Bun.write(
+    join(authoredDir, "docker-compose.yml"),
+    JSON.stringify({
+      name: "fixture",
+      services: {
+        web: { image: "example/web:1", command: "echo $\\$AMBIENT" },
+      },
+    })
+  );
+  const synthesizedDollar = await cli(["--dry-run"]);
+  assert(
+    synthesizedDollar.exit !== 0 &&
+      fields(synthesizedDollar.report).some(
+        (field) =>
+          field.pointer === "/services/web/command" &&
+          field.code === "invalid_or_ambiguous_value"
+      ),
+    "raw unpaired dollars refuse before word splitting can synthesize a pair"
+  );
   await Bun.write(
     join(authoredDir, "docker-compose.yml"),
     JSON.stringify({

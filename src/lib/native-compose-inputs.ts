@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { NativeConfigCompilerError } from "./native-config-compiler.ts";
+import { assertNativeComposeFileSubset } from "./native-compose-file-subset.ts";
+import {
+  NativeConfigCompilerError,
+  type NativeConfigPlanResult,
+} from "./native-config-compiler.ts";
 import { authoredFilePlanningRequired } from "./native-file-plan-protocol.ts";
 import {
   type NativePreparedProject,
@@ -70,13 +74,41 @@ export function nativeComposeSourceRevision(
  * CLI report or engine labels. Rechecking detects changes; it does not freeze
  * unrelated editors or provide an atomic snapshot across files.
  */
-export async function acquireNativeComposeInputs(opts: {
+type NativeComposeInputSelection = {
   readonly projectRoot: string;
   readonly profiles?: readonly string[];
   readonly explicitOverlay?: string | null;
   readonly explicitDomain?: string;
   readonly signal?: AbortSignal;
+};
+export type NativeComposeExecutionInputs = {
+  readonly result: Extract<NativeConfigPlanResult, { readonly ok: true }>;
+  readonly inputRevision: string;
+  readonly assertFresh: () => Promise<void>;
+  readonly resolveManagedValues: () => Promise<
+    Readonly<Record<string, Readonly<Record<string, string>>>>
+  >;
+  readonly resolveHostValues: (
+    name: string
+  ) => Promise<Readonly<Record<string, string>>>;
+};
+export async function acquireNativeComposeInputs(
+  opts: NativeComposeInputSelection
+): Promise<NativeComposeExecutionInputs> {
+  return await acquireInputs({ selection: opts, filePolicy: "refuse" });
+}
+/** Symbolic file planning for the command owner; it neither acquires files nor stages material. */
+export async function acquireNativeComposeFilePlanningInputs(
+  opts: NativeComposeInputSelection
+): Promise<NativeComposeExecutionInputs> {
+  return await acquireInputs({ selection: opts, filePolicy: "plan" });
+}
+async function acquireInputs(input: {
+  readonly selection: NativeComposeInputSelection;
+  readonly filePolicy: "refuse" | "plan";
 }) {
+  const opts = input.selection;
+  const filePolicy = input.filePolicy;
   const projectRoot = opts.projectRoot;
   const signal = opts.signal;
   const selection: NativeProjectSelection = {
@@ -94,10 +126,13 @@ export async function acquireNativeComposeInputs(opts: {
   }
   const resolved = prepared.result;
   if (authoredFilePlanningRequired(prepared.input)) {
-    throw new NativeConfigCompilerError(
-      "E_NATIVE_PROJECT_UNSUPPORTED",
-      "Native file inputs require a qualified private material owner. No private values, hooks or engine operations ran. Values omitted."
-    );
+    if (filePolicy === "refuse") {
+      throw new NativeConfigCompilerError(
+        "E_NATIVE_PROJECT_UNSUPPORTED",
+        "Native file inputs require a qualified private material owner. No private values, hooks or engine operations ran. Values omitted."
+      );
+    }
+    assertNativeComposeFileSubset(prepared.input);
   }
   const declared = resolved.declared_workloads;
   if (!declared) {

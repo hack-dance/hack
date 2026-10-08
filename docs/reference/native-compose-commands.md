@@ -116,7 +116,11 @@ projection and retained literal build declarations that were saved. Compose,
 owned image admission and readiness checks still run, as do authored
 finite hooks. This avoids recreating healthy containers solely because of a new
 generation label. Changed inputs, stopped instances and explicit `restart` retain
-the new-generation path. Routed warm `up` remains outside this reuse slice.
+the new-generation path. Routed projects and file material remain outside this
+reuse slice. A file-enabled `up` acquires a fresh private snapshot even when the
+authored declarations are unchanged; file bytes may have changed independently
+of the authored input revision. Its previous material retires only after the
+owned replacement and final absence checks succeed.
 
 The compiler's owned bridge declarations and workload attachment maps are lowered
 without adding an outbound default attachment to an explicit selection. Custom
@@ -204,6 +208,17 @@ hook intent remains. `down --recover` can recover a verified dead CLI mutation
 owner; it cannot prove hook process ownership, clear hook uncertainty or rerun a
 hook. Explicit recovery for interrupted hooks remains a later lifecycle slice.
 An uncertain hook also prevents routing claim retirement after an owned stop.
+It also prevents private file retirement. Image-only file configs/secrets use
+symbolic planning before hooks, then acquire and stage selected bytes only after
+known before-hook completion. Private material arms durably before Compose; known
+child reaping is separate from workload readiness. Saved stop and replacement
+retire exact old snapshots before committing the generation receipt, after fresh
+owned-container and global snapshot-mount absence on the saved engine. Failure
+retains the exact pending generation, even if material already retired before a
+later engine or ownership check failed. `down --recover` skips source/decryption
+but cannot clear unknown hooks or an armed file journal without original-attempt
+child reaping. File one-off `run`, writable/custom ownership grants and authored
+build/file combinations remain refused. See [file inputs](native-config-files.md).
 Normal `down` runs `host.down.before` before stopping the owned engine and
 `host.down.after` only after fresh exact container, network and proxy dispatch
 absence. Hostname claims remain held through after hooks. A hook failure returns

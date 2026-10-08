@@ -3,10 +3,12 @@ import { isRecord } from "./guards.ts";
 import { prepareNativeComposeFiniteHooks } from "./native-compose-after-hooks.ts";
 import type { NativeComposeGeneration } from "./native-compose-generation.ts";
 import { selectNativeComposeDownHooks } from "./native-compose-host-contract.ts";
-import { acquireNativeComposeInputs } from "./native-compose-inputs.ts";
+import { acquireNativeComposeFilePlanningInputs } from "./native-compose-inputs.ts";
 
 const EXTENSION = "x-hack-native-down-hooks";
-type Inputs = Awaited<ReturnType<typeof acquireNativeComposeInputs>>;
+type Inputs = Awaited<
+  ReturnType<typeof acquireNativeComposeFilePlanningInputs>
+>;
 type Binding = {
   readonly version: 1;
   readonly inputRevision: string;
@@ -108,7 +110,7 @@ export async function prepareNativeComposeDownHooks(opts: {
   readonly assertAbsent: () => Promise<void>;
 }) {
   const acquire = () =>
-    acquireNativeComposeInputs({
+    acquireNativeComposeFilePlanningInputs({
       projectRoot: opts.projectRoot,
       profiles: opts.binding.profiles,
       explicitOverlay: opts.binding.explicitOverlay,

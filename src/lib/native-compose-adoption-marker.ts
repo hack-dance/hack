@@ -71,6 +71,7 @@ export async function inspectLegacyComposeAdoptionSelection(opts: {
   readonly projectRoot: string;
 }): Promise<LegacyComposeAdoptionSelection | null> {
   const directories: HeldDirectory[] = [];
+  let inputAccessFailure = false;
   try {
     if (
       !isRecord(opts) ||
@@ -92,7 +93,7 @@ export async function inspectLegacyComposeAdoptionSelection(opts: {
       // A non-directory ancestor is an input access failure, never absence or
       // permission to search an ancestor project. Preserve the selector refusal.
       if (hasCode(error, "ENOTDIR")) {
-        throw new LegacyComposeAdoptionSelectionError("input-access");
+        inputAccessFailure = true;
       }
       throw error;
     }
@@ -114,9 +115,9 @@ export async function inspectLegacyComposeAdoptionSelection(opts: {
       refuse();
     }
     return status;
-  } catch (error: unknown) {
-    if (error instanceof LegacyComposeAdoptionSelectionError) {
-      throw error;
+  } catch {
+    if (inputAccessFailure) {
+      throw new LegacyComposeAdoptionSelectionError("input-access");
     }
     refuse();
   } finally {

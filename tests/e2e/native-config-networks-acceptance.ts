@@ -129,6 +129,62 @@ export function nativeNetworkFixtureStateRefused(value: unknown): boolean {
       "Native Compose state is unsafe or changed; values omitted. Inspect owned state before recovery."
   );
 }
+
+/** Docker inspect may permute Mounts; every field and mount entry must survive. */
+export function nativeNetworkFixturePreservedContainerMatches(opts: {
+  readonly before: string;
+  readonly after: string;
+}): boolean {
+  const normalize = (text: string): Record<string, unknown> | null => {
+    if (Buffer.byteLength(text) > OUTPUT_LIMIT) {
+      return null;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return null;
+    }
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length !== 1 ||
+      !isRecord(parsed[0]) ||
+      typeof parsed[0].Id !== "string" ||
+      !ID.test(parsed[0].Id) ||
+      !Array.isArray(parsed[0].Mounts)
+    ) {
+      return null;
+    }
+    const mounts: {
+      readonly destination: string;
+      readonly value: Record<string, unknown>;
+    }[] = [];
+    const destinations = new Set<string>();
+    for (const mount of parsed[0].Mounts) {
+      if (
+        !isRecord(mount) ||
+        typeof mount.Destination !== "string" ||
+        mount.Destination.length === 0 ||
+        destinations.has(mount.Destination)
+      ) {
+        return null;
+      }
+      destinations.add(mount.Destination);
+      mounts.push({ destination: mount.Destination, value: mount });
+    }
+    mounts.sort((left, right) =>
+      left.destination.localeCompare(right.destination)
+    );
+    return { ...parsed[0], Mounts: mounts.map((mount) => mount.value) };
+  };
+  const before = normalize(opts.before);
+  const after = normalize(opts.after);
+  return (
+    before !== null &&
+    after !== null &&
+    JSON.stringify(before) === JSON.stringify(after)
+  );
+}
 function sameNames(value: unknown, expected: readonly string[]): boolean {
   return (
     Array.isArray(value) &&
@@ -2097,7 +2153,10 @@ export const nativeConfigNetworksScenario: Scenario = {
         );
         for (const [id, before] of selected.preserved) {
           requireValue(
-            (await docker(["container", "inspect", id])) === before,
+            nativeNetworkFixturePreservedContainerMatches({
+              before,
+              after: await docker(["container", "inspect", id]),
+            }),
             "Stopped user Caddy containers must remain unchanged"
           );
         }

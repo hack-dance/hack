@@ -21,6 +21,7 @@ import {
   nativeNetworkFixtureHasNoPublication,
   nativeNetworkFixtureInventory,
   nativeNetworkFixtureNetworkMatches,
+  nativeNetworkFixturePreservedContainerMatches,
   nativeNetworkFixtureProtocolMatches,
   nativeNetworkFixtureRefusalDiagnostic,
   nativeNetworkFixtureShim,
@@ -30,6 +31,63 @@ import {
   provisionNativeNetworkFixtureComposePlugin,
   runNativeNetworkFixtureCommand,
 } from "./e2e/native-config-networks-acceptance.ts";
+
+test("preserved user container comparison permits only mount ordering", () => {
+  const mount = {
+    Type: "bind",
+    Source: "/fixture/source",
+    Destination: "/source",
+    RW: false,
+  };
+  const volume = {
+    Type: "volume",
+    Name: "fixture-volume",
+    Destination: "/data",
+    RW: true,
+  };
+  const value = {
+    Id: "a".repeat(64),
+    Created: "fixed-birth",
+    State: { Status: "exited" },
+    Mounts: [mount, volume],
+  };
+  const before = JSON.stringify([value]);
+  expect(
+    nativeNetworkFixturePreservedContainerMatches({
+      before,
+      after: JSON.stringify([{ ...value, Mounts: [volume, mount] }]),
+    })
+  ).toBe(true);
+  for (const after of [
+    { ...value, Id: "b".repeat(64) },
+    { ...value, Created: "other-birth" },
+    { ...value, State: { Status: "running" } },
+    { ...value, Mounts: [volume] },
+    { ...value, Mounts: [volume, { ...mount, Source: "/other-source" }] },
+    { ...value, Mounts: [volume, { ...mount, RW: true }] },
+    { ...value, Mounts: [volume, mount, mount] },
+    { ...value, Mounts: [volume, { ...mount, Destination: "" }] },
+    { ...value, unexpected: true },
+  ]) {
+    expect(
+      nativeNetworkFixturePreservedContainerMatches({
+        before,
+        after: JSON.stringify([after]),
+      })
+    ).toBe(false);
+  }
+  for (const after of [
+    "invalid",
+    "null",
+    "[]",
+    JSON.stringify([value, value]),
+    JSON.stringify([{ Id: value.Id, Mounts: null }]),
+  ]) {
+    expect(
+      nativeNetworkFixturePreservedContainerMatches({ before, after })
+    ).toBe(false);
+  }
+});
 
 test("foreign endpoint admission requires the structured redacted state error", () => {
   const message =

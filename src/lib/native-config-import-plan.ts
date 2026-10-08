@@ -5,6 +5,7 @@ import {
   importPointer,
   parseImportDocument,
 } from "./native-config-import-parser.ts";
+import { mapLegacyComposeStorage } from "./native-config-import-storage.ts";
 import { normalizeEnvConfigName } from "./project.ts";
 
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -124,9 +125,10 @@ function mappingFields(
  * Completeness here describes mapping coverage; the preview owner separately requires
  * authoritative compiler validation before exposing a complete public preview.
  */
-export function mapLegacyNativeImport(opts: {
+function mapLegacyNativeInput(opts: {
   readonly configText: string;
   readonly composeText: string;
+  readonly storageAdoption: boolean;
 }): NativeImportPlan {
   const config = parseImportDocument({
     text: opts.configText,
@@ -166,7 +168,91 @@ export function mapLegacyNativeImport(opts: {
   mapOverlay(context);
   mapWorktree(context);
   mapServices({ source: compose.value.services, candidate, mark, refuse });
+  if (opts.storageAdoption) {
+    mapStorageCandidate({
+      config: config.value,
+      compose: compose.value,
+      candidate,
+      mark,
+      refuse,
+    });
+  }
   return nativeImportResult({ fields, candidate });
+}
+
+/** Read-only preview keeps named storage refused until a separate verified adoption owner binds it. */
+export function mapLegacyNativeImport(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({
+    configText: opts.configText,
+    composeText: opts.composeText,
+    storageAdoption: false,
+  });
+}
+
+/** Private static candidate with the same closed mappings plus strictly qualified local named storage. No ownership grant. */
+export function mapLegacyNativeStorageAdoption(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({
+    configText: opts.configText,
+    composeText: opts.composeText,
+    storageAdoption: true,
+  });
+}
+
+function mapStorageCandidate(
+  opts: MappingContext & { readonly compose: Record<string, unknown> }
+) {
+  const storage = mapLegacyComposeStorage({
+    config: opts.config,
+    compose: opts.compose,
+  });
+  if (!storage) {
+    opts.refuse(
+      "compose",
+      "/volumes",
+      "explicit_identity_and_owned_storage_required"
+    );
+    return;
+  }
+  opts.candidate.storage = Object.fromEntries(
+    storage.intent.volumes.map((volume) => [
+      volume.storage,
+      { kind: "persistent", scope: "worktree" },
+    ])
+  );
+  for (const [pointer, target] of storage.accepted) {
+    opts.mark(
+      "compose",
+      pointer,
+      target
+        .replace("/existing_storage", "/storage")
+        .replace("/existing_mounts/", "/services/") +
+        (target.startsWith("/existing_mounts/") ? "/mounts" : ""),
+      "exact",
+      true
+    );
+  }
+  if (!isRecord(opts.candidate.services)) {
+    return;
+  }
+  for (const [name, service] of Object.entries(opts.candidate.services)) {
+    if (!isRecord(service)) {
+      continue;
+    }
+    const mounts = storage.mounts.filter((mount) => mount.service === name);
+    if (mounts.length) {
+      service.mounts = mounts.map((mount) => ({
+        storage: mount.storage,
+        target: mount.target,
+        access: mount.readOnly ? "read-only" : "read-write",
+      }));
+    }
+  }
 }
 
 function overlayEntries(opts: MappingContext) {

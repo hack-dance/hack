@@ -428,7 +428,12 @@ async function engine(probe: Probe) {
   );
   return row.id;
 }
-async function snapshot(opts: {
+/**
+ * Private read-only observation reused by the durable adoption owner. It grants
+ * no mutation authority: that owner must first validate its saved source/binding
+ * anchors and compare every returned fact to the original verified acquisition.
+ */
+export async function inspectLegacyComposeAdoptionResources(opts: {
   readonly root: string;
   readonly intent: LegacyComposeStorageIntent;
   readonly signal?: AbortSignal;
@@ -512,6 +517,15 @@ export type LegacyComposeAdoptionBinding = {
     readonly projectRoot: string;
     readonly signal?: AbortSignal;
   }) => Promise<LegacyComposeVerifiedBinding>;
+  /** Same bounded raw-source acquisition and binding, exclusively for private durable preparation. */
+  readonly resolvePreparationInputs: (opts: {
+    readonly projectRoot: string;
+    readonly signal?: AbortSignal;
+  }) => Promise<{
+    readonly configText: string;
+    readonly composeText: string;
+    readonly binding: LegacyComposeVerifiedBinding;
+  }>;
 };
 function translate(error: unknown, signal?: AbortSignal): never {
   cancelled(signal);
@@ -566,7 +580,12 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
     if (!intent) {
       refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
     }
-    const baseline = await snapshot({ root, intent, signal, timeoutMs });
+    const baseline = await inspectLegacyComposeAdoptionResources({
+      root,
+      intent,
+      signal,
+      timeoutMs,
+    });
     freezeImportValue(baseline);
     const assertFresh = async (current: {
       readonly projectRoot: string;
@@ -587,7 +606,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           refuse("E_LEGACY_COMPOSE_BINDING_CHANGED");
         }
         await source.assertFresh({ signal: currentSignal });
-        const observed = await snapshot({
+        const observed = await inspectLegacyComposeAdoptionResources({
           root,
           intent,
           signal: currentSignal,
@@ -618,9 +637,25 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
         await assertFresh(current);
         return baseline;
       },
+      resolvePreparationInputs: async (current) => {
+        await assertFresh(current);
+        const result = {
+          configText: source.configText,
+          composeText: source.composeText,
+          binding: baseline,
+        };
+        for (const key of ["configText", "composeText", "binding"]) {
+          Object.defineProperty(result, key, { enumerable: false });
+        }
+        return Object.freeze(result);
+      },
     };
     freezeImportValue(result.report);
-    for (const key of ["assertFresh", "resolveBinding"]) {
+    for (const key of [
+      "assertFresh",
+      "resolveBinding",
+      "resolvePreparationInputs",
+    ]) {
       Object.defineProperty(result, key, { enumerable: false });
     }
     await assertFresh({ projectRoot: root, signal });

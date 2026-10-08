@@ -1,7 +1,7 @@
 #![cfg(feature = "native-stream-relay")]
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     net::{Shutdown, TcpListener},
     os::{
         fd::AsRawFd,
@@ -209,12 +209,105 @@ fn idle_streams_expire_and_cleanup_preserves_replaced_path() {
     let mut relay = Relay::start(target.local_addr().unwrap().port(), 100);
     let mut client = relay.connect();
     let (_upstream, _) = target.accept().unwrap();
-    assert_eq!(client.read(&mut [0]).unwrap(), 0);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let result = read_before_deadline(deadline, Instant::now, |remaining| {
+        client.set_read_timeout(Some(remaining))?;
+        client.read(&mut [0])
+    });
+    assert_eq!(result.unwrap(), 0);
     assert!(relay.child.try_wait().unwrap().is_none());
     fs::rename(&relay.socket, relay.root.join("original.sock")).unwrap();
     fs::write(&relay.socket, b"replacement").unwrap();
     relay.stop();
     assert_eq!(fs::read(&relay.socket).unwrap(), b"replacement");
+}
+
+// Signals may interrupt this read; retries must not extend its original timeout.
+fn read_before_deadline(
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut read: impl FnMut(Duration) -> io::Result<usize>,
+) -> io::Result<usize> {
+    loop {
+        let remaining = deadline
+            .checked_duration_since(now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "read deadline elapsed"))?;
+        match read(remaining) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
+}
+
+#[test]
+fn interrupted_read_retries_with_only_the_remaining_deadline() {
+    let start = Instant::now();
+    let mut times = [0, 25, 75].into_iter();
+    let mut timeouts = Vec::new();
+    let result = read_before_deadline(
+        start + Duration::from_millis(100),
+        || start + Duration::from_millis(times.next().unwrap()),
+        |remaining| {
+            timeouts.push(remaining);
+            if timeouts.len() < 3 {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            } else {
+                Ok(0)
+            }
+        },
+    );
+    assert_eq!(result.unwrap(), 0);
+    assert_eq!(timeouts, [100, 75, 25].map(Duration::from_millis).to_vec());
+    assert!(times.next().is_none());
+}
+
+#[test]
+fn interrupted_reads_cannot_restart_an_expired_deadline() {
+    let start = Instant::now();
+    let mut times = [0, 40, 100].into_iter();
+    let mut reads = 0;
+    let error = read_before_deadline(
+        start + Duration::from_millis(100),
+        || start + Duration::from_millis(times.next().unwrap()),
+        |_| {
+            reads += 1;
+            Err(io::Error::from(io::ErrorKind::Interrupted))
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(reads, 2);
+    assert!(times.next().is_none());
+}
+
+#[test]
+fn read_deadline_preserves_success_and_non_interrupted_errors() {
+    let start = Instant::now();
+    assert_eq!(
+        read_before_deadline(start + Duration::from_secs(1), || start, |_| Ok(1)).unwrap(),
+        1
+    );
+    for kind in [
+        io::ErrorKind::WouldBlock,
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::TimedOut,
+    ] {
+        let mut reads = 0;
+        let error = read_before_deadline(
+            start + Duration::from_secs(1),
+            || start,
+            |_| {
+                reads += 1;
+                assert_eq!(reads, 1, "only Interrupted may retry");
+                Err(io::Error::new(kind, "original read error"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), kind);
+        assert_eq!(error.to_string(), "original read error");
+        assert_eq!(reads, 1);
+    }
 }
 #[test]
 fn occupied_socket_is_not_unlinked_and_unavailable_target_fails_connection() {

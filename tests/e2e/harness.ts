@@ -1,5 +1,5 @@
 import type { Dirent } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -78,6 +78,8 @@ export type ScenarioContext = {
   readonly cli: (invocation: CliInvocation) => Promise<CliResult>;
   /** Structured progress log line (plain text, no colors). */
   readonly log: (message: string) => void;
+  /** Preserve both owned roots for incomplete cleanup; this can never become a passing scenario. */
+  readonly retainFixtures: (reason: string) => void;
   /** Abort the scenario as skipped (does not fail the suite). */
   readonly skip: (reason: string) => never;
 };
@@ -432,7 +434,7 @@ export async function runCommand(opts: {
 export async function makeTempDir(opts: {
   readonly prefix: string;
 }): Promise<string> {
-  return await mkdtemp(join(tmpdir(), `${opts.prefix}-`));
+  return await realpath(await mkdtemp(join(tmpdir(), `${opts.prefix}-`)));
 }
 
 /**
@@ -698,6 +700,24 @@ export function selectScenarios(opts: {
   );
 }
 
+async function cleanupScenarioRoots(opts: {
+  readonly keep: boolean;
+  readonly retained: boolean;
+  readonly tempRoot: string;
+  readonly hackHome: string;
+  readonly log: (message: string) => void;
+}): Promise<void> {
+  if (!(opts.keep || opts.retained)) {
+    await rm(opts.tempRoot, { recursive: true, force: true });
+    await rm(opts.hackHome, { recursive: true, force: true });
+  }
+  if (opts.retained) {
+    opts.log(
+      `Owned fixture cleanup incomplete; retained recovery roots: ${opts.tempRoot} and ${opts.hackHome}`
+    );
+  }
+}
+
 /**
  * Run scenarios sequentially, printing a plain-text progress log and a final
  * summary table. Returns the outcomes; the caller decides the exit code.
@@ -726,6 +746,7 @@ export async function runScenarios(
     const hackHome = await makeTempDir({ prefix: "hack-e2e-home" });
     const tempRoot = await makeTempDir({ prefix: "hack-e2e-fixture" });
     await seedIsolatedHackHome({ hackHome });
+    let retentionReason: string | null = null;
     const ctx: ScenarioContext = {
       repoRoot: REPO_ROOT,
       hackHome,
@@ -733,6 +754,9 @@ export async function runScenarios(
       cli: (invocation) => runCli({ invocation, hackHome }),
       log: (message) => {
         process.stdout.write(`  [${scenario.name}] ${message}\n`);
+      },
+      retainFixtures: (reason) => {
+        retentionReason = reason;
       },
       skip: (reason) => {
         throw new ScenarioSkip(reason);
@@ -747,6 +771,11 @@ export async function runScenarios(
         message: "Host ingress qualification requires HACK_E2E_DOCKER=1",
       });
       await scenario.run(ctx);
+      expect({
+        that: retentionReason === null,
+        message:
+          "Scenario cleanup is incomplete; owned fixtures are retained for recovery",
+      });
       outcome = {
         name: scenario.name,
         tier: scenario.tier,
@@ -756,7 +785,9 @@ export async function runScenarios(
       };
     } catch (error: unknown) {
       outcome =
-        error instanceof ScenarioSkip && scenario.tier !== "host-ingress"
+        error instanceof ScenarioSkip &&
+        scenario.tier !== "host-ingress" &&
+        retentionReason === null
           ? {
               name: scenario.name,
               tier: scenario.tier,
@@ -772,10 +803,13 @@ export async function runScenarios(
               reason: error instanceof Error ? error.message : String(error),
             };
     } finally {
-      if (opts.keepTempDirs !== true) {
-        await rm(tempRoot, { recursive: true, force: true });
-        await rm(hackHome, { recursive: true, force: true });
-      }
+      await cleanupScenarioRoots({
+        keep: opts.keepTempDirs === true,
+        retained: retentionReason !== null,
+        tempRoot,
+        hackHome,
+        log: ctx.log,
+      });
     }
     outcomes.push(outcome);
     printOutcome(outcome);

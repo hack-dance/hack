@@ -13,6 +13,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { openNativeComposeGenerationStore } from "../src/lib/native-compose-generation.ts";
 import { renderNativeCompose } from "../src/lib/native-compose-renderer.ts";
+import { openNativeComposeRouteClaims } from "../src/lib/native-compose-route-claims.ts";
+import {
+  prepareNativeComposeRouteOwner,
+  readNativeComposeRouteMetadata,
+} from "../src/lib/native-compose-route-owner.ts";
+import type { NativeRoutingResolution } from "../src/lib/native-routing-plan-protocol.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
 
 const roots: string[] = [];
@@ -29,7 +35,10 @@ afterEach(async () => {
   );
 });
 
-async function savedFixture(outcome: "complete" | "uncertain" = "complete") {
+async function savedFixture(
+  outcome: "complete" | "uncertain" = "complete",
+  routed = false
+) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-saved-command-"))
   );
@@ -46,27 +55,102 @@ async function savedFixture(outcome: "complete" | "uncertain" = "complete") {
   });
   await owner.withMutation(async (mutation) => {
     const reservation = mutation.reserveGeneration();
+    const input = composeFixture();
+    if (routed) {
+      input.plan.routes = {
+        domain: "dev.test",
+        aliases: {},
+        http: {
+          app: {
+            service: "web",
+            port: 3000,
+            protocol: "http",
+            hostname: "project",
+          },
+        },
+      };
+    }
+    const origin = "https://fixture.dev.test";
+    const resolution: NativeRoutingResolution | undefined = routed
+      ? {
+          domain: "dev.test",
+          domain_origin: "project",
+          project_origin: origin,
+          aliases: {},
+          oauth_alias: null,
+          open_preference: "auto",
+          open_preference_origin: "default",
+          open_origin: origin,
+          routes: {
+            app: {
+              service: "web",
+              port: 3000,
+              protocol: "http",
+              origin,
+              aliases: {},
+            },
+          },
+        }
+      : undefined;
     const rendered = renderNativeCompose({
-      ...composeFixture(),
+      ...input,
       projectRoot: root,
       runtimeIdentity: owner.identity.composeProject,
       generationIdentity: reservation.generationId,
       ownerToken: owner.identity.ownerToken,
+      routingResolution: resolution,
+      declaredWorkloads: { web: "service" },
     });
-    const generation = await mutation.publish({
-      reservation,
-      composeJson: rendered.json,
-      profiles: [],
-      inputRevision: createHash("sha256").update("fixture").digest("hex"),
-      assertFresh: async () => {},
+    await mkdir(join(root, "home"), { recursive: true });
+    const routing = await prepareNativeComposeRouteOwner({
+      owner: owner.identity,
+      generationId: reservation.generationId,
+      document: rendered.document,
+      plan: input.plan,
+      resolution,
+      declared: { web: "service" },
+      previous: [],
+      io: {
+        ingress: async () => ({
+          engineId: "fixture-engine:1",
+          proxyId: "a".repeat(64),
+          networkId: "b".repeat(64),
+          proxyIp: "172.29.0.2",
+        }),
+        inventory: async () => {},
+        proxy: async () => {},
+        claims: async (options) =>
+          await openNativeComposeRouteClaims({
+            ...options,
+            root: join(root, "home", "compose-routing"),
+          }),
+      },
     });
-    await mutation.runEffect({
-      generation,
-      operation: "up",
-      assertFresh: async () => {},
-      assertOwned: async () => {},
-      effect: async () => ({ outcome, value: 0 }),
-    });
+    try {
+      const generation = await mutation.publish({
+        reservation,
+        composeJson: JSON.stringify(routing?.document ?? rendered.document),
+        profiles: [],
+        inputRevision: createHash("sha256").update("fixture").digest("hex"),
+        assertFresh: async () => {},
+      });
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        ...(routing ? { beforeComplete: () => routing.complete() } : {}),
+        effect: async () => {
+          await routing?.markEffectsPossible();
+          if (outcome === "complete") {
+            await routing?.verifyTransition({ deadline: Date.now() + 5000 });
+          }
+          return { outcome, value: 0 };
+        },
+      });
+    } finally {
+      await routing?.close();
+    }
   });
   const leases = join(
     root,
@@ -74,6 +158,15 @@ async function savedFixture(outcome: "complete" | "uncertain" = "complete") {
     owner.identity.instanceId,
     "leases"
   );
+  const state = await owner.loadCurrent();
+  const generation = state.generation ?? (await owner.loadPending());
+  if (!generation) {
+    throw new Error("Missing saved fixture generation");
+  }
+  const metadata = readNativeComposeRouteMetadata({
+    generationId: generation.generationId,
+    document: await owner.readGenerationDocument(generation),
+  });
   await owner.close();
   const binary = join(root, "docker");
   await Bun.write(
@@ -81,6 +174,7 @@ async function savedFixture(outcome: "complete" | "uncertain" = "complete") {
     `#!${process.execPath}
 import { writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
+if (args[0] === "info") { writeFileSync(${JSON.stringify(join(root, "ingress-read"))}, "unexpected ingress read"); process.exit(23); }
 if (args[0] !== "compose") process.exit(0);
 writeFileSync(${JSON.stringify(join(root, "started"))}, String(process.pid));
 process.on("SIGTERM", () => { writeFileSync(${JSON.stringify(join(root, "stopped"))}, "reaped"); process.exit(143); });
@@ -88,7 +182,93 @@ await Bun.sleep(60_000);
 `
   );
   await chmod(binary, 0o700);
-  return { root, leases };
+  return {
+    root,
+    leases,
+    identity: owner.identity,
+    generationId: generation.generationId,
+    routeReference: metadata?.reference,
+  };
+}
+
+async function verifiedStopTransport(root: string) {
+  const proxyId = "a".repeat(64);
+  const reader = [
+    "exec",
+    proxyId,
+    "curl",
+    "--disable",
+    "--silent",
+    "--show-error",
+    "--fail",
+    "--proxy",
+    "",
+    "--noproxy",
+    "*",
+    "--proto",
+    "=http",
+    "--max-time",
+    "10",
+    "--max-redirs",
+    "0",
+    "--write-out",
+    "\n%{http_code}",
+    "--url",
+    "http://127.0.0.1:2019/config/apps/http/servers",
+  ];
+  await Bun.write(
+    join(root, "docker"),
+    `#!${process.execPath}
+import {appendFileSync} from "node:fs";
+const args=process.argv.slice(2), proxyId=${JSON.stringify(proxyId)}, networkId=${JSON.stringify("b".repeat(64))};
+appendFileSync(${JSON.stringify(join(root, "commands"))},JSON.stringify(args)+"\\n");
+if(args[0]==="compose" && args.includes("down")) process.exit(0);
+if(JSON.stringify(args)===${JSON.stringify(JSON.stringify(reader))}) {process.stdout.write('{}\\n200');process.exit(0);}
+if(args[0]==="info") console.log(JSON.stringify("fixture-engine:1"));
+else if(args[0]==="network" && args[1]==="inspect") console.log(JSON.stringify({id:networkId,name:"hack-dev"}));
+else if(args[0]==="container" && args[1]==="ls") {
+ if(args.includes("label=com.docker.compose.project=hack-dev-proxy") || !args.includes("--filter")) {
+  const format=args[args.indexOf("--format")+1]??"";
+  console.log(JSON.stringify(format.includes('"name"')?{id:proxyId,name:"hack-dev-proxy-caddy-1",project:"hack-dev-proxy"}:proxyId));
+ }
+} else if(args[0]==="container" && args[1]==="inspect") {
+ const format=args[args.indexOf("--format")+1]??"";
+ console.log(JSON.stringify(format.includes("sites")?{id:proxyId,project:"hack-dev-proxy",owner:null,instance:null,generation:null,sites:[null]}:{id:proxyId,project:"hack-dev-proxy",service:"caddy",running:true,network:networkId,ip:"172.29.0.2"}));
+} else if(!(["network","volume"].includes(args[0]) && args[1]==="ls")) process.exit(97);
+`
+  );
+}
+
+async function recoverSavedStop(root: string) {
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      resolve(import.meta.dir, "../index.ts"),
+      "down",
+      "--recover",
+      "--json",
+    ],
+    {
+      cwd: root,
+      env: {
+        ...process.env,
+        PATH: `${root}:/usr/bin:/bin`,
+        HACK_HOME: join(root, "home"),
+        HACK_RUNTIME_BACKEND: "compose",
+        HACK_LOGGER: "console",
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  children.push(child);
+  const stdout = new Response(child.stdout).text();
+  const stderr = new Response(child.stderr).text();
+  return {
+    exit: await child.exited,
+    outputs: await Promise.all([stdout, stderr]),
+  };
 }
 
 test("saved ps reports pending state after an incomplete first startup", async () => {
@@ -122,11 +302,17 @@ test("saved ps reports pending state after an incomplete first startup", async (
 }, 20_000);
 
 test.each([
-  "exec",
-  "logs",
-  "ps",
-] as const)("saved %s forwards cancellation, reaps its child and releases the lease", async (operation) => {
-  const { root, leases } = await savedFixture();
+  { operation: "exec", routed: false },
+  { operation: "logs", routed: false },
+  { operation: "ps", routed: false },
+  { operation: "exec", routed: true },
+  { operation: "logs", routed: true },
+  { operation: "ps", routed: true },
+] as const)("saved $operation forwards cancellation with routing $routed and releases the lease", async ({
+  operation,
+  routed,
+}) => {
+  const { root, leases } = await savedFixture("complete", routed);
   const child = Bun.spawn(
     [
       process.execPath,
@@ -173,4 +359,181 @@ test.each([
   expect(() => process.kill(pid, 0)).toThrow();
   expect(await readdir(leases)).toEqual([]);
   expect(outputs.join("")).not.toContain("invalid authored input");
+  expect(await Bun.file(join(root, "ingress-read")).exists()).toBe(false);
+}, 20_000);
+
+test.each([
+  "complete",
+  "uncertain",
+  "interrupted-hook",
+] as const)("saved routed stop after %s startup runs before retained-claims diagnostics", async (outcome) => {
+  const { root, generationId, routeReference } = await savedFixture(
+    outcome === "uncertain" ? "uncertain" : "complete",
+    true
+  );
+  if (outcome === "interrupted-hook") {
+    const hookOwner = await openNativeComposeGenerationStore({
+      projectRoot: root,
+      instance: null,
+      mode: "prepare",
+    });
+    try {
+      await hookOwner.withMutation((mutation) =>
+        mutation.runBeforeHooks({
+          assertFresh: async () => {},
+          effect: async () => ({ outcome: "uncertain", value: 143 }),
+        })
+      );
+    } finally {
+      await hookOwner.close();
+    }
+  }
+  await Bun.write(
+    join(root, "docker"),
+    `#!${process.execPath}
+import { appendFileSync, writeFileSync } from "node:fs";
+const root = ${JSON.stringify(root)};
+const args = process.argv.slice(2);
+appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
+if (args[0] === "compose") {
+  if (!args.includes("down")) process.exit(88);
+  writeFileSync(root + "/owned-stop", "complete");
+  process.exit(0);
+}
+if (args[0] === "info") { console.error("private-routing-canary"); process.exit(23); }
+process.exit(0);
+`
+  );
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      resolve(import.meta.dir, "../index.ts"),
+      "down",
+      "--json",
+      ...(outcome === "uncertain" ? ["--recover"] : []),
+    ],
+    {
+      cwd: root,
+      env: {
+        ...process.env,
+        PATH: `${root}:/usr/bin:/bin`,
+        HACK_HOME: join(root, "home"),
+        HACK_RUNTIME_BACKEND: "compose",
+        HACK_LOGGER: "console",
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  children.push(child);
+  const stdout = new Response(child.stdout).text(),
+    stderr = new Response(child.stderr).text();
+  expect(await child.exited).toBe(1);
+  const outputs = await Promise.all([stdout, stderr]);
+  expect(outputs.join("")).toContain("Owned native Compose containers stopped");
+  expect(outputs.join("")).not.toContain("private-routing-canary");
+  expect(outputs.join("")).not.toContain("invalid authored input");
+  if (outcome === "interrupted-hook") {
+    expect(outputs.join("")).toContain("E_LIFECYCLE_FAILED");
+    expect(outputs.join("")).toContain(
+      "routing claims and the recovery generation are retained"
+    );
+    expect(outputs.join("")).toContain("host hook");
+  }
+  expect(await Bun.file(join(root, "owned-stop")).text()).toBe("complete");
+  const commands: string[][] = (await readFile(join(root, "commands"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const stopped = commands.findIndex(
+    (args) => args[0] === "compose" && args.includes("down")
+  );
+  expect(stopped).toBeGreaterThanOrEqual(0);
+  const ingress = commands.findIndex((args) => args[0] === "info");
+  if (outcome !== "interrupted-hook") {
+    expect(ingress).toBeGreaterThan(stopped);
+  } else {
+    expect(ingress).toBe(-1);
+  }
+  expect(commands[stopped]).not.toContain("--volumes");
+  const saved = await openNativeComposeGenerationStore({
+    projectRoot: root,
+    instance: null,
+    mode: "saved",
+  });
+  try {
+    const current = await saved.loadCurrent();
+    expect(current.stopped).toBe(outcome === "uncertain");
+    expect(current.pending?.generationId).toBe(generationId);
+    const recovery = await saved.loadPending();
+    if (!recovery) {
+      throw new Error("Lost stop recovery generation");
+    }
+    expect(
+      readNativeComposeRouteMetadata({
+        generationId: recovery.generationId,
+        document: await saved.readGenerationDocument(recovery),
+      })?.reference
+    ).toEqual(routeReference);
+    expect(current.beforeHooksPending).toBe(outcome === "interrupted-hook");
+  } finally {
+    await saved.close();
+  }
+  const foreign = await openNativeComposeRouteClaims({
+    root: join(root, "home", "compose-routing"),
+    binding: {
+      engineId: "fixture-engine:1",
+      proxyId: "a".repeat(64),
+      networkId: "b".repeat(64),
+    },
+    owner: {
+      composeProject: "foreign-native-fixture",
+      ownerToken: "e".repeat(32),
+    },
+  });
+  try {
+    await expect(
+      foreign.acquire({
+        hostnames: ["fixture.dev.test"],
+        generationIdentity: "f".repeat(32),
+      })
+    ).rejects.toThrow();
+    await verifiedStopTransport(root);
+    const retry = await recoverSavedStop(root);
+    expect(retry.exit, retry.outputs.join("")).toBe(
+      outcome === "interrupted-hook" ? 1 : 0
+    );
+    expect(retry.outputs.join("")).not.toContain("invalid authored input");
+    if (outcome === "interrupted-hook") {
+      expect(retry.outputs.join("")).toContain("E_LIFECYCLE_FAILED");
+      await expect(
+        foreign.acquire({
+          hostnames: ["fixture.dev.test"],
+          generationIdentity: "f".repeat(32),
+        })
+      ).rejects.toThrow();
+    } else {
+      const replacement = await foreign.acquire({
+        hostnames: ["fixture.dev.test"],
+        generationIdentity: "f".repeat(32),
+      });
+      await foreign.rollback(replacement);
+    }
+    const recovered = await openNativeComposeGenerationStore({
+      projectRoot: root,
+      instance: null,
+      mode: "saved",
+    });
+    try {
+      const current = await recovered.loadCurrent();
+      expect(current.generation?.generationId).toBe(generationId);
+      expect(current.pending === null).toBe(outcome !== "interrupted-hook");
+      expect(current.beforeHooksPending).toBe(outcome === "interrupted-hook");
+    } finally {
+      await recovered.close();
+    }
+  } finally {
+    await foreign.close();
+  }
 }, 20_000);

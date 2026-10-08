@@ -16,6 +16,50 @@ pinned artifact. Each check has a 120-second timeout, 512 MiB Java heap, two wor
 and bounded output; temporary TLC metadata is removed after success or failure.
 No credentials or running VM are needed.
 
+## Native Compose routing stop recovery
+
+`native-route-stop/Stop.tla` checks the generation receipt and hostname claims as
+two separate durable stores. It starts with one uncertain routed startup, with
+either a known or uncertain host-hook outcome. Stopping owned containers, Caddy
+route convergence, observation, claim exclusion, claim retirement and generation
+completion are separate actions. One crash can occur between any two effect or
+commit steps; explicit retry retains the same saved generation and route reference.
+The positive configuration explores **202 distinct states** (338 generated,
+maximum depth 16), including completion after claim retirement and a crash between
+those commits. No fairness or eventual cleanup is asserted.
+
+The main negative control removes only the completion-order guard. It reproduces
+the lost-recovery failure: `CommitStop` clears the pending generation while
+`claimHeld = TRUE`, even though the owned workload is absent. Three further
+controls remove the absence, exact-reference or hook-completion guard and require
+`NoUnprovedRelease` to fail in the same `RetireClaims` state. The
+`completion-reachable` control instead asserts `NeverComplete` and must fail at a
+safe `CommitStop`; the positive model does not pass by disabling all recovery.
+Every control requires TLC exit 12, its named invariant and complete same-state
+witness. Parse errors, timeouts and partial exploration are failures.
+
+| Model action | Implementation boundary under `src/lib/` |
+| --- | --- |
+| `Recover` / `StopWorkload` | `native-compose-generation.ts` mutation/recovery owner writes pending `down` before the command removes exact owned containers and networks. Persistent volumes remain. |
+| `ConvergeProxy` / `Observe` | `native-compose-route-owner.ts` independently verifies whole-owner container absence, exact ingress and active proxy route absence. Container absence alone is insufficient. |
+| `ReplaceReference` / `AcquireClaims` | `native-compose-route-claims.ts` validates anchored journals under the cooperative claim lock; selection before exclusion cannot authorize a replaced reference. |
+| `RetireClaims` | Explicit verified stop recovery retires retained/armed attempts only after fresh absence proof and revalidation. It cannot grant live completion or clear unknown host-hook effects. |
+| `CommitStop` | `native-compose-command.ts` invokes route retirement in `beforeComplete`; `native-compose-generation.ts` rechecks generation, engine ownership and pending intent before the completed receipt. |
+| `Crash` | Durable generation/reference survive, while process locks do not; retry does not replay startup or infer completion from a missing process. |
+
+Claim retirement is one aggregate modeled step; interrupted per-host journal
+writes and unlinks require the separate implementation crash/retry regressions.
+The abstraction treats durable writes as atomic and summarizes exact engine,
+proxy, resource and filesystem identities by one reference version. Cooperative
+exclusion prevents version replacement after claim admission. The modeled
+pre-lock substitution is a refusal control. Arbitrary external Docker writers,
+same-user filesystem replacement, actual fsync/inode checks, journal parsing,
+PID reuse, boot changes, repeated unbounded crashes, actual TLS, data continuity
+and the cleanup of a pre-fix already-lost receipt are outside this model.
+Implementation regressions and the registered `native-config-routing` Docker
+scenario supply separate evidence. The model does not prove those checks,
+browser access, performance or whole NC03 completion.
+
 ## Projects registry writer ownership
 
 `registry-writer/RegistryWriter.tla` models two one-shot writers, two independent

@@ -12,6 +12,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
 import { inspectProjectInputsAtRoot } from "./project-input-selection.ts";
 import { resolveVerifiedPrimaryWorktreeRoot } from "./worktree-local-config.ts";
@@ -746,8 +747,13 @@ function documentOwned(
   return (
     !Object.hasOwn(document, "networks") ||
     (isRecord(document.networks) &&
-      Object.values(document.networks).every((network) =>
-        labelsMatch(network, false)
+      Object.entries(document.networks).every(([name, network]) =>
+        name === "ingress"
+          ? isRecord(network) &&
+            keys(network, "external,name") &&
+            network.external === true &&
+            network.name === DEFAULT_INGRESS_NETWORK
+          : labelsMatch(network, false)
       ))
   );
 }
@@ -772,6 +778,13 @@ export type NativeComposeEffectOptions<T> = {
   readonly assertFresh?: () => Promise<void>;
   readonly assertOwned: () => Promise<void>;
   readonly recoverPending?: boolean;
+  /**
+   * Finalize dependent ownership after a reaped, verified complete effect and fresh
+   * pending/ownership checks, before publishing the completed generation receipt.
+   * Failure preserves the uncertain pending generation; this is not a cross-store
+   * atomic commit, and the finalizer must retain its own crash recovery evidence.
+   */
+  readonly beforeComplete?: () => Promise<void>;
   readonly effect: () => Promise<{
     readonly outcome: "complete" | "uncertain";
     readonly value: T;
@@ -847,6 +860,7 @@ function completedReceipt(
   }
   return {
     ...state,
+    current: state.current ?? anchor,
     stopped: operation === "down" || state.stopped,
     pending: null,
   };
@@ -1238,9 +1252,18 @@ export async function openNativeComposeGenerationStore(opts: {
     ) => {
       await verifyGeneration(input.generation);
       await input.assertOwned();
-      const latest = await receipt();
+      let latest = await receipt();
       if (JSON.stringify(latest.pending) !== JSON.stringify(pending)) {
         refuse();
+      }
+      if (input.beforeComplete) {
+        await input.beforeComplete();
+        await verifyGeneration(input.generation);
+        await input.assertOwned();
+        latest = await receipt();
+        if (JSON.stringify(latest.pending) !== JSON.stringify(pending)) {
+          refuse();
+        }
       }
       await save(completedReceipt(latest, anchor, input.operation));
     };

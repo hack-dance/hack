@@ -7,12 +7,17 @@ import type {
 } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "./guards.ts";
 import { selectNativeComposeBeforeHooks } from "./native-compose-host-contract.ts";
+import {
+  type NativeComposeRouting,
+  planNativeComposeRouting,
+} from "./native-compose-routing.ts";
 import type { NativeConfigDiagnostic } from "./native-config-compiler.ts";
 import {
   parseNativeEndpointReference,
   parseNativeHostBindingTarget,
 } from "./native-endpoint-plan-protocol.ts";
 import {
+  type NativeDeclaredWorkloads,
   type NativeEnvironmentPlan,
   parseNativeEnvironmentPlan,
 } from "./native-env-plan-protocol.ts";
@@ -68,6 +73,7 @@ type RenderContext = {
   readonly jobs: Workloads;
   readonly storage: Record<string, unknown>;
   readonly profiles: readonly string[];
+  readonly routing: NativeComposeRouting | null;
 };
 type PreparedCompose = {
   readonly context: RenderContext;
@@ -113,6 +119,8 @@ export type NativeComposeInputs = {
   readonly ownerToken: string;
   /** Owner-generated random token, never a hash derived from secret values or input contents. */
   readonly generationIdentity: string;
+  readonly routingResolution?: unknown;
+  readonly declaredWorkloads?: NativeDeclaredWorkloads;
   /** The command owner journals and executes the supported finite before-hook sequence. */
   readonly beforeHooksOwned?: boolean;
 };
@@ -174,6 +182,11 @@ export function renderNativeCompose(
         name: `${opts.runtimeIdentity}_default`,
         labels: { ...resourceLabels },
       },
+      ...(prepared.context.routing
+        ? {
+            ingress: { name: prepared.context.routing.network, external: true },
+          }
+        : {}),
     },
   };
   return {
@@ -199,6 +212,16 @@ function prepare(opts: NativeComposeInputs): PreparedCompose {
   assert(source.mode === "host-mounted", "E_COMPOSE_SOURCE");
   const sourceRoot = anchor(opts.projectRoot, source.root);
   settings(plan);
+  assert(
+    !(Object.hasOwn(plan, "routes") || Object.hasOwn(plan, "open")) ||
+      opts.routingResolution !== undefined,
+    "E_COMPOSE_ROUTING_OWNER"
+  );
+  const routing = planNativeComposeRouting({
+    plan,
+    resolution: opts.routingResolution,
+    declared: opts.declaredWorkloads,
+  });
   unsupportedOwners(plan, opts.beforeHooksOwned === true);
   const services = workloadMap(plan.services);
   const jobs = workloadMap(plan.jobs);
@@ -232,6 +255,7 @@ function prepare(opts: NativeComposeInputs): PreparedCompose {
     jobs,
     storage,
     profiles,
+    routing,
   };
   return { context, env, names: allNames, sourceRoot };
 }
@@ -366,10 +390,6 @@ function unsupportedOwners(
   plan: Record<string, unknown>,
   beforeHooksOwned: boolean
 ): void {
-  assert(
-    !(Object.hasOwn(plan, "routes") || Object.hasOwn(plan, "open")),
-    "E_COMPOSE_ROUTING_OWNER"
-  );
   if (Object.hasOwn(plan, "host")) {
     if (beforeHooksOwned) {
       selectNativeComposeBeforeHooks(plan);
@@ -516,9 +536,17 @@ function renderWorkload(opts: {
   readonly values?: Readonly<Record<string, string>>;
 }): JsonObject {
   const { workload, context } = opts;
+  const routingLabels = context.routing?.labels[opts.name];
   const output: JsonObject = {
-    labels: { ...context.labels, "io.hack.native-config.workload": opts.kind },
+    labels: {
+      ...context.labels,
+      "io.hack.native-config.workload": opts.kind,
+      ...(routingLabels ?? {}),
+    },
   };
+  if (routingLabels) {
+    output.networks = ["default", "ingress"];
+  }
   acquisition(workload, output, context.root);
   if (Object.hasOwn(workload, "command")) {
     output.command = command(workload.command, false);

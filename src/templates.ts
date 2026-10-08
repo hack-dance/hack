@@ -35,7 +35,7 @@ export function renderGlobalCaddyCompose(opts?: {
     "name: hack-dev-proxy",
     "services:",
     "  caddy:",
-    "    image: lucaslorentz/caddy-docker-proxy:2.10",
+    "    image: lucaslorentz/caddy-docker-proxy:2.10.0-alpine",
     "    command:",
     "      - docker-proxy",
     "      - --polling-interval",

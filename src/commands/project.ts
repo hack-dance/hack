@@ -194,6 +194,7 @@ import {
   resolveUseLoki,
 } from "../lib/logs.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
+import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
 import { readNodesRegistry } from "../lib/nodes-registry.ts";
 import {
   parseOpenHostPreference,
@@ -9355,6 +9356,20 @@ async function handleOpen({
   readonly ctx: CliContext;
   readonly args: OpenArgs;
 }): Promise<number> {
+  const nativeOrigin = await tryNativeComposeOpen({
+    cwd: ctx.cwd,
+    path: args.options.path,
+    project: args.options.project,
+    instance: args.options.branch,
+    target: args.positionals.target,
+    prefer: args.options.prefer,
+  });
+  if (nativeOrigin !== null) {
+    return await emitOpenOrigin({
+      url: nativeOrigin,
+      json: args.options.json === true,
+    });
+  }
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -9418,13 +9433,19 @@ async function handleOpen({
   const grafanaHost = await resolveOpenGrafanaHost(targetRaw);
   const url = resolveOpenUrl({ targetRaw, resolvedHost, grafanaHost });
 
-  if (json) {
-    process.stdout.write(`${JSON.stringify({ url }, null, 2)}\n`);
+  return await emitOpenOrigin({ url, json });
+}
+
+async function emitOpenOrigin(opts: {
+  readonly url: string;
+  readonly json: boolean;
+}): Promise<number> {
+  if (opts.json) {
+    process.stdout.write(`${JSON.stringify({ url: opts.url }, null, 2)}\n`);
     return 0;
   }
-
-  logger.step({ message: `Opening ${url}` });
-  return await openUrl(url);
+  logger.step({ message: `Opening ${opts.url}` });
+  return await openUrl(opts.url);
 }
 
 function hasUrlScheme(value: string): boolean {

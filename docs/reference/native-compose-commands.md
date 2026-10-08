@@ -37,13 +37,27 @@ running, healthy when it declares a health check, and each initializer job must
 have exited successfully. An older healthy container does not satisfy a new
 generation's readiness.
 
-`run` can start a cold project’s dependencies. It gives the one-off container a
+Compiler-selected HTTP routes use the already running global Caddy proxy and the
+external `hack-dev` network on the selected Docker engine. Only routed services
+join that ingress. Hack verifies the exact engine, proxy and network before effects,
+admits every selected hostname through private cooperative claims, and refuses
+observed foreign Caddy site collisions. Startup also checks Caddy's active route
+configuration against the ready generation's exact owned upstream addresses.
+Rendering labels or receiving a successful Compose exit does not prove routing.
+This path does not start or repair global services, change DNS, install trust, or
+open a browser. Arbitrary external Docker writers are outside the cooperative
+claim boundary; fresh inventory checks detect observed collisions.
+
+For projects without routing, `run` can start a cold project's dependencies.
+It gives the one-off container a
 fresh name, verifies its generation, service, stopped state and exact exit code,
 then removes that verified stopped ID without forcing removal. A real nonzero
 command exit remains nonzero after verified completion. Failure to start or remove
 the one-off leaves execution incomplete; absence alone does not prove completion.
 The selected target's direct dependency conditions are checked as authored;
 `service_started` does not acquire an extra health requirement.
+`run` refuses selected or retained routing generations until one-off Caddy label
+projection is qualified, including an unrouted job in a routed project.
 
 Managed environment selection, native source and selected local configuration
 are acquired together. Support preflight precedes private value delivery. Private
@@ -78,10 +92,24 @@ This can recover a verified same-boot dead mutation owner and stop the retained
 pending generation. It does not kill a live writer, steal unknown locks, remove
 volumes, prune old generations, or replay a start. Unverified ownership refuses.
 
+Routing references, ingress identity and route proof targets live only in the
+private generated document's `x-hack-native-routing` extension. Saved `ps`, `logs`
+and `exec` remain usable if the proxy is unavailable. `down` stops owned containers
+first, then releases hostname claims only after fresh container absence and exact
+proxy route absence. Proxy loss returns a retained-claims diagnostic after the stop.
+Replacing or removing routing admits the union of old and new hostnames and removes
+owned orphan containers before retiring obsolete claims. Persistent volumes remain.
+
+An uncertain route effect retains its claims, even after `down --recover` proves
+the owned containers stopped. A saved reference cannot complete a prior interrupted
+attempt. Such claims prevent restart and hostname handoff; explicit route-owner
+recovery remains unimplemented. A pre-effect failure rolls back only claims newly
+acquired by that live preparation.
+
 ## Remaining coverage
 
 This slice explicitly refuses foreground or partial-service startup, non-plain
-logs, pruning options, host hooks/processes, routing/open declarations, route
+logs, pruning options, host hooks/processes, browser opening, route
 bindings, typed host/gateway endpoints, TCP endpoint derivation, and HTTP/TCP
 readiness. It preserves ordinary project DNS and outbound networking and adds no
 CPU, memory or PID limits. The renderer documents the remaining field refusals.

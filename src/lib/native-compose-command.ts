@@ -14,6 +14,8 @@ import {
   type NativeComposeGeneration,
   NativeComposeGenerationError,
   type NativeComposeGenerationStore,
+  type NativeComposeMutation,
+  type NativeComposeReservation,
   openNativeComposeGenerationStore,
 } from "./native-compose-generation.ts";
 import { acquireNativeComposeInputs } from "./native-compose-inputs.ts";
@@ -28,6 +30,14 @@ import {
   NativeComposeRenderError,
   renderNativeCompose,
 } from "./native-compose-renderer.ts";
+import { NativeComposeRouteClaimError } from "./native-compose-route-claims.ts";
+import {
+  type NativeComposeRoutingOwner,
+  prepareNativeComposeRouteOwner,
+  readNativeComposeRouteMetadata,
+  releaseNativeComposeSavedRoutes,
+} from "./native-compose-route-owner.ts";
+import { NativeComposeRoutingError } from "./native-compose-routing.ts";
 import {
   requireNativeComposeBackend,
   selectNativeComposeProject,
@@ -84,6 +94,29 @@ function networkSelection(document: PrivateDocument): string {
   }
   const name = document.networks.default.name;
   return typeof name === "string" ? name : invalid();
+}
+
+async function savedRouteDocuments(store: NativeComposeGenerationStore) {
+  const state = await store.loadCurrent();
+  const pending = await store.loadPending();
+  const generations = [state.generation, pending].filter(
+    (value): value is NativeComposeGeneration => value !== null
+  );
+  return await Promise.all(
+    generations.map(async (generation) => ({
+      generation,
+      generationId: generation.generationId,
+      document: await store.readGenerationDocument(generation),
+    }))
+  );
+}
+
+function refuseRoutedRun(): never {
+  throw new HackCliError({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message:
+      "Native Compose run with routing requires qualified one-off label projection. Use up or restart for this project; no engine operation ran.",
+  });
 }
 
 /** Only a verified private document may select engine resources. */
@@ -282,6 +315,7 @@ async function savedCommand(opts: {
   };
   if (options.operation === "down") {
     return await store.withMutation(async (mutation) => {
+      const saved = await savedRouteDocuments(store);
       const result = await mutation.runEffect({
         generation,
         operation: "down",
@@ -317,6 +351,23 @@ async function savedCommand(opts: {
           code: "E_COMPOSE_FAILED",
           message:
             "Native Compose stop is incomplete; saved ownership and persistent data are retained.",
+        });
+      }
+      try {
+        for (const value of saved) {
+          await store.readGenerationDocument(value.generation);
+        }
+        await releaseNativeComposeSavedRoutes({
+          owner: store.identity,
+          saved,
+          signal,
+          deadline: Date.now() + resolveComposeStartupTimeoutMs(),
+        });
+      } catch {
+        throw new HackCliError({
+          code: "E_CONFIG_INVALID",
+          message:
+            "Owned native Compose containers stopped; routing claims remain retained because prior route effects or the exact ingress could not be verified. Values omitted.",
         });
       }
       if (options.json) {
@@ -431,6 +482,85 @@ async function runOneOff(opts: {
   };
 }
 
+async function startNativeComposeWorkloads(opts: {
+  readonly options: NativeComposeCommandOptions;
+  readonly generation: NativeComposeGeneration;
+  readonly document: PrivateDocument;
+  readonly selection: NativeComposeOwnershipOptions;
+  readonly base: RuntimeBaseOptions;
+  readonly routing: NativeComposeRoutingOwner | null;
+}) {
+  const { options, generation, document, selection, base, routing } = opts;
+  const timeout = resolveComposeStartupTimeoutMs();
+  const deadline = Date.now() + timeout;
+  await routing?.markEffectsPossible();
+  const code = await run(
+    [
+      ...composeArgs(generation),
+      "up",
+      "-d",
+      "--remove-orphans",
+      ...(options.operation === "restart" ? ["--force-recreate"] : []),
+    ],
+    {
+      cwd: base.cwd,
+      env: base.env,
+      stdout: options.json ? "stderr" : "inherit",
+      timeoutMs: timeout,
+      forwardSignals: true,
+    }
+  );
+  const observed =
+    code === 0
+      ? await waitReady({
+          document,
+          ownership: selection,
+          deadline,
+          generation,
+        })
+      : null;
+  if (observed) {
+    await routing?.verifyTransition({ deadline });
+  }
+  return {
+    value: observed ? 0 : code || 1,
+    outcome: observed ? ("complete" as const) : ("uncertain" as const),
+  };
+}
+
+async function publishPreparedGeneration(opts: {
+  readonly existing: NativeComposeGeneration | null;
+  readonly reservation: NativeComposeReservation | null;
+  readonly mutation: NativeComposeMutation;
+  readonly store: NativeComposeGenerationStore;
+  readonly document: PrivateDocument;
+  readonly profiles: readonly string[];
+  readonly inputRevision: string;
+  readonly assertFresh: () => Promise<void>;
+}): Promise<NativeComposeGeneration> {
+  if (opts.existing) {
+    const saved = await opts.store.readGenerationDocument(opts.existing);
+    if (JSON.stringify(saved) !== JSON.stringify(opts.document)) {
+      throw new HackCliError({
+        code: "E_CONFIG_INVALID",
+        message:
+          "Native Compose inputs differ from the running generation. Run hack up or restart before a one-off command. Values omitted.",
+      });
+    }
+    return opts.existing;
+  }
+  if (!opts.reservation) {
+    return invalid();
+  }
+  return await opts.mutation.publish({
+    reservation: opts.reservation,
+    composeJson: JSON.stringify(opts.document),
+    profiles: opts.profiles,
+    inputRevision: opts.inputRevision,
+    assertFresh: opts.assertFresh,
+  });
+}
+
 async function prepareCommand(opts: {
   readonly options: NativeComposeCommandOptions;
   readonly projectRoot: string;
@@ -457,7 +587,16 @@ async function prepareCommand(opts: {
     runtimeIdentity: "native-preflight",
     generationIdentity: "0".repeat(32),
     ownerToken: "0".repeat(32),
+    routingResolution: inputs.result.routing_resolution,
+    declaredWorkloads: inputs.result.declared_workloads,
   });
+  if (
+    options.operation === "run" &&
+    (inputs.result.plan.routes !== undefined ||
+      inputs.result.plan.open !== undefined)
+  ) {
+    return refuseRoutedRun();
+  }
   const values = await inputs.resolveManagedValues();
   const store = await openNativeComposeGenerationStore({
     projectRoot,
@@ -467,6 +606,13 @@ async function prepareCommand(opts: {
   try {
     return await store.withMutation(async (mutation) => {
       const current = await store.loadCurrent();
+      const previous = await savedRouteDocuments(store);
+      if (
+        options.operation === "run" &&
+        previous.some((saved) => readNativeComposeRouteMetadata(saved) !== null)
+      ) {
+        return refuseRoutedRun();
+      }
       const existingRun =
         options.operation === "run" ? current.generation : null;
       const reservation = existingRun ? null : mutation.reserveGeneration();
@@ -483,115 +629,104 @@ async function prepareCommand(opts: {
         generationIdentity: generationId,
         ownerToken: store.identity.ownerToken,
         managedValues: values,
+        routingResolution: inputs.result.routing_resolution,
+        declaredWorkloads: inputs.result.declared_workloads,
       });
-      let generation: NativeComposeGeneration;
-      if (existingRun) {
-        const saved = await store.readGenerationDocument(existingRun);
-        if (JSON.stringify(saved) !== JSON.stringify(rendered.document)) {
-          throw new HackCliError({
-            code: "E_CONFIG_INVALID",
-            message:
-              "Native Compose inputs differ from the running generation. Run hack up or restart before a one-off command. Values omitted.",
-          });
-        }
-        generation = existingRun;
-      } else {
-        if (!reservation) {
-          return invalid();
-        }
-        generation = await mutation.publish({
+      const routing = await prepareNativeComposeRouteOwner({
+        owner: store.identity,
+        generationId,
+        document: rendered.document,
+        plan: inputs.result.plan,
+        resolution: inputs.result.routing_resolution,
+        declared: inputs.result.declared_workloads,
+        previous,
+        signal,
+      });
+      try {
+        const document = routing?.document ?? rendered.document;
+        const generation = await publishPreparedGeneration({
+          existing: existingRun,
           reservation,
-          composeJson: rendered.json,
+          mutation,
+          store,
+          document,
           profiles: rendered.profiles,
           inputRevision: inputs.inputRevision,
           assertFresh: inputs.assertFresh,
         });
-      }
-      const selection = await ownershipSelection({
-        store,
-        generation,
-        document: rendered.document,
-        signal,
-      });
-      const base = {
-        ...runtimeOptions(generation),
-        routeStdoutToStderr: options.json === true,
-      };
-      const operation = options.operation;
-      if (
-        operation !== "up" &&
-        operation !== "restart" &&
-        operation !== "run"
-      ) {
-        return invalid();
-      }
-      const result = await mutation.runEffect({
-        generation,
-        operation,
-        assertFresh: inputs.assertFresh,
-        assertOwned: async () => {
-          await assertNativeComposeOwned(selection);
-        },
-        effect: async () => {
-          if (operation === "run") {
-            return await runOneOff({
+        const selection = await ownershipSelection({
+          store,
+          generation,
+          document,
+          signal,
+        });
+        const base = {
+          ...runtimeOptions(generation),
+          routeStdoutToStderr: options.json === true,
+        };
+        const operation = options.operation;
+        if (
+          operation !== "up" &&
+          operation !== "restart" &&
+          operation !== "run"
+        ) {
+          return invalid();
+        }
+        const result = await mutation.runEffect({
+          generation,
+          operation,
+          assertFresh: async () => {
+            await inputs.assertFresh();
+            for (const saved of previous) {
+              await store.readGenerationDocument(saved.generation);
+            }
+          },
+          assertOwned: async () => {
+            await assertNativeComposeOwned(selection);
+            await routing?.assertBeforeEffects();
+          },
+          effect: async () => {
+            if (operation === "run") {
+              return await runOneOff({
+                options,
+                generation,
+                document,
+                selection,
+                base,
+              });
+            }
+            return await startNativeComposeWorkloads({
               options,
               generation,
-              document: rendered.document,
+              document,
               selection,
               base,
+              routing,
             });
-          }
-          const timeout = resolveComposeStartupTimeoutMs();
-          const deadline = Date.now() + timeout;
-          const code = await run(
-            [
-              ...composeArgs(generation),
-              "up",
-              "-d",
-              ...(operation === "restart" ? ["--force-recreate"] : []),
-            ],
-            {
-              cwd: base.cwd,
-              env: base.env,
-              stdout: options.json ? "stderr" : "inherit",
-              timeoutMs: timeout,
-              forwardSignals: true,
-            }
-          );
-          const observed =
-            code === 0
-              ? await waitReady({
-                  document: rendered.document,
-                  ownership: selection,
-                  deadline,
-                  generation,
-                })
-              : null;
-          return {
-            value: observed ? 0 : code || 1,
-            outcome: observed ? ("complete" as const) : ("uncertain" as const),
-          };
-        },
-      });
-      if (result.outcome === "uncertain") {
-        throw new HackCliError({
-          code: "E_STARTUP_INCOMPLETE",
-          message:
-            "Native Compose execution is incomplete; inspect saved state and use explicit owned stop recovery before retrying.",
+          },
         });
+        if (result.outcome === "uncertain") {
+          throw new HackCliError({
+            code: "E_STARTUP_INCOMPLETE",
+            message:
+              "Native Compose execution is incomplete; inspect saved state and use explicit owned stop recovery before retrying.",
+          });
+        }
+        await routing?.complete();
+        if (options.json) {
+          emitCliResult({
+            result: okResult({
+              data: {
+                status: "ready",
+                composeProject: store.identity.composeProject,
+              },
+            }),
+          });
+        }
+        return result.value;
+      } finally {
+        await routing?.close();
       }
-      if (options.json) {
-        emitCliResult({
-          result: okResult({
-            data: {
-              status: "ready",
-              composeProject: store.identity.composeProject,
-            },
-          }),
-        });
-      }
-      return result.value;
     });
   } finally {
     await store.close();
@@ -608,7 +743,7 @@ function validateNativeOptions(options: NativeComposeCommandOptions): boolean {
     (options.operation === "up" && !(options.detach || options.json))
   ) {
     throw new CliUsageError(
-      "This native Compose slice requires whole-project detached startup and refuses unsupported lifecycle, pruning, routing or log options."
+      "This native Compose slice requires whole-project detached startup and refuses unsupported lifecycle, pruning, browser or log options."
     );
   }
   const prepare = ["up", "restart", "run"].includes(options.operation);
@@ -672,6 +807,16 @@ export async function tryNativeComposeCommand(
         code: "E_NATIVE_PROJECT_UNSUPPORTED",
         message:
           "Native Compose does not yet support this selected workload contract; no engine operation ran. Values omitted.",
+      });
+    }
+    if (
+      error instanceof NativeComposeRoutingError ||
+      error instanceof NativeComposeRouteClaimError
+    ) {
+      throw new HackCliError({
+        code: "E_CONFIG_INVALID",
+        message:
+          "Native Compose routing admission or verification failed; routing claims and owned state are preserved as required. Values omitted.",
       });
     }
     if (

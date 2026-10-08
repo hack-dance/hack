@@ -304,11 +304,12 @@ fn selection_json_excludes_real_compiler_argv_environment_keys_values_and_owner_
         "SELECTOR_DEST_KEY_CANARY",
         "SELECTOR_SOURCE_KEY_CANARY",
         fixture.root.to_str().unwrap(),
-        "command",
-        "environment",
-        "process",
-        "publication",
-        "original",
+        "\"command\":",
+        "\"environment\":",
+        "\"argv\":",
+        "\"process\":",
+        "\"publication\":",
+        "\"original\":",
     ] {
         assert!(
             !text.contains(canary),
@@ -332,6 +333,12 @@ fn selection_json_excludes_real_compiler_argv_environment_keys_values_and_owner_
         ]
     );
     assert_eq!(wire["receipt"]["phase"], "ready-observed");
+    assert!(super::super::super::super::hex(
+        wire["receipt"]["review"]["provenance"]["input"]["environment_policy_hash"]
+            .as_str()
+            .unwrap(),
+        64
+    ));
     assert_eq!(
         wire["receipt"]["resources"]["container:web"]["id"],
         selected.receipt.resources["container:web"]

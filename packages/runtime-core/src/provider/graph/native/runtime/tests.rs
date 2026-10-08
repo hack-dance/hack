@@ -1126,13 +1126,25 @@ fn cleanup_owner_guard_fences_delete_after_stop_and_network_delete_after_contain
             after_delete
         );
         let (mut retained, _) = journal::load(&fixture.candidate, RUN, OWNER, BOOT).unwrap();
-        assert!(retained.terminal["container:web"].stop_requested);
+        if after_delete {
+            assert_eq!(retained.phase, Phase::RemovalIntent);
+            assert!(retained.terminal["container:web"].stop_requested);
+        } else {
+            // Authority was lost inside the admitted stop batch: its result is
+            // retained as uncertain, with no unauthorized terminal observation.
+            assert_eq!(retained.phase, Phase::StopIntent);
+            assert!(retained.terminal.is_empty());
+        }
         changed.set(false);
         session.backend.state.borrow_mut().cancel_after_stop = None;
         session.backend.state.borrow_mut().cancel_after_delete = None;
         cleanup_using_guarded(&session.backend, &mut retained, &session.root, Some(&guard))
             .unwrap();
         assert_eq!(retained.phase, Phase::Removed);
+        assert_eq!(
+            retained.terminal["container:web"].stop_requested,
+            after_delete
+        );
         let effects = &session.backend.state.borrow().effects;
         assert_eq!(
             effects

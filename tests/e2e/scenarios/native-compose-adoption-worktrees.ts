@@ -228,7 +228,9 @@ async function prepareFixtureInputs(ctx: ScenarioContext) {
   if (process.platform !== "darwin" && process.platform !== "linux") {
     ctx.skip("requires supported native private-state host");
   }
-  const probe = createNativeComposeProbe({ timeoutMs: 30_000 });
+  const boundedProbe = createNativeComposeProbe({ timeoutMs: 30_000 });
+  const probe = async (args: readonly string[]) =>
+    (await boundedProbe(args)).trim();
   const engine = Bun.which("docker");
   if (!engine) {
     ctx.skip("Docker executable unavailable");

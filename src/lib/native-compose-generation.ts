@@ -36,6 +36,7 @@ import {
   nativeComposeStorageWitnessIntentValid,
   nativeComposeStorageWitnessStatesValid,
 } from "./native-compose-storage-witness-state.ts";
+import type { NativeComposeStorageXattrCarrier } from "./native-compose-storage-witness-xattr-carrier.ts";
 
 // biome-ignore lint/performance/noBarrelFile: Preserve the generation store's public topology contract after the single-parser extraction.
 export {
@@ -859,17 +860,24 @@ export type NativeComposeEffectOptions<T> = {
   /** Reuse the exact preceding ownership observation; never perform extra probes here. */
   readonly captureStorage?: () => readonly NativeComposeRetainedVolume[];
   /** Required for previously enrolled v3 startup/run. Carrier remains unactivated in the CLI. */
-  readonly storageWitnesses?: {
-    readonly engineId: string;
-    readonly observe: (selection: {
-      readonly name: string;
-      readonly storage: string;
-      readonly markerName: string;
-    }) => Promise<{
-      readonly volume: NativeComposeRetainedVolume;
-      readonly archive: Uint8Array;
-    }>;
-  };
+  readonly storageWitnesses?:
+    | {
+        readonly kind?: "file-ustar";
+        readonly engineId: string;
+        readonly observe: (selection: {
+          readonly name: string;
+          readonly storage: string;
+          readonly markerName: string;
+        }) => Promise<{
+          readonly volume: NativeComposeRetainedVolume;
+          readonly archive: Uint8Array;
+        }>;
+      }
+    | {
+        readonly kind: "directory-xattr";
+        readonly engineId: string;
+        readonly carrier: NativeComposeStorageXattrCarrier;
+      };
   readonly recoverPending?: boolean;
   /** Store-derived immutable one-off delivery, verified before/after run effects. */
   readonly projection?: NativeComposeRunProjection;

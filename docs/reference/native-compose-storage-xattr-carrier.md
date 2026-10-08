@@ -1,9 +1,11 @@
 # Native Compose directory-xattr carrier source
 
-This is an unactivated Linux helper source and an offline protocol. It does not
-enroll CLI volumes or qualify an engine transport. The [witness foundation](native-compose-storage-witness.md)
-still accepts only its regular-file/USTAR format. Ordinary CLI instances retain
-the metadata guard's same-metadata replacement limitation.
+This is an unactivated Linux helper source, injectable owner protocol and offline
+controls. The [witness foundation](native-compose-storage-witness.md) accepts its
+distinct xattr expectation/reference format under the same opaque generation
+authority. There is no Docker implementation of the carrier ports, and the CLI
+does not enroll volume witnesses. Ordinary CLI instances retain the metadata
+guard's same-metadata replacement limitation.
 
 The proposed directory xattr avoids adding a directory entry to PostgreSQL's
 authored data root. It detects a replacement missing its enrolled random witness;
@@ -35,9 +37,12 @@ enumeration, replace, remove, repair or caller-selected path. Device and inode
 facts use canonical unsigned 64-bit decimal strings; UID/GID are unsigned
 32-bit integers. Unknown kinds/versions, alternate encodings, duplicate JSON
 keys, trailing data and extra fields refuse. This format cannot be relabeled as
-the foundation's USTAR proof or attached to its existing completion reference.
-An explicit required reference/expectation codec change and owner review must
-precede xattr receipt integration; older owners must continue to refuse it.
+the foundation's USTAR proof or attached to its version-one completion reference.
+Xattr expectations and references require version two, `kind: "directory-xattr"`,
+and exact image/platform/Bun/libc/helper and kernel-ABI pins. Their version-three
+generation intent requires the carrier tag and those artifact pins even while
+Expected. Older strict owners reject the new required fields; absence of an
+artifact or tag cannot downgrade to USTAR.
 
 The Linux adapter fixes the root at `/hack-storage-witness`. It checks Linux
 arm64 or x64 open constants and fixed architecture-specific glibc paths, uses
@@ -68,7 +73,8 @@ qualification cells. There is no capability or ownership-changing fallback.
 ## Required cold provisioning and receipt order
 
 `startNativeComposeWorkloads` currently launches one Compose `up -d` child.
-Carrier activation must add the following boundary before that child, under the
+The injectable owner implements the following order; activation must supply a
+qualified cold provisioning and carrier transport before that child, under the
 same existing instance mutation and generation effect authority:
 
 1. Reacquire source, engine identity and exact owned inventory. Initial admission
@@ -84,8 +90,10 @@ same existing instance mutation and generation effect authority:
    Check the create result, then freshly inspect and capture the actual birth,
    local driver/options, current Mountpoint and holders before seed. Idempotent
    `volume create` is not proof of original cold admission. No recovery invocation
-   gains provisioning or seed authority. The final cold transaction and engine
-   observation contract remain unimplemented and require review.
+   gains provisioning or seed authority. The owner exposes exactly one captured
+   provisioning callback in the original consumed enrollment. A real engine
+   implementation must prove newness across that transaction; idempotent create
+   and synthetic observations do not qualify it.
 4. Run one create-only seed while all selected workloads remain stopped and no
    foreign or unaccounted holder exists. Require stopped, exact owned helper
    absence before non-force helper removal. Obtain fresh read-only marker and
@@ -95,6 +103,14 @@ same existing instance mutation and generation effect authority:
    after startup, as well as both final receipt boundaries. Read-only proofs may
    coexist with only the exact admitted running generation's holders. They never
    stop an application to obtain a proof or omit the existing final fences.
+
+The carrier handle synchronously captures its callbacks, immutable artifact,
+AbortSignal and absolute deadline. Preparation captures that exact handle and
+the source selection before its first await. The existing owner, private slot,
+one-use enrollment and owner-issued publication proof serve both formats; there
+is no second enrollment controller. Xattr completion additionally binds the
+canonical kernel response hash and observed root. Fabricated references and
+caller-supplied no-op verifiers cannot publish Enrolled.
 
 Any crash before enrollment keeps `Expected`, even if the token matches. Saved
 recovery may stop exact owned resources but must preserve the intent and pending
@@ -117,8 +133,22 @@ Each proof must create a fresh carrier from a freshly checked current root. An
 old carrier can retain a removed root even when the replacement repeats its
 name, birth and Mountpoint string. Do not accept its token or reuse that pinned
 mount across operations. Metadata discovery and the matching-UID reader must
-each be bracketed by fresh engine/birth/Mountpoint/holder checks. Drift refuses;
-there is no UID retry loop or permission repair.
+each be bracketed by fresh engine/birth/Mountpoint/holder checks. After the token
+read, a third fresh metadata carrier must still observe that exact root. This
+detects a reader pinned to an old removed root across its await even when Docker
+metadata repeats; it is a finite observation fence, not an atomic exclusion of
+later swaps. Drift refuses; there is no UID retry loop or permission repair.
+
+The source port contract requires a complete selected-volume holder inventory,
+the exact daemon and Compose owner, canonical local Mountpoint and empty local
+driver options. Only current/pending owned generations may hold the volume;
+enrollment forbids every running holder. Every invocation has a fresh nonce,
+exact generation/pending context, artifact and UID/GID. Its response must match
+those fields, contain one strict canonical helper result, and report exact
+stopped helper identity followed by empty helper inventory. Replayed accepted
+carrier IDs or invocation IDs refuse. These predicates validate an injectable
+contract; they are not proof of actual engine identity or cleanup without the
+qualified transport.
 
 Durable carrier intent, exact image/program/ID labels, fixed mount correspondence,
 no image-declared anonymous volumes, dropped capabilities, no network/ports/socket,
@@ -130,10 +160,14 @@ journals. This source contains no Docker transport or helper cleanup implementat
 
 ## Evidence limits and remaining gates
 
-Offline controls substitute synchronous syscall ports. They check strict input,
+Offline controls substitute synchronous syscall ports and synthetic engine/carrier
+observations through the public generation store. They check strict input,
 one create request, no overwrite/repair requests, missing/wrong witness under
 unchanged metadata, root/credential drift, callback capture and uncertain fsync
-or close. They do not execute the Linux adapter or qualify kernel atomicity,
+or close; required Expected before cold provisioning; one seed; exact stopped
+adoption; resumed missing/same-birth-empty/foreign-root refusals; artifact,
+holder, context and cleanup drift; cancellation; and retained interrupted state.
+They do not execute the Linux adapter or qualify kernel atomicity,
 permissions, xattr persistence, filesystem crash durability or Docker semantics.
 
 Before activation: qualify exact source/artifact/image/Bun/libc ABI and filesystem;
@@ -144,8 +178,9 @@ crash/timeout/cancellation with exact helper absence and retained uncertainty;
 no daemon-log token persistence; full original engine/resource restoration.
 
 Count every helper process, container and query. The first straightforward proof
-needs metadata discovery followed by a matching-UID read; initial enrollment adds
-a write helper and a separate read-only proof. Required pre/post/final proofs
+needs metadata discovery, a matching-UID read and a fresh metadata observation
+after that read. Initial enrollment adds a discovery and write helper before its
+separate three-invocation read-only proof. Required pre/post/final proofs
 therefore have a real startup cost. No performance improvement or production
 activation is claimed, and no persistent helper is proposed.
 

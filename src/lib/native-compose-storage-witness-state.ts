@@ -4,6 +4,11 @@ import {
   type NativeComposeRetainedVolume,
   nativeComposeRetainedVolumesValid,
 } from "./native-compose-retained-storage.ts";
+import {
+  captureNativeComposeStorageXattrArtifact,
+  type NativeComposeStorageXattrArtifact,
+  nativeComposeStorageXattrArtifactValid,
+} from "./native-compose-storage-witness-xattr-carrier.ts";
 
 const HASH = /^[a-f0-9]{64}$/;
 const TOKEN = /^[a-f0-9]{32}$/;
@@ -11,19 +16,27 @@ const ENGINE = /^[a-zA-Z0-9][a-zA-Z0-9:-]{0,127}$/;
 type DirectoryAnchor = { readonly dev: number; readonly ino: number };
 type Anchor = DirectoryAnchor & { readonly hash: string };
 /** Private immutable extension references. Never include in a public DTO. */
-export type NativeComposeStorageWitnessReference = {
-  readonly version: 1;
+type ReferenceAnchors = {
   readonly volume: NativeComposeRetainedVolume;
   readonly root: DirectoryAnchor;
   readonly directory: DirectoryAnchor;
   readonly expectation: Anchor;
   readonly completion: Anchor;
 };
+export type NativeComposeStorageWitnessReference = ReferenceAnchors &
+  (
+    | { readonly version: 1 }
+    | {
+        readonly version: 2;
+        readonly kind: "directory-xattr";
+        readonly artifact: NativeComposeStorageXattrArtifact;
+      }
+  );
 /** Issued privately by the witness owner. An object copy cannot authorize receipt publication. */
 export type NativeComposeStorageWitnessCompletionProof = Readonly<
   Record<never, never>
 >;
-export type NativeComposeStorageWitnessIntent = {
+type IntentBinding = {
   readonly name: string;
   readonly storage: string;
   readonly engineId: string;
@@ -32,6 +45,14 @@ export type NativeComposeStorageWitnessIntent = {
   readonly admission: "initial-create" | "explicit-adoption";
   readonly originalVolume: NativeComposeRetainedVolume | null;
 };
+export type NativeComposeStorageWitnessIntent = IntentBinding &
+  (
+    | { readonly carrier?: never; readonly artifact?: never }
+    | {
+        readonly carrier: "directory-xattr";
+        readonly artifact: NativeComposeStorageXattrArtifact;
+      }
+  );
 /** Required v3 state: Expected survives every interruption; only this invocation can enroll. */
 export type NativeComposeStorageWitnessState =
   NativeComposeStorageWitnessIntent &
@@ -70,8 +91,15 @@ export function nativeComposeStorageWitnessReferenceValid(
 ): value is NativeComposeStorageWitnessReference {
   return (
     isRecord(value) &&
-    keys(value, "completion,directory,expectation,root,version,volume") &&
-    value.version === 1 &&
+    ((value.version === 1 &&
+      keys(value, "completion,directory,expectation,root,version,volume")) ||
+      (value.version === 2 &&
+        keys(
+          value,
+          "artifact,completion,directory,expectation,kind,root,version,volume"
+        ) &&
+        value.kind === "directory-xattr" &&
+        nativeComposeStorageXattrArtifactValid(value.artifact))) &&
     nativeComposeRetainedVolumesValid([value.volume]) &&
     directoryValid(value.root) &&
     directoryValid(value.directory) &&
@@ -85,10 +113,17 @@ export function nativeComposeStorageWitnessIntentValid(
   if (
     !(
       isRecord(value) &&
-      keys(
-        value,
-        "admission,engineId,generationId,name,originalVolume,pendingToken,storage"
-      ) &&
+      (Object.hasOwn(value, "carrier")
+        ? keys(
+            value,
+            "admission,artifact,carrier,engineId,generationId,name,originalVolume,pendingToken,storage"
+          ) &&
+          value.carrier === "directory-xattr" &&
+          nativeComposeStorageXattrArtifactValid(value.artifact)
+        : keys(
+            value,
+            "admission,engineId,generationId,name,originalVolume,pendingToken,storage"
+          )) &&
       nativeComposeRetainedVolumesValid([
         {
           name: value.name,
@@ -117,6 +152,31 @@ export function nativeComposeStorageWitnessIntentValid(
     value.originalVolume.storage === value.storage
   );
 }
+function enrolledReferenceMatches(
+  intent: NativeComposeStorageWitnessIntent,
+  reference: unknown
+): boolean {
+  if (!nativeComposeStorageWitnessReferenceValid(reference)) {
+    return false;
+  }
+  const carrierMatches =
+    intent.carrier === "directory-xattr"
+      ? reference.version === 2 &&
+        JSON.stringify(
+          captureNativeComposeStorageXattrArtifact(reference.artifact)
+        ) ===
+          JSON.stringify(
+            captureNativeComposeStorageXattrArtifact(intent.artifact)
+          )
+      : reference.version === 1;
+  return (
+    carrierMatches &&
+    reference.volume.name === intent.name &&
+    reference.volume.storage === intent.storage &&
+    (intent.originalVolume === null ||
+      reference.volume.createdAt === intent.originalVolume.createdAt)
+  );
+}
 export function nativeComposeStorageWitnessStatesValid(
   value: unknown
 ): value is readonly NativeComposeStorageWitnessState[] {
@@ -132,9 +192,20 @@ export function nativeComposeStorageWitnessStatesValid(
         isRecord(entry) &&
         keys(
           entry,
-          entry.state === "expected"
-            ? "admission,engineId,generationId,name,originalVolume,pendingToken,state,storage"
-            : "admission,engineId,generationId,name,originalVolume,pendingToken,reference,state,storage"
+          [
+            "admission",
+            "engineId",
+            "generationId",
+            "name",
+            "originalVolume",
+            "pendingToken",
+            "state",
+            "storage",
+            ...(entry.state === "expected" ? [] : ["reference"]),
+            ...(Object.hasOwn(entry, "carrier") ? ["artifact", "carrier"] : []),
+          ]
+            .sort()
+            .join(",")
         )
       )
     ) {
@@ -154,14 +225,7 @@ export function nativeComposeStorageWitnessStatesValid(
     engineId = intent.engineId;
     if (
       state !== "expected" &&
-      !(
-        state === "enrolled" &&
-        nativeComposeStorageWitnessReferenceValid(reference) &&
-        reference.volume.name === intent.name &&
-        reference.volume.storage === intent.storage &&
-        (intent.originalVolume === null ||
-          reference.volume.createdAt === intent.originalVolume.createdAt)
-      )
+      !(state === "enrolled" && enrolledReferenceMatches(intent, reference))
     ) {
       return false;
     }

@@ -77,7 +77,9 @@ or helper download is implemented by this foundation. Store and source-CLI tests
 use synthetic observation ports and engine transports; they do not qualify Docker
 write or archive semantics.
 
-The separate [directory-xattr helper source](native-compose-storage-xattr-carrier.md)
-explores a create-only token without a PostgreSQL data-root directory entry. It
-has a distinct codec and no Docker transport, receipt integration or CLI activation.
-Its offline syscall controls do not qualify a carrier.
+The separate [directory-xattr owner and helper source](native-compose-storage-xattr-carrier.md)
+uses a create-only token without a PostgreSQL data-root directory entry. Required
+version-two expectation/reference records and tagged artifact-bound intent keep
+it distinct from USTAR under the same version-three receipt owner. It adds
+injectable cold provisioning and fresh read-only proof ports; no Docker transport
+or CLI activation is implemented. Its offline controls do not qualify a carrier.

@@ -176,9 +176,24 @@ readonly root filesystem, finite CPU/memory/PID limits and absolute deadline/gro
 reaping are mandatory before implementing the engine owner. Cancellation or an
 unknown create/start outcome keeps the anchor. Cleanup must prove the exact helper
 stopped before non-force removal and never remove data, witness, material or
-journals. This source contains no Docker transport, host deadline/group owner or
-helper cleanup implementation. Journal bytes validate the owning port contract;
-they do not replace actual stop and absence observations.
+journals. The candidate Docker port now uses the shared bounded query and child
+owners, captures canonical stdin privately, and records the created helper before
+start. It inspects all selected-volume holders, binds the fresh canonical local
+Mountpoint with `bind-recursive=disabled`, and never uses a named-volume helper
+mount or requests bind source creation. Known completion requires an exact stopped
+helper, non-force removal and fresh empty helper inventory. Unknown disposition
+retains the private journal and input. Journal bytes do not replace these actual
+stop and absence observations. The CLI does not call this unactivated port.
+
+The first declared dependency is the fixed Linux arm64 Bun 1.4.2 image
+`sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61`.
+The packaged helper pins its bytes and the qualified Bun/libc bytes separately.
+Dependency/platform checks precede volume effects; every helper uses `--pull never`.
+There is no image download, emulation fallback or platform substitution. Linux
+amd64 and uncached first installation remain outside this qualification.
+Maintain the packaged source with
+`bun scripts/generate-native-storage-witness-helper.ts --check` or `--write`;
+the generator refuses a changed artifact pin rather than approving new bytes.
 
 ## Evidence limits and remaining gates
 

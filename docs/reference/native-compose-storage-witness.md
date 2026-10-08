@@ -81,7 +81,8 @@ The separate [directory-xattr owner and helper source](native-compose-storage-xa
 uses a create-only token without a PostgreSQL data-root directory entry. Required
 version-three expectation/reference records and tagged artifact/journal-bound intent keep
 it distinct from USTAR under the same version-three receipt owner. It adds
-injectable cold provisioning and fresh read-only proof ports; no Docker transport
-or CLI activation is implemented. Required finite carrier intent survives unknown
+injectable cold provisioning and fresh read-only proof ports. The candidate Docker
+port remains unactivated pending its persistent-volume qualification; no CLI caller
+enrolls storage yet. Required finite carrier intent survives unknown
 helper outcomes even after enrollment; saved recovery stops resources without
 retiring that anchor. Its offline controls do not qualify a carrier.

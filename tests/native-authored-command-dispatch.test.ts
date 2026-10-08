@@ -50,6 +50,7 @@ async function invoke(opts: {
   readonly selected: Awaited<ReturnType<typeof fixture>>;
   readonly args: readonly string[];
   readonly backend?: string;
+  readonly logger?: "console";
 }) {
   const { root, native, compiler } = opts.selected;
   const child = Bun.spawn(
@@ -70,6 +71,7 @@ async function invoke(opts: {
         HACK_CONFIG_COMPILER_BINARY: compiler,
         HACK_NATIVE_BINARY: native,
         HACK_NATIVE_HOME: join(root, "candidate"),
+        ...(opts.logger === undefined ? {} : { HACK_LOGGER: opts.logger }),
         ...(opts.backend === undefined
           ? {}
           : { HACK_RUNTIME_BACKEND: opts.backend }),
@@ -201,10 +203,11 @@ macTest.each(
       selected: { ...selected, compiler: realCompiler },
       args: ["up", "--env", "base"],
       backend: "native",
+      logger: "console",
     });
     expect(value.code).toBe(1);
     expect(value.stdout + value.stderr).toMatch(
-      /^ERROR E_NATIVE_PROJECT_UNSUPPORTED:/
+      /^ERROR: E_NATIVE_PROJECT_UNSUPPORTED:/
     );
     expect(value.stdout + value.stderr).not.toContain("E_STARTUP_INCOMPLETE");
     expect(value.stdout + value.stderr).toContain(

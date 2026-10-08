@@ -50,6 +50,8 @@ jobs:
         run: bun -e 'if (process.platform !== process.env.EXPECTED_PLATFORM || process.arch !== process.env.EXPECTED_ARCH) throw new Error("Unexpected compiler release host");'
       - run: bun run check:config-compiler && bun run test:config-compiler
       - run: bun run build:config-compiler
+      - name: Test private file sources and owner with the matching compiler
+        run: bun test tests/native-compose-file-sources.test.ts tests/native-compose-file-owner.test.ts
       - name: Independently validate generated schema shape corpus
         run: |
           python3 -m venv "$RUNNER_TEMP/config-schema"
@@ -296,11 +298,13 @@ jobs:
         run: bun run privacy:check
       - name: Quality checks (Turbo)
         run: bun run turbo:check
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Prepare matching compiler for private file owner tests
+        run: bun run build:config-compiler
       - name: Tests (Turbo)
         run: bun run turbo:test
       - name: Build CLI
         run: bun run build
-      - uses: dtolnay/rust-toolchain@1.97.1
       - name: Build release smoke (no tests)
         run: bun run build:release --skip-tests --no-clean --out=dist/release-ci
 

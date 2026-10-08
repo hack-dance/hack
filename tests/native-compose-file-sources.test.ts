@@ -40,7 +40,9 @@ const KEYS = [
   "GIT_WORK_TREE",
   "GIT_COMMON_DIR",
 ] as const;
-const compiler = resolve(".hack-local/target/debug/hack-config-compiler");
+const compiler = resolve(
+  process.env.HACK_CONFIG_COMPILER_BINARY ?? "dist/hack-config-compiler"
+);
 const CANARY = "synthetic-private-file-value-$-no-newline";
 const binary = Buffer.from([0, 255, 4, 10]);
 let parent = "";

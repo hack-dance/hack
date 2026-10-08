@@ -57,6 +57,9 @@ const SOURCE = {
   },
 };
 const BYTES = Buffer.from([0, 255, 10]);
+const compiler = resolve(
+  process.env.HACK_CONFIG_COMPILER_BINARY ?? "dist/hack-config-compiler"
+);
 let parent = "";
 let root = "";
 let materialRoot = "";
@@ -89,9 +92,7 @@ beforeEach(async () => {
   );
   await writeFile(join(root, "settings.bin"), BYTES);
   process.env.HACK_HOME = join(parent, "home");
-  process.env.HACK_CONFIG_COMPILER_BINARY = resolve(
-    ".hack-local/target/debug/hack-config-compiler"
-  );
+  process.env.HACK_CONFIG_COMPILER_BINARY = compiler;
   store = await openNativeComposeGenerationStore({
     projectRoot: root,
     instance: null,

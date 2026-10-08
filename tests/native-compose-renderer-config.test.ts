@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { join } from "node:path";
+import { resolveTestConfigCompilerBinary } from "../scripts/check-test-config-compiler.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import { renderNativeCompose } from "../src/lib/native-compose-renderer.ts";
 import { compileNativeConfig } from "../src/lib/native-config-compiler.ts";
@@ -9,6 +9,7 @@ import { composeFixture } from "./helpers/native-compose.ts";
 
 const configTest =
   process.env.HACK_TEST_COMPOSE_CONFIG === "1" ? test : test.skip;
+const compiler = resolveTestConfigCompilerBinary();
 
 /** Uses configuration normalization only: no daemon connection, container start, pull or build. */
 async function normalized(opts: {
@@ -141,7 +142,7 @@ configTest(
     for (const profiles of [[], ["qa"]]) {
       const compiled = await compileNativeConfig({
         input: new TextEncoder().encode(JSON.stringify(mapped.candidate)),
-        binary: join(import.meta.dir, "../dist/hack-config-compiler"),
+        binary: compiler,
         profiles,
       });
       expect(compiled.ok).toBe(true);
@@ -270,7 +271,7 @@ configTest(
     for (const profiles of [[], ["qa"]]) {
       const compiled = await compileNativeConfig({
         input: new TextEncoder().encode(JSON.stringify(mapped.candidate)),
-        binary: join(import.meta.dir, "../dist/hack-config-compiler"),
+        binary: compiler,
         profiles,
       });
       expect(compiled.ok).toBe(true);

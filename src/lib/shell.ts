@@ -1,3 +1,7 @@
+import {
+  beginNativeCpuChild,
+  nativeCpuCommandCategory,
+} from "./native-cpu-diagnostics.ts";
 import { readSubprocessResourceUsage } from "./process-resource-usage.ts";
 import { hasControllingTerminal } from "./tty-process-group.ts";
 
@@ -53,10 +57,12 @@ export async function exec(
     pid: proc.pid,
     timeoutMs: opts.timeoutMs,
   });
+  const observeCpu = beginNativeCpuChild(proc, nativeCpuCommandCategory(cmd));
 
   const stdoutText = await streamToText(proc.stdout);
   const stderrText = await streamToText(proc.stderr);
   const exitCode = await proc.exited;
+  observeCpu(exitCode);
   timeout.dispose();
 
   return {
@@ -157,6 +163,10 @@ export async function run(
     stderr: options.stderr ?? "inherit",
     detached: ownsProcessGroup,
   });
+  const observeCpu = beginNativeCpuChild(
+    proc,
+    nativeCpuCommandCategory(command)
+  );
   const timeout = installSubprocessTimeout({
     pid: proc.pid,
     timeoutMs: options.timeoutMs,
@@ -174,10 +184,11 @@ export async function run(
   const completion = (async (): Promise<RunExitEvent> => {
     try {
       const exitCode = await proc.exited;
+      const diagnosticUsage = observeCpu(exitCode);
       const code =
         cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
       const usage = options.onExit
-        ? readSubprocessResourceUsage(proc)
+        ? (diagnosticUsage ?? readSubprocessResourceUsage(proc))
         : { cpuTimeMs: null, maxRssBytes: null };
       return {
         finishedAt: new Date().toISOString(),

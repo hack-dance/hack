@@ -64,7 +64,12 @@ impl Fixture {
     }
     fn session(&self, prepared: selection::Prepared) -> (execution::Graph, Session<'_, Fake>) {
         let (selected, input) = prepared.into_parts(&self.candidate).unwrap();
-        let mut config = configuration(&input, OWNER).unwrap();
+        let source = selected.project_source.as_ref().map(|source| {
+            source
+                .bind(&crate::provider::ProjectShareIntent::approve(&self.project, true).unwrap())
+                .unwrap()
+        });
+        let mut config = configuration_with_source(&input, OWNER, source.clone()).unwrap();
         for value in config.configs.values_mut() {
             value["StopTimeout"] = json!(10);
         }
@@ -84,6 +89,7 @@ impl Fixture {
         let backend = Fake {
             root: root.clone(),
             run: RUN.into(),
+            source,
             state: RefCell::new(FakeState::default()),
         };
         (
@@ -188,10 +194,12 @@ struct FakeState {
     cancel_after_stop: Option<Rc<Cell<bool>>>,
     cancel_after_delete: Option<Rc<Cell<bool>>>,
     cancel_on_delete_inspection: Option<Rc<Cell<bool>>>,
+    replace_source_after_create: Option<PathBuf>,
 }
 struct Fake {
     root: PathBuf,
     run: String,
+    source: Option<source::Binding>,
     state: RefCell<FakeState>,
 }
 impl Fake {
@@ -200,6 +208,17 @@ impl Fake {
     }
 }
 impl Backend for Fake {
+    fn verify_source(&self, receipt: &Receipt, active: bool) -> Result<(), CandidateError> {
+        // This fake verifies the admitted binding and real host selection. The
+        // real backend separately checks the provider lease and virtiofs mapping.
+        if receipt.source != self.source {
+            return Err(refused());
+        }
+        if active && let Some(source) = &receipt.source {
+            source.verify_host()?;
+        }
+        Ok(())
+    }
     fn request(
         &self,
         method: Method,
@@ -307,8 +326,12 @@ impl Backend for Fake {
             assert_eq!(config["HostConfig"]["NetworkMode"], network.name);
             let aliases = &config["NetworkingConfig"]["EndpointsConfig"][&network.name]["Aliases"];
             assert_eq!(aliases, &json!([resource.key]));
-            let value = json!({"Id":id,"Name":format!("/{name}"),"Image":config["Image"],"Config":process,"HostConfig":config["HostConfig"],"NetworkSettings":{"Networks":{network.name.clone():{"NetworkID":"","Aliases":aliases}}},"State":{"Running":false,"Status":"created","Pid":0,"ExitCode":0,"OOMKilled":false,"Dead":false,"Paused":false,"Restarting":false}});
+            let value = json!({"Id":id,"Name":format!("/{name}"),"Image":config["Image"],"Config":process,"HostConfig":config["HostConfig"],"Mounts":[],"NetworkSettings":{"Networks":{network.name.clone():{"NetworkID":"","Aliases":aliases}}},"State":{"Running":false,"Status":"created","Pid":0,"ExitCode":0,"OOMKilled":false,"Dead":false,"Paused":false,"Restarting":false}});
             state.containers.insert(name.into(), value);
+            if let Some(path) = &state.replace_source_after_create {
+                fs::rename(path, path.with_extension("original")).unwrap();
+                fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+            }
             return Ok(json!({"Id":id}));
         }
         if let Some(id) = path
@@ -328,6 +351,7 @@ impl Backend for Fake {
                 return Err(error("fake_start_uncertain", "once"));
             }
             let value = state.containers.get_mut(&resource.name).unwrap();
+            value["Mounts"] = json!(value["HostConfig"]["Mounts"].as_array().map(|mounts| mounts.iter().map(|mount| json!({"Type":mount["Type"],"Source":mount["Source"],"Destination":mount["Target"],"RW":!mount["ReadOnly"].as_bool().unwrap(),"Propagation":mount["BindOptions"]["Propagation"]})).collect::<Vec<_>>()).unwrap_or_default());
             value["State"] = if resource.key == "z.seed" {
                 json!({"Running":false,"Status":"exited","Pid":0,"ExitCode":0,"OOMKilled":false,"Dead":false,"Paused":false,"Restarting":false})
             } else {
@@ -424,6 +448,148 @@ impl Backend for Fake {
             canceled.set(true);
         }
         Ok(())
+    }
+}
+
+fn source_fixture() -> Fixture {
+    let mut project = basic();
+    project["services"]["web"]["mounts"] =
+        json!([{"source":"src","target":"/app","access":"read-only"}]);
+    let fixture = Fixture::new(project);
+    fs::write(fixture.project.join("package.json"), "{}").unwrap();
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(fixture.project.join("src"))
+        .unwrap();
+    fs::write(fixture.project.join("src/main.js"), "initial live source").unwrap();
+    fixture
+}
+
+#[test]
+fn live_source_controller_preserves_edits_and_cleans_only_original_owned_resources_after_move() {
+    let fixture = source_fixture();
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        serde_json::to_value(&session.receipt).unwrap()["version"],
+        3
+    );
+    fs::write(fixture.project.join("src/new"), "atomic edit").unwrap();
+    fs::rename(
+        fixture.project.join("src/new"),
+        fixture.project.join("src/main.js"),
+    )
+    .unwrap();
+    snapshot(&session.backend, session.receipt.clone()).unwrap();
+    let moved = fixture.project.join("moved");
+    fs::rename(fixture.project.join("src"), &moved).unwrap();
+    fs::write(
+        fixture.project.join("foreign-canary"),
+        "preserve foreign data",
+    )
+    .unwrap();
+    assert!(snapshot(&session.backend, session.receipt.clone()).is_err());
+    cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+    assert_eq!(session.receipt.phase, Phase::Removed);
+    assert!(session.backend.state.borrow().containers.is_empty());
+    assert!(session.backend.state.borrow().networks.is_empty());
+    assert_eq!(
+        fs::read_to_string(moved.join("main.js")).unwrap(),
+        "atomic edit"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.project.join("foreign-canary")).unwrap(),
+        "preserve foreign data"
+    );
+    snapshot(&session.backend, session.receipt.clone()).unwrap();
+}
+
+#[test]
+fn selected_source_replacement_before_effect_or_after_create_refuses_without_start_or_adoption() {
+    for after_create in [false, true] {
+        let fixture = source_fixture();
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        let path = fixture.project.join("src");
+        if after_create {
+            session
+                .backend
+                .state
+                .borrow_mut()
+                .replace_source_after_create = Some(path);
+        } else {
+            fs::rename(&path, fixture.project.join("original")).unwrap();
+            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        }
+        assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
+        assert!(
+            !session
+                .backend
+                .state
+                .borrow()
+                .effects
+                .iter()
+                .any(|effect| effect.starts_with("start:"))
+        );
+        if after_create {
+            assert_eq!(
+                session.backend.state.borrow().effects,
+                ["create:network", "create:web"]
+            );
+            cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+            assert_eq!(session.receipt.phase, Phase::Removed);
+        } else {
+            assert!(session.backend.state.borrow().effects.is_empty());
+        }
+        assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
+    }
+}
+
+#[test]
+fn retained_source_bind_or_approved_share_drift_refuses_cleanup_before_mutation() {
+    for changed_share in [false, true] {
+        let fixture = source_fixture();
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        if changed_share {
+            session.backend.source.as_mut().unwrap().share.inode += 1;
+        } else {
+            let mut state = session.backend.state.borrow_mut();
+            state.containers.values_mut().next().unwrap()["Mounts"][0]["RW"] = json!(true);
+        }
+        let effects = session.backend.state.borrow().effects.clone();
+        assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
+        assert_eq!(session.backend.state.borrow().effects, effects);
+    }
+}
+
+#[test]
+fn source_cleanup_does_not_recapture_a_moved_or_deleted_host_project() {
+    for deleted in [false, true] {
+        let fixture = source_fixture();
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        let moved = fixture.root.join("moved-project");
+        if deleted {
+            fs::remove_dir_all(&fixture.project).unwrap();
+        } else {
+            fs::rename(&fixture.project, &moved).unwrap();
+        }
+        assert!(snapshot(&session.backend, session.receipt.clone()).is_err());
+        cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+        assert_eq!(session.receipt.phase, Phase::Removed);
+        assert!(session.backend.state.borrow().containers.is_empty());
+        assert!(session.backend.state.borrow().networks.is_empty());
+        assert!(!fixture.project.exists());
+        if !deleted {
+            assert_eq!(
+                fs::read_to_string(moved.join("src/main.js")).unwrap(),
+                "initial live source"
+            );
+        }
     }
 }
 

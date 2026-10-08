@@ -6,8 +6,8 @@ use hack_config_compiler::{
     environment::{EnvironmentBinding, EnvironmentPlan, PlanResult},
     local::LocalResolution,
     model::{
-        Command, Dependency, EnvironmentValue, Plan, Readiness, ServiceCondition, Source, Workload,
-        WorktreePolicy,
+        Access, Command, Dependency, EnvironmentValue, Mount, Plan, Readiness, ServiceCondition,
+        Source, SourceMode, Workload, WorktreePolicy,
     },
     process::{Entrypoint, Restart, ShutdownSignal},
 };
@@ -96,8 +96,17 @@ pub struct WorkloadInputs {
     pub shutdown: Option<Shutdown>,
     pub restart: Option<Restart>,
     pub working_directory: Option<String>,
+    pub source_mount: Option<SourceMount>,
     pub environment: BTreeMap<String, String>,
     pub readiness: Option<ExecReadiness>,
+}
+
+/// Compiler-normalized source and destination; live sharing is admitted separately.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceMount {
+    pub source: String,
+    pub target: String,
 }
 
 /// Millisecond precision is retained; a future backend must qualify signal/timing delivery.
@@ -117,7 +126,7 @@ pub struct ExecReadiness {
 fn refused() -> CandidateError {
     CandidateError::new(
         "native_graph_subset",
-        "Native graph adapter requires image-only workloads, exec readiness and no acquisition, mounts, storage, custom networks, routing, endpoints, host effects or automatic restart; values omitted.",
+        "Native graph adapter requires images, exec readiness and at most one read-only live project-source mount; acquisition, other mounts, storage, custom networks, routing, endpoints, host effects and automatic restart remain unsupported; values omitted.",
     )
 }
 
@@ -178,7 +187,7 @@ fn entrypoint(value: Entrypoint) -> Result<Vec<String>, CandidateError> {
 fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, CandidateError> {
     if value.build.is_some()
         || value.pull_policy.is_some()
-        || !value.mounts.is_empty()
+        || value.mounts.len() > 1
         || (value.entrypoint.is_some() && value.command.is_none())
         || value
             .restart
@@ -187,6 +196,20 @@ fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, Candi
     {
         return Err(refused());
     }
+    let source_mount = match value.mounts.as_slice() {
+        [] => None,
+        [
+            Mount::Source {
+                source,
+                target,
+                access: Access::ReadOnly,
+            },
+        ] => Some(SourceMount {
+            source: source.clone(),
+            target: target.clone(),
+        }),
+        _ => return Err(refused()),
+    };
     let readiness = value
         .readiness
         .map(|check| match check {
@@ -226,6 +249,7 @@ fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, Candi
         shutdown,
         restart: value.restart,
         working_directory: value.working_directory,
+        source_mount,
         environment: BTreeMap::new(),
         readiness,
     })
@@ -310,6 +334,7 @@ fn compile_inputs(
     refuse_authored_network_intent(request)?;
     let environment_policy_hash = policy_hash(&plan, &environment_plan)?;
     if plan.source.root != "."
+        || !matches!(&plan.source.mode, SourceMode::HostMounted)
         || !plan.storage.is_empty()
         || !plan.configs.is_empty()
         || !plan.secrets.is_empty()

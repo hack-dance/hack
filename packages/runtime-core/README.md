@@ -66,6 +66,36 @@ grace up to 30 seconds is represented exactly; fractional seconds refuse. This p
 lowerer checks owner shape and deadline, never real guest ownership, image presence,
 combined capacity, private staging or engine effects.
 
+The explicit native consumer additionally admits at most one compiler-normalized
+read-only project source bind per selected workload. The authored source mode is
+`host-mounted` with root `.`: content changes remain live, including atomic edits
+of descendants inside a selected directory. A selected regular file may change
+in place; replacing that file itself changes the selected identity and refuses.
+Writable and other mounts, storage and custom source roots remain unsupported.
+This does not create an immutable snapshot or publish a new source revision.
+
+Source consumption requires the provider pool to already contain the exact
+explicitly approved unfiltered project share. The consumer never approves that
+whole-tree writable share, changes pool mounts or enrolls a project implicitly.
+Individual workload binds are read-only and `rprivate`. Selection pins the source
+root, every selected path and its ancestors by device, inode, type, UID and full
+mode; aliases, hardlinked selected files and permission changes refuse. Startup
+and active observations recheck those host paths, the existing provider share,
+virtiofs mapping and configured/runtime bind around engine work. Host editors are
+not locked: these are bounded replacement checks, not an atomic host filesystem
+fence. Descendant edits under a selected directory follow the approved live-share
+policy; its whole tree can include local configuration.
+
+Source-bearing native graph receipts use a closed v3 source binding; image-only
+v2 receipts keep their prior fields and serialization. This graph v3 is separate
+from the foreground publication-owner v3 and does not change the v2 ready/control
+envelopes. Retained inspection/startup cannot recapture or adopt a new selected
+path. Exact owned cleanup continues after the host source is moved or deleted:
+it verifies the original provider share and read-only container bind, stops and
+removes only the original resource inventory, and never deletes host source data.
+Dead-owner recovery of source-bearing graph v3 remains outside this increment;
+the separately qualified image-only recovery admission must refuse that version.
+
 `provider::graph::native::selection` selects only the exact absolute native project
 root and reads bounded, stable regular `.hack/hack.project.json` and optional
 `.hack/hack.local.json` files. It forwards raw authored text and owner-supplied
@@ -135,8 +165,8 @@ ordinary frontend selection yet and does not implement reactive health or hooks.
 The optional feature exposes this bounded consumer through a distinct public CLI:
 `graph native plan --source-file FILE --json`, then
 `graph native run --source-file FILE --expect-review SHA --json`.
-`graph native inspect|cleanup --run-id RUN --json` use its v2 journal. These commands
-are explicit image-only prerequisites, not ordinary project startup. Their project
+`graph native inspect|cleanup --run-id RUN --json` use its versioned native journal. These commands
+are explicit bounded prerequisites, not full ordinary project parity. Their project
 network does not publish ports or grant host-service access. Normal native `hack up`
 continues to require the full source/storage/routing/host and foreground-owner contract.
 

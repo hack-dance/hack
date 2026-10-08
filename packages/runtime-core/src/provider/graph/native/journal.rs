@@ -51,8 +51,9 @@ fn decode_failure_observation<'de, D: serde::Deserializer<'de>>(
     WireObservation::deserialize(reader).map(Into::into)
 }
 
-/// Hash-only native provenance plus value-free resource ownership. No replay authority,
-/// compiler request, argv, environment values or renewable timestamp is persisted.
+/// Hash-only compiler provenance plus public source/resource ownership metadata.
+/// No replay authority, source contents, compiler request, argv, environment values
+/// or renewable timestamp is persisted.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
@@ -64,16 +65,28 @@ pub struct Receipt {
     pub(super) phase: Phase,
     pub(super) readiness: BTreeMap<String, Condition>,
     pub(super) resources: BTreeMap<String, Resource>,
+    #[serde(
+        default,
+        deserialize_with = "decode_source",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(super) source: Option<source::Binding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure: Option<Failure>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) terminal: BTreeMap<String, super::super::shutdown::Terminal>,
+}
+fn decode_source<'de, D: serde::Deserializer<'de>>(
+    reader: D,
+) -> Result<Option<source::Binding>, D::Error> {
+    source::Binding::deserialize(reader).map(Some)
 }
 impl Receipt {
     /// Mutable phases and terminal evidence may advance; admitted identity cannot.
     pub(super) fn check_binding(&self, expected: &Self) -> Result<(), CandidateError> {
         self.validate(expected.review.scope().run, &expected.owner)?;
         if self.review != expected.review
+            || self.source != expected.source
             || self.boot != expected.boot
             || self.readiness != expected.readiness
             || self.resources.keys().ne(expected.resources.keys())
@@ -110,7 +123,7 @@ impl Receipt {
         boot: &str,
     ) -> Result<Self, CandidateError> {
         let receipt = Self {
-            version: 2,
+            version: if config.source.is_some() { 3 } else { 2 },
             kind: InputKind::NativeGraphRuntime,
             owner: owner.into(),
             boot: boot.into(),
@@ -123,6 +136,7 @@ impl Receipt {
                 .map(|(name, service)| (name.clone(), service.ready))
                 .collect(),
             resources: config.resources.clone(),
+            source: config.source.clone(),
             failure: None,
             terminal: BTreeMap::new(),
         };
@@ -138,7 +152,7 @@ impl Receipt {
     pub(super) fn validate(&self, run: &str, owner: &str) -> Result<(), CandidateError> {
         let scope = self.review.scope();
         self.review.validate(scope).map_err(|_| refused())?;
-        if self.version != 2
+        if self.version != if self.source.is_some() { 3 } else { 2 }
             || !hex(run, 32)
             || run != scope.run
             || !hex(owner, 32)
@@ -152,6 +166,9 @@ impl Receipt {
             })
         {
             return Err(refused());
+        }
+        if let Some(source) = &self.source {
+            source.validate(&self.readiness).map_err(|_| refused())?;
         }
         let network = self.resources.get("network:default").ok_or_else(refused)?;
         if network.kind != Kind::Network

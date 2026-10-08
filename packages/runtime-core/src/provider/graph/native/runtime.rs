@@ -4,6 +4,12 @@ use crate::provider::{environment::PendingEnvironment, native_environment};
 use std::{cell::Cell, path::Path, time::Instant};
 
 trait Backend {
+    fn verify_source(&self, receipt: &Receipt, _active: bool) -> Result<(), CandidateError> {
+        if receipt.source.is_some() {
+            return Err(refused());
+        }
+        Ok(())
+    }
     fn request(
         &self,
         method: Method,
@@ -45,6 +51,12 @@ struct OwnedBackend<'a> {
     leases: BTreeMap<String, crate::provider::environment::EnvironmentLease>,
 }
 impl Backend for OwnedBackend<'_> {
+    fn verify_source(&self, receipt: &Receipt, active: bool) -> Result<(), CandidateError> {
+        if let Some(binding) = &receipt.source {
+            source::verify(&self.engine, binding, active)?;
+        }
+        Ok(())
+    }
     fn request(
         &self,
         method: Method,
@@ -120,6 +132,11 @@ fn ownership(receipt: &Receipt, resource: &Resource, value: &Value) -> Result<()
         .all(|(key, expected)| observed_labels.get(key) == Some(expected))
     {
         return Err(refused());
+    }
+    if resource.kind == Kind::Container
+        && let Some(binding) = &receipt.source
+    {
+        binding.verify_container(&resource.key, value)?;
     }
     Ok(())
 }
@@ -330,6 +347,11 @@ impl<B: Backend> Session<'_, B> {
 impl<B: Backend> Driver for Session<'_, B> {
     fn check_cancelled(&self) -> Result<(), CandidateError> {
         check_startup(self.startup_guard)?;
+        self.selected.assert_fresh(self.candidate)?;
+        self.backend.verify_source(&self.receipt, true)?;
+        // Guest source checks can wait. They cannot renew the original authored
+        // selection/cancellation/deadline at the create or ready boundary.
+        check_startup(self.startup_guard)?;
         self.selected.assert_fresh(self.candidate)
     }
     fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
@@ -361,6 +383,7 @@ impl<B: Backend> Driver for Session<'_, B> {
             }
             Event::Observed { .. } => Ok(()),
             Event::Ready => {
+                self.check_cancelled()?;
                 self.receipt.phase = Phase::ReadyObserved;
                 self.save()
             }
@@ -399,6 +422,7 @@ impl<B: Backend> Driver for Session<'_, B> {
             .to_owned();
         self.receipt.resources.get_mut(&key).ok_or_else(refused)?.id = Some(id.clone());
         self.reserve(service, "created")?;
+        self.check_cancelled()?;
         let value = inspected(&self.backend, &self.receipt, &self.receipt.resources[&key])?
             .ok_or_else(refused)?;
         verify_config(
@@ -414,6 +438,7 @@ impl<B: Backend> Driver for Session<'_, B> {
         project_network(&self.backend, &self.receipt, None)?;
         self.backend
             .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+        self.check_cancelled()?;
         Ok(())
     }
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
@@ -429,6 +454,7 @@ impl<B: Backend> Driver for Session<'_, B> {
             &value,
         )?;
         project_network(&self.backend, &self.receipt, Some(&value))?;
+        self.check_cancelled()?;
         observation(&value)
     }
 }
@@ -477,7 +503,14 @@ pub(super) fn run_guarded(
     }
     check_startup(startup_guard)?;
     selected.assert_fresh(candidate)?;
-    let mut config = configuration(&input, engine.guest().incarnation())?;
+    let source = selected
+        .project_source
+        .as_ref()
+        .map(|source| source::prepare(&engine, source))
+        .transpose()?;
+    check_startup(startup_guard)?;
+    selected.assert_fresh(candidate)?;
+    let mut config = configuration_with_source(&input, engine.guest().incarnation(), source)?;
     check_network_intent(&engine, &config.resources)?;
     let private = input.private_services();
     // Stop observations require a whole-second bounded timeout even when authored intent omits it.
@@ -584,6 +617,7 @@ pub struct Snapshot {
     pub observations: BTreeMap<String, Option<Observation>>,
 }
 fn snapshot<B: Backend>(backend: &B, receipt: Receipt) -> Result<Snapshot, CandidateError> {
+    backend.verify_source(&receipt, receipt.phase != Phase::Removed)?;
     let mut observations = BTreeMap::new();
     if receipt.phase == Phase::Removed {
         if inspected(backend, &receipt, &receipt.resources["network:default"])?.is_some() {
@@ -607,6 +641,7 @@ fn snapshot<B: Backend>(backend: &B, receipt: Receipt) -> Result<Snapshot, Candi
             observed.as_ref().map(observation).transpose()?,
         );
     }
+    backend.verify_source(&receipt, receipt.phase != Phase::Removed)?;
     Ok(Snapshot {
         receipt,
         observations,
@@ -665,6 +700,7 @@ fn cleanup_using_guarded<B: Backend>(
     guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
 ) -> Result<(), CandidateError> {
     check_startup(guard)?;
+    backend.verify_source(receipt, false)?;
     // A committed cleanup phase is retry authority for this same inventory, never
     // permission to move the receipt back to startup or stop an already retired run.
     let stopped = matches!(
@@ -708,6 +744,7 @@ fn cleanup_using_guarded<B: Backend>(
         }
     }
     check_startup(guard)?;
+    backend.verify_source(receipt, false)?;
     if removed {
         return Ok(());
     }
@@ -727,8 +764,10 @@ fn cleanup_using_guarded<B: Backend>(
         .map(|(key, prepared)| (prepared.id.as_str(), receipt.resources[key].key.as_str()))
         .collect::<BTreeMap<_, _>>();
     if !stopped {
+        backend.verify_source(receipt, false)?;
         backend.stop(&stops, &admitted)?;
     }
+    backend.verify_source(receipt, false)?;
     for (key, prepared) in &prepared {
         let resource = &receipt.resources[key];
         let value = inspected(backend, receipt, resource)?.ok_or_else(refused)?;
@@ -750,10 +789,12 @@ fn cleanup_using_guarded<B: Backend>(
     }
     for key in prepared.keys() {
         check_startup(guard)?;
+        backend.verify_source(receipt, false)?;
         let resource = &receipt.resources[key];
         let value = inspected(backend, receipt, resource)?.ok_or_else(refused)?;
         super::super::shutdown::terminal(resource, &value, false)?;
         check_startup(guard)?;
+        backend.verify_source(receipt, false)?;
         backend.request(
             Method::DELETE,
             &format!(
@@ -788,6 +829,7 @@ fn cleanup_using_guarded<B: Backend>(
             .phase = "remove-intent".into();
         journal::save(root, receipt)?;
         check_startup(guard)?;
+        backend.verify_source(receipt, false)?;
         backend.request(
             Method::DELETE,
             &format!(
@@ -806,6 +848,7 @@ fn cleanup_using_guarded<B: Backend>(
         .ok_or_else(refused)?
         .phase = "removed".into();
     receipt.phase = Phase::Removed;
+    backend.verify_source(receipt, false)?;
     journal::save(root, receipt)
 }
 

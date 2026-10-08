@@ -57,6 +57,33 @@ fn source_root_subset_refuses_review_before_any_private_copy() {
     assert_eq!(values, original);
 }
 
+#[test]
+fn one_read_only_host_mounted_source_is_lowered_without_snapshot_or_share_effects() {
+    let mut project = basic();
+    project["source"] = json!({"root":".","mode":"host-mounted"});
+    project["services"]["web"]["mounts"] =
+        json!([{"source":"src","target":"/app","access":"read-only"}]);
+    let selected = lower(&project, json!({"web":{}}), &BTreeMap::new()).unwrap();
+    assert_eq!(
+        selected.workloads["web"].source_mount,
+        Some(SourceMount {
+            source: "src".into(),
+            target: "/app".into()
+        })
+    );
+    assert!(review(&request(&project, json!({"web":{}})), &[]).is_ok());
+    for mounts in [
+        json!([{"source":"src","target":"/app","access":"read-write"}]),
+        json!([{"source":"src","target":"/app","access":"read-only"},{"source":"other","target":"/other","access":"read-only"}]),
+    ] {
+        project["services"]["web"]["mounts"] = mounts;
+        refusal(
+            lower(&project, json!({"web":{}}), &BTreeMap::new()),
+            "native_graph_subset",
+        );
+    }
+}
+
 fn refusal(result: Result<NativeInputs, CandidateError>, code: &str) {
     let error = match result {
         Ok(_) => panic!("expected refusal"),
@@ -749,7 +776,7 @@ fn entrypoint_overrides_without_authored_command_refuse_until_image_cmd_is_quali
 fn unsupported_intent_is_never_dropped() {
     let empty = BTreeMap::new();
     for field in [
-        json!({"mounts":[{"source":".","target":"/app","access":"read-only"}]}),
+        json!({"mounts":[{"source":".","target":"/app","access":"read-write"}]}),
         json!({"pull_policy":"never"}),
         json!({"restart":{"kind":"on-failure","max_retries":2}}),
         json!({"readiness":{"kind":"http","port":8080,"path":"/","interval":"1s","timeout":"1s","retries":1}}),

@@ -57,8 +57,30 @@ type Terminal = {
   readonly oom_killed: boolean;
   readonly stop_requested: boolean;
 };
-export type NativeAuthoredReceipt = {
-  readonly version: 2;
+type NativeSourceAnchor = {
+  readonly device: number;
+  readonly inode: number;
+  readonly mode: number;
+  readonly uid: number;
+  readonly gid: number;
+  readonly kind: "file" | "directory";
+};
+type NativeSourceBinding = {
+  readonly version: 1;
+  readonly policy: "host-mounted";
+  readonly share: {
+    readonly project: string;
+    readonly guest_path: string;
+    readonly device: number;
+    readonly inode: number;
+    readonly unfiltered_source: true;
+  };
+  readonly mounts: Readonly<
+    Record<string, { readonly source: string; readonly target: string }>
+  >;
+  readonly anchors: Readonly<Record<string, NativeSourceAnchor>>;
+};
+type NativeAuthoredInventory = {
   readonly kind: "native-graph-runtime";
   readonly owner: string;
   readonly boot: string;
@@ -72,6 +94,11 @@ export type NativeAuthoredReceipt = {
   };
   readonly terminal?: Readonly<Record<string, Terminal>>;
 };
+export type NativeAuthoredReceipt = NativeAuthoredInventory &
+  (
+    | { readonly version: 2; readonly source?: never }
+    | { readonly version: 3; readonly source: NativeSourceBinding }
+  );
 function refused(): never {
   throw new Error(
     "Native authored graph response is invalid or changed; values omitted."
@@ -95,6 +122,174 @@ function hash(value: unknown): value is string {
 }
 function utf8Order(left: string, right: string): number {
   return Buffer.compare(Buffer.from(left), Buffer.from(right));
+}
+function unsigned(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+function relativeSource(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.isWellFormed() &&
+    Buffer.byteLength(value) <= 4096 &&
+    !CONTROL.test(value) &&
+    (value === "." ||
+      (value.length > 0 &&
+        value
+          .split("/")
+          .every((part) => part.length > 0 && part !== "." && part !== "..")))
+  );
+}
+function absoluteSource(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.isWellFormed() &&
+    value.startsWith("/") &&
+    Buffer.byteLength(value) <= 4096 &&
+    !CONTROL.test(value) &&
+    (value === "/" ||
+      value
+        .slice(1)
+        .split("/")
+        .every((part) => part.length > 0 && part !== "." && part !== ".."))
+  );
+}
+function sourceAnchor(value: unknown): NativeSourceAnchor {
+  if (
+    !(
+      fields(value, ["device", "inode", "mode", "uid", "gid", "kind"]) &&
+      unsigned(value.device) &&
+      unsigned(value.inode)
+    ) ||
+    value.inode === 0 ||
+    !unsigned(value.mode) ||
+    value.mode > 0xff_ff ||
+    !unsigned(value.uid) ||
+    value.uid > 0xff_ff_ff_ff ||
+    !unsigned(value.gid) ||
+    value.gid > 0xff_ff_ff_ff ||
+    (value.mode & 0o022) !== 0 ||
+    !(
+      (value.kind === "file" &&
+        (value.mode & 0o17_0000) === 0o10_0000 &&
+        (value.mode & 0o400) !== 0) ||
+      (value.kind === "directory" &&
+        (value.mode & 0o17_0000) === 0o04_0000 &&
+        (value.mode & 0o500) === 0o500)
+    )
+  ) {
+    return refused();
+  }
+  return {
+    device: value.device,
+    inode: value.inode,
+    mode: value.mode,
+    uid: value.uid,
+    gid: value.gid,
+    kind: value.kind,
+  };
+}
+function sourceBinding(
+  value: unknown,
+  services: readonly string[]
+): NativeSourceBinding {
+  if (
+    !fields(value, ["version", "policy", "share", "mounts", "anchors"]) ||
+    value.version !== 1 ||
+    value.policy !== "host-mounted" ||
+    !fields(value.share, [
+      "project",
+      "guest_path",
+      "device",
+      "inode",
+      "unfiltered_source",
+    ]) ||
+    !absoluteSource(value.share.project) ||
+    value.share.project.includes(":") ||
+    !unsigned(value.share.device) ||
+    !unsigned(value.share.inode) ||
+    value.share.inode === 0 ||
+    value.share.unfiltered_source !== true ||
+    value.share.guest_path !==
+      `/mnt/hack-projects/${createHash("sha256").update(value.share.project).digest("hex")}` ||
+    !isRecord(value.mounts) ||
+    !isRecord(value.anchors)
+  ) {
+    return refused();
+  }
+  const declared = Object.keys(value.mounts).sort(utf8Order);
+  const declaredMounts = value.mounts;
+  const declaredAnchors = value.anchors;
+  if (
+    declared.length === 0 ||
+    declared.length > services.length ||
+    declared.some((name) => !services.includes(name))
+  ) {
+    return refused();
+  }
+  const required = new Set(["."]);
+  const mounts = Object.fromEntries(
+    declared.map((name) => {
+      const mount = declaredMounts[name];
+      if (
+        !(
+          fields(mount, ["source", "target"]) &&
+          relativeSource(mount.source) &&
+          absoluteSource(mount.target)
+        )
+      ) {
+        return refused();
+      }
+      if (mount.source !== ".") {
+        const parts = mount.source.split("/");
+        for (let length = 1; length <= parts.length; length += 1) {
+          required.add(parts.slice(0, length).join("/"));
+        }
+      }
+      return [name, { source: mount.source, target: mount.target }];
+    })
+  );
+  const anchors = Object.fromEntries(
+    Object.keys(declaredAnchors)
+      .sort(utf8Order)
+      .map((name) => {
+        if (!required.has(name)) {
+          return refused();
+        }
+        return [name, sourceAnchor(declaredAnchors[name])];
+      })
+  );
+  const root = anchors["."];
+  if (
+    Object.keys(anchors).length !== required.size ||
+    root === undefined ||
+    root.kind !== "directory" ||
+    root.device !== value.share.device ||
+    root.inode !== value.share.inode ||
+    Object.values(anchors).some((anchor) => anchor.uid !== root.uid) ||
+    [...required].some(
+      (path) =>
+        path !== "." &&
+        Object.values(mounts).some((mount) =>
+          mount.source.startsWith(`${path}/`)
+        ) &&
+        anchors[path]?.kind !== "directory"
+    )
+  ) {
+    return refused();
+  }
+  return {
+    version: 1,
+    policy: "host-mounted",
+    share: {
+      project: value.share.project,
+      guest_path: value.share.guest_path,
+      device: value.share.device,
+      inode: value.share.inode,
+      unfiltered_source: true,
+    },
+    mounts,
+    anchors,
+  };
 }
 function profiles(value: unknown): value is readonly string[] {
   return (
@@ -300,26 +495,31 @@ function resource(
   };
 }
 
-/** Native v2 remains disjoint from legacy Compose receipts and their plan IDs. */
+/** Image-only v2 and source-bearing v3 stay disjoint from legacy Compose receipts. */
 export function parseNativeAuthoredReceipt(
   value: unknown
 ): NativeAuthoredReceipt {
   if (
-    !fields(
-      value,
-      [
-        "version",
-        "kind",
-        "owner",
-        "boot",
-        "review",
-        "phase",
-        "readiness",
-        "resources",
-      ],
-      ["failure", "terminal"]
+    !(
+      fields(
+        value,
+        [
+          "version",
+          "kind",
+          "owner",
+          "boot",
+          "review",
+          "phase",
+          "readiness",
+          "resources",
+        ],
+        ["failure", "terminal", "source"]
+      ) &&
+      (value.version === 2 || value.version === 3)
     ) ||
-    value.version !== 2 ||
+    (value.version === 2
+      ? Object.hasOwn(value, "source")
+      : !Object.hasOwn(value, "source")) ||
     value.kind !== "native-graph-runtime" ||
     typeof value.owner !== "string" ||
     !HEX32.test(value.owner) ||
@@ -392,8 +592,7 @@ export function parseNativeAuthoredReceipt(
   const terminal = Object.hasOwn(value, "terminal")
     ? parseTerminal(value.terminal, resources)
     : undefined;
-  return {
-    version: 2,
+  const common: NativeAuthoredInventory = {
     kind: "native-graph-runtime",
     owner: value.owner,
     boot: value.boot,
@@ -404,6 +603,9 @@ export function parseNativeAuthoredReceipt(
     ...(failure ? { failure } : {}),
     ...(terminal ? { terminal } : {}),
   };
+  return value.version === 2
+    ? { version: 2, ...common }
+    : { version: 3, ...common, source: sourceBinding(value.source, names) };
 }
 function parseFailure(
   value: unknown,
@@ -474,6 +676,7 @@ export function nativeAuthoredReceiptBinding(
   receipt: NativeAuthoredReceipt
 ): string {
   return JSON.stringify({
+    ...(receipt.version === 3 ? { version: 3, source: receipt.source } : {}),
     owner: receipt.owner,
     boot: receipt.boot,
     review: receipt.review,

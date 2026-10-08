@@ -26,8 +26,13 @@ import {
 } from "../harness.ts";
 import {
   adoptionDependencyHealthcheck,
+  assertAdoptionDependencyControl,
   assertAdoptionDependencyHealthcheck,
 } from "./native-compose-adoption-dependency-inputs.ts";
+import {
+  type AdoptionDependencyFirstPrepare,
+  captureAdoptionDependencyFirstPrepare,
+} from "./native-compose-adoption-dependency-staged-read.ts";
 import {
   prepareTypedLocalAdoptionFixtureSources,
   typedLocalAdoptionFixtureSourceSnapshot,
@@ -931,6 +936,9 @@ async function withholdPrimaryLocal(h: FixtureRuntime) {
 }
 async function interruptFirstStop(h: FixtureRuntime) {
   const { ctx, engine, first, container, cli } = h;
+  const firstPrepare = first.dependency
+    ? await captureAdoptionDependencyFirstPrepare({ projectRoot: first.root })
+    : undefined;
   const shimRoot = join(ctx.tempRoot, "partial-stop-shim");
   await mkdir(shimRoot, { mode: 0o700 });
   const receipt = join(
@@ -961,7 +969,7 @@ if(args[0]==="container" && args[1]==="stop") {
  if(await child.exited!==0) process.exit(97);
  await Bun.write(${JSON.stringify(control)},"journal-before-partial-stop");process.exit(71);
 }
-${first.dependency ? dependencyReadGuard(h, first, receipt) : ""}
+${first.dependency ? dependencyReadGuard(h, first, receipt, firstPrepare) : ""}
 const child=Bun.spawn([engine,...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});process.exit(await child.exited);
 `
   );
@@ -969,7 +977,17 @@ const child=Bun.spawn([engine,...args],{stdin:"inherit",stdout:"inherit",stderr:
   const partial = await cli(first, ["config", "adopt", "--stop", "--json"], {
     PATH: `${shimRoot}:${process.env.PATH ?? "/usr/bin:/bin"}`,
   });
-  if (
+  if (first.dependency) {
+    assertAdoptionDependencyControl({
+      stage: "prepared-stop",
+      exitCode: partial.exitCode,
+      timedOut: partial.timedOut,
+      control: await dependencyControlMarker(
+        control,
+        "journal-before-partial-stop"
+      ),
+    });
+  } else if (
     partial.timedOut ||
     partial.exitCode === 0 ||
     (await Bun.file(control).text()) !== "journal-before-partial-stop"
@@ -986,6 +1004,20 @@ const child=Bun.spawn([engine,...args],{stdin:"inherit",stdout:"inherit",stderr:
   }
 }
 
+async function dependencyControlMarker(path: string, expected: string) {
+  try {
+    const file = Bun.file(path);
+    if (!(await file.exists())) {
+      return "missing" as const;
+    }
+    return (await file.text()) === expected
+      ? ("valid" as const)
+      : ("invalid" as const);
+  } catch {
+    return "invalid" as const;
+  }
+}
+
 function dependencyEngineCheck(h: FixtureRuntime): string {
   return `const engineCheck=Bun.spawn([engine,'info','--format','{{json .ID}}'],{stdin:'ignore',stdout:'pipe',stderr:'ignore'});
  const engineId=(await new Response(engineCheck.stdout).text()).trim();if(await engineCheck.exited!==0 || engineId!==${JSON.stringify(h.engineId)})process.exit(95);`;
@@ -995,7 +1027,8 @@ function dependencyEngineCheck(h: FixtureRuntime): string {
 function dependencyReadGuard(
   h: FixtureRuntime,
   instance: Instance,
-  receipt: string
+  receipt: string,
+  firstPrepare?: AdoptionDependencyFirstPrepare
 ): string {
   const anchor = h.anchors.get(instance);
   const network = anchor?.resources.network[0];
@@ -1012,13 +1045,21 @@ function dependencyReadGuard(
   const helper = fileURLToPath(
     new URL("./native-compose-adoption-dependency-inputs.ts", import.meta.url)
   );
+  const stagedHelper = fileURLToPath(
+    new URL(
+      "./native-compose-adoption-dependency-staged-read.ts",
+      import.meta.url
+    )
+  );
   return `import {adoptionDependencyReadAllowed} from ${JSON.stringify(helper)};
+import {adoptionDependencyStagedReadAllowed} from ${JSON.stringify(stagedHelper)};
 try {
  const savedFile=Bun.file(${JSON.stringify(receipt)});
  const saved=await savedFile.exists() ? JSON.parse(await savedFile.text()) : null;
  const generationId=saved?.prepared?.id ?? saved?.publication?.generation?.id;
- if(!adoptionDependencyReadAllowed({args,projectRoot:${JSON.stringify(instance.root)},project:${JSON.stringify(instance.name)},containerIds:${JSON.stringify(anchor.resources.container.map((row) => row.id))},networkId:${JSON.stringify(network.id)},volumeName:${JSON.stringify(volume.id)},generationId}))process.exit(93);
-}catch{process.exit(93);}`;
+ const allowed=adoptionDependencyReadAllowed({args,projectRoot:${JSON.stringify(instance.root)},project:${JSON.stringify(instance.name)},containerIds:${JSON.stringify(anchor.resources.container.map((row) => row.id))},networkId:${JSON.stringify(network.id)},volumeName:${JSON.stringify(volume.id)},generationId})${firstPrepare ? ` || await adoptionDependencyStagedReadAllowed({args,project:${JSON.stringify(instance.name)},first:${JSON.stringify(firstPrepare)}})` : ""};
+ if(!allowed){console.error('dependency-read-refused stage=read-admission code=93');process.exit(93);}
+}catch{console.error('dependency-read-refused stage=read-admission code=93');process.exit(93);}`;
 }
 async function recoverFirstAndRollback(h: FixtureRuntime) {
   const { first, second, cli, container, waitReady, check, anchors, effect } =
@@ -1146,13 +1187,12 @@ const child=Bun.spawn([engine,...args],{stdin:'inherit',stdout:'inherit',stderr:
     PATH: `${shimRoot}:${process.env.PATH ?? "/usr/bin:/bin"}`,
   });
   const expected = partial ? [db] : [db, worker];
-  if (
-    result.timedOut ||
-    JSON.stringify(JSON.parse(await Bun.file(starts).text())) !==
-      JSON.stringify(expected)
-  ) {
-    refused();
-  }
+  assertAdoptionDependencyControl({
+    stage: partial ? "pending-start" : "ordered-start",
+    exitCode: result.exitCode,
+    timedOut: result.timedOut,
+    control: await dependencyControlMarker(starts, JSON.stringify(expected)),
+  });
   if (partial) {
     if (
       result.exitCode === 0 ||

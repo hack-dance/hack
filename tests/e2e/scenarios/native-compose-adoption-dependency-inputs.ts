@@ -14,6 +14,39 @@ function refused(): never {
   );
 }
 
+/** Fixed stage/code flags preserve the failure boundary without exposing CLI output or authored values. */
+export function assertAdoptionDependencyControl(opts: {
+  readonly stage: "prepared-stop" | "pending-start" | "ordered-start";
+  readonly exitCode: number;
+  readonly timedOut: boolean;
+  readonly control: "missing" | "invalid" | "valid";
+}): void {
+  const validExit = Number.isSafeInteger(opts.exitCode) && opts.exitCode >= 0;
+  const exitCode = validExit ? opts.exitCode : -1;
+  const stage = ["prepared-stop", "pending-start", "ordered-start"].includes(
+    opts.stage
+  )
+    ? opts.stage
+    : "invalid-stage";
+  const control = ["missing", "invalid", "valid"].includes(opts.control)
+    ? opts.control
+    : "invalid";
+  const expectedExit =
+    stage === "ordered-start" ? exitCode === 0 : exitCode !== 0;
+  if (
+    stage === "invalid-stage" ||
+    !validExit ||
+    typeof opts.timedOut !== "boolean" ||
+    opts.timedOut ||
+    !expectedExit ||
+    control !== "valid"
+  ) {
+    throw new Error(
+      `Adoption dependency fixture failed: stage=${stage} exit=${exitCode} timedOut=${opts.timedOut === true} control=${control}; values omitted.`
+    );
+  }
+}
+
 /** Independent oracle for the actual forwarded start, not an extra simulated engine effect. */
 export function assertAdoptionDependencyStart(opts: {
   readonly db: string;

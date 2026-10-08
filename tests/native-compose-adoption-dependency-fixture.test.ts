@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import {
   adoptionDependencyHealthcheck,
   adoptionDependencyReadAllowed,
+  assertAdoptionDependencyControl,
   assertAdoptionDependencyHealthcheck,
   assertAdoptionDependencyStart,
 } from "./e2e/scenarios/native-compose-adoption-dependency-inputs.ts";
@@ -27,6 +28,45 @@ const options = {
 };
 const refusal =
   "Adoption dependency fixture ordering check failed; values omitted.";
+
+test("missing fixture controls retain fixed stage and exit diagnostics instead of ENOENT or private CLI output", () => {
+  expect(() =>
+    assertAdoptionDependencyControl({
+      stage: "prepared-stop",
+      exitCode: 1,
+      timedOut: false,
+      control: "missing",
+    })
+  ).toThrow(
+    "stage=prepared-stop exit=1 timedOut=false control=missing; values omitted."
+  );
+  expect(() =>
+    assertAdoptionDependencyControl({
+      stage: "pending-start",
+      exitCode: 1,
+      timedOut: false,
+      control: "invalid",
+    })
+  ).toThrow(
+    "stage=pending-start exit=1 timedOut=false control=invalid; values omitted."
+  );
+  expect(() =>
+    assertAdoptionDependencyControl({
+      stage: "ordered-start",
+      exitCode: 0,
+      timedOut: false,
+      control: "valid",
+    })
+  ).not.toThrow();
+  expect(() =>
+    assertAdoptionDependencyControl({
+      stage: "prepared-stop",
+      exitCode: 1,
+      timedOut: false,
+      control: "valid",
+    })
+  ).not.toThrow();
+});
 
 test("actual ordered-start oracle requires original DB first and a healthy prerequisite", () => {
   expect(() =>

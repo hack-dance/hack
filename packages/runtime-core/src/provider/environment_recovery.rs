@@ -39,7 +39,7 @@ fn error() -> CandidateError {
 fn root(candidate: &Candidate) -> PathBuf {
     candidate.state_root.join("run/environment-leases")
 }
-fn valid_slot(slot: &str) -> bool {
+pub(super) fn valid_slot(slot: &str) -> bool {
     let Some(rest) = slot.strip_prefix("hack-env-lease-") else {
         return false;
     };
@@ -55,7 +55,7 @@ fn hex(value: &str, len: usize) -> bool {
             .bytes()
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
-fn uuid(value: &str) -> bool {
+pub(super) fn uuid(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(i, c)| {
             if [8, 13, 18, 23].contains(&i) {
@@ -103,11 +103,15 @@ pub(super) fn preflight_records(
     }
     let directory = root(candidate);
     crate::reject_aliased_state(&directory)?;
+    let native = native_count(candidate)?;
+    let available = MAX_INTENT_ENTRIES
+        .checked_sub(requested)
+        .and_then(|n| n.checked_sub(native))
+        .ok_or_else(error)?;
     if !directory.try_exists().map_err(state::io)? {
         return Ok(());
     }
     state::check_private_directory(&directory)?;
-    let available = MAX_INTENT_ENTRIES - requested;
     for (index, entry) in fs::read_dir(&directory).map_err(state::io)?.enumerate() {
         entry.map_err(state::io)?;
         if index >= available {
@@ -117,10 +121,33 @@ pub(super) fn preflight_records(
     Ok(())
 }
 
+// Allocation history is shared even when this binary cannot decode native bindings.
+pub(super) fn native_count(candidate: &Candidate) -> Result<usize, CandidateError> {
+    let directory = candidate.state_root.join("run/native-environment-leases");
+    crate::reject_aliased_state(&directory)?;
+    if !directory.try_exists().map_err(state::io)? {
+        return Ok(0);
+    }
+    state::check_private_directory(&directory)?;
+    let mut count = 0;
+    for entry in fs::read_dir(directory).map_err(state::io)? {
+        entry.map_err(state::io)?;
+        count += 1;
+        if count > MAX_INTENT_ENTRIES {
+            return Err(error());
+        }
+    }
+    Ok(count)
+}
+
 pub(super) fn record(
     candidate: &Candidate,
     lease: &EnvironmentLease,
 ) -> Result<(), CandidateError> {
+    #[cfg(feature = "native-config-plan")]
+    if lease.native.is_some() {
+        return Err(error());
+    }
     if retention::reserved(candidate, &lease.slot)? {
         return Err(error());
     }
@@ -538,7 +565,7 @@ fn retire_intent(guest: &OwnedGuest<'_>, intent: &Intent) -> Result<(), Candidat
     }
     Ok(())
 }
-const RETIRE: &str = r#"
+pub(super) const RETIRE: &str = r#"
 (
 set -eu
 root="/run/$1"

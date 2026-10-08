@@ -102,19 +102,31 @@ pub fn load(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         _ => return Err(artifact_refused()),
     }
-    // Existing state::read_bounded lacks O_NONBLOCK, so use a bounded descriptor read here
-    // to refuse FIFOs/devices before any read instead of blocking on open.
-    let path = root.join("input.json");
+    let bytes = read_file(&root.join("input.json"), MAX_ARTIFACT_BYTES)?;
+    let receipt: Receipt = serde_json::from_slice(&bytes).map_err(|_| artifact_refused())?;
+    receipt.validate(scope, expected)?;
+    Ok(receipt)
+}
+
+/// Caller owns directory/kind/scope checks. Descriptor read never blocks on a
+/// FIFO/device and admits only unchanged, singly-linked private regular files.
+pub(in crate::provider) fn read_file(
+    path: &std::path::Path,
+    limit: usize,
+) -> Result<Vec<u8>, CandidateError> {
+    if limit == 0 || limit > 64 * 1024 {
+        return Err(artifact_refused());
+    }
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)
+        .open(path)
         .map_err(|_| artifact_refused())?;
     let before = file.metadata().map_err(|_| artifact_refused())?;
     // SAFETY: geteuid has no preconditions.
     if !before.is_file()
         || before.len() == 0
-        || before.len() > MAX_ARTIFACT_BYTES as u64
+        || before.len() > limit as u64
         || before.nlink() != 1
         || before.uid() != unsafe { libc::geteuid() }
         || before.mode() & 0o777 != 0o600
@@ -123,11 +135,11 @@ pub fn load(
     }
     let mut bytes = Vec::new();
     (&mut file)
-        .take((MAX_ARTIFACT_BYTES + 1) as u64)
+        .take((limit + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| artifact_refused())?;
     let after = file.metadata().map_err(|_| artifact_refused())?;
-    let current = fs::symlink_metadata(&path).map_err(|_| artifact_refused())?;
+    let current = fs::symlink_metadata(path).map_err(|_| artifact_refused())?;
     if bytes.len() as u64 != before.len()
         || after.len() != before.len()
         || after.mtime() != before.mtime()
@@ -140,7 +152,5 @@ pub fn load(
     {
         return Err(artifact_refused());
     }
-    let receipt: Receipt = serde_json::from_slice(&bytes).map_err(|_| artifact_refused())?;
-    receipt.validate(scope, expected)?;
-    Ok(receipt)
+    Ok(bytes)
 }

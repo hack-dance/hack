@@ -1,0 +1,393 @@
+import { expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  nativeNetworkFixtureAttachmentMatches,
+  nativeNetworkFixtureCreateArgs,
+  nativeNetworkFixtureHasNoPublication,
+  nativeNetworkFixtureNetworkMatches,
+  nativeNetworkFixtureProtocolMatches,
+  nativeNetworkFixtureVolumeMatches,
+  nativeNetworkFixtureVolumeSelectionMatches,
+  runNativeNetworkFixtureCommand,
+} from "./e2e/native-config-networks-acceptance.ts";
+
+const PROJECT = "com.docker.compose.project";
+const INSTANCE = "io.hack.native-config.instance";
+const OWNER = "io.hack.native-config.owner";
+const VERSION = "io.hack.native-config.version";
+const STORAGE = "io.hack.native-config.storage";
+const project = "hack-native-fixture";
+const owner = "b".repeat(32);
+const labels = {
+  [PROJECT]: project,
+  [INSTANCE]: project,
+  [OWNER]: owner,
+  [VERSION]: "1",
+};
+const volumePin = {
+  name: "hack-native-fixture_state",
+  createdAt: "2026-10-08T00:00:00Z",
+  storage: "state",
+  project,
+  owner,
+};
+const networkPin = {
+  name: "hack-net-fixture-outbound",
+  id: "a".repeat(64),
+  createdAt: "2026-10-08T00:00:00Z",
+  internal: false,
+  project,
+  owner,
+};
+
+function volume() {
+  return {
+    Name: volumePin.name,
+    CreatedAt: volumePin.createdAt,
+    Driver: "local",
+    Labels: { ...labels, [STORAGE]: "state" },
+  };
+}
+function network() {
+  return {
+    Id: networkPin.id,
+    Name: networkPin.name,
+    Created: networkPin.createdAt,
+    Driver: "bridge",
+    Internal: false,
+    Labels: { ...labels },
+    Containers: {},
+  };
+}
+
+test("network fixture admits all required own version-one protocol capabilities", () => {
+  const value = {
+    transport_version: 1,
+    authored_version: 1,
+    plan_version: 1,
+    resolve_version: 1,
+    local_version: 1,
+    env_plan_version: 1,
+    endpoint_plan_version: 1,
+    process_plan_version: 1,
+    acquisition_plan_version: 1,
+    network_plan_version: 1,
+  };
+  expect(nativeNetworkFixtureProtocolMatches(value)).toBe(true);
+  for (const key of Object.keys(value)) {
+    const dropped: Record<string, unknown> = { ...value };
+    delete dropped[key];
+    expect(nativeNetworkFixtureProtocolMatches(dropped)).toBe(false);
+    expect(nativeNetworkFixtureProtocolMatches({ ...value, [key]: 2 })).toBe(
+      false
+    );
+  }
+  expect(nativeNetworkFixtureProtocolMatches(Object.create(value))).toBe(false);
+  expect(nativeNetworkFixtureProtocolMatches(null)).toBe(false);
+});
+
+test("retained volume requires exact singleton selection even after saved stop", () => {
+  expect(
+    nativeNetworkFixtureVolumeSelectionMatches([volumePin.name], volumePin)
+  ).toBe(true);
+  expect(nativeNetworkFixtureVolumeSelectionMatches([], volumePin)).toBe(false);
+  expect(
+    nativeNetworkFixtureVolumeSelectionMatches(
+      [volumePin.name, "extra"],
+      volumePin
+    )
+  ).toBe(false);
+  expect(
+    nativeNetworkFixtureVolumeSelectionMatches(["replacement"], volumePin)
+  ).toBe(false);
+  expect(nativeNetworkFixtureVolumeSelectionMatches([], null)).toBe(true);
+  expect(
+    nativeNetworkFixtureVolumeSelectionMatches([volumePin.name], null)
+  ).toBe(false);
+});
+
+test.each([
+  { Name: "replacement" },
+  { CreatedAt: "2026-10-09T00:00:00Z" },
+  { Driver: "remote" },
+  { Labels: { ...labels, [STORAGE]: "wrong" } },
+  { Labels: { ...labels, [OWNER]: "c".repeat(32), [STORAGE]: "state" } },
+  { Labels: Object.create({ ...labels, [STORAGE]: "state" }) },
+])("volume effect fence refuses creation/name/storage/owner drift (%#)", (change) => {
+  expect(nativeNetworkFixtureVolumeMatches(volume(), volumePin)).toBe(true);
+  expect(
+    nativeNetworkFixtureVolumeMatches({ ...volume(), ...change }, volumePin)
+  ).toBe(false);
+});
+
+test.each([
+  { Id: "c".repeat(64) },
+  { Name: "replacement" },
+  { Created: "2026-10-09T00:00:00Z" },
+  { Driver: "host" },
+  { Internal: true },
+  { Labels: { ...labels, [OWNER]: "d".repeat(32) } },
+  { Labels: Object.create(labels) },
+  { Containers: { constructor: {} } },
+  { Containers: null },
+])("network deletion fence refuses nonempty, replaced or wrong-policy bridge (%#)", (change) => {
+  expect(nativeNetworkFixtureNetworkMatches(network(), networkPin, true)).toBe(
+    true
+  );
+  expect(
+    nativeNetworkFixtureNetworkMatches(
+      { ...network(), ...change },
+      networkPin,
+      true
+    )
+  ).toBe(false);
+});
+
+test("actual aliases bind the exact reciprocal network ID with no extra alias", () => {
+  const aliases = ["fixture-web-1", "web", "web-alias"];
+  const check = (value: unknown, created = false) =>
+    nativeNetworkFixtureAttachmentMatches({
+      value,
+      networkId: networkPin.id,
+      aliases,
+      created,
+    });
+  expect(
+    check({ NetworkID: networkPin.id, Aliases: [...aliases].reverse() })
+  ).toBe(true);
+  expect(check({ NetworkID: "c".repeat(64), Aliases: aliases })).toBe(false);
+  expect(
+    check({ NetworkID: networkPin.id, Aliases: [...aliases, "extra"] })
+  ).toBe(false);
+  expect(
+    check({ NetworkID: networkPin.id, Aliases: ["web", "web-alias"] })
+  ).toBe(false);
+  expect(
+    check(Object.create({ NetworkID: networkPin.id, Aliases: aliases }))
+  ).toBe(false);
+  expect(
+    check({ NetworkID: networkPin.id, Aliases: [...aliases, "web"] })
+  ).toBe(false);
+});
+
+test("created recovery admits empty NetworkID with null, empty or configured aliases without admitting ready emptiness", () => {
+  const aliases = ["fixture-web-1", "web", "web-alias"];
+  for (const wireAliases of [null, [], aliases]) {
+    const value = { NetworkID: "", Aliases: wireAliases };
+    expect(
+      nativeNetworkFixtureAttachmentMatches({
+        value,
+        networkId: networkPin.id,
+        aliases,
+        created: true,
+      })
+    ).toBe(true);
+    expect(
+      nativeNetworkFixtureAttachmentMatches({
+        value,
+        networkId: networkPin.id,
+        aliases,
+        created: false,
+      })
+    ).toBe(false);
+  }
+  expect(
+    nativeNetworkFixtureAttachmentMatches({
+      value: { NetworkID: "", Aliases: ["foreign"] },
+      networkId: networkPin.id,
+      aliases,
+      created: true,
+    })
+  ).toBe(false);
+  expect(
+    nativeNetworkFixtureAttachmentMatches({
+      value: { NetworkID: "c".repeat(64), Aliases: aliases },
+      networkId: networkPin.id,
+      aliases,
+      created: true,
+    })
+  ).toBe(false);
+});
+
+test("controlled created interruption rewrites only the exact admitted product up argv", () => {
+  const args = [
+    "compose",
+    "-p",
+    project,
+    "-f",
+    "/owned/generation/compose.json",
+    "up",
+    "-d",
+  ];
+  expect(nativeNetworkFixtureCreateArgs(args, project)).toEqual([
+    ...args.slice(0, 5),
+    "create",
+    "--no-build",
+    "--pull",
+    "never",
+  ]);
+  for (const changed of [
+    [...args, "web"],
+    [...args.slice(0, -1), "--force-recreate"],
+    ["compose", "-p", "foreign", ...args.slice(3)],
+    [...args.slice(0, 4), "relative/compose.json", ...args.slice(5)],
+    [...args.slice(0, 4), "/owned/override.yaml", ...args.slice(5)],
+    [...args.slice(0, 5), "run", "-d"],
+    ["container", "rm", "-f", networkPin.id],
+  ]) {
+    expect(nativeNetworkFixtureCreateArgs(changed, project)).toBeNull();
+  }
+});
+
+test("publication verifier permits exposed-unpublished ports and refuses host bindings or unexpected keys", () => {
+  for (const value of [
+    null,
+    {},
+    { "3000/tcp": null },
+    { "80/tcp": null, "443/tcp": null },
+  ]) {
+    expect(nativeNetworkFixtureHasNoPublication(value)).toBe(true);
+  }
+  for (const value of [
+    undefined,
+    [],
+    { "3000/tcp": [] },
+    { "3000/tcp": [{ HostIp: "127.0.0.1", HostPort: "3000" }] },
+    { constructor: null },
+  ]) {
+    expect(nativeNetworkFixtureHasNoPublication(value)).toBe(false);
+  }
+});
+
+test("bounded private capture preserves literal argv, rejects inherited caller credentials and returns exit17", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-network-capture-"));
+  const previous = process.env.CALLER_PRIVATE;
+  process.env.CALLER_PRIVATE = "synthetic-private-caller-control";
+  try {
+    const result = await runNativeNetworkFixtureCommand({
+      argv: [
+        process.execPath,
+        "-e",
+        "if(process.env.CALLER_PRIVATE)process.exit(23);console.log(JSON.stringify(process.argv.slice(-2)));process.exit(17)",
+        "--",
+        "space arg",
+        "$HOME",
+      ],
+      cwd: root,
+      env: { PATH: "/usr/bin:/bin" },
+      captures: join(root, "captures"),
+    });
+    expect(result.exitCode).toBe(17);
+    expect(result.stdout.trim()).toBe('["space arg","$HOME"]');
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "CALLER_PRIVATE");
+    } else {
+      process.env.CALLER_PRIVATE = previous;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("capture output overflow fails rather than returning a truncated green command", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-network-output-"));
+  try {
+    await expect(
+      runNativeNetworkFixtureCommand({
+        argv: [
+          process.execPath,
+          "-e",
+          'process.stdout.write("x".repeat(20000))',
+        ],
+        cwd: root,
+        env: {},
+        captures: join(root, "captures"),
+        outputLimit: 1024,
+      })
+    ).rejects.toThrow("output bound");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("capture timeout reaps the owned descendant group and retains failure evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-network-timeout-"));
+  const marker = join(root, "escaped");
+  try {
+    await expect(
+      runNativeNetworkFixtureCommand({
+        argv: [
+          "/bin/sh",
+          "-c",
+          '(sleep 1; printf escaped > "$1") & wait',
+          "fixture",
+          marker,
+        ],
+        cwd: root,
+        env: {},
+        captures: join(root, "captures"),
+        timeoutMs: 150,
+      })
+    ).rejects.toThrow("timed out");
+    await Bun.sleep(1100);
+    expect(await Bun.file(marker).exists()).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("owned parent completion cannot leave a delayed background child writing a marker", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-network-orphan-"));
+  const marker = join(root, "escaped");
+  try {
+    const result = await runNativeNetworkFixtureCommand({
+      argv: [
+        "/bin/sh",
+        "-c",
+        '(sleep 1; printf escaped > "$1") & exit 0',
+        "fixture",
+        marker,
+      ],
+      cwd: root,
+      env: {},
+      captures: join(root, "captures"),
+      timeoutMs: 2000,
+    });
+    expect(result.exitCode).toBe(0);
+    await Bun.sleep(1100);
+    expect(await Bun.file(marker).exists()).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("capture failure kills and reaps the owned command before allowing fixture cleanup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-network-capture-failure-"));
+  const marker = join(root, "escaped");
+  try {
+    await expect(
+      runNativeNetworkFixtureCommand({
+        argv: [
+          "/bin/sh",
+          "-c",
+          '(sleep 1; printf escaped > "$1") & printf capture; wait',
+          "fixture",
+          marker,
+        ],
+        cwd: root,
+        env: {},
+        captures: join(root, "captures"),
+        timeoutMs: 2000,
+        afterCaptureWrite: () => {
+          throw new Error("synthetic capture failure");
+        },
+      })
+    ).rejects.toThrow("capture failed after owned command reap");
+    await Bun.sleep(1100);
+    expect(await Bun.file(marker).exists()).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

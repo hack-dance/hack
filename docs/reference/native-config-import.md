@@ -33,6 +33,8 @@ reported as successful.
 | String environment map or `KEY=value` list | Native `default` bindings, preserving managed-value precedence and empty values |
 | Nonempty canonical `profiles` lists | Native service selection and the union of declared profiles |
 | One explicitly declared project-owned Compose `bridge` network with boolean `internal`, attached explicitly to every service and optional static aliases | The same logical native bridge policy and per-service aliases; no implicit default attachment or physical-ID claim |
+| Short `depends_on` lists, or long edges with `service_started` / `service_healthy` | Native service `started` / `ready` edges; `required` must be absent/true and `restart` absent/false |
+| `healthcheck.test: [CMD, executable, ...args]` with authored positive `interval`, `timeout`, `retries` | Native exec readiness; complete argument dollar pairs decode once, and the compiler validates timings |
 
 Names in this slice use lowercase letters, digits and single hyphen separators.
 Overlay aliases additionally accept ASCII case, underscores and spaces and apply
@@ -54,7 +56,7 @@ rather than inheriting ambient environment. Environment list entries without `=`
 names, nulls and non-string values refuse.
 
 Every unknown field remains a refusal, including fields in inactive profiles.
-Builds, volumes/bind mounts, other network shapes, ports, dependencies, health checks, labels,
+Builds, volumes/bind mounts, other network shapes, ports, labels,
 routes, host/lifecycle settings, `env_file`, deployment options and extensions
 are outside the first slice. They cannot be silently omitted from a complete
 conversion.
@@ -68,6 +70,17 @@ workload-colliding aliases refuse. Import preview preserves the authored
 logical topology; it does not claim that a running Compose bridge belongs to
 the project. The separate adoption owner must prove the existing bridge and
 container endpoints before a retained-ID transition.
+
+Health intervals and timeouts must use integer `ms`, `s`, `m` or `h` durations
+that fit the compiler's positive u32 milliseconds. Missing or zero timings,
+`CMD-SHELL`, string probes, `NONE`, disabled probes, `start_period` and
+`start_interval` refuse: image health settings and image `SHELL` are not acquired,
+and the native contract cannot express all of those options. Explicit `disable:
+false` is the default enabled setting. Optional edges, restart propagation and
+`service_completed_successfully` refuse. Completed jobs remain a required later
+conversion and retained execution slice. Unknown HTTP/TCP fields also refuse.
+The compiler rejects missing, cyclic or inactive dependency targets and ready
+edges whose target has no explicit readiness. Refusals include inactive profiles.
 
 ## Parsing and input boundary
 

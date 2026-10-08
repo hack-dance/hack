@@ -1,4 +1,5 @@
 import { isRecord } from "./guards.ts";
+import { literalComposeArg } from "./native-config-import-argv.ts";
 import { mapLegacyOwnedNetwork } from "./native-config-import-network.ts";
 import {
   type ImportDocument,
@@ -6,6 +7,10 @@ import {
   importPointer,
   parseImportDocument,
 } from "./native-config-import-parser.ts";
+import {
+  mapLegacyComposeDependencies,
+  mapLegacyComposeHealthcheck,
+} from "./native-config-import-readiness.ts";
 import { mapLegacyComposeStorage } from "./native-config-import-storage.ts";
 import { normalizeEnvConfigName } from "./project.ts";
 
@@ -458,24 +463,6 @@ function staticText(value: unknown): value is string {
     !value.includes("\0")
   );
 }
-function literalComposeArg(value: unknown): string | undefined {
-  if (typeof value !== "string" || value.includes("\0")) {
-    return undefined;
-  }
-  let decoded = "";
-  for (let index = 0; index < value.length; index++) {
-    if (value[index] !== "$") {
-      decoded += value[index];
-      continue;
-    }
-    if (value[index + 1] !== "$") {
-      return undefined;
-    }
-    decoded += "$";
-    index++;
-  }
-  return decoded;
-}
 function composeWordSpace(character: string | undefined): boolean {
   return (
     character === " " ||
@@ -676,6 +663,61 @@ function markServiceValue(opts: {
   }
 }
 
+function mapServiceReadiness(
+  opts: Pick<MappingContext, "mark" | "refuse"> & {
+    readonly service: Record<string, unknown>;
+    readonly key: string;
+    readonly raw: unknown;
+    readonly servicePointer: string;
+  }
+): boolean {
+  if (opts.key !== "depends_on" && opts.key !== "healthcheck") {
+    return false;
+  }
+  const pointer = importPointer(opts.servicePointer, opts.key);
+  const value =
+    opts.key === "depends_on"
+      ? mapLegacyComposeDependencies(opts.raw)
+      : mapLegacyComposeHealthcheck(opts.raw);
+  if (value === undefined) {
+    opts.refuse(
+      "compose",
+      pointer,
+      "dependency_or_health_contract_unsupported"
+    );
+  } else {
+    const property = opts.key === "depends_on" ? "depends_on" : "readiness";
+    opts.service[property] = value;
+    opts.mark(
+      "compose",
+      pointer,
+      `${opts.servicePointer}/${property}`,
+      "compose_readiness_contract",
+      true
+    );
+  }
+  return true;
+}
+
+function mapServiceReadinessFields(
+  opts: Pick<MappingContext, "mark" | "refuse"> & {
+    readonly source: Record<string, unknown>;
+    readonly pointer: string;
+    readonly service: Record<string, unknown>;
+  }
+) {
+  for (const key of ["depends_on", "healthcheck"]) {
+    if (Object.hasOwn(opts.source, key)) {
+      mapServiceReadiness({
+        ...opts,
+        key,
+        raw: opts.source[key],
+        servicePointer: opts.pointer,
+      });
+    }
+  }
+}
+
 function commandPresence(
   key: string,
   raw: unknown
@@ -705,6 +747,7 @@ function mapService(
 ) {
   const service: Record<string, unknown> = {};
   opts.mark("compose", opts.pointer, opts.pointer);
+  mapServiceReadinessFields({ ...opts, service });
   for (const [key, raw] of Object.entries(opts.source)) {
     if (!Object.hasOwn(SERVICE_RULES, key)) {
       continue;

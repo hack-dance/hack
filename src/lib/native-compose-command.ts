@@ -103,6 +103,7 @@ import {
   requireNativeComposeBackend,
   selectNativeComposeProject,
 } from "./native-compose-selection.ts";
+import { waitNativeComposeReady } from "./native-compose-wait-ready.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
 import { parseEnvConfigSelection } from "./project.ts";
@@ -421,20 +422,12 @@ async function waitReady(opts: {
   readonly generation: NativeComposeGeneration;
 }): Promise<NativeComposeOwnershipObservation | null> {
   const services = nativeComposeOnFailureServices(opts.document);
-  while (Date.now() < opts.deadline) {
-    const state = await observeNativeComposeStartupOwned(
-      opts.ownership,
-      services
-    );
-    if (state && ready(opts.document, state, opts.generation)) {
-      return state;
-    }
-    if (opts.ownership.signal?.aborted) {
-      return null;
-    }
-    await Bun.sleep(500);
-  }
-  return null;
+  return await waitNativeComposeReady({
+    deadline: opts.deadline,
+    signal: opts.ownership.signal,
+    observe: () => observeNativeComposeStartupOwned(opts.ownership, services),
+    ready: (state) => ready(opts.document, state, opts.generation),
+  });
 }
 function requireService(
   document: PrivateDocument,

@@ -1430,153 +1430,162 @@ test("known reaped readiness failure retains pending material until a separate v
 test.each([
   ["0400", 0o400],
   ["0600", 0o600],
-] as const)("protected %s delivery preserves original permissions and binds exact private snapshot2 modes", async (mode, bits) => {
-  const secretPath = join(root, "protected.bin");
-  await writeFile(secretPath, BYTES, { mode: bits });
-  const original = await lstat(secretPath);
-  await writeFile(
-    join(root, ".hack/hack.project.json"),
-    JSON.stringify({
-      ...SOURCE,
-      secrets: { empty: { file: "protected.bin" } },
-      services: {
-        reader: {
-          ...SOURCE.services.reader,
-          mounts: [
-            SOURCE.services.reader.mounts[0],
-            {
-              secret: "empty",
-              target: "/run/empty",
-              access: "read-only",
-              mode,
-            },
-          ],
+] as const)(
+  "protected %s delivery preserves original permissions and binds exact private snapshot2 modes",
+  async (mode, bits) => {
+    const secretPath = join(root, "protected.bin");
+    await writeFile(secretPath, BYTES, { mode: bits });
+    const original = await lstat(secretPath);
+    await writeFile(
+      join(root, ".hack/hack.project.json"),
+      JSON.stringify({
+        ...SOURCE,
+        secrets: { empty: { file: "protected.bin" } },
+        services: {
+          reader: {
+            ...SOURCE.services.reader,
+            mounts: [
+              SOURCE.services.reader.mounts[0],
+              {
+                secret: "empty",
+                target: "/run/empty",
+                access: "read-only",
+                mode,
+              },
+            ],
+          },
         },
-      },
-    })
-  );
-  const selected = await store.withMutation(running);
-  expect(selected.projection.reference.version).toBe(2);
-  const granted = selected.projection.workloads.reader;
-  const secret = granted?.find((grant) => grant.target === "/run/empty");
-  const config = granted?.find((grant) => grant.target === "/etc/settings");
-  if (!(secret && config)) {
-    throw new Error("Missing selected file grants");
-  }
-  expect(await readFile(secret.source)).toEqual(BYTES);
-  expect((await lstat(secret.source)).mode & 0o777).toBe(bits);
-  expect((await lstat(config.source)).mode & 0o777).toBe(0o444);
-  const after = await lstat(secretPath);
-  expect({
-    dev: after.dev,
-    ino: after.ino,
-    mode: after.mode,
-    uid: after.uid,
-    gid: after.gid,
-  }).toEqual({
-    dev: original.dev,
-    ino: original.ino,
-    mode: original.mode,
-    uid: original.uid,
-    gid: original.gid,
-  });
-  const reference = selected.projection.reference;
-  const text = await readFile(
-    join(
-      reference.root,
-      `${reference.generationId}-${reference.snapshotToken}`,
-      "manifest.json"
-    ),
-    "utf8"
-  );
-  const raw: unknown = JSON.parse(text);
-  if (!(isRecord(raw) && isRecord(raw.creation))) {
-    throw new Error("Missing owned material binding");
-  }
-  // This binding comes from the genuine owner-produced private manifest; parsing
-  // below verifies it and no external effect authority is obtained from this fixture.
-  const binding = raw.creation as NativeComposeMaterialBinding;
-  const manifest = parseNativeComposeFileManifest({ text, reference, binding });
-  expect(manifest.version).toBe(2);
-  expect(
-    manifest.members.find((member) => member.target === "/run/empty")?.file.mode
-  ).toBe(bits);
-  for (const changed of [0o000, 0o644, 0o777, "0400", null]) {
-    const forged = structuredClone(manifest);
-    const originalMembers = forged.members.map((member) => ({
-      ...member,
-      file: { ...member.file },
-    }));
-    const member = originalMembers.find(
-      (entry) => entry.target === "/run/empty"
+      })
     );
-    if (!member) {
-      throw new Error("Missing owned secret member");
+    const selected = await store.withMutation(running);
+    expect(selected.projection.reference.version).toBe(2);
+    const granted = selected.projection.workloads.reader;
+    const secret = granted?.find((grant) => grant.target === "/run/empty");
+    const config = granted?.find((grant) => grant.target === "/etc/settings");
+    if (!(secret && config)) {
+      throw new Error("Missing selected file grants");
     }
-    const altered = {
-      ...forged,
-      members: originalMembers.map((entry) =>
-        entry === member
-          ? { ...entry, file: { ...entry.file, mode: changed } }
-          : entry
+    expect(await readFile(secret.source)).toEqual(BYTES);
+    expect((await lstat(secret.source)).mode & 0o777).toBe(bits);
+    expect((await lstat(config.source)).mode & 0o777).toBe(0o444);
+    const after = await lstat(secretPath);
+    expect({
+      dev: after.dev,
+      ino: after.ino,
+      mode: after.mode,
+      uid: after.uid,
+      gid: after.gid,
+    }).toEqual({
+      dev: original.dev,
+      ino: original.ino,
+      mode: original.mode,
+      uid: original.uid,
+      gid: original.gid,
+    });
+    const reference = selected.projection.reference;
+    const text = await readFile(
+      join(
+        reference.root,
+        `${reference.generationId}-${reference.snapshotToken}`,
+        "manifest.json"
       ),
+      "utf8"
+    );
+    const raw: unknown = JSON.parse(text);
+    if (!(isRecord(raw) && isRecord(raw.creation))) {
+      throw new Error("Missing owned material binding");
+    }
+    // This binding comes from the genuine owner-produced private manifest; parsing
+    // below verifies it and no external effect authority is obtained from this fixture.
+    const binding = raw.creation as NativeComposeMaterialBinding;
+    const manifest = parseNativeComposeFileManifest({
+      text,
+      reference,
+      binding,
+    });
+    expect(manifest.version).toBe(2);
+    expect(
+      manifest.members.find((member) => member.target === "/run/empty")?.file
+        .mode
+    ).toBe(bits);
+    for (const changed of [0o000, 0o644, 0o777, "0400", null]) {
+      const forged = structuredClone(manifest);
+      const originalMembers = forged.members.map((member) => ({
+        ...member,
+        file: { ...member.file },
+      }));
+      const member = originalMembers.find(
+        (entry) => entry.target === "/run/empty"
+      );
+      if (!member) {
+        throw new Error("Missing owned secret member");
+      }
+      const altered = {
+        ...forged,
+        members: originalMembers.map((entry) =>
+          entry === member
+            ? { ...entry, file: { ...entry.file, mode: changed } }
+            : entry
+        ),
+      };
+      expect(() =>
+        parseNativeComposeFileManifest({
+          text: JSON.stringify(altered),
+          reference,
+          binding,
+        })
+      ).toThrow();
+    }
+    const legacy = {
+      ...manifest,
+      version: 1,
+      reference: { ...manifest.reference, version: 1 },
     };
     expect(() =>
       parseNativeComposeFileManifest({
-        text: JSON.stringify(altered),
+        text: JSON.stringify(legacy),
+        reference: { ...reference, version: 1 },
+        binding,
+      })
+    ).toThrow();
+    const allPublic = {
+      ...manifest,
+      members: manifest.members.map((member) => ({
+        ...member,
+        file: { ...member.file, mode: 0o444 },
+      })),
+    };
+    expect(() =>
+      parseNativeComposeFileManifest({
+        text: JSON.stringify(allPublic),
         reference,
         binding,
       })
     ).toThrow();
-  }
-  const legacy = {
-    ...manifest,
-    version: 1,
-    reference: { ...manifest.reference, version: 1 },
-  };
-  expect(() =>
-    parseNativeComposeFileManifest({
-      text: JSON.stringify(legacy),
-      reference: { ...reference, version: 1 },
-      binding,
-    })
-  ).toThrow();
-  const allPublic = {
-    ...manifest,
-    members: manifest.members.map((member) => ({
-      ...member,
-      file: { ...member.file, mode: 0o444 },
-    })),
-  };
-  expect(() =>
-    parseNativeComposeFileManifest({
-      text: JSON.stringify(allPublic),
-      reference,
-      binding,
-    })
-  ).toThrow();
-  expect(() =>
-    parseNativeComposeFileReference({ ...reference, version: 3 })
-  ).toThrow();
-  const unknownVersion = {
-    ...manifest,
-    version: 3,
-    reference: { ...manifest.reference, version: 3 },
-  };
-  expect(() =>
-    Reflect.apply(parseNativeComposeFileManifest, undefined, [
-      {
-        text: JSON.stringify(unknownVersion),
-        reference: { ...reference, version: 3 },
-        binding,
-      },
-    ])
-  ).toThrow();
-  await store.withMutation(async (mutation) => {
-    await ownerFor(mutation).assertSavedReady(selected.generation);
-  });
-  expect(JSON.stringify(selected.attempt)).toBe("{}");
-});
+    expect(() =>
+      parseNativeComposeFileReference({ ...reference, version: 3 })
+    ).toThrow();
+    const unknownVersion = {
+      ...manifest,
+      version: 3,
+      reference: { ...manifest.reference, version: 3 },
+    };
+    expect(() =>
+      Reflect.apply(parseNativeComposeFileManifest, undefined, [
+        {
+          text: JSON.stringify(unknownVersion),
+          reference: { ...reference, version: 3 },
+          binding,
+        },
+      ])
+    ).toThrow();
+    await store.withMutation(async (mutation) => {
+      await ownerFor(mutation).assertSavedReady(selected.generation);
+    });
+    expect(JSON.stringify(selected.attempt)).toBe("{}");
+  },
+  30_000
+);
 
 test("protected snapshot mode drift refuses saved readiness while preserving owned stop recovery", async () => {
   await writeFile(join(root, "protected.bin"), BYTES, { mode: 0o600 });

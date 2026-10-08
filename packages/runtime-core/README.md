@@ -146,6 +146,10 @@ child exits, even if descendants retain output pipes. Cancellation or owner exit
 during that handshake prevents publication and waits for owned process shutdown.
 The caller must still recheck selected input before publication and inspect the
 durable native journal after exit; process completion alone does not prove cleanup.
+Its separate `native-authored-project-run` v2 artifact records the original native
+receipt in excluded private storage. It never supplies a Compose plan ID or grants
+cleanup authority; retirement requires unchanged file identity and matching Removed
+evidence. Startup intent, command integration and live frontend acceptance remain gates.
 
 The stable, absolute source file is a public v2 envelope with
 `kind: "native-graph-source"`, `project`, optional canonical `branch`, 32-hex `run`,

@@ -9,8 +9,11 @@ the selected project and permitted local settings for offline resolution.
 
 The CLI recognizes this filename as a project boundary. The experimental
 [Compose command adapter](native-compose-commands.md) runs its supported subset
-for new disposable projects. Native graph execution and existing-project adoption
-remain unsupported; commands outside that subset refuse with
+for new disposable projects. The separate explicit [legacy Compose adoption owner](native-compose-adoption.md)
+can switch qualified stopped instances and roll back while retaining their original
+resources. Its receipt and upgraded selector guard adopted execution; an unmodified
+older launcher is outside that guard. Native graph execution remains unsupported;
+commands outside the supported command subsets refuse with
 `E_NATIVE_PROJECT_UNSUPPORTED`. If active `.hack/` or `.dev/` Compose, JSON or TOML
 inputs also exist, they refuse with `E_NATIVE_PROJECT_CONFLICT`. The marker still
 blocks fallback when malformed, a future version, a directory or a dangling link.
@@ -25,13 +28,14 @@ configuration and explicit offline validation remain available. Init, legacy env
 repair, config writes and domain migration/rollback refuse before modifying native
 input; a refused rollback preserves its recovery journal. Selection is checked
 again at mutation boundaries, but this is not atomic protection against concurrent
-external edits. Locked adoption belongs to a later integration step.
+external edits. Explicit adoption uses its separate private source/resource owner
+and recovery journal; ordinary config writes do not perform that transition.
 `hack env get` retains its fixed redacted failure message and empty stdout.
 
 The separate [read-only import preview](native-config-import.md) accepts a strict
 image-only subset of the exact legacy JSON/Compose pair. Complete private candidates
-are validated here in memory; import/adoption writes and resource transfer remain
-unavailable.
+are validated here in memory. Preview performs no writes or resource transfer;
+qualified adoption requires the separate explicit owner above.
 
 The standalone `packages/config-compiler` Rust package has no dependency on the
 native runtime, virtualization, Docker, or platform provider APIs. It uses the

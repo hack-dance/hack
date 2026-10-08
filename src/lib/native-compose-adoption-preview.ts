@@ -4,6 +4,7 @@ import {
   legacyComposeAdoptionCandidateSupported,
   legacyComposeAdoptionLayoutSupported,
 } from "./native-compose-adoption-contract.ts";
+import { legacyAdoptionLocalRefusalFields } from "./native-compose-adoption-local.ts";
 import {
   inspectLegacyComposeContainerStates,
   inspectLegacyComposeRuntimeConfig,
@@ -41,7 +42,10 @@ export async function previewLegacyComposeAdoption(input: {
     const owner = await acquireLegacyComposeAdoptionBinding(opts),
       acquired = await owner.resolvePreparationInputs(opts);
     const mapped = mapLegacyNativeStorageAdoption(acquired);
-    fields = mapped.report.fields;
+    fields = [
+      ...mapped.report.fields,
+      ...(acquired.projection?.localFields ?? []),
+    ];
     const candidate = acquired.projection?.candidate ?? mapped.candidate;
     if (!candidate) {
       return report({
@@ -114,11 +118,15 @@ export async function previewLegacyComposeAdoption(input: {
       stop: opts.stop ? "requested" : "not_requested",
       fields,
     });
-  } catch {
+  } catch (error: unknown) {
     return report({
       complete: false,
       adoption: "not_performed",
-      fields: [...fields, refused("unsafe_changed_or_unavailable_binding")],
+      fields: [
+        ...fields,
+        ...legacyAdoptionLocalRefusalFields(error),
+        refused("unsafe_changed_or_unavailable_binding"),
+      ],
     });
   }
 }

@@ -82,9 +82,10 @@ bounds, not workload resource caps or production deadlines. Explicit recovery is
 a separate caller invocation with its own budget and the same original pending
 anchor. Recovery may itself time out; no fairness or eventual cleanup is asserted.
 
-The prior `a59c23d3` positive model exhausted **9,248 distinct states / 18,049
-generated states**. Timestamp and final-publication guard corrections are awaiting
-their focused validation; prior counts are not a pass claim for those amendments.
+The corrected positive model exhausts **9,248 distinct states / 18,049 generated
+states**. The closest suite also requires all ten guard-removal counterexamples,
+including the four final-only publication controls. These are finite offline
+results, not production job adoption or actual two-worktree acceptance.
 Reachability checks require healthy observation, fast and running job completion,
 known failure, interruption, stopped recovery, finalization and explicit restart.
 SQL continuity is represented by a fixed seed witness (`seedWrites = 1`); the job

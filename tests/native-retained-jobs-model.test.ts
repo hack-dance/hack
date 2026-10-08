@@ -219,10 +219,7 @@ test.each([
   ["2026-10-08T00:00:01Z", "2026-10-08T00:00:01.000Z"],
   ["2026-10-08T00:00:01.000000000Z", "2026-10-08T00:00:01Z"],
   ["2026-10-08T00:00:01.1Z", "2026-10-08T00:00:01.100000000Z"],
-])("equivalent UTC spellings cannot make historical exit0 fresh: %s -> %s", (
-  prior,
-  current
-) => {
+])("equivalent UTC spellings cannot make historical exit0 fresh: %s -> %s", (prior, current) => {
   expect(result(job({ startedAt: current }), true, prior)).toBe("waiting");
 });
 
@@ -240,9 +237,9 @@ test("a genuine one-nanosecond attempt change survives millisecond normalization
   expect(
     result(job({ startedAt: OLD }), true, "2026-10-08T00:00:01.123456788Z")
   ).toBe("ready");
-  expect(
-    result(job({ startedAt: "1970-01-01T00:00:00Z" }), true, OLD)
-  ).toBe("ready");
+  expect(result(job({ startedAt: "1970-01-01T00:00:00Z" }), true, OLD)).toBe(
+    "ready"
+  );
 });
 
 test.each([
@@ -420,9 +417,10 @@ test.each([
   }
 });
 
-test.each(["start", "stop"] as const)("final %s publication refuses new fence/deadline drift and preserves pending", (
-  operation
-) => {
+test.each([
+  "start",
+  "stop",
+] as const)("final %s publication refuses new fence/deadline drift and preserves pending", (operation) => {
   let ready = firstReady();
   if (operation === "stop") {
     ready = step(step(ready, "CommitStart"), "JournalStop");
@@ -440,9 +438,9 @@ test.each(["start", "stop"] as const)("final %s publication refuses new fence/de
     expired = step(expired, action);
   }
   for (const blocked of [changed, expired]) {
-    expect(transitions(blocked).some((edge) => edge.action === commitAction)).toBe(
-      false
-    );
+    expect(
+      transitions(blocked).some((edge) => edge.action === commitAction)
+    ).toBe(false);
     expect(blocked.pending).toBe(operation);
     expect(blocked.anchor).toBe(ready.anchor);
     expect(blocked.originalIds).toBe(ready.originalIds);

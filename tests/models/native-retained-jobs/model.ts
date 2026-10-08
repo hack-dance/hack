@@ -134,9 +134,7 @@ function commit(s: State, change: Partial<State>): State {
 }
 function startPhase(s: State, fault: Fault): readonly Edge[] {
   if (
-    !(s.cursor === 3
-      ? commitAdmitted(s, fault, "start")
-      : admitted(s, fault))
+    !(s.cursor === 3 ? commitAdmitted(s, fault, "start") : admitted(s, fault))
   ) {
     return [];
   }
@@ -227,13 +225,8 @@ function jobPhase(s: State, fault: Fault): readonly Edge[] {
 }
 function stopPhase(s: State, fault: Fault): readonly Edge[] {
   const finalStop =
-    s.cursor === -1 &&
-    !(s.phase === "stopping" && s.pending === "restart");
-  if (
-    !(finalStop
-      ? commitAdmitted(s, fault, "stop")
-      : admitted(s, fault))
-  ) {
+    s.cursor === -1 && !(s.phase === "stopping" && s.pending === "restart");
+  if (!(finalStop ? commitAdmitted(s, fault, "stop") : admitted(s, fault))) {
     return [];
   }
   const edges: Edge[] = [];

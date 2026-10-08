@@ -35,6 +35,24 @@ stop. A run using the current saved generation preserves that anchor; the store
 refuses another generation while a current anchor exists. The adapter requires
 the exact saved document and explicit `up`/`restart` for input changes.
 
+`publishRunProjection` derives a one-off document from the verified saved artifact
+inside the mutation lock. It accepts a target service, never caller-supplied JSON.
+The projection removes routing keys on that target and the saved route extension;
+it preserves the original generation and all other delivery fields. Random
+projection identity, source anchor, document hash and file identities remain in
+private `oneoffs/<id>/` files under that generation. `runEffect` accepts only the
+exact returned projection handle for a `run`; it verifies the actual projected
+file before and after effects and records its private anchor in pending intent.
+Inputs and delivery files are rechecked after potentially slow engine ownership
+observations, immediately before intent or effect entry. This still cannot freeze
+arbitrary outside edits atomically.
+
+Failure or interruption retains the projection and recovery intent. Saved stop
+continues to use the original generation, without requiring fresh environment
+delivery or accepting the projection for replay. Projection files and manifests
+can contain private values or their hashes; never log or publish them. The store
+does not prune them or delete persistent data.
+
 Saved mode reads only saved ownership state and Git/filesystem identity. It neither
 reads authored contents nor resolves environment values. `loadCurrent`,
 `loadPending` and `withLease` support pinned observation. A retained-data `down`

@@ -261,10 +261,10 @@ async function invoke(root: string, args: readonly string[]) {
   return outputs.join("");
 }
 
-test("routed run refuses before any Docker observation or effect", async () => {
+test("cold routed run refuses before any Docker observation or effect", async () => {
   const root = await fixture();
   const output = await invoke(root, ["run", "web", "--", "true"]);
-  expect(output).toContain("one-off label projection");
+  expect(output).toContain("already-ready saved instance");
   expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
 }, 20_000);
 

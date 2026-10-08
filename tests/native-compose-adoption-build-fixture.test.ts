@@ -392,7 +392,7 @@ function capturedBuildGraph() {
       digests: [],
       labelNames: labels,
     },
-  ];
+  ] as const;
   const capture = (
     rows: readonly unknown[] = values,
     originals = [baseBuildImage]

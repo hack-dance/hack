@@ -37,6 +37,16 @@ For native setup use root `mise.toml`, the Bun pin in `package.json`, and
 `bun run test:local`. Add `--all-features` to equivalent Cargo commands for feature
 changes; the toolchain Rust tasks already enable all features. Keep default coverage.
 
+Before a full CLI suite, explicitly prepare the ignored compiler with
+`bun run build:config-compiler` on the host, or the toolchain `config-compiler` task
+inside Linux. Root `test`/`turbo:test`, direct CLI `test`, and no-argument toolchain
+`test` check its protocol and usability before launching the suite. An absolute
+`HACK_CONFIG_COMPILER_BINARY` selects the caller's compiler and survives Turbo's
+environment filtering; no fallback, build or download occurs during preflight.
+Host and container `dist` remain separate. This checks compatibility, not exact
+source provenance. Raw `bun test <paths>` remains available for focused tests;
+it bypasses the suite preflight and does not prepare compiler-dependent fixtures.
+
 For release workflow edits, run the pinned syntax/context check also enforced by CI:
 `mise x actionlint@1.7.12 -- actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/prerelease.yml`.
 This validates event globs and reusable workflow contexts; Bun YAML parsing alone does not.

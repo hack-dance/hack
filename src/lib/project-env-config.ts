@@ -1659,11 +1659,22 @@ export async function acquireProjectEnvForNativeExecution(
   });
 }
 
+/** A replacement invocation signal cannot revive a cancelled legacy acquisition. */
+function retainedEnvSignal(
+  captured: AbortSignal | undefined,
+  supplied: AbortSignal | undefined
+): AbortSignal | undefined {
+  return captured && supplied
+    ? AbortSignal.any([captured, supplied])
+    : (supplied ?? captured);
+}
+
 /** Metadata, revision and delivery share one raw-layer acquisition under the admitted input owner. */
 async function acquireExplicitProjectEnvExecution(opts: {
   readonly selection: NativeProjectEnvSelectionOptions;
   readonly inputOwner: ExplicitManagedEnvInputOwner;
   readonly redactError?: (error: unknown) => Error;
+  readonly retainCapturedSignal?: boolean;
 }): Promise<NativeProjectEnvExecutionAcquisition> {
   const redactError = opts.redactError ?? redactNativeEnvRevisionError;
   try {
@@ -1678,7 +1689,12 @@ async function acquireExplicitProjectEnvExecution(opts: {
     const revision = recorded.finish(selection, selected);
     const assertFresh = async (current: NativeProjectEnvSelectionOptions) => {
       try {
-        const currentSelection = snapshotNativeEnvSelection(current);
+        const currentSelection = snapshotNativeEnvSelection({
+          ...current,
+          signal: opts.retainCapturedSignal
+            ? retainedEnvSignal(selection.signal, current.signal)
+            : current.signal,
+        });
         const rechecked = nativeEnvRevisionRecorder();
         const currentInputs = await readNativeProjectEnvSelection(
           currentSelection,
@@ -1695,8 +1711,17 @@ async function acquireExplicitProjectEnvExecution(opts: {
     const resolveValues = async (valueOpts?: {
       readonly signal?: AbortSignal;
     }) => {
-      const signal = valueOpts?.signal ?? selection.signal;
       try {
+        if (
+          opts.retainCapturedSignal &&
+          valueOpts !== undefined &&
+          !isRecord(valueOpts)
+        ) {
+          throw nativeEnvRevisionError();
+        }
+        const signal = opts.retainCapturedSignal
+          ? retainedEnvSignal(selection.signal, valueOpts?.signal)
+          : (valueOpts?.signal ?? selection.signal);
         await assertFresh({ ...selection, signal });
         const resolved = await resolveNativeProjectEnvValues({
           selected,
@@ -1755,6 +1780,7 @@ export async function acquireProjectEnvForLegacyAdoption(opts: {
       selection: opts.admission.selection,
       inputOwner: opts.admission,
       redactError: redactLegacyAdoptionEnvError,
+      retainCapturedSignal: true,
     });
   } catch (error: unknown) {
     throw redactLegacyAdoptionEnvError(error);

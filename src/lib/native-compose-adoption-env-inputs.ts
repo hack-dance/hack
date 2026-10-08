@@ -150,6 +150,12 @@ export class LegacyAdoptionManagedEnvAdmission {
         refuse();
       }
       const context = this.#context;
+      if (context.selection.signal?.aborted) {
+        throw new NativeConfigCompilerError(
+          "E_COMPILER_CANCELLED",
+          "Legacy adoption managed acquisition was cancelled; values omitted."
+        );
+      }
       if (
         !isRecord(opts) ||
         (opts.projectRoot !== context.source.projectRoot &&
@@ -159,15 +165,24 @@ export class LegacyAdoptionManagedEnvAdmission {
       ) {
         refuse();
       }
-      await context.source.assertFresh(opts);
-      await context.primary?.assertFresh(opts);
-      if (!(await legacyComposeAdoptionManagedReadLayoutSupported(opts))) {
+      const signal =
+        context.selection.signal && opts.signal
+          ? AbortSignal.any([context.selection.signal, opts.signal])
+          : (opts.signal ?? context.selection.signal);
+      await context.source.assertFresh({ signal });
+      await context.primary?.assertFresh({ signal });
+      if (
+        !(await legacyComposeAdoptionManagedReadLayoutSupported({
+          projectRoot: opts.projectRoot,
+          signal,
+        }))
+      ) {
         refuse();
       }
       const primaryRoot = shouldInheritPrimaryLocalInputs(context.selection)
         ? await resolveVerifiedPrimaryWorktreeRoot({
             ...context.selection,
-            signal: opts.signal,
+            signal,
           })
         : null;
       if (primaryRoot !== (context.primary?.projectRoot ?? null)) {

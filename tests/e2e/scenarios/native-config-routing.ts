@@ -885,6 +885,27 @@ export const nativeConfigRoutingScenario: Scenario = {
         ctx.retainFixtures("Native routing owner cleanup is incomplete");
         const path = join(ctx.hackHome, "native-routing-fixture-recovery.json");
         try {
+          // Capture already known ownership before any fresh engine read: an
+          // unavailable daemon must not erase the proxy ID needed for recovery.
+          await Bun.write(
+            path,
+            JSON.stringify(
+              {
+                version: 1,
+                proxy: { id: proxyId, name: proxyName, token, networkId },
+                privateBinds: { dataRoot, configRoot },
+                roots: [...attempted],
+                owners: Object.fromEntries(knownOwners),
+                claimsRoot,
+              },
+              null,
+              2
+            )
+          );
+          await chmod(path, 0o600);
+          ctx.log(
+            "Private recovery identity receipt retained in isolated HACK_HOME"
+          );
           const resources: Record<string, unknown> = {};
           for (const [root, owner] of knownOwners) {
             const found: Record<string, readonly string[]> = {};
@@ -914,29 +935,25 @@ export const nativeConfigRoutingScenario: Scenario = {
             }
             resources[root] = found;
           }
+          const observationPath = join(
+            ctx.hackHome,
+            "native-routing-fixture-resources.json"
+          );
           await Bun.write(
-            path,
+            observationPath,
             JSON.stringify(
-              {
-                version: 1,
-                proxy: { id: proxyId, name: proxyName, token, networkId },
-                privateBinds: { dataRoot, configRoot },
-                roots: [...attempted],
-                owners: Object.fromEntries(knownOwners),
-                observedOwnedResources: resources,
-                claimsRoot,
-              },
+              { version: 1, observedOwnedResources: resources },
               null,
               2
             )
           );
-          await chmod(path, 0o600);
+          await chmod(observationPath, 0o600);
           ctx.log(
             "Owned cleanup incomplete; private recovery identity receipt retained in isolated HACK_HOME"
           );
         } catch {
           ctx.log(
-            "Owned cleanup incomplete; recovery roots retained, but additional fixture receipt could not be recorded"
+            "Owned cleanup incomplete; recovery roots retained, but additional fixture observation could not be recorded"
           );
         }
       },

@@ -60,8 +60,8 @@ managed owner and exact material projection. The native graph adapter continues 
 refuse raw file namespace presence, including empty definitions and inactive
 grants, before private value copies. Neither path falls back to another backend.
 
-The first private owner subset is read-only mode `0444` with no UID/GID override;
-custom permissions, writable access, one-off `run`, and projects combining builds
+The private owner supports read-only modes `0444`, `0400` and `0600` with no UID/GID
+override. Other permissions, writable access, one-off `run`, and projects combining builds
 with file inputs remain outside that subset. File-backed Compose config/secret
 mounts do not implement portable ownership remapping, so emitting ignored attributes
 would not satisfy this contract. See the [Compose long-syntax contract](https://docs.docker.com/reference/compose-file/services/#secrets).
@@ -84,9 +84,17 @@ managed owner before reading file bytes. Hooks may create the selected source fi
 changing selection or unsupported permission intent refuses delivery. All authored
 build/file combinations, including inactive workloads, refuse before private reads.
 
-Snapshots use owned 0700 directories outside the checkout, exclusive 0444 files,
-0600 metadata and exact read-only binds with `create_host_path: false`. A private
+Snapshots use owned 0700 directories outside the checkout, exclusive files with
+the exact selected `0444`, `0400` or `0600` mode, and 0600 metadata and exact read-only binds with `create_host_path: false`. A private
 generated extension anchors the root receipt, snapshot, manifest and file identities.
+Snapshot reference/manifest/journal version 1 remains the exact `0444` contract.
+Version 2 records protected `0400`/`0600` members, with the requested mode bound by
+the selected compiler grant and each immutable file anchor. Older clients refuse
+version 2. Host source permissions are observed and never changed to satisfy a
+grant; the selected mode applies only to Hack's exclusive private copy. Effective
+guest ownership is not remapped or inferred from an image user. This source
+contract does not establish application access or retained Compose bind parity;
+those need separate live ownership and permission acceptance.
 The bind projection encodes literal dollar signs once for Compose interpolation;
 filesystem paths and the stored reference remain raw. Saved document checks require
 those exact encoded binds and reject interpolation in additional mounts, including

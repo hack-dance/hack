@@ -367,7 +367,7 @@ test.each([
     raw.services.off = { build: { context: "." }, profiles: ["inactive"] };
   } else {
     raw.services.reader.mounts[0][kind] =
-      kind === "uid" ? 0 : kind === "mode" ? "0600" : "read-write";
+      kind === "uid" ? 0 : kind === "mode" ? "0644" : "read-write";
   }
   await writeFile(join(root, ".hack/hack.project.json"), JSON.stringify(raw));
   await writeFile(join(root, ".hack/hack.env.json"), CANARY);

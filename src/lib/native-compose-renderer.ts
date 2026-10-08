@@ -10,6 +10,7 @@ import {
   type NativeComposeFileProjection,
   nativeComposeFileProjectionMatches,
 } from "./native-compose-file-owner.ts";
+import { nativeComposeFileMode } from "./native-compose-file-permissions.ts";
 import { NATIVE_COMPOSE_FILES_EXTENSION } from "./native-compose-file-state.ts";
 import { selectNativeComposeBeforeHooks } from "./native-compose-host-contract.ts";
 import {
@@ -836,7 +837,9 @@ function renderMounts(opts: {
       const kind = Object.hasOwn(mount, "config") ? "config" : "secret";
       closed(mount, [kind, "target", "access", "mode"]);
       assert(
-        context.files && mount.access === "read-only" && mount.mode === "0444",
+        context.files &&
+          mount.access === "read-only" &&
+          nativeComposeFileMode(mount.mode) !== undefined,
         "E_COMPOSE_FILE_OWNER"
       );
       assert(
@@ -845,7 +848,7 @@ function renderMounts(opts: {
             file.kind === kind &&
             file.name === mount[kind] &&
             file.target === mount.target &&
-            file.mode === "0444" &&
+            file.mode === mount.mode &&
             file.uid === undefined &&
             file.gid === undefined
         ),

@@ -1,12 +1,13 @@
 import { isRecord } from "./guards.ts";
 import { refuseNativeComposeFile } from "./native-compose-file-bytes.ts";
+import { nativeComposeFileMode } from "./native-compose-file-permissions.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { authoredFilePlanningRequired } from "./native-file-plan-protocol.ts";
 
 function unsupported(): never {
   throw new NativeConfigCompilerError(
     "E_NATIVE_PROJECT_UNSUPPORTED",
-    "Native file delivery requires read-only mode 0444, no UID/GID override and no builds. Values omitted."
+    "Native file delivery requires read-only mode 0444, 0400 or 0600, no UID/GID override and no builds. Values omitted."
   );
 }
 function assertWorkloadSubset(workload: unknown): void {
@@ -28,9 +29,10 @@ function assertWorkloadSubset(workload: unknown): void {
     ) {
       continue;
     }
+    const mode = Object.hasOwn(mount, "mode") ? mount.mode : undefined;
     if (
       mount.access !== "read-only" ||
-      (mount.mode !== undefined && mount.mode !== "0444") ||
+      (mode !== undefined && nativeComposeFileMode(mode) === undefined) ||
       Object.hasOwn(mount, "uid") ||
       Object.hasOwn(mount, "gid")
     ) {

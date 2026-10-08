@@ -16,7 +16,12 @@ import {
   type Scenario,
 } from "../harness.ts";
 import { prepareNativeEngineTripwire } from "../native-engine-tripwire.ts";
-import { recordKnownUncertainProcessPolicyStartup } from "../native-process-policy-startup-diagnostic.ts";
+import { summarizeProcessPolicyInitialTrace } from "../native-process-policy-initial-replay.ts";
+import { prepareProcessPolicyInitialTrace } from "../native-process-policy-initial-trace.ts";
+import {
+  isKnownUncertainProcessPolicyStartup,
+  recordKnownUncertainProcessPolicyStartup,
+} from "../native-process-policy-startup-diagnostic.ts";
 
 const TIMEOUT = 120_000;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
@@ -711,13 +716,28 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
         message: "Retry event history requires the exact engine clock",
       });
       const expectedEngineId = await docker(["info", "--format", "{{.ID}}"]);
+      const initialTrace = await prepareProcessPolicyInitialTrace({
+        directory: join(ctx.tempRoot, "initial-process-policy-trace"),
+      });
       const initialUp = await raw([
         "--profile",
         "exercise",
         "up",
         "--detach",
         "--json",
-      ]);
+      ], { PATH: initialTrace.path });
+      if (isKnownUncertainProcessPolicyStartup(initialUp)) {
+        try {
+          const replay = await summarizeProcessPolicyInitialTrace({
+            directory: initialTrace.directory,
+            projectRoot: root,
+            replayRoot: join(ctx.tempRoot, "initial-process-policy-replay"),
+          });
+          ctx.log(`fixed-field original-query replay: ${JSON.stringify(replay)}`);
+        } catch {
+          stage("fixed-field original-query replay unavailable; no cause inferred");
+        }
+      }
       const diagnostic = await recordKnownUncertainProcessPolicyStartup({
         result: initialUp,
         projectRoot: root,

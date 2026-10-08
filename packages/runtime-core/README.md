@@ -54,6 +54,16 @@ namespace, image/source/provider admission and effect-time deadline, integrate a
 native runs into common capacity/inventory, and implement tagged native ownership and
 recovery. These preparation artifacts carry no resource ownership or replay authority.
 
+`provider::graph::native::configuration` lowers freshly prepared image-only input
+into public container configuration using the existing bounded container isolation.
+It preserves exact process/exec-readiness values and compiler job/dependency goals,
+requires immutable image IDs and the default source root, and adds distinct native
+input labels and resource names. Omitted image process/environment defaults remain
+omitted; managed values remain in separate pending handles. Whole-second shutdown
+grace up to 30 seconds is represented exactly; fractional seconds refuse. This pure
+lowerer checks owner shape and deadline, never real guest ownership, image presence,
+combined capacity, private staging or engine effects.
+
 No backend consumes this adapter yet. Native input provenance, image availability,
 source/storage ownership, provider admission and installed execution/recovery remain
 separate qualification gates. Existing Compose plans and receipts retain their formats.

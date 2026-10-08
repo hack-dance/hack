@@ -59,6 +59,15 @@ export type NativeComposePending = {
   readonly recoveryToken?: string;
 };
 
+type HostHookIntent =
+  | { readonly token: string; readonly phase: "before" }
+  | {
+      readonly token: string;
+      readonly phase: "after";
+      readonly pendingToken: string;
+      readonly generationId: string;
+      readonly operation: "up" | "restart";
+    };
 type Receipt = {
   readonly version: 1;
   readonly identity: NativeComposeIdentity;
@@ -67,7 +76,7 @@ type Receipt = {
   readonly stopped: boolean;
   readonly pending: (NativeComposePending & GenerationAnchor) | null;
   /** No command, PID, environment, or content fingerprint. Interrupted finite hooks never replay. */
-  readonly beforeHooks: { readonly token: string } | null;
+  readonly beforeHooks: HostHookIntent | null;
 };
 type FileIdentity = { readonly dev: number; readonly ino: number };
 type CheckoutAnchor = FileIdentity & {
@@ -555,14 +564,48 @@ function pendingValid(
 }
 function beforeHooksValid(
   value: unknown
-): value is { readonly token: string } | null {
+): value is
+  | HostHookIntent
+  | { readonly token: string; readonly phase?: "before" }
+  | null {
   return (
     value === null ||
     (isRecord(value) &&
-      keys(value, "token") &&
       typeof value.token === "string" &&
-      TOKEN.test(value.token))
+      TOKEN.test(value.token) &&
+      (keys(value, "token") ||
+        (keys(value, "phase,token") && value.phase === "before") ||
+        (keys(value, "generationId,operation,pendingToken,phase,token") &&
+          value.phase === "after" &&
+          (value.operation === "up" || value.operation === "restart") &&
+          typeof value.pendingToken === "string" &&
+          TOKEN.test(value.pendingToken) &&
+          typeof value.generationId === "string" &&
+          TOKEN.test(value.generationId))))
   );
+}
+function normalizeHostIntent(
+  value:
+    | HostHookIntent
+    | { readonly token: string; readonly phase?: "before" }
+    | null
+    | undefined
+): HostHookIntent | null {
+  if (value == null) {
+    return null;
+  }
+  if (value.phase === "after") {
+    return value;
+  }
+  return { token: value.token, phase: "before" };
+}
+function afterHookOperation(
+  operation: NativeComposeOperation
+): "up" | "restart" {
+  if (operation === "up" || operation === "restart") {
+    return operation;
+  }
+  return refuse();
 }
 function requireBeforeHooksAdmission(
   state: Receipt,
@@ -610,7 +653,7 @@ function parseReceipt(
     current: value.current,
     stopped: value.stopped,
     pending: value.pending,
-    beforeHooks: value.beforeHooks ?? null,
+    beforeHooks: normalizeHostIntent(value.beforeHooks),
   };
 }
 function checkoutMatches(value: unknown, expected: CheckoutAnchor): boolean {
@@ -785,6 +828,16 @@ export type NativeComposeEffectOptions<T> = {
    * atomic commit, and the finalizer must retain its own crash recovery evidence.
    */
   readonly beforeComplete?: () => Promise<void>;
+  /** Prepare private values after verified engine readiness, then journal a generation-bound finite phase before spawn. */
+  readonly afterHooks?: {
+    readonly prepare: () => Promise<
+      () => Promise<{
+        readonly outcome: "complete" | "uncertain";
+        readonly value: T;
+        readonly ready: boolean;
+      }>
+    >;
+  };
   readonly effect: () => Promise<{
     readonly outcome: "complete" | "uncertain";
     readonly value: T;
@@ -810,6 +863,13 @@ function admitEffect<T>(
   mode: "prepare" | "saved" | undefined
 ): void {
   if (!["up", "restart", "run", "down"].includes(input.operation)) {
+    refuse();
+  }
+  if (
+    input.afterHooks &&
+    input.operation !== "up" &&
+    input.operation !== "restart"
+  ) {
     refuse();
   }
   if (input.operation !== "down" && state.beforeHooks !== null) {
@@ -893,6 +953,7 @@ export type NativeComposeGenerationStore = {
     readonly stopped: boolean;
     readonly pending: NativeComposePending | null;
     readonly beforeHooksPending: boolean;
+    readonly hostHookPhase: "before" | "after" | null;
   }>;
   loadPending(): Promise<NativeComposeGeneration | null>;
   /** Private values: never serialize/log this object. Use within a saved-generation lease. */
@@ -1250,18 +1311,30 @@ export async function openNativeComposeGenerationStore(opts: {
       pending: Receipt["pending"],
       anchor: GenerationAnchor
     ) => {
+      if (input.assertFresh) {
+        await assertFresh(input.assertFresh);
+      }
       await verifyGeneration(input.generation);
       await input.assertOwned();
       let latest = await receipt();
-      if (JSON.stringify(latest.pending) !== JSON.stringify(pending)) {
+      if (
+        JSON.stringify(latest.pending) !== JSON.stringify(pending) ||
+        (input.operation !== "down" && latest.beforeHooks !== null)
+      ) {
         refuse();
       }
       if (input.beforeComplete) {
         await input.beforeComplete();
+        if (input.assertFresh) {
+          await assertFresh(input.assertFresh);
+        }
         await verifyGeneration(input.generation);
         await input.assertOwned();
         latest = await receipt();
-        if (JSON.stringify(latest.pending) !== JSON.stringify(pending)) {
+        if (
+          JSON.stringify(latest.pending) !== JSON.stringify(pending) ||
+          (input.operation !== "down" && latest.beforeHooks !== null)
+        ) {
           refuse();
         }
       }
@@ -1287,6 +1360,7 @@ export async function openNativeComposeGenerationStore(opts: {
           stopped: state.stopped,
           pending: publicPending(state.pending),
           beforeHooksPending: state.beforeHooks !== null,
+          hostHookPhase: state.beforeHooks?.phase ?? null,
         };
       },
       async loadPending() {
@@ -1439,6 +1513,63 @@ export async function openNativeComposeGenerationStore(opts: {
             await check();
             requireActive();
           };
+          const performAfterHooks = async <T>(
+            input: NativeComposeEffectOptions<T>,
+            pending: NonNullable<Receipt["pending"]>
+          ) => {
+            if (!input.afterHooks) {
+              return refuse();
+            }
+            await checkEffect(input);
+            const execute = await input.afterHooks.prepare();
+            await checkEffect(input);
+            const state = await receipt();
+            if (
+              state.beforeHooks !== null ||
+              JSON.stringify(state.pending) !== JSON.stringify(pending)
+            ) {
+              return refuse();
+            }
+            const intent: HostHookIntent = Object.freeze({
+              token: token(),
+              phase: "after",
+              pendingToken: pending.token,
+              generationId: pending.generationId,
+              operation: afterHookOperation(input.operation),
+            });
+            await save({ ...state, beforeHooks: intent });
+            await checkEffect(input);
+            const result = await execute();
+            if (result.outcome === "complete") {
+              const latest = await receipt();
+              if (
+                JSON.stringify(latest.beforeHooks) !== JSON.stringify(intent) ||
+                JSON.stringify(latest.pending) !== JSON.stringify(pending)
+              ) {
+                return refuse();
+              }
+              await save({ ...latest, beforeHooks: null });
+            }
+            return result;
+          };
+          const finishEffect = async <T>(
+            input: NativeComposeEffectOptions<T>,
+            pending: NonNullable<Receipt["pending"]>,
+            anchor: GenerationAnchor,
+            result: Awaited<ReturnType<NativeComposeEffectOptions<T>["effect"]>>
+          ) => {
+            if (result.outcome !== "complete") {
+              return result;
+            }
+            if (input.afterHooks) {
+              const after = await performAfterHooks(input, pending);
+              if (after.outcome !== "complete" || !after.ready) {
+                return { value: after.value, outcome: "uncertain" as const };
+              }
+            }
+            await finalizeEffect(input, pending, anchor);
+            return result;
+          };
           const mutation: NativeComposeMutation = {
             async runBeforeHooks<T>(input: {
               readonly assertFresh: () => Promise<void>;
@@ -1452,7 +1583,10 @@ export async function openNativeComposeGenerationStore(opts: {
                 const state = await receipt();
                 requireBeforeHooksAdmission(state, opts.mode);
                 await assertFresh(captured.assertFresh);
-                const beforeHooks = Object.freeze({ token: token() });
+                const beforeHooks = Object.freeze({
+                  token: token(),
+                  phase: "before" as const,
+                });
                 await save({ ...state, beforeHooks });
                 try {
                   await assertFresh(captured.assertFresh);
@@ -1461,7 +1595,10 @@ export async function openNativeComposeGenerationStore(opts: {
                     return result;
                   }
                   const latest = await receipt();
-                  if (latest.beforeHooks?.token !== beforeHooks.token) {
+                  if (
+                    JSON.stringify(latest.beforeHooks) !==
+                    JSON.stringify(beforeHooks)
+                  ) {
                     refuse();
                   }
                   await save({ ...latest, beforeHooks: null });
@@ -1564,11 +1701,7 @@ export async function openNativeComposeGenerationStore(opts: {
                 try {
                   await checkEffect(input);
                   const result = await input.effect();
-                  if (result.outcome !== "complete") {
-                    return result;
-                  }
-                  await finalizeEffect(input, pending, anchor);
-                  return result;
+                  return await finishEffect(input, pending, anchor, result);
                 } catch {
                   throw new NativeComposeGenerationError(
                     "E_NATIVE_COMPOSE_UNCERTAIN"

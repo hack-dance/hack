@@ -82,9 +82,11 @@ documents can contain decrypted values and remain in owned private files with
 restricted permissions. They are never part of the public plan or JSON output.
 Do not copy these documents into source control or attach them to diagnostics.
 
-## Finite host before hooks
+## Finite host up hooks
 
-Whole-project `up` and `restart` run `host.up.before` in authored order. A hook
+Whole-project `up` and `restart` run `host.up.before` before engine startup, then
+`host.up.after` after the exact workloads and routes are ready. Each phase runs in
+authored order. A hook
 uses either ordered `command.exec` arguments or explicit `command.shell` source
 through `/bin/sh -c`. Its relative `cwd` anchors to the selected checkout. Standard
 input and native authorization prompts remain attached to the terminal; with
@@ -96,30 +98,42 @@ the compiler's effective bindings. `env_target` can select the default host or a
 declared workload's host view. Managed references read that immutable baseline;
 literal overrides, empty defaults and explicit unset destinations retain their
 meaning. HTTP/HTTPS external endpoint bindings are supported. Other endpoint
-owners remain refused. `run` currently refuses projects with nonempty before
+owners remain refused. `run` currently refuses projects with either nonempty up
 hooks instead of assigning new lifecycle semantics to a one-off command.
 
-The entire hook sequence has a separate budget equal to
-`HACK_COMPOSE_STARTUP_TIMEOUT_MS`; Compose startup gets its own budget afterward.
-A nonzero hook exits with its status and prevents later hooks and engine startup.
+Each hook phase has a separate budget equal to `HACK_COMPOSE_STARTUP_TIMEOUT_MS`;
+Compose startup and final route verification each receive their own bounded
+budget. A nonzero hook exits with its status and prevents later hooks. A before
+failure prevents engine startup. An after failure leaves startup pending without
+reporting ready; an owned engine can be stopped with saved `down --recover`.
 Cancellation and timeout forward signals to the owned process group. Completion
 requires the group to be absent; a hook that leaves descendants is uncertain.
 
-Hooks can prepare managed environment files or local endpoint bindings. Hack
+Before hooks can prepare managed environment files or local endpoint bindings. Hack
 reacquires source, local, routing and environment inputs after the sequence and
 before private generation publication. A changed project name, source contract,
 worktree policy, selected profiles or hook sequence refuses startup rather than
 silently skipping newly authored hooks.
 
+After hooks cannot rebind a running generation. Before committing readiness, Hack
+reacquires and checks the same source, local, routing and environment inputs,
+rechecks actual workload readiness, and verifies routes with a fresh bounded
+deadline. A changed input, stopped service or failed health check keeps the engine
+operation pending. The generation becomes ready only after those checks pass.
+
 Before spawning, Hack synchronizes a private hook intent under the same instance
 mutation lock used for engine effects. An interrupted or unverified hook retains
 that intent and blocks `up`, `restart` and `run` without replay. Saved `ps --json`
-reports `beforeHooksPending`, even if no engine generation was created. Saved
+reports `beforeHooksPending` for either phase and `hostHookPhase` as `before`,
+`after`, or null, even if no engine generation was created. Older token-only
+receipts remain uncertain before intents. An after intent also binds its exact
+pending startup operation and generation. Saved
 `down` can stop a retained engine generation but reports incomplete cleanup while
 hook intent remains. `down --recover` can recover a verified dead CLI mutation
 owner; it cannot prove hook process ownership, clear hook uncertainty or rerun a
 hook. Explicit recovery for interrupted hooks remains a later lifecycle slice.
 An uncertain hook also prevents routing claim retirement after an owned stop.
+Down hooks and persistent host processes remain unsupported.
 
 ## Saved operations and recovery
 
@@ -190,7 +204,7 @@ from orphan generation files by this recovery path.
 ## Remaining coverage
 
 This slice explicitly refuses foreground or partial-service startup, non-plain
-logs, pruning options, `host.up.after`, all `host.down` hooks, persistent host
+logs, pruning options, all `host.down` hooks, persistent host
 processes, browser opening, route
 bindings, typed host/gateway endpoints, TCP endpoint derivation, and HTTP/TCP
 readiness. It preserves ordinary project DNS and outbound networking and adds no

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import {
   chmod,
   mkdir,
@@ -462,14 +462,55 @@ test("cancelled real child is reaped and abort reason stays private", async () =
   expect(() => process.kill(pid, 0)).toThrow();
 });
 test("timeout reaps real child without authorizing any mutation", async () => {
-  fixture.mode = "hang";
-  await save();
-  await refusal(
-    acquireLegacyComposeAdoptionBinding({ projectRoot, timeoutMs: 150 }),
-    "E_LEGACY_COMPOSE_BINDING_PROBE"
-  );
-  const pid = Number(await readFile(join(root, "started"), "utf8"));
-  expect(() => process.kill(pid, 0)).toThrow();
+  const binary = join(root, "docker");
+  // A slow startup may be killed before its script can publish a PID. Force that
+  // case; observe the actual returned child without changing spawn or the timer.
+  await writeFile(binary, `#!${process.execPath}\nawait Bun.sleep(60_000);\n`);
+  const children: {
+    child: ReturnType<typeof Bun.spawn>;
+    exited: boolean;
+  }[] = [];
+  const actualSpawn = Bun.spawn;
+  const spawn = spyOn(Bun, "spawn").mockImplementation((...args) => {
+    const child: ReturnType<typeof Bun.spawn> = Reflect.apply(
+      actualSpawn,
+      Bun,
+      args
+    );
+    const argv = args[0];
+    if (Array.isArray(argv) && argv[0] === binary) {
+      const observed = { child, exited: false };
+      children.push(observed);
+      void child.exited.then(() => {
+        observed.exited = true;
+      });
+    }
+    return child;
+  });
+  try {
+    await refusal(
+      acquireLegacyComposeAdoptionBinding({ projectRoot, timeoutMs: 150 }),
+      "E_LEGACY_COMPOSE_BINDING_PROBE"
+    );
+    expect(children.length).toBeGreaterThan(0);
+    for (const { child, exited } of children) {
+      expect(exited).toBe(true);
+      expect(child.signalCode).toBe("SIGKILL");
+      expect(await child.exited).not.toBe(0);
+      expect(() => process.kill(child.pid, 0)).toThrow();
+    }
+    expect(await Bun.file(join(root, "started")).exists()).toBe(false);
+  } finally {
+    spawn.mockRestore();
+    // Preserve the assertion failure while preventing a broken reaping path from
+    // leaving this exact synthetic child alive in the rest of the test suite.
+    for (const { child } of children) {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
+    }
+  }
 });
 test("abort before acquisition starts no Docker process", async () => {
   await refusal(

@@ -86,7 +86,7 @@ const ROUTING = [
   "HACK_EXECUTION_MODE",
 ] as const;
 type SavedManifest = {
-  readonly adoption_generation_version: 1 | 3 | 4 | 5 | 6 | 9;
+  readonly adoption_generation_version: 1 | 3 | 4 | 5 | 6 | 9 | 10;
   readonly kind: typeof KIND;
   readonly projectRoot: string;
   readonly id: string;
@@ -244,6 +244,7 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
           keys(value.buildProof, "images,source") &&
           isRecord(value.buildProof.source) &&
           Array.isArray(value.buildProof.images)) ||
+        value.adoption_generation_version === 10 ||
         (value.adoption_generation_version === 5 &&
           (!Object.hasOwn(value, "projectionProof") ||
             (isRecord(value.projectionProof) &&
@@ -447,10 +448,13 @@ async function requireSelectedTopologyOwner(opts: {
   if (!isRecord(meta.binding)) {
     refuse();
   }
+  const bridgeOnly = custom && !requiresV5;
+  const healthOnly = !custom && requiresV5;
+  const bridgeAndHealth = custom && requiresV5;
   if (
-    (meta.adoption_generation_version === 6) !== custom ||
-    (meta.adoption_generation_version === 5) !== requiresV5 ||
-    (custom && requiresV5) ||
+    (meta.adoption_generation_version === 6) !== bridgeOnly ||
+    (meta.adoption_generation_version === 5) !== healthOnly ||
+    (meta.adoption_generation_version === 10) !== bridgeAndHealth ||
     (custom &&
       (meta.binding.binding_version !== 3 ||
         meta.projectionProof !== undefined)) ||
@@ -469,8 +473,9 @@ async function requireSelectedTopologyOwner(opts: {
   }
   const state = await publicationState(ctx);
   if (
-    (state.adoption_receipt_version === 6) !== custom ||
-    (state.adoption_receipt_version === 5) !== requiresV5 ||
+    (state.adoption_receipt_version === 6) !== bridgeOnly ||
+    (state.adoption_receipt_version === 5) !== healthOnly ||
+    (state.adoption_receipt_version === 10) !== bridgeAndHealth ||
     (state.adoption_receipt_version === 9) !==
       (meta.adoption_generation_version === 9) ||
     JSON.stringify(state.prepared) !== JSON.stringify(selected)
@@ -691,14 +696,14 @@ function manifestVersion(
     readonly projectionProof: { readonly projection_version: number };
   }
 ): Manifest["adoption_generation_version"] {
+  if (binding.binding_version === 3) {
+    return requiresV5 ? 10 : 6;
+  }
   if (requiresV5) {
-    if (binding.binding_version === 3 || binding.binding_version === 4) {
+    if (binding.binding_version === 4) {
       refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
     }
     return 5;
-  }
-  if (binding.binding_version === 3) {
-    return 6;
   }
   if (binding.binding_version === 4) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
@@ -722,7 +727,7 @@ async function prepare(
     projectRoot: ctx.root,
     signal: ctx.signal,
   });
-  // Version 6 owns only the static custom bridge. Generated-source or typed
+  // Versions 6 and 10 own the static custom bridge. Generated-source or typed
   // local combinations need a separate selected owner, never a v3/v4 alias.
   if (
     acquired.binding.binding_version === 4 ||
@@ -742,9 +747,6 @@ async function prepare(
     acquired.projection?.candidate ?? mapped.candidate
   );
   const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
-  if (retainedPlan.requiresV5 && acquired.binding.binding_version >= 3) {
-    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
-  }
   if (
     acquired.build &&
     (acquired.binding.binding_version !== 1 ||
@@ -1466,7 +1468,8 @@ function preparedReceiptVersion(
   if (
     prior.adoption_receipt_version === 5 ||
     prior.adoption_receipt_version === 6 ||
-    prior.adoption_receipt_version === 9
+    prior.adoption_receipt_version === 9 ||
+    prior.adoption_receipt_version === 10
   ) {
     return "kind" in checkout.git ? 2 : 1;
   }
@@ -1540,7 +1543,7 @@ async function mutateRetainedContainers(
     refuse();
   }
   if (
-    ![5, 9].includes(captured.generation.report.adoption_generation_version)
+    ![5, 9, 10].includes(captured.generation.report.adoption_generation_version)
   ) {
     return await mutateRetainedContainersWithinBudget(
       original,

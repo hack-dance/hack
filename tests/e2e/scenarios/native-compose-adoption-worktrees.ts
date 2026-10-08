@@ -549,9 +549,6 @@ function linkedFixtureFeatures(opts: {
   readonly dependencies: boolean;
   readonly role: "first" | "second";
 }): Partial<Pick<Instance, "ownedNetwork" | "dependency">> {
-  if (opts.ownedNetwork && opts.dependencies) {
-    refused();
-  }
   return {
     ...(opts.ownedNetwork ? { ownedNetwork: true as const } : {}),
     ...(opts.dependencies
@@ -2019,7 +2016,9 @@ function partialStopReceiptVersion(first: Instance): number {
   return first.basicBuild
     ? 9
     : first.ownedNetwork
-      ? 6
+      ? first.dependency
+        ? 10
+        : 6
       : first.dependency
         ? 5
         : first.sourceMode
@@ -2398,7 +2397,7 @@ const args=process.argv.slice(2), engine=${JSON.stringify(h.engine)};
 if(args[0]==='container' && args[1]==='start') {
  if(args.length!==3)process.exit(99);
  const receipt=JSON.parse(await Bun.file(${JSON.stringify(receipt)}).text());
- if(receipt.adoption_receipt_version!==5 || receipt.pendingOperation?.operation!=='start')process.exit(98);
+if(receipt.adoption_receipt_version!==${instance.ownedNetwork ? 10 : 5} || receipt.pendingOperation?.operation!=='start')process.exit(98);
  const startsFile=Bun.file(${JSON.stringify(starts)}), prior=await startsFile.exists() ? JSON.parse(await startsFile.text()) : [];
  let observed;
  if(args[2]===${JSON.stringify(worker)}) {
@@ -2763,92 +2762,110 @@ export const nativeComposeAdoptionBuildWorktreesScenario: Scenario = {
   },
 };
 
-/** Explicit selector keeps the new v5 dependency acceptance independent of all previously qualified worktree cases. */
+async function runDependencyWorktrees(
+  ctx: ScenarioContext,
+  ownedNetwork: boolean
+) {
+  const h = createFixtureRuntime(
+    await prepareFixtureInputs(ctx, { dependencies: true, ownedNetwork })
+  );
+  const foreignCanary = { pending: false };
+  await runWithFixtureCleanup({
+    run: async () => {
+      for (const instance of [h.first, h.second]) {
+        await bootstrapOriginal(h, instance);
+        const preview = successful(
+          await h.cli(instance, [
+            "config",
+            "adopt",
+            "--dry-run",
+            "--stop",
+            "--json",
+          ])
+        );
+        if (object(preview.stdout).complete !== true) {
+          refused();
+        }
+        await h.assertNoState(instance);
+        await h.check(instance);
+      }
+      if (ownedNetwork) {
+        await foreignCanaryRefusal(h, foreignCanary);
+      }
+      await interruptFirstStop(h);
+      successful(
+        await h.cli(h.first, [
+          "config",
+          "adopt",
+          "--recover",
+          "--stop",
+          "--json",
+        ])
+      );
+      await h.assertStopped(h.first);
+      refusedPreview(await h.cli(h.first, ["up", "db", "--detach", "--json"]));
+      await h.assertStopped(h.first);
+      await h.check(h.second);
+      await dependencyFixtureUp(h, h.first, true);
+      await h.waitReady(h.first);
+      if (
+        (await h.sql(h.first, "SELECT value FROM marker WHERE id=1")) !==
+        h.first.marker
+      ) {
+        refused();
+      }
+      await dependencyCandidateDriftRefusal(h);
+      successful(await h.cli(h.first, ["down", "--recover", "--json"]));
+      await h.assertStopped(h.first);
+      await h.check(h.second);
+      await dependencyFixtureUp(h, h.first, false);
+      await h.check(h.first, false);
+      await h.check(h.second);
+      refusedPreview(await h.cli(h.first, ["run", "db", "--", "true"]));
+      await rollbackDependencyInstance(h, h.first);
+      await h.check(h.second);
+      successful(
+        await h.cli(h.second, ["config", "adopt", "--stop", "--json"])
+      );
+      await h.assertStopped(h.second);
+      await h.check(h.first);
+      await dependencyFixtureUp(h, h.second, false);
+      await h.check(h.second, false);
+      await h.check(h.first);
+      await rollbackDependencyInstance(h, h.second);
+      await h.check(h.first);
+      ctx.log(
+        ownedNetwork
+          ? "owned internal bridges and started/exec-healthy ordered originals retain alias SQL, source, IDs and births through stop recovery and rollback"
+          : "started/exec-healthy ordered originals, SQL/birth/IDs, unchanged-source stop recovery, active-candidate repair and isolated rollback verified"
+      );
+    },
+    cleanup: guardedAdoptionCanaryCleanup(foreignCanary, () =>
+      cleanupOwnedAdoptionFixture({ ...h, instances: [h.first, h.second] })
+    ),
+    secondaryFailure: () =>
+      ctx.log("secondary exact-owned cleanup failed; retain fixture evidence"),
+  });
+}
+
+/** Explicit selector keeps the version 5 dependency acceptance independent of the owned-bridge intersection. */
 export const nativeComposeAdoptionDependencyWorktreesScenario: Scenario = {
   name: "native-compose-adoption-dependency-worktrees",
   tier: "docker",
   preserveFixtureOnFailure: true,
   summary:
     "started and exec-healthy edges preserve two linked original SQL volumes through ordered repair and rollback",
-  run: async (ctx) => {
-    const h = createFixtureRuntime(
-      await prepareFixtureInputs(ctx, { dependencies: true })
-    );
-    await runWithFixtureCleanup({
-      run: async () => {
-        for (const instance of [h.first, h.second]) {
-          await bootstrapOriginal(h, instance);
-          const preview = successful(
-            await h.cli(instance, [
-              "config",
-              "adopt",
-              "--dry-run",
-              "--stop",
-              "--json",
-            ])
-          );
-          if (object(preview.stdout).complete !== true) {
-            refused();
-          }
-          await h.assertNoState(instance);
-          await h.check(instance);
-        }
-        await interruptFirstStop(h);
-        successful(
-          await h.cli(h.first, [
-            "config",
-            "adopt",
-            "--recover",
-            "--stop",
-            "--json",
-          ])
-        );
-        await h.assertStopped(h.first);
-        refusedPreview(
-          await h.cli(h.first, ["up", "db", "--detach", "--json"])
-        );
-        await h.assertStopped(h.first);
-        await h.check(h.second);
-        await dependencyFixtureUp(h, h.first, true);
-        await h.waitReady(h.first);
-        if (
-          (await h.sql(h.first, "SELECT value FROM marker WHERE id=1")) !==
-          h.first.marker
-        ) {
-          refused();
-        }
-        await dependencyCandidateDriftRefusal(h);
-        successful(await h.cli(h.first, ["down", "--recover", "--json"]));
-        await h.assertStopped(h.first);
-        await h.check(h.second);
-        await dependencyFixtureUp(h, h.first, false);
-        await h.check(h.first, false);
-        await h.check(h.second);
-        refusedPreview(await h.cli(h.first, ["run", "db", "--", "true"]));
-        await rollbackDependencyInstance(h, h.first);
-        await h.check(h.second);
-        successful(
-          await h.cli(h.second, ["config", "adopt", "--stop", "--json"])
-        );
-        await h.assertStopped(h.second);
-        await h.check(h.first);
-        await dependencyFixtureUp(h, h.second, false);
-        await h.check(h.second, false);
-        await h.check(h.first);
-        await rollbackDependencyInstance(h, h.second);
-        await h.check(h.first);
-        ctx.log(
-          "started/exec-healthy ordered originals, SQL/birth/IDs, unchanged-source stop recovery, active-candidate repair and isolated rollback verified"
-        );
-      },
-      cleanup: () =>
-        cleanupOwnedAdoptionFixture({ ...h, instances: [h.first, h.second] }),
-      secondaryFailure: () =>
-        ctx.log(
-          "secondary exact-owned cleanup failed; retain fixture evidence"
-        ),
-    });
-  },
+  run: (ctx) => runDependencyWorktrees(ctx, false),
+};
+
+/** Combined version 10 owner keeps original bridge, SQL and dependency order through two linked recoveries. */
+export const nativeComposeAdoptionNetworkHealthWorktreesScenario: Scenario = {
+  name: "native-compose-adoption-network-health-worktrees",
+  tier: "docker",
+  preserveFixtureOnFailure: true,
+  summary:
+    "owned internal bridges and healthy dependencies retain original IDs, alias SQL and rollback through linked recovery",
+  run: (ctx) => runDependencyWorktrees(ctx, true),
 };
 
 /** An external raw-byte edit must prevent recovery before another stop while both original data bindings remain intact. */
@@ -2998,7 +3015,7 @@ export async function cleanupOwnedAdoptionFixture(h: CleanupInputs) {
     await cleanupInstance(h, instance);
   }
 }
-async function runWithFixtureCleanup(opts: {
+export async function runWithFixtureCleanup(opts: {
   readonly run: () => Promise<void>;
   readonly cleanup: () => Promise<void>;
   readonly secondaryFailure: () => void;
@@ -3022,6 +3039,19 @@ async function runWithFixtureCleanup(opts: {
   if (failed) {
     throw failure;
   }
+}
+
+/** An uncertain foreign-canary retirement must retain the original fixture. */
+export function guardedAdoptionCanaryCleanup(
+  gate: { readonly pending: boolean },
+  cleanup: () => Promise<void>
+): () => Promise<void> {
+  return async () => {
+    if (gate.pending) {
+      refused();
+    }
+    await cleanup();
+  };
 }
 
 async function runLiteralWorktrees(

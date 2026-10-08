@@ -271,6 +271,60 @@ test.each([
     reader.mockRestore();
   }
 });
+test.each([
+  ["config", false],
+  ["config", true],
+  ["secret", false],
+  ["secret", true],
+] as const)("preview-qualified %s build grant (inactive=%s) refuses retained source before context reads", async (kind, inactive) => {
+  const namespace = `${kind}s`;
+  composeText = JSON.stringify({
+    name: "fixture",
+    services: {
+      db: {
+        build: "..",
+        ...(inactive ? { profiles: ["later"] } : {}),
+        [namespace]: ["settings"],
+      },
+    },
+    [namespace]: { settings: { file: `./${CANARY}` } },
+  });
+  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  const inputs = { configText: '{"name":"fixture"}', composeText };
+  const preview = mapLegacyNativeImport(inputs);
+  expect(preview.report.complete).toBe(true);
+  expect(preview.candidate).toMatchObject({
+    [namespace]: { settings: { file: `.hack/${CANARY}` } },
+    services: {
+      db: {
+        build: { context: "." },
+        mounts: [{ [kind]: "settings", access: "read-only", mode: "0444" }],
+      },
+    },
+  });
+  const retained = mapLegacyNativeRetainedBasicBuild(inputs);
+  expect(retained.candidate).toBeUndefined();
+  expect(retained.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: `/services/db/${namespace}`,
+      status: "refused",
+      code: "unsupported_field",
+    })
+  );
+  expect(JSON.stringify(preview.report)).not.toContain(CANARY);
+  expect(JSON.stringify(retained.report)).not.toContain(CANARY);
+  const source = await acquireLegacyAdoptionSourceInputs({ projectRoot: root });
+  if (!source.ok) {
+    throw new Error("Synthetic source setup refused; values omitted.");
+  }
+  const reader = spyOn(importInputs, "readNativeConfigImportSourceFile");
+  try {
+    await red(acquireLegacyComposeBuildSource({ source }));
+    expect(reader).not.toHaveBeenCalled();
+  } finally {
+    reader.mockRestore();
+  }
+});
 test("creation and edits inside actually ignored owned outputs do not invalidate included source", async () => {
   const captured = await acquire();
   await mkdir(join(root, ".hack/.internal"));

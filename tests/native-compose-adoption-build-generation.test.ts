@@ -209,7 +209,7 @@ test("candidate build edits refuse before any retained effect or rollback overwr
     await store.close();
   }
 });
-test("older receipt versions cannot label a build manifest", async () => {
+test("foreign receipt versions cannot label a build manifest", async () => {
   const { store } = await prepared();
   try {
     const receipt = await h.receipt();
@@ -217,7 +217,7 @@ test("older receipt versions cannot label a build manifest", async () => {
       parseLegacyComposeAdoptionReceipt(receipt, receipt.checkout)
         .adoption_receipt_version
     ).toBe(9);
-    for (const version of [1, 2, 3, 4, 5]) {
+    for (const version of [1, 2, 3, 4, 5, 6, 10]) {
       await writeReceipt({ ...receipt, adoption_receipt_version: version });
       await red(store.loadPrepared());
     }

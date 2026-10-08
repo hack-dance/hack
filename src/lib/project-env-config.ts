@@ -51,7 +51,10 @@ import {
 } from "./git-worktree.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
 import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
-import { LegacyAdoptionManagedEnvAdmission } from "./native-compose-adoption-env-inputs.ts";
+import {
+  isOwnedLegacyAdoptionManagedEnvAdmission,
+  type LegacyAdoptionManagedEnvAdmission,
+} from "./native-compose-adoption-env-inputs.ts";
 import {
   NATIVE_CONFIG_INPUT_LIMIT,
   NativeConfigCompilerError,
@@ -1743,7 +1746,7 @@ export async function acquireProjectEnvForLegacyAdoption(opts: {
     if (
       !(
         isRecord(opts) &&
-        opts.admission instanceof LegacyAdoptionManagedEnvAdmission
+        isOwnedLegacyAdoptionManagedEnvAdmission(opts.admission)
       )
     ) {
       throw nativeEnvRevisionError();

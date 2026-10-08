@@ -74,8 +74,7 @@ fn decode(bytes: &[u8]) -> Result<(Record, Option<u64>), CandidateError> {
         Some(3) => {
             let record: BootQualifiedRecord =
                 serde_json::from_slice(bytes).map_err(|_| refused())?;
-            if record.host_boot_micros == 0
-                || record.process.start_micros < record.host_boot_micros
+            if record.host_boot_micros == 0 || record.process.start_micros < record.host_boot_micros
             {
                 return Err(refused());
             }
@@ -184,9 +183,7 @@ impl Pin {
             .review
             .validate(record.review.scope())
             .map_err(|_| refused())?;
-        if record.candidate != candidate.checkout
-            || record.review.scope().run != run
-        {
+        if record.candidate != candidate.checkout || record.review.scope().run != run {
             return Err(refused());
         }
         let pin = Self {

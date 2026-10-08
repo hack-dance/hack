@@ -10,6 +10,7 @@ import {
   completedJobFixtureNoDependentStart,
   completedJobFixtureObject,
   completedJobFixtureResource,
+  createCompletedJobFixturePhases,
   createCompletedJobFixtureSettlement,
 } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
 
@@ -54,6 +55,48 @@ const CONTAINER = {
   ],
   networks: [{ name: "completed-alpha_default", id: NETWORK }],
 };
+
+test("fixture diagnostics keep the failed phase separate from later cleanup", () => {
+  const messages: string[] = [];
+  const phases = createCompletedJobFixturePhases((message) =>
+    messages.push(message)
+  );
+  phases.mark("alpha-start-2");
+  phases.failed();
+  phases.mark("cleanup");
+  expect(messages).toEqual([
+    "phase=alpha-start-2 status=enter",
+    "phase=alpha-start-2 status=failed",
+    "phase=cleanup status=enter",
+  ]);
+});
+
+test("fixture diagnostics neither quote unknown values nor interrupt cleanup on logging failure", () => {
+  const messages: string[] = [];
+  const phases = createCompletedJobFixturePhases((message) =>
+    messages.push(message)
+  );
+  phases.mark("alpha-adopt");
+  for (const value of [
+    "private-diagnostic-canary",
+    "constructor",
+    null,
+    17,
+    {},
+  ]) {
+    expect(() => phases.mark(value)).not.toThrow();
+  }
+  phases.failed();
+  expect(messages).toEqual([
+    "phase=alpha-adopt status=enter",
+    "phase=alpha-adopt status=failed",
+  ]);
+  const broken = createCompletedJobFixturePhases(() => {
+    throw new Error("private-log-failure-canary");
+  });
+  expect(() => broken.mark("cleanup")).not.toThrow();
+  expect(() => broken.failed()).not.toThrow();
+});
 
 test("private observation parsing refuses malformed values without quoting them", () => {
   expect(() => completedJobFixtureObject("private-invalid-canary")).toThrow(

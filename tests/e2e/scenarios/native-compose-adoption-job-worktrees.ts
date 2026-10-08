@@ -29,6 +29,25 @@ const FULL_ID = /^[a-f0-9]{64}$/;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 const PROJECT = "com.docker.compose.project";
 const ROLES = ["db", "seed", "app"] as const;
+const PHASES = [
+  "prepare",
+  "alpha-bootstrap",
+  "beta-bootstrap",
+  "alpha-adopt",
+  "alpha-start-2",
+  "alpha-partial-refusal",
+  "alpha-down-up-3",
+  "alpha-restart-4",
+  "alpha-nonzero-job-5",
+  "alpha-interrupt-6",
+  "alpha-stop-recovery",
+  "alpha-start-7",
+  "alpha-rollback",
+  "beta-adopt-start-2",
+  "beta-rollback",
+  "cleanup",
+] as const;
+type Phase = (typeof PHASES)[number];
 type Role = (typeof ROLES)[number];
 type Kind = "container" | "network" | "volume";
 type Instance = {
@@ -59,6 +78,33 @@ type InterruptReadAdmission = {
   readonly signal: AbortSignal;
   readonly deadline: number;
 };
+
+/** Closed diagnostics never expose fixture values or replace a runtime/cleanup failure. */
+export function createCompletedJobFixturePhases(
+  log: (message: string) => void
+) {
+  let current: Phase = "prepare";
+  const emit = (status: "enter" | "failed") => {
+    try {
+      log(`phase=${current} status=${status}`);
+    } catch {
+      // Diagnostics cannot skip cleanup or replace its original refusal.
+    }
+  };
+  return Object.freeze({
+    mark: (phase: unknown) => {
+      if (
+        typeof phase !== "string" ||
+        !PHASES.some((value) => value === phase)
+      ) {
+        return;
+      }
+      current = phase as Phase;
+      emit("enter");
+    },
+    failed: () => emit("failed"),
+  });
+}
 
 /** An unfinished owned callback or child prevents teardown, even if it settles later. */
 export function createCompletedJobFixtureSettlement() {
@@ -1224,29 +1270,40 @@ export const nativeComposeAdoptionJobWorktreesScenario: Scenario = {
   summary:
     "fresh completed jobs preserve two worktree SQL seeds through ordered start, cancellation, recovery and rollback",
   run: async (ctx) => {
+    const phases = createCompletedJobFixturePhases(ctx.log);
+    phases.mark("prepare");
     const h = runtime(await prepare(ctx));
     let failed = false;
     let failure: unknown;
     try {
       for (const instance of [h.first, h.second]) {
+        phases.mark(
+          instance === h.first ? "alpha-bootstrap" : "beta-bootstrap"
+        );
         await h.bootstrap(instance);
       }
       const first = h.first,
         second = h.second;
+      phases.mark("alpha-adopt");
       successful(await h.cli(first, ["config", "adopt", "--stop", "--json"]));
       await h.stopped(first);
       await h.pending(first, null);
       await h.counts(second, 1, [1]);
+      phases.mark("alpha-start-2");
       await h.freshUp(first, 2, [1, 2]);
       await h.counts(second, 1, [1]);
+      phases.mark("alpha-partial-refusal");
       const partial = await h.cli(first, ["up", "seed", "--detach", "--json"]);
       requireValue(!partial.timedOut && partial.exitCode !== 0);
       await h.pending(first, null);
       await h.counts(first, 2, [1, 2]);
+      phases.mark("alpha-down-up-3");
       await stop(h, first);
       await h.freshUp(first, 3, [1, 2, 3]);
+      phases.mark("alpha-restart-4");
       await h.freshUp(first, 4, [1, 2, 3, 4], true);
       await h.counts(second, 1, [1]);
+      phases.mark("alpha-nonzero-job-5");
       await h.control(first, "fail");
       await stop(h, first);
       const beforeApp = await h.state(first, "app");
@@ -1264,9 +1321,11 @@ export const nativeComposeAdoptionJobWorktreesScenario: Scenario = {
         after: await h.state(first, "app"),
       });
       await h.counts(first, 5, [1, 2, 3, 4]);
+      phases.mark("alpha-interrupt-6");
       await h.control(first, "hold");
       await stop(h, first, true);
       await interruptedStart(h, first);
+      phases.mark("alpha-stop-recovery");
       await h.control(first, "success");
       await stop(h, first, true);
       // Recovery must not start a job; inspect its retained attempt count after a DB-only observation start.
@@ -1277,25 +1336,32 @@ export const nativeComposeAdoptionJobWorktreesScenario: Scenario = {
         (await h.state(first, "seed")).running === false &&
           (await h.state(first, "app")).running === false
       );
+      phases.mark("alpha-start-7");
       await h.freshUp(first, 7, [1, 2, 3, 4, 7]);
       await h.counts(second, 1, [1]);
+      phases.mark("alpha-rollback");
       await rollback(h, first, 7, [1, 2, 3, 4, 7]);
+      phases.mark("beta-adopt-start-2");
       successful(await h.cli(second, ["config", "adopt", "--stop", "--json"]));
       await h.stopped(second);
       await h.freshUp(second, 2, [1, 2]);
       await h.counts(first, 7, [1, 2, 3, 4, 7]);
+      phases.mark("beta-rollback");
       await rollback(h, second, 2, [1, 2]);
       await h.counts(first, 7, [1, 2, 3, 4, 7]);
       ctx.log(
         "fresh job exit0, seed-once SQL, no dependent start on17, pending cancellation, no-replay stop recovery and isolated retained-ID rollback verified"
       );
     } catch (error: unknown) {
+      phases.failed();
       failed = true;
       failure = error;
     }
+    phases.mark("cleanup");
     try {
       await cleanup(h);
     } catch (error: unknown) {
+      phases.failed();
       ctx.retainFixtures(
         "Exact completed-job fixture cleanup is incomplete; original owner evidence retained"
       );

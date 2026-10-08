@@ -112,8 +112,9 @@ test.each([
   const selected = await fixture();
   const value = await invoke({ selected, args, backend: "native" });
   expect(value.code).toBe(1);
+  expect(value.stdout + value.stderr).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
   expect(value.stdout + value.stderr).toContain(
-    "whole-project foreground up on macOS"
+    "whole-project foreground up or explicit stored-generation down --recover on macOS"
   );
   expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
     false

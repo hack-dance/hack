@@ -28,6 +28,8 @@ export type NativeProjectSelection = {
   readonly profiles?: readonly string[];
   readonly explicitOverlay?: string | null;
   readonly explicitDomain?: string;
+  /** Exact native source namespace context; supplied branches never trigger implicit Git/domain discovery. */
+  readonly compilerBranch?: string;
   readonly signal?: AbortSignal;
 };
 
@@ -189,7 +191,8 @@ export async function prepareNativeProjectSelection(
     signal: opts.signal,
     requireLocalResolution: true,
     requireEnvPlanning: opts.requireEnvPlanning,
-    requireRoutingPlanning: opts.explicitDomain !== undefined,
+    requireRoutingPlanning:
+      opts.explicitDomain !== undefined || opts.compilerBranch !== undefined,
   });
   if (!compiled.ok) {
     const result: NativeConfigResolveResult = {
@@ -213,18 +216,24 @@ export async function prepareNativeProjectSelection(
     inheritLocal: worktree.inherit_local,
     signal: opts.signal,
   });
+  let routingInputs: {
+    readonly globalDomain?: string;
+    readonly branch?: string;
+  } = opts.compilerBranch === undefined ? {} : { branch: opts.compilerBranch };
   const resolveInputs = {
     input: project.input,
     ...locals,
     profiles: opts.profiles,
     explicitOverlay: opts.explicitOverlay,
     explicitDomain: opts.explicitDomain,
+    ...routingInputs,
     signal: opts.signal,
     requireEnvPlanning: opts.requireEnvPlanning,
     requireHostPlanning:
       opts.requireEnvPlanning && compiled.host_env_targets !== undefined,
     requireRoutingPlanning:
       opts.explicitDomain !== undefined ||
+      opts.compilerBranch !== undefined ||
       Object.hasOwn(compiled.plan, "routes") ||
       Object.hasOwn(compiled.plan, "open"),
     requireEndpointPlanning: nativeEndpointPlanningRequired(compiled.plan),
@@ -244,13 +253,9 @@ export async function prepareNativeProjectSelection(
   };
   let result = await resolveNativeConfig({
     ...resolveInputs,
-    probeRoutingInputs: true,
+    probeRoutingInputs: opts.compilerBranch === undefined,
   });
   checkResolvedIdentity(result);
-  let routingInputs: {
-    readonly globalDomain?: string;
-    readonly branch?: string;
-  } = {};
   if (result.ok && result.routing_inputs_required === true) {
     routingInputs = {
       globalDomain: await acquireNativeGlobalDomain({ signal: opts.signal }),

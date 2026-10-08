@@ -51,6 +51,7 @@ import {
 } from "./native-compose-private-state.ts";
 
 export type NativeComposeFileAttempt = Readonly<Record<never, never>>;
+/** Private generated-document binds. Dollar signs are already encoded once for Compose. */
 export type NativeComposeFileProjection = {
   readonly reference: NativeComposeFileReference;
   readonly workloads: Readonly<
@@ -247,6 +248,17 @@ async function readOwnedDocument(
   }
   return value;
 }
+function composeLiteral(value: string): string {
+  return value.replaceAll("$", () => "$$");
+}
+/** Reject interpolation instead of interpreting caller environment in saved bind checks. */
+function rawComposeLiteral(value: string): string {
+  const raw = value.replaceAll("$$", () => "$");
+  if (composeLiteral(raw) !== value) {
+    return refuseNativeComposeFile();
+  }
+  return raw;
+}
 function projection(
   reference: NativeComposeFileReference,
   members: readonly NativeComposeFileMember[]
@@ -265,8 +277,8 @@ function projection(
     const selected = workloads[member.workload] ?? [];
     selected.push({
       type: "bind",
-      source: join(snapshotPath(reference), member.id),
-      target: member.target,
+      source: composeLiteral(join(snapshotPath(reference), member.id)),
+      target: composeLiteral(member.target),
       read_only: true,
       bind: { create_host_path: false },
     });
@@ -335,15 +347,21 @@ function matchVolume(opts: {
     opts.matched.add(`${opts.name}:${grant.target}`);
     return;
   }
+  const source =
+    typeof volume.source === "string"
+      ? rawComposeLiteral(volume.source)
+      : undefined;
+  const rawTarget = rawComposeLiteral(target);
   const ownedSource =
-    typeof volume.source === "string" &&
-    (volume.source === opts.root || volume.source.startsWith(`${opts.root}/`));
-  const overlaps = opts.grants.some(
-    (item) =>
-      target === "/" ||
-      item.target.startsWith(`${target}/`) ||
-      target.startsWith(`${item.target}/`)
-  );
+    source === opts.root || source?.startsWith(`${opts.root}/`);
+  const overlaps = opts.grants.some((item) => {
+    const grantedTarget = rawComposeLiteral(item.target);
+    return (
+      rawTarget === "/" ||
+      grantedTarget.startsWith(`${rawTarget}/`) ||
+      rawTarget.startsWith(`${grantedTarget}/`)
+    );
+  });
   if (ownedSource || overlaps) {
     refuseNativeComposeFile();
   }

@@ -167,6 +167,45 @@ test("actual compiler plus managed owner acquires exact binary/empty bytes and s
     restoreEnv("TOKEN", previousToken);
   }
 });
+test("selection options and the profiles array are captured before async authority admission", async () => {
+  await writeFile(
+    join(root, ".hack/hack.project.json"),
+    JSON.stringify({ ...SOURCE, profiles: ["debug", "other"] })
+  );
+  await writeFile(
+    join(root, ".hack/hack.env.qa.yaml"),
+    JSON.stringify({
+      version: 1,
+      environment: "qa",
+      secretsprovider: "project_key",
+      values: {},
+    })
+  );
+  await store.withMutation(async (mutation) => {
+    const profiles = ["debug"];
+    const options = {
+      authority: mutation.materialAuthority,
+      reservation: mutation.reserveGeneration(),
+      profiles,
+      explicitOverlay: "qa",
+      explicitDomain: "selected.test",
+    };
+    const pending = acquired(options);
+    profiles[0] = "other";
+    options.profiles = ["other"];
+    options.explicitOverlay = "default";
+    options.explicitDomain = "changed.test";
+    const selected = await pending;
+    expect(selected.result.plan.selected_profiles).toEqual(["debug"]);
+    expect(selected.result.local_resolution.overlay).toBe("qa");
+    expect(selected.result.routing_resolution?.domain).toBe("selected.test");
+    await assertNativeComposeFileSources({
+      sources: selected,
+      authority: options.authority,
+      reservation: options.reservation,
+    });
+  });
+});
 test.each([
   "leaf",
   "parent",

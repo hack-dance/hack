@@ -11,7 +11,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
+import { isRecord } from "../src/lib/guards.ts";
 import {
   createNativeComposeFileOwner,
   type NativeComposeFileProjection,
@@ -265,6 +266,104 @@ test("actual acquisition stages binary/empty 0444 files outside checkout; exact 
         generation: selected.generation,
       })
     ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+  });
+});
+async function dollarFixture(): Promise<void> {
+  materialRoot = join(parent, "material-${ROOT}-$cash");
+  const authored = structuredClone(SOURCE);
+  const grant = authored.services.reader.mounts[0];
+  if (!grant) {
+    throw new Error("missing authored fixture grant");
+  }
+  grant.target = "/etc/${TARGET}/$settings";
+  await writeFile(
+    join(root, ".hack/hack.project.json"),
+    JSON.stringify(authored)
+  );
+}
+test("literal dollar roots and targets are encoded once in binds while saved filesystem anchors stay raw", async () => {
+  await dollarFixture();
+  await store.withMutation(async (mutation) => {
+    const selected = await running(mutation);
+    const grant = selected.projection.workloads.reader?.[0];
+    expect(grant?.target).toBe("/etc/$${TARGET}/$$settings");
+    expect(grant?.source).toBe(
+      join(
+        parent,
+        "material-$${ROOT}-$$cash",
+        `${selected.projection.reference.generationId}-${selected.projection.reference.snapshotToken}`,
+        basename(grant?.source ?? "")
+      )
+    );
+    expect(selected.projection.reference.root).toBe(materialRoot);
+    expect(
+      await readFile(
+        join(
+          materialRoot,
+          `${selected.projection.reference.generationId}-${selected.projection.reference.snapshotToken}`,
+          basename(grant?.source ?? "")
+        )
+      )
+    ).toEqual(BYTES);
+    await selected.owner.assertSavedReady(selected.generation);
+  });
+});
+test.each([
+  "extra-private-bind",
+  "interpolated-bind",
+] as const)("%s refuses before simulated child for a dollar-containing material root", async (kind) => {
+  await dollarFixture();
+  await store.withMutation(async (mutation) => {
+    const selected = await staged(mutation, {
+      mutateDocument: (document) => {
+        if (
+          !(
+            isRecord(document.services) &&
+            isRecord(document.services.reader) &&
+            Array.isArray(document.services.reader.volumes)
+          )
+        ) {
+          throw new Error("invalid generated fixture services");
+        }
+        document.services.reader.volumes = [
+          ...document.services.reader.volumes,
+          {
+            type: "bind",
+            source:
+              kind === "extra-private-bind"
+                ? `${materialRoot.replaceAll("$", () => "$$")}/extra`
+                : "/tmp/${UNQUALIFIED}",
+            target: "/unexpected",
+            read_only: true,
+            bind: { create_host_path: false },
+          },
+        ];
+      },
+    });
+    let children = 0;
+    await expect(
+      mutation.runEffect({
+        generation: selected.generation,
+        operation: "up",
+        assertFresh: selected.assertFresh,
+        assertOwned: async () => {},
+        effect: async () => {
+          await selected.owner.arm({
+            attempt: selected.attempt,
+            generation: selected.generation,
+          });
+          children += 1;
+          return { outcome: "complete", value: 0 };
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+    expect(children).toBe(0);
+    expect((await store.loadPending())?.generationId).toBe(
+      selected.generation.generationId
+    );
+    expect(
+      await readFile(journalPath(selected.projection), "utf8")
+    ).not.toContain('"phase":"armed"');
   });
 });
 test.each([

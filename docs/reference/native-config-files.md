@@ -81,6 +81,10 @@ authored env delivery, without reading caller env or introducing encryption.
 Snapshots use owned 0700 directories outside the checkout, exclusive 0444 files,
 0600 metadata and exact read-only binds with `create_host_path: false`. A private
 generated extension anchors the root receipt, snapshot, manifest and file identities.
+The bind projection encodes literal dollar signs once for Compose interpolation;
+filesystem paths and the stored reference remain raw. Saved document checks require
+those exact encoded binds and reject interpolation in additional mounts, including
+extra binds into the private material root.
 Public plans, logs and CLI receipts contain no values, private paths or content
 digests. Copied identities, reservations or handles cannot mint mutation authority;
 closing the mutation revokes that authority and awaits its owned work.

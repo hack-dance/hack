@@ -257,6 +257,9 @@ export async function acquireNativeComposeFileSources(opts: {
   const authority = opts.authority;
   const reservation = opts.reservation;
   const signal = opts.signal;
+  const profiles = [...(opts.profiles ?? [])];
+  const explicitOverlay = opts.explicitOverlay;
+  const explicitDomain = opts.explicitDomain;
   const checkAuthority = () =>
     assertNativeComposeMaterialAuthority({
       authority,
@@ -266,9 +269,9 @@ export async function acquireNativeComposeFileSources(opts: {
   const binding = await checkAuthority();
   const selection: NativeProjectSelection = {
     startDir: binding.identity.checkoutRoot,
-    profiles: [...(opts.profiles ?? [])],
-    explicitOverlay: opts.explicitOverlay,
-    explicitDomain: opts.explicitDomain,
+    profiles,
+    explicitOverlay,
+    explicitDomain,
     signal,
   };
   const prepare = () =>

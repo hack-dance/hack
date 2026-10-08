@@ -67,7 +67,7 @@ test("cleanup oracle accepts only the original fixture IDs, canonical mounts and
         ...rows.container,
         name: `/${instance.name}-worker-1`,
         service: "worker",
-        mounts: [],
+        mounts: [{ ...rows.container.mounts[0], rw: false }],
       },
     })
   ).toEqual({ id, service: "worker" });
@@ -85,6 +85,28 @@ test("cleanup oracle accepts only the original fixture IDs, canonical mounts and
       row: rows.volume,
     })
   ).toEqual({ id: `${instance.name}_data`, createdAt });
+});
+
+test.each([
+  ["writable storage", [{ ...rows.container.mounts[0], rw: true }]],
+  ["missing explicit storage", []],
+  [
+    "image-created anonymous storage",
+    [{ ...rows.container.mounts[0], name: "b".repeat(64), rw: false }],
+  ],
+])("worker cleanup refuses %s", (_name, mounts) => {
+  expect(() =>
+    ownedAdoptionFixtureObservation({
+      instance,
+      kind: "container",
+      row: {
+        ...rows.container,
+        name: `/${instance.name}-worker-1`,
+        service: "worker",
+        mounts,
+      },
+    })
+  ).toThrow(REFUSAL);
 });
 
 for (const kind of ["container", "network", "volume"] as const) {

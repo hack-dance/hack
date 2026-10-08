@@ -102,18 +102,14 @@ function validateOwnedObservation(opts: {
       row.configFiles !==
         join(opts.instance.root, ".hack/docker-compose.yml") ||
       JSON.stringify(row.mounts) !==
-        JSON.stringify(
-          row.service === "db"
-            ? [
-                {
-                  type: "volume",
-                  name: `${opts.instance.name}_data`,
-                  target: "/var/lib/postgresql/data",
-                  rw: true,
-                },
-              ]
-            : []
-        )
+        JSON.stringify([
+          {
+            type: "volume",
+            name: `${opts.instance.name}_data`,
+            target: "/var/lib/postgresql/data",
+            rw: row.service === "db",
+          },
+        ])
     ) {
       refused();
     }
@@ -198,6 +194,8 @@ async function writeLegacy(instance: Instance, image: string) {
         worker: {
           image,
           pull_policy: "never",
+          // Shadow the image's declared VOLUME with the exact existing named storage.
+          volumes: ["data:/var/lib/postgresql/data:ro"],
           entrypoint: ["/bin/sh", "-c"],
           command: [
             "trap 'sleep 10; exit 0' TERM; while true; do sleep 1; done",

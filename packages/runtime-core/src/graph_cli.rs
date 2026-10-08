@@ -1,5 +1,7 @@
 #[cfg(target_os = "macos")]
 mod environment;
+#[cfg(feature = "native-config-plan")]
+mod native;
 mod normalized;
 mod one_off;
 #[cfg(target_os = "macos")]
@@ -25,6 +27,10 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let Some((action, args)) = args.split_first() else {
         return Err(invalid());
     };
+    #[cfg(feature = "native-config-plan")]
+    if *action == "native" {
+        return native::command(candidate, args);
+    }
     if *action == "inspect-interrupted-start-cleanup" {
         let run = match *args {
             ["--run-id", run] | ["--run-id", run, "--json"] => run,

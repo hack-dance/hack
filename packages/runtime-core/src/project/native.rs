@@ -247,7 +247,14 @@ pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateErr
 /// Review the same supported typed subset without acquiring private values.
 /// Preparation must recompile with the exact managed selection and compare this identity.
 pub fn review(request: &[u8], profiles: &[String]) -> Result<ReviewIdentity, CandidateError> {
-    compile_inputs(request, profiles, None).map(|inputs| inputs.review_identity())
+    review_inputs(request, profiles).map(|inputs| inputs.review_identity())
+}
+
+pub(crate) fn review_inputs(
+    request: &[u8],
+    profiles: &[String],
+) -> Result<NativeInputs, CandidateError> {
+    compile_inputs(request, profiles, None)
 }
 
 #[cfg(test)]

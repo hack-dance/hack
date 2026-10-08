@@ -54,9 +54,82 @@ namespace, image/source/provider admission and effect-time deadline, integrate a
 native runs into common capacity/inventory, and implement tagged native ownership and
 recovery. These preparation artifacts carry no resource ownership or replay authority.
 
-No backend consumes this adapter yet. Native input provenance, image availability,
-source/storage ownership, provider admission and installed execution/recovery remain
-separate qualification gates. Existing Compose plans and receipts retain their formats.
+`provider::graph::native::configuration` lowers freshly prepared image-only input
+into public container configuration using the existing bounded container isolation.
+It preserves exact process/exec-readiness values and compiler job/dependency goals,
+requires immutable image IDs and the default source root, and adds distinct native
+input labels and resource names. One ordinary outbound project bridge supplies exact
+service/job DNS aliases, including dotted names, through the shared network lowerer.
+Omitted image process/environment defaults remain
+omitted; managed values remain in separate pending handles. Whole-second shutdown
+grace up to 30 seconds is represented exactly; fractional seconds refuse. This pure
+lowerer checks owner shape and deadline, never real guest ownership, image presence,
+combined capacity, private staging or engine effects.
+
+`provider::graph::native::selection` selects only the exact absolute native project
+root and reads bounded, stable regular `.hack/hack.project.json` and optional
+`.hack/hack.local.json` files. It forwards raw authored text and owner-supplied
+environment metadata through the typed compiler request; it does not parse authored
+policy, decrypt values, search ancestors or fall back to Compose. Selection binds
+the candidate's real project/branch namespace, preserves the ingress deadline, and
+rechecks file/directory identities, content, absent local input and legacy conflicts
+before and after private preparation. Linked-worktree local inheritance explicitly
+refuses until its primary-worktree verification is qualified; opted-out inheritance
+preserves the owning compiler's checkout-local semantics. This is read-only input
+selection and private preparation, with no durable enrollment or runtime ownership.
+
+`provider::graph::native::run` is an explicit library consumer for the bounded
+image-only subset. It retains the development guest mutation lease, requires an
+admitted Internet or explicitly restricted outbound pool, verifies existing immutable
+images and shared graph/allocation capacity, and reserves a distinct v2
+`native-graph-runtime` journal in `run/native-graphs` before effects. Create/start
+intent is durable and never replayed or adopted. Network create intent precedes the
+first network effect; its immutable ID, labels, bridge driver and outbound policy
+are verified before container work. Containers bind the recorded network ID and exact
+service alias; running endpoints must match the owned network membership. The same authored selection and
+ingress deadline are checked before staging, creates, starts and observations.
+Omitted shutdown grace uses a bounded ten-second runtime default. Optional private
+delivery uses the existing static launcher and tmpfs through separate v2
+`native-environment-allocation` records in `run/native-environment-leases`, binding
+namespace, native review, run, workload and container without persisting values.
+
+Native `inspect` and `cleanup` require the original guest incarnation and boot,
+exact resource labels, immutable IDs, names and images. Foreign network members or
+changed network policy refuse before cleanup effects. Cleanup preflights every
+stop, retains terminal observations before deletes, removes the verified empty project
+network after containers, and retires private payloads
+only after the bound container is absent. Failed/uncertain attempts retain their
+reservations. Shared admission counts native and Compose attempts together; a build
+with native support accepts validated, fully removed same-owner history from an
+older boot for capacity purposes only. Active, malformed or foreign old-boot
+records still refuse; they grant no inspection, cleanup or restore authority. A build
+without native input support refuses retained native journals before more graph
+work. Existing Compose v1 codecs, bindings and paths retain their contracts.
+
+The optional feature exposes this bounded consumer through a distinct public CLI:
+`graph native plan --source-file FILE --json`, then
+`graph native run --source-file FILE --expect-review SHA --json`.
+`graph native inspect|cleanup --run-id RUN --json` use its v2 journal. These commands
+are explicit image-only prerequisites, not ordinary project startup. Their project
+network does not publish ports or grant host-service access. Normal native `hack up`
+continues to require the full source/storage/routing/host and foreground-owner contract.
+
+The stable, absolute source file is a public v2 envelope with
+`kind: "native-graph-source"`, `project`, optional canonical `branch`, 32-hex `run`,
+optional `profiles`, and compiler-owned `env_metadata`. Its `overlay` is `"inherit"`
+(also the omission default), `"base"`, or `{"named":"NAME"}`; null refuses. The source
+and authored files are rechecked before private preparation and effects. It returns
+a native `review_id`; Compose plan IDs and normalized-input fields are not accepted.
+Optional `run --environment-stdin` receives a bounded private pipe envelope with
+`version: 2`, `kind: "native-graph-environment"`, `review`, `run`,
+`lifetime_seconds` (1..300), and selected source-keyed `services`. Public selection
+and review comparison happen before reading this descriptor. The old private v1
+Compose codec remains strict and cannot decode this envelope. Values never enter
+source files, arguments, stdout or journal records.
+
+The Bun project frontend does not select this consumer yet. Actual installed
+native execution, frontend ownership/cancellation, interrupted recovery and full
+network acceptance, source/storage/routing/host contracts remain separate qualification gates.
 
 Run its pure regressions with
 `cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --features native-config-plan project::native::tests`.

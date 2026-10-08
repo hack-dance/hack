@@ -680,6 +680,7 @@ pub(super) fn cleanup_recovery(
         Some(finish),
     )
 }
+type CleanupFinish<'a> = dyn Fn(&Snapshot) -> Result<(), CandidateError> + 'a;
 fn cleanup_inner(
     candidate: &Candidate,
     run: &str,
@@ -687,7 +688,7 @@ fn cleanup_inner(
     guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
     environment_retired: bool,
     inventory: Option<&native_environment::Inventory>,
-    finish: Option<&dyn Fn(&Snapshot) -> Result<(), CandidateError>>,
+    finish: Option<&CleanupFinish<'_>>,
 ) -> Result<Receipt, CandidateError> {
     check_startup(guard)?;
     let engine = Engine::connect_cleanup(candidate)?;

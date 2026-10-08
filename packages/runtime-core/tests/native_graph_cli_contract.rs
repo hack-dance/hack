@@ -8,6 +8,7 @@ use std::{
     path::PathBuf,
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 struct Fixture {
     root: PathBuf,
@@ -84,6 +85,15 @@ impl Fixture {
             .spawn()
             .unwrap();
         let unread = child.stdin.take().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("argument refusal failed to settle before the owned fixture deadline");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let output = child.wait_with_output().unwrap();
         drop(unread);
         output

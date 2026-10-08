@@ -9,7 +9,7 @@ use std::{
 fn refused() -> CandidateError {
     CandidateError::new(
         "native_graph_arguments",
-        "Use graph native plan --source-file FILE, run|serve --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300], inspect|cleanup|recovery-selection --run-id ID, or control --run-id ID --action status|cleanup; optional --json. Foreground serve/control and read-only recovery selection require macOS. Native source and private envelopes require their exact kind/version; values omitted.",
+        "Use graph native plan --source-file FILE, run|serve --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300], inspect|cleanup|recovery-selection --run-id ID, recover-live-owner --run-id ID --expect-receipt SHA --expect-owner SHA, or control --run-id ID --action status|cleanup; optional --json. Foreground ownership and its recovery require macOS. Native source and private envelopes require their exact kind/version; values omitted.",
     )
 }
 fn hex(value: &str, len: usize) -> bool {
@@ -35,7 +35,7 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
                 index += 1;
             }
             key @ ("--source-file" | "--expect-review" | "--timeout-seconds" | "--run-id"
-            | "--action") => {
+            | "--action" | "--expect-receipt" | "--expect-owner") => {
                 let value = *args
                     .get(index + 1)
                     .filter(|value| !value.starts_with("--"))
@@ -46,6 +46,40 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
                 index += 2;
             }
             _ => return Err(refused()),
+        }
+    }
+    if *action == "recover-live-owner" {
+        if private || singles.len() != 3 {
+            return Err(refused());
+        }
+        let run = *singles
+            .get("--run-id")
+            .filter(|run| hex(run, 32))
+            .ok_or_else(refused)?;
+        let receipt = *singles
+            .get("--expect-receipt")
+            .filter(|receipt| hex(receipt, 64))
+            .ok_or_else(refused)?;
+        let owner = *singles
+            .get("--expect-owner")
+            .filter(|owner| hex(owner, 64))
+            .ok_or_else(refused)?;
+        #[cfg(target_os = "macos")]
+        {
+            return serde_json::to_value(native::foreground::recovery::recover(
+                candidate,
+                native::foreground::recovery::Options {
+                    run,
+                    expect_receipt: receipt,
+                    expect_owner: owner,
+                },
+            )?)
+            .map_err(|_| refused());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (run, receipt, owner);
+            return Err(foreground_unavailable());
         }
     }
     if *action == "recovery-selection" {
@@ -118,6 +152,8 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
     if !["plan", "run", "serve"].contains(action)
         || singles.contains_key("--run-id")
         || singles.contains_key("--action")
+        || singles.contains_key("--expect-receipt")
+        || singles.contains_key("--expect-owner")
     {
         return Err(refused());
     }

@@ -151,6 +151,12 @@ hashes and inventory remain fixed while cleanup phases advance. Completed retry
 checks absence rather than repeating retirement. Pending writes, unexpected
 replacements or missing original and archive paths retain a refusal. Public
 frontend recovery and actual dead-owner acceptance remain separate gates.
+The distinct macOS command `graph native recover-live-owner --run-id ID
+--expect-receipt SHA --expect-owner SHA --json` exposes only this explicit
+cleanup entrypoint. Both hashes select the original read-only recovery envelope;
+source, private stdin, review, action and timeout options refuse. Existing live
+control and direct-cleanup ownership gates remain strict. This command does not
+retire frontend start/ready/source artifacts or enable ordinary `up` takeover.
 
 Guarded native cleanup checks its retained authority before and after every
 engine observation, removal request and admitted stop batch, including failed

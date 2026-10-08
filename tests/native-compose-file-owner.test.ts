@@ -225,7 +225,7 @@ async function expectAbsent(paths: readonly string[]) {
     await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
   }
 }
-test("actual acquisition stages binary/empty 0444 files outside checkout; exact bind/ref projection arms before simulated child", async () => {
+test("actual acquisition stages binary and empty 0444 files outside checkout", async () => {
   await store.withMutation(async (mutation) => {
     const selected = await staged(mutation);
     expect(JSON.stringify(selected.attempt)).toBe("{}");
@@ -236,6 +236,11 @@ test("actual acquisition stages binary/empty 0444 files outside checkout; exact 
     for (const path of paths) {
       expect((await lstat(path)).mode & 0o777).toBe(0o444);
     }
+  });
+});
+test("exact bind/ref projection arms before simulated child and rejects a cloned capability", async () => {
+  await store.withMutation(async (mutation) => {
+    const selected = await staged(mutation);
     let simulatedChildren = 0;
     await mutation.runEffect({
       generation: selected.generation,

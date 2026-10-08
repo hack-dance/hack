@@ -323,6 +323,43 @@ fn receive_forwarded_scoped(
 pub fn receive(fd: OwnedFd, expected_plan: &str, run: &str) -> Result<Managed, CandidateError> {
     receive_scoped(fd, expected_plan, run, Scope::Application)
 }
+
+/// Native private input has distinct provenance and cannot be forwarded as a Compose v1 envelope.
+#[cfg(feature="native-config-plan")]
+pub struct NativeManaged(Managed);
+#[cfg(feature="native-config-plan")]
+impl NativeManaged {
+    pub fn values(&self) -> &Values { self.0.values() }
+    pub fn deadline(&self) -> Instant { self.0.deadline() }
+}
+#[cfg(feature="native-config-plan")]
+#[derive(Deserialize)]
+#[serde(rename_all="kebab-case")]
+enum NativeKind { NativeGraphEnvironment }
+#[cfg(feature="native-config-plan")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeEnvelope {
+    version: u8,kind: NativeKind,review: String,run: String,lifetime_seconds: u64,services: Services,
+}
+#[cfg(feature="native-config-plan")]
+fn parse_native(bytes: &[u8],review: &str,run: &str,started: Instant) -> Result<NativeManaged,CandidateError> {
+    if bytes.len() > MAX_INPUT_BYTES { return Err(refused()); }
+    let input: NativeEnvelope = serde_json::from_slice(bytes).map_err(|_| refused())?;
+    if input.version != 2 || !matches!(input.kind,NativeKind::NativeGraphEnvironment)
+        || !hex(&input.review,64) || input.review != review || !hex(&input.run,32) || input.run != run
+        || !(1..=300).contains(&input.lifetime_seconds) || !Scope::Application.accepts(&input.services) { return Err(refused()); }
+    let deadline = started.checked_add(Duration::from_secs(input.lifetime_seconds)).ok_or_else(refused)?;
+    finish(input.services,deadline,input.review,input.run).map(NativeManaged)
+}
+/// Receive bounded private native values against their exact native review/run and original ingress clock.
+#[cfg(feature="native-config-plan")]
+pub fn receive_native(fd: OwnedFd,review: &str,run: &str) -> Result<NativeManaged,CandidateError> {
+    if !cfg!(feature="environment-launcher") { return Err(refused()); }
+    let started = Instant::now();
+    let bytes = super::private_input::receive(fd,Duration::from_secs(5),MAX_INPUT_BYTES).map_err(|_| refused())?;
+    parse_native(&bytes,review,run,started)
+}
 /// Receive an explicit, bounded one-off envelope, including `services: {}`.
 /// Missing input, missing fields and empty per-service maps remain invalid.
 pub fn receive_for_one_off(

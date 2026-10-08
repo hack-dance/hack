@@ -885,7 +885,7 @@ export function nativeNetworkFixtureCreateArgs(
 ): readonly string[] | null {
   if (
     !(
-      args.length === 7 &&
+      args.length === 8 &&
       args[0] === "compose" &&
       args[1] === "-p" &&
       args[2] === project &&
@@ -893,7 +893,8 @@ export function nativeNetworkFixtureCreateArgs(
       args[4]?.startsWith("/") &&
       args[4].endsWith("/compose.json") &&
       args[5] === "up" &&
-      args[6] === "-d"
+      args[6] === "-d" &&
+      args[7] === "--remove-orphans"
     )
   ) {
     return null;
@@ -901,7 +902,8 @@ export function nativeNetworkFixtureCreateArgs(
   return [...args.slice(0, 5), "create", "--no-build", "--pull", "never"];
 }
 
-async function fixtureShim(opts: {
+/** Fixture-only fault injection; up admission must match the shipping command exactly. */
+export async function nativeNetworkFixtureShim(opts: {
   readonly root: string;
   readonly engine: string;
   readonly bun: string;
@@ -918,7 +920,7 @@ async function fixtureShim(opts: {
         `const engine=${JSON.stringify(opts.engine)},project=${JSON.stringify(opts.identity.composeProject)},owner=${JSON.stringify(opts.identity.ownerToken)},receipt=${JSON.stringify(opts.receipt)};`,
         "const a=process.argv.slice(2);",
         'if(a.includes("up")){',
-        'if(!(a.length===7&&a[0]==="compose"&&a[1]==="-p"&&a[2]===project&&a[3]==="-f"&&a[4]?.startsWith("/")&&a[4].endsWith("/compose.json")&&a[5]==="up"&&a[6]==="-d") || await Bun.file(receipt).exists())process.exit(98);',
+        'if(!(a.length===8&&a[0]==="compose"&&a[1]==="-p"&&a[2]===project&&a[3]==="-f"&&a[4]?.startsWith("/")&&a[4].endsWith("/compose.json")&&a[5]==="up"&&a[6]==="-d"&&a[7]==="--remove-orphans") || await Bun.file(receipt).exists())process.exit(98);',
         "const st=await lstat(a[4]);if(!st.isFile()||st.isSymbolicLink()||st.nlink!==1||st.size>8388608)process.exit(98);",
         'const d=await Bun.file(a[4]).json();if(!d.services||Object.keys(d.services).length!==4||Object.values(d.services).some(s=>s.labels?.["io.hack.native-config.owner"]!==owner||s.labels?.["io.hack.native-config.instance"]!==project))process.exit(98);',
         'await Bun.write(receipt,"create-admitted");const p=Bun.spawn([engine,...a.slice(0,5),"create","--no-build","--pull","never"],{stdin:"ignore",stdout:"inherit",stderr:"inherit"});const code=await p.exited;process.exit(code===0?71:code);',
@@ -1307,7 +1309,7 @@ export const nativeConfigNetworksScenario: Scenario = {
         `no-effect-${randomBytes(8).toString("hex")}`
       );
       const receipt = join(path, "invoked");
-      const shim = await fixtureShim({
+      const shim = await nativeNetworkFixtureShim({
         root: path,
         engine,
         bun,
@@ -1472,7 +1474,7 @@ export const nativeConfigNetworksScenario: Scenario = {
       await store.close();
       const shimRoot = join(ctx.tempRoot, "created-up");
       const createReceipt = join(shimRoot, "created");
-      const shim = await fixtureShim({
+      const shim = await nativeNetworkFixtureShim({
         root: shimRoot,
         engine,
         bun,

@@ -21,6 +21,7 @@ import {
   nativeNetworkFixtureHasNoPublication,
   nativeNetworkFixtureNetworkMatches,
   nativeNetworkFixtureProtocolMatches,
+  nativeNetworkFixtureShim,
   nativeNetworkFixtureVolumeMatches,
   nativeNetworkFixtureVolumeSelectionMatches,
   provisionNativeNetworkFixtureComposePlugin,
@@ -363,6 +364,7 @@ test("controlled created interruption rewrites only the exact admitted product u
     "/owned/generation/compose.json",
     "up",
     "-d",
+    "--remove-orphans",
   ];
   expect(nativeNetworkFixtureCreateArgs(args, project)).toEqual([
     ...args.slice(0, 5),
@@ -372,6 +374,8 @@ test("controlled created interruption rewrites only the exact admitted product u
     "never",
   ]);
   for (const changed of [
+    args.slice(0, 7),
+    [...args.slice(0, 6), "--remove-orphans", "-d"],
     [...args, "web"],
     [...args.slice(0, -1), "--force-recreate"],
     ["compose", "-p", "foreign", ...args.slice(3)],
@@ -381,6 +385,97 @@ test("controlled created interruption rewrites only the exact admitted product u
     ["container", "rm", "-f", networkPin.id],
   ]) {
     expect(nativeNetworkFixtureCreateArgs(changed, project)).toBeNull();
+  }
+});
+
+test("generated create shim matches the strict argv oracle without calling Docker", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-network-create-shim-"))
+  );
+  const receipt = join(root, "receipt");
+  const calls = join(root, "engine-call.json");
+  try {
+    const engine = join(root, "synthetic-engine");
+    await writeFile(
+      engine,
+      `#!${process.execPath}\nawait Bun.write(${JSON.stringify(calls)},JSON.stringify(process.argv.slice(2)));\n`,
+      { mode: 0o700 }
+    );
+    const document = join(root, "compose.json");
+    await writeFile(
+      document,
+      JSON.stringify({
+        services: Object.fromEntries(
+          ["web", "peer", "vault", "reader"].map((name) => [
+            name,
+            {
+              labels: {
+                "io.hack.native-config.owner": owner,
+                "io.hack.native-config.instance": project,
+              },
+            },
+          ])
+        ),
+      }),
+      { mode: 0o600 }
+    );
+    const shim = await nativeNetworkFixtureShim({
+      root: join(root, "shim"),
+      engine,
+      bun: process.execPath,
+      identity: {
+        checkoutRoot: root,
+        repositoryRoot: root,
+        instance: null,
+        instanceId: "a".repeat(64),
+        composeProject: project,
+        ownerToken: owner,
+      },
+      create: true,
+      receipt,
+    });
+    const args = [
+      "compose",
+      "-p",
+      project,
+      "-f",
+      document,
+      "up",
+      "-d",
+      "--remove-orphans",
+    ];
+    const invoke = (argv: readonly string[]) =>
+      runNativeNetworkFixtureCommand({
+        argv: [join(shim, "docker"), ...argv],
+        cwd: root,
+        env: {},
+        captures: join(root, "captures"),
+        timeoutMs: 30_000,
+      });
+    for (const changed of [
+      args.slice(0, 7),
+      [...args.slice(0, 6), "--remove-orphans", "-d"],
+      [...args, "web"],
+      [...args.slice(0, 7), "--force-recreate"],
+      ["compose", "-p", "foreign", ...args.slice(3)],
+      [...args.slice(0, 4), "relative/compose.json", ...args.slice(5)],
+      [...args.slice(0, 4), "/owned/override.yaml", ...args.slice(5)],
+    ]) {
+      expect(nativeNetworkFixtureCreateArgs(changed, project)).toBeNull();
+      expect((await invoke(changed)).exitCode).toBe(98);
+      expect(await Bun.file(receipt).exists()).toBe(false);
+      expect(await Bun.file(calls).exists()).toBe(false);
+    }
+    expect((await invoke(args)).exitCode).toBe(71);
+    expect(await Bun.file(receipt).text()).toBe("create-admitted");
+    const actualCall = await Bun.file(calls).text();
+    expect(JSON.parse(actualCall)).toEqual(
+      nativeNetworkFixtureCreateArgs(args, project)
+    );
+    expect((await invoke(args)).exitCode).toBe(98);
+    expect(await Bun.file(calls).text()).toBe(actualCall);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

@@ -75,3 +75,35 @@ The closest regression suite is `tests/native-compose-ownership.test.ts`. Its
 isolated executable checks accepted resources, collisions, stale generations,
 inventory changes, redaction, and actual subprocess overflow/timeout/cancellation.
 Docker application readiness and lifecycle acceptance remain command-level gates.
+
+## Ingress daemon identity transport
+
+`observeNativeComposeIngress` still reads and compares the daemon ID before and
+again after inspecting the shared proxy and network. For an explicit local
+`DOCKER_HOST=unix:///...` selection, those two ID reads use fresh, nonpooled
+Unix HTTP connections to `GET /info`. The response is bounded and parsed as
+untrusted JSON; only the public daemon ID is returned. Other system-info fields,
+Docker configuration values and transport diagnostics are discarded. No daemon
+identity is cached, and no ownership or readiness observation is removed.
+
+Context, TLS, explicit API-version and custom-header selections retain Docker's
+existing CLI transport. The same applies to ambiguous or symlinked client-config
+paths, unreadable or malformed configuration, nonempty configured `HttpHeaders`,
+or input beyond the 1 MiB config admission budget. Missing configuration or strict
+JSON with absent or empty headers is eligible. Config admission uses the selected
+`DOCKER_CONFIG` directory or `$HOME/.docker`, binds named path identities and the
+exact content hash, and never forwards or exposes authentication values.
+
+The direct observer rechecks its selection, executable, config and socket bindings
+before and after every request. Replaced sockets, named symlinks, executables,
+configuration or selection sources refuse. Unrelated sibling creation does not
+invalidate an unchanged directory. A direct observer that has been admitted never
+falls back to the CLI after a failure. Ambient HTTP proxy variables do not change
+the Unix destination. Its deadline and cumulative 8 MiB response limit remain
+control-channel budgets; cancellation or failure closes only its owned connection.
+
+Real Unix-server controls live in `tests/native-compose-engine-identity.test.ts`;
+existing CLI-transport and proxy ownership controls remain in
+`tests/native-compose-ingress.test.ts`. These tests establish the bounded transport
+and refusal behavior. Actual Docker compatibility and performance require separate
+current-artifact fixture and matched measurements.

@@ -1,6 +1,7 @@
 import { isIP } from "node:net";
 import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
+import { createNativeComposeEngineIdentityObserver } from "./native-compose-engine-identity.ts";
 import { createNativeComposeProbe } from "./native-compose-ownership.ts";
 import { NativeComposeRoutingError } from "./native-compose-routing.ts";
 
@@ -56,8 +57,11 @@ export async function observeNativeComposeIngress(
 ): Promise<NativeComposeIngressBinding> {
   try {
     const probe = createNativeComposeProbe({ signal: opts.signal });
-    const result = await inspectIngress(probe);
-    const after = await inspectIngress(probe);
+    const identity = createNativeComposeEngineIdentityObserver({
+      signal: opts.signal,
+    });
+    const result = await inspectIngress(probe, identity);
+    const after = await inspectIngress(probe, identity);
     if (
       !sameBinding(result, after) ||
       (opts.expected && !sameBinding(result, opts.expected))
@@ -71,11 +75,12 @@ export async function observeNativeComposeIngress(
 }
 
 async function inspectIngress(
-  probe: ReturnType<typeof createNativeComposeProbe>
+  probe: ReturnType<typeof createNativeComposeProbe>,
+  identity: (() => Promise<string>) | null
 ): Promise<NativeComposeIngressBinding> {
-  const engineId: unknown = JSON.parse(
-    await probe(["info", "--format", "{{json .ID}}"])
-  );
+  const engineId: unknown = identity
+    ? await identity()
+    : JSON.parse(await probe(["info", "--format", "{{json .ID}}"]));
   if (typeof engineId !== "string" || !ENGINE_ID.test(engineId)) {
     return refused();
   }

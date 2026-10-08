@@ -108,7 +108,7 @@ not serialized. Orphan preparations are retained as evidence after a refused
 transition. The native version-one receipt and manifest contract is unchanged.
 
 `hack config adopt` requires all original containers stopped. It refuses local,
-dotenv or managed-env inputs, linked/separate Git layouts, selected profiles,
+dotenv or managed-env inputs, unverified linked or separate Git layouts, selected profiles,
 unsupported source mappings and changed source/resource ownership. It never
 silently stops a running instance. Add explicit `--stop` to journal and stop all
 verified original IDs before the format switch. `--dry-run --stop` qualifies that
@@ -178,3 +178,27 @@ These observed boundaries supplement the synthetic probe/interruption tests.
 Full NC04 remains open for typed local inheritance, real linked-worktree isolation,
 advanced lossless mappings, recreation and application migration; that acceptance
 does not qualify those unsupported cases or an atomic freeze of external actors.
+
+The maintained `native-compose-adoption-worktrees` Docker scenario exercises two
+real linked checkouts with distinct canonical Compose names, original PostgreSQL
+volumes and stored SQL rows. It checks inherited primary local-env refusal before
+adoption state, then qualifies the static source pair while that unsupported local
+input is withheld. Partial-stop repair, retained-container execution and rollback
+must preserve the other checkout's source inodes, bytes, resource IDs and SQL row.
+Stopped originals remain bound, and unsupported recreation through `run` refuses.
+Cleanup uses only captured, reverified original IDs and volume creation facts.
+Failed acceptance retains its disposable sources and isolated home for inspection;
+retention alone does not prove engine cleanup succeeded.
+
+Run it with the current compiled CLI and adjacent matching compiler, a Linux
+Docker daemon and cached `postgres:17.6-alpine` image:
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_KEEP=1 \
+  bun tests/e2e/run.ts --only=native-compose-adoption-worktrees
+```
+
+This fixture distinguishes static isolation from successful typed inheritance;
+its inherited-input refusal does not qualify migration of generated Compose
+overrides or managed values. A registered scenario and cleanup unit tests alone
+do not establish live acceptance.

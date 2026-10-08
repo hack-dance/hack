@@ -119,7 +119,7 @@ after retirement and requires unchanged parent/lock identities, absent publicati
 paths and the exact durable removed journal. Changed current membership and
 unknown native failure-observation fields refuse. Failed or abandoned publications preserve evidence;
 they never authorize adoption, restart or dead-owner recovery. This owner has no
-public CLI/frontend selection yet and does not implement reactive health or hooks.
+ordinary frontend selection yet and does not implement reactive health or hooks.
 
 The optional feature exposes this bounded consumer through a distinct public CLI:
 `graph native plan --source-file FILE --json`, then
@@ -129,13 +129,23 @@ are explicit image-only prerequisites, not ordinary project startup. Their proje
 network does not publish ports or grant host-service access. Normal native `hack up`
 continues to require the full source/storage/routing/host and foreground-owner contract.
 
+On macOS, `graph native serve` accepts the same source, reviewed identity and private
+stdin options as `run`, and keeps the owner in the foreground until TERM/INT or
+`graph native control --run-id RUN --action cleanup --json`. Its first stdout line is
+the v2 `native-graph-foreground-ready` envelope, binding run, review and admitted
+receipt; its final JSON receipt follows owned shutdown. Authenticated `control`
+with `--action status` returns the exact admitted snapshot. Direct cleanup refuses
+while this owner is published. Serve/control on other platforms refuse before
+reading private stdin or using the provider. These explicit candidate commands
+do not activate ordinary native `hack up`.
+
 The stable, absolute source file is a public v2 envelope with
 `kind: "native-graph-source"`, `project`, optional canonical `branch`, 32-hex `run`,
 optional `profiles`, and compiler-owned `env_metadata`. Its `overlay` is `"inherit"`
 (also the omission default), `"base"`, or `{"named":"NAME"}`; null refuses. The source
 and authored files are rechecked before private preparation and effects. It returns
 a native `review_id`; Compose plan IDs and normalized-input fields are not accepted.
-Optional `run --environment-stdin` receives a bounded private pipe envelope with
+Optional `run|serve --environment-stdin` receives a bounded private pipe envelope with
 `version: 2`, `kind: "native-graph-environment"`, `review`, `run`,
 `lifetime_seconds` (1..300), and selected source-keyed `services`. Public selection
 and review comparison happen before reading this descriptor. The old private v1

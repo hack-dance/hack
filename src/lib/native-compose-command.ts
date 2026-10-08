@@ -487,7 +487,7 @@ async function savedCommand(opts: {
           beforeComplete: async () => {
             try {
               if (hooks) {
-                await hooks.assertFresh();
+                await hooks.assertSelectionUnchanged();
                 await assertAbsent();
               }
               await finalizeNativeComposeStop({

@@ -239,6 +239,114 @@ else if(args[0]==="container" && args[1]==="ls") {
   );
 }
 
+async function createdSavedTransport(fixture: {
+  root: string;
+  identity: { composeProject: string; ownerToken: string };
+  generationId: string;
+}) {
+  const { root, identity, generationId } = fixture;
+  const network = `${identity.composeProject}_default`;
+  const name = `${identity.composeProject}-web-1`;
+  const container = {
+    id: "c".repeat(64),
+    name: `/${name}`,
+    project: identity.composeProject,
+    version: "1",
+    instance: identity.composeProject,
+    owner: identity.ownerToken,
+    generation: generationId,
+    service: "web",
+    oneoff: "False",
+    state: "created",
+    exitCode: 0,
+    health: null,
+    networks: { [network]: { NetworkID: "", Aliases: [name, "web"] } },
+  };
+  const bridge = {
+    id: "d".repeat(64),
+    name: network,
+    project: identity.composeProject,
+    version: "1",
+    instance: identity.composeProject,
+    owner: identity.ownerToken,
+    driver: "bridge",
+    internal: false,
+    containers: {},
+  };
+  await Bun.write(
+    join(root, "docker"),
+    `#!${process.execPath}
+import {writeFileSync} from "node:fs";
+const args=process.argv.slice(2), container=${JSON.stringify(container)}, bridge=${JSON.stringify(bridge)};
+if (args[0]==="compose" && args.includes("logs")) {console.log("synthetic pending logs");process.exit(0);}
+if (["container","network","volume"].includes(args[0]) && ["ls","inspect"].includes(args[1])) {
+ const row=args[0]==="container"?container:args[0]==="network"?bridge:null;
+ if (row) console.log(JSON.stringify(args[1]==="ls"?{id:row.id,name:row.name.replace(/^\\//,""),project:row.project}:row));
+ process.exit(0);
+}
+writeFileSync(${JSON.stringify(join(root, "unexpected-engine-effect"))},JSON.stringify(args));process.exit(99);
+`
+  );
+}
+
+test.each([
+  "ps",
+  "logs",
+  "exec",
+] as const)("saved %s handles created workloads without granting mutation authority", async (operation) => {
+  const fixture = await savedFixture(
+    operation === "exec" ? "complete" : "uncertain"
+  );
+  await createdSavedTransport(fixture);
+  const args =
+    operation === "exec"
+      ? ["exec", "web", "--", "true"]
+      : operation === "ps"
+        ? ["ps", "--json"]
+        : ["logs"];
+  const child = Bun.spawn(
+    [process.execPath, resolve(import.meta.dir, "../index.ts"), ...args],
+    {
+      cwd: fixture.root,
+      env: {
+        PATH: `${fixture.root}:/usr/bin:/bin`,
+        HOME: join(fixture.root, "home"),
+        HACK_HOME: join(fixture.root, "home"),
+        HACK_RUNTIME_BACKEND: "compose",
+        HACK_LOGGER: "console",
+        HACK_NO_INTERACTIVE: "1",
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  children.push(child);
+  const stdout = new Response(child.stdout).text();
+  const stderr = new Response(child.stderr).text();
+  expect(await child.exited).toBe(operation === "exec" ? 1 : 0);
+  const output = await stdout;
+  const diagnostic = await stderr;
+  if (operation === "ps") {
+    expect(JSON.parse(output)).toMatchObject({
+      ok: true,
+      data: {
+        pending: true,
+        services: [{ service: "web", status: "created" }],
+      },
+    });
+  } else if (operation === "logs") {
+    expect(output).toContain("synthetic pending logs");
+  } else {
+    expect(`${output}\n${diagnostic}`).toContain("E_CONFIG_INVALID");
+  }
+  expect(diagnostic).not.toContain("invalid authored input");
+  expect(await readdir(fixture.leases)).toEqual([]);
+  expect(
+    await Bun.file(join(fixture.root, "unexpected-engine-effect")).exists()
+  ).toBe(false);
+}, 20_000);
+
 async function recoverSavedStop(root: string) {
   const child = Bun.spawn(
     [

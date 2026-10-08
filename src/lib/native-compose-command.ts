@@ -34,6 +34,7 @@ import {
   type NativeComposeReservation,
   type NativeComposeRunProjection,
   openNativeComposeGenerationStore,
+  readNativeComposeNetworkTopology,
 } from "./native-compose-generation.ts";
 import {
   NativeComposeHostHookError,
@@ -48,9 +49,11 @@ import {
 import { acquireNativeComposeInputs } from "./native-compose-inputs.ts";
 import {
   assertNativeComposeOwned,
+  mergeNativeComposeNetworkPolicies,
   NativeComposeOwnershipError,
   type NativeComposeOwnershipObservation,
   type NativeComposeOwnershipOptions,
+  observeSavedNativeComposeOwned,
 } from "./native-compose-ownership.ts";
 import { NativeComposeProxyAccessError } from "./native-compose-proxy-routes.ts";
 import {
@@ -124,14 +127,6 @@ function volumeSelections(document: PrivateDocument) {
     return { storage, name: value.name };
   });
 }
-function networkSelection(document: PrivateDocument): string {
-  if (!(isRecord(document.networks) && isRecord(document.networks.default))) {
-    return invalid();
-  }
-  const name = document.networks.default.name;
-  return typeof name === "string" ? name : invalid();
-}
-
 async function savedRouteDocuments(store: NativeComposeGenerationStore) {
   const state = await store.loadCurrent();
   const pending = await store.loadPending();
@@ -216,7 +211,12 @@ function routedRunEffectOwnership(opts: {
   };
 }
 
-/** Completion proves retirement; released old hostnames may now have a new owner. */
+/**
+ * Active selection contains only proposed bridges after preserving every prior
+ * physical policy. Generation finalization rechecks that exact inventory before
+ * and after route completion; extra old networks cannot be forgotten.
+ * Released old hostnames may now have a new owner.
+ */
 function preparedEffectOwnership(opts: {
   readonly selection: NativeComposeOwnershipOptions;
   readonly routing: NativeComposeRoutingOwner | null;
@@ -250,22 +250,79 @@ async function ownershipSelection(opts: {
   readonly generation: NativeComposeGeneration;
   readonly document: PrivateDocument;
   readonly signal: AbortSignal;
+  readonly operation: Operation;
+  readonly recover?: boolean;
 }): Promise<NativeComposeOwnershipOptions> {
   const state = await opts.store.loadCurrent();
   const pending = await opts.store.loadPending();
   const generations = [opts.generation, state.generation, pending].filter(
     (value): value is NativeComposeGeneration => value !== null
   );
-  const documents = [opts.document];
+  const documents = [{ document: opts.document, generation: opts.generation }];
+  const loaded = new Set([opts.generation.generationId]);
   for (const generation of generations) {
-    if (generation.generationId !== opts.generation.generationId) {
-      documents.push(await opts.store.readGenerationDocument(generation));
+    if (!loaded.has(generation.generationId)) {
+      documents.push({
+        document: await opts.store.readGenerationDocument(generation),
+        generation,
+      });
+      loaded.add(generation.generationId);
     }
   }
   const services = new Set<string>();
   const volumes = new Map<string, { storage: string; name: string }>();
-  let network: string | undefined;
-  for (const document of documents) {
+  const topologies = documents
+    .filter(
+      ({ generation }) =>
+        !(
+          state.stopped &&
+          generation.generationId === state.generation?.generationId &&
+          generation.generationId !== opts.generation.generationId
+        )
+    )
+    .map(({ document, generation }) => ({
+      document,
+      generation,
+      topology: readNativeComposeNetworkTopology(document, opts.store.identity),
+    }));
+  const proposed = topologies.find(
+    ({ generation }) => generation.generationId === opts.generation.generationId
+  );
+  if (!proposed) {
+    return invalid();
+  }
+  const expectedNetworks = mergeNativeComposeNetworkPolicies({
+    proposed: proposed.topology.networks,
+    retained: topologies
+      .filter((value) => value !== proposed)
+      .map((value) => value.topology.networks),
+    retiring: opts.operation === "down",
+  });
+  const expectedWorkloadNetworks = topologies.flatMap(
+    ({ document, generation, topology }) => {
+      const routing = readNativeComposeRouteMetadata({
+        document,
+        generationId: generation.generationId,
+      });
+      return topology.workloads.map((workload) => ({
+        generationId: generation.generationId,
+        service: workload.service,
+        networks: workload.networks.map((attachment) => {
+          if (attachment.external && !routing) {
+            return invalid();
+          }
+          return {
+            name: attachment.name,
+            aliases: attachment.aliases,
+            ...(attachment.external
+              ? { externalId: routing?.binding.networkId }
+              : {}),
+          };
+        }),
+      }));
+    }
+  );
+  for (const { document } of documents) {
     for (const name of Object.keys(serviceMap(document))) {
       services.add(name);
     }
@@ -276,11 +333,6 @@ async function ownershipSelection(opts: {
       }
       volumes.set(selection.name, selection);
     }
-    const selectedNetwork = networkSelection(document);
-    if (network !== undefined && network !== selectedNetwork) {
-      return invalid();
-    }
-    network = selectedNetwork;
   }
   return {
     composeProject: opts.store.identity.composeProject,
@@ -289,7 +341,11 @@ async function ownershipSelection(opts: {
     generationIds: [...new Set(generations.map((value) => value.generationId))],
     expectedServices: [...services],
     expectedVolumes: [...volumes.values()],
-    expectedNetwork: network,
+    expectedNetworks,
+    expectedWorkloadNetworks,
+    ...(opts.operation === "down" && opts.recover
+      ? { recovery: "down" as const }
+      : {}),
     signal: opts.signal,
   };
 }
@@ -357,6 +413,34 @@ function requireService(
   return name;
 }
 
+function assertRunNetworkSupported(opts: {
+  readonly options: NativeComposeCommandOptions;
+  readonly document: PrivateDocument;
+  readonly identity: NativeComposeGenerationStore["identity"];
+}): void {
+  if (opts.options.operation !== "run") {
+    return;
+  }
+  const service = requireService(opts.document, opts.options.service);
+  const topology = readNativeComposeNetworkTopology(
+    opts.document,
+    opts.identity
+  );
+  if (
+    topology.workloads
+      .find((workload) => workload.service === service)
+      ?.networks.some(
+        (network) => !network.external && network.logicalName !== "default"
+      )
+  ) {
+    throw new HackCliError({
+      code: "E_NATIVE_PROJECT_UNSUPPORTED",
+      message:
+        "Native Compose run with custom networks requires qualified one-off attachment behavior. Use up or restart for this project; no engine operation ran. Values omitted.",
+    });
+  }
+}
+
 async function runSavedProcess(opts: {
   readonly options: NativeComposeCommandOptions;
   readonly generation: NativeComposeGeneration;
@@ -422,7 +506,10 @@ async function savedCommand(opts: {
   const generation =
     options.operation === "down" && options.recover && pending
       ? pending
-      : (state.generation ?? (options.operation === "ps" ? pending : null));
+      : (state.generation ??
+        (options.operation === "ps" || options.operation === "logs"
+          ? pending
+          : null));
   if (!generation) {
     if (state.beforeHooksPending) {
       if (options.operation === "ps" && options.json) {
@@ -458,6 +545,8 @@ async function savedCommand(opts: {
     generation,
     document,
     signal,
+    operation: options.operation,
+    recover: options.recover,
   });
   const base = {
     ...runtimeOptions(generation),
@@ -563,7 +652,10 @@ async function savedCommand(opts: {
   return await store.withLease({
     generation,
     run: async () => {
-      const observed = await assertNativeComposeOwned(selection);
+      const observed =
+        options.operation === "ps" || options.operation === "logs"
+          ? await observeSavedNativeComposeOwned(selection)
+          : await assertNativeComposeOwned(selection);
       if (options.operation === "ps") {
         if (options.json) {
           emitCliResult({
@@ -991,6 +1083,7 @@ async function executePreparedGeneration(opts: {
     generation,
     document,
     signal,
+    operation: options.operation,
   });
   const base = {
     ...runtimeOptions(generation),
@@ -1156,25 +1249,41 @@ async function prepareCommand(opts: {
       }
       inputs = prepared.inputs;
       const values = await inputs.resolveManagedValues();
+      const render = (generationIdentity: string) =>
+        renderNativeCompose({
+          plan: inputs.result.plan,
+          environmentPlan: inputs.result.environment_plan,
+          projectRoot,
+          runtimeIdentity: store.identity.composeProject,
+          generationIdentity,
+          ownerToken: store.identity.ownerToken,
+          managedValues: values,
+          routingResolution: inputs.result.routing_resolution,
+          declaredWorkloads: inputs.result.declared_workloads,
+          beforeHooksOwned: true,
+        });
+      // Preserve an unchanged unrouted generation under this mutation owner.
+      // New generation labels alone would make Compose recreate healthy services.
+      const reusableUp = await unchangedUnroutedUp({
+        options,
+        current,
+        inputs,
+        store,
+        render,
+      });
       const existingRun =
         options.operation === "run" ? current.generation : null;
-      const reservation = existingRun ? null : mutation.reserveGeneration();
-      const generationId =
-        existingRun?.generationId ?? reservation?.generationId;
+      const existing = existingRun ?? reusableUp?.generation ?? null;
+      const reservation = existing ? null : mutation.reserveGeneration();
+      const generationId = existing?.generationId ?? reservation?.generationId;
       if (!generationId) {
         return invalid();
       }
-      const rendered = renderNativeCompose({
-        plan: inputs.result.plan,
-        environmentPlan: inputs.result.environment_plan,
-        projectRoot,
-        runtimeIdentity: store.identity.composeProject,
-        generationIdentity: generationId,
-        ownerToken: store.identity.ownerToken,
-        managedValues: values,
-        routingResolution: inputs.result.routing_resolution,
-        declaredWorkloads: inputs.result.declared_workloads,
-        beforeHooksOwned: true,
+      const rendered = reusableUp?.rendered ?? render(generationId);
+      assertRunNetworkSupported({
+        options,
+        document: rendered.document,
+        identity: store.identity,
       });
       const {
         routing,
@@ -1198,7 +1307,7 @@ async function prepareCommand(opts: {
           document: routedDocument,
         });
         const generation = await publishPreparedGeneration({
-          existing: existingRun,
+          existing,
           reservation,
           mutation,
           store,
@@ -1234,6 +1343,52 @@ async function prepareCommand(opts: {
 type AcquiredComposeInputs = Awaited<
   ReturnType<typeof acquireNativeComposeInputs>
 >;
+
+/** Exact private correspondence permits reuse; it never bypasses effects or readiness. */
+async function unchangedUnroutedUp(opts: {
+  readonly options: NativeComposeCommandOptions;
+  readonly current: Awaited<
+    ReturnType<NativeComposeGenerationStore["loadCurrent"]>
+  >;
+  readonly inputs: AcquiredComposeInputs;
+  readonly store: NativeComposeGenerationStore;
+  readonly render: (
+    generationId: string
+  ) => ReturnType<typeof renderNativeCompose>;
+}) {
+  const generation = opts.current.generation;
+  if (
+    opts.options.operation !== "up" ||
+    opts.current.stopped ||
+    !generation ||
+    generation.inputRevision !== opts.inputs.inputRevision ||
+    opts.inputs.result.plan.routes !== undefined ||
+    opts.inputs.result.plan.open !== undefined
+  ) {
+    return null;
+  }
+  const saved = await opts.store.readGenerationDocument(generation);
+  if (
+    readNativeComposeRouteMetadata({
+      generationId: generation.generationId,
+      document: saved,
+    })
+  ) {
+    return null;
+  }
+  const rendered = opts.render(generation.generationId);
+  const document = bindNativeComposeDownHooks({
+    inputs: opts.inputs,
+    profiles: rendered.profiles,
+    explicitOverlay: opts.options.overlay,
+    document: rendered.document,
+  });
+  return JSON.stringify(generation.profiles) ===
+    JSON.stringify(rendered.profiles) &&
+    JSON.stringify(saved) === JSON.stringify(document)
+    ? { generation, rendered }
+    : null;
+}
 
 function reportNativeStartupIncomplete(opts: {
   readonly afterHookCode: number | undefined;

@@ -28,6 +28,7 @@ pub(crate) fn project(document: &json::Document) -> Result<(), Diagnostic> {
         "routes",
         "open",
         "host_bindings",
+        "networks",
     ] {
         optional_object(document, &json::child("", key))?;
     }
@@ -43,6 +44,11 @@ pub(crate) fn project(document: &json::Document) -> Result<(), Diagnostic> {
     if let Some(storage) = document.value.get("storage").and_then(Value::as_object) {
         for key in storage.keys() {
             object(document, &json::child("/storage", key))?;
+        }
+    }
+    if let Some(networks) = document.value.get("networks").and_then(Value::as_object) {
+        for name in networks.keys() {
+            object(document, &json::child("/networks", name))?;
         }
     }
     for namespace in ["services", "jobs"] {
@@ -70,10 +76,17 @@ pub(crate) fn project(document: &json::Document) -> Result<(), Diagnostic> {
                     "entrypoint",
                     "shutdown",
                     "restart",
+                    "networks",
                 ] {
                     optional_object(document, &json::child(&pointer, field))?;
                 }
                 optional_object(document, &format!("{pointer}/readiness/command"))?;
+                let networks = json::child(&pointer, "networks");
+                if let Some(values) = document.value.pointer(&networks).and_then(Value::as_object) {
+                    for name in values.keys() {
+                        object(document, &json::child(&networks, name))?;
+                    }
+                }
                 if let Some(env) = document
                     .value
                     .pointer(&format!("{pointer}/environment"))

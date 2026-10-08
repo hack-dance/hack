@@ -22,6 +22,7 @@ import {
   type NativeComposeMutation,
   type NativeComposeReservation,
   openNativeComposeGenerationStore,
+  readNativeComposeNetworkTopology,
 } from "../src/lib/native-compose-generation.ts";
 import {
   type NativeComposeRouteClaims,
@@ -1001,6 +1002,7 @@ test("generation accepts only the fixed external ingress and never claims it as 
     const reservation = mutation.reserveGeneration();
     const content = JSON.parse(document(reservation));
     content.networks.ingress = { name: "hack-dev", external: true };
+    content.services.app.networks = ["default", "ingress"];
     const generation = await mutation.publish({
       reservation,
       composeJson: JSON.stringify(content),
@@ -1033,6 +1035,189 @@ test("generation accepts only the fixed external ingress and never claims it as 
       );
     });
   }
+});
+
+function customNetworkDocument(reservation: NativeComposeReservation) {
+  const content = JSON.parse(document(reservation));
+  const project = reservation.identity.composeProject;
+  const labels = content.networks.default.labels;
+  content.networks = {
+    data: {
+      name: `hack-net-${project.length}-${project}-4-data`,
+      driver: "bridge",
+      internal: true,
+      labels,
+    },
+  };
+  content.services.app.networks = { data: { aliases: ["query"] } };
+  return content;
+}
+
+test("closed custom-only saved topology survives private publication and reopen with exact instance names", async () => {
+  const root = await fixture();
+  const first = await store(root, "first");
+  const second = await store(root, "second");
+  const names: string[] = [];
+  for (const owner of [first, second]) {
+    await owner.withMutation(async (mutation) => {
+      const reservation = mutation.reserveGeneration();
+      const content = customNetworkDocument(reservation);
+      const generation = await mutation.publish({
+        reservation,
+        composeJson: JSON.stringify(content),
+        profiles: [],
+        inputRevision: REVISION,
+        assertFresh: async () => {},
+      });
+      const saved = await owner.readGenerationDocument(generation);
+      const topology = readNativeComposeNetworkTopology(saved, owner.identity);
+      expect(topology.networks).toEqual([
+        { name: content.networks.data.name, driver: "bridge", internal: true },
+      ]);
+      expect(topology.workloads).toEqual([
+        {
+          service: "app",
+          networks: [
+            {
+              logicalName: "data",
+              name: content.networks.data.name,
+              aliases: ["query"],
+              external: false,
+            },
+          ],
+        },
+      ]);
+      expect(Object.hasOwn(saved.networks ?? {}, "default")).toBe(false);
+      names.push(topology.networks[0]?.name ?? "missing");
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => ({ outcome: "complete", value: 0 }),
+      });
+    });
+  }
+  expect(names[0]).not.toBe(names[1]);
+  const reopened = await store(root, "first", "saved");
+  const generation = (await reopened.loadCurrent()).generation;
+  if (!generation) {
+    throw new Error("Missing custom fixture generation");
+  }
+  expect(
+    readNativeComposeNetworkTopology(
+      await reopened.readGenerationDocument(generation),
+      reopened.identity
+    ).networks[0]?.name
+  ).toBe(names[0]);
+});
+
+test("legacy version-one saved documents retain implicit outbound default semantics", async () => {
+  const owner = await store(await fixture());
+  await owner.withMutation(async (mutation) => {
+    const reservation = mutation.reserveGeneration();
+    const explicit = JSON.parse(document(reservation));
+    const { networks: _omitted, ...implicit } = explicit;
+    for (const content of [explicit, implicit]) {
+      expect(readNativeComposeNetworkTopology(content, owner.identity)).toEqual(
+        {
+          networks: [
+            {
+              name: `${owner.identity.composeProject}_default`,
+              driver: "bridge",
+              internal: false,
+            },
+          ],
+          workloads: [
+            {
+              service: "app",
+              networks: [
+                {
+                  logicalName: "default",
+                  name: `${owner.identity.composeProject}_default`,
+                  aliases: [],
+                  external: false,
+                },
+              ],
+            },
+          ],
+        }
+      );
+    }
+  });
+});
+
+test("saved custom topology refuses foreign names, policies, missing definitions, extra attachments and ambiguous aliases before publication", async () => {
+  const owner = await store(await fixture());
+  await owner.withMutation(async (mutation) => {
+    const reservation = mutation.reserveGeneration();
+    for (const change of [
+      "physical-name",
+      "owner",
+      "driver",
+      "internal-type",
+      "missing",
+      "unused",
+      "extra-attachment-key",
+      "null-aliases",
+      "duplicate-aliases",
+      "service-alias",
+      "invalid-alias",
+      "empty-attachments",
+    ]) {
+      const content = customNetworkDocument(reservation);
+      if (change === "physical-name") {
+        content.networks.data.name = "foreign";
+      }
+      if (change === "owner") {
+        content.networks.data.labels["io.hack.native-config.owner"] =
+          "f".repeat(32);
+      }
+      if (change === "driver") {
+        content.networks.data.driver = "host";
+      }
+      if (change === "internal-type") {
+        content.networks.data.internal = "false";
+      }
+      if (change === "missing") {
+        content.networks = {};
+      }
+      if (change === "unused") {
+        content.networks.unused = {
+          ...content.networks.data,
+          name: `hack-net-${owner.identity.composeProject.length}-${owner.identity.composeProject}-6-unused`,
+        };
+      }
+      if (change === "extra-attachment-key") {
+        content.services.app.networks.data.priority = 100;
+      }
+      if (change === "null-aliases") {
+        content.services.app.networks.data.aliases = null;
+      }
+      if (change === "duplicate-aliases") {
+        content.services.app.networks.data.aliases = ["query", "query"];
+      }
+      if (change === "service-alias") {
+        content.services.app.networks.data.aliases = ["app"];
+      }
+      if (change === "invalid-alias") {
+        content.services.app.networks.data.aliases = ["../host"];
+      }
+      if (change === "empty-attachments") {
+        content.services.app.networks = {};
+      }
+      await rejected(
+        mutation.publish({
+          reservation,
+          composeJson: JSON.stringify(content),
+          profiles: [],
+          inputRevision: REVISION,
+          assertFresh: async () => {},
+        }),
+        "E_NATIVE_COMPOSE_STATE"
+      );
+    }
+  });
 });
 
 test("complete cold run retains its dependency generation for saved observation and stop", async () => {

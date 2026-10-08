@@ -116,6 +116,32 @@ test("private Compose document joins only routed services to the external ingres
   });
 });
 
+test("routing joins a custom-only workload to ingress without adding the default bridge", () => {
+  const input = fixture();
+  input.plan.networks = { private: { internal: true } };
+  input.plan.services.web!.networks = { private: { aliases: ["frontend"] } };
+  const base = composeFixture();
+  const rendered = renderNativeCompose({
+    ...base,
+    plan: input.plan,
+    routingResolution: input.resolution,
+    declaredWorkloads: input.declared,
+  });
+  expect(Object.keys(rendered.document.networks).sort()).toEqual([
+    "ingress",
+    "private",
+  ]);
+  expect(rendered.document.services.web?.networks).toEqual({
+    private: { aliases: ["frontend"] },
+    ingress: {},
+  });
+  expect(rendered.document.networks.private?.internal).toBe(true);
+  expect(rendered.document.networks.ingress).toEqual({
+    name: "hack-dev",
+    external: true,
+  });
+});
+
 test("distinct upstream protocols and ports remain separate site groups", () => {
   const input = fixture();
   if (!input.plan.routes?.http) {

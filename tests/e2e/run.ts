@@ -1,4 +1,5 @@
 import { runIsolationCanary, runScenarios, type Scenario } from "./harness.ts";
+import { nativeConfigNetworksScenario } from "./native-config-networks-acceptance.ts";
 import { agentDocsSyncScenario } from "./scenarios/agent-docs-sync.ts";
 import { automationCheckScenario } from "./scenarios/automation-check.ts";
 import { cachePruneScenario } from "./scenarios/cache-prune.ts";
@@ -66,6 +67,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   nativeConfigDownHooksScenario,
   nativeConfigProcessPolicyScenario,
   nativeConfigRoutingScenario,
+  nativeConfigNetworksScenario,
   nativeComposeAdoptionWorktreesScenario,
   lifecycleHostProcessScenario,
   worktreeParallelUpScenario,

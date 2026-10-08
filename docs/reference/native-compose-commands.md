@@ -108,6 +108,43 @@ documents can contain decrypted values and remain in owned private files with
 restricted permissions. They are never part of the public plan or JSON output.
 Do not copy these documents into source control or attach them to diagnostics.
 
+## Owned project networks
+
+For an unchanged unrouted running instance, `up` reuses its saved generation only
+when the full input revision, selected profiles and freshly rendered private
+document match exactly. Compose and readiness checks still run, as do authored
+finite hooks. This avoids recreating healthy containers solely because of a new
+generation label. Changed inputs, stopped instances and explicit `restart` retain
+the new-generation path. Routed warm `up` remains outside this reuse slice.
+
+The compiler's owned bridge declarations and workload attachment maps are lowered
+without adding an outbound default attachment to an explicit selection. Custom
+network names stay stable for an instance and differ between worktrees. Only
+selected networks are allocated. Routing supplies its separately verified ingress
+attachment to routed services.
+
+Saved operations verify each owned bridge's exact engine ID, driver, internal
+policy and members, and each container's configured attachments and DNS aliases.
+Unknown attachments, foreign members or changes between inspection passes refuse.
+An active topology must retain every old network and its policy; removing a network
+or changing its internal policy requires an owned `down` before the next `up`.
+Adding a network retains the old generation's verified topology until completion.
+
+Custom-network `run` refuses before hooks or engine effects until one-off alias
+behavior is separately qualified. Explicit `down --recover` can clean a receipt-bound
+stopped container after an owned bridge disappeared, or a never-started created
+container with empty endpoint metadata on a verified owned bridge. Neither case
+relaxes running-container or ingress identity checks or grants deletion authority
+over an unknown network. Runtime isolation remains a separate acceptance gate.
+
+Saved `ps` and `logs` can observe these verified CREATED containers while startup
+is pending. This read permission does not grant `exec`, readiness or ordinary
+mutation authority. Substituting canonical service aliases for a temporary
+replacement name requires its fully owned, receipt-selected predecessor in the
+same scan. An unknown prefix cannot justify that substitution; an empty alias
+set still requires the owned CREATED-container and bridge proofs. Changed
+observations refuse.
+
 ## Finite host lifecycle hooks
 
 Whole-project `up` and `restart` run `host.up.before` before engine startup, then
@@ -210,7 +247,7 @@ The following `up` can reuse that data. Ownership checks refuse foreign resource
 including a matching Compose project or resource name with another owner token.
 
 An interrupted or uncertain operation retains its intent. Inspect it with saved
-`ps`; then explicitly request owned stop recovery:
+`ps` or `logs`; then explicitly request owned stop recovery:
 
 ```sh
 HACK_RUNTIME_BACKEND=compose ./dist/hack --path /absolute/project down --recover

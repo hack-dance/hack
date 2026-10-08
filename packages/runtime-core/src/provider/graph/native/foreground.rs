@@ -22,7 +22,7 @@ pub(super) fn require_unpublished(candidate: &Candidate, run: &str) -> Result<()
     Ok(())
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
     Status,
@@ -86,18 +86,10 @@ enum Outcome {
 // execution Observation codec used by existing Compose readers.
 fn decode_snapshot<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Snapshot, D::Error> {
     #[derive(Deserialize)]
-    #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-    enum WireObservation {
-        Created {},
-        Running { health: execution::Health },
-        Exited { code: i64 },
-        Dead {},
-    }
-    #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct WireSnapshot {
         receipt: Receipt,
-        observations: BTreeMap<String, Option<WireObservation>>,
+        observations: BTreeMap<String, Option<journal::WireObservation>>,
     }
     let decoded = WireSnapshot::deserialize(reader)?;
     Ok(Snapshot {
@@ -105,22 +97,12 @@ fn decode_snapshot<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Snapsh
         observations: decoded
             .observations
             .into_iter()
-            .map(|(key, value)| {
-                (
-                    key,
-                    value.map(|value| match value {
-                        WireObservation::Created {} => Observation::Created,
-                        WireObservation::Running { health } => Observation::Running { health },
-                        WireObservation::Exited { code } => Observation::Exited { code },
-                        WireObservation::Dead {} => Observation::Dead,
-                    }),
-                )
-            })
+            .map(|(key, value)| (key, value.map(Into::into)))
             .collect(),
     })
 }
 impl Reply {
-    fn validate(&self, expected: &Receipt) -> Result<(), CandidateError> {
+    fn validate(&self, expected: &Receipt, action: Action) -> Result<(), CandidateError> {
         let review = &expected.review;
         if self.version != 2 || self.run != review.scope().run || self.review != review.review_id()
         {
@@ -128,17 +110,18 @@ impl Reply {
         }
         let receipt = match &self.result {
             Outcome::Status { snapshot } => {
-                if snapshot
-                    .observations
-                    .keys()
-                    .ne(snapshot.receipt.readiness.keys())
+                if action != Action::Status
+                    || snapshot
+                        .observations
+                        .keys()
+                        .ne(snapshot.receipt.readiness.keys())
                 {
                     return Err(refused());
                 }
                 &snapshot.receipt
             }
             Outcome::Cleaned { receipt } => {
-                if receipt.phase != Phase::Removed {
+                if action != Action::Cleanup || receipt.phase != Phase::Removed {
                     return Err(refused());
                 }
                 receipt
@@ -153,7 +136,8 @@ impl Reply {
                         .bytes()
                         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
                     || stop_failures.as_ref().is_some_and(|detail| {
-                        !detail.valid()
+                        action != Action::Cleanup
+                            || !detail.valid()
                             || !matches!(
                                 code.as_str(),
                                 "engine_protocol" | "engine_rejected" | "engine_not_found"
@@ -169,13 +153,7 @@ impl Reply {
                 return Ok(());
             }
         };
-        if receipt.review != *review
-            || receipt.owner != expected.owner
-            || receipt.boot != expected.boot
-        {
-            return Err(refused());
-        }
-        receipt.validate(review.scope().run, &receipt.owner)
+        receipt.check_binding(expected)
     }
 }
 
@@ -214,13 +192,16 @@ pub fn serve(
         Ok(receipt) => receipt,
         Err(error) => {
             if admitted.get() {
-                if runtime::cleanup_guarded(
-                    candidate,
-                    &run,
-                    Some(&review),
-                    Some(&|| publication.verify()),
-                )
-                .is_ok()
+                if journal::read_control(candidate, &review)
+                    .and_then(|retained| {
+                        runtime::cleanup_guarded(
+                            candidate,
+                            &run,
+                            Some(&retained),
+                            Some(&|| publication.verify()),
+                        )
+                    })
+                    .is_ok()
                 {
                     publication.finish()?;
                 }
@@ -236,7 +217,7 @@ pub fn serve(
         runtime::cleanup_guarded(
             candidate,
             &run,
-            Some(&review),
+            Some(&receipt),
             Some(&|| publication.verify()),
         )
     };
@@ -287,16 +268,18 @@ pub fn serve(
             review: review.review_id().into(),
             result,
         };
-        reply.validate(&receipt)?;
-        // Cleanup completion remains durable if the authenticated caller loses the reply.
-        let _ = transport::write(&mut stream, &reply, Duration::from_secs(5));
+        reply.validate(&receipt, request.action)?;
         if cleaned {
+            // Retire before writing on the retained authenticated stream. Clients
+            // verify both absent publication paths and the exact durable Removed journal.
+            publication.finish()?;
+            let _ = transport::write(&mut stream, &reply, Duration::from_secs(5));
             let Outcome::Cleaned { receipt } = reply.result else {
                 return Err(refused());
             };
-            publication.finish()?;
             return Ok(receipt);
         }
+        let _ = transport::write(&mut stream, &reply, Duration::from_secs(5));
     }
 }
 
@@ -322,8 +305,19 @@ pub fn request(
     };
     transport::write(&mut stream, &input, Duration::from_secs(5))?;
     let reply: Reply = transport::read(&mut stream, Duration::from_secs(30), LIMIT)?;
-    pin.verify()?;
-    reply.validate(&expected)?;
+    reply.validate(&expected, options.action)?;
+    let current = journal::read_control(candidate, review)?;
+    current.check_binding(&expected)?;
+    if let Outcome::Cleaned { receipt } = &reply.result {
+        if serde_json::to_vec(receipt).map_err(|_| refused())?
+            != serde_json::to_vec(&current).map_err(|_| refused())?
+        {
+            return Err(refused());
+        }
+        pin.verify_retired()?;
+    } else {
+        pin.verify()?;
+    }
     if let Outcome::Refused {
         code,
         stop_failures,

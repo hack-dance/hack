@@ -142,6 +142,25 @@ impl Pin {
     pub(super) fn review(&self) -> &native_input::Review {
         &self.record.review
     }
+    /// The caller already authenticated its retained connection before the owner
+    /// retired. Absence grants no new connection, process or cleanup authority.
+    pub(super) fn verify_retired(&self) -> Result<(), CandidateError> {
+        state::check_private_directory(&self.root).map_err(|_| refused())?;
+        let parent = fs::symlink_metadata(&self.root).map_err(|_| refused())?;
+        let lock = fs::symlink_metadata(self.root.join("operation.lock")).map_err(|_| refused())?;
+        if !parent.is_dir()
+            || id(&parent) != self.record.parent
+            || !lock.is_file()
+            || !private(&lock)
+            || lock.nlink() != 1
+            || id(&lock) != self.record.lock
+            || exists(&self.root.join("owner.json"))?
+            || exists(&self.root.join("control.sock"))?
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
     pub(super) fn verify(&self) -> Result<(), CandidateError> {
         state::check_private_directory(&self.root).map_err(|_| refused())?;
         let parent = fs::symlink_metadata(&self.root).map_err(|_| refused())?;

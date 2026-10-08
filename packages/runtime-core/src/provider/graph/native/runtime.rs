@@ -626,7 +626,7 @@ pub fn cleanup(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateErr
 pub(super) fn cleanup_guarded(
     candidate: &Candidate,
     run: &str,
-    review: Option<&native_input::Review>,
+    expected: Option<&Receipt>,
     guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
 ) -> Result<Receipt, CandidateError> {
     check_startup(guard)?;
@@ -637,8 +637,8 @@ pub(super) fn cleanup_guarded(
         engine.guest().incarnation(),
         engine.guest().boot_id(),
     )?;
-    if review.is_some_and(|review| *review != receipt.review) {
-        return Err(refused());
+    if let Some(expected) = expected {
+        receipt.check_binding(expected)?;
     }
     let backend = OwnedBackend {
         engine,
@@ -731,6 +731,7 @@ fn cleanup_using_guarded<B: Backend>(
         let resource = &receipt.resources[key];
         let value = inspected(backend, receipt, resource)?.ok_or_else(refused)?;
         super::super::shutdown::terminal(resource, &value, false)?;
+        check_startup(guard)?;
         backend.request(
             Method::DELETE,
             &format!(

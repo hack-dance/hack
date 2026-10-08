@@ -181,7 +181,7 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
         );
     }
     let reply = status(receipt.clone());
-    reply.validate(&receipt).unwrap();
+    reply.validate(&receipt, Action::Status).unwrap();
     let encoded = serde_json::to_value(reply).unwrap();
     for (field, value) in [
         ("kind", json!("graph-control-reply")),
@@ -200,7 +200,7 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
         json!({"state":"running","health":"healthy"});
     serde_json::from_value::<Reply>(bad)
         .unwrap()
-        .validate(&receipt)
+        .validate(&receipt, Action::Status)
         .unwrap();
     for (pointer, value) in [
         ("/version", json!(1)),
@@ -213,7 +213,7 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
         assert!(
             serde_json::from_value::<Reply>(bad)
                 .unwrap()
-                .validate(&receipt)
+                .validate(&receipt, Action::Status)
                 .is_err()
         );
     }
@@ -226,14 +226,14 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
             receipt: receipt.clone(),
         },
     };
-    assert!(cleaned.validate(&receipt).is_err());
+    assert!(cleaned.validate(&receipt, Action::Cleanup).is_err());
     if let Outcome::Cleaned { receipt } = &mut cleaned.result {
         receipt.phase = Phase::Removed;
         for resource in receipt.resources.values_mut() {
             resource.phase = "removed".into();
         }
     }
-    cleaned.validate(&receipt).unwrap();
+    cleaned.validate(&receipt, Action::Cleanup).unwrap();
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn native_stop_details_require_the_exact_journal_membership_and_closed_stage() {
         }}
     });
     let reply: Reply = serde_json::from_value(encoded.clone()).unwrap();
-    reply.validate(&receipt).unwrap();
+    reply.validate(&receipt, Action::Cleanup).unwrap();
     for (pointer, value) in [
         ("/result/code", json!("native_graph_foreground")),
         ("/result/stop_failures/failures/0/service", json!("foreign")),
@@ -269,7 +269,7 @@ fn native_stop_details_require_the_exact_journal_membership_and_closed_stage() {
         assert!(
             serde_json::from_value::<Reply>(bad)
                 .unwrap()
-                .validate(&receipt)
+                .validate(&receipt, Action::Cleanup)
                 .is_err(),
             "{pointer}"
         );
@@ -433,4 +433,273 @@ fn direct_operation_guard_refuses_replaced_lock_path() {
     let _replacement = state::Lock::acquire(&root).unwrap();
     assert!(direct.verify().is_err());
     assert!(root.join("old.lock").exists());
+}
+
+fn admitted(mut receipt: Receipt) -> Receipt {
+    receipt.phase = Phase::ReadyObserved;
+    for (index, resource) in receipt.resources.values_mut().enumerate() {
+        resource.id = Some(format!("{:064x}", index + 1));
+        resource.phase = if resource.kind == Kind::Network {
+            "created"
+        } else {
+            "started"
+        }
+        .into();
+    }
+    receipt.validate(RUN, &receipt.owner).unwrap();
+    receipt
+}
+fn removed(mut receipt: Receipt) -> Receipt {
+    receipt.phase = Phase::Removed;
+    for resource in receipt.resources.values_mut() {
+        resource.phase = "removed".into();
+    }
+    receipt.validate(RUN, &receipt.owner).unwrap();
+    receipt
+}
+fn changed(mut receipt: Receipt, field: &str) -> Receipt {
+    match field {
+        "image" => {
+            receipt.resources.get_mut("container:web").unwrap().image =
+                Some(format!("sha256:{}", "a".repeat(64)))
+        }
+        "id" => receipt.resources.get_mut("container:web").unwrap().id = Some("a".repeat(64)),
+        "readiness" => *receipt.readiness.get_mut("web").unwrap() = Condition::Healthy,
+        "membership" => {
+            let ready = receipt.readiness.remove("web").unwrap();
+            receipt.readiness.insert("foreign".into(), ready);
+            let mut resource = receipt.resources.remove("container:web").unwrap();
+            resource.key = "foreign".into();
+            receipt
+                .resources
+                .insert("container:foreign".into(), resource);
+        }
+        "namespace" => {
+            receipt.review = native_input::Review::new(
+                native_input::Scope {
+                    namespace: &"a".repeat(64),
+                    run: RUN,
+                },
+                receipt.review.compiler_identity().clone(),
+            )
+            .unwrap()
+        }
+        _ => unreachable!(),
+    }
+    receipt.validate(RUN, &receipt.owner).unwrap();
+    receipt
+}
+fn accepted(
+    publication: &owner::Publication,
+    review: &native_input::Review,
+) -> std::os::unix::net::UnixStream {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut stream = loop {
+        if let Some(stream) = publication.accept().unwrap() {
+            break stream;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let input: Request = transport::read(&mut stream, Duration::from_secs(1), 4096).unwrap();
+    input.validate(review).unwrap();
+    stream
+}
+
+#[test]
+fn success_replies_bind_immutable_images_ids_readiness_membership_and_requested_action() {
+    let fixture = Fixture::new();
+    let receipt = admitted(fixture.receipt());
+    for field in ["image", "id", "readiness", "membership", "namespace"] {
+        let reply = status(changed(receipt.clone(), field));
+        assert!(reply.validate(&receipt, Action::Status).is_err(), "{field}");
+        let actual = removed(changed(receipt.clone(), field));
+        let reply = Reply {
+            version: 2,
+            kind: ReplyKind::NativeGraphControlReply,
+            run: RUN.into(),
+            review: receipt.review.review_id().into(),
+            result: Outcome::Cleaned { receipt: actual },
+        };
+        assert!(
+            reply.validate(&receipt, Action::Cleanup).is_err(),
+            "{field}"
+        );
+    }
+    assert!(
+        status(receipt.clone())
+            .validate(&receipt, Action::Cleanup)
+            .is_err()
+    );
+    let reply = Reply {
+        version: 2,
+        kind: ReplyKind::NativeGraphControlReply,
+        run: RUN.into(),
+        review: receipt.review.review_id().into(),
+        result: Outcome::Cleaned {
+            receipt: removed(receipt.clone()),
+        },
+    };
+    reply.validate(&receipt, Action::Cleanup).unwrap();
+    assert!(reply.validate(&receipt, Action::Status).is_err());
+}
+
+#[test]
+fn native_failure_observations_close_nested_fields_in_status_and_cleanup() {
+    let fixture = Fixture::new();
+    let receipt = admitted(fixture.receipt());
+    let cleaned = Reply {
+        version: 2,
+        kind: ReplyKind::NativeGraphControlReply,
+        run: RUN.into(),
+        review: receipt.review.review_id().into(),
+        result: Outcome::Cleaned {
+            receipt: removed(receipt.clone()),
+        },
+    };
+    for (reply, pointer, action) in [
+        (
+            status(receipt.clone()),
+            "/result/snapshot/receipt",
+            Action::Status,
+        ),
+        (cleaned, "/result/receipt", Action::Cleanup),
+    ] {
+        let mut encoded = serde_json::to_value(reply).unwrap();
+        encoded.pointer_mut(pointer).unwrap()["failure"] = json!({
+            "service":"web","observation":{"state":"exited","code":1}
+        });
+        serde_json::from_value::<Reply>(encoded.clone())
+            .unwrap()
+            .validate(&receipt, action)
+            .unwrap();
+        encoded.pointer_mut(pointer).unwrap()["failure"]["observation"]["values"] =
+            json!("private-canary");
+        assert!(serde_json::from_value::<Reply>(encoded).is_err());
+    }
+}
+
+#[test]
+fn authenticated_cleanup_reply_after_retirement_requires_exact_removed_journal_and_paths() {
+    for case in [
+        "valid",
+        "foreign_reply",
+        "foreign_journal",
+        "not_removed",
+        "replaced_socket",
+        "replaced_lock",
+        "replaced_parent",
+    ] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let mut publication =
+            owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
+        std::thread::scope(|scope| {
+            let caller = scope.spawn(|| {
+                request(
+                    &fixture.candidate,
+                    RequestOptions {
+                        run: RUN,
+                        action: Action::Cleanup,
+                    },
+                )
+            });
+            let mut stream = accepted(&publication, &receipt.review);
+            let clean = removed(receipt.clone());
+            let durable = match case {
+                "foreign_journal" => changed(clean.clone(), "image"),
+                "not_removed" => receipt.clone(),
+                _ => clean.clone(),
+            };
+            journal::save(&root, &durable).unwrap();
+            publication.finish().unwrap();
+            match case {
+                "replaced_socket" => {
+                    let _socket =
+                        UnixListener::bind(fixture.owner_root().join("control.sock")).unwrap();
+                    fs::set_permissions(
+                        fixture.owner_root().join("control.sock"),
+                        fs::Permissions::from_mode(0o600),
+                    )
+                    .unwrap();
+                }
+                "replaced_lock" => {
+                    fs::rename(
+                        fixture.owner_root().join("operation.lock"),
+                        fixture.owner_root().join("old.lock"),
+                    )
+                    .unwrap();
+                    let _lock = state::Lock::acquire(&fixture.owner_root()).unwrap();
+                }
+                "replaced_parent" => {
+                    fs::rename(fixture.owner_root(), fixture.root.join("saved-owner")).unwrap();
+                    state::private_directory(&fixture.owner_root()).unwrap();
+                    let _lock = state::Lock::acquire(&fixture.owner_root()).unwrap();
+                }
+                _ => {}
+            }
+            let reply = Reply {
+                version: 2,
+                kind: ReplyKind::NativeGraphControlReply,
+                run: RUN.into(),
+                review: receipt.review.review_id().into(),
+                result: Outcome::Cleaned {
+                    receipt: if case == "foreign_reply" {
+                        changed(clean, "image")
+                    } else {
+                        clean
+                    },
+                },
+            };
+            transport::write(&mut stream, &reply, Duration::from_secs(1)).unwrap();
+            let result = caller.join().unwrap();
+            assert_eq!(result.is_ok(), case == "valid", "{case}");
+        });
+    }
+}
+
+#[test]
+fn stopped_failure_detail_refuses_changed_current_admission_after_request_capture() {
+    for field in ["image", "id", "readiness", "membership", "namespace"] {
+        let fixture = Fixture::new();
+        let receipt = admitted(fixture.receipt());
+        let mut publication =
+            owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        let root = journal::reserve(&fixture.candidate, &receipt).unwrap();
+        std::thread::scope(|scope| {
+            let caller = scope.spawn(|| {
+                request(
+                    &fixture.candidate,
+                    RequestOptions {
+                        run: RUN,
+                        action: Action::Cleanup,
+                    },
+                )
+            });
+            let mut stream = accepted(&publication, &receipt.review);
+            journal::save(&root, &changed(receipt.clone(), field)).unwrap();
+            let reply = Reply {
+                version: 2,
+                kind: ReplyKind::NativeGraphControlReply,
+                run: RUN.into(),
+                review: receipt.review.review_id().into(),
+                result: Outcome::Refused {
+                    code: "engine_protocol".into(),
+                    stop_failures: Some(crate::error::StopFailuresDiagnostic {
+                        version: 1,
+                        failures: vec![crate::error::StopFailureDiagnostic {
+                            service: "web".into(),
+                            stage: crate::error::StopFailureStage::Timeout,
+                        }],
+                    }),
+                },
+            };
+            reply.validate(&receipt, Action::Cleanup).unwrap();
+            transport::write(&mut stream, &reply, Duration::from_secs(1)).unwrap();
+            let error = caller.join().unwrap().unwrap_err();
+            assert!(error.stop_failures.is_none(), "{field}");
+        });
+        publication.finish().unwrap();
+    }
 }

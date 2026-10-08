@@ -15,8 +15,9 @@ checks that reservation, reserved delivery identity and the document budget, the
 synchronizes one private immutable `compose.json` and its manifest. Directory
 permissions are `0700`; private files are `0600`. Current/pending receipts anchor
 the exact manifest and document device, inode and digest. Input revisions and
-document digests stay in private files and are absent from returned generation
-identity and engine labels.
+document digests stay in private files. The private generation handle exposes its
+non-enumerable immutable input revision only for saved down-hook binding validation; public
+reports and engine labels omit it.
 All rendered resources also carry the exact random store owner nonce, so a new
 store cannot silently adopt resources with the same stable Compose namespace.
 Container resources carry the reserved workload discriminator `service` or `job`
@@ -56,7 +57,9 @@ does not prune them or delete persistent data.
 Saved mode reads only saved ownership state and Git/filesystem identity. It neither
 reads authored contents nor resolves environment values. `loadCurrent`,
 `loadPending` and `withLease` support pinned observation. A retained-data `down`
-uses saved generation identity without requiring current credentials. Explicit
+uses saved generation identity. The adapter may opt into fresh finite down hooks
+only when the immutable document carries their saved source-selection binding.
+Explicit recovery and generations without that binding require no current credentials. Explicit
 pending recovery records a recovery token and clears uncertainty only after the
 caller verifies its owned stop completed. No store API deletes persistent data,
 prunes generations, or removes abandoned leases.
@@ -99,7 +102,20 @@ host intent and retains the pending engine effect. Uncertain completion retains
 both. Final source/environment checks and workload/route readiness precede the
 ready receipt; an after hook cannot rebind the running generation.
 
-Saved observation exposes `beforeHooksPending` for either phase and
+Finite `down.before` and `down.after` use a separate `downHooks` callback contract,
+accepted only for a fresh normal down with current running generation, null pending
+operation, null host intent and a freshness callback. Recovery never replays these
+callbacks. Each intent binds phase, exact down operation/token and generation; an
+up/run/recovery callback cannot clear it. The adapter captures both phases' private
+values before the stop journal. Before failure prevents engine effects. After runs
+only after exact owned engine/proxy absence while route claims remain held. A known
+finite nonzero clears only its exact hook intent and retains stop pending; unknown
+completion retains both. Completion requires null host intent at both receipt
+checks around the finalizer. The finalizer rechecks source/env freshness and whole
+owner/proxy absence before claim retirement; a later failure or crash preserves the
+pending recovery generation, including the retirement/receipt publication gap.
+
+Saved observation exposes `beforeHooksPending` for every phase and
 `hostHookPhase`. A legacy token-only receipt decodes as an uncertain before
 intent. Unknown phases refuse without rewriting or clearing the receipt.
 Saved retaining down may

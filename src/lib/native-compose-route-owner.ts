@@ -767,14 +767,32 @@ export async function prepareNativeComposeRouteOwner(input: {
  * Proxy loss leaves claims in place after owned stop. Explicit recovery may retire
  * anchored uncertain attempts only after fresh whole-owner and proxy absence proof.
  */
-export async function releaseNativeComposeSavedRoutes(input: {
+type SavedRouteOperation = {
   readonly owner: Owner;
   readonly saved: readonly NativeComposeSavedRouteDocument[];
   readonly signal?: AbortSignal;
   readonly deadline: number;
   readonly recover?: boolean;
   readonly io?: IO;
-}): Promise<void> {
+};
+
+/** Verify exact saved dispatch absence while retaining every referenced hostname claim. */
+export async function verifyNativeComposeSavedRoutesAbsent(
+  input: SavedRouteOperation
+): Promise<void> {
+  await savedRouteOperation(input, false);
+}
+
+export async function releaseNativeComposeSavedRoutes(
+  input: SavedRouteOperation
+): Promise<void> {
+  await savedRouteOperation(input, true);
+}
+
+async function savedRouteOperation(
+  input: SavedRouteOperation,
+  retire: boolean
+): Promise<void> {
   const opts = Object.freeze({
     ...input,
     owner: Object.freeze({
@@ -827,7 +845,12 @@ export async function releaseNativeComposeSavedRoutes(input: {
           });
         },
       } satisfies Parameters<NativeComposeRouteClaims["release"]>[0];
-      if (opts.recover) {
+      if (!retire) {
+        await claims.verifyAbsent({
+          ...retirement,
+          references: group.map((value) => value.reference),
+        });
+      } else if (opts.recover) {
         await claims.recoverStopped({
           ...retirement,
           references: group.map((value) => value.reference),

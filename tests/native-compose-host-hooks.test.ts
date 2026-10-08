@@ -6,6 +6,7 @@ import {
   type NativeComposeHook,
   selectNativeComposeAfterHooks,
   selectNativeComposeBeforeHooks,
+  selectNativeComposeDownHooks,
 } from "../src/lib/native-compose-host-contract.ts";
 import {
   assertNativeComposeBeforeHookBindings,
@@ -209,16 +210,16 @@ test("timeout reaps a resistant descendant group and blocks later hooks", async 
   expect(await Bun.file(join(root, "later")).exists()).toBe(false);
 });
 
-test("persistent processes, other phases, traversal and unknown normalized fields refuse", () => {
+test("all finite lifecycle phases select while persistent processes, traversal and unknown fields refuse", () => {
   const valid = hook("before", { shell: "true" });
   for (const host of [
-    { down: { before: [valid] } },
-    { down: { after: [valid] } },
     { processes: { worker: valid } },
     { up: { before: [{ ...valid, cwd: "../outside" }] } },
     { up: { before: [{ ...valid, persistent: true }] } },
   ]) {
-    expect(() => selectNativeComposeBeforeHooks({ host })).toThrow("finite up");
+    expect(() => selectNativeComposeBeforeHooks({ host })).toThrow(
+      "finite lifecycle"
+    );
   }
   expect(
     selectNativeComposeBeforeHooks({ host: { up: { before: [valid] } } })
@@ -227,6 +228,21 @@ test("persistent processes, other phases, traversal and unknown normalized field
   const both = { host: { up: { before: [valid], after: [after] } } };
   expect(selectNativeComposeBeforeHooks(both)).toEqual([valid]);
   expect(selectNativeComposeAfterHooks(both)).toEqual([after]);
+  const downBefore = hook("down-before", { shell: "true" });
+  const downAfter = hook("down-after", { shell: "true" });
+  expect(
+    selectNativeComposeDownHooks({
+      host: {
+        ...both.host,
+        down: { before: [downBefore], after: [downAfter] },
+      },
+    })
+  ).toEqual({ before: [downBefore], after: [downAfter] });
+  expect(() =>
+    selectNativeComposeDownHooks({
+      host: { up: { before: [valid] }, down: { after: [valid] } },
+    })
+  ).toThrow();
   expect(() =>
     selectNativeComposeAfterHooks({
       host: { up: { before: [valid], after: [valid] } },

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmod, mkdtemp, readdir, rm, symlink, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createNativeComposeProbe, type NativeComposeOwnershipOptions } from "../src/lib/native-compose-ownership.ts";
+import { assertNativeComposeOwned, type NativeComposeOwnershipOptions } from "../src/lib/native-compose-ownership.ts";
 import { exec } from "../src/lib/shell.ts";
 import { replayProcessPolicyInitialOwnership } from "./e2e/native-process-policy-initial-replay.ts";
 import {
@@ -136,7 +136,7 @@ test("malformed UTF-8 keeps the caller's exact bytes/exit and makes replay unava
     expect(actual).toEqual(bytes);
     expect(await new Response(child.stderr).text()).toBe("");
     process.env.PATH = prepared.path;
-    await expect(createNativeComposeProbe({ timeoutMs: 3000 })(list("container"))).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_PROBE" });
+    await expect(assertNativeComposeOwned({ ...selection, timeoutMs: 3000 })).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_PROBE" });
     await expect(readProcessPolicyInitialTrace(prepared.directory)).rejects.toThrow("trace unavailable; values omitted");
     for (const name of await readdir(prepared.directory)) {
       expect(await Bun.file(join(prepared.directory, name)).text()).not.toContain("�");

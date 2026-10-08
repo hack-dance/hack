@@ -23,7 +23,32 @@ enum InputKind {
 #[serde(deny_unknown_fields)]
 struct Failure {
     service: String,
+    #[serde(deserialize_with = "decode_failure_observation")]
     observation: Observation,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub(super) enum WireObservation {
+    Created {},
+    Running { health: execution::Health },
+    Exited { code: i64 },
+    Dead {},
+}
+impl From<WireObservation> for Observation {
+    fn from(value: WireObservation) -> Self {
+        match value {
+            WireObservation::Created {} => Self::Created,
+            WireObservation::Running { health } => Self::Running { health },
+            WireObservation::Exited { code } => Self::Exited { code },
+            WireObservation::Dead {} => Self::Dead,
+        }
+    }
+}
+fn decode_failure_observation<'de, D: serde::Deserializer<'de>>(
+    reader: D,
+) -> Result<Observation, D::Error> {
+    WireObservation::deserialize(reader).map(Into::into)
 }
 
 /// Hash-only native provenance plus value-free resource ownership. No replay authority,
@@ -45,6 +70,28 @@ pub struct Receipt {
     pub(super) terminal: BTreeMap<String, super::super::shutdown::Terminal>,
 }
 impl Receipt {
+    /// Mutable phases and terminal evidence may advance; admitted identity cannot.
+    pub(super) fn check_binding(&self, expected: &Self) -> Result<(), CandidateError> {
+        self.validate(expected.review.scope().run, &expected.owner)?;
+        if self.review != expected.review
+            || self.boot != expected.boot
+            || self.readiness != expected.readiness
+            || self.resources.keys().ne(expected.resources.keys())
+            || self.resources.iter().any(|(key, resource)| {
+                let prior = &expected.resources[key];
+                resource.kind != prior.kind
+                    || resource.key != prior.key
+                    || resource.name != prior.name
+                    || resource.id != prior.id
+                    || resource.image != prior.image
+                    || resource.networks != prior.networks
+                    || resource.outbound != prior.outbound
+            })
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
     pub fn phase(&self) -> &Phase {
         &self.phase
     }

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { join } from "node:path";
+import { resolveTestConfigCompilerBinary } from "../scripts/check-test-config-compiler.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import { renderNativeCompose } from "../src/lib/native-compose-renderer.ts";
 import { compileNativeConfig } from "../src/lib/native-config-compiler.ts";
@@ -9,6 +9,7 @@ import { composeFixture } from "./helpers/native-compose.ts";
 
 const configTest =
   process.env.HACK_TEST_COMPOSE_CONFIG === "1" ? test : test.skip;
+const compiler = resolveTestConfigCompilerBinary();
 
 /** Uses configuration normalization only: no daemon connection, container start, pull or build. */
 async function normalized(opts: {
@@ -141,7 +142,7 @@ configTest(
     for (const profiles of [[], ["qa"]]) {
       const compiled = await compileNativeConfig({
         input: new TextEncoder().encode(JSON.stringify(mapped.candidate)),
-        binary: join(import.meta.dir, "../dist/hack-config-compiler"),
+        binary: compiler,
         profiles,
       });
       expect(compiled.ok).toBe(true);
@@ -190,6 +191,101 @@ configTest(
       expect(JSON.stringify(actual)).not.toContain(
         "hostile-interpolation-value"
       );
+    }
+  }
+);
+
+configTest(
+  "one authored bridge keeps internal policy and static aliases through compiler and Compose normalization",
+  async () => {
+    for (const internal of [true, false]) {
+      const source = {
+        name: "fixture",
+        services: {
+          web: {
+            image: "fixture/web:1",
+            networks: { private: { aliases: ["web-api"] } },
+          },
+          inactive: {
+            image: "fixture/optional:1",
+            profiles: ["qa"],
+            networks: { private: { aliases: ["qa-api"] } },
+          },
+        },
+        networks: {
+          private: { ...(internal ? { driver: "bridge" } : {}), internal },
+        },
+      };
+      const mapped = mapLegacyNativeImport({
+        configText: '{"name":"fixture"}',
+        composeText: JSON.stringify(source),
+      });
+      expect(mapped.report.complete).toBe(true);
+      expect(mapped.candidate).toBeDefined();
+      for (const profiles of [[], ["qa"]]) {
+        const compiled = await compileNativeConfig({
+          input: new TextEncoder().encode(JSON.stringify(mapped.candidate)),
+          binary: compiler,
+          profiles,
+        });
+        expect(compiled.ok).toBe(true);
+        if (!compiled.ok) {
+          continue;
+        }
+        const fixture = composeFixture({
+          services: {
+            web: { image: "fixture/web:1" },
+            inactive: { image: "fixture/optional:1" },
+          },
+        });
+        const selected = profiles.length ? ["web", "inactive"] : ["web"];
+        fixture.environmentPlan.workloads = Object.fromEntries(
+          selected.map((name) => [name, {}])
+        );
+        fixture.managedValues = Object.fromEntries(
+          selected.map((name) => [name, {}])
+        );
+        const generated = renderNativeCompose({
+          ...fixture,
+          plan: compiled.plan,
+        });
+        const original = await normalized({
+          json: JSON.stringify(source),
+          profiles,
+        });
+        const actual = await normalized({ json: generated.json, profiles });
+        const sourceNetworks = original.networks;
+        const generatedNetworks = actual.networks;
+        expect(isRecord(sourceNetworks)).toBe(true);
+        expect(isRecord(generatedNetworks)).toBe(true);
+        if (!(isRecord(sourceNetworks) && isRecord(generatedNetworks))) {
+          continue;
+        }
+        const sourceBridge = sourceNetworks.private;
+        const generatedBridge = generatedNetworks.private;
+        expect(isRecord(sourceBridge)).toBe(true);
+        expect(isRecord(generatedBridge)).toBe(true);
+        if (!(isRecord(sourceBridge) && isRecord(generatedBridge))) {
+          continue;
+        }
+        expect(sourceBridge.driver ?? "bridge").toBe("bridge");
+        expect(sourceBridge.internal ?? false).toBe(internal);
+        expect(generatedBridge.driver).toBe("bridge");
+        expect(generatedBridge.internal ?? false).toBe(internal);
+        for (const name of selected) {
+          const sourceService = isRecord(original.services)
+            ? original.services[name]
+            : undefined;
+          const generatedService = isRecord(actual.services)
+            ? actual.services[name]
+            : undefined;
+          expect(isRecord(sourceService)).toBe(true);
+          expect(isRecord(generatedService)).toBe(true);
+          if (isRecord(sourceService) && isRecord(generatedService)) {
+            expect(sourceService.networks).toEqual(generatedService.networks);
+          }
+        }
+      }
     }
   }
 );
@@ -270,7 +366,7 @@ configTest(
     for (const profiles of [[], ["qa"]]) {
       const compiled = await compileNativeConfig({
         input: new TextEncoder().encode(JSON.stringify(mapped.candidate)),
-        binary: join(import.meta.dir, "../dist/hack-config-compiler"),
+        binary: compiler,
         profiles,
       });
       expect(compiled.ok).toBe(true);

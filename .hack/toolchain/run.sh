@@ -12,7 +12,11 @@ if [ "$#" -gt 0 ]; then shift; fi
 case "$task" in
   models) exec bun run test:models "$@" ;;
   install) install_deps ;;
-  test) install_deps; exec bun test "$@" ;;
+  test)
+    install_deps
+    if [ "$#" -eq 0 ]; then bun run test:preflight; fi
+    exec bun test "$@"
+    ;;
   check) install_deps; bun run typecheck; exec bun run check ;;
   rust-check) cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check; exec cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir /build/rust --all-targets --all-features --jobs 2 -- -D warnings ;;
   rust) exec cargo test --all-features --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir /build/rust --jobs 2 "$@" ;;

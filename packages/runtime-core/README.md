@@ -99,7 +99,10 @@ changed network policy refuse before cleanup effects. Cleanup preflights every
 stop, retains terminal observations before deletes, removes the verified empty project
 network after containers, and retires private payloads
 only after the bound container is absent. Failed/uncertain attempts retain their
-reservations. Shared admission counts native and Compose attempts together; a build
+reservations. Cleanup retries preserve committed stop/removal progress: terminal
+instances are not stopped again, and fully Removed inventories are inspected without
+rewriting their receipt. A restarted stopped instance or reappearing removed resource
+refuses before any cleanup effect. Shared admission counts native and Compose attempts together; a build
 with native support accepts validated, fully removed same-owner history from an
 older boot for capacity purposes only. Active, malformed or foreign old-boot
 records still refuse; they grant no inspection, cleanup or restore authority. A build
@@ -111,6 +114,14 @@ this same subset. Its private `native-graph-owner` record and authenticated v2
 `native-graph-control` status/cleanup protocol bind the native review, exact
 process incarnation, directory, socket, file and retained per-run lock. Direct
 run/cleanup and foreground publication exclude each other under that lock.
+New publications use a closed version3 owner record with independently captured
+native host boot time. Live authentication rechecks that boot together with the
+existing exact process and filesystem identities. The closed version2 live-owner
+decoder remains available without inferring host boot from PID birth or guest
+receipt boot. Version2 records reject the new field, and version3 records require
+it. Native runtime receipts and the authenticated control/ready wire remain v2;
+Compose receipt and owner formats remain unchanged. This provenance alone grants
+no dead-owner recovery authority.
 Cancellation fences startup before admission and subsequent effects. Cleanup
 retains stop failures by admitted workload name, and retires the publication only
 after exact cleanup succeeds. Replies bind their requested action and immutable

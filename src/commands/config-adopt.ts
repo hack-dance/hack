@@ -8,6 +8,7 @@ import {
 import { optJson, optPath } from "../cli/options.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "../lib/compose-startup-budget.ts";
+import { runLegacyComposeRetainedOperation } from "../lib/native-compose-adoption-execution.ts";
 import {
   LegacyComposeAdoptedGenerationError,
   type LegacyComposeAdoptedGenerationStore,
@@ -100,12 +101,22 @@ async function adoptPrepared(
     );
   }
   if (opts.stop) {
+    const deadline = Date.now() + resolveComposeStartupTimeoutMs();
     const code = await store.withPreparationStop({
       generation,
       recover: opts.recover,
+      deadline,
       run: async (input) => {
         if (opts.signal.aborted) {
           throw new Error("Legacy adoption cancelled; values omitted.");
+        }
+        if (input.retainedPlan.requiresV5) {
+          return await runLegacyComposeRetainedOperation({
+            input,
+            operation: "stop",
+            deadline,
+            signal: opts.signal,
+          });
         }
         return await run(
           [

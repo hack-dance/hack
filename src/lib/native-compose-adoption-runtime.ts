@@ -1,5 +1,6 @@
 import { isRecord } from "./guards.ts";
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
+import type { LegacyComposeReadinessState } from "./native-compose-adoption-readiness.ts";
 import { createNativeComposeProbe } from "./native-compose-ownership.ts";
 
 const ID = /^[a-f0-9]{64}$/;
@@ -52,7 +53,7 @@ export async function inspectLegacyComposeRuntimeConfig(opts: {
   const probe = createNativeComposeProbe(opts);
   const expectedFiles = [
     opts.composeFile,
-    ...(opts.binding.binding_version === 2
+    ...(opts.binding.binding_version === 2 || opts.binding.binding_version === 4
       ? opts.binding.composeFiles.slice(1)
       : []),
   ];
@@ -173,6 +174,71 @@ export async function inspectLegacyComposeContainerStates(opts: {
         running: value.running,
         paused: value.paused,
         status: value.status,
+      })
+    );
+  }
+  return Object.freeze(result);
+}
+
+/**
+ * Fresh original-ID-only readiness acquisition. Does not read image defaults,
+ * health output or container environment. The mutation store separately rechecks
+ * exact resource/source authority before effects and before clearing its journal.
+ */
+export async function inspectLegacyComposeReadiness(opts: {
+  readonly binding: LegacyComposeVerifiedBinding;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+}): Promise<readonly LegacyComposeReadinessState[]> {
+  const probe = createNativeComposeProbe(opts);
+  const result: LegacyComposeReadinessState[] = [];
+  for (const container of opts.binding.containers) {
+    if (!ID.test(container.id)) {
+      refuse();
+    }
+    const value = row(
+      await probe([
+        "container",
+        "inspect",
+        "--format",
+        '{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}""{{end}}}',
+        container.id,
+      ])
+    );
+    if (
+      Object.keys(value).sort().join() !== "health,id,paused,running,status" ||
+      value.id !== container.id ||
+      typeof value.running !== "boolean" ||
+      typeof value.paused !== "boolean" ||
+      typeof value.status !== "string" ||
+      ![
+        "created",
+        "running",
+        "paused",
+        "restarting",
+        "removing",
+        "exited",
+        "dead",
+      ].includes(value.status) ||
+      !["", "starting", "healthy", "unhealthy"].includes(String(value.health))
+    ) {
+      refuse();
+    }
+    if (
+      value.health !== "" &&
+      value.health !== "starting" &&
+      value.health !== "healthy" &&
+      value.health !== "unhealthy"
+    ) {
+      refuse();
+    }
+    result.push(
+      Object.freeze({
+        id: container.id,
+        running: value.running,
+        paused: value.paused,
+        status: value.status,
+        health: value.health,
       })
     );
   }

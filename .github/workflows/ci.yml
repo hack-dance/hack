@@ -28,7 +28,8 @@ jobs:
             platform: darwin
             arch: x64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # Intel needs time for full compiler, schema and bundle verification.
+    timeout-minutes: ${{ matrix.os == 'macos-15-intel' && 30 || 15 }}
     permissions:
       contents: read
     steps:
@@ -52,6 +53,8 @@ jobs:
       - run: bun run build:config-compiler
       - name: Test private file sources and owner with the matching compiler
         run: bun test tests/native-compose-file-sources.test.ts tests/native-compose-file-owner.test.ts
+      - name: Test explicit imported jobs and readiness with the matching compiler
+        run: HACK_TEST_NATIVE_COMPILER_BINARY="$PWD/dist/hack-config-compiler" bun test tests/native-config-import-jobs.test.ts tests/native-config-import-readiness.test.ts
       - name: Independently validate generated schema shape corpus
         run: |
           python3 -m venv "$RUNNER_TEMP/config-schema"
@@ -274,6 +277,8 @@ jobs:
         run: HACK_TEST_COMPOSE_CONFIG=1 bun test tests/native-compose-renderer-config.test.ts --test-name-pattern '^legacy dollar-pair argv matches real compiler plan and Compose normalization$'
       - name: Verify Compose string argv through real compiler and Compose normalization
         run: HACK_TEST_COMPOSE_CONFIG=1 bun test tests/native-compose-renderer-config.test.ts --test-name-pattern '^(Compose string words match real compiler and renderer exec argv for selected profiles|raw unpaired dollars cannot become accepted pairs after Compose word splitting)$'
+      - name: Verify owned bridge policy and aliases through real compiler and Compose normalization
+        run: HACK_TEST_COMPOSE_CONFIG=1 bun test tests/native-compose-renderer-config.test.ts --test-name-pattern '^one authored bridge keeps internal policy and static aliases through compiler and Compose normalization$'
       - name: Run local and Docker E2E
         env:
           HACK_E2E_CLI_BIN: ${{ github.workspace }}/dist/hack

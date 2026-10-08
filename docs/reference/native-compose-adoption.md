@@ -32,6 +32,11 @@ static directory checkout receipts retain version 1 and their original wire shap
 Canonical generated-source adoption uses version 3 in either qualified layout.
 An admitted typed local file selects version 4; existing versions 1–3 keep their
 wire shapes and their original local-input refusal.
+One static project-owned custom bridge selects private manifest and receipt
+version 6 with resource binding version 3. This owner refuses generated managed
+sources, typed local inputs and dependency or health declarations until a
+combined saved-source and lifecycle proof qualifies them. Versions 1–4 do not
+gain custom-bridge authority; an older reader refuses the version 6 receipt.
 
 The static retained-container slice also inspects relevant filenames in the
 verified primary checkout when local inheritance is enabled. Managed-env,
@@ -75,6 +80,38 @@ This prerequisite produces a private identity intent, not a native candidate or
 compiler acceptance. The default import command still refuses volumes and mounts.
 
 ## Existing resource verification
+
+The version 5 retained owner supports the closed started/explicit exec-healthy
+subset above without recreating containers. It journals the whole original
+selection, starts exact original IDs in dependency order, and waits for an
+authored healthy edge before starting its dependent. A started edge does not
+wait for health; final successful startup still requires every explicit probe
+to be healthy. Stop uses reverse dependency order; restart stops in reverse
+order before starting through the same readiness gates. Partial graph selection
+refuses before a journal or effect. The same ordering applies to explicit
+`config adopt --stop` and interrupted stop recovery.
+
+Each effect rechecks the held source, original resource and receipt authority.
+Version 5 requires one finite operation deadline; all source, configuration and
+resource reacquisitions use its remaining clock, including final verification.
+Fresh bounded original-ID observations and the shared process runner use one
+operation deadline and cancellation owner. Failure, drift, cancellation or
+unverified final readiness retains the pending journal; only explicit verified
+stop recovery can clear it. These rechecks do not freeze external editors or
+the engine atomically. Public output remains field/count/status metadata;
+capabilities and authored probe arguments are private. Prior versions 1–4 keep
+their existing execution behavior, and older upgraded owners refuse version 5
+before engine/key reads. Unmodified older launchers still require the previously
+documented upgrade boundary. Completed-job dependencies and container recreation
+remain unsupported required follow-up work.
+
+The maintained `native-compose-adoption-dependency-worktrees` selector exercises
+an explicit exec-healthy edge and a short started edge whose target has no health
+probe. It uses two original SQL volumes and checks actual ordered ID starts,
+unchanged-source partial stop recovery, active-candidate raw drift refusal and
+same-identity byte repair, separate rollback and
+exact owned cleanup. It requires the current compiled CLI and companion compiler;
+it does not qualify completed jobs or container recreation.
 
 The version 4 typed-local slice reads optional `.hack/hack.local.json` at the
 selected checkout and verified inherited primary in the same issued private source
@@ -121,16 +158,26 @@ exposes names rather than immutable IDs; creation timestamps alone are not a
 sufficient ownership token. Docker [refuses removal of a referenced volume](https://docs.docker.com/reference/cli/docker/volume/rm/),
 so retaining and rechecking the referencing container IDs matters.
 
-The existing default bridge network must also match its Compose labels, immutable
-ID and creation timestamp. Every retained original must configure that exact
-network ID; active endpoint membership must exactly match the running originals.
+The selected Compose bridge must match its project and logical labels, immutable
+ID, local bridge driver, internal policy and creation timestamp. Version 6
+requires one explicitly named, project-owned, non-default bridge with one
+explicit attachment per service and static, unique aliases. Every retained
+original must configure that exact network ID; active endpoint membership must
+exactly match the running originals. Its active endpoint aliases must equal
+the authored aliases plus the original container and service names.
 Stopped originals remain bound through their configured network IDs even though
-Docker removes their active endpoints. This transient running state is not saved
-in the resource binding. Other authored
-network policies remain unsupported. Engine ID, resource inventories and source
+Docker removes their active endpoints. A stopped version 6 endpoint may expose
+no aliases, but cannot acquire a different configured network ID. This transient
+running state is not saved in the resource binding. Other authored network
+policies remain unsupported. Engine ID, resource inventories and source
 bytes are rechecked, and acquisition compares two complete private observations.
 The Docker routing environment is captured for later comparison. Queries never
-request container environment or image configuration. Execution admission also
+request container environment or image configuration. This retained-resource authority
+keeps the original bridge and container IDs through stop, saved restart,
+recovery and rollback; it does not authorize a later newly created native
+generation to take over those identities. That transition needs a separate
+topology and data acceptance proof.
+Execution admission also
 compares Compose configuration hashes from the saved ordered sources with the
 engine-created `com.docker.compose.config-hash` label on each original container.
 Those private digests never enter reports, authored files or resource labels.

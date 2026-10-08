@@ -7,6 +7,7 @@ import {
   nativeAcquisitionPlanningRequired,
   nativeAcquisitionSourceMatches,
 } from "./native-acquisition-plan-protocol.ts";
+import { beginNativeCpuChild } from "./native-cpu-diagnostics.ts";
 import {
   type NativeHostBindingResolution,
   nativeEndpointEnvironmentMatches,
@@ -971,9 +972,15 @@ async function invokeCompiler(opts: {
   }
   let timedOut = false;
   let cancelled = false;
+  let settled = false;
+  let stopped = false;
+  const observeCpu = beginNativeCpuChild(child, "compiler");
   const io = new AbortController();
   const kill = () => {
-    killOwnedCompiler({ child, ownsProcessGroup });
+    if (!(settled || stopped)) {
+      stopped = true;
+      killOwnedCompiler({ child, ownsProcessGroup });
+    }
     io.abort();
   };
   const cancel = () => {
@@ -996,6 +1003,9 @@ async function invokeCompiler(opts: {
       errorRead,
       child.exited,
     ]);
+    // Reaped leader plus closed streams releases the group. Leader exit alone
+    // cannot disarm cleanup while an owned descendant holds inherited pipes.
+    settled = true;
     throwIfCompilerInterrupted({ cancelled, timedOut });
     return { output, exitCode };
   } catch (error: unknown) {
@@ -1010,9 +1020,15 @@ async function invokeCompiler(opts: {
   } finally {
     clearTimeout(timer);
     opts.signal?.removeEventListener("abort", cancel);
-    // A wrapper may leave descendants holding the pipes after the leader exits.
     kill();
-    await Promise.allSettled([outputRead, errorRead, child.exited]);
+    const completion = await Promise.allSettled([
+      outputRead,
+      errorRead,
+      child.exited,
+    ]);
+    observeCpu(
+      completion[2].status === "fulfilled" ? completion[2].value : undefined
+    );
   }
 }
 

@@ -2,11 +2,13 @@ import {
   chmod,
   lstat,
   mkdir,
+  open,
   readFile,
   rename,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isRecord } from "../../../src/lib/guards.ts";
 import { createNativeComposeProbe } from "../../../src/lib/native-compose-ownership.ts";
 import { setProjectEnvValue } from "../../../src/lib/project-env-config.ts";
@@ -23,6 +25,15 @@ import {
   type Scenario,
   type ScenarioContext,
 } from "../harness.ts";
+import {
+  adoptionDependencyHealthcheck,
+  assertAdoptionDependencyControl,
+  assertAdoptionDependencyHealthcheck,
+} from "./native-compose-adoption-dependency-inputs.ts";
+import {
+  type AdoptionDependencyFirstPrepare,
+  captureAdoptionDependencyFirstPrepare,
+} from "./native-compose-adoption-dependency-staged-read.ts";
 import {
   prepareTypedLocalAdoptionFixtureSources,
   typedLocalAdoptionFixtureSourceSnapshot,
@@ -84,6 +95,8 @@ type Instance = {
   readonly sourceMode?: "canonical-generated";
   readonly argvMode?: "string-entrypoint" | "string-cleared";
   readonly typedLocal?: true;
+  readonly ownedNetwork?: true;
+  readonly dependency?: "service_started" | "service_healthy";
 };
 type Observation = {
   readonly id: string;
@@ -98,6 +111,123 @@ type Snapshot = {
   };
   readonly source: string;
 };
+function fixtureNetworkName(instance: Instance): string {
+  return `${instance.name}_${instance.ownedNetwork ? "private" : "default"}`;
+}
+function networkPolicyMatches(
+  instance: Instance,
+  row: Record<string, unknown>
+) {
+  return (
+    row.name === fixtureNetworkName(instance) &&
+    row.logical === (instance.ownedNetwork ? "private" : "default") &&
+    (!instance.ownedNetwork ||
+      (row.driver === "bridge" &&
+        row.scope === "local" &&
+        row.internal === true))
+  );
+}
+
+/** Pure exact-ID fixture oracle; a stopped bridge must have no remaining members. */
+export function assertAdoptionBridgeObservation(opts: {
+  readonly instance: Instance;
+  readonly id: string;
+  readonly members: readonly string[];
+  readonly row: unknown;
+}) {
+  const { instance, id, members, row } = opts;
+  if (!(ID.test(id) && isRecord(row))) {
+    refused();
+  }
+  if (
+    row.id !== id ||
+    !networkPolicyMatches(instance, row) ||
+    !Array.isArray(row.members) ||
+    row.members.some(
+      (member) => typeof member !== "string" || !ID.test(member)
+    ) ||
+    new Set(row.members).size !== row.members.length ||
+    JSON.stringify([...row.members].sort()) !==
+      JSON.stringify([...members].sort())
+  ) {
+    refused();
+  }
+}
+
+const BRIDGE_INSPECT_FORMAT = `{"id":{{json .Id}},"name":{{json .Name}},"logical":{{json (index .Labels "com.docker.compose.network")}},"internal":{{json .Internal}},"driver":{{json .Driver}},"scope":{{json .Scope}},"members":[{{$first := true}}{{range $id,$c := .Containers}}{{if not $first}},{{end}}{{$first = false}}{{json $id}}{{end}}]}`;
+
+/** The real inspection request and the policy oracle share one fixed row contract. */
+export async function inspectAdoptionBridge(opts: {
+  readonly instance: Instance;
+  readonly id: string;
+  readonly members: readonly string[];
+  readonly probe: (args: readonly string[]) => Promise<string>;
+}) {
+  const row = object(
+    await opts.probe([
+      "network",
+      "inspect",
+      "--format",
+      BRIDGE_INSPECT_FORMAT,
+      opts.id,
+    ])
+  );
+  assertAdoptionBridgeObservation({
+    instance: opts.instance,
+    id: opts.id,
+    members: opts.members,
+    row,
+  });
+}
+
+/** A retained original may lose stopped aliases, never a running alias or bridge ID. */
+export function assertAdoptionEndpointObservation(opts: {
+  readonly instance: Instance;
+  readonly networkId: string;
+  readonly container: Observation;
+  readonly running: boolean;
+  readonly row: unknown;
+}) {
+  const { instance, networkId, container, running, row } = opts;
+  const expectedAliases = [
+    `${instance.name}-${container.service}-1`,
+    container.service,
+    container.service === "db" ? "db-reader" : "worker-reader",
+  ].sort();
+  const endpoint =
+    isRecord(row) && Array.isArray(row.networks) ? row.networks[0] : undefined;
+  if (
+    !(
+      ID.test(networkId) &&
+      container.service &&
+      ["db", "worker"].includes(container.service) &&
+      isRecord(row)
+    )
+  ) {
+    refused();
+  }
+  if (
+    row.id !== container.id ||
+    row.running !== running ||
+    !Array.isArray(row.networks) ||
+    row.networks.length !== 1 ||
+    !isRecord(endpoint) ||
+    endpoint.name !== fixtureNetworkName(instance) ||
+    endpoint.id !== networkId ||
+    !(
+      (Array.isArray(endpoint.aliases) &&
+        endpoint.aliases.every((alias) => typeof alias === "string") &&
+        new Set(endpoint.aliases).size === endpoint.aliases.length &&
+        JSON.stringify([...endpoint.aliases].sort()) ===
+          JSON.stringify(expectedAliases)) ||
+      (!running &&
+        (endpoint.aliases === null ||
+          (Array.isArray(endpoint.aliases) && endpoint.aliases.length === 0)))
+    )
+  ) {
+    refused();
+  }
+}
 function refused(): never {
   throw new Error(
     "Adoption worktree fixture ownership or data check failed; values omitted."
@@ -266,8 +396,7 @@ function validateOwnedObservation(opts: {
     if (
       typeof row.id !== "string" ||
       !ID.test(row.id) ||
-      row.name !== `${opts.instance.name}_default` ||
-      row.logical !== "default"
+      !networkPolicyMatches(opts.instance, row)
     ) {
       refused();
     }
@@ -343,6 +472,12 @@ async function writeLegacy(instance: Instance, image: string) {
             POSTGRES_HOST_AUTH_METHOD: "trust",
           },
           volumes: ["data:/var/lib/postgresql/data"],
+          ...(instance.ownedNetwork
+            ? { networks: { private: { aliases: ["db-reader"] } } }
+            : {}),
+          ...(instance.dependency === "service_healthy"
+            ? { healthcheck: adoptionDependencyHealthcheck }
+            : {}),
         },
         worker: {
           image,
@@ -356,9 +491,29 @@ async function writeLegacy(instance: Instance, image: string) {
             ? [WORKER_SCRIPT]
             : (stringSource?.command ?? LITERAL_SOURCE_COMMAND),
           stop_grace_period: "15s",
+          ...(instance.ownedNetwork
+            ? { networks: { private: { aliases: ["worker-reader"] } } }
+            : {}),
+          ...(instance.dependency
+            ? {
+                depends_on:
+                  instance.dependency === "service_started"
+                    ? ["db"]
+                    : {
+                        db: {
+                          condition: instance.dependency,
+                          required: true,
+                          restart: false,
+                        },
+                      },
+              }
+            : {}),
         },
       },
       volumes: { data: { name: `${instance.name}_data` } },
+      ...(instance.ownedNetwork
+        ? { networks: { private: { driver: "bridge", internal: true } } }
+        : {}),
     })
   );
 }
@@ -367,9 +522,30 @@ function formats(kind: Kind): string {
     return `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"nativeNames":[{{$first := true}}{{range $name,$value := .Config.Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}],"service":{{json (index .Config.Labels "com.docker.compose.service")}},"workingDir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"configFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{json $m.Name}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}]}`;
   }
   if (kind === "network") {
-    return `{"id":{{json .Id}},"name":{{json .Name}},"createdAt":{{json .Created}},"project":{{json (index .Labels "${PROJECT_LABEL}")}},"nativeNames":[{{$first := true}}{{range $name,$value := .Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}],"logical":{{json (index .Labels "com.docker.compose.network")}}}`;
+    return `{"id":{{json .Id}},"name":{{json .Name}},"createdAt":{{json .Created}},"project":{{json (index .Labels "${PROJECT_LABEL}")}},"nativeNames":[{{$first := true}}{{range $name,$value := .Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}],"logical":{{json (index .Labels "com.docker.compose.network")}},"driver":{{json .Driver}},"scope":{{json .Scope}},"internal":{{json .Internal}}}`;
   }
   return `{"name":{{json .Name}},"createdAt":{{json .CreatedAt}},"project":{{json (index .Labels "${PROJECT_LABEL}")}},"nativeNames":[{{$first := true}}{{range $name,$value := .Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}],"storage":{{json (index .Labels "com.docker.compose.volume")}}}`;
+}
+
+function linkedFixtureFeatures(opts: {
+  readonly ownedNetwork: boolean;
+  readonly dependencies: boolean;
+  readonly role: "first" | "second";
+}): Partial<Pick<Instance, "ownedNetwork" | "dependency">> {
+  if (opts.ownedNetwork && opts.dependencies) {
+    refused();
+  }
+  return {
+    ...(opts.ownedNetwork ? { ownedNetwork: true as const } : {}),
+    ...(opts.dependencies
+      ? {
+          dependency:
+            opts.role === "first"
+              ? ("service_healthy" as const)
+              : ("service_started" as const),
+        }
+      : {}),
+  };
 }
 
 async function prepareFixtureInputs(
@@ -378,9 +554,27 @@ async function prepareFixtureInputs(
     readonly generated?: boolean;
     readonly typedLocal?: boolean;
     readonly stringArgv?: boolean;
+    readonly ownedNetwork?: boolean;
+    readonly dependencies?: boolean;
   } = {}
 ) {
-  const { generated = false, typedLocal = false, stringArgv = false } = options;
+  const {
+    generated = false,
+    typedLocal = false,
+    stringArgv = false,
+    ownedNetwork = false,
+    dependencies = false,
+  } = options;
+  const firstFeatures = linkedFixtureFeatures({
+    ownedNetwork,
+    dependencies,
+    role: "first",
+  });
+  const secondFeatures = linkedFixtureFeatures({
+    ownedNetwork,
+    dependencies,
+    role: "second",
+  });
   expect({
     that: resolveCliSpawnArgs([]).length === 1,
     message:
@@ -406,6 +600,7 @@ async function prepareFixtureInputs(
     ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
     ...(stringArgv ? { argvMode: "string-entrypoint" as const } : {}),
     ...(typedLocal ? { typedLocal: true as const } : {}),
+    ...(ownedNetwork ? { ownedNetwork: true as const } : {}),
   };
   if ((await probe(["info", "--format", "{{.OSType}}"])) !== "linux") {
     refused();
@@ -435,6 +630,7 @@ async function prepareFixtureInputs(
     ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
     ...(stringArgv ? { argvMode: "string-entrypoint" as const } : {}),
     ...(typedLocal ? { typedLocal: true as const } : {}),
+    ...firstFeatures,
   };
   const second: Instance = {
     root: await addLinkedWorktree({ fixture, branch: "adoption-beta" }),
@@ -443,6 +639,7 @@ async function prepareFixtureInputs(
     ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
     ...(stringArgv ? { argvMode: "string-cleared" as const } : {}),
     ...(typedLocal ? { typedLocal: true as const } : {}),
+    ...secondFeatures,
   };
   for (const instance of [first, second]) {
     await writeLegacy(instance, image);
@@ -583,6 +780,25 @@ function createFixtureRuntime(
     });
     await owned(instance, "container", id);
   };
+  const checkHealthcheck = async (instance: Instance) => {
+    if (instance.dependency !== "service_healthy") {
+      return;
+    }
+    const id = container(instance, "db");
+    await owned(instance, "container", id);
+    assertAdoptionDependencyHealthcheck(
+      object(
+        await probe([
+          "container",
+          "inspect",
+          "--format",
+          '{"test":{{json .Config.Healthcheck.Test}},"interval":{{json .Config.Healthcheck.Interval}},"timeout":{{json .Config.Healthcheck.Timeout}},"retries":{{json .Config.Healthcheck.Retries}}}',
+          id,
+        ])
+      )
+    );
+    await owned(instance, "container", id);
+  };
   const sql = async (instance: Instance, query: string) =>
     (
       await probe([
@@ -599,11 +815,78 @@ function createFixtureRuntime(
         query,
       ])
     ).trim();
+  const aliasSql = async (instance: Instance) =>
+    (
+      await probe([
+        "container",
+        "exec",
+        container(instance, "worker"),
+        "psql",
+        "-h",
+        "db-reader",
+        "-U",
+        "postgres",
+        "-d",
+        "fixture",
+        "-At",
+        "-c",
+        "SELECT value FROM marker WHERE id=1",
+      ])
+    ).trim();
+  const assertAliasSql = async (instance: Instance) => {
+    if (
+      instance.ownedNetwork &&
+      (await aliasSql(instance)) !== instance.marker
+    ) {
+      refused();
+    }
+  };
   const waitReady = async (instance: Instance) => {
     await waitForAdoptionFixtureSql({
       read: () => sql(instance, "SELECT 1"),
       expected: "1",
     });
+  };
+  const assertTopology = async (instance: Instance, running: boolean) => {
+    if (!instance.ownedNetwork) {
+      return;
+    }
+    const baseline = anchors.get(instance);
+    const network = baseline?.resources.network[0];
+    if (
+      !network ||
+      baseline.resources.network.length !== 1 ||
+      baseline.resources.container.length !== 2
+    ) {
+      refused();
+    }
+    const expectedMembers = running
+      ? baseline.resources.container.map((entry) => entry.id).sort()
+      : [];
+    await inspectAdoptionBridge({
+      instance,
+      id: network.id,
+      members: expectedMembers,
+      probe,
+    });
+    for (const entry of baseline.resources.container) {
+      const container = object(
+        await probe([
+          "container",
+          "inspect",
+          "--format",
+          `{"id":{{json .Id}},"running":{{json .State.Running}},"networks":[{{$first := true}}{{range $name,$n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}},"aliases":{{json $n.Aliases}}}{{end}}]}`,
+          entry.id,
+        ])
+      );
+      assertAdoptionEndpointObservation({
+        instance,
+        networkId: network.id,
+        container: entry,
+        running,
+        row: container,
+      });
+    }
   };
   const check = async (instance: Instance, checkSource = true) => {
     const baseline = anchors.get(instance);
@@ -617,7 +900,10 @@ function createFixtureRuntime(
     ) {
       refused();
     }
+    await assertTopology(instance, true);
+    await assertAliasSql(instance);
     await checkWorkerArgv(instance);
+    await checkHealthcheck(instance);
     if (instance.sourceMode === "canonical-generated") {
       if (
         (await managedAdoptionFixtureSourceSnapshot({ primary, instance })) !==
@@ -647,6 +933,7 @@ function createFixtureRuntime(
     ) {
       refused();
     }
+    await assertTopology(instance, true);
   };
   const assertNoState = async (instance: Instance) => {
     expect({
@@ -668,7 +955,9 @@ function createFixtureRuntime(
     ) {
       refused();
     }
+    await assertTopology(instance, false);
     await checkWorkerArgv(instance);
+    await checkHealthcheck(instance);
     for (const row of baseline.resources.container) {
       if (
         (await probe([
@@ -744,7 +1033,7 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
   }
   for (const [kind, name] of [
     ["volume", `${instance.name}_data`],
-    ["network", `${instance.name}_default`],
+    ["network", fixtureNetworkName(instance)],
     ["container", `${instance.name}-db-1`],
     ["container", `${instance.name}-worker-1`],
   ] as const) {
@@ -877,8 +1166,421 @@ async function withholdPrimaryLocal(h: FixtureRuntime) {
 
   return { localPath, localOriginal };
 }
+
+const FOREIGN_CANARY_LABEL = "io.hack.nc04.foreign-canary";
+export const FOREIGN_CANARY_FORMAT = `{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Image}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"task":{{json (index .Config.Labels "${FOREIGN_CANARY_LABEL}")}},"native":{{json (index .Config.Labels "io.hack.native-config.version")}},"state":{{json .State.Status}},"running":{{json .State.Running}},"pid":{{json .State.Pid}},"startedAt":{{json .State.StartedAt}},"networkMode":{{json .HostConfig.NetworkMode}},"readOnlyRootfs":{{json .HostConfig.ReadonlyRootfs}},"publishAllPorts":{{json .HostConfig.PublishAllPorts}},"portBindings":{{json (index .HostConfig "PortBindings")}},"runtimePorts":{{json .NetworkSettings.Ports}},"configuredTmpfs":{{json (index .HostConfig "Tmpfs")}},"hostBinds":{{json (index .HostConfig "Binds")}},"hostMounts":{{json (index .HostConfig "Mounts")}},"volumesFrom":{{json (index .HostConfig "VolumesFrom")}},"imageVolumes":{{json .Config.Volumes}},"networks":[{{$first := true}}{{range $name,$n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}}}{{end}}],"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"target":{{json $m.Destination}}}{{end}}]}`;
+/** Docker may omit an active --tmpfs from inspect Mounts; read the owned container's mount namespace. */
+export const FOREIGN_CANARY_MOUNTINFO_SCRIPT = `set -eu
+matched=0
+while IFS=' ' read -r mount_id parent device root mountpoint options rest; do
+  if [ "$mountpoint" = "/var/lib/postgresql/data" ]; then
+    [ "$matched" -eq 0 ] || exit 71
+    case "$rest" in
+      "- "*) after_separator=\${rest#- } ;;
+      *" - "*) after_separator=\${rest#* - } ;;
+      *) exit 72 ;;
+    esac
+    case "$after_separator" in
+      "tmpfs "*) matched=1 ;;
+      *) exit 72 ;;
+    esac
+  fi
+done < /proc/self/mountinfo
+[ "$matched" -eq 1 ] || exit 73
+printf 'tmpfs-ok\\n'`;
+type ForeignCanaryPin = {
+  readonly id: string;
+  readonly name: string;
+  readonly created: string;
+  readonly image: string;
+  readonly project: string;
+  readonly task: string;
+  readonly networkId: string;
+  readonly networkName: string;
+};
+
+function canaryIdentityMatches(
+  row: Record<string, unknown>,
+  pin: ForeignCanaryPin
+) {
+  return (
+    row.id === pin.id &&
+    row.name === `/${pin.name}` &&
+    row.created === pin.created &&
+    row.image === pin.image &&
+    row.project === pin.project &&
+    row.task === pin.task &&
+    (row.native === null || row.native === "")
+  );
+}
+
+function canaryStateMatches(
+  row: Record<string, unknown>,
+  state: "created" | "running" | "exited"
+) {
+  const pid = row.pid;
+  const neverStarted = "0001-01-01T00:00:00Z";
+  return (
+    row.state === state &&
+    row.running === (state === "running") &&
+    typeof pid === "number" &&
+    Number.isSafeInteger(pid) &&
+    (state === "running" ? pid > 0 : pid === 0) &&
+    typeof row.startedAt === "string" &&
+    (state === "created"
+      ? row.startedAt === neverStarted
+      : CREATED.test(row.startedAt) && row.startedAt !== neverStarted)
+  );
+}
+
+function canaryStorageMatches(
+  row: Record<string, unknown>,
+  state: "created" | "running" | "exited"
+) {
+  const target = "/var/lib/postgresql/data";
+  const activeTmpfs = JSON.stringify([{ type: "tmpfs", target }]);
+  const mounts = JSON.stringify(row.mounts);
+  return (
+    isRecord(row.configuredTmpfs) &&
+    Object.keys(row.configuredTmpfs).length === 1 &&
+    row.configuredTmpfs[target] === "rw,noexec,nosuid,nodev,mode=700" &&
+    isRecord(row.imageVolumes) &&
+    Object.keys(row.imageVolumes).length === 1 &&
+    isRecord(row.imageVolumes[target]) &&
+    (state === "created"
+      ? mounts === "[]"
+      : mounts === "[]" || mounts === activeTmpfs)
+  );
+}
+
+function absentOrEmptyArray(value: unknown) {
+  return value === null || (Array.isArray(value) && value.length === 0);
+}
+
+function canaryHostIsolationMatches(row: Record<string, unknown>) {
+  const noRuntimePorts =
+    row.runtimePorts === null ||
+    (isRecord(row.runtimePorts) &&
+      Object.values(row.runtimePorts).every(
+        (bindings) =>
+          bindings === null ||
+          (Array.isArray(bindings) && bindings.length === 0)
+      ));
+  return (
+    row.readOnlyRootfs === true &&
+    row.publishAllPorts === false &&
+    (row.portBindings === null ||
+      (isRecord(row.portBindings) &&
+        Object.keys(row.portBindings).length === 0)) &&
+    noRuntimePorts &&
+    absentOrEmptyArray(row.hostBinds) &&
+    absentOrEmptyArray(row.hostMounts) &&
+    absentOrEmptyArray(row.volumesFrom)
+  );
+}
+
+function canaryNetworkMatches(
+  row: Record<string, unknown>,
+  pin: ForeignCanaryPin,
+  state: "created" | "running" | "exited"
+) {
+  const endpoint = Array.isArray(row.networks) && row.networks[0];
+  return (
+    row.networkMode === pin.networkId &&
+    Array.isArray(row.networks) &&
+    row.networks.length === 1 &&
+    isRecord(endpoint) &&
+    endpoint.name === pin.networkName &&
+    (endpoint.id === pin.networkId ||
+      (state !== "running" && endpoint.id === ""))
+  );
+}
+
+/** The canary has a different project owner, one selected bridge, and no data volume. */
+export function assertAdoptionForeignCanaryObservation(opts: {
+  readonly pin: ForeignCanaryPin;
+  readonly state: "created" | "running" | "exited";
+  readonly row: unknown;
+}) {
+  const { pin, row, state } = opts;
+  if (!isRecord(row)) {
+    refused();
+  }
+  const validPin =
+    ID.test(pin.id) && IMAGE.test(pin.image) && CREATED.test(pin.created);
+  const selected =
+    validPin &&
+    canaryIdentityMatches(row, pin) &&
+    canaryStateMatches(row, state) &&
+    canaryStorageMatches(row, state) &&
+    canaryHostIsolationMatches(row) &&
+    canaryNetworkMatches(row, pin, state);
+  if (!selected) {
+    refused();
+  }
+}
+
+async function foreignCanaryRefusal(
+  h: FixtureRuntime,
+  gate: { pending: boolean }
+) {
+  const first = h.first;
+  if (!first.ownedNetwork || gate.pending) {
+    refused();
+  }
+  await h.check(first);
+  await h.check(h.second);
+  const baseline = h.anchors.get(first);
+  const bridge = baseline?.resources.network[0];
+  if (
+    !baseline ||
+    baseline.resources.network.length !== 1 ||
+    baseline.resources.container.length !== 2 ||
+    !bridge ||
+    !ID.test(bridge.id)
+  ) {
+    refused();
+  }
+  const name = `${first.name}-foreign-canary`;
+  const task = first.name;
+  const project = `${first.name}-foreign`;
+  const image = await h.probe([
+    "container",
+    "inspect",
+    "--format",
+    "{{.Image}}",
+    h.container(first, "db"),
+  ]);
+  if (!IMAGE.test(image)) {
+    refused();
+  }
+  const byName = await h.probe([
+    "container",
+    "ls",
+    "--all",
+    "--no-trunc",
+    "--filter",
+    `name=^/${name}$`,
+    "--format",
+    "{{.ID}}",
+  ]);
+  const byTask = await h.probe([
+    "container",
+    "ls",
+    "--all",
+    "--no-trunc",
+    "--filter",
+    `label=${FOREIGN_CANARY_LABEL}=${task}`,
+    "--format",
+    "{{.ID}}",
+  ]);
+  if (byName || byTask) {
+    refused();
+  }
+  const proofRoot = join(h.ctx.tempRoot, "foreign-canary-proof");
+  await mkdir(proofRoot, { mode: 0o700 });
+  const record = async (filename: string, value: unknown) => {
+    const handle = await open(join(proofRoot, filename), "wx", 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(value)}\n`);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    const directory = await open(proofRoot, "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  };
+  await record("intent.json", {
+    engine: h.engineId,
+    bridge: bridge.id,
+    source: baseline.source,
+    name,
+    task,
+    project,
+    image,
+  });
+  gate.pending = true;
+  let pin: ForeignCanaryPin | undefined;
+  let stage: "created" | "running" = "created";
+  const inspect = async (state: "created" | "running" | "exited") => {
+    if (!pin) {
+      refused();
+    }
+    await requirePreparedEngine(h);
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state,
+      row: object(
+        await h.probe([
+          "container",
+          "inspect",
+          "--format",
+          FOREIGN_CANARY_FORMAT,
+          pin.id,
+        ])
+      ),
+    });
+  };
+  const verifyRunningTmpfs = async () => {
+    if (!pin) {
+      refused();
+    }
+    await inspect("running");
+    await requirePreparedEngine(h);
+    const result = await h.probe([
+      "container",
+      "exec",
+      pin.id,
+      "/bin/sh",
+      "-c",
+      FOREIGN_CANARY_MOUNTINFO_SCRIPT,
+    ]);
+    if (result !== "tmpfs-ok") {
+      refused();
+    }
+    await inspect("running");
+    await requirePreparedEngine(h);
+  };
+  const retire = async () => {
+    if (!pin) {
+      refused();
+    }
+    if (stage === "running") {
+      await verifyRunningTmpfs();
+      await h.effect(["container", "stop", "--time", "5", pin.id]);
+      await inspect("exited");
+    } else {
+      await inspect(stage);
+    }
+    await h.effect(["container", "rm", pin.id]);
+    await requirePreparedEngine(h);
+    if (
+      await h.probe([
+        "container",
+        "ls",
+        "--all",
+        "--no-trunc",
+        "--filter",
+        `label=${FOREIGN_CANARY_LABEL}=${task}`,
+        "--format",
+        "{{.ID}}",
+      ])
+    ) {
+      refused();
+    }
+    await record("retired.json", { id: pin.id, created: pin.created });
+    gate.pending = false;
+  };
+  try {
+    const created = await h.effect([
+      "container",
+      "create",
+      "--pull=never",
+      "--name",
+      name,
+      "--network",
+      bridge.id,
+      "--label",
+      `${PROJECT_LABEL}=${project}`,
+      "--label",
+      `${FOREIGN_CANARY_LABEL}=${task}`,
+      "--read-only",
+      "--tmpfs",
+      "/var/lib/postgresql/data:rw,noexec,nosuid,nodev,mode=700",
+      "--entrypoint",
+      "/bin/sh",
+      image,
+      "-c",
+      "while true; do sleep 1; done",
+    ]);
+    const id = created.stdout.trim();
+    if (!ID.test(id)) {
+      refused();
+    }
+    const createdAt = await h.probe([
+      "container",
+      "inspect",
+      "--format",
+      "{{.Created}}",
+      id,
+    ]);
+    if (!CREATED.test(createdAt)) {
+      refused();
+    }
+    const selectedPin = {
+      id,
+      name,
+      created: createdAt,
+      image,
+      project,
+      task,
+      networkId: bridge.id,
+      networkName: fixtureNetworkName(first),
+    };
+    await record("selected.json", selectedPin);
+    pin = selectedPin;
+    await inspect("created");
+    await h.effect(["container", "start", id]);
+    stage = "running";
+    await verifyRunningTmpfs();
+    await inspectAdoptionBridge({
+      instance: first,
+      id: bridge.id,
+      members: [...baseline.resources.container.map((row) => row.id), id],
+      probe: h.probe,
+    });
+    const before = JSON.stringify(await h.resources(first));
+    const sourceBefore = await source(first);
+    const sqlBefore = await h.sql(first, "SELECT value FROM marker WHERE id=1");
+    await requirePreparedEngine(h);
+    const denied = refusedPreview(
+      await h.cli(first, ["config", "adopt", "--dry-run", "--stop", "--json"])
+    );
+    await requirePreparedEngine(h);
+    if (
+      object(denied.stdout).complete !== false ||
+      before !== JSON.stringify(baseline.resources) ||
+      before !== JSON.stringify(await h.resources(first)) ||
+      sourceBefore !== baseline.source ||
+      sourceBefore !== (await source(first)) ||
+      sqlBefore !== first.marker ||
+      sqlBefore !== (await h.sql(first, "SELECT value FROM marker WHERE id=1"))
+    ) {
+      refused();
+    }
+    await h.assertNoState(first);
+    await h.check(h.second);
+    await verifyRunningTmpfs();
+    await inspectAdoptionBridge({
+      instance: first,
+      id: bridge.id,
+      members: [...baseline.resources.container.map((row) => row.id), id],
+      probe: h.probe,
+    });
+  } finally {
+    if (pin && gate.pending) {
+      await retire();
+    }
+  }
+  await h.check(first);
+  await h.check(h.second);
+  const restored = successful(
+    await h.cli(first, ["config", "adopt", "--dry-run", "--stop", "--json"])
+  );
+  if (object(restored.stdout).complete !== true) {
+    refused();
+  }
+  await h.assertNoState(first);
+}
 async function interruptFirstStop(h: FixtureRuntime) {
   const { ctx, engine, first, container, cli } = h;
+  const firstPrepare = first.dependency
+    ? await captureAdoptionDependencyFirstPrepare({ projectRoot: first.root })
+    : undefined;
   const shimRoot = join(ctx.tempRoot, "partial-stop-shim");
   await mkdir(shimRoot, { mode: 0o700 });
   const receipt = join(
@@ -889,7 +1591,13 @@ async function interruptFirstStop(h: FixtureRuntime) {
     worker = container(first, "worker");
   const control = join(shimRoot, "control-hit");
   const generatedVersion = first.typedLocal ? 4 : 3;
-  const receiptVersion = first.sourceMode ? generatedVersion : 2;
+  const receiptVersion = first.ownedNetwork
+    ? 6
+    : first.dependency
+      ? 5
+      : first.sourceMode
+        ? generatedVersion
+        : 2;
   const shim = join(shimRoot, "docker");
   await Bun.write(
     shim,
@@ -897,13 +1605,15 @@ async function interruptFirstStop(h: FixtureRuntime) {
 const args = process.argv.slice(2);
 const engine = ${JSON.stringify(engine)};
 if(args[0]==="container" && args[1]==="stop") {
- if(args.length!==4 || !args.includes(${JSON.stringify(db)}) || !args.includes(${JSON.stringify(worker)})) process.exit(99);
+ if(${first.dependency ? `args.length!==3 || args[2]!==${JSON.stringify(worker)}` : `args.length!==4 || !args.includes(${JSON.stringify(db)}) || !args.includes(${JSON.stringify(worker)})`}) process.exit(99);
  const state=JSON.parse(await Bun.file(${JSON.stringify(receipt)}).text());
  if(state.adoption_receipt_version!==${receiptVersion} || state.pendingOperation?.operation!=="stop") process.exit(98);
- const child=Bun.spawn([engine,"container","stop",${JSON.stringify(db)}],{stdin:"ignore",stdout:"ignore",stderr:"ignore"});
+ ${first.dependency ? dependencyEngineCheck(h) : ""}
+ const child=Bun.spawn([engine,"container","stop",${JSON.stringify(first.dependency ? worker : db)}],{stdin:"ignore",stdout:"ignore",stderr:"ignore"});
  if(await child.exited!==0) process.exit(97);
  await Bun.write(${JSON.stringify(control)},"journal-before-partial-stop");process.exit(71);
 }
+${first.dependency ? dependencyReadGuard(h, first, receipt, firstPrepare) : ""}
 const child=Bun.spawn([engine,...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});process.exit(await child.exited);
 `
   );
@@ -911,7 +1621,17 @@ const child=Bun.spawn([engine,...args],{stdin:"inherit",stdout:"inherit",stderr:
   const partial = await cli(first, ["config", "adopt", "--stop", "--json"], {
     PATH: `${shimRoot}:${process.env.PATH ?? "/usr/bin:/bin"}`,
   });
-  if (
+  if (first.dependency) {
+    assertAdoptionDependencyControl({
+      stage: "prepared-stop",
+      exitCode: partial.exitCode,
+      timedOut: partial.timedOut,
+      control: await dependencyControlMarker(
+        control,
+        "journal-before-partial-stop"
+      ),
+    });
+  } else if (
     partial.timedOut ||
     partial.exitCode === 0 ||
     (await Bun.file(control).text()) !== "journal-before-partial-stop"
@@ -926,6 +1646,64 @@ const child=Bun.spawn([engine,...args],{stdin:"inherit",stdout:"inherit",stderr:
   if (blocked.exitCode === 0) {
     refused();
   }
+}
+
+async function dependencyControlMarker(path: string, expected: string) {
+  try {
+    const file = Bun.file(path);
+    if (!(await file.exists())) {
+      return "missing" as const;
+    }
+    return (await file.text()) === expected
+      ? ("valid" as const)
+      : ("invalid" as const);
+  } catch {
+    return "invalid" as const;
+  }
+}
+
+function dependencyEngineCheck(h: FixtureRuntime): string {
+  return `const engineCheck=Bun.spawn([engine,'info','--format','{{json .ID}}'],{stdin:'ignore',stdout:'pipe',stderr:'ignore'});
+ const engineId=(await new Response(engineCheck.stdout).text()).trim();if(await engineCheck.exited!==0 || engineId!==${JSON.stringify(h.engineId)})process.exit(95);`;
+}
+
+/** Only fixed metadata reads and canonical config hashes reach the real engine through new dependency shims. */
+function dependencyReadGuard(
+  h: FixtureRuntime,
+  instance: Instance,
+  receipt: string,
+  firstPrepare?: AdoptionDependencyFirstPrepare
+): string {
+  const anchor = h.anchors.get(instance);
+  const network = anchor?.resources.network[0];
+  const volume = anchor?.resources.volume[0];
+  if (
+    !anchor ||
+    anchor.resources.network.length !== 1 ||
+    anchor.resources.volume.length !== 1 ||
+    !network ||
+    !volume
+  ) {
+    refused();
+  }
+  const helper = fileURLToPath(
+    new URL("./native-compose-adoption-dependency-inputs.ts", import.meta.url)
+  );
+  const stagedHelper = fileURLToPath(
+    new URL(
+      "./native-compose-adoption-dependency-staged-read.ts",
+      import.meta.url
+    )
+  );
+  return `import {adoptionDependencyReadAllowed} from ${JSON.stringify(helper)};
+import {adoptionDependencyStagedReadAllowed} from ${JSON.stringify(stagedHelper)};
+try {
+ const savedFile=Bun.file(${JSON.stringify(receipt)});
+ const saved=await savedFile.exists() ? JSON.parse(await savedFile.text()) : null;
+ const generationId=saved?.prepared?.id ?? saved?.publication?.generation?.id;
+ const allowed=adoptionDependencyReadAllowed({args,projectRoot:${JSON.stringify(instance.root)},project:${JSON.stringify(instance.name)},containerIds:${JSON.stringify(anchor.resources.container.map((row) => row.id))},networkId:${JSON.stringify(network.id)},volumeName:${JSON.stringify(volume.id)},generationId})${firstPrepare ? ` || await adoptionDependencyStagedReadAllowed({args,project:${JSON.stringify(instance.name)},first:${JSON.stringify(firstPrepare)}})` : ""};
+ if(!allowed){console.error('dependency-read-refused stage=read-admission code=93');process.exit(93);}
+}catch{console.error('dependency-read-refused stage=read-admission code=93');process.exit(93);}`;
 }
 async function recoverFirstAndRollback(h: FixtureRuntime) {
   const { first, second, cli, container, waitReady, check, anchors, effect } =
@@ -996,6 +1774,220 @@ async function adoptSecondAndRollback(h: FixtureRuntime) {
   await check(second);
   await check(first);
 }
+
+/** Fixture forwarder observes the actual ordered starts, with no substitution of resources or engine replies. */
+async function dependencyFixtureUp(
+  h: FixtureRuntime,
+  instance: Instance,
+  partial: boolean
+) {
+  if (!instance.dependency) {
+    refused();
+  }
+  const shimRoot = join(
+    h.ctx.tempRoot,
+    `dependency-start-${instance.name}-${partial ? "partial" : "complete"}`
+  );
+  await mkdir(shimRoot, { mode: 0o700 });
+  const receipt = join(
+    instance.root,
+    ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
+  );
+  const db = h.container(instance, "db"),
+    worker = h.container(instance, "worker");
+  const starts = join(shimRoot, "starts.json");
+  const helper = fileURLToPath(
+    new URL("./native-compose-adoption-dependency-inputs.ts", import.meta.url)
+  );
+  const shim = join(shimRoot, "docker");
+  await Bun.write(
+    shim,
+    `#!${process.execPath}
+import {assertAdoptionDependencyStart} from ${JSON.stringify(helper)};
+const args=process.argv.slice(2), engine=${JSON.stringify(h.engine)};
+if(args[0]==='container' && args[1]==='start') {
+ if(args.length!==3)process.exit(99);
+ const receipt=JSON.parse(await Bun.file(${JSON.stringify(receipt)}).text());
+ if(receipt.adoption_receipt_version!==5 || receipt.pendingOperation?.operation!=='start')process.exit(98);
+ const startsFile=Bun.file(${JSON.stringify(starts)}), prior=await startsFile.exists() ? JSON.parse(await startsFile.text()) : [];
+ let observed;
+ if(args[2]===${JSON.stringify(worker)}) {
+  const capture=Bun.spawn([engine,'container','inspect','--format','{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}""{{end}}}',${JSON.stringify(db)}],{stdin:'ignore',stdout:'pipe',stderr:'ignore'});
+  const text=await new Response(capture.stdout).text();if(await capture.exited!==0)process.exit(97);observed=JSON.parse(text);
+ }
+ try {assertAdoptionDependencyStart({db:${JSON.stringify(db)},worker:${JSON.stringify(worker)},condition:${JSON.stringify(instance.dependency)},prior,requested:args[2],observed});}catch{process.exit(96);}
+ ${dependencyEngineCheck(h)}
+ const effect=Bun.spawn([engine,...args],{stdin:'ignore',stdout:'ignore',stderr:'ignore'});if(await effect.exited!==0)process.exit(94);
+ await Bun.write(startsFile,JSON.stringify([...prior,args[2]]));
+ if(${partial} && args[2]===${JSON.stringify(db)})process.exit(71);
+ process.exit(0);
+}
+${dependencyReadGuard(h, instance, receipt)}
+const child=Bun.spawn([engine,...args],{stdin:'inherit',stdout:'inherit',stderr:'inherit'});process.exit(await child.exited);
+`
+  );
+  await chmod(shim, 0o700);
+  const result = await h.cli(instance, ["up", "--detach", "--json"], {
+    PATH: `${shimRoot}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+  });
+  const expected = partial ? [db] : [db, worker];
+  assertAdoptionDependencyControl({
+    stage: partial ? "pending-start" : "ordered-start",
+    exitCode: result.exitCode,
+    timedOut: result.timedOut,
+    control: await dependencyControlMarker(starts, JSON.stringify(expected)),
+  });
+  if (partial) {
+    if (
+      result.exitCode === 0 ||
+      object(await Bun.file(receipt).text()).pendingOperation === null
+    ) {
+      refused();
+    }
+  } else {
+    successful(result);
+  }
+}
+
+/** Active candidate repair pins identity and bytes; prepared authored source timestamps are never rewritten. */
+async function dependencyCandidateDriftRefusal(h: FixtureRuntime) {
+  const path = join(h.first.root, ".hack/hack.project.json");
+  const original = await readFile(path);
+  const states = async () =>
+    Promise.all(
+      ["db", "worker"].map((service) =>
+        h.probe([
+          "container",
+          "inspect",
+          "--format",
+          "{{.State.Running}}",
+          h.container(h.first, service),
+        ])
+      )
+    );
+  const prior = await states();
+  await h.check(h.second);
+  await writeFile(path, Buffer.concat([original, Buffer.from("\n")]));
+  try {
+    refusedPreview(await h.cli(h.first, ["down", "--recover", "--json"]));
+    if (JSON.stringify(await states()) !== JSON.stringify(prior)) {
+      refused();
+    }
+    await h.check(h.second);
+  } finally {
+    await writeFile(path, original);
+  }
+}
+
+async function rollbackDependencyInstance(
+  h: FixtureRuntime,
+  instance: Instance
+) {
+  successful(await h.cli(instance, ["down", "--json"]));
+  await h.assertStopped(instance);
+  successful(
+    await h.cli(instance, ["config", "adopt", "--rollback", "--json"])
+  );
+  if ((await source(instance)) !== h.anchors.get(instance)?.source) {
+    refused();
+  }
+  await h.effect([
+    "container",
+    "start",
+    h.container(instance, "db"),
+    h.container(instance, "worker"),
+  ]);
+  await h.waitReady(instance);
+  await h.check(instance);
+}
+
+/** Explicit selector keeps the new v5 dependency acceptance independent of all previously qualified worktree cases. */
+export const nativeComposeAdoptionDependencyWorktreesScenario: Scenario = {
+  name: "native-compose-adoption-dependency-worktrees",
+  tier: "docker",
+  preserveFixtureOnFailure: true,
+  summary:
+    "started and exec-healthy edges preserve two linked original SQL volumes through ordered repair and rollback",
+  run: async (ctx) => {
+    const h = createFixtureRuntime(
+      await prepareFixtureInputs(ctx, { dependencies: true })
+    );
+    await runWithFixtureCleanup({
+      run: async () => {
+        for (const instance of [h.first, h.second]) {
+          await bootstrapOriginal(h, instance);
+          const preview = successful(
+            await h.cli(instance, [
+              "config",
+              "adopt",
+              "--dry-run",
+              "--stop",
+              "--json",
+            ])
+          );
+          if (object(preview.stdout).complete !== true) {
+            refused();
+          }
+          await h.assertNoState(instance);
+          await h.check(instance);
+        }
+        await interruptFirstStop(h);
+        successful(
+          await h.cli(h.first, [
+            "config",
+            "adopt",
+            "--recover",
+            "--stop",
+            "--json",
+          ])
+        );
+        await h.assertStopped(h.first);
+        refusedPreview(
+          await h.cli(h.first, ["up", "db", "--detach", "--json"])
+        );
+        await h.assertStopped(h.first);
+        await h.check(h.second);
+        await dependencyFixtureUp(h, h.first, true);
+        await h.waitReady(h.first);
+        if (
+          (await h.sql(h.first, "SELECT value FROM marker WHERE id=1")) !==
+          h.first.marker
+        ) {
+          refused();
+        }
+        await dependencyCandidateDriftRefusal(h);
+        successful(await h.cli(h.first, ["down", "--recover", "--json"]));
+        await h.assertStopped(h.first);
+        await h.check(h.second);
+        await dependencyFixtureUp(h, h.first, false);
+        await h.check(h.first, false);
+        await h.check(h.second);
+        refusedPreview(await h.cli(h.first, ["run", "db", "--", "true"]));
+        await rollbackDependencyInstance(h, h.first);
+        await h.check(h.second);
+        successful(
+          await h.cli(h.second, ["config", "adopt", "--stop", "--json"])
+        );
+        await h.assertStopped(h.second);
+        await h.check(h.first);
+        await dependencyFixtureUp(h, h.second, false);
+        await h.check(h.second, false);
+        await h.check(h.first);
+        await rollbackDependencyInstance(h, h.second);
+        await h.check(h.first);
+        ctx.log(
+          "started/exec-healthy ordered originals, SQL/birth/IDs, unchanged-source stop recovery, active-candidate repair and isolated rollback verified"
+        );
+      },
+      cleanup: () =>
+        cleanupOwnedAdoptionFixture({ ...h, instances: [h.first, h.second] }),
+      secondaryFailure: () =>
+        ctx.log(
+          "secondary exact-owned cleanup failed; retain fixture evidence"
+        ),
+    });
+  },
+};
 
 /** An external raw-byte edit must prevent recovery before another stop while both original data bindings remain intact. */
 async function refuseChangedInheritedRepair(h: FixtureRuntime) {
@@ -1170,10 +2162,15 @@ async function runWithFixtureCleanup(opts: {
   }
 }
 
-async function runLiteralWorktrees(ctx: ScenarioContext, stringArgv: boolean) {
+async function runLiteralWorktrees(
+  ctx: ScenarioContext,
+  stringArgv: boolean,
+  ownedNetwork = false
+) {
   const h = createFixtureRuntime(
-    await prepareFixtureInputs(ctx, { stringArgv })
+    await prepareFixtureInputs(ctx, { stringArgv, ownedNetwork })
   );
+  const foreignCanary = { pending: false };
   await runWithFixtureCleanup({
     run: async () => {
       for (const instance of [h.first, h.second]) {
@@ -1181,6 +2178,9 @@ async function runLiteralWorktrees(ctx: ScenarioContext, stringArgv: boolean) {
       }
       await checkInheritedRefusal(h);
       const local = await withholdPrimaryLocal(h);
+      if (ownedNetwork) {
+        await foreignCanaryRefusal(h, foreignCanary);
+      }
       await interruptFirstStop(h);
       await recoverFirstAndRollback(h);
       await adoptSecondAndRollback(h);
@@ -1195,8 +2195,16 @@ async function runLiteralWorktrees(ctx: ScenarioContext, stringArgv: boolean) {
         "two linked original SQL volumes, retained IDs, partial-stop recovery and isolated rollback verified"
       );
     },
-    cleanup: () =>
-      cleanupOwnedAdoptionFixture({ ...h, instances: [h.first, h.second] }),
+    cleanup: async () => {
+      // An ambiguous canary create or retirement must preserve the original data.
+      if (foreignCanary.pending) {
+        refused();
+      }
+      await cleanupOwnedAdoptionFixture({
+        ...h,
+        instances: [h.first, h.second],
+      });
+    },
     secondaryFailure: () =>
       ctx.log("secondary exact-owned cleanup failed; retain fixture evidence"),
   });
@@ -1220,6 +2228,16 @@ export const nativeComposeAdoptionStringWorktreesScenario: Scenario = {
   summary:
     "Compose string argv and explicit cleared entrypoint keep linked SQL and exact original identities",
   run: (ctx) => runLiteralWorktrees(ctx, true),
+};
+
+/** Original project bridge IDs, internal policy, aliases and SQL survive two linked adoptions and rollback. */
+export const nativeComposeAdoptionNetworkWorktreesScenario: Scenario = {
+  name: "native-compose-adoption-network-worktrees",
+  tier: "docker",
+  preserveFixtureOnFailure: true,
+  summary:
+    "owned internal bridges retain original IDs, alias DNS and linked SQL; a foreign member refuses before adoption",
+  run: (ctx) => runLiteralWorktrees(ctx, false, true),
 };
 
 /** Canonical writer-produced sources and six managed layers retain both linked checkouts' original SQL and identities through v3 repair/rollback. */

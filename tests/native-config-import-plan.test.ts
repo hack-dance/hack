@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { parseImportDocument } from "../src/lib/native-config-import-parser.ts";
-import { mapLegacyNativeImport } from "../src/lib/native-config-import-plan.ts";
+import {
+  mapLegacyNativeAdoptionBaseline,
+  mapLegacyNativeImport,
+} from "../src/lib/native-config-import-plan.ts";
 
 const CANARY = "synthetic-private-import-value";
 const CONFIG = '{"name":"fixture"}';
@@ -106,6 +109,236 @@ test("static list values split only at first equal sign without source mutation"
     },
   });
   expect(JSON.stringify(source)).toBe(before);
+});
+
+test("one owned internal bridge maps selected and inactive static aliases without source drift", () => {
+  const source = {
+    name: "fixture",
+    networks: { private: { driver: "bridge", internal: true } },
+    services: {
+      db: {
+        image: "postgres:17",
+        networks: { private: { aliases: ["db-reader", "db-writer"] } },
+      },
+      worker: {
+        image: "worker:1",
+        profiles: ["later"],
+        networks: ["private"],
+      },
+    },
+  };
+  const original = JSON.stringify(source);
+  const result = map({ name: "fixture" }, source);
+  expect(result.report.complete).toBe(true);
+  expect(result.candidate).toMatchObject({
+    networks: { private: { internal: true } },
+    services: {
+      db: { networks: { private: { aliases: ["db-reader", "db-writer"] } } },
+      worker: { networks: { private: { aliases: [] } } },
+    },
+  });
+  expect(
+    result.report.fields
+      .filter((field) => field.pointer.includes("networks"))
+      .every((field) => field.status === "normalized" && !!field.target)
+  ).toBe(true);
+  expect(JSON.stringify(source)).toBe(original);
+  expect(JSON.stringify(result)).not.toContain("db-reader");
+});
+
+test("basic build preview and owned bridge remain separate from retained adoption", () => {
+  const compose = {
+    networks: { private: { internal: true } },
+    services: {
+      db: {
+        image: "postgres:17",
+        networks: { private: { aliases: ["db-reader"] } },
+      },
+      worker: {
+        build: "..",
+        pull_policy: "build",
+        profiles: ["later"],
+        networks: { private: { aliases: ["worker-reader"] } },
+      },
+    },
+  };
+  const source = {
+    configText: CONFIG,
+    composeText: JSON.stringify(compose),
+  };
+  const preview = mapLegacyNativeImport(source);
+  expect(preview.report.complete).toBe(true);
+  expect(preview.candidate).toMatchObject({
+    networks: { private: { internal: true } },
+    services: {
+      db: { networks: { private: { aliases: ["db-reader"] } } },
+      worker: {
+        build: { context: "." },
+        pull_policy: "build",
+        profiles: ["later"],
+        networks: { private: { aliases: ["worker-reader"] } },
+      },
+    },
+  });
+  expect(preview.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/services/worker/build",
+      status: "normalized",
+    })
+  );
+  const adoption = mapLegacyNativeAdoptionBaseline(source);
+  expect(adoption.candidate).toBeUndefined();
+  expect(adoption.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/services/worker/build",
+      status: "refused",
+    })
+  );
+});
+
+test("owned bridge and inactive completed job refuse retained adoption baseline", () => {
+  code(
+    mapLegacyNativeAdoptionBaseline({
+      configText: '{"name":"fixture"}',
+      composeText: JSON.stringify({
+        networks: { private: { internal: true } },
+        services: {
+          web: { image: "fixture:1", networks: ["private"] },
+          initialize: {
+            image: "fixture:1",
+            labels: { "hack.service.one-shot": "true" },
+            profiles: ["later"],
+            networks: ["private"],
+          },
+        },
+      }),
+    }),
+    "completed_job_adoption_unqualified"
+  );
+});
+
+test.each([
+  [
+    "external",
+    { external: true, internal: true },
+    "unsupported_network_policy",
+  ],
+  [
+    "missing internal",
+    { driver: "bridge" },
+    "explicit_internal_policy_required",
+  ],
+  [
+    "foreign driver",
+    { driver: "overlay", internal: true },
+    "owned_bridge_driver_required",
+  ],
+])("owned bridge refuses %s before exposing a candidate", (_name, declaration, expected) => {
+  code(
+    map(
+      { name: "fixture" },
+      {
+        networks: { private: declaration },
+        services: { web: { image: "fixture:1", networks: ["private"] } },
+      }
+    ),
+    expected
+  );
+});
+
+test.each([
+  [
+    "implicit sibling default",
+    undefined,
+    "explicit_owned_bridge_attachment_required",
+  ],
+  ["mixed default", ["private", "default"], "single_owned_bridge_required"],
+  [
+    "foreign endpoint option",
+    { private: { ipv4_address: "10.0.0.5" } },
+    "unsupported_network_attachment",
+  ],
+  [
+    "collision with workload",
+    { private: { aliases: ["db"] } },
+    "network_alias_collision",
+  ],
+])("owned bridge refuses %s in the inactive workload too", (_name, networks, expected) => {
+  code(
+    map(
+      { name: "fixture" },
+      {
+        networks: { private: { internal: false } },
+        services: {
+          db: { image: "fixture:1", networks: ["private"] },
+          worker: { image: "fixture:1", profiles: ["later"], networks },
+        },
+      }
+    ),
+    expected
+  );
+});
+
+test("explicit outbound bridge policy remains representable without inventing a default network", () => {
+  const result = map(
+    { name: "fixture" },
+    {
+      services: { web: { image: "fixture:1", networks: ["private"] } },
+      networks: { private: { internal: false } },
+    }
+  );
+  expect(result.report.complete).toBe(true);
+  expect(result.candidate).toMatchObject({
+    networks: { private: { internal: false } },
+    services: { web: { networks: { private: { aliases: [] } } } },
+  });
+});
+
+test.each([
+  ["mixed default", { private: { internal: true }, default: {} }],
+  [
+    "multiple owned bridges",
+    { private: { internal: true }, second: { internal: true } },
+  ],
+  ["custom physical name", { private: { internal: true, name: "foreign" } }],
+  ["IPAM", { private: { internal: true, ipam: { config: [] } } }],
+  ["driver options", { private: { internal: true, driver_opts: {} } }],
+])("owned bridge refuses top-level %s without a candidate", (_name, networks) => {
+  code(
+    map(
+      { name: "fixture" },
+      {
+        services: { web: { image: "fixture:1", networks: ["private"] } },
+        networks,
+      }
+    ),
+    Object.keys(networks).length !== 1
+      ? "single_owned_bridge_required"
+      : "unsupported_network_policy"
+  );
+});
+
+test("duplicate static alias across active and inactive services refuses", () => {
+  code(
+    map(
+      { name: "fixture" },
+      {
+        networks: { private: { internal: true } },
+        services: {
+          web: {
+            image: "fixture:1",
+            networks: { private: { aliases: ["shared"] } },
+          },
+          later: {
+            image: "fixture:1",
+            profiles: ["later"],
+            networks: { private: { aliases: ["shared"] } },
+          },
+        },
+      }
+    ),
+    "network_alias_collision"
+  );
 });
 
 test("complete Compose dollar pairs become literal exec argv in selected and inactive services", () => {
@@ -499,8 +732,6 @@ test.each([
   ["build", { context: CANARY }],
   ["ports", ["3000:3000"]],
   ["volumes", [CANARY]],
-  ["depends_on", ["other"]],
-  ["healthcheck", { test: ["CMD", CANARY] }],
   ["labels", { "hack.domain": CANARY }],
   ["env_file", CANARY],
   ["networks", ["default"]],

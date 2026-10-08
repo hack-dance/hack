@@ -2,7 +2,10 @@ import { afterEach, expect, test } from "bun:test";
 import { chmod, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { nativeRoutedRunRemovalScript } from "./e2e/scenarios/native-config-routed-run.ts";
+import {
+  nativeRoutedRunPinnedOriginCheck,
+  nativeRoutedRunRemovalScript,
+} from "./e2e/scenarios/native-config-routed-run.ts";
 import {
   nativeRoutingFixtureVolumeMatches,
   nativeRoutingFixtureVolumeSelectionMatches,
@@ -15,6 +18,54 @@ const OWNER = "c".repeat(32);
 const GENERATION = "d".repeat(32);
 const PROJECT = "fixture-routed-removal";
 const FACTS = `${OWNER}|${PROJECT}|${GENERATION}|True|exited|17`;
+
+test("pending routed-run checks use exact preverified origins without CLI origin selection", async () => {
+  const origins = ["https://primary.test", "https://oauth.test"];
+  const calls: string[][] = [];
+  let ingress = 0;
+  const check = nativeRoutedRunPinnedOriginCheck({
+    checkouts: [
+      { root: "/primary", marker: "primary", origins },
+      {
+        root: "/sibling",
+        marker: "sibling",
+        origins: ["https://sibling.test"],
+      },
+    ],
+    tls: async (origin, marker) => {
+      calls.push([origin, marker]);
+    },
+    assertIngress: async () => {
+      ingress += 1;
+    },
+  });
+  origins.push("https://changed.test");
+  await check({ root: "/primary", marker: "primary" });
+  await check({ root: "/sibling", marker: "sibling" });
+  expect(calls).toEqual([
+    ["https://primary.test", "primary"],
+    ["https://oauth.test", "primary"],
+    ["https://sibling.test", "sibling"],
+  ]);
+  expect(ingress).toBe(2);
+  await expect(check({ root: "/foreign", marker: "primary" })).rejects.toThrow(
+    "unpinned"
+  );
+  await expect(check({ root: "/primary", marker: "foreign" })).rejects.toThrow(
+    "unpinned"
+  );
+  expect(calls).toHaveLength(3);
+  expect(() =>
+    nativeRoutedRunPinnedOriginCheck({
+      checkouts: [
+        { root: "/primary", marker: "primary", origins: [] },
+        { root: "/primary", marker: "sibling", origins: [] },
+      ],
+      tls: async () => {},
+      assertIngress: async () => {},
+    })
+  ).toThrow("distinct");
+});
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))

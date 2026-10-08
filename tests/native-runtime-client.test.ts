@@ -61,6 +61,53 @@ test("native selection is explicit and requires an isolated absolute home", () =
   ).toEqual({ binary: "/tmp/hack-native", home: "/tmp/home" });
 });
 
+test("bounded native status draining cannot select another action or legacy command", async () => {
+  const runtime = {
+    home: "/absent-native-status-home",
+    binary: "/absent-native-status-binary",
+  };
+  for (const args of [
+    [
+      "graph",
+      "native",
+      "control",
+      "--run-id",
+      "a".repeat(32),
+      "--action",
+      "cleanup",
+      "--json",
+    ],
+    [
+      "graph",
+      "control",
+      "--run-id",
+      "a".repeat(32),
+      "--action",
+      "status",
+      "--json",
+    ],
+    [
+      "graph",
+      "native",
+      "control",
+      "--run-id",
+      "../foreign",
+      "--action",
+      "status",
+      "--json",
+    ],
+  ]) {
+    await expect(
+      invokeNativeRuntime({
+        runtime,
+        cwd: runtime.home,
+        args,
+        boundNativeStatusDrain: true,
+      })
+    ).rejects.toThrow("budget");
+  }
+});
+
 test("managed input uses stdin with EOF and is absent from argv and inherited env", async () => {
   const runtime = await fixture();
   const prior = process.env.HACK_RUNTIME_CLIENT_CANARY;

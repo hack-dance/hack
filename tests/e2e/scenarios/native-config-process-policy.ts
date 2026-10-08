@@ -26,6 +26,8 @@ const INSTANCE = "io.hack.native-config.instance";
 const OWNER = "io.hack.native-config.owner";
 const READER_OWNER = "hack.e2e.native-process-policy-reader";
 const UNSUPPORTED_VALUE = "private-process-policy-refusal-canary";
+const EXECUTION_INPUT_REFUSAL =
+  "Native execution inputs are invalid or changed; prepare a fresh generation. Values omitted.";
 const RECORDS = [
   "graceful-signal",
   "graceful-complete",
@@ -254,6 +256,43 @@ export function nativeProcessPolicyProject(opts: {
   };
 }
 
+/** Compile diagnostics identify unsupported intent; execution deliberately returns a fixed redacted refusal. */
+export function verifyUnsupportedNativeProcessPolicy(opts: {
+  readonly field: "resources" | "logging";
+  readonly compilerReport: unknown;
+  readonly executionReport: unknown;
+}): void {
+  const compiler = opts.compilerReport;
+  const diagnostic =
+    isRecord(compiler) &&
+    Array.isArray(compiler.diagnostics) &&
+    compiler.diagnostics.length === 1
+      ? compiler.diagnostics[0]
+      : null;
+  expect({
+    that:
+      isRecord(compiler) &&
+      compiler.transport_version === 1 &&
+      compiler.ok === false &&
+      isRecord(diagnostic) &&
+      diagnostic.code === "unknown_field" &&
+      diagnostic.pointer === `/services/unsupported/${opts.field}` &&
+      diagnostic.document === "project",
+    message:
+      "Compiler must specifically refuse the unsupported resource/logging field",
+  });
+  const execution = opts.executionReport;
+  expect({
+    that:
+      isRecord(execution) &&
+      execution.ok === false &&
+      isRecord(execution.error) &&
+      execution.error.code === "E_UNEXPECTED" &&
+      execution.error.message === EXECUTION_INPUT_REFUSAL,
+    message: "Native execution must return its fixed redacted input refusal",
+  });
+}
+
 /** Actual compiler/CLI refusals run behind engine and hook tripwires, including unselected declarations. */
 async function refuseUnsupportedPolicies(opts: {
   readonly root: string;
@@ -265,6 +304,19 @@ async function refuseUnsupportedPolicies(opts: {
     env: Readonly<Record<string, string>>
   ) => Promise<CliResult>;
 }): Promise<void> {
+  const baseline = await opts.invoke(
+    ["--profile", "exercise", "config", "validate", "--json"],
+    {}
+  );
+  expectExit({
+    result: baseline,
+    codes: [0],
+    message: "The supported process-policy fixture must validate first",
+  });
+  expect({
+    that: object(baseline.stdout).ok === true,
+    message: "Supported process-policy declarations must compile successfully",
+  });
   const tripwire = join(opts.root, "tripwire");
   await mkdir(tripwire);
   const engineCalled = join(tripwire, "engine-called");
@@ -305,20 +357,29 @@ async function refuseUnsupportedPolicies(opts: {
         },
       };
       await Bun.write(opts.source, JSON.stringify(invalid));
+      const validation = await opts.invoke(
+        ["--profile", "exercise", "config", "validate", "--json"],
+        { PATH: `${tripwire}:${process.env.PATH ?? "/usr/bin:/bin"}` }
+      );
       const result = await opts.invoke(
         ["--profile", "exercise", "up", "--detach", "--json"],
         { PATH: `${tripwire}:${process.env.PATH ?? "/usr/bin:/bin"}` }
       );
-      const payload = object(result.stdout);
       expect({
         that:
+          validation.exitCode !== 0 &&
+          !validation.timedOut &&
+          !validation.combined.includes(UNSUPPORTED_VALUE) &&
           result.exitCode !== 0 &&
           !result.timedOut &&
-          payload.ok === false &&
-          result.combined.includes("unknown_field") &&
           !result.combined.includes(UNSUPPORTED_VALUE),
         message:
           "Unsupported resource/logging intent, including inactive workloads, must refuse with redacted compiler diagnostics",
+      });
+      verifyUnsupportedNativeProcessPolicy({
+        field,
+        compilerReport: object(validation.stdout),
+        executionReport: object(result.stdout),
       });
       expect({
         that: !(

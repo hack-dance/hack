@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   nativeProcessPolicyProject,
   verifyNativeProcessPolicyEvidence,
+  verifyUnsupportedNativeProcessPolicy,
 } from "./e2e/scenarios/native-config-process-policy.ts";
 
 function evidence() {
@@ -36,6 +37,93 @@ function evidence() {
 
 test("process evidence requires observed signal, grace, orphan reaping and exact retries", () => {
   expect(() => verifyNativeProcessPolicyEvidence(evidence())).not.toThrow();
+});
+
+function policyRefusals(field: "resources" | "logging") {
+  return {
+    field,
+    compilerReport: {
+      transport_version: 1,
+      ok: false,
+      diagnostics: [
+        {
+          code: "unknown_field",
+          pointer: `/services/unsupported/${field}`,
+          document: "project",
+        },
+      ],
+    },
+    executionReport: {
+      ok: false,
+      error: {
+        code: "E_UNEXPECTED",
+        message:
+          "Native execution inputs are invalid or changed; prepare a fresh generation. Values omitted.",
+      },
+    },
+  };
+}
+
+test("unsupported policy evidence separates precise compiler refusal from redacted execution output", () => {
+  for (const field of ["resources", "logging"] as const) {
+    expect(() =>
+      verifyUnsupportedNativeProcessPolicy(policyRefusals(field))
+    ).not.toThrow();
+  }
+});
+
+test("unrelated, missing or ambiguous compiler errors cannot qualify unsupported policy refusal", () => {
+  const good = policyRefusals("resources");
+  const diagnostic = good.compilerReport.diagnostics[0];
+  for (const compilerReport of [
+    null,
+    { ...good.compilerReport, ok: true },
+    { ...good.compilerReport, diagnostics: [] },
+    { ...good.compilerReport, diagnostics: [diagnostic, diagnostic] },
+    {
+      ...good.compilerReport,
+      diagnostics: [{ ...diagnostic, code: "invalid_type" }],
+    },
+    {
+      ...good.compilerReport,
+      diagnostics: [{ ...diagnostic, pointer: "/services/unsupported/image" }],
+    },
+    {
+      ...good.compilerReport,
+      diagnostics: [{ ...diagnostic, document: "checkout_local" }],
+    },
+  ]) {
+    expect(() =>
+      verifyUnsupportedNativeProcessPolicy({ ...good, compilerReport })
+    ).toThrow("Compiler must specifically refuse");
+  }
+});
+
+test("compiler refusal cannot substitute for a failed redacted execution refusal", () => {
+  const good = policyRefusals("logging");
+  for (const executionReport of [
+    null,
+    { ok: true },
+    {
+      ok: false,
+      error: { ...good.executionReport.error, code: "E_PROJECT_NOT_FOUND" },
+    },
+    {
+      ok: false,
+      error: { ...good.executionReport.error, message: "private-proof-canary" },
+    },
+  ]) {
+    try {
+      verifyUnsupportedNativeProcessPolicy({ ...good, executionReport });
+      throw new Error("Expected redacted execution refusal");
+    } catch (error: unknown) {
+      expect(String(error)).toContain("fixed redacted input refusal");
+      expect(String(error)).not.toContain("private-proof-canary");
+      expect(String(error)).not.toContain(
+        "Expected redacted execution refusal"
+      );
+    }
+  }
 });
 
 test("configured init and eventual readiness cannot substitute for actual reaping or retries", () => {

@@ -98,6 +98,14 @@ fn error(code: &'static str, message: &str) -> CandidateError {
     CandidateError::new(code, message)
 }
 impl Graph {
+    /// Check an explicitly compiled dependency graph before handing it to a driver.
+    /// This validates names, active targets, budgets and cycles, not executable inputs.
+    pub fn from_services(services: BTreeMap<String, Service>) -> Result<Self, CandidateError> {
+        let graph = Self { services };
+        graph.execution_order()?;
+        Ok(graph)
+    }
+
     /// Compile only dependency intent from an already compatible review. Commands and environment
     /// stay redacted; drivers still need a separate verified executable-input compiler.
     pub fn from_plan(
@@ -166,9 +174,7 @@ impl Graph {
                 "Readiness includes inactive or unknown services.",
             ));
         }
-        let graph = Self { services };
-        graph.execution_order()?;
-        Ok(graph)
+        Self::from_services(services)
     }
     fn execution_order(&self) -> Result<Vec<&String>, CandidateError> {
         if self.services.is_empty() || self.services.len() > 128 {
@@ -180,9 +186,9 @@ impl Graph {
         for (name, service) in &self.services {
             if name.is_empty()
                 || name.len() > 128
-                || !name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                || !name.bytes().enumerate().all(|(index, b)| {
+                    b.is_ascii_alphanumeric() || b"_-".contains(&b) || (index > 0 && b == b'.')
+                })
             {
                 return Err(error(
                     "graph_service",

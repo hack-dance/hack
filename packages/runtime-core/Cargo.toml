@@ -7,6 +7,7 @@ publish = false
 description = "Private Hack v5 candidate runtime contracts and local planning"
 
 [features]
+native-config-plan = ["dep:hack-config-compiler"]
 installed-candidate = []
 environment-launcher = []
 native-http-probe = []
@@ -31,6 +32,7 @@ path = "src/bin/hack-mcp-adapter.rs"
 required-features = ["shared-mcp"]
 
 [dependencies]
+hack-config-compiler = { path = "../config-compiler", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

@@ -1,5 +1,38 @@
 # Hack runtime core
 
+The opt-in `native-config-plan` feature exposes `project::native::compile`, an
+experimental, pure adapter from the native configuration compiler's metadata
+planning request to dependency IR and ephemeral
+workload inputs. It calls the compiler in-process and performs no filesystem,
+provider, image acquisition or receipt effects. This feature's compiler path
+dependency requires the repository's pinned Rust 1.97.1. The default runtime
+package keeps its declared Rust 1.85 minimum; enabling the adapter requires Rust 1.97.1.
+
+The adapter accepts at most 32 selected image-only services/jobs, exec readiness,
+explicit exec/shell commands, entrypoint clearing, init, exact shutdown intent and
+working directories. Jobs require successful completion; services with readiness
+require health, and other services require startup. Workload names, including dots,
+remain exact. Omitted process fields preserve image/backend defaults. Source and
+worktree declarations and local resolution remain intent only.
+An explicit entrypoint requires an authored command, matching the bounded NC03
+renderer; image CMD inheritance under an entrypoint override remains unqualified.
+
+The compiler owns profiles and environment policy. Caller-selected private values
+must match its active managed source keys exactly, after unset/profile selection.
+The adapter remaps those values into a separate destination-keyed map. Public
+literals/defaults remain separate; private values never affect portable identities.
+Outputs deliberately lack `Debug` and `Serialize`. Encoded private values are
+bounded to 32 KiB and 256 destination keys per workload; process argv is bounded
+to 4096 arguments and 64 KiB. Build/acquisition policy, mounts, storage, routing,
+endpoints, host effects, HTTP/TCP readiness and automatic restart explicitly refuse.
+
+No backend consumes this adapter yet. Native input provenance, image availability,
+source/storage ownership, provider admission and installed execution/recovery remain
+separate qualification gates. Existing Compose plans and receipts retain their formats.
+
+Run its pure regressions with
+`cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --features native-config-plan project::native::tests`.
+
 The optional `shared-mcp` feature builds `hack-mcp-adapter`, an experimental native
 stdio relay for the explicit shared MCP socket backend. Build it with
 `cargo build --locked --release --manifest-path packages/runtime-core/Cargo.toml --features shared-mcp --bin hack-mcp-adapter`.

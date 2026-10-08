@@ -88,6 +88,7 @@ fn authored_file_presence_refuses_before_private_copies_even_empty_or_inactive()
         );
         assert!(hack_config_compiler::environment::plan(&input, &[]).complete());
         PRIVATE_COPIES.with(|copies| copies.set(0));
+        refusal(review_inputs(&input, &[]), "native_graph_subset");
         refusal(
             compile(CompileOptions {
                 request: &input,
@@ -108,6 +109,7 @@ fn authored_file_presence_refuses_before_private_copies_even_empty_or_inactive()
     );
     assert!(hack_config_compiler::environment::plan(&input, &[]).complete());
     PRIVATE_COPIES.with(|copies| copies.set(0));
+    refusal(review_inputs(&input, &[]), "native_graph_subset");
     refusal(
         compile(CompileOptions {
             request: &input,

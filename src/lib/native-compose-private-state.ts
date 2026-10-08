@@ -26,6 +26,13 @@ export type HeldDirectory = {
   readonly info: Stats;
   readonly private: boolean;
 };
+/** Private identity of the actual held mutation lock; an identity is not authority. */
+export type NativeComposeMutationLease = {
+  readonly token: string;
+  readonly directory: { readonly dev: number; readonly ino: number };
+  readonly owner: { readonly dev: number; readonly ino: number };
+  readonly assertHeld: () => Promise<void>;
+};
 type LockOwner = {
   readonly version: 1;
   readonly token: string;
@@ -385,8 +392,11 @@ export async function readPrivate(
 }
 export async function jsonPrivate(path: string): Promise<unknown> {
   const read = await readPrivate(path, RECEIPT_LIMIT);
+  return parsePrivateJson(read.text);
+}
+export function parsePrivateJson(text: string): unknown {
   try {
-    return JSON.parse(read.text) as unknown;
+    return JSON.parse(text) as unknown;
   } catch {
     return refuse();
   }
@@ -447,7 +457,9 @@ export function createNativeComposePrivateMutationLock(opts: {
   readonly check: () => Promise<void>;
 }) {
   const { lockPath, recoveryPath, parent, check } = opts;
-  const withLock = async <T>(run: () => Promise<T>) => {
+  const withLock = async <T>(
+    run: (lease: NativeComposeMutationLease) => Promise<T>
+  ) => {
     await check();
     await requireAbsentGuard(recoveryPath);
     const lockOwner = await captureLockOwner();
@@ -463,28 +475,44 @@ export function createNativeComposePrivateMutationLock(opts: {
     const ownerPath = join(lockPath, "owner");
     const lockToken = JSON.stringify(lockOwner);
     let ownerInfo: Stats | undefined;
+    let active = true;
+    const assertHeld = async () => {
+      if (!active) {
+        refuse();
+      }
+      await check();
+      await requireAbsentGuard(recoveryPath);
+      await recheckDirectories([lock]);
+      const latest = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
+      if (
+        !active ||
+        ownerInfo === undefined ||
+        !sameFile(latest.info, ownerInfo) ||
+        latest.text !== lockToken
+      ) {
+        refuse();
+      }
+    };
     try {
       ownerInfo = await writeExclusive(ownerPath, lockToken);
       await lock.file.sync();
-      await check();
-      await requireAbsentGuard(recoveryPath);
-      return await run();
+      await assertHeld();
+      return await run(
+        Object.freeze({
+          token: lockOwner.token,
+          directory: Object.freeze({ dev: lock.info.dev, ino: lock.info.ino }),
+          owner: Object.freeze({ dev: ownerInfo.dev, ino: ownerInfo.ino }),
+          assertHeld,
+        })
+      );
     } finally {
       try {
-        await check();
-        await recheckDirectories([lock]);
-        const latest = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
-        if (
-          ownerInfo === undefined ||
-          !sameFile(latest.info, ownerInfo) ||
-          latest.text !== lockToken
-        ) {
-          refuse();
-        }
+        await assertHeld();
         await unlink(ownerPath);
         await rmdir(lockPath);
         await parent?.file.sync();
       } finally {
+        active = false;
         await lock.file.close();
       }
     }

@@ -2,6 +2,7 @@
 pub mod acquisition;
 pub mod endpoint;
 pub mod environment;
+pub mod file;
 pub mod host;
 mod json;
 pub mod local;
@@ -130,6 +131,11 @@ fn diagnostic_message(code: &str) -> &'static str {
         "invalid_environment_key" => "Use a valid environment variable name.",
         "invalid_environment_value" => "Environment values cannot contain NUL bytes.",
         "unknown_storage" => "The mount must reference declared storage.",
+        "unknown_file_input" => "The mount must reference a declared config or secret.",
+        "invalid_file_mode" => {
+            "File modes must be four octal permission digits from 0000 through 0777."
+        }
+        "file_mount_overlap" => "File mount targets must not overlap another mount target.",
         "duplicate_mount_target" => "Mount targets must be unique after path normalization.",
         "duplicate_dependency" => "Each dependency target may be declared only once.",
         "invalid_readiness" => "The readiness check requires valid port, path and retry settings.",
@@ -309,6 +315,12 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
         environment::HostEnvironmentPlan::decl(&cfg),
         environment::EnvPlanRequest::decl(&cfg),
         environment::EnvironmentBinding::decl(&cfg),
+        file::FileConfig::decl(&cfg),
+        file::FileSecret::decl(&cfg),
+        file::FileKind::decl(&cfg),
+        file::FileBindingSource::decl(&cfg),
+        file::FileBinding::decl(&cfg),
+        file::FilePlan::decl(&cfg),
         endpoint::EndpointProtocol::decl(&cfg),
         endpoint::EndpointReference::decl(&cfg),
         endpoint::HostBindingTarget::decl(&cfg),
@@ -394,5 +406,5 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
 }
 
 pub fn protocol() -> Value {
-    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1,"endpoint_plan_version":1,"process_plan_version":1,"acquisition_plan_version":1,"network_plan_version":1})
+    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1,"endpoint_plan_version":1,"process_plan_version":1,"acquisition_plan_version":1,"network_plan_version":1,"file_plan_version":1})
 }

@@ -30,7 +30,7 @@ pub(crate) fn overlay_name(value: &str) -> bool {
         })
 }
 // References use the managed owner's PROJECT_ENV_KEY_PATTERN, not arbitrary process env keys.
-fn managed_key(value: &str) -> bool {
+pub(crate) fn managed_key(value: &str) -> bool {
     !value.is_empty()
         && value
             .bytes()
@@ -137,6 +137,7 @@ pub fn lower(mut project: Project, profiles: &[String], at: &At) -> Result<Plan,
         }
     }
     crate::network::normalize(&mut project, at)?;
+    crate::file::normalize_sources(&mut project.configs, &mut project.secrets, at)?;
     for (kind, workloads) in [
         ("services", &mut project.services),
         ("jobs", &mut project.jobs),
@@ -147,6 +148,13 @@ pub fn lower(mut project: Project, profiles: &[String], at: &At) -> Result<Plan,
                 return Err(at("invalid_name", &pointer));
             }
             validate_workload(workload, &pointer, &project.profiles, &project.storage, at)?;
+            crate::file::validate_grants(
+                workload,
+                &pointer,
+                &project.configs,
+                &project.secrets,
+                at,
+            )?;
             crate::process::normalize(workload, kind == "jobs", &pointer, at)?;
         }
     }
@@ -221,6 +229,8 @@ pub fn lower(mut project: Project, profiles: &[String], at: &At) -> Result<Plan,
         selected_profiles: selected,
         storage: project.storage,
         networks: project.networks,
+        configs: project.configs,
+        secrets: project.secrets,
         services: project.services,
         jobs: project.jobs,
     })
@@ -282,6 +292,7 @@ fn validate_workload(
                 }
                 target
             }
+            Mount::Config { target, .. } | Mount::Secret { target, .. } => target,
         };
         *target = absolute(target).ok_or_else(|| at("invalid_path", &child(&path, "target")))?;
         if !targets.insert(target.clone()) {

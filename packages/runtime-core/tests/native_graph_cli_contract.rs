@@ -135,6 +135,63 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn public_native_file_intent_refuses_before_private_stdin_or_candidate_state() {
+    let fixture = Fixture::new();
+    let project_path = fixture.project.join(".hack/hack.project.json");
+    let baseline: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    for (field, definition) in [
+        ("configs", json!({})),
+        ("secrets", json!({})),
+        ("configs", json!({"unused":{"file":"authored-file-canary"}})),
+        ("secrets", json!({"unused":{"env_ref":"TOKEN"}})),
+    ] {
+        let mut project = baseline.clone();
+        project[field] = definition;
+        fs::write(&project_path, project.to_string()).unwrap();
+        let planned = fixture.invoke(&[
+            "graph",
+            "native",
+            "plan",
+            "--source-file",
+            fixture.source_path(),
+            "--json",
+        ]);
+        assert!(!planned.status.success());
+        assert!(String::from_utf8_lossy(&planned.stderr).contains("native_graph_subset"));
+
+        // Keep stdin open with no bytes. Source admission must refuse before the
+        // bounded private receiver attempts to read it, even with a valid SHA shape.
+        let expected = "c".repeat(64);
+        let mut child = fixture
+            .command(&[
+                "graph",
+                "native",
+                "run",
+                "--source-file",
+                fixture.source_path(),
+                "--expect-review",
+                &expected,
+                "--environment-stdin",
+                "--json",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let unread_stdin = child.stdin.take().unwrap();
+        let output = child.wait_with_output().unwrap();
+        drop(unread_stdin);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("native_graph_subset"), "{stderr}");
+        assert!(!stderr.contains("authored-file-canary"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("authored-file-canary"));
+        fixture.assert_no_state();
+    }
+}
+
+#[test]
 fn public_native_plan_binds_real_namespace_and_run_without_compose_or_runtime_state() {
     let fixture = Fixture::new();
     let output = fixture.invoke(&[

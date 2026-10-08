@@ -41,6 +41,75 @@ const laterIncompleteMissingLockStages = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "native-route-stop",
+    module: "Stop",
+    states: 202,
+    invariant: "NoLostRecovery",
+    action: "CommitStop",
+    fields: [
+      'generation = "stopped"',
+      'phase = "complete"',
+      "claimHeld = TRUE",
+      "workloadPresent = FALSE",
+    ],
+    additionalControls: [
+      {
+        name: "unproved-retirement",
+        negative: true,
+        invariant: "NoUnprovedRelease",
+        action: "RetireClaims",
+        fields: [
+          'phase = "released"',
+          "claimHeld = FALSE",
+          "absenceObserved = FALSE",
+          "unsafeRelease = TRUE",
+        ],
+      },
+      {
+        name: "stale-reference",
+        negative: true,
+        invariant: "NoUnprovedRelease",
+        action: "RetireClaims",
+        fields: [
+          'phase = "released"',
+          "claimHeld = FALSE",
+          "absenceObserved = TRUE",
+          "selected = 1",
+          "version = 2",
+          "unsafeRelease = TRUE",
+        ],
+      },
+      {
+        name: "uncertain-hook",
+        negative: true,
+        invariant: "NoUnprovedRelease",
+        action: "RetireClaims",
+        fields: [
+          'phase = "released"',
+          "claimHeld = FALSE",
+          "absenceObserved = TRUE",
+          "hookPending = TRUE",
+          "unsafeRelease = TRUE",
+        ],
+      },
+      {
+        name: "completion-reachable",
+        negative: true,
+        invariant: "NeverComplete",
+        action: "CommitStop",
+        fields: [
+          'generation = "stopped"',
+          'phase = "complete"',
+          "claimHeld = FALSE",
+          "workloadPresent = FALSE",
+          "routePresent = FALSE",
+          "hookPending = FALSE",
+          "unsafeRelease = FALSE",
+        ],
+      },
+    ],
+  },
+  {
     name: "registry-writer",
     module: "RegistryWriter",
     states: 7721,

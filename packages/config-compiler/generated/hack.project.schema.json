@@ -286,6 +286,46 @@
         }
       ]
     },
+    "FileConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "type": "object"
+    },
+    "FileSecret": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "file": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "env_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "env_ref"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "HostBindingTarget": {
       "description": "`host` is the host loopback/gateway intent; an external hostname is a literal address.",
       "oneOf": [
@@ -619,6 +659,76 @@
           },
           "required": [
             "storage",
+            "target",
+            "access"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "access": {
+              "$ref": "#/$defs/Access"
+            },
+            "config": {
+              "type": "string"
+            },
+            "gid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "mode": {
+              "default": "0444",
+              "pattern": "^0[0-7]{3}$",
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            },
+            "uid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "config",
+            "target",
+            "access"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "access": {
+              "$ref": "#/$defs/Access"
+            },
+            "gid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "mode": {
+              "default": "0444",
+              "pattern": "^0[0-7]{3}$",
+              "type": "string"
+            },
+            "secret": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            },
+            "uid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "secret",
             "target",
             "access"
           ],
@@ -1142,6 +1252,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "configs": {
+      "additionalProperties": {
+        "$ref": "#/$defs/FileConfig"
+      },
+      "type": "object"
+    },
     "environment": {
       "$ref": "#/$defs/EnvironmentSelection",
       "default": {}
@@ -1213,6 +1329,12 @@
       "maximum": 1,
       "minimum": 1,
       "type": "integer"
+    },
+    "secrets": {
+      "additionalProperties": {
+        "$ref": "#/$defs/FileSecret"
+      },
+      "type": "object"
     },
     "services": {
       "additionalProperties": {

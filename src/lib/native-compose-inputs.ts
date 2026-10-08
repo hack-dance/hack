@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
+import { authoredFilePlanningRequired } from "./native-file-plan-protocol.ts";
 import {
   type NativePreparedProject,
   type NativeProjectSelection,
@@ -29,7 +30,9 @@ function freezePlan(value: unknown): void {
 }
 
 /** Private receipt fingerprint. Managed env fingerprints remain inside their owner. */
-function sourceRevision(prepared: NativePreparedProject): string {
+export function nativeComposeSourceRevision(
+  prepared: NativePreparedProject
+): string {
   const digest = createHash("sha256");
   const add = (name: string, bytes: Uint8Array | undefined) => {
     digest.update(name);
@@ -90,6 +93,12 @@ export async function acquireNativeComposeInputs(opts: {
     return refused();
   }
   const resolved = prepared.result;
+  if (authoredFilePlanningRequired(prepared.input)) {
+    throw new NativeConfigCompilerError(
+      "E_NATIVE_PROJECT_UNSUPPORTED",
+      "Native file inputs require a qualified private material owner. No private values, hooks or engine operations ran. Values omitted."
+    );
+  }
   const declared = resolved.declared_workloads;
   if (!declared) {
     return refused();
@@ -115,18 +124,24 @@ export async function acquireNativeComposeInputs(opts: {
     metadata: env.metadata,
     signal,
   });
-  if (!(planned.ok && planned.environment_plan.complete)) {
+  if (
+    !(
+      planned.ok &&
+      planned.environment_plan.complete &&
+      planned.file_plan?.complete !== false
+    )
+  ) {
     return refused();
   }
   const selectedWorkloads = Object.keys(planned.environment_plan.workloads);
   freezePlan(planned);
-  const revision = sourceRevision(prepared);
+  const revision = nativeComposeSourceRevision(prepared);
   const assertFresh = async () => {
     const current = await prepare();
     if (
       current.projectRoot !== prepared.projectRoot ||
       !current.result.ok ||
-      sourceRevision(current) !== revision
+      nativeComposeSourceRevision(current) !== revision
     ) {
       return refused();
     }

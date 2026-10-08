@@ -135,6 +135,9 @@ pub enum PlanResult {
         #[ts(optional, type = "HostBindingResolution")]
         host_binding_resolution: Option<Box<crate::endpoint::HostBindingResolution>>,
         environment_plan: Box<EnvironmentPlan>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "FilePlan")]
+        file_plan: Option<Box<crate::file::FilePlan>>,
     },
     Failure {
         #[ts(type = "1")]
@@ -153,13 +156,13 @@ impl PlanResult {
         }
     }
     pub fn complete(&self) -> bool {
-        matches!(self, Self::Success {environment_plan, ..} if environment_plan.complete)
+        matches!(self, Self::Success {environment_plan, file_plan, ..} if environment_plan.complete && file_plan.as_ref().is_none_or(|files| files.complete))
     }
 }
 /// Plans symbolic bindings from original documents and effective owner metadata only.
 pub fn plan(bytes: &[u8], profiles: &[String]) -> PlanResult {
     match plan_inner(bytes, profiles) {
-        Ok((resolved, environment_plan)) => PlanResult::Success {
+        Ok((resolved, environment_plan, file_plan)) => PlanResult::Success {
             transport_version: 1,
             ok: true,
             host_env_targets: resolved
@@ -175,6 +178,7 @@ pub fn plan(bytes: &[u8], profiles: &[String]) -> PlanResult {
             routing_resolution: resolved.routing_resolution.map(Box::new),
             host_binding_resolution: resolved.host_binding_resolution.map(Box::new),
             environment_plan: Box::new(environment_plan),
+            file_plan: file_plan.map(Box::new),
         },
         Err(error) => PlanResult::failure(error),
     }
@@ -324,7 +328,14 @@ fn validate_metadata(metadata: &EnvMetadata, resolved: &local::Resolved) -> bool
 fn plan_inner(
     bytes: &[u8],
     profiles: &[String],
-) -> Result<(local::Resolved, EnvironmentPlan), local::ResolveDiagnostic> {
+) -> Result<
+    (
+        local::Resolved,
+        EnvironmentPlan,
+        Option<crate::file::FilePlan>,
+    ),
+    local::ResolveDiagnostic,
+> {
     let mut document = json::parse_with_limit(bytes, local::MAX_REQUEST_BYTES)
         .map_err(|d| local::with_role(local::DocumentRole::Request, d))?;
     if document.value.get("routing_probe").is_some() {
@@ -342,8 +353,9 @@ fn plan_inner(
             metadata_location,
         ));
     }
-    let output = bind(&resolved, metadata)?;
-    Ok((resolved, output))
+    let files = crate::file::bind(&resolved, &metadata)?;
+    let output = bind(&resolved, metadata, files.as_ref())?;
+    Ok((resolved, output, files))
 }
 fn project_diagnostic(
     resolved: &local::Resolved,
@@ -365,8 +377,13 @@ fn managed(key: &str, binding: &ManagedBindingMetadata) -> EnvironmentBinding {
 fn bind(
     resolved: &local::Resolved,
     metadata: EnvMetadata,
+    files: Option<&crate::file::FilePlan>,
 ) -> Result<EnvironmentPlan, local::ResolveDiagnostic> {
     let mut budget = ReportBudget::new(resolved, &metadata)?;
+    if let Some(files) = files {
+        budget.value(files, resolved, "")?;
+        budget.charge(16, resolved, "")?;
+    }
     let mut output = EnvironmentPlan {
         plan_version: 1,
         overlay: metadata.overlay.clone(),

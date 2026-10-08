@@ -127,3 +127,18 @@ The spawn/publication gap deliberately remains blocked until a later explicit
 hook recovery contract can qualify it. Existing receipts without the optional
 hook field read as having no pending hook; older readers refuse receipts they
 do not understand.
+
+Private dependent owners receive an opaque capability from the actual generation
+mutation. Public identities, copied reservations and copied capability objects do
+not grant that authority. Each assertion rechecks the held lock token and its owner
+and directory inodes, the exact receipt written by this invocation, immutable
+generation membership and the live pending operation. Inspection remains available
+without granting effect or retirement authority. Source freshness checks may run
+during the invocation's own finite after-hook phase; an uncertain saved hook does
+not grant new acquisition or retirement authority.
+
+The capability is revoked when the mutation callback closes. The lock remains held
+until any registered material work settles, so escaped asynchronous work cannot
+continue under a replacement lease. Dependent filesystem owners must use this
+capability and the existing `beforeComplete` boundary; a serialized identity or
+saved extension is only a selector for immutable state.

@@ -6,6 +6,7 @@ const HEX64 = /^[a-f0-9]{64}$/;
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const BOOT = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const CONTROL = /\p{Cc}/u;
+const SERVICE = /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$/;
 const PHASES = [
   "preparing",
   "ready-observed",
@@ -103,6 +104,7 @@ function profiles(value: unknown): value is readonly string[] {
     value.every(
       (name, index) =>
         typeof name === "string" &&
+        name.isWellFormed() &&
         name.length > 0 &&
         Buffer.byteLength(name) <= 256 &&
         !CONTROL.test(name) &&
@@ -333,21 +335,22 @@ export function parseNativeAuthoredReceipt(
   const declaredReadiness = value.readiness;
   const declaredResources = value.resources;
   const names = Object.keys(declaredReadiness).sort(utf8Order);
+  const requiredResources = [
+    "network:default",
+    ...names.map((name) => `container:${name}`),
+  ];
   if (
+    names.length === 0 ||
     names.length > 32 ||
-    names.length + 1 !== Object.keys(declaredResources).length
+    requiredResources.length !== Object.keys(declaredResources).length ||
+    !requiredResources.every((key) => Object.hasOwn(declaredResources, key))
   ) {
     return refused();
   }
   const readiness = Object.fromEntries(
     names.map((name): [string, Condition] => {
       const selected = declaredReadiness[name];
-      if (
-        !name ||
-        Buffer.byteLength(name) > 256 ||
-        CONTROL.test(name) ||
-        !condition(selected)
-      ) {
+      if (!(SERVICE.test(name) && condition(selected))) {
         return refused();
       }
       return [name, selected];
@@ -437,7 +440,7 @@ function parseTerminal(
   }
   return Object.fromEntries(
     Object.entries(value).map(([key, item]): [string, Terminal] => {
-      const bound = resources[key];
+      const bound = Object.hasOwn(resources, key) ? resources[key] : undefined;
       if (
         !bound ||
         bound.kind !== "container" ||

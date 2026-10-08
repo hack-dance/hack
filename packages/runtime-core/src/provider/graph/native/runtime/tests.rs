@@ -175,6 +175,8 @@ struct FakeState {
     containers: BTreeMap<String, Value>,
     networks: BTreeMap<String, Value>,
     effects: Vec<String>,
+    stop_batches: usize,
+    observed_phases: Vec<Phase>,
     fail_create: bool,
     fail_start: bool,
     fail_delete: bool,
@@ -205,6 +207,7 @@ impl Backend for Fake {
         body: Option<&Value>,
     ) -> Result<Value, CandidateError> {
         let mut state = self.state.borrow_mut();
+        state.observed_phases.push(self.receipt().phase);
         if method == Method::GET && path.starts_with("/v1.53/networks/") {
             let selected = path.strip_prefix("/v1.53/networks/").unwrap();
             return state
@@ -391,6 +394,7 @@ impl Backend for Fake {
     ) -> Result<(), CandidateError> {
         assert_eq!(self.receipt().phase, Phase::StopIntent);
         let mut state = self.state.borrow_mut();
+        state.stop_batches += 1;
         if state.fail_stop {
             return Err(super::super::super::shutdown::stop_error(
                 crate::provider::engine::StopBatchFailure {
@@ -778,6 +782,142 @@ fn cleanup_retry_keeps_observed_stop_request_for_the_same_immutable_id() {
             .count(),
         1
     );
+}
+
+#[test]
+fn committed_removal_retry_does_not_repeat_stop_or_regress_the_receipt_phase() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    session.backend.state.borrow_mut().fail_delete = true;
+    assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
+    let (mut retained, _) = journal::load(&fixture.candidate, RUN, OWNER, BOOT).unwrap();
+    assert_eq!(retained.phase, Phase::RemovalIntent);
+    // Valid bounded state with missing terminal detail must persist fresh evidence
+    // before Fake's DELETE independently reads the durable journal.
+    retained.terminal.clear();
+    journal::save(&session.root, &retained).unwrap();
+    let before_stops = session.backend.state.borrow().stop_batches;
+    session.backend.state.borrow_mut().observed_phases.clear();
+    cleanup_using(&session.backend, &mut retained, &session.root).unwrap();
+    assert_eq!(retained.phase, Phase::Removed);
+    let state = session.backend.state.borrow();
+    assert_eq!(state.stop_batches, before_stops);
+    assert!(
+        state
+            .observed_phases
+            .iter()
+            .all(|phase| *phase == Phase::RemovalIntent)
+    );
+    assert!(!retained.terminal["container:web"].stop_requested);
+}
+
+#[test]
+fn stopped_cleanup_resumes_only_terminal_instances_without_another_stop_batch() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    session.backend.state.borrow_mut().fail_delete = true;
+    assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
+    // Select the durable Stopped boundary with actual matching terminal observations.
+    let (mut retained, _) = journal::load(&fixture.candidate, RUN, OWNER, BOOT).unwrap();
+    retained.phase = Phase::Stopped;
+    journal::save(&session.root, &retained).unwrap();
+    let before_stops = session.backend.state.borrow().stop_batches;
+    session.backend.state.borrow_mut().observed_phases.clear();
+    cleanup_using(&session.backend, &mut retained, &session.root).unwrap();
+    assert_eq!(retained.phase, Phase::Removed);
+    let state = session.backend.state.borrow();
+    assert_eq!(state.stop_batches, before_stops);
+    assert!(
+        state
+            .observed_phases
+            .iter()
+            .all(|phase| matches!(phase, Phase::Stopped | Phase::RemovalIntent))
+    );
+}
+
+#[test]
+fn cleanup_of_removed_inventory_is_read_only_and_keeps_the_committed_bytes() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+    let before = fs::read(session.root.join("state.json")).unwrap();
+    let effects = session.backend.state.borrow().effects.clone();
+    let stops = session.backend.state.borrow().stop_batches;
+    session.backend.state.borrow_mut().observed_phases.clear();
+    cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+    assert_eq!(fs::read(session.root.join("state.json")).unwrap(), before);
+    let state = session.backend.state.borrow();
+    assert_eq!(state.effects, effects);
+    assert_eq!(state.stop_batches, stops);
+    assert!(
+        state
+            .observed_phases
+            .iter()
+            .all(|phase| *phase == Phase::Removed)
+    );
+}
+
+#[test]
+fn stopped_or_removing_inventory_refuses_a_restarted_instance_before_effects() {
+    for phase in [Phase::Stopped, Phase::RemovalIntent] {
+        let fixture = Fixture::new(basic());
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        session.backend.state.borrow_mut().fail_delete = true;
+        assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
+        session.receipt.phase = phase;
+        journal::save(&session.root, &session.receipt).unwrap();
+        let name = &session.receipt.resources["container:web"].name;
+        {
+            let mut state = session.backend.state.borrow_mut();
+            let value = state.containers.get_mut(name).unwrap();
+            value["State"]["Running"] = json!(true);
+            value["State"]["Status"] = json!("running");
+            value["State"]["Pid"] = json!(1234);
+        }
+        let before = fs::read(session.root.join("state.json")).unwrap();
+        let effects = session.backend.state.borrow().effects.clone();
+        let stops = session.backend.state.borrow().stop_batches;
+        assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
+        assert_eq!(fs::read(session.root.join("state.json")).unwrap(), before);
+        assert_eq!(session.backend.state.borrow().effects, effects);
+        assert_eq!(session.backend.state.borrow().stop_batches, stops);
+    }
+}
+
+#[test]
+fn removed_inventory_refuses_even_matching_resource_reappearance_without_effects() {
+    for container in [false, true] {
+        let fixture = Fixture::new(basic());
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        let containers = session.backend.state.borrow().containers.clone();
+        let networks = session.backend.state.borrow().networks.clone();
+        cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+        {
+            let mut state = session.backend.state.borrow_mut();
+            if container {
+                state.containers = containers;
+            } else {
+                state.networks = networks;
+            }
+        }
+        let before = fs::read(session.root.join("state.json")).unwrap();
+        let effects = session.backend.state.borrow().effects.clone();
+        let stops = session.backend.state.borrow().stop_batches;
+        assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
+        assert_eq!(fs::read(session.root.join("state.json")).unwrap(), before);
+        assert_eq!(session.backend.state.borrow().effects, effects);
+        assert_eq!(session.backend.state.borrow().stop_batches, stops);
+    }
 }
 
 #[test]

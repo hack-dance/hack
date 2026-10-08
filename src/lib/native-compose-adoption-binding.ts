@@ -8,7 +8,10 @@ import {
   createNativeComposeProbe,
   NativeComposeOwnershipError,
 } from "./native-compose-ownership.ts";
-import { acquireNativeConfigImportInputs } from "./native-config-import-inputs.ts";
+import {
+  acquireNativeConfigImportInputs,
+  type NativeConfigImportSourceIdentity,
+} from "./native-config-import-inputs.ts";
 import { freezeImportValue } from "./native-config-import-plan.ts";
 
 const ID = /^[a-f0-9]{64}$/;
@@ -525,6 +528,10 @@ export type LegacyComposeAdoptionBinding = {
     readonly configText: string;
     readonly composeText: string;
     readonly binding: LegacyComposeVerifiedBinding;
+    readonly sourceFiles: {
+      readonly config: NativeConfigImportSourceIdentity;
+      readonly compose: NativeConfigImportSourceIdentity;
+    };
   }>;
 };
 function translate(error: unknown, signal?: AbortSignal): never {
@@ -643,8 +650,14 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           configText: source.configText,
           composeText: source.composeText,
           binding: baseline,
+          sourceFiles: source.sourceFiles,
         };
-        for (const key of ["configText", "composeText", "binding"]) {
+        for (const key of [
+          "configText",
+          "composeText",
+          "binding",
+          "sourceFiles",
+        ]) {
           Object.defineProperty(result, key, { enumerable: false });
         }
         return Object.freeze(result);

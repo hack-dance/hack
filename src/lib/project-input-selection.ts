@@ -10,6 +10,7 @@ import {
 import { HackCliError } from "./cli-result.ts";
 import { pathExists } from "./fs.ts";
 import { isRecord } from "./guards.ts";
+import { assertLegacyComposeAdoptionSelectionStable } from "./native-compose-adoption-marker.ts";
 
 export const NATIVE_PROJECT_FILENAME = "hack.project.json";
 type ProjectDirName =
@@ -66,12 +67,16 @@ export async function inspectProjectInputsAtRoot(opts: {
   readonly projectRoot: string;
 }): Promise<ProjectInputSelection> {
   const projectRoot = resolve(opts.projectRoot);
+  const adoption = await assertLegacyComposeAdoptionSelectionStable({
+    projectRoot,
+  });
   const nativeFile = resolve(
     projectRoot,
     HACK_PROJECT_DIR_PRIMARY,
     NATIVE_PROJECT_FILENAME
   );
-  const nativePresent = await inputPresent(nativeFile);
+  const nativePresent =
+    adoption === "active" || (await inputPresent(nativeFile));
   const legacyFiles: string[] = [];
   const composeDirectories: ProjectDirName[] = [];
   for (const directory of PROJECT_DIRECTORIES) {
@@ -140,6 +145,9 @@ export function requireLegacyProjectInputs(
 export async function assertLegacyProjectInputFamily(opts: {
   readonly projectRoot: string;
 }): Promise<void> {
+  if ((await assertLegacyComposeAdoptionSelectionStable(opts)) === "active") {
+    throw new ProjectInputSelectionError("native");
+  }
   // Legacy reads/writes need only one strict marker check on their common path.
   // Full authored-family classification is needed when the marker is present.
   if (

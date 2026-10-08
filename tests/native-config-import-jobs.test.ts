@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { isRecord } from "../src/lib/guards.ts";
+import { planLegacyComposeAdoption } from "../src/lib/native-compose-adoption-plan.ts";
 import { legacyComposeRetainedPlan } from "../src/lib/native-compose-adoption-readiness.ts";
 import { compileNativeConfig } from "../src/lib/native-config-compiler.ts";
 import {
@@ -7,6 +8,7 @@ import {
   legacyComposeOneShotMarker,
 } from "../src/lib/native-config-import-jobs.ts";
 import {
+  mapLegacyNativeAdoptionBaseline,
   mapLegacyNativeImport,
   mapLegacyNativeStorageAdoption,
 } from "../src/lib/native-config-import-plan.ts";
@@ -197,6 +199,43 @@ test("omitted job restart remains absent; empty image-default entrypoint/command
     services: {},
     jobs: { done: { image: "fixture:1" } },
   });
+});
+
+test("closed adoption baseline refuses jobs while the static v7 plan preserves them before effects", () => {
+  const services = graph();
+  const source = {
+    name: "fixture",
+    services: {
+      ...services,
+      db: { ...services.db, volumes: ["data:/database"] },
+    },
+    volumes: { data: { name: "fixture-data" } },
+  };
+  const opts = {
+    configText: '{"name":"fixture"}',
+    composeText: JSON.stringify(source),
+  };
+  const spawn = spyOn(Bun, "spawn");
+  try {
+    expect(mapLegacyNativeStorageAdoption(opts).report.complete).toBe(true);
+    const baseline = mapLegacyNativeAdoptionBaseline(opts);
+    expect(baseline.report.complete).toBe(false);
+    expect(baseline.report.fields).toContainEqual(
+      expect.objectContaining({
+        document: "compose",
+        pointer: "/services/initialize",
+        status: "refused",
+        code: "completed_job_adoption_unqualified",
+      })
+    );
+    const planned = planLegacyComposeAdoption(opts);
+    expect(planned.report.supported).toBe(true);
+    expect(planned.intent).toBeDefined();
+    expect(JSON.stringify(planned)).not.toContain(CANARY);
+    expect(spawn).not.toHaveBeenCalled();
+  } finally {
+    spawn.mockRestore();
+  }
 });
 
 test("pure named mount mapping includes jobs and keeps original logical storage identity", () => {

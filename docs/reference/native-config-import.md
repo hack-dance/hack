@@ -79,6 +79,10 @@ qualifies only its closed static/default-network family. A job import preview do
 receipt, launch or recreate a container, transfer ownership, or qualify application
 migration. Two-worktree data acceptance remains a separate live gate.
 
+The service-only adoption baseline continues to refuse jobs. Only the version-7
+owner selects its distinct completed-job baseline after verifying the closed
+static family. Symbolic conversion is not an ownership grant.
+
 Custom-network job combinations remain refused; no static-bridge import or
 retained network authority is added by this completed-job conversion.
 

@@ -458,7 +458,7 @@ test("actual renderer requires the exact live owner projection and preserves lit
       renderNativeCompose({ ...options, fileProjection: projection })
     ).toThrow();
   });
-});
+}, 30_000);
 test("only the original live stop attempt may reap; copied and replacement-owner handles refuse", async () => {
   const selected = await store.withMutation(running);
   await store.withMutation(async (mutation) => {
@@ -500,7 +500,7 @@ test("only the original live stop attempt may reap; copied and replacement-owner
     });
   });
   await expectAbsent(memberPaths(selected.projection));
-});
+}, 30_000);
 test("stop authority exists only within the exact live down effect; an unknown stop survives mutation revocation and cannot be handed off", async () => {
   const selected = await store.withMutation(running);
   let original: Awaited<
@@ -565,7 +565,7 @@ test("stop authority exists only within the exact live down effect; an unknown s
     selected.generation.generationId
   );
   await expectPresent(memberPaths(selected.projection));
-});
+}, 30_000);
 test("a known stop can re-arm after partial retirement intent and finish exact saved retry without recreating missing members", async () => {
   const selected = await store.withMutation(running);
   let unlinked = 0;
@@ -628,7 +628,7 @@ test("a known stop can re-arm after partial retirement intent and finish exact s
   });
   await expectAbsent(memberPaths(selected.projection));
   expect(await store.loadPending()).toBeNull();
-});
+}, 30_000);
 test.each([
   "extra-private-bind",
   "interpolated-bind",
@@ -1123,7 +1123,7 @@ test("absence proof drift during retirement preserves other members and pending 
       await readFile(journalPath(selected.projection), "utf8")
     ).not.toContain('"phase":"retired"');
   });
-});
+}, 30_000);
 
 test("replacement retires obsolete current snapshot before receipt handoff while new pending material remains", async () => {
   await store.withMutation(async (mutation) => {

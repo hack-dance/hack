@@ -195,6 +195,94 @@ configTest(
 );
 
 configTest(
+  "one authored bridge keeps internal policy and static aliases through compiler and Compose normalization",
+  async () => {
+    const source = {
+      name: "fixture",
+      services: {
+        web: {
+          image: "fixture/web:1",
+          networks: { private: { aliases: ["web-api"] } },
+        },
+        inactive: {
+          image: "fixture/optional:1",
+          profiles: ["qa"],
+          networks: { private: { aliases: ["qa-api"] } },
+        },
+      },
+      networks: { private: { driver: "bridge", internal: true } },
+    };
+    const mapped = mapLegacyNativeImport({
+      configText: '{"name":"fixture"}',
+      composeText: JSON.stringify(source),
+    });
+    expect(mapped.report.complete).toBe(true);
+    expect(mapped.candidate).toBeDefined();
+    for (const profiles of [[], ["qa"]]) {
+      const compiled = await compileNativeConfig({
+        input: new TextEncoder().encode(JSON.stringify(mapped.candidate)),
+        binary: join(import.meta.dir, "../dist/hack-config-compiler"),
+        profiles,
+      });
+      expect(compiled.ok).toBe(true);
+      if (!compiled.ok) {
+        continue;
+      }
+      const fixture = composeFixture({
+        services: {
+          web: { image: "fixture/web:1" },
+          inactive: { image: "fixture/optional:1" },
+        },
+      });
+      const selected = profiles.length ? ["web", "inactive"] : ["web"];
+      fixture.environmentPlan.workloads = Object.fromEntries(
+        selected.map((name) => [name, {}])
+      );
+      fixture.managedValues = Object.fromEntries(
+        selected.map((name) => [name, {}])
+      );
+      const generated = renderNativeCompose({
+        ...fixture,
+        plan: compiled.plan,
+      });
+      const original = await normalized({
+        json: JSON.stringify(source),
+        profiles,
+      });
+      const actual = await normalized({ json: generated.json, profiles });
+      const sourceNetworks = original.networks;
+      const generatedNetworks = actual.networks;
+      expect(isRecord(sourceNetworks)).toBe(true);
+      expect(isRecord(generatedNetworks)).toBe(true);
+      if (!(isRecord(sourceNetworks) && isRecord(generatedNetworks))) {
+        continue;
+      }
+      expect(sourceNetworks.private).toMatchObject({
+        driver: "bridge",
+        internal: true,
+      });
+      expect(generatedNetworks.private).toMatchObject({
+        driver: "bridge",
+        internal: true,
+      });
+      for (const name of selected) {
+        const sourceService = isRecord(original.services)
+          ? original.services[name]
+          : undefined;
+        const generatedService = isRecord(actual.services)
+          ? actual.services[name]
+          : undefined;
+        expect(isRecord(sourceService)).toBe(true);
+        expect(isRecord(generatedService)).toBe(true);
+        if (isRecord(sourceService) && isRecord(generatedService)) {
+          expect(sourceService.networks).toEqual(generatedService.networks);
+        }
+      }
+    }
+  }
+);
+
+configTest(
   "Compose string words match real compiler and renderer exec argv for selected profiles",
   async () => {
     const source = {

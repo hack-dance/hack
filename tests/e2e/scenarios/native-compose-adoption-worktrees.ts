@@ -84,6 +84,7 @@ type Instance = {
   readonly sourceMode?: "canonical-generated";
   readonly argvMode?: "string-entrypoint" | "string-cleared";
   readonly typedLocal?: true;
+  readonly ownedNetwork?: true;
 };
 type Observation = {
   readonly id: string;
@@ -98,6 +99,97 @@ type Snapshot = {
   };
   readonly source: string;
 };
+function fixtureNetworkName(instance: Instance): string {
+  return `${instance.name}_${instance.ownedNetwork ? "private" : "default"}`;
+}
+function networkPolicyMatches(
+  instance: Instance,
+  row: Record<string, unknown>
+) {
+  return (
+    row.name === fixtureNetworkName(instance) &&
+    row.logical === (instance.ownedNetwork ? "private" : "default") &&
+    (!instance.ownedNetwork ||
+      (row.driver === "bridge" &&
+        row.scope === "local" &&
+        row.internal === true))
+  );
+}
+
+/** Pure exact-ID fixture oracle; a stopped bridge must have no remaining members. */
+export function assertAdoptionBridgeObservation(opts: {
+  readonly instance: Instance;
+  readonly id: string;
+  readonly members: readonly string[];
+  readonly row: unknown;
+}) {
+  const { instance, id, members, row } = opts;
+  if (!(ID.test(id) && isRecord(row))) {
+    refused();
+  }
+  if (
+    row.id !== id ||
+    !networkPolicyMatches(instance, row) ||
+    !Array.isArray(row.members) ||
+    row.members.some(
+      (member) => typeof member !== "string" || !ID.test(member)
+    ) ||
+    new Set(row.members).size !== row.members.length ||
+    JSON.stringify([...row.members].sort()) !==
+      JSON.stringify([...members].sort())
+  ) {
+    refused();
+  }
+}
+
+/** A retained original may lose stopped aliases, never a running alias or bridge ID. */
+export function assertAdoptionEndpointObservation(opts: {
+  readonly instance: Instance;
+  readonly networkId: string;
+  readonly container: Observation;
+  readonly running: boolean;
+  readonly row: unknown;
+}) {
+  const { instance, networkId, container, running, row } = opts;
+  const expectedAliases = [
+    `${instance.name}-${container.service}-1`,
+    container.service,
+    container.service === "db" ? "db-reader" : "worker-reader",
+  ].sort();
+  const endpoint =
+    isRecord(row) && Array.isArray(row.networks) ? row.networks[0] : undefined;
+  if (
+    !(
+      ID.test(networkId) &&
+      container.service &&
+      ["db", "worker"].includes(container.service) &&
+      isRecord(row)
+    )
+  ) {
+    refused();
+  }
+  if (
+    row.id !== container.id ||
+    row.running !== running ||
+    !Array.isArray(row.networks) ||
+    row.networks.length !== 1 ||
+    !isRecord(endpoint) ||
+    endpoint.name !== fixtureNetworkName(instance) ||
+    endpoint.id !== networkId ||
+    !(
+      (Array.isArray(endpoint.aliases) &&
+        endpoint.aliases.every((alias) => typeof alias === "string") &&
+        new Set(endpoint.aliases).size === endpoint.aliases.length &&
+        JSON.stringify([...endpoint.aliases].sort()) ===
+          JSON.stringify(expectedAliases)) ||
+      (!running &&
+        (endpoint.aliases === null ||
+          (Array.isArray(endpoint.aliases) && endpoint.aliases.length === 0)))
+    )
+  ) {
+    refused();
+  }
+}
 function refused(): never {
   throw new Error(
     "Adoption worktree fixture ownership or data check failed; values omitted."
@@ -266,8 +358,7 @@ function validateOwnedObservation(opts: {
     if (
       typeof row.id !== "string" ||
       !ID.test(row.id) ||
-      row.name !== `${opts.instance.name}_default` ||
-      row.logical !== "default"
+      !networkPolicyMatches(opts.instance, row)
     ) {
       refused();
     }
@@ -343,6 +434,9 @@ async function writeLegacy(instance: Instance, image: string) {
             POSTGRES_HOST_AUTH_METHOD: "trust",
           },
           volumes: ["data:/var/lib/postgresql/data"],
+          ...(instance.ownedNetwork
+            ? { networks: { private: { aliases: ["db-reader"] } } }
+            : {}),
         },
         worker: {
           image,
@@ -356,9 +450,15 @@ async function writeLegacy(instance: Instance, image: string) {
             ? [WORKER_SCRIPT]
             : (stringSource?.command ?? LITERAL_SOURCE_COMMAND),
           stop_grace_period: "15s",
+          ...(instance.ownedNetwork
+            ? { networks: { private: { aliases: ["worker-reader"] } } }
+            : {}),
         },
       },
       volumes: { data: { name: `${instance.name}_data` } },
+      ...(instance.ownedNetwork
+        ? { networks: { private: { driver: "bridge", internal: true } } }
+        : {}),
     })
   );
 }
@@ -367,7 +467,7 @@ function formats(kind: Kind): string {
     return `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"nativeNames":[{{$first := true}}{{range $name,$value := .Config.Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}],"service":{{json (index .Config.Labels "com.docker.compose.service")}},"workingDir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"configFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{json $m.Name}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}]}`;
   }
   if (kind === "network") {
-    return `{"id":{{json .Id}},"name":{{json .Name}},"createdAt":{{json .Created}},"project":{{json (index .Labels "${PROJECT_LABEL}")}},"nativeNames":[{{$first := true}}{{range $name,$value := .Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}],"logical":{{json (index .Labels "com.docker.compose.network")}}}`;
+    return `{"id":{{json .Id}},"name":{{json .Name}},"createdAt":{{json .Created}},"project":{{json (index .Labels "${PROJECT_LABEL}")}},"nativeNames":[{{$first := true}}{{range $name,$value := .Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}],"logical":{{json (index .Labels "com.docker.compose.network")}},"driver":{{json .Driver}},"scope":{{json .Scope}},"internal":{{json .Internal}}}`;
   }
   return `{"name":{{json .Name}},"createdAt":{{json .CreatedAt}},"project":{{json (index .Labels "${PROJECT_LABEL}")}},"nativeNames":[{{$first := true}}{{range $name,$value := .Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}],"storage":{{json (index .Labels "com.docker.compose.volume")}}}`;
 }
@@ -378,9 +478,15 @@ async function prepareFixtureInputs(
     readonly generated?: boolean;
     readonly typedLocal?: boolean;
     readonly stringArgv?: boolean;
+    readonly ownedNetwork?: boolean;
   } = {}
 ) {
-  const { generated = false, typedLocal = false, stringArgv = false } = options;
+  const {
+    generated = false,
+    typedLocal = false,
+    stringArgv = false,
+    ownedNetwork = false,
+  } = options;
   expect({
     that: resolveCliSpawnArgs([]).length === 1,
     message:
@@ -406,6 +512,7 @@ async function prepareFixtureInputs(
     ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
     ...(stringArgv ? { argvMode: "string-entrypoint" as const } : {}),
     ...(typedLocal ? { typedLocal: true as const } : {}),
+    ...(ownedNetwork ? { ownedNetwork: true as const } : {}),
   };
   if ((await probe(["info", "--format", "{{.OSType}}"])) !== "linux") {
     refused();
@@ -435,6 +542,7 @@ async function prepareFixtureInputs(
     ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
     ...(stringArgv ? { argvMode: "string-entrypoint" as const } : {}),
     ...(typedLocal ? { typedLocal: true as const } : {}),
+    ...(ownedNetwork ? { ownedNetwork: true as const } : {}),
   };
   const second: Instance = {
     root: await addLinkedWorktree({ fixture, branch: "adoption-beta" }),
@@ -443,6 +551,7 @@ async function prepareFixtureInputs(
     ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
     ...(stringArgv ? { argvMode: "string-cleared" as const } : {}),
     ...(typedLocal ? { typedLocal: true as const } : {}),
+    ...(ownedNetwork ? { ownedNetwork: true as const } : {}),
   };
   for (const instance of [first, second]) {
     await writeLegacy(instance, image);
@@ -605,6 +714,56 @@ function createFixtureRuntime(
       expected: "1",
     });
   };
+  const assertTopology = async (instance: Instance, running: boolean) => {
+    if (!instance.ownedNetwork) {
+      return;
+    }
+    const baseline = anchors.get(instance);
+    const network = baseline?.resources.network[0];
+    if (
+      !network ||
+      baseline.resources.network.length !== 1 ||
+      baseline.resources.container.length !== 2
+    ) {
+      refused();
+    }
+    const selected = object(
+      await probe([
+        "network",
+        "inspect",
+        "--format",
+        `{"id":{{json .Id}},"name":{{json .Name}},"internal":{{json .Internal}},"driver":{{json .Driver}},"scope":{{json .Scope}},"members":[{{$first := true}}{{range $id,$c := .Containers}}{{if not $first}},{{end}}{{$first = false}}{{json $id}}{{end}}]}`,
+        network.id,
+      ])
+    );
+    const expectedMembers = running
+      ? baseline.resources.container.map((entry) => entry.id).sort()
+      : [];
+    assertAdoptionBridgeObservation({
+      instance,
+      id: network.id,
+      members: expectedMembers,
+      row: selected,
+    });
+    for (const entry of baseline.resources.container) {
+      const container = object(
+        await probe([
+          "container",
+          "inspect",
+          "--format",
+          `{"id":{{json .Id}},"running":{{json .State.Running}},"networks":[{{$first := true}}{{range $name,$n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}},"aliases":{{json $n.Aliases}}}{{end}}]}`,
+          entry.id,
+        ])
+      );
+      assertAdoptionEndpointObservation({
+        instance,
+        networkId: network.id,
+        container: entry,
+        running,
+        row: container,
+      });
+    }
+  };
   const check = async (instance: Instance, checkSource = true) => {
     const baseline = anchors.get(instance);
     if (
@@ -617,6 +776,7 @@ function createFixtureRuntime(
     ) {
       refused();
     }
+    await assertTopology(instance, true);
     await checkWorkerArgv(instance);
     if (instance.sourceMode === "canonical-generated") {
       if (
@@ -647,6 +807,7 @@ function createFixtureRuntime(
     ) {
       refused();
     }
+    await assertTopology(instance, true);
   };
   const assertNoState = async (instance: Instance) => {
     expect({
@@ -668,6 +829,7 @@ function createFixtureRuntime(
     ) {
       refused();
     }
+    await assertTopology(instance, false);
     await checkWorkerArgv(instance);
     for (const row of baseline.resources.container) {
       if (
@@ -744,7 +906,7 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
   }
   for (const [kind, name] of [
     ["volume", `${instance.name}_data`],
-    ["network", `${instance.name}_default`],
+    ["network", fixtureNetworkName(instance)],
     ["container", `${instance.name}-db-1`],
     ["container", `${instance.name}-worker-1`],
   ] as const) {
@@ -1170,9 +1332,13 @@ async function runWithFixtureCleanup(opts: {
   }
 }
 
-async function runLiteralWorktrees(ctx: ScenarioContext, stringArgv: boolean) {
+async function runLiteralWorktrees(
+  ctx: ScenarioContext,
+  stringArgv: boolean,
+  ownedNetwork = false
+) {
   const h = createFixtureRuntime(
-    await prepareFixtureInputs(ctx, { stringArgv })
+    await prepareFixtureInputs(ctx, { stringArgv, ownedNetwork })
   );
   await runWithFixtureCleanup({
     run: async () => {
@@ -1220,6 +1386,16 @@ export const nativeComposeAdoptionStringWorktreesScenario: Scenario = {
   summary:
     "Compose string argv and explicit cleared entrypoint keep linked SQL and exact original identities",
   run: (ctx) => runLiteralWorktrees(ctx, true),
+};
+
+/** Original project bridge IDs, internal policy, aliases and SQL survive two linked adoptions and rollback. */
+export const nativeComposeAdoptionNetworkWorktreesScenario: Scenario = {
+  name: "native-compose-adoption-network-worktrees",
+  tier: "docker",
+  preserveFixtureOnFailure: true,
+  summary:
+    "one authored internal bridge and aliases retain original IDs and linked SQL through adoption and rollback",
+  run: (ctx) => runLiteralWorktrees(ctx, false, true),
 };
 
 /** Canonical writer-produced sources and six managed layers retain both linked checkouts' original SQL and identities through v3 repair/rollback. */

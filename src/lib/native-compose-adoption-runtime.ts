@@ -52,7 +52,7 @@ export async function inspectLegacyComposeRuntimeConfig(opts: {
   const probe = createNativeComposeProbe(opts);
   const expectedFiles = [
     opts.composeFile,
-    ...(opts.binding.binding_version === 2
+    ...(opts.binding.binding_version === 2 || opts.binding.binding_version === 4
       ? opts.binding.composeFiles.slice(1)
       : []),
   ];

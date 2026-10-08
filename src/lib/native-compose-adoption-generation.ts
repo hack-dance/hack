@@ -547,6 +547,11 @@ async function prepare(
     projectRoot: ctx.root,
     signal: ctx.signal,
   });
+  // A custom bridge needs its own durable receipt owner. Never serialize it
+  // with the default-network wire contract while that owner is unavailable.
+  if (acquired.binding.binding_version >= 3) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
   const mapped = mapLegacyNativeStorageAdoption(acquired);
   if (!mapped.candidate) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");

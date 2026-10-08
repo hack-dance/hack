@@ -1,4 +1,5 @@
 import { isRecord } from "./guards.ts";
+import { mapLegacyOwnedNetwork } from "./native-config-import-network.ts";
 import {
   type ImportDocument,
   type ImportField,
@@ -168,6 +169,13 @@ function mapLegacyNativeInput(opts: {
   mapOverlay(context);
   mapWorktree(context);
   mapServices({ source: compose.value.services, candidate, mark, refuse });
+  mapOwnedNetwork({
+    project: name,
+    compose: compose.value,
+    candidate,
+    mark,
+    refuse,
+  });
   if (opts.storageAdoption) {
     mapStorageCandidate({
       config: config.value,
@@ -178,6 +186,42 @@ function mapLegacyNativeInput(opts: {
     });
   }
   return nativeImportResult({ fields, candidate });
+}
+
+function mapOwnedNetwork(
+  opts: Pick<MappingContext, "candidate" | "mark" | "refuse"> & {
+    readonly project: unknown;
+    readonly compose: Record<string, unknown>;
+  }
+): void {
+  if (typeof opts.project !== "string") {
+    return;
+  }
+  const mapping = mapLegacyOwnedNetwork({
+    project: opts.project,
+    compose: opts.compose,
+  });
+  if (mapping.kind === "omitted") {
+    return;
+  }
+  if (mapping.kind === "refused") {
+    opts.refuse("compose", mapping.pointer, mapping.code);
+    return;
+  }
+  const { logical, internal, attachments } = mapping.intent;
+  opts.candidate.networks = { [logical]: { internal } };
+  if (!isRecord(opts.candidate.services)) {
+    return;
+  }
+  for (const { service, aliases } of attachments) {
+    const workload = opts.candidate.services[service];
+    if (isRecord(workload)) {
+      workload.networks = { [logical]: { aliases: [...aliases] } };
+    }
+  }
+  for (const { source, target, code } of mapping.pointers) {
+    opts.mark("compose", source, target, code, true);
+  }
 }
 
 /** Read-only preview keeps named storage refused until a separate verified adoption owner binds it. */

@@ -1,5 +1,9 @@
 import { posix } from "node:path";
 import { isRecord } from "./guards.ts";
+import {
+  type LegacyOwnedNetworkIntent,
+  mapLegacyOwnedNetwork,
+} from "./native-config-import-network.ts";
 import { importPointer } from "./native-config-import-parser.ts";
 
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -9,6 +13,7 @@ const TARGET = /^\/[a-zA-Z0-9_./-]+$/;
 export type LegacyComposeStorageIntent = {
   readonly composeProject: string;
   readonly services: readonly string[];
+  readonly ownedNetwork?: LegacyOwnedNetworkIntent;
   readonly volumes: readonly {
     readonly storage: string;
     readonly name: string;
@@ -191,12 +196,20 @@ export function mapLegacyComposeStorage(opts: {
   if (!mapping.supported) {
     return undefined;
   }
+  const network = mapLegacyOwnedNetwork({
+    project: config.name,
+    compose,
+  });
+  if (network.kind === "refused") {
+    return undefined;
+  }
   return {
     accepted: mapping.accepted,
     mounts: [...mapping.mounts],
     intent: {
       composeProject: config.name,
       services: Object.keys(compose.services).sort(),
+      ...(network.kind === "owned" ? { ownedNetwork: network.intent } : {}),
       volumes: mapping.volumes.sort((a, b) =>
         a.storage.localeCompare(b.storage)
       ),

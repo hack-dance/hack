@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createNativeComposeProbe } from "../src/lib/native-compose-ownership.ts";
 import {
+  assertAdoptionBridgeObservation,
+  assertAdoptionEndpointObservation,
   assertAdoptionWorkerArgv,
   cleanupOwnedAdoptionFixture,
   createAdoptionFixtureProbe,
@@ -394,6 +396,144 @@ test("logical resource mismatches and shortened network IDs never authorize clea
       kind: "volume",
       row: { ...rows.volume, storage: "foreign" },
     })
+  ).toThrow(REFUSAL);
+});
+
+test("owned bridge fixture cleanup binds exact logical name and internal bridge policy", () => {
+  const custom = { ...instance, ownedNetwork: true as const };
+  const selected = {
+    ...rows.network,
+    name: `${instance.name}_private`,
+    logical: "private",
+    driver: "bridge",
+    scope: "local",
+    internal: true,
+  };
+  expect(
+    ownedAdoptionFixtureObservation({
+      instance: custom,
+      kind: "network",
+      row: selected,
+    })
+  ).toEqual({ id, createdAt });
+  for (const changed of [
+    { name: `${instance.name}_default` },
+    { logical: "default" },
+    { driver: "overlay" },
+    { scope: "swarm" },
+    { internal: false },
+  ]) {
+    expect(() =>
+      ownedAdoptionFixtureObservation({
+        instance: custom,
+        kind: "network",
+        row: { ...selected, ...changed },
+      })
+    ).toThrow(REFUSAL);
+  }
+});
+
+test("owned bridge observation refuses foreign membership and policy", () => {
+  const custom = { ...instance, ownedNetwork: true as const };
+  const selected = {
+    id,
+    name: `${instance.name}_private`,
+    logical: "private",
+    driver: "bridge",
+    scope: "local",
+    internal: true,
+    members: [id],
+  };
+  expect(() =>
+    assertAdoptionBridgeObservation({
+      instance: custom,
+      id,
+      members: [id],
+      row: selected,
+    })
+  ).not.toThrow();
+  for (const changed of [
+    { members: [] },
+    { members: [id, "b".repeat(64)] },
+    { internal: false },
+    { name: `${instance.name}_default` },
+    { id: "c".repeat(64) },
+  ]) {
+    expect(() =>
+      assertAdoptionBridgeObservation({
+        instance: custom,
+        id,
+        members: [id],
+        row: { ...selected, ...changed },
+      })
+    ).toThrow(REFUSAL);
+  }
+});
+
+test("running original requires exact bridge ID and static aliases; stopped alias loss stays bounded", () => {
+  const custom = { ...instance, ownedNetwork: true as const };
+  const selected = {
+    id,
+    running: true,
+    networks: [
+      {
+        name: `${instance.name}_private`,
+        id,
+        aliases: [`${instance.name}-db-1`, "db", "db-reader"],
+      },
+    ],
+  };
+  const verify = (row: unknown, running = true) =>
+    assertAdoptionEndpointObservation({
+      instance: custom,
+      networkId: id,
+      container: { id, service: "db" },
+      running,
+      row,
+    });
+  expect(() => verify(selected)).not.toThrow();
+  const originalEndpoint = selected.networks[0];
+  if (!originalEndpoint) {
+    throw new Error("Fixture endpoint missing");
+  }
+  for (const endpoint of [
+    { ...originalEndpoint, id: "c".repeat(64) },
+    { ...originalEndpoint, aliases: ["db", "db-reader"] },
+    {
+      ...originalEndpoint,
+      aliases: [...originalEndpoint.aliases, "foreign"],
+    },
+    { ...originalEndpoint, name: `${instance.name}_default` },
+  ]) {
+    expect(() => verify({ ...selected, networks: [endpoint] })).toThrow(
+      REFUSAL
+    );
+  }
+  expect(() =>
+    verify({
+      ...selected,
+      networks: [{ ...selected.networks[0], aliases: null }],
+    })
+  ).toThrow(REFUSAL);
+  expect(() =>
+    verify(
+      {
+        ...selected,
+        running: false,
+        networks: [{ ...selected.networks[0], aliases: null }],
+      },
+      false
+    )
+  ).not.toThrow();
+  expect(() =>
+    verify(
+      {
+        ...selected,
+        running: false,
+        networks: [{ ...selected.networks[0], aliases: ["foreign"] }],
+      },
+      false
+    )
   ).toThrow(REFUSAL);
 });
 

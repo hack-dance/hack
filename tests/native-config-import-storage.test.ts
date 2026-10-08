@@ -3,6 +3,7 @@ import {
   mapLegacyNativeImport,
   mapLegacyNativeStorageAdoption,
 } from "../src/lib/native-config-import-plan.ts";
+import { mapLegacyComposeStorage } from "../src/lib/native-config-import-storage.ts";
 
 const CANARY = "synthetic-private-original-storage";
 const configText = '{"name":"fixture"}';
@@ -50,6 +51,41 @@ test("private storage adoption preserves command, empty environment and authored
   const preview = mapLegacyNativeImport({ configText, composeText });
   expect(preview.report.complete).toBe(false);
   expect(preview.candidate).toBeUndefined();
+});
+
+test("owned bridge extends private intent while omitted topology keeps old intent bytes", () => {
+  const config = { name: "fixture" };
+  const legacy = mapLegacyComposeStorage({ config, compose });
+  expect(legacy?.intent).not.toHaveProperty("ownedNetwork");
+  const selected = {
+    ...compose,
+    networks: { private: { driver: "bridge", internal: true } },
+    services: {
+      db: {
+        ...compose.services.db,
+        networks: { private: { aliases: ["db-reader"] } },
+      },
+    },
+  };
+  const mapping = mapLegacyComposeStorage({ config, compose: selected });
+  expect(mapping?.intent.ownedNetwork).toEqual({
+    logical: "private",
+    name: "fixture_private",
+    internal: true,
+    attachments: [{ service: "db", aliases: ["db-reader"] }],
+  });
+  expect(
+    mapLegacyNativeStorageAdoption({
+      configText,
+      composeText: JSON.stringify(selected),
+    }).report.complete
+  ).toBe(true);
+  expect(
+    mapLegacyComposeStorage({
+      config,
+      compose: { ...selected, networks: { private: { external: true } } },
+    })
+  ).toBeUndefined();
 });
 
 for (const [name, change] of [

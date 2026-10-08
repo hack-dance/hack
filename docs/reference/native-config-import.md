@@ -32,6 +32,7 @@ reported as successful.
 | Service `restart` of `no`, `always`, `unless-stopped`, `on-failure[:N]` | Native restart intent; retry counts must fit a positive u32; jobs accept only explicit `no` or omission |
 | String `stop_signal`, `stop_grace_period` | Native shutdown signal/grace, validated by the compiler |
 | String environment map or `KEY=value` list | Native `default` bindings, preserving managed-value precedence and empty values |
+| One explicitly declared project-owned Compose `bridge` network with boolean `internal`, attached explicitly to every workload and optional static aliases | The same logical native bridge policy and per-workload aliases; no implicit default attachment or physical-ID claim |
 | Nonempty canonical `profiles` lists | Native workload selection and the union of declared profiles |
 | Short `depends_on` lists, or long edges with `service_started` / `service_healthy` | Native service `started` / `ready` edges; `required` must be absent/true and `restart` absent/false |
 | Long edges with `service_completed_successfully` | The referenced declaration becomes a native job; the edge becomes `job` / `completed` |
@@ -58,10 +59,20 @@ rather than inheriting ambient environment. Environment list entries without `=`
 names, nulls and non-string values refuse.
 
 Every unknown field remains a refusal, including fields in inactive profiles.
-Advanced builds, volumes/bind mounts, networks, ports, other labels,
+Advanced builds, volumes/bind mounts, other network shapes, ports, other labels,
 routes, host/lifecycle settings, `env_file`, deployment options and extensions
 are outside the first slice. They cannot be silently omitted from a complete
 conversion.
+
+The network mapping accepts one named non-default, non-ingress bridge only. It
+requires explicit `internal: true` or `false`, optional `driver: bridge`, and
+one explicit attachment per workload, including inactive jobs. Unknown
+network/attachment fields, custom physical names, external networks, IPAM,
+driver options, implicit or mixed default attachments, and duplicate or
+workload-colliding aliases refuse. Import preview preserves the authored
+logical topology; it does not claim that a running Compose bridge belongs to
+the project. The separate adoption owner must prove the existing bridge and
+container endpoints before a retained-ID transition.
 
 Completion roles are discovered before declarations are converted, including
 inactive declarations. A completed target or explicit one-shot keeps its authored
@@ -84,8 +95,10 @@ The service-only adoption baseline continues to refuse jobs. Only the version-7
 owner selects its distinct completed-job baseline after verifying the closed
 static family. Symbolic conversion is not an ownership grant.
 
-Custom-network job combinations remain refused; no static-bridge import or
-retained network authority is added by this completed-job conversion.
+Pure preview can preserve a completed job's explicit attachment and aliases on
+the same owned bridge. Retained storage/adoption still refuses custom-network
+job combinations: neither the job nor network receipt proves their combined
+ordering, endpoint ownership, recovery or replay.
 
 Health intervals and timeouts must use integer `ms`, `s`, `m` or `h` durations
 that fit the compiler's positive u32 milliseconds. Missing or zero timings,

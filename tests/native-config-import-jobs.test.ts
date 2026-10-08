@@ -266,7 +266,7 @@ test("pure named mount mapping includes jobs and keeps original logical storage 
 test.each([
   false,
   true,
-])("custom-network job conversion remains refused, including inactive declarations: %s", (inactive) => {
+])("pure custom-network job preview preserves inactive attachments: %s", (inactive) => {
   const source = graph();
   const services = Object.fromEntries(
     Object.entries(source).map(([name, workload]) => [
@@ -280,25 +280,45 @@ test.each([
       },
     ])
   );
-  const result = mapLegacyNativeImport({
-    configText: '{"name":"fixture"}',
-    composeText: JSON.stringify({
-      name: "fixture",
-      services,
-      networks: { private: { driver: "bridge", internal: true } },
-    }),
+  const composeText = JSON.stringify({
+    name: "fixture",
+    services,
+    networks: { private: { driver: "bridge", internal: true } },
   });
-  expect(result.report.complete).toBe(false);
-  expect(result.candidate).toBeUndefined();
+  const configText = '{"name":"fixture"}';
+  const result = mapLegacyNativeImport({ configText, composeText });
+  expect(result.report.complete).toBe(true);
+  expect(result.candidate).toMatchObject({
+    networks: { private: { internal: true } },
+    jobs: {
+      initialize: {
+        networks: { private: { aliases: ["seed"] } },
+        ...(inactive ? { profiles: ["later"] } : {}),
+      },
+    },
+  });
   expect(
     result.report.fields.find(
       (field) =>
         field.pointer === "/services/initialize/networks/private/aliases/0"
     )
-  ).toMatchObject({ status: "refused", code: "unsupported_field" });
+  ).toMatchObject({
+    status: "normalized",
+    target: "/jobs/initialize/networks",
+  });
   expect(
     result.report.fields.find((field) => field.pointer === "/networks")
-  ).toMatchObject({ status: "refused", code: "unsupported_field" });
+  ).toMatchObject({ status: "normalized", target: "/networks" });
+  const adoption = mapLegacyNativeStorageAdoption({ configText, composeText });
+  expect(adoption.report.complete).toBe(false);
+  expect(adoption.candidate).toBeUndefined();
+  expect(adoption.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/networks",
+      code: "owned_bridge_jobs_unsupported",
+      status: "refused",
+    })
+  );
 });
 
 test.each([

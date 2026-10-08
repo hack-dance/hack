@@ -58,6 +58,15 @@ const formats = {
     inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Labels "${PROJECT}")}},"native":{{json (index .Labels "${VERSION}")}},"logical":{{json (index .Labels "com.docker.compose.network")}},"createdAt":{{json .Created}},"driver":{{json .Driver}},"scope":{{json .Scope}},"internal":{{json .Internal}},"containers":[{{$first := true}}{{range $id, $c := .Containers}}{{if not $first}},{{end}}{{$first = false}}{{json $id}}{{end}}]}`,
   },
 } as const;
+const CUSTOM_CONTAINER_NETWORK_FORMAT = formats.container.inspect.replace(
+  '"id":{{json $n.NetworkID}}}',
+  '"id":{{json $n.NetworkID}},"aliases":{{json $n.Aliases}}}'
+);
+if (CUSTOM_CONTAINER_NETWORK_FORMAT === formats.container.inspect) {
+  throw new Error(
+    "Legacy adoption inspection format is invalid; values omitted."
+  );
+}
 type Kind = keyof typeof formats;
 type Probe = (args: readonly string[]) => Promise<string>;
 type Inventory = {
@@ -177,7 +186,7 @@ async function inventory(opts: {
   ]);
   const expected = {
     volume: intent.volumes.map((volume) => volume.name),
-    network: [`${intent.composeProject}_default`],
+    network: [intent.ownedNetwork?.name ?? `${intent.composeProject}_default`],
     container: intent.services.map(
       (service) => `${intent.composeProject}-${service}-1`
     ),
@@ -209,6 +218,7 @@ async function inspect(opts: {
   readonly probe: Probe;
   readonly resources: readonly Inventory[];
   readonly project: string;
+  readonly ownedNetwork?: boolean;
 }) {
   const rows: Record<string, unknown>[] = [];
   // One name/ID per request gives a fixed argv bound; cumulative I/O/time is shared.
@@ -218,7 +228,9 @@ async function inspect(opts: {
         opts.kind,
         "inspect",
         "--format",
-        formats[opts.kind].inspect,
+        opts.kind === "container" && opts.ownedNetwork
+          ? CUSTOM_CONTAINER_NETWORK_FORMAT
+          : formats[opts.kind].inspect,
         resource.id,
       ])
     );
@@ -259,10 +271,14 @@ export type LegacyComposeVerifiedBinding = {
     readonly id: string;
     readonly name: string;
     readonly createdAt: string;
+    readonly logical?: string;
+    readonly internal?: boolean;
   };
 } & (
   | { readonly binding_version: 1 }
   | { readonly binding_version: 2; readonly composeFiles: readonly string[] }
+  | { readonly binding_version: 3 }
+  | { readonly binding_version: 4; readonly composeFiles: readonly string[] }
 );
 
 type ProjectedPreparation = Pick<
@@ -412,6 +428,11 @@ function containerRows(
           ID.test(row.id) &&
           typeof row.name === "string"
       );
+      if (opts.intent.ownedNetwork) {
+        requireValue(
+          row.name === `/${opts.intent.composeProject}-${row.service}-1`
+        );
+      }
       services.add(row.service);
       containerMounts(row, {
         service: row.service,
@@ -421,10 +442,36 @@ function containerRows(
       requireValue(Array.isArray(row.networks) && row.networks.length === 1);
       const network = row.networks[0];
       requireValue(isRecord(network));
-      keys(network, ["name", "id"]);
+      keys(
+        network,
+        opts.intent.ownedNetwork ? ["name", "id", "aliases"] : ["name", "id"]
+      );
       requireValue(
         network.name === opts.network.name && network.id === opts.network.id
       );
+      if (opts.intent.ownedNetwork) {
+        const configured = opts.intent.ownedNetwork.attachments.find(
+          (entry) => entry.service === row.service
+        );
+        requireValue(configured);
+        const expected = [
+          `${opts.intent.composeProject}-${row.service}-1`,
+          row.service,
+          ...configured.aliases,
+        ].sort();
+        const actual = network.aliases;
+        requireValue(
+          (Array.isArray(actual) &&
+            actual.every(
+              (alias) => typeof alias === "string" && NAME.test(alias)
+            ) &&
+            new Set(actual).size === actual.length &&
+            JSON.stringify([...actual].sort()) === JSON.stringify(expected)) ||
+            (!row.running &&
+              (actual === null ||
+                (Array.isArray(actual) && actual.length === 0)))
+        );
+      }
       return { id: row.id, name: row.name.slice(1), service: row.service };
     })
     .sort((a, b) => a.service.localeCompare(b.service));
@@ -451,18 +498,29 @@ function networkRow(
   requireValue(
     typeof row.id === "string" &&
       ID.test(row.id) &&
-      row.name === `${intent.composeProject}_default` &&
-      row.logical === "default" &&
+      row.name ===
+        (intent.ownedNetwork?.name ?? `${intent.composeProject}_default`) &&
+      row.logical === (intent.ownedNetwork?.logical ?? "default") &&
       timestamp(row.createdAt) &&
       row.driver === "bridge" &&
       row.scope === "local" &&
-      row.internal === false &&
+      row.internal === (intent.ownedNetwork?.internal ?? false) &&
       Array.isArray(row.containers) &&
       row.containers.every((id) => typeof id === "string" && ID.test(id)) &&
       new Set(row.containers).size === row.containers.length
   );
   return {
-    network: { id: row.id, name: row.name, createdAt: row.createdAt },
+    network: {
+      id: row.id,
+      name: row.name,
+      createdAt: row.createdAt,
+      ...(intent.ownedNetwork
+        ? {
+            logical: intent.ownedNetwork.logical,
+            internal: intent.ownedNetwork.internal,
+          }
+        : {}),
+    },
     containerIds: row.containers,
   };
 }
@@ -530,6 +588,7 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
     probe,
     resources: selected.container,
     project: opts.intent.composeProject,
+    ownedNetwork: opts.intent.ownedNetwork !== undefined,
   });
   const containers = containerRows(containerFacts, {
     ...opts,
@@ -559,10 +618,16 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
   return {
     ...(opts.composeFiles
       ? {
-          binding_version: 2 as const,
+          binding_version: opts.intent.ownedNetwork
+            ? (4 as const)
+            : (2 as const),
           composeFiles: Object.freeze(composeFiles),
         }
-      : { binding_version: 1 as const }),
+      : {
+          binding_version: opts.intent.ownedNetwork
+            ? (3 as const)
+            : (1 as const),
+        }),
     projectRoot: opts.root,
     composeFile: resolve(opts.root, ".hack/docker-compose.yml"),
     composeProject: opts.intent.composeProject,
@@ -575,7 +640,7 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
 }
 export type LegacyComposeAdoptionBinding = {
   readonly report: {
-    readonly binding_version: 1 | 2;
+    readonly binding_version: 1 | 2 | 3 | 4;
     readonly status: "verified";
     readonly adoption: "not_performed";
     readonly containers: number;

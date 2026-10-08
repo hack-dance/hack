@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rename,
@@ -238,6 +239,22 @@ afterEach(async () => {
 async function save() {
   await writeFile(join(root, "fixture.json"), JSON.stringify(fixture));
 }
+async function ownedBridge() {
+  await writeFile(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    `name: fixture\nservices:\n  db:\n    image: ${CANARY}\n    environment:\n      PRIVATE: ${CANARY}\n      EMPTY: ""\n    networks:\n      lab:\n        aliases: [db-alias]\n    volumes:\n      - data:/var/lib/database\nnetworks:\n  lab:\n    driver: bridge\n    internal: true\nvolumes:\n  data:\n    name: ${VOLUME}\n`
+  );
+  fixture.container[0]!.networks = [
+    { name: "fixture_lab", id: NETWORK, aliases: [] },
+  ];
+  fixture.network[0] = {
+    ...fixture.network[0],
+    name: "fixture_lab",
+    logical: "lab",
+    internal: true,
+  };
+  await save();
+}
 function container() {
   const row = fixture.container[0];
   if (!row) {
@@ -265,8 +282,8 @@ async function compiler(body = "") {
   await writeFile(
     binary,
     `#!${process.execPath}
-if(process.argv[2]==='--protocol'){console.log(${JSON.stringify(JSON.stringify({ transport_version: 1, authored_version: 1, plan_version: 1 }))})}
-else { const raw=await Bun.stdin.text(); await Bun.write(${JSON.stringify(join(root, "candidate-received"))},raw); ${body}; console.log(${JSON.stringify(JSON.stringify({ transport_version: 1, ok: true, plan: { plan_version: 1 }, semantic_hash: "a".repeat(64) }))}); }
+if(process.argv[2]==='--protocol'){console.log(${JSON.stringify(JSON.stringify({ transport_version: 1, authored_version: 1, plan_version: 1, network_plan_version: 1 }))})}
+else { const raw=await Bun.stdin.text(); await Bun.write(${JSON.stringify(join(root, "candidate-received"))},raw); ${body}; const input=JSON.parse(raw); const networkAware=Object.hasOwn(input,'networks'); const plan=networkAware?{...input,plan_version:1,selected_profiles:[],networks:Object.fromEntries(Object.entries(input.networks).map(([name,value])=>[name,{internal:value.internal===true}])),jobs:input.jobs??{}}:{plan_version:1}; const result={transport_version:1,ok:true,plan,semantic_hash:'a'.repeat(64),...(networkAware?{declared_workloads:Object.fromEntries(Object.keys(input.services).map(name=>[name,'service']))}:{})}; console.log(JSON.stringify(result)); }
 `
   );
   await chmod(binary, 0o700);
@@ -2015,6 +2032,321 @@ test("a verified linked checkout adopts and rolls back using the original resour
       "rolled-back"
     );
     expect(fixture.container[0]?.id).toBe(ID);
+    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+  } finally {
+    await store.close();
+  }
+});
+
+test("v6 static owned bridge preserves the selected original IDs through saved publication and rollback", async () => {
+  await ownedBridge();
+  const original = await readFile(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    "utf8"
+  );
+  const binary = await compiler();
+  const preview = await previewLegacyComposeAdoption({ projectRoot, binary });
+  expect(preview.complete).toBe(true);
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const generation = await store.prepare({ binary });
+    expect(generation.report.adoption_generation_version).toBe(6);
+    const receipt = JSON.parse(
+      await readFile(join(stateRoot(), "receipt.json"), "utf8")
+    );
+    expect(receipt.adoption_receipt_version).toBe(6);
+    const meta = JSON.parse(
+      await readFile(await artifactPath("manifest.json"), "utf8")
+    );
+    expect(meta.adoption_generation_version).toBe(6);
+    expect(meta.binding.binding_version).toBe(3);
+    expect(meta.binding.network).toEqual({
+      id: NETWORK,
+      name: "fixture_lab",
+      createdAt: CREATED,
+      logical: "lab",
+      internal: true,
+    });
+    await store.publish({ generation, binary });
+    await store.close();
+    const saved = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+      mode: "saved",
+    });
+    try {
+      const active = await saved.loadActive();
+      expect(active?.report.adoption_generation_version).toBe(6);
+      if (!active) {
+        throw new Error("Expected active owned bridge adoption");
+      }
+      await saved.withLease({
+        generation: active,
+        run: async (input) => {
+          expect(input.binding.containers[0]?.id).toBe(ID);
+          expect(input.binding.network.id).toBe(NETWORK);
+          expect(input.binding.volumes[0]?.createdAt).toBe(CREATED);
+          expect(JSON.stringify(input)).toBe("{}");
+        },
+      });
+      await saved.rollback();
+      expect(
+        await readFile(join(projectRoot, ".hack/docker-compose.yml"), "utf8")
+      ).toBe(original);
+      expect(fixture.container[0]?.id).toBe(ID);
+      expect(fixture.network[0]?.id).toBe(NETWORK);
+    } finally {
+      await saved.close();
+    }
+  } finally {
+    await store.close();
+  }
+});
+
+test("v6 custom bridge with v5 health dependencies refuses before generation writes", async () => {
+  await dependencyFixture();
+  const composePath = join(projectRoot, ".hack/docker-compose.yml");
+  const compose = JSON.parse(await readFile(composePath, "utf8"));
+  compose.networks = { lab: { driver: "bridge", internal: true } };
+  compose.services.db.networks = { lab: { aliases: ["db-alias"] } };
+  compose.services.web.networks = { lab: { aliases: ["web-alias"] } };
+  await writeFile(composePath, JSON.stringify(compose));
+  for (const row of fixture.container) {
+    row.networks = [{ name: "fixture_lab", id: NETWORK, aliases: [] }];
+  }
+  fixture.network[0] = {
+    ...network(),
+    name: "fixture_lab",
+    logical: "lab",
+    internal: true,
+  };
+  await save();
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const before = await readFile(join(stateRoot(), "receipt.json"), "utf8");
+    await refusal(
+      store.prepare({ binary: await compiler() }),
+      "E_LEGACY_ADOPTION_UNSUPPORTED"
+    );
+    expect(await readFile(join(stateRoot(), "receipt.json"), "utf8")).toBe(
+      before
+    );
+    expect(await readdir(join(stateRoot(), "generations"))).toEqual([]);
+    expect(fixture.container.map((row) => row.id)).toEqual([
+      ID,
+      "c".repeat(64),
+    ]);
+    expect(network().id).toBe(NETWORK);
+    expect(volume().createdAt).toBe(CREATED);
+  } finally {
+    await store.close();
+  }
+});
+
+test("v6 saved bridge refuses a changed policy before another retained effect", async () => {
+  await ownedBridge();
+  const binary = await compiler();
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const generation = await store.prepare({ binary });
+    await store.publish({ generation, binary });
+    fixture.network[0]!.internal = false;
+    await save();
+    let effects = 0;
+    await refusal(
+      store.withLease({
+        generation,
+        run: async () => {
+          effects++;
+        },
+      }),
+      "E_LEGACY_ADOPTION_STATE"
+    );
+    expect(effects).toBe(0);
+    expect(fixture.container[0]?.id).toBe(ID);
+    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+  } finally {
+    await store.close();
+  }
+});
+
+test("v6 manifest and receipt must select the same saved topology owner", async () => {
+  await ownedBridge();
+  const { store, generation } = await prepared();
+  try {
+    expect(generation.report.adoption_generation_version).toBe(6);
+    const current = await readReceipt();
+    for (const foreignVersion of [4, 5, 7]) {
+      await writeReceipt({
+        ...current,
+        adoption_receipt_version: foreignVersion,
+      });
+      await refusal(store.loadPrepared());
+      expect(await readReceipt()).toEqual({
+        ...current,
+        adoption_receipt_version: foreignVersion,
+      });
+    }
+    expect(fixture.container[0]?.id).toBe(ID);
+    expect(fixture.network[0]?.id).toBe(NETWORK);
+  } finally {
+    await store.close();
+  }
+});
+
+test("v5 retained health owner refuses a v6 topology receipt", async () => {
+  await dependencyFixture();
+  const { store, generation } = await prepared();
+  try {
+    expect(generation.report.adoption_generation_version).toBe(5);
+    const current = await readReceipt();
+    expect(current.adoption_receipt_version).toBe(5);
+    await writeReceipt({ ...current, adoption_receipt_version: 6 });
+    await refusal(store.loadPrepared());
+    expect(await readReceipt()).toEqual({
+      ...current,
+      adoption_receipt_version: 6,
+    });
+    expect(fixture.container.map((row) => row.id)).toEqual([
+      ID,
+      "c".repeat(64),
+    ]);
+    expect(network().id).toBe(NETWORK);
+  } finally {
+    await store.close();
+  }
+});
+
+boundedTest(
+  "v7 retained completion owner refuses a v6 topology receipt",
+  async () => {
+    const { app, job } = await completedJobFixture();
+    const { store, generation } = await prepared();
+    try {
+      expect(generation.report.adoption_generation_version).toBe(7);
+      const current = await readReceipt();
+      expect(current.adoption_receipt_version).toBe(7);
+      await writeReceipt({ ...current, adoption_receipt_version: 6 });
+      await refusal(store.loadPrepared());
+      expect(await readReceipt()).toEqual({
+        ...current,
+        adoption_receipt_version: 6,
+      });
+      expect(await mutationCommands()).toEqual([]);
+      expect(fixture.container.map((row) => row.id)).toEqual([ID, app, job]);
+      expect(network().id).toBe(NETWORK);
+      expect(volume().createdAt).toBe(CREATED);
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+test("v6 rollback permits a later plain owner without inheriting topology authority", async () => {
+  const composePath = join(projectRoot, ".hack/docker-compose.yml");
+  const plainCompose = await readFile(composePath, "utf8");
+  await ownedBridge();
+  const binary = await compiler();
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const custom = await store.prepare({ binary });
+    expect(custom.report.adoption_generation_version).toBe(6);
+    await store.publish({ generation: custom, binary });
+    await store.rollback();
+    expect(network().id).toBe(NETWORK);
+    expect(volume().createdAt).toBe(CREATED);
+
+    const plainNetwork = "e".repeat(64);
+    await writeFile(composePath, plainCompose);
+    container().networks = [{ name: "fixture_default", id: plainNetwork }];
+    fixture.network[0] = {
+      ...network(),
+      id: plainNetwork,
+      name: "fixture_default",
+      logical: "default",
+      internal: false,
+    };
+    await save();
+    const plain = await store.prepare({ binary });
+    expect(plain.report.adoption_generation_version).toBe(1);
+    expect((await readReceipt()).adoption_receipt_version).toBe(1);
+    await store.publish({ generation: plain, binary });
+    await store.close();
+    const saved = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+      mode: "saved",
+    });
+    try {
+      expect(
+        (await saved.loadActive())?.report.adoption_generation_version
+      ).toBe(1);
+      expect(container().id).toBe(ID);
+      expect(network().id).toBe(plainNetwork);
+      expect(volume().createdAt).toBe(CREATED);
+    } finally {
+      await saved.close();
+    }
+  } finally {
+    await store.close();
+  }
+});
+
+test("v6 journals a running original stop before effect and retains the owned bridge on recovery", async () => {
+  await ownedBridge();
+  fixture.running = true;
+  fixture.container[0]!.networks = [
+    {
+      name: "fixture_lab",
+      id: NETWORK,
+      aliases: ["fixture-db-1", "db", "db-alias"],
+    },
+  ];
+  await save();
+  const binary = await compiler();
+  expect(
+    (await previewLegacyComposeAdoption({ projectRoot, binary })).complete
+  ).toBe(false);
+  expect(
+    (await previewLegacyComposeAdoption({ projectRoot, binary, stop: true }))
+      .complete
+  ).toBe(true);
+  const { store, generation } = await prepared();
+  try {
+    expect(
+      await store.withPreparationStop({
+        generation,
+        binary,
+        run: async (input) => {
+          expect(input.binding.network.id).toBe(NETWORK);
+          expect((await readReceipt()).adoption_receipt_version).toBe(6);
+          expect((await readReceipt()).pendingOperation).toMatchObject({
+            operation: "stop",
+            services: ["db"],
+          });
+          fixture.running = false;
+          fixture.container[0]!.networks = [
+            { name: "fixture_lab", id: NETWORK, aliases: [] },
+          ];
+          await save();
+          return 7;
+        },
+      })
+    ).toBe(7);
+    await refusal(store.loadPrepared(), "E_LEGACY_ADOPTION_BUSY");
+    const recovered = await store.loadPrepared({ recoverOperation: true });
+    if (!recovered) {
+      throw new Error("Expected exact selected recovery");
+    }
+    await store.withPreparationStop({
+      generation: recovered,
+      binary,
+      recover: true,
+      run: async () => 0,
+    });
+    await store.publish({ generation: recovered, binary });
+    await store.rollback();
+    expect(fixture.container[0]?.id).toBe(ID);
+    expect(fixture.network[0]?.id).toBe(NETWORK);
     expect(fixture.volume[0]?.createdAt).toBe(CREATED);
   } finally {
     await store.close();

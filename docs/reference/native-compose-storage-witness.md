@@ -76,3 +76,8 @@ compiled CLI coverage and real engine acceptance remain required gates. No carri
 or helper download is implemented by this foundation. Store and source-CLI tests
 use synthetic observation ports and engine transports; they do not qualify Docker
 write or archive semantics.
+
+The separate [directory-xattr helper source](native-compose-storage-xattr-carrier.md)
+explores a create-only token without a PostgreSQL data-root directory entry. It
+has a distinct codec and no Docker transport, receipt integration or CLI activation.
+Its offline syscall controls do not qualify a carrier.

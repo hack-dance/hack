@@ -167,6 +167,34 @@ fingerprints are checked before commands and after measured action blocks; no mi
 binary comparison qualifies. A host/kernel syscall stuck in an uninterruptible
 state is outside hard real-time guarantees.
 
+## Separate pure compiler observations
+
+The same module exports `compiler_sample` for one direct `--protocol`, `compile`
+or metadata-only `plan` observation. Its caller supplies the frozen absolute owned
+executable and SHA256, immutable request bytes and their SHA256 (no input for
+protocol), and the SHA256 of canonical JSON from independent untimed correctness
+qualification. It does not select a compiler from PATH, use a shell, read managed
+values or call Docker. Request bytes use an anonymous regular stdin file, avoiding
+pipe backpressure; input/output are bounded to one MiB and each child to five seconds.
+
+It uses one-ms wait polling rather than the lifecycle collector's ten-ms polling.
+Each row reports launch-to-reap wall, reaped child CPU and the observation interval.
+Observer hashing, input setup and JSON validation are outside that boundary. A
+version/output mismatch, executable change, nonzero exit, output overflow or timeout
+returns a failed row with real metrics and a fixed reason, never a successful zero
+sample. No raw input, stdout or stderr is returned. Raised caller interruption,
+including Python's normal SIGINT, reaps only the owned group. Interrupt delivery is fenced across wait4/returncode publication,
+so a received interruption cannot signal an already-reaped former group.
+A successful exit observed after the deadline also fails with its real metrics;
+that post-reap refusal sends no group signal.
+
+The caller owns the balanced warmup/trial schedule, host-noise admission and private
+report; importing or adding the helper collects no samples. Use the same two warmups
+and eight forward/reverse rounds declared before execution, preserving failures.
+Standalone protocol/compile/plan costs are not additive estimates of integrated CLI
+commands. They do not measure secret delivery, rendering, app/engine/VM work or
+demonstrate a speedup. This collector requires POSIX wait4 and pthread signal masks.
+
 ## Cleanup and remaining qualification
 
 Before later warm up, restart, down and cleanup effects, the harness verifies the

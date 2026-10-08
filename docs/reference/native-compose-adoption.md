@@ -37,6 +37,20 @@ preparation refuse publication or later retained-container mutations; they canno
 be silently applied or ignored by a fresh migration. Successful generated-source
 and managed-env inheritance adoption remains a separate NC04 requirement.
 
+A private read-only prerequisite now acquires managed values for a strict legacy
+source capability. `LegacyAdoptionManagedEnvAdmission` binds the selected source,
+verified inherited primary, overlay, declared scopes and runner exclusions.
+`acquireProjectEnvForLegacyAdoption` shares the native owner's bounded raw-layer
+acquisition, precedence, tombstones and existing key/decryption owner. Selected
+managed syntax uses the strict importer parser and a closed field mapping;
+alternate inputs and unknown scopes refuse. Metadata needs no key or decryption,
+and values and freshness callbacks must remain private runtime inputs. Neither
+raw values nor callbacks enter public reports; only names-only metadata is
+serializable. Rechecks detect changed raw bytes
+before and after value delivery; they do not freeze editors. These APIs grant no
+write or engine authority, and `config adopt` still refuses managed inputs until
+ordered generated-source provenance and durable recovery are qualified.
+
 The pure `planLegacyComposeAdoption` prerequisite retains original field pointers
 and positions. It reuses all preview mapping refusals, including unknown fields
 in inactive profiles, then qualifies only these additional storage fields:

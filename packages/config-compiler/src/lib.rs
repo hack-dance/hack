@@ -7,6 +7,7 @@ pub mod host;
 mod json;
 pub mod local;
 pub mod model;
+pub mod network;
 pub mod process;
 pub mod routing;
 mod shape;
@@ -95,6 +96,14 @@ fn diagnostic_message(code: &str) -> &'static str {
             "Alias open preference requires an explicitly selected OAuth alias."
         }
         "unknown_profile" => "The profile must be declared by the project.",
+        "unknown_network" => "The attachment must select an owned declared network or default.",
+        "invalid_network_selection" => {
+            "An explicit network attachment selection must not be empty."
+        }
+        "network_alias_collision" => {
+            "Network aliases must have one owner and cannot replace workload names."
+        }
+        "disconnected_endpoint_target" => "A service endpoint requires a shared project network.",
         "duplicate_workload" => "Services and jobs must have distinct names.",
         "unknown_dependency" => {
             "The dependency must reference a declared target of the correct kind."
@@ -360,6 +369,8 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
         StorageKind::decl(&cfg),
         StorageScope::decl(&cfg),
         Storage::decl(&cfg),
+        network::Network::decl(&cfg),
+        network::NetworkAttachment::decl(&cfg),
         Access::decl(&cfg),
         Mount::decl(&cfg),
         ServiceCondition::decl(&cfg),
@@ -395,5 +406,5 @@ pub fn artifacts() -> Result<(String, String), serde_json::Error> {
 }
 
 pub fn protocol() -> Value {
-    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1,"endpoint_plan_version":1,"process_plan_version":1,"acquisition_plan_version":1,"file_plan_version":1})
+    serde_json::json!({"transport_version":1,"authored_version":1,"plan_version":1,"resolve_version":1,"local_version":1,"env_plan_version":1,"host_env_plan_version":1,"routing_plan_version":1,"endpoint_plan_version":1,"process_plan_version":1,"acquisition_plan_version":1,"network_plan_version":1,"file_plan_version":1})
 }

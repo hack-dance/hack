@@ -203,6 +203,53 @@ struct Fake {
     states: BTreeMap<String, Observation>,
     ready: bool,
 }
+
+#[test]
+fn authored_network_intent_refuses_before_private_copy_even_when_inactive() {
+    let metadata = json!({"web":{"TOKEN":{"scope":"web","secret":true}}});
+    let values = BTreeMap::from([(
+        "web".into(),
+        BTreeMap::from([("TOKEN".into(), "synthetic-private-network".into())]),
+    )]);
+    // Network-free callers still reach the existing private delivery owner.
+    PRIVATE_COPIES.with(|copies| copies.set(0));
+    let accepted = lower(&basic(), metadata.clone(), &values).unwrap();
+    assert_eq!(PRIVATE_COPIES.with(std::cell::Cell::get), 1);
+    assert_eq!(accepted.managed_environment, values);
+    for field in [
+        json!({"networks":{"private":{"internal":true}}}),
+        json!({"networks":{}}),
+        json!({"services":{"web":{"image":"fixture/web:1","networks":{"default":{}}}}}),
+        json!({"profiles":["disabled"],"jobs":{"offline":{"image":"fixture/job:1","profiles":["disabled"],"networks":{"default":{"aliases":["offline-alias"]}}}}}),
+    ] {
+        let mut project = basic();
+        project
+            .as_object_mut()
+            .unwrap()
+            .extend(field.as_object().unwrap().clone());
+        let mut declared_metadata = metadata.clone();
+        if project["jobs"]["offline"].is_object() {
+            // Compiler metadata covers every declaration, including inactive jobs.
+            declared_metadata["offline"] = json!({});
+        }
+        let request = request(&project, declared_metadata);
+        assert!(hack_config_compiler::environment::plan(&request, &[]).complete());
+        PRIVATE_COPIES.with(|copies| copies.set(0));
+        refusal(
+            compile(CompileOptions {
+                request: &request,
+                profiles: &[],
+                managed_values: &values,
+            }),
+            "native_graph_subset",
+        );
+        assert_eq!(PRIVATE_COPIES.with(std::cell::Cell::get), 0);
+        refusal(
+            review(&request, &[]).map(|_| unreachable!()),
+            "native_graph_subset",
+        );
+    }
+}
 impl Driver for Fake {
     fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
         match event {

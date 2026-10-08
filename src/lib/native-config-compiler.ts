@@ -37,6 +37,12 @@ import {
   parseNativeHostTargets,
 } from "./native-host-plan-protocol.ts";
 import {
+  authoredNetworkPlanningRequired,
+  nativeNetworkPlanIsValid,
+  nativeNetworkPlanningRequired,
+  nativeNetworkSourceMatches,
+} from "./native-network-plan-protocol.ts";
+import {
   authoredProcessPlanningRequired,
   nativeProcessPlanIsValid,
   nativeProcessPlanningRequired,
@@ -188,6 +194,7 @@ export async function compileNativeConfig(opts: {
   readonly requireEndpointPlanning?: boolean;
   readonly requireProcessPlanning?: boolean;
   readonly requireAcquisitionPlanning?: boolean;
+  readonly requireNetworkPlanning?: boolean;
   readonly requireFilePlanning?: boolean;
 }): Promise<NativeConfigCompileResult> {
   const authoredInput = captureCompilerInput(opts.input);
@@ -207,6 +214,9 @@ export async function compileNativeConfig(opts: {
       authoredAcquisitionPlanningRequired(authoredInput),
     requireFilePlanning:
       opts.requireFilePlanning || authoredFilePlanningRequired(authoredInput),
+    requireNetworkPlanning:
+      opts.requireNetworkPlanning ||
+      authoredNetworkPlanningRequired(authoredInput),
   });
   const response = await invokeCompiler({
     ...request,
@@ -215,6 +225,14 @@ export async function compileNativeConfig(opts: {
   });
   const result = parseCompileResponse(response);
   if (result.ok) {
+    if (nativeNetworkPlanningRequired(result.plan)) {
+      await checkProtocol({ ...request, requireNetworkPlanning: true });
+    }
+    assertNetworkSource({
+      input: authoredInput,
+      result,
+      profiles: opts.profiles,
+    });
     assertFileSource({ input: authoredInput, result, profiles: opts.profiles });
     assertProcessSource({
       input: authoredInput,
@@ -274,6 +292,7 @@ export async function resolveNativeConfig(opts: {
   readonly requireEndpointPlanning?: boolean;
   readonly requireProcessPlanning?: boolean;
   readonly requireAcquisitionPlanning?: boolean;
+  readonly requireNetworkPlanning?: boolean;
   readonly requireFilePlanning?: boolean;
   readonly probeRoutingInputs?: boolean;
 }): Promise<NativeConfigResolveResult> {
@@ -296,6 +315,9 @@ export async function resolveNativeConfig(opts: {
       authoredAcquisitionPlanningRequired(authoredInput),
     requireFilePlanning:
       opts.requireFilePlanning || authoredFilePlanningRequired(authoredInput),
+    requireNetworkPlanning:
+      opts.requireNetworkPlanning ||
+      authoredNetworkPlanningRequired(authoredInput),
   });
   const routingProbe =
     opts.probeRoutingInputs === true && capabilities.routingPlanning;
@@ -320,6 +342,14 @@ export async function resolveNativeConfig(opts: {
   if (!parsed.ok) {
     return parsed;
   }
+  if (nativeNetworkPlanningRequired(parsed.plan)) {
+    await checkProtocol({ ...request, requireNetworkPlanning: true });
+  }
+  assertNetworkSource({
+    input: authoredInput,
+    result: parsed,
+    profiles: opts.profiles,
+  });
   assertFileSource({
     input: authoredInput,
     result: parsed,
@@ -442,6 +472,7 @@ export async function planNativeConfig(
     readonly requireEndpointPlanning?: boolean;
     readonly requireProcessPlanning?: boolean;
     readonly requireAcquisitionPlanning?: boolean;
+    readonly requireNetworkPlanning?: boolean;
     readonly requireFilePlanning?: boolean;
   }
 ): Promise<NativeConfigPlanResult> {
@@ -479,6 +510,9 @@ export async function planNativeConfig(
       authoredAcquisitionPlanningRequired(authoredInput),
     requireFilePlanning:
       opts.requireFilePlanning || authoredFilePlanningRequired(authoredInput),
+    requireNetworkPlanning:
+      opts.requireNetworkPlanning ||
+      authoredNetworkPlanningRequired(authoredInput),
   });
   const response = await invokeCompiler({
     ...request,
@@ -498,6 +532,14 @@ export async function planNativeConfig(
   if (!parsed.ok) {
     return parsed;
   }
+  if (nativeNetworkPlanningRequired(parsed.plan)) {
+    await checkProtocol({ ...request, requireNetworkPlanning: true });
+  }
+  assertNetworkSource({
+    input: authoredInput,
+    result: parsed,
+    profiles: opts.profiles,
+  });
   assertFileSource({
     input: authoredInput,
     result: parsed,
@@ -817,6 +859,7 @@ async function checkProtocol(opts: {
   readonly requireEndpointPlanning?: boolean;
   readonly requireProcessPlanning?: boolean;
   readonly requireAcquisitionPlanning?: boolean;
+  readonly requireNetworkPlanning?: boolean;
   readonly requireFilePlanning?: boolean;
 }): Promise<{ readonly routingPlanning: boolean }> {
   const handshake = await invokeCompiler({ ...opts, args: ["--protocol"] });
@@ -835,6 +878,7 @@ async function checkProtocol(opts: {
     (opts.requireFilePlanning && protocol.file_plan_version !== 1) ||
     (opts.requireAcquisitionPlanning &&
       protocol.acquisition_plan_version !== 1) ||
+    (opts.requireNetworkPlanning && protocol.network_plan_version !== 1) ||
     (opts.requireLocalResolution &&
       (protocol.resolve_version !== 1 || protocol.local_version !== 1))
   ) {
@@ -1155,6 +1199,7 @@ function assertPlanDeclarations(opts: {
     ["endpoint", nativeEndpointPlanIsValid(opts)],
     ["process", nativeProcessPlanIsValid(opts)],
     ["acquisition", nativeAcquisitionPlanIsValid(opts)],
+    ["network", nativeNetworkPlanIsValid(opts)],
     ["file", nativeFilePlanIsValid(opts)],
   ] as const) {
     if (!valid) {
@@ -1222,6 +1267,26 @@ function assertAcquisitionSource(opts: {
     throw failure(
       "E_COMPILER_RESPONSE",
       "Native compiler changed the authored acquisition requirements."
+    );
+  }
+}
+
+function assertNetworkSource(opts: {
+  readonly input: Uint8Array;
+  readonly result: Extract<NativeConfigCompileResult, { readonly ok: true }>;
+  readonly profiles?: readonly string[];
+}): void {
+  if (
+    !nativeNetworkSourceMatches({
+      input: opts.input,
+      plan: opts.result.plan,
+      declared: opts.result.declared_workloads,
+      profiles: opts.profiles,
+    })
+  ) {
+    throw failure(
+      "E_COMPILER_RESPONSE",
+      "Native compiler changed the authored network requirements."
     );
   }
 }

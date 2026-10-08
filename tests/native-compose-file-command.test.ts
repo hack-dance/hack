@@ -103,6 +103,34 @@ test("source CLI delivers actual acquired binary, managed and empty files with e
   expect(await fileJournal(ready.document)).toContain('"phase":"retired"');
   await assertFileTransport(fixture);
 }, 120_000);
+test("unchanged authored file up acquires new bytes and retires its prior snapshot instead of reusing a warm generation", async () => {
+  const fixture = await fileCommandFixture();
+  expect((await invokeFiles(fixture)).code).toBe(0);
+  const before = await fileCommandState(fixture.root);
+  const oldPaths = sources(before.document);
+  const changed = Uint8Array.from([9, 0, 255, 7]);
+  await writeFile(join(fixture.root, "binary"), changed);
+  const up = await invokeFiles(fixture);
+  expect(up.code).toBe(0);
+  const after = await fileCommandState(fixture.root);
+  expect(after.current.generation?.generationId).not.toBe(
+    before.current.generation?.generationId
+  );
+  expect(fileReference(after.document)).not.toEqual(
+    fileReference(before.document)
+  );
+  expect(after.pending).toBeNull();
+  expect(
+    (await Bun.file(join(fixture.parent, "delivered")).json())[0].bytes
+  ).toEqual(Array.from(changed));
+  for (const path of oldPaths) {
+    await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
+  }
+  expect(await fileJournal(before.document)).toContain('"phase":"retired"');
+  expect(await fileJournal(after.document)).toContain('"phase":"reaped"');
+  privateOutput(up, after.document);
+  await assertFileTransport(fixture);
+}, 120_000);
 test("post-retirement engine drift refuses the completed stop receipt and preserves exact recovery even after material unlink", async () => {
   const fixture = await fileCommandFixture();
   expect((await invokeFiles(fixture)).code).toBe(0);

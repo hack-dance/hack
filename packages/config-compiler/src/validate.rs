@@ -136,6 +136,7 @@ pub fn lower(mut project: Project, profiles: &[String], at: &At) -> Result<Plan,
             return Err(at("invalid_name", &child("/storage", key)));
         }
     }
+    crate::network::normalize(&mut project, at)?;
     crate::file::normalize_sources(&mut project.configs, &mut project.secrets, at)?;
     for (kind, workloads) in [
         ("services", &mut project.services),
@@ -227,6 +228,7 @@ pub fn lower(mut project: Project, profiles: &[String], at: &At) -> Result<Plan,
         host_bindings: project.host_bindings,
         selected_profiles: selected,
         storage: project.storage,
+        networks: project.networks,
         configs: project.configs,
         secrets: project.secrets,
         services: project.services,

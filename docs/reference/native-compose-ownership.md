@@ -43,6 +43,25 @@ resources after the last observation, or replace a volume under the same name.
 The caller must recheck at its effect boundary and retain explicit recovery for
 uncertain outcomes.
 
+Saved `ps` and `logs` use `observeSavedNativeComposeOwned`. This separate read
+contract can inspect a receipt-selected CREATED container whose configured
+endpoint has no network ID yet. Its owned bridge must exist and pass the same
+policy, membership and repeated inventory checks; the container must be absent
+from bridge membership. Supplied aliases must equal the configured set. The
+read contract does not authorize startup, readiness, `exec`, or ordinary stop.
+
+An interrupted Compose replacement can have a temporary container name prefixed
+with its predecessor's 12-character ID while retaining canonical service aliases.
+Saved reads and explicit `down --recover` accept that alias set only when the
+same scan proves exactly one fully owned predecessor with the canonical name,
+same service and another receipt-selected generation. Unknown prefixes and
+one-off containers cannot justify this canonical-alias substitution. An empty
+alias set needs no substitution and still requires the same owned CREATED
+container and bridge proofs. Changed observations refuse. Running containers and external
+ingress still require their exact connected endpoint identity. Recovery after an
+owned bridge has disappeared accepts only an empty, unbound endpoint ID; a
+nonempty ID cannot be attributed to the absent bridge.
+
 The default budget is 15 seconds for the whole probe, with a maximum configurable
 probe budget of 60 seconds. Captured stdout is bounded to 8 MiB across all queries;
 each query's discarded stderr is bounded to 16 KiB. Inspect arguments are batched

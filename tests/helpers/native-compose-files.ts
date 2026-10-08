@@ -51,11 +51,13 @@ export const FILE_SOURCE = {
 const CONTAINER_LIST =
   '{"id":{{json .ID}},"name":{{json .Names}},"project":{{json (.Label "com.docker.compose.project")}}}';
 const CONTAINER_INSPECT =
-  '{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"version":{{json (index .Config.Labels "io.hack.native-config.version")}},"instance":{{json (index .Config.Labels "io.hack.native-config.instance")}},"owner":{{json (index .Config.Labels "io.hack.native-config.owner")}},"generation":{{json (index .Config.Labels "io.hack.native-config.generation")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"state":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}null{{end}}}';
+  '{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"version":{{json (index .Config.Labels "io.hack.native-config.version")}},"instance":{{json (index .Config.Labels "io.hack.native-config.instance")}},"owner":{{json (index .Config.Labels "io.hack.native-config.owner")}},"generation":{{json (index .Config.Labels "io.hack.native-config.generation")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"state":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}null{{end}},"networks":{{json .NetworkSettings.Networks}}}';
 const VOLUME_LIST =
   '{"id":{{json .Name}},"name":{{json .Name}},"project":{{json (.Label "com.docker.compose.project")}}}';
 const NETWORK_LIST =
   '{"id":{{json .ID}},"name":{{json .Name}},"project":{{json (.Label "com.docker.compose.project")}}}';
+const NETWORK_INSPECT =
+  '{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Labels "com.docker.compose.project")}},"version":{{json (index .Labels "io.hack.native-config.version")}},"instance":{{json (index .Labels "io.hack.native-config.instance")}},"owner":{{json (index .Labels "io.hack.native-config.owner")}},"driver":{{json .Driver}},"internal":{{json .Internal}},"containers":{{json .Containers}}}';
 const MOUNT_INSPECT = '{"id":{{json .Id}},"mounts":{{json .Mounts}}}';
 
 /** Only Docker responses are stand-ins: compiler, inputs, hooks, child groups,
@@ -87,7 +89,7 @@ export async function fileCommandFixture(source: unknown = FILE_SOURCE) {
     docker,
     `#!${process.execPath}
 import {appendFile,readFile,stat,rm,rename,writeFile} from "node:fs/promises";
-const parent=${JSON.stringify(parent)},root=${JSON.stringify(root)},args=process.argv.slice(2),id="c".repeat(64),foreign="d".repeat(64);
+const parent=${JSON.stringify(parent)},root=${JSON.stringify(root)},args=process.argv.slice(2),id="c".repeat(64),foreign="d".repeat(64),networkId="b".repeat(64);
 await appendFile(parent+"/requests",JSON.stringify(args)+"\\n");
 const engine=parent+"/engine",same=(a,b)=>JSON.stringify(a)===JSON.stringify(b),exists=path=>Bun.file(path).exists();
 async function fail(){await Bun.write(parent+"/unexpected","unexpected engine operation");process.exit(97);}
@@ -133,10 +135,14 @@ if(same(args,["container","inspect","--format",${JSON.stringify(MOUNT_INSPECT)},
 }
 const formats={container:${JSON.stringify(CONTAINER_LIST)},volume:${JSON.stringify(VOLUME_LIST)},network:${JSON.stringify(NETWORK_LIST)}};
 if(formats[args[0]]&&same(args,[args[0],"ls",...(args[0]==="container"?["--all","--no-trunc"]:args[0]==="network"?["--no-trunc"]:[]),"--format",formats[args[0]]])){
- if(args[0]==="container"&&doc)console.log(JSON.stringify({id,name:project+"-reader-1",project}));process.exit(0);
+ if(args[0]==="container"&&doc)console.log(JSON.stringify({id,name:project+"-reader-1",project}));
+ if(args[0]==="network"&&doc)console.log(JSON.stringify({id:networkId,name:doc.networks.default.name,project}));process.exit(0);
 }
 if(same(args,["container","inspect","--format",${JSON.stringify(CONTAINER_INSPECT)},id])){
- if(!doc)await fail();const l=doc.services.reader.labels;console.log(JSON.stringify({id,name:"/"+project+"-reader-1",project,version:l["io.hack.native-config.version"],instance:l["io.hack.native-config.instance"],owner:l["io.hack.native-config.owner"],generation:l["io.hack.native-config.generation"],service:"reader",oneoff:"False",state:await exists(parent+"/unready")?"exited":"running",exitCode:0,health:null}));process.exit(0);
+ if(!doc)await fail();const l=doc.services.reader.labels;console.log(JSON.stringify({id,name:"/"+project+"-reader-1",project,version:l["io.hack.native-config.version"],instance:l["io.hack.native-config.instance"],owner:l["io.hack.native-config.owner"],generation:l["io.hack.native-config.generation"],service:"reader",oneoff:"False",state:await exists(parent+"/unready")?"exited":"running",exitCode:0,health:null,networks:{[doc.networks.default.name]:{NetworkID:networkId,Aliases:[project+"-reader-1","reader"]}}}));process.exit(0);
+}
+if(same(args,["network","inspect","--format",${JSON.stringify(NETWORK_INSPECT)},networkId])){
+ if(!doc)await fail();const n=doc.networks.default,l=n.labels;console.log(JSON.stringify({id:networkId,name:n.name,project,version:l["io.hack.native-config.version"],instance:l["io.hack.native-config.instance"],owner:l["io.hack.native-config.owner"],driver:"bridge",internal:n.internal??false,containers:{[id]:{}}}));process.exit(0);
 }
 await fail();
 `

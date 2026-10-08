@@ -31,6 +31,14 @@ pub struct Project {
     #[serde(default)]
     #[ts(as = "Option<BTreeMap<String, Storage>>", optional)]
     pub storage: BTreeMap<String, Storage>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "BTreeMap<String, crate::network::Network>")]
+    #[ts(optional, type = "{ [key in string]: Network }")]
+    pub networks: Option<BTreeMap<String, crate::network::Network>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     #[ts(optional, type = "{ [key in string]: FileConfig }")]
     pub configs: BTreeMap<String, crate::file::FileConfig>,
@@ -221,6 +229,14 @@ pub struct Workload {
     #[serde(default)]
     #[ts(as = "Option<Vec<Mount>>", optional)]
     pub mounts: Vec<Mount>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "BTreeMap<String, crate::network::NetworkAttachment>")]
+    #[ts(optional, type = "{ [key in string]: NetworkAttachment }")]
+    pub networks: Option<BTreeMap<String, crate::network::NetworkAttachment>>,
     #[serde(default)]
     #[ts(as = "Option<BTreeMap<String, EnvironmentValue>>", optional)]
     pub environment: BTreeMap<String, EnvironmentValue>,
@@ -481,6 +497,9 @@ pub struct Plan {
 
     pub selected_profiles: Vec<String>,
     pub storage: BTreeMap<String, Storage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "{ [key in string]: Network }")]
+    pub networks: Option<BTreeMap<String, crate::network::Network>>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     #[ts(optional, type = "{ [key in string]: FileConfig }")]
     pub configs: BTreeMap<String, crate::file::FileConfig>,

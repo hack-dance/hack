@@ -48,6 +48,35 @@ fn file_contract_negotiates_and_normalizes_without_reading_material() {
 }
 
 #[test]
+fn file_bindings_preserve_owned_network_topology_and_both_capabilities() {
+    let mut input = project();
+    input["networks"] = json!({"private":{"internal":true}});
+    input["services"]["reader"]["networks"] =
+        json!({"private":{"aliases":["reader-b","reader-a"]}});
+    let compiled = compiled(input.clone());
+    let planned = output(request(input), &[]);
+    assert_eq!(protocol()["network_plan_version"], 1);
+    assert_eq!(protocol()["file_plan_version"], 1);
+    assert_eq!(compiled["ok"], true);
+    assert_eq!(planned["ok"], true);
+    assert_eq!(planned["plan"], compiled["plan"]);
+    assert_eq!(planned["plan"]["networks"]["private"]["internal"], true);
+    assert_eq!(
+        planned["plan"]["services"]["reader"]["networks"],
+        json!({"private":{"aliases":["reader-a","reader-b"]}})
+    );
+    assert_eq!(planned["file_plan"]["complete"], true);
+    assert_eq!(
+        planned["file_plan"]["workloads"]["reader"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(planned["environment_plan"]["complete"], true);
+}
+
+#[test]
 fn managed_file_authority_is_separate_from_unset_environment_and_scope_selected() {
     let result = output(request(project()), &[]);
     assert_eq!(result["ok"], true);

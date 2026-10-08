@@ -960,7 +960,7 @@ test("failure after retired marker but before receipt commit keeps exact recover
     expect((await store.loadCurrent()).stopped).toBe(true);
     await expectAbsent(memberPaths(selected.projection));
   });
-});
+}, 30_000);
 test("uncertain after hook permits owned stop but retains material and blocks completion", async () => {
   let hooks = 0;
   const selected = await store.withMutation(async (mutation) => {

@@ -489,6 +489,73 @@ export type NativeComposeRoutingOwner = {
   close(): Promise<void>;
 };
 
+export type NativeComposeSavedRunRouting = {
+  assertContinuity(opts: { readonly deadline: number }): Promise<void>;
+  close(): Promise<void>;
+};
+
+/** Reopen completed references for observation only; no claim or attempt mutation. */
+export async function prepareNativeComposeSavedRunRouting(input: {
+  readonly owner: Owner;
+  readonly generationId: string;
+  readonly document: Document;
+  readonly signal?: AbortSignal;
+  readonly io?: IO;
+}): Promise<NativeComposeSavedRunRouting | null> {
+  const owner = Object.freeze({ ...input.owner });
+  const metadata = readNativeComposeRouteMetadata({
+    generationId: input.generationId,
+    document: frozenDocument(input.document),
+  });
+  if (!metadata) {
+    return null;
+  }
+  const io = Object.freeze({ ...(input.io ?? defaultIO) });
+  const claims = await io.claims(claimScope(owner, metadata.binding));
+  const assertContinuity = async ({
+    deadline,
+  }: {
+    readonly deadline: number;
+  }) => {
+    const attempt = await claims.reopen(metadata.reference);
+    if (
+      attempt.phase !== "complete" ||
+      attempt.hostnames.join() !== metadata.hostnames.join()
+    ) {
+      return refused();
+    }
+    await io.ingress({ expected: metadata.binding, signal: input.signal });
+    await io.inventory({
+      ...owner,
+      hostnames: metadata.hostnames,
+      requireGenerationId: input.generationId,
+      signal: input.signal,
+    });
+    await io.proxy({
+      binding: metadata.binding,
+      ...owner,
+      generationId: input.generationId,
+      routes: metadata.routes,
+      absentHostnames: metadata.hostnames.filter(
+        (hostname) => !activeHostnames(metadata.routes).includes(hostname)
+      ),
+      signal: input.signal,
+      deadline,
+    });
+    const after = await claims.reopen(metadata.reference);
+    if (
+      after.phase !== "complete" ||
+      after.hostnames.join() !== metadata.hostnames.join()
+    ) {
+      return refused();
+    }
+  };
+  return {
+    assertContinuity,
+    close: () => claims.close(),
+  };
+}
+
 /**
  * Own admission under the caller's instance mutation lock. Only this live attempt
  * can complete after a reaped engine child and verified workload readiness. Closing

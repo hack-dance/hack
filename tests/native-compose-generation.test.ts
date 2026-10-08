@@ -1345,9 +1345,8 @@ test("failed recovery preserves the original pending generation", async () => {
   );
 });
 
-test("second freshness failure after journaling preserves intent and invokes no effect", async () => {
+test("freshness failure after journaling preserves intent and invokes no effect", async () => {
   const owner = await store(await fixture());
-  let checks = 0;
   let effects = 0;
   await rejected(
     owner.withMutation(async (mutation) => {
@@ -1356,8 +1355,7 @@ test("second freshness failure after journaling preserves intent and invokes no 
         generation,
         operation: "up",
         assertFresh: async () => {
-          checks += 1;
-          if (checks === 2) {
+          if ((await owner.loadCurrent()).pending !== null) {
             throw new Error("changed");
           }
         },

@@ -15,6 +15,8 @@ import {
   type Scenario,
 } from "../harness.ts";
 
+import { runWithOwnedCleanup } from "../native-compose-owned-fixture.ts";
+
 const TIMEOUT = 180_000;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 const TOKEN = /^[a-f0-9]{32}$/;
@@ -93,33 +95,6 @@ function object(text: string): Record<string, unknown> {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-/** Cleanup failure fails successful acceptance; an earlier failure keeps its original evidence. */
-async function runWithOwnedCleanup(opts: {
-  readonly run: () => Promise<void>;
-  readonly cleanup: () => Promise<void>;
-  readonly secondaryFailure: () => void;
-}): Promise<void> {
-  let failed = false;
-  let failure: unknown;
-  try {
-    await opts.run();
-  } catch (error: unknown) {
-    failed = true;
-    failure = error;
-  }
-  try {
-    await opts.cleanup();
-  } catch (error: unknown) {
-    if (!failed) {
-      throw error;
-    }
-    opts.secondaryFailure();
-  }
-  if (failed) {
-    throw failure;
-  }
 }
 
 /** Assert this before a harness failure can attach CLI captures to an error. */

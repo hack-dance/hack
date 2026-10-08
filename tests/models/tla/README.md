@@ -47,6 +47,8 @@ witness. Parse errors, timeouts and partial exploration are failures.
 | `CommitStop` | `native-compose-command.ts` invokes route retirement in `beforeComplete`; `native-compose-generation.ts` rechecks generation, engine ownership and pending intent before the completed receipt. |
 | `Crash` | Durable generation/reference survive, while process locks do not; retry does not replay startup or infer completion from a missing process. |
 
+Claim retirement is one aggregate modeled step; interrupted per-host journal
+writes and unlinks require the separate implementation crash/retry regressions.
 The abstraction treats durable writes as atomic and summarizes exact engine,
 proxy, resource and filesystem identities by one reference version. Cooperative
 exclusion prevents version replacement after claim admission. The modeled

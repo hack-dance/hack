@@ -86,7 +86,7 @@ const ROUTING = [
   "HACK_EXECUTION_MODE",
 ] as const;
 type SavedManifest = {
-  readonly adoption_generation_version: 1 | 3 | 4 | 5 | 9;
+  readonly adoption_generation_version: 1 | 3 | 4 | 5 | 6 | 9;
   readonly kind: typeof KIND;
   readonly projectRoot: string;
   readonly id: string;
@@ -238,6 +238,7 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
       isRecord(value) &&
       keys(value, manifestFieldKeys(value)) &&
       (value.adoption_generation_version === 1 ||
+        value.adoption_generation_version === 6 ||
         (value.adoption_generation_version === 9 &&
           isRecord(value.buildProof) &&
           keys(value.buildProof, "images,source") &&
@@ -434,12 +435,45 @@ async function assertRetainedBuildSource(opts: {
     checkOwner: opts.ctx.check,
   });
 }
-function requireSavedReceiptVersion(meta: SavedManifest, current: Receipt) {
+async function requireSelectedTopologyOwner(opts: {
+  readonly ctx: Context;
+  readonly selected: Anchor;
+  readonly meta: SavedManifest;
+  readonly custom: boolean;
+  readonly requiresV5: boolean;
+  readonly preparing: boolean;
+}) {
+  const { ctx, selected, meta, custom, requiresV5, preparing } = opts;
+  if (!isRecord(meta.binding)) {
+    refuse();
+  }
   if (
-    (meta.adoption_generation_version === 5) !==
-      (current.adoption_receipt_version === 5) ||
-    (meta.adoption_generation_version === 9) !==
-      (current.adoption_receipt_version === 9)
+    (meta.adoption_generation_version === 6) !== custom ||
+    (meta.adoption_generation_version === 5) !== requiresV5 ||
+    (custom && requiresV5) ||
+    (custom &&
+      (meta.binding.binding_version !== 3 ||
+        meta.projectionProof !== undefined)) ||
+    (!custom &&
+      (meta.binding.binding_version === 3 ||
+        meta.binding.binding_version === 4)) ||
+    (meta.adoption_generation_version === 9 &&
+      (meta.binding.binding_version !== 1 ||
+        meta.projectionProof !== undefined ||
+        requiresV5))
+  ) {
+    refuse();
+  }
+  if (preparing) {
+    return;
+  }
+  const state = await publicationState(ctx);
+  if (
+    (state.adoption_receipt_version === 6) !== custom ||
+    (state.adoption_receipt_version === 5) !== requiresV5 ||
+    (state.adoption_receipt_version === 9) !==
+      (meta.adoption_generation_version === 9) ||
+    JSON.stringify(state.prepared) !== JSON.stringify(selected)
   ) {
     refuse();
   }
@@ -488,6 +522,15 @@ async function readInputs(
     const assertBuildSource = () =>
       assertRetainedBuildSource({ ctx, meta, configText, composeText });
     await assertBuildSource();
+    const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
+    await requireSelectedTopologyOwner({
+      ctx,
+      selected,
+      meta,
+      custom: planned.intent?.ownedNetwork !== undefined,
+      requiresV5: retainedPlan.requiresV5,
+      preparing,
+    });
     const projectionOpts = {
       projectRoot: ctx.root,
       configText,
@@ -512,13 +555,6 @@ async function readInputs(
       )
     ) {
       refuse();
-    }
-    const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
-    if (retainedPlan.requiresV5 !== (meta.adoption_generation_version === 5)) {
-      refuse();
-    }
-    if (!preparing) {
-      requireSavedReceiptVersion(meta, await publicationState(ctx));
     }
     const observed = await inspectLegacyComposeAdoptionResources({
       root: ctx.root,
@@ -648,6 +684,30 @@ function claim(
   known.set(result, selected);
   return result;
 }
+function manifestVersion(
+  binding: LegacyComposeVerifiedBinding,
+  requiresV5: boolean,
+  projection?: {
+    readonly projectionProof: { readonly projection_version: number };
+  }
+): Manifest["adoption_generation_version"] {
+  if (requiresV5) {
+    if (binding.binding_version === 3 || binding.binding_version === 4) {
+      refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+    }
+    return 5;
+  }
+  if (binding.binding_version === 3) {
+    return 6;
+  }
+  if (binding.binding_version === 4) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
+  if (!projection) {
+    return 1;
+  }
+  return projection.projectionProof.projection_version === 2 ? 4 : 3;
+}
 async function prepare(
   ctx: Context,
   binary: string | undefined
@@ -662,6 +722,14 @@ async function prepare(
     projectRoot: ctx.root,
     signal: ctx.signal,
   });
+  // Version 6 owns only the static custom bridge. Generated-source or typed
+  // local combinations need a separate selected owner, never a v3/v4 alias.
+  if (
+    acquired.binding.binding_version === 4 ||
+    (acquired.binding.binding_version === 3 && acquired.projection)
+  ) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
   const mapped = (
     acquired.build
       ? mapLegacyNativeRetainedBasicBuild
@@ -673,6 +741,18 @@ async function prepare(
   const candidateText = JSON.stringify(
     acquired.projection?.candidate ?? mapped.candidate
   );
+  const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
+  if (retainedPlan.requiresV5 && acquired.binding.binding_version >= 3) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
+  if (
+    acquired.build &&
+    (acquired.binding.binding_version !== 1 ||
+      acquired.projection !== undefined ||
+      retainedPlan.requiresV5)
+  ) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
   const admitted = await admitLegacyComposeCandidate({
     candidateText,
     metadata: acquired.projection?.metadata,
@@ -706,19 +786,14 @@ async function prepare(
     const originals = await privateDirectory(join(generationRoot, "originals"));
     await originals.file.sync();
     await originals.file.close();
-    const projectionVersion =
-      acquired.projection?.projectionProof.projection_version === 2 ? 4 : 3;
-    let version: Manifest["adoption_generation_version"] = acquired.projection
-      ? projectionVersion
-      : 1;
-    if (legacyComposeRetainedPlan(JSON.parse(candidateText)).requiresV5) {
-      version = 5;
-    }
-    if (acquired.build) {
-      version = 9;
-    }
     const meta: Manifest = {
-      adoption_generation_version: version,
+      adoption_generation_version: acquired.build
+        ? 9
+        : manifestVersion(
+            acquired.binding,
+            retainedPlan.requiresV5,
+            acquired.projection
+          ),
       kind: KIND,
       projectRoot: ctx.root,
       id,
@@ -1390,6 +1465,7 @@ function preparedReceiptVersion(
   // A rolled-back proof owner must not label a later plain generation with its version.
   if (
     prior.adoption_receipt_version === 5 ||
+    prior.adoption_receipt_version === 6 ||
     prior.adoption_receipt_version === 9
   ) {
     return "kind" in checkout.git ? 2 : 1;

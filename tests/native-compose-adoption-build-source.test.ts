@@ -220,6 +220,57 @@ test("root context pins included source and keeps private proof/candidate/callba
     checkOwner: async () => {},
   });
 });
+test.each([
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+] as const)("preview-qualified owned bridge build (internal=%s, inactive=%s) refuses retained source before context reads", async (internal, inactive) => {
+  composeText = JSON.stringify({
+    name: "fixture",
+    services: {
+      db: {
+        build: "..",
+        ...(inactive ? { profiles: ["later"] } : {}),
+        networks: { private: { aliases: ["db-reader"] } },
+      },
+    },
+    networks: { private: { driver: "bridge", internal } },
+  });
+  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  const inputs = { configText: '{"name":"fixture"}', composeText };
+  const preview = mapLegacyNativeImport(inputs);
+  expect(preview.report.complete).toBe(true);
+  expect(preview.candidate).toMatchObject({
+    services: {
+      db: {
+        build: { context: "." },
+        networks: { private: { aliases: ["db-reader"] } },
+      },
+    },
+    networks: { private: { internal } },
+  });
+  const retained = mapLegacyNativeRetainedBasicBuild(inputs);
+  expect(retained.candidate).toBeUndefined();
+  expect(retained.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/networks",
+      status: "refused",
+      code: "retained_build_network_adoption_unqualified",
+    })
+  );
+  const source = await acquireLegacyAdoptionSourceInputs({ projectRoot: root });
+  if (!source.ok) {
+    throw new Error("Synthetic source setup refused; values omitted.");
+  }
+  const reader = spyOn(importInputs, "readNativeConfigImportSourceFile");
+  try {
+    await red(acquireLegacyComposeBuildSource({ source }));
+    expect(reader).not.toHaveBeenCalled();
+  } finally {
+    reader.mockRestore();
+  }
+});
 test("creation and edits inside actually ignored owned outputs do not invalidate included source", async () => {
   const captured = await acquire();
   await mkdir(join(root, ".hack/.internal"));

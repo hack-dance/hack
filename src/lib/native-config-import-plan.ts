@@ -5,6 +5,7 @@ import {
   legacyComposeJobNames,
   legacyComposeOneShotMarker,
 } from "./native-config-import-jobs.ts";
+import { mapLegacyOwnedNetwork } from "./native-config-import-network.ts";
 import {
   type ImportDocument,
   type ImportField,
@@ -193,6 +194,14 @@ function mapLegacyNativeInput(opts: {
     jobPreview:
       opts.purpose === "preview" || opts.purpose === "storage-adoption",
   });
+  mapOwnedNetwork({
+    project: name,
+    compose: compose.value,
+    candidate,
+    mark,
+    refuse,
+    purpose: opts.purpose,
+  });
   if (
     opts.purpose === "storage-adoption" ||
     opts.purpose === "retained-basic-build"
@@ -206,6 +215,66 @@ function mapLegacyNativeInput(opts: {
     });
   }
   return nativeImportResult({ fields, candidate });
+}
+
+function mapOwnedNetwork(
+  opts: Pick<MappingContext, "candidate" | "mark" | "refuse"> & {
+    readonly project: unknown;
+    readonly compose: Record<string, unknown>;
+    readonly purpose:
+      | "preview"
+      | "adoption-baseline"
+      | "storage-adoption"
+      | "retained-basic-build";
+  }
+): void {
+  if (typeof opts.project !== "string") {
+    return;
+  }
+  const mapping = mapLegacyOwnedNetwork({
+    project: opts.project,
+    compose: opts.compose,
+  });
+  if (mapping.kind === "omitted") {
+    return;
+  }
+  if (mapping.kind === "refused") {
+    opts.refuse("compose", mapping.pointer, mapping.code);
+    return;
+  }
+  if (opts.purpose === "retained-basic-build") {
+    opts.refuse(
+      "compose",
+      "/networks",
+      "retained_build_network_adoption_unqualified"
+    );
+    return;
+  }
+  if (
+    opts.purpose !== "preview" &&
+    isRecord(opts.candidate.jobs) &&
+    Object.keys(opts.candidate.jobs).length > 0
+  ) {
+    opts.refuse("compose", "/networks", "owned_bridge_jobs_unsupported");
+    return;
+  }
+  const { logical, internal, attachments } = mapping.intent;
+  opts.candidate.networks = { [logical]: { internal } };
+  for (const { service, aliases } of attachments) {
+    const workload = candidateWorkload(opts.candidate, service);
+    if (isRecord(workload)) {
+      workload.networks = { [logical]: { aliases: [...aliases] } };
+    }
+  }
+  for (const { source, target, code } of mapping.pointers) {
+    opts.mark(
+      "compose",
+      source,
+      workloadTarget(opts.candidate, target),
+      code,
+      true
+    );
+  }
 }
 
 function candidateWorkload(candidate: Record<string, unknown>, name: string) {

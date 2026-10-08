@@ -32,6 +32,11 @@ static directory checkout receipts retain version 1 and their original wire shap
 Canonical generated-source adoption uses version 3 in either qualified layout.
 An admitted typed local file selects version 4; existing versions 1–3 keep their
 wire shapes and their original local-input refusal.
+One static project-owned custom bridge selects private manifest and receipt
+version 6 with resource binding version 3. This owner refuses generated managed
+sources, typed local inputs and dependency or health declarations until a
+combined saved-source and lifecycle proof qualifies them. Versions 1–4 do not
+gain custom-bridge authority; an older reader refuses the version 6 receipt.
 
 The static retained-container slice also inspects relevant filenames in the
 verified primary checkout when local inheritance is enabled. Managed-env,
@@ -121,6 +126,9 @@ refuse. Image-only binding APIs and versions 1–5 retain their prior contracts.
 Versions for custom networks, completed jobs and retained files are separate;
 their combinations with this first build proof refuse, as do profiles, readiness,
 managed/generated inputs, typed locals and literal-dollar build paths.
+Pure preview can map a qualified custom bridge alongside a basic build; retained
+build adoption refuses that intersection before opening context files, including
+inactive workloads.
 
 Included context files, the Dockerfile, optional root and Dockerfile-specific
 ignore files, and their safe filesystem identities are privately pinned. The
@@ -210,17 +218,27 @@ exposes names rather than immutable IDs; creation timestamps alone are not a
 sufficient ownership token. Docker [refuses removal of a referenced volume](https://docs.docker.com/reference/cli/docker/volume/rm/),
 so retaining and rechecking the referencing container IDs matters.
 
-The existing default bridge network must also match its Compose labels, immutable
-ID and creation timestamp. Every retained original must configure that exact
-network ID; active endpoint membership must exactly match the running originals.
+The selected Compose bridge must match its project and logical labels, immutable
+ID, local bridge driver, internal policy and creation timestamp. Version 6
+requires one explicitly named, project-owned, non-default bridge with one
+explicit attachment per service and static, unique aliases. Every retained
+original must configure that exact network ID; active endpoint membership must
+exactly match the running originals. Its active endpoint aliases must equal
+the authored aliases plus the original container and service names.
 Stopped originals remain bound through their configured network IDs even though
-Docker removes their active endpoints. This transient running state is not saved
-in the resource binding. Other authored
-network policies remain unsupported. Engine ID, resource inventories and source
+Docker removes their active endpoints. A stopped version 6 endpoint may expose
+no aliases, but cannot acquire a different configured network ID. This transient
+running state is not saved in the resource binding. Other authored network
+policies remain unsupported. Engine ID, resource inventories and source
 bytes are rechecked, and acquisition compares two complete private observations.
 The Docker routing environment is captured for later comparison. Queries never
 request container environment or full image configuration; version 9 additionally
-reads the minimal image reference, ID and birth described above. Execution admission also
+reads the minimal image reference, ID and birth described above. This retained-resource authority
+keeps the original bridge and container IDs through stop, saved restart,
+recovery and rollback; it does not authorize a later newly created native
+generation to take over those identities. That transition needs a separate
+topology and data acceptance proof.
+Execution admission also
 compares Compose configuration hashes from the saved ordered sources with the
 engine-created `com.docker.compose.config-hash` label on each original container.
 Those private digests never enter reports, authored files or resource labels.

@@ -276,7 +276,9 @@ build subset; it does not close the full advanced-build corpus requirement.
 
 Cleanup checks captured full image IDs, fixed Dockerfile fixture labels, exclusive
 generated tags and baseline absence before ID-only non-forced removal with
-`--no-prune`. The cached base and preexisting images remain. Ordinary builder cache
+`--no-prune`. A generated repository's self-digest is accepted only when its hash
+equals that inspected full image ID; foreign repositories or mismatched digests
+still refuse cleanup. The cached base and preexisting images remain. Ordinary builder cache
 is recorded before/after and retained; there is no general cache prune or cache
 reclamation claim. Failed exact cleanup retains the private fixture and recovery
 identities. Host DNS/trust, registry network denial and advanced builder features

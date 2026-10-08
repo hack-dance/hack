@@ -184,7 +184,17 @@ export function verifyNativeBuildImage(opts: {
             (tag) => typeof tag === "string" && opts.tags.includes(tag)
           ))) &&
       (image.digests === null ||
-        (Array.isArray(image.digests) && image.digests.length === 0)),
+        (Array.isArray(image.digests) &&
+          new Set(image.digests).size === image.digests.length &&
+          image.digests.every(
+            (digest) =>
+              typeof digest === "string" &&
+              opts.tags.some(
+                (tag) =>
+                  tag.endsWith(":latest") &&
+                  digest === `${tag.slice(0, -":latest".length)}@${opts.id}`
+              )
+          ))),
     message:
       "Only a new exact source-labeled fixture image with no foreign tags or digests may be removed",
   });

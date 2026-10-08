@@ -179,6 +179,25 @@ test("built image ownership rejects old IDs, relabeled images and foreign aliase
   }
 });
 
+test("owned self-digest requires the exact generated repository and inspected full ID", () => {
+  const self = `${TAG.slice(0, -":latest".length)}@${ID}`;
+  expect(() => verifyImage({ ...image(), digests: [self] })).not.toThrow();
+  expect(() =>
+    verifyImage({ ...image(), tags: null, digests: [self] })
+  ).not.toThrow();
+  for (const digests of [
+    [`foreign@${ID}`],
+    [`${TAG.slice(0, -":latest".length)}@sha256:${"d".repeat(64)}`],
+    [self, `foreign@${ID}`],
+    [self, self],
+    [`${self}-suffix`],
+    [null],
+    "not-an-array",
+  ]) {
+    expect(() => verifyImage({ ...image(), digests })).toThrow();
+  }
+});
+
 test("unsupported build proof rejects unrelated diagnostics or accidental execution", () => {
   const diagnostic = {
     code: "unknown_field",

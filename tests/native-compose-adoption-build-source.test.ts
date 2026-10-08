@@ -25,11 +25,20 @@ import {
   mapLegacyNativeRetainedBasicBuild,
   mapLegacyNativeStorageAdoption,
 } from "../src/lib/native-config-import-plan.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const CANARY = "synthetic-private-build-source";
 let root: string;
 let composeText: string;
+let previousCi: string | undefined;
+let previousExecutionMode: string | undefined;
 beforeEach(async () => {
+  previousCi = process.env.CI;
+  previousExecutionMode = process.env.HACK_EXECUTION_MODE;
+  // These inherited-input cases intentionally exercise the ordinary local
+  // selection rather than CI/slim's existing primary-scope opt-out.
+  process.env.CI = "";
+  process.env.HACK_EXECUTION_MODE = "";
   root = await realpath(
     await mkdtemp(join(tmpdir(), "retained-build-source-"))
   );
@@ -48,6 +57,8 @@ beforeEach(async () => {
   await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
 });
 afterEach(async () => {
+  restoreEnv("CI", previousCi);
+  restoreEnv("HACK_EXECUTION_MODE", previousExecutionMode);
   await rm(root, { recursive: true, force: true });
 });
 async function acquire(signal?: AbortSignal) {

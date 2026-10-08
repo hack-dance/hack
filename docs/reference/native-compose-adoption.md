@@ -151,7 +151,11 @@ selector/launcher boundary. Configuration rollback must restore the held legacy
 pair and verify the original data binding before using an older client; installing
 an old executable alone is not rollback.
 
+Disposable Compose/PostgreSQL acceptance on macOS verified the original SQL row
+after adopted execution and rollback, retained container/network/volume anchors,
+an interrupted partial stop, process-killed switch and rollback repair, candidate
+edit/removal refusal, exact original-file inode restoration and owned cleanup.
+These observed boundaries supplement the synthetic probe/interruption tests.
 Full NC04 remains open for typed local inheritance, linked-worktree isolation,
-advanced lossless mappings, recreation and application migration. Synthetic
-probe/interruption tests do not prove live data preservation; actual disposable
-engine/data readback and process-kill boundaries require separate acceptance.
+advanced lossless mappings, recreation and application migration; that acceptance
+does not qualify those unsupported cases or an atomic freeze of external actors.

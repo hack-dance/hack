@@ -161,11 +161,14 @@ test("unreadable native input remains a boundary without reading its values", as
   }
 });
 
-test("invalid project directory access refuses rather than selecting ancestor Compose", async () => {
+test.each([
+  ".hack",
+  ".hack/.internal",
+])("invalid project directory %s refuses rather than selecting ancestor Compose", async (path) => {
   const outer = await fixture();
   await file(outer, ".hack/docker-compose.yml");
   const inner = join(outer, "child");
-  await file(inner, ".hack", "not a directory");
+  await file(inner, path, "not a directory");
   await expect(findProjectContext(inner)).rejects.toThrow(
     "Cannot inspect Hack project inputs"
   );

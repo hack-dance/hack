@@ -204,7 +204,7 @@ from orphan generation files by this recovery path.
 ## Remaining coverage
 
 This slice explicitly refuses foreground or partial-service startup, non-plain
-logs, pruning options, `host.up.after`, all `host.down` hooks, persistent host
+logs, pruning options, all `host.down` hooks, persistent host
 processes, browser opening, route
 bindings, typed host/gateway endpoints, TCP endpoint derivation, and HTTP/TCP
 readiness. It preserves ordinary project DNS and outbound networking and adds no

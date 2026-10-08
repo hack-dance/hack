@@ -16,6 +16,46 @@ pinned artifact. Each check has a 120-second timeout, 512 MiB Java heap, two wor
 and bounded output; temporary TLC metadata is removed after success or failure.
 No credentials or running VM are needed.
 
+## Native foreground recovery lease takeover
+
+`native-frontend-recovery/Recovery.tla` models the explicit saved-run frontend
+recovery lease protocol. Its checker and exact exploration-count registration
+are pending initial qualification. It bounds one lease to two new candidates,
+one crash, one immutable resource selection and one possible foreign-binding
+substitution. Two initial states cover a fresh active recovery at release and a
+dead selected owner awaiting takeover. The same protocol serves the primary and
+mutation leases; this model checks one lease and assumes its enclosing required
+guard is held. It does not establish the ordering of both leases together.
+
+Reservation, promotion, issuance, current-owner binding, release intent, owner
+unlink and directory removal are separate transitions. A pending selector records
+the current candidate's exact identity but grants no active lease. Crashes clear
+live authority while retaining committed selectors and release phases. Unknown
+pending publication refuses, and expected absence needs the preexisting release
+intent. Fresh release-publication failure retains its owner. Retry can continue
+from a committed candidate before/after promotion or an owner-unlinked directory;
+resource progress still requires actual issued authority and unchanged original
+membership. Four unsafe controls remove reservation, release, active-authority or
+binding checks. Five reachability controls require completion after the named
+crashes, unknown-pending refusal and fresh-release retention.
+
+| Model boundary | Implementation mapping and separate evidence |
+| --- | --- |
+| `ReserveCandidate` / `BindCandidate` | `createNativeComposePrivateMutationLock.withPreparedRecoveryLock` exclusively writes `owner.pending`, then the frontend `publishIntent` commits its exact inode/raw-byte selector before promotion. Reservation callbacks change only lease metadata. |
+| `PromoteCandidate` / `IssueLease` / `BindIssuedLease` | The shared owner rechecks the current/candidate selectors before rename, issues its private active lease only afterward, and the frontend commits the current owner before resource phases can advance. |
+| `AdvanceResources` | `recoverNativeAuthoredProject` requires both actual guards, strict original Ready/start/source selections and an authenticated native Removed receipt with null current observations. The three abstract steps are retirement intent, exact Ready unlink and completion; native resource cleanup and other frontend members are omitted. |
+| `ArmRelease` / `RemoveOwner` / `RemoveDirectory` | Frontend primary and mutation release flags commit before the shared owner removes the exact owner and directory. `withFreshRecoveryLock` retains both on a failed durable release callback. |
+| `Crash` / `RecoverSavedCandidate` / `ReadmitOwner` | The finite child tests SIGKILL the retained child before promotion, after promotion and after owner unlink, then use the same saved intent to retry without replaying cleanup. |
+| `RefuseUnknown` / `ReplaceBinding` / `LoseAuthority` | Implementation controls refuse unbound pending publication, live candidate, same-byte/new-inode candidate replacement and revoked issued authority. The model summarizes those identity fields by one version rather than proving real inode/boot/process readers. |
+
+Each committed durable write is one abstract action; partial writes, pending
+intent refusal, fsync durability, hash/entropy/UTF-8 bounds, real filesystem
+substitution, OS process identity, deadlines, callback rejection, signal delivery,
+socket/guest boot proof and native environment retirement need separate source and
+implementation checks. Hardlink archive interruption remains a retained refusal
+and is omitted. No fairness, unlimited-crash recovery, provider effects, old-format
+compatibility, data deletion or whole NC05 acceptance is claimed.
+
 ## Native storage witness enrollment and read-only resume
 
 `native-storage-witness/Witness.tla` checks a proposed storage continuity protocol.

@@ -112,7 +112,17 @@ jobs:
           cache: false
           env: false
       - name: Validate release workflow syntax
-        run: mise x actionlint@1.7.12 -- actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/prerelease.yml
+        run: |
+          for attempt in 1 2 3; do
+            if mise install actionlint@1.7.12; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
+          mise x actionlint@1.7.12 -- actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/prerelease.yml
       - name: Fetch pinned model checker
         run: curl --fail --location --retry 2 --max-time 60 https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar --output "$RUNNER_TEMP/tla2tools.jar"
       - name: Check evidence validation and models

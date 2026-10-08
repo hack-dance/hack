@@ -1,4 +1,4 @@
-import { chmod, mkdir, realpath } from "node:fs/promises";
+import { chmod, mkdir, open, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   Project,
@@ -15,6 +15,7 @@ import {
   runCommand,
   type Scenario,
 } from "../harness.ts";
+import { recordKnownUncertainProcessPolicyStartup } from "../native-process-policy-startup-diagnostic.ts";
 
 const TIMEOUT = 120_000;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
@@ -708,10 +709,43 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
           eventStart.length <= 64 && Number.isFinite(Date.parse(eventStart)),
         message: "Retry event history requires the exact engine clock",
       });
+      const expectedEngineId = await docker(["info", "--format", "{{.ID}}"]);
+      const initialUp = await raw([
+        "--profile",
+        "exercise",
+        "up",
+        "--detach",
+        "--json",
+      ]);
+      const diagnostic = await recordKnownUncertainProcessPolicyStartup({
+        result: initialUp,
+        projectRoot: root,
+        expectedEngineId,
+        record: async (summary) => {
+          const handle = await open(
+            join(ctx.tempRoot, "native-process-policy-startup-diagnostic.json"),
+            "wx",
+            0o600
+          );
+          try {
+            await handle.writeFile(`${JSON.stringify(summary)}\n`);
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+          ctx.log(`fixed-field startup diagnostic: ${JSON.stringify(summary)}`);
+        },
+      });
+      if (diagnostic !== "not-applicable") {
+        stage(`fixed-field startup diagnostic ${diagnostic}`);
+      }
+      expectExit({
+        result: initialUp,
+        codes: [0],
+        message: "Native --profile must succeed",
+      });
       expect({
-        that:
-          data(await cli(["--profile", "exercise", "up", "--detach", "--json"]))
-            .status === "ready",
+        that: data(initialUp).status === "ready",
         message: "Process policy workloads must actually reach readiness",
       });
       await readIdentity();

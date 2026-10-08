@@ -23,8 +23,10 @@ their exact SHA-256 hashes and qualified source revision. Reserve the Docker tes
 slot before starting: the flag acknowledges coordination; it cannot detect every
 other engine user. There must be no competing stateful tests. The harness requires
 an existing local Unix Docker endpoint, cached `oven/bun:1.4.2-slim`, and the exact
-already-running global proxy with curl and standard HTTP port 80. It does not pull
-images, start/repair global services, publish an admin endpoint, or change DNS/trust.
+already-running proxy with curl. By default that proxy must expose standard HTTP
+port 80. The explicit fixture mode below accepts a separately qualified proxy with
+no published ports. The harness does not pull images, start/repair global services,
+publish an admin endpoint, or change DNS/trust.
 Existing distroless proxies require a separately authorized setup refresh; see the
 native routing prerequisites. A missing capability refuses the run.
 
@@ -44,6 +46,52 @@ native receipts and JSON samples stay there with private access. The harness kee
 them as evidence, including on failure. Global proxy JSON is consumed in memory and
 is never included in captures or reports. No host credentials are fixture inputs.
 
+## Optional proxy fixture without published ports
+
+Pass `--proxy-fixture-receipt /absolute/private-parent/proxy-receipt.json` only after
+separate fixture setup and qualification. Preview still performs no file reads or
+engine calls when this option is present. The benchmark never creates or retires
+the proxy; its owner must retire it after verified workload and route absence.
+
+The closed version-one receipt contains these fields:
+
+| Field | Qualified value |
+| --- | --- |
+| `fixture_version`, `phase` | `1`, `qualified` |
+| `engine_id`, `docker_endpoint` | Exact engine ID and the pinned local Unix endpoint |
+| `proxy_id`, `image_id`, `started_at` | Full container ID, cached image ID and observed start identity |
+| `owner_token`, `proxy_name` | Random 32-character hexadecimal token and `nc03-overhead-proxy-<token>` |
+| `network_id` | Full ID of the retained existing `hack-dev` network |
+| `ca_sha256` | SHA-256 of the live root certificate's DER bytes |
+| `canary` | Only `hostname: canary-<token>.benchmark.invalid` and a random hexadecimal `marker` |
+
+The receipt must be a stable, owned, regular file with mode 0600, one link and at
+most 64 KiB. Its canonical parent must be owned with mode 0700. Unsafe ancestry,
+symlinks, changed named inodes/content or extra receipt fields refuse the run.
+The `qualified` field records completed setup; writing it alone does not qualify
+a fixture. Setup must verify the actual cached Alpine proxy image, its public CA
+and fixed HTTPS canary before handing over the receipt.
+
+The proxy must be the unique running `hack-dev-proxy`/`caddy` selector, have the exact
+random `io.hack.benchmark.proxy-owner` label, run without privilege or published
+ports, and attach only to the retained `hack-dev` network. Both explicit port
+bindings and dynamic runtime host bindings must be absent; `PublishAllPorts` must
+be false. Its sole bind mount is
+read-only `/var/run/docker.sock`. Both `/data` and `/config` must be tmpfs with exact
+options `rw,noexec,nosuid,nodev,mode=700`; there are no host data/config directories
+or anonymous volumes to leave behind. This avoids root-owned host files during
+Linux cleanup. It does not impose a new workload resource limit.
+
+Every application GET/POST uses the same fixed in-proxy curl oracle in both lanes.
+It connects to `http://127.0.0.1:80/` with the synthetic Host header and literal marker.
+Curl configuration files, proxies and redirects are disabled; curl has a three-second
+deadline, the subprocess a five-second ceiling, and the response a 4096-byte budget.
+The exact engine/proxy/image/start/network/mount/CA binding is checked before and
+after the request. A failed probe never falls back to host ingress. Preflight also
+checks the fixed HTTPS canary against the pinned public root at
+`/data/caddy/pki/authorities/local/root.crt`; it does not read private keys or install
+trust. The existing host-port-80 mode remains available without this receipt.
+
 ## Matched workload and sequence
 
 Both lanes use the same cached image ID, Bun app/initializer commands, health check,
@@ -53,8 +101,9 @@ There are no installs, builds, host mounts, resource caps or application credent
 Both use a shared isolated `HACK_HOME` with daemon autostart disabled.
 
 Each paired project uses the same random HTTP origin through the verified existing
-proxy. Requests connect directly to loopback with that Host header; no DNS or TLS
-setup is needed. Lanes execute sequentially, with verified route/container/network
+proxy. Requests connect directly to loopback with that Host header, either from
+the host or the qualified proxy namespace; no host DNS or TLS setup is needed.
+Lanes execute sequentially, with verified route/container/network
 absence before their peer starts. Cohorts contain one and two projects: at most
 four workload containers run simultaneously, including initializer jobs.
 
@@ -82,8 +131,10 @@ route proof remain in its timed command. They must not be disabled to obtain a w
 Each command records wall seconds and `wait4` user/system CPU of the CLI and
 terminated descendants it reaped, following the existing prepared-base benchmark
 pattern. It excludes Docker daemon/Caddy/app container work and the independent
-observer. `ready_wall_s` runs from CLI launch through the common oracle, including
-its HTTP/engine observations. Cohort totals sum sequential project operations.
+observer. In fixture mode the observer's `docker exec curl` and CA reads are also
+outside CLI-tree CPU accounting. They remain in `ready_wall_s` equally for both
+lanes. That metric runs from CLI launch through the common oracle, including its
+HTTP/engine observations. Cohort totals sum sequential project operations.
 Reported child `ru_maxrss` is OS accounting, not simultaneous process-tree RSS or
 container memory; do not add those quantities together.
 
@@ -135,7 +186,8 @@ private runtime journals remain on disk intentionally; no deletion of the eviden
 directory is implied. Cached images remain shared and are not reclaimed by this run.
 
 Source/offline gates cannot prove Docker inspect compatibility, routing admission,
-or actual timing. Before trials, qualify the exact compiled CLI/compiler and proxy
-image, then run this protocol in the reserved slot. Until actual matched acceptance
+or actual timing. The optional fixture's actual tmpfs/mount representation and
+retirement also require engine acceptance. Before trials, qualify the exact compiled
+CLI/compiler and proxy image, then run this protocol in the reserved slot. Until actual matched acceptance
 and cleanup pass, `summary.json` must not be presented as product parity or v5
 performance evidence.

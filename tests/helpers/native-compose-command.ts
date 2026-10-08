@@ -28,6 +28,12 @@ export async function fixture(
     readonly before?: string;
     readonly hooks?: unknown;
     readonly noHooks?: boolean;
+    readonly storage?: Readonly<
+      Record<
+        string,
+        { readonly kind: "persistent"; readonly scope: "worktree" }
+      >
+    >;
   } = {}
 ) {
   const root = await realpath(
@@ -42,7 +48,21 @@ export async function fixture(
       name: "fixture",
       source: { root: ".", mode: "host-mounted" },
       worktree: { inherit_local: false, auto_branch: false },
-      services: { web: { image: "fixture/web:1" } },
+      services: {
+        web: {
+          image: "fixture/web:1",
+          ...(opts.storage
+            ? {
+                mounts: Object.keys(opts.storage).map((storage) => ({
+                  storage,
+                  target: `/storage/${storage}`,
+                  access: "read-write",
+                })),
+              }
+            : {}),
+        },
+      },
+      ...(opts.storage ? { storage: opts.storage } : {}),
       ...(opts.noHooks
         ? {}
         : {
@@ -101,7 +121,7 @@ else {
  const host=Object.fromEntries(["up","down"].map(phase=>[phase,{before:normalized(source.host?.[phase]?.before??[]),after:normalized(source.host?.[phase]?.after??[])}]));
  const profiles=process.argv.slice(3).filter((_,i,a)=>a[i-1]==="--profile").sort();
  const allHooks=[...host.up.before,...host.up.after,...host.down.before,...host.down.after];
- const plan={...source,plan_version:1,selected_profiles:profiles,jobs:{},environment:{},storage:{},host};delete plan.schema_version;delete plan.profiles;
+ const plan={...source,plan_version:1,selected_profiles:profiles,jobs:{},environment:{},storage:source.storage??{},host};delete plan.schema_version;delete plan.profiles;
  const result={transport_version:1,ok:true,semantic_hash:createHash("sha256").update(text).digest("hex"),declared_workloads:{web:"service"},host_env_targets:{include_default:[...host.up.before,...host.up.after,...host.down.before,...host.down.after].length>0,workloads:[]},plan};
  if(allHooks.length===0) {delete plan.host;delete result.host_env_targets;}
  if(operation!=="compile") result.local_resolution={overlay:null,origin:"project",auto_branch:false,inherit_local:false,resolution_hash:"b".repeat(64)};
@@ -122,20 +142,44 @@ import {appendFile,rm} from "node:fs/promises";
 const root=${JSON.stringify(root)};const args=process.argv.slice(2);
 await appendFile(root+"/requests",JSON.stringify(args)+"\\n");
 const engine=root+"/engine";
+const volumes=root+"/volumes";
 if(args[0]==="compose") {
  if(args.includes("up")) {
   if(${failedStartup}) process.exit(19);
-  const doc=await Bun.file(args[args.indexOf("-f")+1]).json();await Bun.write(engine,JSON.stringify(doc));await appendFile(root+"/order","engine-ready\\n");process.exit(0);
+  const doc=await Bun.file(args[args.indexOf("-f")+1]).json();
+  if(Object.keys(doc.volumes).length>0) {
+   const retained=await Bun.file(volumes).exists()?await Bun.file(volumes).json():[];
+   for(const [storage,volume] of Object.entries(doc.volumes)) {
+    if(!retained.some(row=>row.name===volume.name)) {
+     retained.push({id:volume.name,name:volume.name,project:doc.name,version:volume.labels["io.hack.native-config.version"],instance:volume.labels["io.hack.native-config.instance"],owner:volume.labels["io.hack.native-config.owner"],storage,createdAt:new Date().toISOString()});
+    }
+   }
+   await Bun.write(volumes,JSON.stringify(retained));
+  }
+  await Bun.write(engine,JSON.stringify(doc));await appendFile(root+"/order","engine-ready\\n");process.exit(0);
  }
  if(args.includes("down")) {await rm(engine,{force:true});await appendFile(root+"/order","engine-stopped\\n");process.exit(0);}
  process.exit(99);
 }
 if(args[1]==="ls") {
+ if(args[0]==="volume" && await Bun.file(volumes).exists()) {
+  for(const row of await Bun.file(volumes).json())console.log(JSON.stringify({id:row.name,name:row.name,project:row.project}));
+ }
  if(args[0]==="container" && await Bun.file(engine).exists()) {
   const doc=await Bun.file(engine).json();console.log(JSON.stringify({id:"c".repeat(64),name:doc.name+"-web-1",project:doc.name}));
  }
  if(args[0]==="network" && await Bun.file(engine).exists()) {
   const doc=await Bun.file(engine).json();console.log(JSON.stringify({id:"d".repeat(64),name:doc.name+"_default",project:doc.name}));
+ }
+ process.exit(0);
+}
+if(args[0]==="volume" && args[1]==="inspect" && await Bun.file(volumes).exists()) {
+ const selected=args.slice(args.indexOf("--format")+2),format=args[args.indexOf("--format")+1];
+ const retained=await Bun.file(volumes).json();
+ for(const name of selected) {
+  const volume=retained.find(row=>row.name===name);if(!volume)process.exit(1);
+  const {createdAt,...row}=volume;
+  console.log(JSON.stringify({...row,...(format.includes(".CreatedAt")?{createdAt}:{})}));
  }
  process.exit(0);
 }

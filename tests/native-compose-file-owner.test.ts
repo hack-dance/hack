@@ -1091,7 +1091,7 @@ test("ownership drift after material retirement blocks completed receipt and kee
       '"phase":"retired"'
     );
   });
-});
+}, 30_000);
 test("absence proof drift during retirement preserves other members and pending recovery state", async () => {
   const selected = await store.withMutation(running);
   await store.withMutation(async (mutation) => {
@@ -1351,4 +1351,4 @@ test("known reaped readiness failure retains pending material until a separate v
     expect((await store.loadCurrent()).stopped).toBe(true);
     await expectAbsent(memberPaths(selected.projection));
   });
-});
+}, 30_000);

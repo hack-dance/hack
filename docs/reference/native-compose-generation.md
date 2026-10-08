@@ -24,6 +24,34 @@ Container resources carry the reserved workload discriminator `service` or `job`
 for the adapter's saved readiness checks. The store does not infer readiness.
 A verified private `.gitignore` excludes generated state from normal Git staging.
 
+The first verified persistent-volume observation upgrades the private instance
+receipt to version `2`. It records each physical name, logical storage key and
+Docker `CreatedAt` value under the existing mutation lock. These facts survive
+`down`, new generations and removed mount declarations. Later observations may
+add volumes, but cannot forget or replace recorded storage. Intent publication
+and completion retain the freshly recorded facts; public command results omit
+them. Missing storage or a changed birth refuses resume before Compose can
+create an empty replacement. A genuinely cold instance may create its first
+volumes.
+
+Version `1` receipts have no historical birth evidence. Their saved declared
+volumes must exist before any new effect, and the first verified observation
+records their current birth. This cannot prove that a same-name replacement did
+not happen before that first observation. Older clients refuse version `2`
+receipts; do not remove or edit private receipts to force a downgrade. The birth
+fence trusts engine metadata and is not a unique engine identity. An ordinary
+same-second replacement with identical labels and `CreatedAt` can be
+indistinguishable when the engine timestamp has coarse precision. This guard
+does not establish volume-content continuity or detect every empty replacement;
+that requires a separately qualified persistent content witness. No volume deletion or automatic
+data-loss repair is added.
+
+Verified readiness and one-off ownership observations also feed this storage
+history. If a later readiness, route or child-completion check fails, the store
+retains already verified birth facts without treating the operation as complete
+or starting another probe of the uncertain child. Its pending effect remains
+available only for explicit recovery.
+
 `runEffect` verifies generation identity, invokes caller freshness and ownership
 checks, and synchronizes a pending intent before calling the effect. Checks repeat
 at the effect boundary. Only a caller-confirmed complete postcondition clears

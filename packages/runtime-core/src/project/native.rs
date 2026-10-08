@@ -250,6 +250,18 @@ pub fn review(request: &[u8], profiles: &[String]) -> Result<ReviewIdentity, Can
     compile_inputs(request, profiles, None).map(|inputs| inputs.review_identity())
 }
 
+#[cfg(test)]
+thread_local! {
+    // Count copies, never retain or report private contents. Each test owns its thread.
+    static PRIVATE_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn copy_private(value: &str) -> String {
+    #[cfg(test)]
+    PRIVATE_COPIES.with(|copies| copies.set(copies.get() + 1));
+    value.into()
+}
+
 fn compile_inputs(
     request: &[u8],
     profiles: &[String],
@@ -285,7 +297,8 @@ fn compile_inputs(
     }
     let mut graph = BTreeMap::new();
     let mut workloads = BTreeMap::new();
-    let mut managed_environment = BTreeMap::new();
+    // Validate every fallible workload/binding/graph condition before copying any
+    // private value. A later refusal must not leave partially accumulated copies.
     for (kind, selected) in [
         (WorkloadKind::Service, plan.services),
         (WorkloadKind::Job, plan.jobs),
@@ -322,7 +335,6 @@ fn compile_inputs(
             let private = managed_values.and_then(|values| values.get(&name));
             let mut source_keys = BTreeSet::new();
             let mut managed_count = 0;
-            let mut destinations = BTreeMap::new();
             let mut private_bytes = 2;
             for (destination, binding) in bindings {
                 match binding {
@@ -338,20 +350,16 @@ fn compile_inputs(
                         let value = private
                             .and_then(|values| values.get(key))
                             .ok_or_else(private_refused)?;
-                        if value.len() > 32 * 1024
-                            || value.contains('\0')
-                            || destinations.len() == 256
-                        {
+                        if value.len() > 32 * 1024 || value.contains('\0') {
                             return Err(private_refused());
                         }
                         private_bytes += destination.len()
                             + 3
                             + json_string_bytes(value)
-                            + usize::from(!destinations.is_empty());
+                            + usize::from(managed_count > 1);
                         if private_bytes > 32 * 1024 {
                             return Err(private_refused());
                         }
-                        destinations.insert(destination.clone(), value.clone());
                     }
                     EnvironmentBinding::Literal { value }
                     | EnvironmentBinding::Default { value } => {
@@ -364,9 +372,6 @@ fn compile_inputs(
             }
             if private.is_some_and(|values| values.keys().collect::<BTreeSet<_>>() != source_keys) {
                 return Err(private_refused());
-            }
-            if !destinations.is_empty() {
-                managed_environment.insert(name.clone(), destinations);
             }
             graph.insert(
                 name.clone(),
@@ -382,6 +387,26 @@ fn compile_inputs(
     {
         return Err(private_refused());
     }
+    let graph = Graph::from_services(graph)?;
+    // No ordinary error path remains after the first copy. The borrowed source
+    // map and owning compiler bindings cannot change between validation and copy.
+    let mut managed_environment = BTreeMap::new();
+    if let Some(selected) = managed_values {
+        for name in workloads.keys() {
+            let destinations: BTreeMap<_, _> = environment_plan.workloads[name]
+                .iter()
+                .filter_map(|(destination, binding)| match binding {
+                    EnvironmentBinding::Managed { key, .. } => {
+                        Some((destination.clone(), copy_private(&selected[name][key])))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !destinations.is_empty() {
+                managed_environment.insert(name.clone(), destinations);
+            }
+        }
+    }
     Ok(NativeInputs {
         semantic_hash,
         environment_policy_hash,
@@ -389,7 +414,7 @@ fn compile_inputs(
         source: plan.source,
         worktree: plan.worktree,
         selected_profiles: plan.selected_profiles,
-        graph: Graph::from_services(graph)?,
+        graph,
         workloads,
         managed_environment,
     })

@@ -42,6 +42,70 @@ fn refusal(result: Result<NativeInputs, CandidateError>, code: &str) {
     assert!(!encoded.contains("authored-canary"));
 }
 
+#[test]
+fn late_workload_and_binding_refusals_never_copy_private_values() {
+    let project = json!({"schema_version":1,"name":"fixture","services":{
+        "a.first":{"image":"first"},"z.last":{"image":"last"}
+    }});
+    let metadata = json!({
+        "a.first":{"TOKEN":{"scope":"a.first","secret":true}},
+        "z.last":{"LATE":{"scope":"z.last","secret":true}}
+    });
+    let values = BTreeMap::from([
+        (
+            "a.first".into(),
+            BTreeMap::from([("TOKEN".into(), "synthetic-private-first".into())]),
+        ),
+        (
+            "z.last".into(),
+            BTreeMap::from([("LATE".into(), "synthetic-private-last".into())]),
+        ),
+    ]);
+    let originals = values.clone();
+
+    // Positive control: real compiler selection reaches the private copy pass.
+    PRIVATE_COPIES.with(|copies| copies.set(0));
+    let selected = lower(&project, metadata.clone(), &values).unwrap();
+    assert_eq!(PRIVATE_COPIES.with(std::cell::Cell::get), 2);
+    assert_eq!(selected.managed_environment, values);
+    drop(selected);
+
+    let mut unsupported = project.clone();
+    unsupported["services"]["z.last"]["entrypoint"] = json!({"exec":[]});
+    let mut missing = values.clone();
+    missing.get_mut("z.last").unwrap().clear();
+    let mut extra = values.clone();
+    extra
+        .get_mut("z.last")
+        .unwrap()
+        .insert("UNSELECTED".into(), "synthetic-private-extra".into());
+    let mut oversized = values.clone();
+    oversized
+        .get_mut("z.last")
+        .unwrap()
+        .insert("LATE".into(), "x".repeat(32 * 1024));
+    for (authored, selected, code) in [
+        (&unsupported, &values, "native_graph_subset"),
+        (&project, &missing, "native_graph_environment"),
+        (&project, &extra, "native_graph_environment"),
+        (&project, &oversized, "native_graph_environment"),
+    ] {
+        let request = request(authored, metadata.clone());
+        assert!(hack_config_compiler::environment::plan(&request, &[]).complete());
+        PRIVATE_COPIES.with(|copies| copies.set(0));
+        refusal(
+            compile(CompileOptions {
+                request: &request,
+                profiles: &[],
+                managed_values: selected,
+            }),
+            code,
+        );
+        assert_eq!(PRIVATE_COPIES.with(std::cell::Cell::get), 0);
+    }
+    assert_eq!(values, originals);
+}
+
 #[derive(Default)]
 struct Fake {
     starts: Vec<String>,

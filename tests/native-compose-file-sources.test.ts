@@ -34,9 +34,12 @@ import {
   type NativeComposeExecutionInputs,
 } from "../src/lib/native-compose-inputs.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+import { resolveVerifiedPrimaryWorktreeRoot } from "../src/lib/worktree-local-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
 const KEYS = [
+  "CI",
+  "HACK_EXECUTION_MODE",
   "HACK_HOME",
   "HACK_GLOBAL_CONFIG_PATH",
   "HACK_CONFIG_COMPILER_BINARY",
@@ -45,7 +48,9 @@ const KEYS = [
   "GIT_WORK_TREE",
   "GIT_COMMON_DIR",
 ] as const;
-const compiler = resolve(".hack-local/target/debug/hack-config-compiler");
+const compiler = resolve(
+  process.env.HACK_CONFIG_COMPILER_BINARY ?? "dist/hack-config-compiler"
+);
 const CANARY = "synthetic-private-file-value-$-no-newline";
 const binary = Buffer.from([0, 255, 4, 10]);
 let parent = "";
@@ -513,6 +518,9 @@ test("linked worktree selects its own source and current local managed layer whi
   ]);
   const linked = join(parent, "linked");
   await git(["worktree", "add", "--quiet", "-b", "fixture", linked]);
+  expect(
+    await resolveVerifiedPrimaryWorktreeRoot({ projectRoot: linked })
+  ).toBe(root);
   await mkdir(join(linked, "inputs"));
   await writeFile(join(linked, "inputs/settings.bin"), Buffer.from([33]));
   await writeFile(join(linked, "inputs/secret"), Buffer.alloc(0), {
@@ -581,4 +589,30 @@ test("linked worktree selects its own source and current local managed layer whi
       },
     });
   });
+  for (const exclusion of ["ci-1", "ci-true", "slim", "codex"]) {
+    Reflect.deleteProperty(process.env, "CI");
+    Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+    if (exclusion.startsWith("ci-")) {
+      process.env.CI = exclusion === "ci-true" ? "true" : "1";
+    } else {
+      process.env.HACK_EXECUTION_MODE = exclusion;
+    }
+    await store.withMutation(async (mutation) => {
+      const reservation = mutation.reserveGeneration();
+      const sources = await acquired({
+        authority: mutation.materialAuthority,
+        reservation,
+      });
+      await withNativeComposeFileBytes({
+        sources,
+        authority: mutation.materialAuthority,
+        reservation,
+        run: async (members) => {
+          expect(Buffer.from(members[1]?.bytes ?? []).toString("utf8")).toBe(
+            CANARY
+          );
+        },
+      });
+    });
+  }
 });

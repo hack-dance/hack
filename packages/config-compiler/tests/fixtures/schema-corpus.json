@@ -5551,5 +5551,896 @@
         }
       }
     }
+  },
+  {
+    "name": "build services active unsupported args",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "args": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build services inactive unsupported args",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "args": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs active unsupported args",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "args": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs inactive unsupported args",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "args": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build services active unsupported platform",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "platform": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build services inactive unsupported platform",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "platform": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs active unsupported platform",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "platform": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs inactive unsupported platform",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "platform": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build services active unsupported platforms",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "platforms": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build services inactive unsupported platforms",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "platforms": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs active unsupported platforms",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "platforms": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs inactive unsupported platforms",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "platforms": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build services active unsupported additional_contexts",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "additional_contexts": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build services inactive unsupported additional_contexts",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "additional_contexts": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs active unsupported additional_contexts",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "additional_contexts": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs inactive unsupported additional_contexts",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "additional_contexts": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build services active unsupported cache_from",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "cache_from": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build services inactive unsupported cache_from",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "cache_from": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs active unsupported cache_from",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "cache_from": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs inactive unsupported cache_from",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "cache_from": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build services active unsupported cache_to",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "cache_to": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build services inactive unsupported cache_to",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "cache_to": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs active unsupported cache_to",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "cache_to": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs inactive unsupported cache_to",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "cache_to": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build services active unsupported no_cache",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "no_cache": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build services inactive unsupported no_cache",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "no_cache": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs active unsupported no_cache",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "no_cache": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs inactive unsupported no_cache",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "no_cache": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build services active unsupported pull",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "pull": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build services inactive unsupported pull",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "pull": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs active unsupported pull",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "pull": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs inactive unsupported pull",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "pull": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build services active unsupported network",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "network": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build services inactive unsupported network",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "network": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs active unsupported network",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "network": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs inactive unsupported network",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "network": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build services active unsupported secrets",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "secrets": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build services inactive unsupported secrets",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "secrets": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs active unsupported secrets",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "secrets": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs inactive unsupported secrets",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "secrets": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build services active unsupported ssh",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "ssh": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build services inactive unsupported ssh",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "services": {
+        "target": {
+          "build": {
+            "context": ".",
+            "ssh": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs active unsupported ssh",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "ssh": {
+              "value": "synthetic-build-value"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "build jobs inactive unsupported ssh",
+    "valid": false,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "profiles": ["dev"],
+      "jobs": {
+        "target": {
+          "build": {
+            "context": ".",
+            "ssh": {
+              "value": "synthetic-build-value"
+            }
+          },
+          "profiles": ["dev"]
+        }
+      }
+    }
+  },
+  {
+    "name": "build nested Dockerfile target literal path",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "services": {
+        "target": {
+          "build": {
+            "context": "build-${AMBIENT}",
+            "dockerfile": "docker/Dockerfile",
+            "target": "selected"
+          },
+          "pull_policy": "build"
+        }
+      }
+    }
+  },
+  {
+    "name": "build default Dockerfile job",
+    "valid": true,
+    "input": {
+      "schema_version": 1,
+      "name": "example",
+      "jobs": {
+        "target": {
+          "build": {
+            "context": "default-context"
+          }
+        }
+      }
+    }
   }
 ]

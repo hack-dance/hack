@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -136,6 +137,244 @@ class Accounting(unittest.TestCase):
             result = benchmark.command([sys.executable, "-c", "import sys; sys.stdout.write('x'*3000000)"],
                                        cwd=root, env=os.environ, timeout=5)
         self.assertEqual(result["interrupted"], "output-budget")
+
+
+class CompilerAccounting(unittest.TestCase):
+    def executable(self, root, body):
+        path = Path(root, "compiler")
+        path.write_text(f"#!{sys.executable}\n{body}\n")
+        path.chmod(0o700)
+        return path
+
+    def options(self, root, path, payload, data=b"{}", action="compile"):
+        return {"compiler": path, "compiler_sha256": benchmark.fingerprint(path), "action": action,
+                "input_bytes": data, "input_sha256": hashlib.sha256(data).hexdigest() if data is not None else None,
+                "expected_output_sha256": hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                "cwd": root}
+
+    def assert_reaped(self, children):
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].returncode)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(children[0].pid, 0)
+
+    def test_direct_argv_and_regular_stdin_preserve_large_literal_input(self):
+        with tempfile.TemporaryDirectory() as root:
+            data = json.dumps({"literal": "$HOME;$(touch must-not-execute)", "blob": "x" * 524288}).encode()
+            payload = {"transport_version": 1, "ok": True, "bytes": len(data), "digest": hashlib.sha256(data).hexdigest()}
+            path = self.executable(root, "import sys,json,hashlib\ndata=sys.stdin.buffer.read()\nprint(json.dumps({'transport_version':1,'ok':True,'bytes':len(data),'digest':hashlib.sha256(data).hexdigest()}))")
+            original = subprocess.Popen
+            observations = []
+            children = []
+            def spawn(argv, **options):
+                observations.append((argv, options.get("shell", False), stat.S_ISREG(os.fstat(options["stdin"].fileno()).st_mode)))
+                child = original(argv, **options)
+                children.append(child)
+                return child
+            with mock.patch.object(benchmark.subprocess, "Popen", side_effect=spawn), mock.patch.object(benchmark.os, "killpg", wraps=os.killpg) as kill:
+                result = benchmark.compiler_sample(**self.options(root, path, payload, data))
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(observations, [([str(path), "compile"], False, True)])
+            self.assertEqual(result["poll_seconds"], .001)
+            self.assertGreaterEqual(result["compiler_cpu_s"], 0)
+            self.assertGreater(result["wall_s"], 0)
+            self.assertNotIn("stdout", result)
+            self.assertNotIn("stderr", result)
+            self.assertFalse(Path(root, "must-not-execute").exists())
+            kill.assert_not_called()
+            self.assert_reaped(children)
+
+    def test_protocol_uses_devnull_and_filters_ambient_credentials(self):
+        with tempfile.TemporaryDirectory() as root:
+            payload = {"transport_version": 1, "authored_version": 1, "plan_version": 1, "credential_present": False}
+            path = self.executable(root, "import os,json,sys\nassert sys.stdin.buffer.read()==b''\nprint(json.dumps({'transport_version':1,'authored_version':1,'plan_version':1,'credential_present':'AWS_SECRET_ACCESS_KEY' in os.environ}))")
+            with mock.patch.dict(os.environ, {"AWS_SECRET_ACCESS_KEY": "synthetic-must-not-forward"}), mock.patch.object(benchmark.subprocess, "Popen", wraps=subprocess.Popen) as spawn:
+                result = benchmark.compiler_sample(**self.options(root, path, payload, None, "--protocol"))
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(spawn.call_args.kwargs["stdin"], subprocess.DEVNULL)
+            self.assertIsNone(result["input_sha256"])
+
+    def test_plan_preserves_versioned_success_with_canonical_output_hash(self):
+        with tempfile.TemporaryDirectory() as root:
+            payload = {"transport_version": 1, "ok": True, "project": {"name": "synthetic"}}
+            path = self.executable(root, f"print({json.dumps(payload, indent=2)!r})")
+            result = benchmark.compiler_sample(**self.options(root, path, payload, b'{"request_version":1}', "plan"))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["action"], "plan")
+
+    def test_late_successful_reap_is_failed_without_signaling_former_group(self):
+        with tempfile.TemporaryDirectory() as root:
+            payload = {"transport_version": 1, "ok": True}
+            path = self.executable(root, f"print({json.dumps(payload)!r})")
+            children = []
+            original_spawn = subprocess.Popen
+            original_wait = os.wait4
+            original_clock = benchmark.time.monotonic
+            clock_delay = 0
+            def spawn(*args, **options):
+                child = original_spawn(*args, **options)
+                children.append(child)
+                return child
+            def wait(pid, options):
+                nonlocal clock_delay
+                observed = original_wait(pid, options)
+                if observed[0]:
+                    # Model late parent observation after real successful reap,
+                    # without relying on scheduler load or extending the deadline.
+                    clock_delay = 6
+                return observed
+            with mock.patch.object(benchmark.subprocess, "Popen", side_effect=spawn), mock.patch.object(benchmark.os, "wait4", side_effect=wait), mock.patch.object(benchmark.time, "monotonic", side_effect=lambda: original_clock() + clock_delay), mock.patch.object(benchmark.os, "killpg", wraps=os.killpg) as kill:
+                result = benchmark.compiler_sample(**self.options(root, path, payload))
+            self.assertFalse(result["ok"], result)
+            self.assertEqual((result["reason"], result["interrupted"]), ("interrupted", "timeout"))
+            self.assertEqual(result["exit"], 0)
+            self.assertGreaterEqual(result["wall_s"], 5)
+            self.assertGreaterEqual(result["compiler_cpu_s"], 0)
+            kill.assert_not_called()
+            self.assert_reaped(children)
+
+    def test_interrupt_after_wait4_reap_never_signals_former_group(self):
+        with tempfile.TemporaryDirectory() as root:
+            payload = {"transport_version": 1, "ok": True}
+            path = self.executable(root, f"print({json.dumps(payload)!r})")
+            children = []
+            original_spawn = subprocess.Popen
+            original_wait = os.wait4
+            def spawn(*args, **options):
+                child = original_spawn(*args, **options)
+                children.append(child)
+                return child
+            def wait(pid, options):
+                observed = original_wait(pid, options)
+                if observed[0]:
+                    os.kill(os.getpid(), signal.SIGINT)
+                return observed
+            previous_handler = signal.signal(signal.SIGINT, signal.default_int_handler)
+            try:
+                with mock.patch.object(benchmark.subprocess, "Popen", side_effect=spawn), mock.patch.object(benchmark.os, "wait4", side_effect=wait), mock.patch.object(benchmark.os, "killpg", wraps=os.killpg) as kill:
+                    with self.assertRaises(KeyboardInterrupt):
+                        benchmark.compiler_sample(**self.options(root, path, payload))
+                kill.assert_not_called()
+                self.assertEqual(children[0].returncode, 0)
+                self.assert_reaped(children)
+            finally:
+                signal.signal(signal.SIGINT, previous_handler)
+
+    def test_invalid_or_oversized_input_refuses_before_any_spawn(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = self.executable(root, "raise SystemExit(90)")
+            options = self.options(root, path, {"transport_version": 1, "ok": True})
+            mutations = ({"input_bytes": b"x" * (benchmark.COMPILER_INPUT_LIMIT + 1)}, {"input_bytes": b""},
+                         {"input_bytes": "{}"}, {"input_sha256": "0" * 64}, {"action": "generate"},
+                         {"timeout": float("inf")}, {"timeout": 6}, {"expected_output_sha256": "invalid"})
+            with mock.patch.object(benchmark.subprocess, "Popen") as spawn:
+                for mutation in mutations:
+                    with self.subTest(mutation=list(mutation)), self.assertRaises(benchmark.Failure):
+                        benchmark.compiler_sample(**{**options, **mutation})
+            spawn.assert_not_called()
+
+    def test_symlink_or_changed_executable_refuses_before_spawn(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = self.executable(root, "raise SystemExit(90)")
+            options = self.options(root, path, {"transport_version": 1, "ok": True})
+            alias = Path(root, "alias")
+            alias.symlink_to(path)
+            with mock.patch.object(benchmark.subprocess, "Popen") as spawn:
+                with self.assertRaises(benchmark.Failure):
+                    benchmark.compiler_sample(**{**options, "compiler": alias})
+                info = path.stat()
+                path.write_bytes(path.read_bytes().replace(b"90", b"91"))
+                os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+                with self.assertRaises(benchmark.Failure):
+                    benchmark.compiler_sample(**options)
+            spawn.assert_not_called()
+
+    def test_timeout_reaps_real_child_and_preserves_unrelated_canary(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = self.executable(root, "import time\ntime.sleep(30)")
+            canary = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+            children = []
+            original = subprocess.Popen
+            def spawn(*args, **options):
+                child = original(*args, **options)
+                children.append(child)
+                return child
+            try:
+                with mock.patch.object(benchmark.subprocess, "Popen", side_effect=spawn):
+                    result = benchmark.compiler_sample(**{**self.options(root, path, {"transport_version": 1, "ok": True}), "timeout": .05})
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["reason"], "interrupted")
+                self.assertEqual(result["interrupted"], "timeout")
+                self.assertEqual(result["exit"], -signal.SIGKILL)
+                self.assertGreater(result["wall_s"], 0)
+                self.assert_reaped(children)
+                self.assertIsNone(canary.poll())
+            finally:
+                canary.kill()
+                canary.wait(timeout=3)
+
+    def test_caller_interruption_reaps_real_owned_child(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = self.executable(root, "import time\ntime.sleep(30)")
+            children = []
+            original = subprocess.Popen
+            def spawn(*args, **options):
+                child = original(*args, **options)
+                children.append(child)
+                return child
+            with mock.patch.object(benchmark.subprocess, "Popen", side_effect=spawn), mock.patch.object(benchmark.time, "sleep", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    benchmark.compiler_sample(**self.options(root, path, {"transport_version": 1, "ok": True}))
+            self.assertEqual(children[0].returncode, -signal.SIGKILL)
+            self.assert_reaped(children)
+
+    def test_output_overflow_is_retained_as_failed_observation(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = self.executable(root, f"import sys\nsys.stdout.write('x'*{benchmark.COMPILER_INPUT_LIMIT + 1234})")
+            result = benchmark.compiler_sample(**self.options(root, path, {"transport_version": 1, "ok": True}))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["interrupted"], "output-budget")
+        self.assertGreater(result["wall_s"], 0)
+        self.assertNotIn("stdout", result)
+
+    def test_nonzero_exit_and_invalid_versioned_output_never_qualify(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = self.executable(root, "raise SystemExit(17)")
+            result = benchmark.compiler_sample(**self.options(root, path, {"transport_version": 1, "ok": True}))
+            self.assertFalse(result["ok"])
+            self.assertEqual((result["reason"], result["exit"]), ("nonzero-exit", 17))
+            for value in ("not-json", '[1]', '{"transport_version":true,"ok":true}', '{"transport_version":1,"ok":false}', '{"transport_version":1,"ok":true,"invalid":NaN}'):
+                path = self.executable(root, f"print({value!r})")
+                result = benchmark.compiler_sample(**self.options(root, path, {"transport_version": 1, "ok": True}))
+                self.assertFalse(result["ok"], value)
+                self.assertEqual(result["reason"], "invalid-output")
+
+    def test_successful_but_changed_output_never_qualifies(self):
+        with tempfile.TemporaryDirectory() as root:
+            payload = {"transport_version": 1, "ok": True, "marker": "original"}
+            path = self.executable(root, "print('{\"transport_version\":1,\"ok\":true,\"marker\":\"changed\"}')")
+            result = benchmark.compiler_sample(**self.options(root, path, payload))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "output-mismatch")
+        self.assertGreater(result["wall_s"], 0)
+
+    def test_post_reap_same_size_tamper_with_restored_mtime_is_retained(self):
+        with tempfile.TemporaryDirectory() as root:
+            payload = {"transport_version": 1, "ok": True}
+            path = self.executable(root, "print('{\"transport_version\":1,\"ok\":true}') # original")
+            options = self.options(root, path, payload)
+            original = benchmark.command
+            def invoke(*args, **keywords):
+                result = original(*args, **keywords)
+                info = path.stat()
+                path.write_bytes(path.read_bytes().replace(b"original", b"modified"))
+                os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+                return result
+            with mock.patch.object(benchmark, "command", side_effect=invoke):
+                result = benchmark.compiler_sample(**options)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "compiler-changed")
+        self.assertGreater(result["wall_s"], 0)
 
 
 class AdmissionAndSummary(unittest.TestCase):

@@ -44,6 +44,7 @@ import {
   NativeComposeOwnershipError,
   type NativeComposeOwnershipObservation,
   type NativeComposeOwnershipOptions,
+  observeSavedNativeComposeOwned,
 } from "./native-compose-ownership.ts";
 import { NativeComposeProxyAccessError } from "./native-compose-proxy-routes.ts";
 import {
@@ -433,7 +434,10 @@ async function savedCommand(opts: {
   const generation =
     options.operation === "down" && options.recover && pending
       ? pending
-      : (state.generation ?? (options.operation === "ps" ? pending : null));
+      : (state.generation ??
+        (options.operation === "ps" || options.operation === "logs"
+          ? pending
+          : null));
   if (!generation) {
     if (state.beforeHooksPending) {
       if (options.operation === "ps" && options.json) {
@@ -553,7 +557,10 @@ async function savedCommand(opts: {
   return await store.withLease({
     generation,
     run: async () => {
-      const observed = await assertNativeComposeOwned(selection);
+      const observed =
+        options.operation === "ps" || options.operation === "logs"
+          ? await observeSavedNativeComposeOwned(selection)
+          : await assertNativeComposeOwned(selection);
       if (options.operation === "ps") {
         if (options.json) {
           emitCliResult({

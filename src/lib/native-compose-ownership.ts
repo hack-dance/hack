@@ -293,10 +293,25 @@ function validateOptions(opts: NativeComposeOwnershipOptions): void {
  * Docker: the effect owner must use the same engine/context and recheck at its
  * effect boundary. No engine mutation, repair, admission or lifecycle is performed.
  */
+/** Read saved status/logs without granting startup, readiness or mutation authority. */
+export async function observeSavedNativeComposeOwned(
+  input: NativeComposeOwnershipOptions
+): Promise<NativeComposeOwnershipObservation> {
+  return await queryNativeComposeOwned(input, true);
+}
+
 export async function assertNativeComposeOwned(
   input: NativeComposeOwnershipOptions
 ): Promise<NativeComposeOwnershipObservation> {
+  return await queryNativeComposeOwned(input, false);
+}
+
+async function queryNativeComposeOwned(
+  input: NativeComposeOwnershipOptions,
+  observeCreated: boolean
+): Promise<NativeComposeOwnershipObservation> {
   try {
+    requireValue(!observeCreated || input.recovery === undefined);
     validateOptions(input);
     const opts: NativeComposeOwnershipOptions = {
       ...input,
@@ -391,7 +406,7 @@ export async function assertNativeComposeOwned(
         observations,
       });
     }
-    validateTopology(opts, observations);
+    validateTopology(opts, observations, observeCreated);
     // Attachments can change without changing container or network object IDs.
     // Recheck policy IDs, aliases and membership; this is not an IP/endpoint-incarnation fence.
     const rechecked: MutableObservation = {
@@ -410,7 +425,7 @@ export async function assertNativeComposeOwned(
         observations: rechecked,
       });
     }
-    validateTopology(opts, rechecked);
+    validateTopology(opts, rechecked, observeCreated);
     requireValue(
       JSON.stringify(topologySnapshot(observations)) ===
         JSON.stringify(topologySnapshot(rechecked))
@@ -619,16 +634,16 @@ function validateEndpointIdentity(opts: {
   readonly id: string | undefined;
   readonly expectedAliases: readonly string[];
   readonly absentOwnedRecovery: boolean;
-  readonly createdOwnedRecovery: boolean;
+  readonly unrealizedCreatedEndpoint: boolean;
 }): void {
   const {
     endpoint,
     id,
     expectedAliases,
     absentOwnedRecovery,
-    createdOwnedRecovery,
+    unrealizedCreatedEndpoint,
   } = opts;
-  if (createdOwnedRecovery) {
+  if (unrealizedCreatedEndpoint) {
     requireValue(
       id !== undefined &&
         (endpoint.NetworkID === undefined || endpoint.NetworkID === "")
@@ -654,9 +669,50 @@ function validateEndpointIdentity(opts: {
   );
 }
 
+function isUnrealizedCreatedEndpoint(opts: {
+  readonly eligible: boolean;
+  readonly state: NativeComposeContainerObservation["state"];
+  readonly externalId: string | undefined;
+  readonly id: string | undefined;
+  readonly endpoint: Record<string, unknown>;
+}): boolean {
+  return (
+    opts.eligible &&
+    opts.state === "created" &&
+    opts.externalId === undefined &&
+    opts.id !== undefined &&
+    (opts.endpoint.NetworkID === undefined || opts.endpoint.NetworkID === "")
+  );
+}
+
+/** Compose may stage a replacement under its verified predecessor's short ID. */
+function endpointContainerName(opts: {
+  readonly container: NativeComposeContainerObservation;
+  readonly containers: readonly NativeComposeContainerObservation[];
+  readonly unrealizedCreatedEndpoint: boolean;
+  readonly composeProject: string;
+}): string {
+  const { container } = opts;
+  if (!opts.unrealizedCreatedEndpoint || container.oneoff) {
+    return container.name;
+  }
+  const canonical = `${opts.composeProject}-${container.service}-1`;
+  const predecessors = opts.containers.filter(
+    (previous) =>
+      previous.id !== container.id &&
+      !previous.oneoff &&
+      previous.service === container.service &&
+      previous.generationId !== container.generationId &&
+      previous.name === canonical &&
+      container.name === `${previous.id.slice(0, 12)}_${canonical}`
+  );
+  return predecessors.length === 1 ? canonical : container.name;
+}
+
 function validateTopology(
   opts: NativeComposeOwnershipOptions,
-  observations: MutableObservation
+  observations: MutableObservation,
+  observeCreated: boolean
 ): void {
   const policies = workloadNetworks(opts);
   const owned = new Map(
@@ -693,31 +749,43 @@ function validateTopology(
       const endpoint = endpoints[attachment.name];
       requireValue(isRecord(endpoint));
       const id = attachment.externalId ?? owned.get(attachment.name);
-      const expected = container.oneoff
-        ? [container.name]
-        : [
-            ...new Set([
-              container.name,
-              container.service,
-              ...attachment.aliases,
-            ]),
-          ].sort();
       const absentOwnedRecovery =
         opts.recovery === "down" &&
         attachment.externalId === undefined &&
         id === undefined &&
         ["created", "exited", "dead", "removing"].includes(container.state);
+      const unrealizedCreatedEndpoint = isUnrealizedCreatedEndpoint({
+        eligible: opts.recovery === "down" || observeCreated,
+        state: container.state,
+        externalId: attachment.externalId,
+        id,
+        endpoint,
+      });
+      if (unrealizedCreatedEndpoint) {
+        requireValue(
+          !observations.members.get(attachment.name)?.includes(container.id)
+        );
+      }
+      const expected = container.oneoff
+        ? [container.name]
+        : [
+            ...new Set([
+              endpointContainerName({
+                container,
+                containers: observations.containers,
+                unrealizedCreatedEndpoint,
+                composeProject: opts.composeProject,
+              }),
+              container.service,
+              ...attachment.aliases,
+            ]),
+          ].sort();
       validateEndpointIdentity({
         endpoint,
         id,
         expectedAliases: expected,
         absentOwnedRecovery,
-        createdOwnedRecovery:
-          opts.recovery === "down" &&
-          container.state === "created" &&
-          attachment.externalId === undefined &&
-          id !== undefined &&
-          (endpoint.NetworkID === undefined || endpoint.NetworkID === ""),
+        unrealizedCreatedEndpoint,
       });
       if (
         attachment.externalId === undefined &&

@@ -7,6 +7,7 @@ import {
   mergeNativeComposeNetworkPolicies,
   NativeComposeOwnershipError,
   type NativeComposeOwnershipOptions,
+  observeSavedNativeComposeOwned,
 } from "../src/lib/native-compose-ownership.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
@@ -834,6 +835,185 @@ test("saved down recovery admits created empty endpoints only on freshly verifie
       await expectRefusal(recovery);
     }
   }
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+test("saved read observes a created unrealized endpoint without authorizing ordinary effects", async () => {
+  const { fixture, selection, container, network } = customOwned();
+  container.state = "created";
+  container.networks = {
+    [CUSTOM]: {
+      NetworkID: "",
+      Aliases: [`${PROJECT}-web-1`, "web", "db-query"],
+    },
+  };
+  network.containers = {};
+  await prepare(fixture);
+  expect(
+    (await observeSavedNativeComposeOwned(selection)).containers[0]
+  ).toMatchObject({
+    id: ID,
+    state: "created",
+  });
+  await expectRefusal(selection);
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+function interruptedReplacement(): Fixture {
+  const fixture = owned();
+  const predecessor = fixture.container?.[0];
+  if (!predecessor) {
+    throw new Error("Missing replacement predecessor");
+  }
+  fixture.container?.push({
+    ...structuredClone(predecessor),
+    id: "e".repeat(64),
+    name: `/${ID.slice(0, 12)}_${PROJECT}-web-1`,
+    generation: PENDING,
+    state: "created",
+    health: null,
+    networks: {
+      [`${PROJECT}_default`]: {
+        NetworkID: "",
+        Aliases: [`${PROJECT}-web-1`, "web"],
+      },
+    },
+  });
+  return fixture;
+}
+
+test("interrupted replacement observes and recovers only a verified predecessor's temporary name", async () => {
+  await prepare(interruptedReplacement());
+  const observed = await observeSavedNativeComposeOwned(options);
+  expect(observed.containers).toHaveLength(2);
+  expect(
+    observed.containers.find((row) => row.generationId === PENDING)
+  ).toMatchObject({
+    state: "created",
+    name: `${ID.slice(0, 12)}_${PROJECT}-web-1`,
+  });
+  await expectRefusal(options);
+  expect(
+    (await assertNativeComposeOwned({ ...options, recovery: "down" }))
+      .containers
+  ).toHaveLength(2);
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+test.each([
+  "unknown-prefix",
+  "missing-predecessor",
+  "same-generation",
+  "other-service",
+  "oneoff",
+  "running",
+  "alias-drift",
+])("interrupted replacement refuses %s", async (change) => {
+  const fixture = interruptedReplacement();
+  const current = fixture.container?.[0];
+  const pending = fixture.container?.[1];
+  if (!(current && pending)) {
+    throw new Error("Missing replacement fixture");
+  }
+  if (change === "unknown-prefix") {
+    pending.name = `/${"f".repeat(12)}_${PROJECT}-web-1`;
+  } else if (change === "missing-predecessor") {
+    fixture.container = [pending];
+    const network = fixture.network?.[0];
+    if (!network) {
+      throw new Error("Missing replacement network");
+    }
+    network.containers = {};
+  } else if (change === "same-generation") {
+    pending.generation = GENERATION;
+  } else if (change === "other-service") {
+    current.service = "install";
+  } else if (change === "oneoff") {
+    pending.oneoff = "True";
+  } else if (change === "running") {
+    pending.state = "running";
+  } else {
+    pending.networks = {
+      [`${PROJECT}_default`]: { NetworkID: "", Aliases: ["unknown", "web"] },
+    };
+  }
+  await prepare(fixture);
+  await expect(observeSavedNativeComposeOwned(options)).rejects.toBeInstanceOf(
+    NativeComposeOwnershipError
+  );
+  await expectRefusal({ ...options, recovery: "down" });
+});
+
+test("empty created aliases retain owned renamed-container observation without authorizing effects", async () => {
+  const fixture = interruptedReplacement();
+  const pending = fixture.container?.[1];
+  if (!pending) {
+    throw new Error("Missing replacement fixture");
+  }
+  pending.name = "/unknown-owned-created-name";
+  pending.networks = {
+    [`${PROJECT}_default`]: { NetworkID: "", Aliases: null },
+  };
+  await prepare(fixture);
+  expect(
+    (await observeSavedNativeComposeOwned(options)).containers
+  ).toHaveLength(2);
+  expect(
+    (await assertNativeComposeOwned({ ...options, recovery: "down" }))
+      .containers
+  ).toHaveLength(2);
+  await expectRefusal(options);
+});
+
+test.each([
+  "running",
+  "paused",
+  "restarting",
+  "exited",
+  "missing-bridge",
+  "foreign-bridge",
+  "foreign-member",
+  "created-member",
+  "wrong-id",
+  "alias-drift",
+  "foreign-key",
+  "endpoint-drift",
+  "recovery-option",
+])("saved created observation refuses %s", async (change) => {
+  const { fixture, selection, container, network } = customOwned();
+  container.state = "created";
+  container.networks = { [CUSTOM]: { NetworkID: "", Aliases: null } };
+  network.containers = {};
+  if (["running", "paused", "restarting", "exited"].includes(change)) {
+    container.state = change;
+  } else if (change === "missing-bridge") {
+    fixture.network = [];
+  } else if (change === "foreign-bridge") {
+    network.owner = "f".repeat(32);
+  } else if (change === "foreign-member" || change === "created-member") {
+    network.containers = {
+      [change === "created-member" ? ID : "f".repeat(64)]: {},
+    };
+  } else if (change === "wrong-id") {
+    container.networks = {
+      [CUSTOM]: { NetworkID: "f".repeat(64), Aliases: null },
+    };
+  } else if (change === "alias-drift") {
+    container.networks = {
+      [CUSTOM]: { NetworkID: "", Aliases: ["unrequested"] },
+    };
+  } else if (change === "foreign-key") {
+    container.networks = { foreign: { NetworkID: "", Aliases: null } };
+  } else if (change === "endpoint-drift") {
+    fixture.mode = change;
+  }
+  await prepare(fixture);
+  await expect(
+    observeSavedNativeComposeOwned({
+      ...selection,
+      ...(change === "recovery-option" ? { recovery: "down" as const } : {}),
+    })
+  ).rejects.toBeInstanceOf(NativeComposeOwnershipError);
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
 });
 

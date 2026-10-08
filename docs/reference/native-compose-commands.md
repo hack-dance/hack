@@ -104,6 +104,14 @@ container with empty endpoint metadata on a verified owned bridge. Neither case
 relaxes running-container or ingress identity checks or grants deletion authority
 over an unknown network. Runtime isolation remains a separate acceptance gate.
 
+Saved `ps` and `logs` can observe these verified CREATED containers while startup
+is pending. This read permission does not grant `exec`, readiness or ordinary
+mutation authority. Substituting canonical service aliases for a temporary
+replacement name requires its fully owned, receipt-selected predecessor in the
+same scan. An unknown prefix cannot justify that substitution; an empty alias
+set still requires the owned CREATED-container and bridge proofs. Changed
+observations refuse.
+
 ## Finite host up hooks
 
 Whole-project `up` and `restart` run `host.up.before` before engine startup, then
@@ -181,7 +189,7 @@ The following `up` can reuse that data. Ownership checks refuse foreign resource
 including a matching Compose project or resource name with another owner token.
 
 An interrupted or uncertain operation retains its intent. Inspect it with saved
-`ps`; then explicitly request owned stop recovery:
+`ps` or `logs`; then explicitly request owned stop recovery:
 
 ```sh
 HACK_RUNTIME_BACKEND=compose ./dist/hack --path /absolute/project down --recover

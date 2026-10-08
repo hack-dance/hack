@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
 import { refuseNativeComposeFile } from "./native-compose-file-bytes.ts";
@@ -209,6 +209,49 @@ function snapshot(reference: NativeComposeFileReference): string {
     `${reference.generationId}-${reference.snapshotToken}`
   );
 }
+function containsPath(parent: string, child: string): boolean {
+  return (
+    parent === child || child.startsWith(parent === "/" ? "/" : `${parent}/`)
+  );
+}
+function sourceContains(source: string, path: string): boolean {
+  return source.startsWith("/") && containsPath(posix.normalize(source), path);
+}
+function overlapsSnapshot(source: string, prefix: string): boolean {
+  return (
+    sourceContains(source, prefix) ||
+    (source.startsWith("/") && containsPath(prefix, posix.normalize(source)))
+  );
+}
+/** Existing ancestor/root mounts can expose bytes as soon as staging writes them.
+ * Other instances' descendant snapshots remain independent. Recheck before effects. */
+export async function assertNativeComposeFileRootUnbound(opts: {
+  readonly root: string;
+  readonly engineId: string;
+  readonly signal?: AbortSignal;
+  readonly probe?: Probe;
+}): Promise<void> {
+  const root = posix.normalize(opts.root);
+  const expectedEngine = opts.engineId;
+  const probe = boundedProbe(opts);
+  try {
+    if (!root.startsWith("/")) {
+      refuseNativeComposeFile();
+    }
+    await checkEngine(probe, expectedEngine);
+    const inventory = await containers(probe);
+    if (
+      inventory.some((container) =>
+        container.mounts.some((mount) => sourceContains(mount.source, root))
+      )
+    ) {
+      refuseNativeComposeFile();
+    }
+    await checkEngine(probe, expectedEngine);
+  } catch {
+    refuseNativeComposeFile();
+  }
+}
 function grants(document: Document, prefix: string) {
   if (!isRecord(document.services)) {
     return refuseNativeComposeFile();
@@ -270,12 +313,7 @@ function assertSnapshotMountsGranted(opts: {
 }): void {
   for (const container of opts.inventory) {
     for (const mount of container.mounts) {
-      if (
-        !(
-          mount.source === opts.prefix ||
-          mount.source.startsWith(`${opts.prefix}/`)
-        )
-      ) {
+      if (!overlapsSnapshot(mount.source, opts.prefix)) {
         continue;
       }
       if (
@@ -356,10 +394,7 @@ export async function assertNativeComposeFileMountsAbsent(opts: {
     const inventory = await containers(probe);
     if (
       inventory.some((container) =>
-        container.mounts.some(
-          (mount) =>
-            mount.source === prefix || mount.source.startsWith(`${prefix}/`)
-        )
+        container.mounts.some((mount) => overlapsSnapshot(mount.source, prefix))
       )
     ) {
       return refuseNativeComposeFile();

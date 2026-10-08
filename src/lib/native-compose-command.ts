@@ -32,6 +32,7 @@ import {
   prepareNativeComposeCommandFiles,
   prepareNativeComposeSavedFileStop,
   retireNativeComposeSavedFiles,
+  runNativeComposeOwnedFileChild,
 } from "./native-compose-file-command.ts";
 import {
   type NativeComposeGeneration,
@@ -232,13 +233,18 @@ function preparedEffectOwnership(opts: {
   readonly routing: NativeComposeRoutingOwner | null;
   readonly afterReadiness?: () => Promise<void>;
   readonly assertFiles?: () => Promise<void>;
+  readonly assertFilesAfterCompletion?: () => Promise<void>;
   readonly retireFiles?: () => Promise<void>;
 }) {
   let completed = false;
   return {
     assertOwned: async () => {
       await assertNativeComposeOwned(opts.selection);
-      await opts.assertFiles?.();
+      if (completed) {
+        await opts.assertFilesAfterCompletion?.();
+      } else {
+        await opts.assertFiles?.();
+      }
       if (!completed) {
         await opts.routing?.assertBeforeEffects();
       }
@@ -530,27 +536,40 @@ async function savedCommand(opts: {
             }
           },
           effect: async () => {
-            const files = await prepareNativeComposeSavedFileStop({
-              mutation,
-              store,
-              saved,
-            });
+            const stopping: {
+              files: Awaited<
+                ReturnType<typeof prepareNativeComposeSavedFileStop>
+              >;
+            } = { files: null };
             try {
-              const code = await run(
-                [...composeArgs(generation), "down", "--remove-orphans"],
-                {
+              const code = await runNativeComposeOwnedFileChild({
+                command: [
+                  ...composeArgs(generation),
+                  "down",
+                  "--remove-orphans",
+                ],
+                signal,
+                deadline: Date.now() + resolveComposeStartupTimeoutMs(),
+                arm: async () => {
+                  stopping.files = await prepareNativeComposeSavedFileStop({
+                    mutation,
+                    store,
+                    saved,
+                  });
+                },
+                assertOwned,
+                options: {
                   cwd: base.cwd,
                   env: base.env,
                   forwardSignals: true,
                   stdout: options.json ? "stderr" : "inherit",
-                  timeoutMs: resolveComposeStartupTimeoutMs(),
-                  ...files?.hooks,
-                }
-              );
+                },
+                hooks: () => stopping.files?.hooks ?? {},
+              });
               const observed = await assertNativeComposeOwned(selection);
               prepared.setStopped(
                 code === 0 &&
-                  (files === null || files.known()) &&
+                  (stopping.files === null || stopping.files.known()) &&
                   observed.containers.length === 0 &&
                   observed.networks.length === 0
               );
@@ -558,14 +577,14 @@ async function savedCommand(opts: {
                 value: code,
                 outcome:
                   code === 0 &&
-                  (files === null || files.known()) &&
+                  (stopping.files === null || stopping.files.known()) &&
                   observed.containers.length === 0 &&
                   observed.networks.length === 0
                     ? ("complete" as const)
                     : ("uncertain" as const),
               };
             } finally {
-              await files?.close();
+              await stopping.files?.close();
             }
           },
         })
@@ -857,30 +876,45 @@ async function startNativeComposeWorkloads(opts: {
   readonly base: RuntimeBaseOptions;
   readonly routing: NativeComposeRoutingOwner | null;
   readonly files: NativeComposeCommandFiles;
+  readonly signal: AbortSignal;
+  readonly assertOwned: () => Promise<void>;
 }) {
-  const { options, generation, document, selection, base, routing, files } =
-    opts;
+  const {
+    options,
+    generation,
+    document,
+    selection,
+    base,
+    routing,
+    files,
+    signal,
+    assertOwned,
+  } = opts;
   const timeout = resolveComposeStartupTimeoutMs();
   const deadline = Date.now() + timeout;
-  await routing?.markEffectsPossible();
-  await files?.arm(generation);
-  const code = await run(
-    [
+  const code = await runNativeComposeOwnedFileChild({
+    signal,
+    deadline,
+    arm: async () => {
+      await routing?.markEffectsPossible();
+      await files?.arm(generation);
+    },
+    assertOwned,
+    command: [
       ...composeArgs(generation),
       "up",
       "-d",
       "--remove-orphans",
       ...(options.operation === "restart" ? ["--force-recreate"] : []),
     ],
-    {
+    options: {
       cwd: base.cwd,
       env: base.env,
       stdout: options.json ? "stderr" : "inherit",
-      timeoutMs: timeout,
       forwardSignals: true,
-      ...files?.childHooks(generation),
-    }
-  );
+    },
+    hooks: () => files?.childHooks(generation) ?? {},
+  });
   const observed =
     code === 0 && (files === null || files.childReaped())
       ? await waitReady({
@@ -1085,7 +1119,15 @@ async function executePreparedGeneration(opts: {
           routing,
           afterReadiness: after.afterReadiness,
           assertFiles: async () => {
-            await files?.assertBeforeEffects();
+            await files?.assertBeforeEffects(generation);
+            await assertNativeComposeSavedFileEngines({
+              saved: previous,
+              store,
+              signal,
+            });
+          },
+          assertFilesAfterCompletion: async () => {
+            await files?.assertReady(selection, generation);
             await assertNativeComposeSavedFileEngines({
               saved: previous,
               store,
@@ -1123,6 +1165,13 @@ async function executePreparedGeneration(opts: {
         base,
         routing,
         files,
+        signal,
+        assertOwned: async () => {
+          await inputs.assertFresh();
+          await assertNativeComposeOwned(selection);
+          await files?.assertBeforeEffects(generation);
+          await routing?.assertBeforeEffects();
+        },
       });
     },
   });

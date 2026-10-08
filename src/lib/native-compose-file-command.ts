@@ -6,6 +6,7 @@ import { refuseNativeComposeFile } from "./native-compose-file-bytes.ts";
 import {
   assertNativeComposeFileMounts,
   assertNativeComposeFileMountsAbsent,
+  assertNativeComposeFileRootUnbound,
   NATIVE_COMPOSE_FILE_ENGINE_EXTENSION,
   observeNativeComposeFileEngine,
   readNativeComposeFileEngine,
@@ -26,19 +27,61 @@ import type {
   NativeComposeMutation,
   NativeComposeReservation,
 } from "./native-compose-generation.ts";
+import { NativeComposeGenerationError } from "./native-compose-generation.ts";
 import type { NativeComposeExecutionInputs } from "./native-compose-inputs.ts";
 import {
   assertNativeComposeOwned,
   type NativeComposeOwnershipOptions,
 } from "./native-compose-ownership.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
-import type { RunOptions } from "./shell.ts";
+import { type RunOptions, run } from "./shell.ts";
 
 type Document = Readonly<Record<string, unknown>>;
 type Saved = {
   readonly generation: NativeComposeGeneration;
   readonly document: Document;
 };
+/** Durable arming is followed by current admission and a synchronous spawn fence.
+ * Cancellation never grants a later retry authority over an earlier armed child. */
+export async function runNativeComposeOwnedFileChild(opts: {
+  readonly arm: () => Promise<void>;
+  readonly assertOwned: () => Promise<void>;
+  readonly command: readonly string[];
+  readonly signal: AbortSignal;
+  readonly deadline: number;
+  readonly options: Omit<
+    RunOptions,
+    "timeoutMs" | "beforeSpawn" | "onSpawn" | "onExit"
+  >;
+  readonly hooks?: () => Pick<RunOptions, "onSpawn" | "onExit">;
+}): Promise<number> {
+  const { arm, assertOwned, signal, deadline } = opts;
+  const command = [...opts.command];
+  const options = { ...opts.options };
+  if (opts.options.env) {
+    options.env = { ...opts.options.env };
+  }
+  if (opts.options.unsetEnvKeys) {
+    options.unsetEnvKeys = [...opts.options.unsetEnvKeys];
+  }
+  const hooks = opts.hooks;
+  const requireAdmission = () => {
+    if (signal.aborted || Date.now() >= deadline) {
+      throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
+    }
+  };
+  requireAdmission();
+  await arm();
+  requireAdmission();
+  await assertOwned();
+  requireAdmission();
+  return await run(command, {
+    ...options,
+    ...hooks?.(),
+    timeoutMs: deadline - Date.now(),
+    beforeSpawn: requireAdmission,
+  });
+}
 function uniqueSaved(saved: readonly Saved[]): readonly Saved[] {
   return [
     ...new Map(
@@ -252,6 +295,7 @@ export async function prepareNativeComposeCommandFiles(opts: {
       refuseNativeComposeFile();
     }
     const engineId = await observeNativeComposeFileEngine({ signal });
+    await assertNativeComposeFileRootUnbound({ root, engineId, signal });
     const attempt = await owner.prepare({ reservation, sources });
     const projection = await owner.projection(attempt);
     return Object.freeze({
@@ -261,8 +305,18 @@ export async function prepareNativeComposeCommandFiles(opts: {
         ...document,
         [NATIVE_COMPOSE_FILE_ENGINE_EXTENSION]: { version: 1, engineId },
       }),
-      assertBeforeEffects: async () => {
-        await observeNativeComposeFileEngine({ expected: engineId, signal });
+      assertBeforeEffects: async (generation: NativeComposeGeneration) => {
+        const assertProjection = async () => {
+          const pending = await store.loadPending();
+          if (armed || pending?.generationId === generation.generationId) {
+            await owner.assertSavedProjection(generation);
+          } else {
+            await owner.projection(attempt);
+          }
+        };
+        await assertProjection();
+        await assertNativeComposeFileRootUnbound({ root, engineId, signal });
+        await assertProjection();
       },
       arm: async (generation: NativeComposeGeneration) => {
         await observeNativeComposeFileEngine({ expected: engineId, signal });
@@ -295,6 +349,7 @@ export async function prepareNativeComposeCommandFiles(opts: {
         if (JSON.stringify(before) !== JSON.stringify(after)) {
           refuseNativeComposeFile();
         }
+        await owner.assertSavedReady(generation);
       },
       rollback: async () => {
         if (!armed) {

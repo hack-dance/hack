@@ -14,6 +14,9 @@ import { openNativeComposeGenerationStore } from "../../src/lib/native-compose-g
 
 const roots: string[] = [];
 const children: Bun.Subprocess<"ignore", "pipe", "pipe">[] = [];
+const compiler = resolve(
+  process.env.HACK_CONFIG_COMPILER_BINARY ?? "dist/hack-config-compiler"
+);
 afterEach(async () => {
   for (const child of children.splice(0)) {
     if (child.exitCode === null) {
@@ -83,15 +86,15 @@ export async function fileCommandFixture(source: unknown = FILE_SOURCE) {
   await Bun.write(
     docker,
     `#!${process.execPath}
-import {appendFile,readFile,stat,rm} from "node:fs/promises";
-const parent=${JSON.stringify(parent)},root=${JSON.stringify(root)},args=process.argv.slice(2),id="c".repeat(64);
+import {appendFile,readFile,stat,rm,rename,writeFile} from "node:fs/promises";
+const parent=${JSON.stringify(parent)},root=${JSON.stringify(root)},args=process.argv.slice(2),id="c".repeat(64),foreign="d".repeat(64);
 await appendFile(parent+"/requests",JSON.stringify(args)+"\\n");
 const engine=parent+"/engine",same=(a,b)=>JSON.stringify(a)===JSON.stringify(b),exists=path=>Bun.file(path).exists();
 async function fail(){await Bun.write(parent+"/unexpected","unexpected engine operation");process.exit(97);}
 let doc=await exists(engine)?await Bun.file(engine).json():null;
 if(args[0]==="compose"){
  const f=args.indexOf("-f");if(f!==3||args[1]!=="-p")await fail();
- if(same(args.slice(5),["up","-d","--remove-orphans"])){
+ if(same(args.slice(5),["up","-d","--remove-orphans"])||same(args.slice(5),["up","-d","--remove-orphans","--force-recreate"])){
   doc=await Bun.file(args[4]).json();if(doc.name!==args[2])await fail();
   const rows=[];for(const v of doc.services.reader.volumes??[]){const p=v.source.replaceAll("$$",()=>"$");rows.push({target:v.target.replaceAll("$$",()=>"$"),bytes:Array.from(await readFile(p)),mode:(await stat(p)).mode&511,readonly:v.read_only,create:v.bind?.create_host_path});}
   await Bun.write(parent+"/delivered",JSON.stringify(rows));await Bun.write(engine,JSON.stringify(doc));await Bun.write(parent+"/last-document",JSON.stringify(doc));
@@ -116,9 +119,17 @@ if(same(args,["info","--format","{{json .ID}}"])) {
  console.log(JSON.stringify(changed?"changed-engine:1":"synthetic-engine:1"));process.exit(0);
 }
 const project=doc?.name??null;
-if(same(args,["container","ls","-a","--no-trunc","--format","{{json .ID}}"])) {if(doc)console.log(JSON.stringify(id));process.exit(0);}
-if(same(args,["container","inspect","--format",${JSON.stringify(MOUNT_INSPECT)},id])){
- if(!doc)await fail();console.log(JSON.stringify({id,mounts:(doc.services.reader.volumes??[]).map(v=>({Type:v.type,Source:v.source.replaceAll("$$",()=>"$"),Destination:v.target.replaceAll("$$",()=>"$"),RW:v.read_only!==true}))}));process.exit(0);
+const hasForeign=await exists(parent+"/foreign-source");
+if(same(args,["container","ls","-a","--no-trunc","--format","{{json .ID}}"])) {if(doc)console.log(JSON.stringify(id));if(hasForeign)console.log(JSON.stringify(foreign));process.exit(0);}
+if(same(args,["container","inspect","--format",${JSON.stringify(MOUNT_INSPECT)},...(doc?[id]:[]),...(hasForeign?[foreign]:[])])){
+ if(doc){
+  const mounts=(doc.services.reader.volumes??[]).map(v=>({Type:v.type,Source:v.source.replaceAll("$$",()=>"$"),Destination:v.target.replaceAll("$$",()=>"$"),RW:v.read_only!==true}));
+  const retired=async flag=>await exists(parent+"/"+flag)&&(await Bun.file(await Bun.file(parent+"/"+flag).text()).text()).includes('"phase":"retired"');
+  if(await retired("late-mount-drift")){mounts.push({Type:"bind",Source:mounts[0].Source,Destination:"/foreign",RW:false});await Bun.write(parent+"/late-drift-reached","reached");}
+  if(await retired("late-member-drift")&&!await exists(parent+"/late-drift-reached")){const first=mounts[0];await rename(first.Source,first.Source+".original");await writeFile(first.Source,Buffer.from(${JSON.stringify(Array.from(FILE_BYTES))}),{mode:0o444});await Bun.write(parent+"/late-drift-reached","reached");}
+  console.log(JSON.stringify({id,mounts}));
+ }
+ if(hasForeign)console.log(JSON.stringify({id:foreign,mounts:[{Type:"bind",Source:await Bun.file(parent+"/foreign-source").text(),Destination:"/foreign",RW:false}]}));process.exit(0);
 }
 const formats={container:${JSON.stringify(CONTAINER_LIST)},volume:${JSON.stringify(VOLUME_LIST)},network:${JSON.stringify(NETWORK_LIST)}};
 if(formats[args[0]]&&same(args,[args[0],"ls",...(args[0]==="container"?["--all","--no-trunc"]:args[0]==="network"?["--no-trunc"]:[]),"--format",formats[args[0]]])){
@@ -153,9 +164,7 @@ export function spawnFiles(
         PATH: `${fixture.parent}:/usr/bin:/bin`,
         HACK_HOME: join(fixture.parent, "home"),
         HACK_GLOBAL_CONFIG_PATH: join(fixture.parent, "global.json"),
-        HACK_CONFIG_COMPILER_BINARY: resolve(
-          ".hack-local/target/debug/hack-config-compiler"
-        ),
+        HACK_CONFIG_COMPILER_BINARY: compiler,
         HACK_RUNTIME_BACKEND: "compose",
         HACK_LOGGER: "console",
         HACK_COMPOSE_STARTUP_TIMEOUT_MS: "3000",

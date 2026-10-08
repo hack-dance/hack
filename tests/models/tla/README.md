@@ -46,7 +46,7 @@ TLC exit 12, its named invariant and complete witness in the same state.
 | Model action | Implementation boundary |
 | --- | --- |
 | `Recover` / `StopContainers` | The generation mutation owner retains the exact saved pending/current generation and stops owned resources. `retireNativeComposeSavedFiles` rereads the immutable private document; saved stop does not acquire authored files or decrypt values. |
-| `ArmStop` / `ReapStop` | `prepareNativeComposeSavedFileStop` appends/syncs `stop-armed` on every exact retained reference before Compose. The original live opaque stop attempt alone may record `stop-reaped`; actual child natural exit and owned-group absence are separate from resource absence. An older unknown stop returns no new completion capability and continues to veto retirement. |
+| `ArmStop` / `ReapStop` | `prepareNativeComposeSavedFileStop` appends/syncs `stop-armed` on every exact retained reference before Compose. `runNativeComposeOwnedFileChild` rechecks cancellation, deadline and ownership after arming; a synchronous normal/terminal spawn fence prevents delayed launch. The original live opaque stop attempt alone may record `stop-reaped`; actual child natural exit and owned-group absence are separate from resource absence. An older unknown stop returns no new completion capability and continues to veto retirement. |
 | `BeginRetirement` | `native-compose-file-owner.ts` validates all immutable members before appending and syncing a retirement intent to its fixed-inode private journal. Missing material before intent refuses. |
 | `DeleteMember` / `MarkRetired` | `retireMembers` checks the live generation authority, root/manifest/journal anchors, callback-provided owned-container absence and exact member identities. Every unlink has a separate directory sync; the final retired record is synced separately. |
 | `ResumeRetired` | Saved recovery selects the exact private generated extension and validates its immutable root, snapshot, manifest and journal inode. Existing retirement intent permits missing original members; replacements refuse. No orphan discovery or material recreation occurs. |
@@ -61,7 +61,9 @@ source descriptors, fsync durability, byte bounds, binary/empty material, encryp
 actual inode reuse, mode/UID/GID, Docker mount projection, arbitrary simultaneous
 external container creation, replacement of a live generation, repeated crashes,
 or uncertain-child containment. Stop-child proof callback internals and real process
-identity checks remain outside this finite model. No fairness or eventual cleanup is asserted.
+identity checks remain outside this finite model. Pre-stage ancestor-bind confidentiality
+and literal mount overlap observations also remain implementation obligations outside
+the modeled deletion predicate. No fairness or eventual cleanup is asserted.
 `tests/native-compose-material-authority.test.ts` covers copied identity, lock/receipt
 substitution, lease revocation and awaited escaped work.
 `tests/native-compose-file-sources.test.ts` exercises actual compiler planning,
@@ -70,12 +72,15 @@ overlay scope, linked worktrees and source drift.
 `tests/native-compose-file-command.test.ts` uses the real source CLI and strict
 Docker stand-ins to cover exact bytes/modes, missing managed key, before-hook file
 creation, source-free stop, replacement, unknown startup/stop children, hook crash
-and post-retirement engine drift. These controls do not qualify actual Docker binds.
+and post-retirement engine, member and mount drift. Preexisting ancestor binds must
+refuse before any member staging; late drift must reach the retired marker and
+preserve pending. These controls do not qualify actual Docker binds.
 `tests/native-compose-file-owner.test.ts` covers exact bind projection, missing or
 replaced members, partial unlink interruption, source-free retry, replacement
 handoff, uncertain hooks, unknown startup children and post-finalizer ownership
 drift. The owner records reaping only through the original live armed attempt;
-container absence does not create missing child-completion evidence.
+container absence does not create missing child-completion evidence. Cancellation
+from the final startup/stop arm keeps the exact pending reference and spawns no child.
 
 These filesystem regressions and injected proof callbacks do not qualify a real
 engine, arbitrary unsynchronized external writers, crash durability on every

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   assertNativeComposeFileMounts,
   assertNativeComposeFileMountsAbsent,
+  assertNativeComposeFileRootUnbound,
   observeNativeComposeFileEngine,
 } from "../src/lib/native-compose-file-inventory.ts";
 import type { NativeComposeOwnershipObservation } from "../src/lib/native-compose-ownership.ts";
@@ -228,6 +229,65 @@ test("retirement requires global absence on the saved engine even for unowned st
       probe: transport({ rows: [], drift: true }).probe,
     })
   ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+});
+test("ancestor and normalized parent mounts refuse readiness and retirement while sibling snapshots remain independent", async () => {
+  for (const source of [ROOT, "/private/synthetic", "/", `${ROOT}/other/..`]) {
+    const foreign = { id: OTHER, mounts: [{ ...mount(), Source: source }] };
+    await expect(
+      assertNativeComposeFileMounts({
+        document: document(),
+        generationId: GENERATION,
+        observed: observation(),
+        probe: transport({ rows: [{ id: ID, mounts: [mount()] }, foreign] })
+          .probe,
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+    await expect(
+      assertNativeComposeFileMountsAbsent({
+        document: document(),
+        probe: transport({ rows: [foreign] }).probe,
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+  }
+  const sibling = { ...mount(), Source: `${PREFIX}-sibling/member` };
+  await assertNativeComposeFileMounts({
+    document: document(),
+    generationId: GENERATION,
+    observed: observation(),
+    probe: transport({
+      rows: [
+        { id: ID, mounts: [mount()] },
+        { id: OTHER, mounts: [sibling] },
+      ],
+    }).probe,
+  });
+  await assertNativeComposeFileMountsAbsent({
+    document: document(),
+    probe: transport({ rows: [{ id: OTHER, mounts: [sibling] }] }).probe,
+  });
+});
+test("pre-stage root inventory refuses exposing ancestors without treating retained descendant snapshots as root binds", async () => {
+  for (const source of [
+    ROOT,
+    "/private",
+    "/",
+    `${ROOT}/../${ROOT.split("/").at(-1)}`,
+  ]) {
+    await expect(
+      assertNativeComposeFileRootUnbound({
+        root: ROOT,
+        engineId: "synthetic-engine:1",
+        probe: transport({
+          rows: [{ id: OTHER, mounts: [{ ...mount(), Source: source }] }],
+        }).probe,
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+  }
+  await assertNativeComposeFileRootUnbound({
+    root: ROOT,
+    engineId: "synthetic-engine:1",
+    probe: transport().probe,
+  });
 });
 test("saved engine observation is checked twice and errors omit daemon output", async () => {
   await expect(

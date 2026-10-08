@@ -135,6 +135,60 @@ test("post-retirement engine drift refuses the completed stop receipt and preser
   expect(fileReference(stopped.document)).toEqual(ref);
   await assertFileTransport(fixture);
 }, 120_000);
+test("a preexisting foreign ancestor bind refuses before any material member is staged or Compose child starts", async () => {
+  const fixture = await fileCommandFixture();
+  await Bun.write(
+    join(fixture.parent, "foreign-source"),
+    join(fixture.parent, "home")
+  );
+  const up = await invokeFiles(fixture);
+  expect(up.code).not.toBe(0);
+  await expect(
+    lstat(join(fixture.parent, "home/compose-files"))
+  ).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await Bun.file(join(fixture.parent, "delivered")).exists()).toBe(
+    false
+  );
+  const requests = await assertFileTransport(fixture);
+  expect(requests.some((args) => args[0] === "compose")).toBe(false);
+}, 120_000);
+test.each([
+  "late-mount-drift",
+  "late-member-drift",
+] as const)("%s after old material retirement prevents ready receipt and retains the new exact recovery reference", async (kind) => {
+  const fixture = await fileCommandFixture();
+  expect((await invokeFiles(fixture)).code).toBe(0);
+  const before = await fileCommandState(fixture.root);
+  const ref = fileReference(before.document);
+  const journal = join(
+    String(ref.root),
+    `${ref.generationId}-${ref.snapshotToken}`,
+    "journal.jsonl"
+  );
+  await Bun.write(join(fixture.parent, kind), journal);
+  const result = await invokeFiles(fixture, ["restart", "--json"]);
+  expect(result.code).not.toBe(0);
+  expect(
+    await Bun.file(join(fixture.parent, "late-drift-reached")).exists()
+  ).toBe(true);
+  expect(await fileJournal(before.document)).toContain('"phase":"retired"');
+  const after = await fileCommandState(fixture.root);
+  expect(after.pending).not.toBeNull();
+  expect(after.pending?.generationId).not.toBe(
+    before.current.generation?.generationId
+  );
+  expect(after.current.generation?.generationId).toBe(
+    before.current.generation?.generationId
+  );
+  expect(after.current.stopped).toBe(false);
+  expect(fileReference(after.document).generationId).toBe(
+    after.pending?.generationId
+  );
+  expect(await fileJournal(after.document)).toContain('"phase":"reaped"');
+  expect(await fileJournal(after.document)).not.toContain('"phase":"retiring"');
+  privateOutput(result, after.document);
+  await assertFileTransport(fixture);
+}, 120_000);
 test("an encrypted managed file with an unavailable project key refuses before staging, hooks or Docker", async () => {
   const fixture = await fileCommandFixture();
   const cipher = join(fixture.parent, "cipher");

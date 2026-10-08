@@ -1014,6 +1014,24 @@ export function createNativeComposeFileOwner(opts: {
         }
       });
     },
+    /** Inspect immutable member/projection identity without claiming child readiness. */
+    async assertSavedProjection(
+      generation: NativeComposeGeneration
+    ): Promise<void> {
+      await run(async () => {
+        const snapshot = await savedSnapshot(generation, "inspect");
+        try {
+          const state = journalState(snapshot);
+          if (state.intent !== null || state.retired) {
+            refuseNativeComposeFile();
+          }
+          await requireMembers(snapshot);
+          await snapshot.check();
+        } finally {
+          await snapshot.close();
+        }
+      });
+    },
     async assertSavedReady(generation: NativeComposeGeneration): Promise<void> {
       await run(async () => {
         const snapshot = await savedSnapshot(generation, "inspect");

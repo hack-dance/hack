@@ -99,8 +99,11 @@ the checkout and build context. Hack does not create an authored source or an
 absent bind path to make admission pass. The private generated document also binds
 the exact Docker engine. Before and after delivery, fixed bounded read-only queries
 verify that each file container has the exact source, target and read-only mount.
-Any extra mount into the snapshot, including an unrelated container's mount,
-refuses readiness or retirement. The observation has a configured phase deadline
+Existing mounts of the material root or its ancestors refuse before staging writes
+members; retained descendant snapshots stay independent. The root fence repeats
+before spawning, together with immutable member/projection and ownership checks.
+Any extra mount overlapping the snapshot, including an unrelated container's mount
+of an ancestor directory, refuses readiness or retirement. The observation has a configured phase deadline
 and aggregate private output budget.
 
 A fixed-inode append journal separates effects-possible, known child reaping,
@@ -115,7 +118,7 @@ descendants never infer a reaping receipt from container absence. A missing
 member before retirement intent refuses; a missing member after exact intent permits
 retry, while replacement always refuses. Old material retires before generation
 handoff, and the pending generation remains until the finalizer and fresh ownership,
-engine and pending checks pass. A failed finalizer retains the exact recovery
+full current file/member/mount readiness, engine and pending checks pass. A failed finalizer retains the exact recovery
 reference, including a crash or drift after member unlink but before the stopped
 receipt. Repeating verified stop can finish an exact already-retired journal.
 
@@ -136,3 +139,7 @@ another `down --recover` succeeds and no snapshot binds remain. Owned stop remai
 available; the exact pending reference and material remain retained. Stop records
 can append after retirement intent or the retired marker, so a retry cannot lose
 this boundary during partial deletion or the retirement/receipt crash gap.
+After durable arming, cancellation and the configured deadline are checked again
+after fresh ownership checks and synchronously at the actual spawn boundary,
+including terminal setup. An interrupted arm retains its exact pending reference
+without launching a later child or inferring reaping from engine absence.

@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { runNativeComposeOwnedFileChild } from "../src/lib/native-compose-file-command.ts";
 import {
   createNativeComposeFileOwner,
   type NativeComposeFileProjection,
@@ -228,6 +229,79 @@ async function expectAbsent(paths: readonly string[]) {
   for (const path of paths) {
     await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
   }
+}
+for (const operation of ["up", "down"] as const) {
+  test(`cancellation during the last durable ${operation} arm never spawns a child and retains the exact pending material`, async () => {
+    const initial =
+      operation === "down" ? await store.withMutation(running) : null;
+    await store.withMutation(async (mutation) => {
+      const selected = initial ?? (await staged(mutation));
+      const owner = initial ? ownerFor(mutation) : selected.owner;
+      const controller = new AbortController();
+      const marker = join(parent, "unexpected-child");
+      await expect(
+        mutation.runEffect({
+          generation: selected.generation,
+          operation,
+          assertFresh: operation === "up" ? selected.assertFresh : undefined,
+          assertOwned: async () => {},
+          effect: async () => {
+            const input = {
+              command: [
+                process.execPath,
+                "-e",
+                `await Bun.write(${JSON.stringify(marker)}, "effect")`,
+              ],
+              signal: controller.signal,
+              deadline: Date.now() + 10_000,
+              options: {
+                stdin: "ignore" as const,
+                stdout: "ignore" as const,
+                stderr: "ignore" as const,
+              },
+              assertOwned: async () => {},
+              arm: async () => {
+                if (operation === "up") {
+                  await owner.arm({
+                    attempt: selected.attempt,
+                    generation: selected.generation,
+                  });
+                } else {
+                  expect(
+                    await owner.armStop(selected.generation)
+                  ).not.toBeNull();
+                }
+                controller.abort();
+                Object.assign(input, {
+                  signal: new AbortController().signal,
+                  deadline: Date.now() + 60_000,
+                });
+              },
+            };
+            const code = await runNativeComposeOwnedFileChild(input);
+            return { outcome: "complete", value: code };
+          },
+        })
+      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+      expect(await Bun.file(marker).exists()).toBe(false);
+      expect((await store.loadPending())?.generationId).toBe(
+        selected.generation.generationId
+      );
+      expect(
+        (await store.readGenerationDocument(selected.generation))[
+          NATIVE_COMPOSE_FILES_EXTENSION
+        ]
+      ).toEqual(selected.projection.reference);
+      const journal = await readFile(journalPath(selected.projection), "utf8");
+      expect(journal).toContain(
+        operation === "up" ? '"phase":"armed"' : '"phase":"stop-armed"'
+      );
+      expect(journal).not.toContain(
+        operation === "up" ? '"phase":"reaped"' : '"phase":"stop-reaped"'
+      );
+      await expectPresent(memberPaths(selected.projection));
+    });
+  });
 }
 test("actual acquisition stages binary/empty 0444 files outside checkout; exact bind/ref projection arms before simulated child", async () => {
   await store.withMutation(async (mutation) => {

@@ -83,6 +83,8 @@ export interface RunOptions {
   readonly timeoutMs?: number;
   /** Forward cancellation to an owned command process group, preserving TTY input. */
   readonly forwardSignals?: boolean;
+  /** Synchronous admission after awaited setup, immediately before spawning. */
+  readonly beforeSpawn?: () => void;
   readonly onSpawn?: (event: {
     readonly pid: number;
     readonly ownsProcessGroup: boolean;
@@ -104,6 +106,7 @@ export async function run(
   cmd: readonly string[],
   opts: RunOptions = {}
 ): Promise<number> {
+  const beforeSpawn = opts.beforeSpawn;
   if (
     opts.forwardSignals &&
     (process.stdin.isTTY || hasControllingTerminal())
@@ -117,12 +120,14 @@ export async function run(
       stderr: opts.stderr,
       stdin: opts.stdin,
       timeoutMs: opts.timeoutMs,
+      beforeSpawn,
       onSpawn: opts.onSpawn,
       onExit: opts.onExit,
     });
   }
   const ownsProcessGroup =
     opts.timeoutMs !== undefined || opts.forwardSignals === true;
+  beforeSpawn?.();
   const proc = Bun.spawn([...cmd], {
     cwd: opts.cwd,
     env: buildSpawnEnv(opts.env, opts.unsetEnvKeys),

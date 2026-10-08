@@ -1,5 +1,6 @@
 import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
+import { nativeComposeVolumeCreatedAt } from "./native-compose-retained-storage.ts";
 import { findExecutableInPath } from "./shell.ts";
 
 const PROJECT = /^[a-z0-9][a-z0-9_-]*$/;
@@ -28,7 +29,7 @@ const FORMATS = {
   volume: {
     // Docker volumes have a name, rather than an immutable engine object ID.
     list: `{"id":{{json .Name}},"name":{{json .Name}},"project":{{json (.Label "${PROJECT_LABEL}")}}}`,
-    inspect: `{"id":{{json .Name}},"name":{{json .Name}},"project":{{json (index .Labels "${PROJECT_LABEL}")}},"version":{{json (index .Labels "${PREFIX}.version")}},"instance":{{json (index .Labels "${PREFIX}.instance")}},"owner":{{json (index .Labels "${PREFIX}.owner")}},"storage":{{json (index .Labels "${PREFIX}.storage")}}}`,
+    inspect: `{"id":{{json .Name}},"name":{{json .Name}},"project":{{json (index .Labels "${PROJECT_LABEL}")}},"version":{{json (index .Labels "${PREFIX}.version")}},"instance":{{json (index .Labels "${PREFIX}.instance")}},"owner":{{json (index .Labels "${PREFIX}.owner")}},"storage":{{json (index .Labels "${PREFIX}.storage")}},"createdAt":{{json .CreatedAt}}}`,
   },
   network: {
     list: `{"id":{{json .ID}},"name":{{json .Name}},"project":{{json (.Label "${PROJECT_LABEL}")}}}`,
@@ -59,6 +60,7 @@ export type NativeComposeOwnershipObservation = {
   readonly volumes: readonly {
     readonly name: string;
     readonly storage: string;
+    readonly createdAt: string;
   }[];
   readonly networks: readonly { readonly id: string; readonly name: string }[];
 };
@@ -75,6 +77,9 @@ export type NativeComposeOwnershipOptions = {
   readonly expectedVolumes?: readonly {
     readonly name: string;
     readonly storage: string;
+    /** Retained observations must exist; a new cold declaration may be absent. */
+    readonly mustExist?: boolean;
+    readonly createdAt?: string;
   }[];
   /** Pre-topology version-one callers mean the owned outbound default bridge. */
   readonly expectedNetwork?: string;
@@ -220,6 +225,20 @@ function lines(text: string): Record<string, unknown>[] {
       return value;
     });
 }
+function validateVolumes(opts: NativeComposeOwnershipOptions): void {
+  const names = new Set<string>();
+  for (const volume of opts.expectedVolumes ?? []) {
+    requireValue(NAME.test(volume.name) && SERVICE.test(volume.storage));
+    requireValue(
+      (volume.mustExist === undefined ||
+        typeof volume.mustExist === "boolean") &&
+        (volume.createdAt === undefined ||
+          nativeComposeVolumeCreatedAt(volume.createdAt))
+    );
+    requireValue(!names.has(volume.name));
+    names.add(volume.name);
+  }
+}
 function validateOptions(opts: NativeComposeOwnershipOptions): void {
   requireValue(PROJECT.test(opts.composeProject));
   requireValue(PROJECT.test(opts.runtimeIdentity));
@@ -229,12 +248,7 @@ function validateOptions(opts: NativeComposeOwnershipOptions): void {
   requireValue(
     new Set(opts.expectedServices).size === opts.expectedServices.length
   );
-  const names = new Set<string>();
-  for (const volume of opts.expectedVolumes ?? []) {
-    requireValue(NAME.test(volume.name) && SERVICE.test(volume.storage));
-    requireValue(!names.has(volume.name));
-    names.add(volume.name);
-  }
+  validateVolumes(opts);
   requireValue(
     opts.expectedNetwork === undefined || NAME.test(opts.expectedNetwork)
   );
@@ -432,8 +446,21 @@ async function queryNativeComposeOwned(
       mode,
       restartingServices
     );
-    // Attachments can change without changing container or network object IDs.
-    // Recheck policy IDs, aliases and membership; this is not an IP/endpoint-incarnation fence.
+    for (const volume of opts.expectedVolumes ?? []) {
+      if (volume.mustExist || volume.createdAt !== undefined) {
+        requireValue(
+          observations.volumes.some(
+            (current) =>
+              current.name === volume.name &&
+              current.storage === volume.storage &&
+              (volume.createdAt === undefined ||
+                current.createdAt === volume.createdAt)
+          )
+        );
+      }
+    }
+    // Attachments and volume incarnations can change without changing inventory names.
+    // Recheck policy IDs, aliases, membership and volume birth; Docker is not atomically locked.
     const rechecked: MutableObservation = {
       containers: [],
       volumes: [],
@@ -441,7 +468,7 @@ async function queryNativeComposeOwned(
       endpoints: new Map(),
       members: new Map(),
     };
-    for (const kind of ["container", "network"] as const) {
+    for (const kind of ["container", "volume", "network"] as const) {
       await collectInspections({
         kind,
         resources: selected.get(kind) ?? [],
@@ -473,6 +500,10 @@ async function queryNativeComposeOwned(
       JSON.stringify(topologySnapshot(observations, restarting)) ===
         JSON.stringify(topologySnapshot(rechecked, restarting))
     );
+    requireValue(
+      JSON.stringify(volumeSnapshot(observations)) ===
+        JSON.stringify(volumeSnapshot(rechecked))
+    );
     for (const kind of ["container", "volume", "network"] as const) {
       requireValue(
         JSON.stringify(await inventory(kind)) ===
@@ -482,7 +513,7 @@ async function queryNativeComposeOwned(
     return {
       observation: {
         containers: rechecked.containers,
-        volumes: observations.volumes,
+        volumes: rechecked.volumes,
         networks: rechecked.networks,
       },
       restarting: restarting.size > 0,
@@ -497,11 +528,16 @@ async function queryNativeComposeOwned(
 
 type MutableObservation = {
   containers: NativeComposeContainerObservation[];
-  volumes: { name: string; storage: string }[];
+  volumes: { name: string; storage: string; createdAt: string }[];
   networks: { id: string; name: string }[];
   endpoints: Map<string, Record<string, unknown>>;
   members: Map<string, readonly string[]>;
 };
+function volumeSnapshot(observations: MutableObservation) {
+  return [...observations.volumes].sort((left, right) =>
+    left.name.localeCompare(right.name)
+  );
+}
 async function collectInspections(input: {
   readonly kind: Kind;
   readonly resources: readonly Inventory[];
@@ -553,6 +589,7 @@ async function collectInspections(input: {
             "instance",
             "owner",
             "storage",
+            "createdAt",
           ])
         );
         requireValue(
@@ -564,7 +601,16 @@ async function collectInspections(input: {
         requireValue(
           expectedVolume !== undefined && expectedVolume.storage === row.storage
         );
-        volumes.push({ name: resource.name, storage: row.storage });
+        requireValue(nativeComposeVolumeCreatedAt(row.createdAt));
+        requireValue(
+          expectedVolume.createdAt === undefined ||
+            expectedVolume.createdAt === row.createdAt
+        );
+        volumes.push({
+          name: resource.name,
+          storage: row.storage,
+          createdAt: row.createdAt,
+        });
       } else {
         requireValue(
           hasKeys(row, [

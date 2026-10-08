@@ -74,12 +74,12 @@ impl Progress {
         Ok(())
     }
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum IntentKind {
     NativeGraphLiveOwnerRecovery,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Intent {
     version: u8,
@@ -183,10 +183,38 @@ pub struct Selection {
     owner_sha256: String,
     host_boot_micros: u64,
 }
+struct Admitted<'a> {
+    candidate: &'a Candidate,
+    run: &'a str,
+    root: PathBuf,
+    root_identity: (u64, u64),
+    lease: owner::RecoveryLease<'a>,
+    original: Receipt,
+    original_bytes: String,
+    receipt_sha256: String,
+    intent: Option<Intent>,
+    witness: Option<((u64, u64), Vec<u8>)>,
+}
+impl Admitted<'_> {
+    fn selection(&self) -> Result<Selection, CandidateError> {
+        Ok(Selection {
+            version: 1,
+            kind: SelectionKind::NativeGraphRecoverySelection,
+            run: self.run.into(),
+            receipt: self.original.clone(),
+            receipt_sha256: self.receipt_sha256.clone(),
+            owner_sha256: self.lease.selected().fingerprint(),
+            host_boot_micros: self.lease.host_boot_micros().map_err(|_| refused())?,
+        })
+    }
+}
 /// Select only a dead version3 complete Ready publication, or its unchanged
 /// committed recovery intent. No file is created or repaired, and no provider
 /// operation, private acquisition, signal or cleanup is performed.
 pub fn select(candidate: &Candidate, run: &str) -> Result<Selection, CandidateError> {
+    admit(candidate, run)?.selection()
+}
+fn admit<'a>(candidate: &'a Candidate, run: &'a str) -> Result<Admitted<'a>, CandidateError> {
     let root = directory(candidate, run)?;
     let root_identity = id(&root)?;
     let intent_path = root.join(FILE);
@@ -240,11 +268,11 @@ pub fn select(candidate: &Candidate, run: &str) -> Result<Selection, CandidateEr
     if directory(candidate, run)? != root || id(&root)? != root_identity {
         return Err(refused());
     }
-    match witness {
+    match &witness {
         Some((identity, original_bytes))
-            if id(&intent_path)? == identity
+            if id(&intent_path)? == *identity
                 && native_input::read_file(&intent_path, LIMIT).map_err(|_| refused())?
-                    == original_bytes => {}
+                    == *original_bytes => {}
         None if !exists(&intent_path)? => {}
         _ => return Err(refused()),
     }
@@ -254,16 +282,25 @@ pub fn select(candidate: &Candidate, run: &str) -> Result<Selection, CandidateEr
     } else {
         Progress::Cleanup.verify(&lease)?;
     }
-    Ok(Selection {
-        version: 1,
-        kind: SelectionKind::NativeGraphRecoverySelection,
-        run: run.into(),
-        receipt: original,
+    let original_bytes = intent
+        .as_ref()
+        .map_or(bytes, |intent| intent.original.clone());
+    Ok(Admitted {
+        candidate,
+        run,
+        root,
+        root_identity,
+        lease,
+        original,
+        original_bytes,
         receipt_sha256,
-        owner_sha256: lease.selected().fingerprint(),
-        host_boot_micros: lease.host_boot_micros().map_err(|_| refused())?,
+        intent,
+        witness,
     })
 }
+
+mod cleanup;
+pub use cleanup::{Options, Outcome, recover};
 
 #[cfg(test)]
 mod tests;

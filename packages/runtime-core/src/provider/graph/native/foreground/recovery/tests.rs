@@ -579,3 +579,259 @@ fn retired_publication_paths_require_prior_exact_phase_and_never_missing_both() 
     fs::remove_file(socket_archive).unwrap();
     assert!(select(&fixture.candidate, RUN).is_err());
 }
+
+fn recovery_options(selected: &Selection) -> Options<'_> {
+    Options {
+        run: RUN,
+        expect_receipt: &selected.receipt_sha256,
+        expect_owner: &selected.owner_sha256,
+    }
+}
+fn removed(fixture: &Fixture) -> Receipt {
+    let mut receipt = fixture.receipt();
+    receipt.phase = Phase::Removed;
+    for resource in receipt.resources.values_mut() {
+        resource.phase = "removed".into();
+    }
+    journal::save(&fixture.journal_root(), &receipt).unwrap();
+    receipt
+}
+fn absent_snapshot(receipt: Receipt) -> runtime::Snapshot {
+    runtime::Snapshot {
+        observations: receipt
+            .readiness
+            .keys()
+            .map(|key| (key.clone(), None))
+            .collect(),
+        receipt,
+    }
+}
+
+#[test]
+fn effect_recovery_requires_exact_selectors_before_intent_or_driver_entry() {
+    let fixture = Fixture::new();
+    fixture.dead();
+    let selected = select(&fixture.candidate, RUN).unwrap();
+    let called = std::cell::Cell::new(0);
+    for owner in [false, true] {
+        let mut options = recovery_options(&selected);
+        let wrong = "f".repeat(64);
+        if owner {
+            options.expect_owner = &wrong;
+        } else {
+            options.expect_receipt = &wrong;
+        }
+        assert!(
+            cleanup::recover_using(&fixture.candidate, options, |_, _| {
+                called.set(called.get() + 1);
+                panic!("wrong original selection cannot reach cleanup")
+            })
+            .is_err()
+        );
+        assert!(!fixture.journal_root().join(FILE).exists());
+        let again = select(&fixture.candidate, RUN).unwrap();
+        assert_eq!(again.receipt_sha256, selected.receipt_sha256);
+        assert_eq!(again.owner_sha256, selected.owner_sha256);
+    }
+    assert_eq!(called.get(), 0);
+}
+
+#[test]
+fn recovery_commits_original_before_driver_and_archives_only_after_removed_absence() {
+    let fixture = Fixture::new();
+    fixture.dead();
+    let selected = select(&fixture.candidate, RUN).unwrap();
+    let lock = id(&fixture.owner_root().join("operation.lock")).unwrap();
+    let outcome = cleanup::recover_using(
+        &fixture.candidate,
+        recovery_options(&selected),
+        |context, retired| {
+            assert!(!retired);
+            let intent: Intent = serde_json::from_slice(
+                &native_input::read_file(&fixture.journal_root().join(FILE), LIMIT).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(intent.receipt_sha256, selected.receipt_sha256);
+            assert_eq!(intent.publication.fingerprint(), selected.owner_sha256);
+            assert!(intent.progress == Progress::Cleanup);
+            context.guard()?;
+            for phase in [Phase::StopIntent, Phase::Stopped, Phase::RemovalIntent] {
+                let mut receipt = fixture.receipt();
+                receipt.phase = phase;
+                journal::save(&fixture.journal_root(), &receipt)?;
+                context.guard()?;
+            }
+            let receipt = removed(&fixture);
+            context.finish_using(&absent_snapshot(receipt.clone()), &|_| Ok(()))?;
+            Ok(receipt)
+        },
+    )
+    .unwrap();
+    let wire = serde_json::to_value(outcome).unwrap();
+    assert_eq!(wire["publication_retired"], true);
+    assert_eq!(wire["receipt"]["phase"], "removed");
+    assert!(!fixture.owner_root().join("owner.json").exists());
+    assert!(!fixture.owner_root().join("control.sock").exists());
+    assert_eq!(
+        id(&fixture.owner_root().join("operation.lock")).unwrap(),
+        lock
+    );
+    let again = select(&fixture.candidate, RUN).unwrap();
+    assert_eq!(again.receipt_sha256, selected.receipt_sha256);
+    assert_eq!(again.owner_sha256, selected.owner_sha256);
+    assert_eq!(again.receipt.phase, Phase::ReadyObserved);
+    let intent = fs::read(fixture.journal_root().join(FILE)).unwrap();
+    cleanup::recover_using(
+        &fixture.candidate,
+        recovery_options(&selected),
+        |context, retired| {
+            assert!(retired);
+            let receipt = fixture.receipt();
+            context.finish_using(&absent_snapshot(receipt.clone()), &|_| {
+                panic!("complete retry cannot repeat archive")
+            })?;
+            Ok(receipt)
+        },
+    )
+    .unwrap();
+    assert_eq!(fs::read(fixture.journal_root().join(FILE)).unwrap(), intent);
+    assert!(!fixture.candidate.state_root.join("run/smolvm").exists());
+}
+
+#[test]
+fn publication_retirement_interruption_retries_only_prior_exact_phase_and_inventory() {
+    for stop in [
+        Progress::SocketRetirementIntent,
+        Progress::SocketRetired,
+        Progress::OwnerRetirementIntent,
+    ] {
+        let fixture = Fixture::new();
+        fixture.dead();
+        let selected = select(&fixture.candidate, RUN).unwrap();
+        let lock = id(&fixture.owner_root().join("operation.lock")).unwrap();
+        assert!(
+            cleanup::recover_using(
+                &fixture.candidate,
+                recovery_options(&selected),
+                |context, _| {
+                    let receipt = removed(&fixture);
+                    context.finish_using(&absent_snapshot(receipt), &|phase| {
+                        if phase == stop {
+                            Err(refused())
+                        } else {
+                            Ok(())
+                        }
+                    })?;
+                    panic!("injected durable retirement boundary must interrupt")
+                }
+            )
+            .is_err()
+        );
+        let before = select(&fixture.candidate, RUN).unwrap();
+        assert_eq!(before.receipt_sha256, selected.receipt_sha256);
+        cleanup::recover_using(
+            &fixture.candidate,
+            recovery_options(&selected),
+            |context, retired| {
+                assert!(retired);
+                let receipt = fixture.receipt();
+                context.finish_using(&absent_snapshot(receipt.clone()), &|_| Ok(()))?;
+                Ok(receipt)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            id(&fixture.owner_root().join("operation.lock")).unwrap(),
+            lock
+        );
+        assert!(!fixture.owner_root().join("owner.json").exists());
+        assert!(!fixture.owner_root().join("control.sock").exists());
+    }
+}
+
+#[test]
+fn oversized_intent_refuses_before_pending_publication_or_cleanup() {
+    let fixture = Fixture::new();
+    fixture.dead();
+    let path = fixture.journal_root().join("state.json");
+    let original = fs::read_to_string(&path).unwrap();
+    let padded = format!("{}{}", original, " ".repeat(LIMIT - original.len()));
+    fs::write(&path, &padded).unwrap();
+    let selected = select(&fixture.candidate, RUN).unwrap();
+    let called = std::cell::Cell::new(false);
+    assert!(
+        cleanup::recover_using(&fixture.candidate, recovery_options(&selected), |_, _| {
+            called.set(true);
+            panic!("oversized serialized intent cannot reach cleanup")
+        })
+        .is_err()
+    );
+    assert!(!called.get());
+    assert!(!fixture.journal_root().join(FILE).exists());
+    assert!(
+        !fixture
+            .journal_root()
+            .join("live-owner-recovery.pending")
+            .exists()
+    );
+    assert_eq!(fs::read_to_string(path).unwrap(), padded);
+}
+
+#[test]
+fn fresh_absence_and_unchanged_publication_are_required_before_retirement() {
+    for substituted in [false, true] {
+        let fixture = Fixture::new();
+        fixture.dead();
+        let selected = select(&fixture.candidate, RUN).unwrap();
+        let owner = fs::read(fixture.owner_root().join("owner.json")).unwrap();
+        assert!(
+            cleanup::recover_using(
+                &fixture.candidate,
+                recovery_options(&selected),
+                |context, _| {
+                    let receipt = removed(&fixture);
+                    let mut observed = absent_snapshot(receipt);
+                    if !substituted {
+                        observed.observations.insert(
+                            "web".into(),
+                            Some(Observation::Running {
+                                health: execution::Health::None,
+                            }),
+                        );
+                    }
+                    context.finish_using(&observed, &|phase| {
+                        if substituted && phase == Progress::SocketRetirementIntent {
+                            let path = fixture.owner_root().join("control.sock");
+                            fs::rename(&path, path.with_extension("retained")).unwrap();
+                            let _replacement =
+                                std::os::unix::net::UnixListener::bind(&path).unwrap();
+                            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                        }
+                        Ok(())
+                    })?;
+                    panic!("unproved absence or substituted socket cannot complete retirement")
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read(fixture.owner_root().join("owner.json")).unwrap(),
+            owner
+        );
+        assert!(fixture.owner_root().join("control.sock").exists());
+        assert!(fixture.journal_root().join(FILE).exists());
+        let prefix = &selected.owner_sha256[..24];
+        assert!(
+            !fixture
+                .owner_root()
+                .join(format!("owner-{prefix}.retired.json"))
+                .exists()
+        );
+        assert!(
+            !fixture
+                .owner_root()
+                .join(format!("control-{prefix}.retired.sock"))
+                .exists()
+        );
+    }
+}

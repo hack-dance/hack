@@ -658,6 +658,34 @@ pub(super) fn cleanup_guarded(
     expected: Option<&Receipt>,
     guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
 ) -> Result<Receipt, CandidateError> {
+    cleanup_inner(candidate, run, expected, guard, false, None)
+}
+#[cfg(target_os = "macos")]
+pub(super) fn cleanup_recovery(
+    candidate: &Candidate,
+    run: &str,
+    expected: &Receipt,
+    guard: &dyn Fn() -> Result<(), CandidateError>,
+    environment_retired: bool,
+    finish: &dyn Fn(&Snapshot) -> Result<(), CandidateError>,
+) -> Result<Receipt, CandidateError> {
+    cleanup_inner(
+        candidate,
+        run,
+        Some(expected),
+        Some(guard),
+        environment_retired,
+        Some(finish),
+    )
+}
+fn cleanup_inner(
+    candidate: &Candidate,
+    run: &str,
+    expected: Option<&Receipt>,
+    guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
+    environment_retired: bool,
+    finish: Option<&dyn Fn(&Snapshot) -> Result<(), CandidateError>>,
+) -> Result<Receipt, CandidateError> {
     check_startup(guard)?;
     let engine = Engine::connect_cleanup(candidate)?;
     check_startup(guard)?;
@@ -678,8 +706,28 @@ pub(super) fn cleanup_guarded(
     };
     cleanup_using_guarded(&backend, &mut receipt, &root, guard)?;
     check_startup(guard)?;
-    native_environment::retire_graph(candidate, backend.engine.guest(), &receipt, guard)?;
+    if !environment_retired {
+        native_environment::retire_graph(candidate, backend.engine.guest(), &receipt, guard)?;
+    }
     check_startup(guard)?;
+    if let Some(finish) = finish {
+        // Keep the cleanup provider lease through fresh absence and publication
+        // retirement; no second startup or cleanup connection supplies authority.
+        native_environment::verify_retired_graph(
+            candidate,
+            backend.engine.guest(),
+            &receipt,
+            guard,
+        )?;
+        let guarded = GuardedBackend {
+            backend: &backend,
+            guard,
+        };
+        let observed = snapshot(&guarded, receipt.clone())?;
+        check_startup(guard)?;
+        finish(&observed)?;
+        check_startup(guard)?;
+    }
     Ok(receipt)
 }
 #[cfg(test)]

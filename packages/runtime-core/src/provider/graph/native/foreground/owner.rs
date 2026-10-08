@@ -364,6 +364,30 @@ impl<'a> RecoveryLease<'a> {
             .record(self.candidate, self.run)
             .map(|(_, boot)| boot)
     }
+    /// Caller has already durably admitted this exact path's retirement phase.
+    /// Existing archive identity is retry evidence, never overwrite permission.
+    pub(super) fn archive(&self, socket: bool) -> Result<(), CandidateError> {
+        let (socket_original, owner_original) = self.verify(true, !socket)?;
+        if !socket && socket_original {
+            return Err(refused());
+        }
+        let original = if socket {
+            socket_original
+        } else {
+            owner_original
+        };
+        if original {
+            let path = self
+                .root
+                .join(if socket { "control.sock" } else { "owner.json" });
+            exclusive_move(&path, &self.archive_path(socket))?;
+            fs::File::open(&self.root)
+                .and_then(|file| file.sync_all())
+                .map_err(|_| refused())?;
+        }
+        self.verify(true, !socket)?;
+        Ok(())
+    }
     fn archive_path(&self, socket: bool) -> PathBuf {
         let fingerprint = self.selection.fingerprint();
         self.root.join(if socket {
@@ -435,6 +459,18 @@ impl<'a> RecoveryLease<'a> {
         self.gate.verify(self.candidate)?;
         Ok((socket_original, owner_original))
     }
+}
+
+pub(super) fn exclusive_move(source: &Path, target: &Path) -> Result<(), CandidateError> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    let source = CString::new(source.as_os_str().as_bytes()).map_err(|_| refused())?;
+    let target = CString::new(target.as_os_str().as_bytes()).map_err(|_| refused())?;
+    // SAFETY: both paths are NUL-terminated for this synchronous call. RENAME_EXCL
+    // refuses any existing target; no replacement or copy fallback is permitted.
+    if unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) } != 0 {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 pub(super) struct Publication {

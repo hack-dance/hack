@@ -218,6 +218,23 @@ pub(in crate::provider) fn retire_graph(
     receipt: &super::graph::native::Receipt,
     guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
 ) -> Result<(), CandidateError> {
+    graph_retirement(candidate, guest, receipt, guard, false)
+}
+pub(in crate::provider) fn verify_retired_graph(
+    candidate: &Candidate,
+    guest: &OwnedGuest<'_>,
+    receipt: &super::graph::native::Receipt,
+    guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
+) -> Result<(), CandidateError> {
+    graph_retirement(candidate, guest, receipt, guard, true)
+}
+fn graph_retirement(
+    candidate: &Candidate,
+    guest: &OwnedGuest<'_>,
+    receipt: &super::graph::native::Receipt,
+    guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
+    already_retired: bool,
+) -> Result<(), CandidateError> {
     check_guard(guard)?;
     let directory = root(candidate);
     if *receipt.phase() != super::graph::native::Phase::Removed {
@@ -260,11 +277,30 @@ pub(in crate::provider) fn retire_graph(
         }
     }
     for slot in selected {
-        retire_guarded(candidate, guest, &slot, None, guard)?;
+        if already_retired {
+            check_guard(guard)?;
+            let result = guest.execute_cleanup(VERIFY_REMOVED, &[&slot]);
+            check_guard(guard)?;
+            if result? != "environment-removed-v1\n" {
+                return Err(refused());
+            }
+        } else {
+            retire_guarded(candidate, guest, &slot, None, guard)?;
+        }
     }
     check_guard(guard)?;
     Ok(())
 }
+
+const VERIFY_REMOVED: &str = r#"
+(
+set -eu
+root="/run/$1"
+test ! -L "$root"
+test ! -e "$root"
+) >/dev/null 2>&1
+printf 'environment-removed-v1\n'
+"#;
 
 #[cfg(test)]
 mod tests;

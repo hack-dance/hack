@@ -137,6 +137,16 @@ keys/values, command argv, source bytes or publication process/path metadata. Th
 selector creates no intent and connects no provider. It grants no cleanup or
 frontend recovery authority.
 
+The separate explicit library recovery entrypoint re-admits both raw selectors
+and commits a bounded 64 KiB recovery intent before cleanup. It retains the
+publication gate, original operation lock and cleanup provider lease through
+matching Removed resources, private-environment absence and publication
+retirement. Durable phases precede each exclusive archive move; original Ready
+hashes and inventory remain fixed while cleanup phases advance. Completed retry
+checks absence rather than repeating retirement. Pending writes, unexpected
+replacements or missing original and archive paths retain a refusal. Public
+frontend recovery and actual dead-owner acceptance remain separate gates.
+
 Guarded native cleanup checks its retained authority before and after every
 engine observation, removal request and admitted stop batch, including failed
 calls. The existing stop batch retains its concurrent HTTP-stop semantics. Cleanup

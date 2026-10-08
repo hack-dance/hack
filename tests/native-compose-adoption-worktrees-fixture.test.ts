@@ -1,7 +1,11 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createNativeComposeProbe } from "../src/lib/native-compose-ownership.ts";
 import {
   cleanupOwnedAdoptionFixture,
+  createAdoptionFixtureProbe,
   nativeComposeAdoptionWorktreesScenario,
   ownedAdoptionFixtureObservation,
   waitForAdoptionFixtureSql,
@@ -51,6 +55,52 @@ const rows = {
     createdAt,
   },
 };
+
+test("later fixture lifecycle reads create independent bounded acquisitions after the original expires", async () => {
+  const root = await mkdtemp(join(tmpdir(), "adoption-probe-lifetime-"));
+  const previous = process.env.PATH;
+  const commands = join(root, "queries");
+  const script = join(root, "docker");
+  await Bun.write(
+    script,
+    `#!${process.execPath}
+import {appendFileSync,writeFileSync} from "node:fs";
+const args=process.argv.slice(2);
+if(args.join(" ")!=="info --format {{.OSType}}") {writeFileSync(${JSON.stringify(join(root, "unexpected"))},"refused");process.exit(99);}
+appendFileSync(${JSON.stringify(commands)},JSON.stringify(args)+"\\n");
+console.log("linux");
+`
+  );
+  await chmod(script, 0o700);
+  process.env.PATH = root;
+  const wallClock = spyOn(Date, "now").mockReturnValue(0);
+  try {
+    const args = ["info", "--format", "{{.OSType}}"];
+    const original = createNativeComposeProbe({ timeoutMs: 30_000 });
+    const later = createAdoptionFixtureProbe();
+    expect((await original(args)).trim()).toBe("linux");
+    expect(await later(args)).toBe("linux");
+    wallClock.mockReturnValue(30_001);
+    await expect(original(args)).rejects.toMatchObject({
+      code: "E_NATIVE_COMPOSE_PROBE_TIMEOUT",
+    });
+    expect(await later(args)).toBe("linux");
+    wallClock.mockReturnValue(60_002);
+    expect(await later(args)).toBe("linux");
+    expect((await readFile(commands, "utf8")).trim().split("\n")).toHaveLength(
+      4
+    );
+    expect(await Bun.file(join(root, "unexpected")).exists()).toBe(false);
+  } finally {
+    wallClock.mockRestore();
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "PATH");
+    } else {
+      process.env.PATH = previous;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("SQL usability retries a transient initialization refusal before accepting the expected row", async () => {
   let attempts = 0;

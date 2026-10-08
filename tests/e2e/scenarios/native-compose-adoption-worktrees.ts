@@ -50,6 +50,55 @@ function refused(): never {
     "Adoption worktree fixture ownership or data check failed; values omitted."
   );
 }
+
+/** Fixture-only polling; callers bind SQL to captured original IDs and only seed markers before adoption. */
+export async function waitForAdoptionFixtureSql(opts: {
+  readonly read: () => Promise<string>;
+  readonly expected: string;
+  readonly timeoutMs?: number;
+  readonly now?: () => number;
+  readonly pause?: () => Promise<void>;
+}) {
+  try {
+    const {
+      read,
+      expected,
+      timeoutMs = 30_000,
+      now = () => performance.now(),
+      pause = () => Bun.sleep(500),
+    } = opts;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 30_000) {
+      refused();
+    }
+    const start = now();
+    if (!Number.isFinite(start)) {
+      refused();
+    }
+    const deadline = start + timeoutMs;
+    while (now() < deadline) {
+      let value: string | undefined;
+      try {
+        value = await read();
+      } catch {
+        // PostgreSQL may restart its initial server before the fixture database is usable.
+      }
+      const after = now();
+      if (!Number.isFinite(after)) {
+        refused();
+      }
+      if (value === expected && after < deadline) {
+        return;
+      }
+      if (after >= deadline) {
+        break;
+      }
+      await pause();
+    }
+    refused();
+  } catch {
+    refused();
+  }
+}
 function object(text: string): Record<string, unknown> {
   try {
     const value: unknown = JSON.parse(text);
@@ -390,25 +439,10 @@ function createFixtureRuntime(
       ])
     ).trim();
   const waitReady = async (instance: Instance) => {
-    const deadline = performance.now() + 30_000;
-    while (performance.now() < deadline) {
-      try {
-        await probe([
-          "container",
-          "exec",
-          container(instance, "db"),
-          "pg_isready",
-          "-U",
-          "postgres",
-          "-d",
-          "fixture",
-        ]);
-        return;
-      } catch {
-        await Bun.sleep(500);
-      }
-    }
-    refused();
+    await waitForAdoptionFixtureSql({
+      read: () => sql(instance, "SELECT 1"),
+      expected: "1",
+    });
   };
   const check = async (instance: Instance, checkSource = true) => {
     const baseline = anchors.get(instance);
@@ -568,10 +602,16 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
     refused();
   }
   await waitReady(instance);
-  await sql(
-    instance,
-    `CREATE TABLE marker(id integer PRIMARY KEY,value text NOT NULL); INSERT INTO marker VALUES(1,'${instance.marker}')`
-  );
+  await waitForAdoptionFixtureSql({
+    read: async () => {
+      await sql(
+        instance,
+        `CREATE TABLE IF NOT EXISTS marker(id integer PRIMARY KEY,value text NOT NULL); INSERT INTO marker VALUES(1,'${instance.marker}') ON CONFLICT (id) DO UPDATE SET value=EXCLUDED.value`
+      );
+      return await sql(instance, "SELECT value FROM marker WHERE id=1");
+    },
+    expected: instance.marker,
+  });
   await check(instance);
 }
 async function checkInheritedRefusal(h: FixtureRuntime) {

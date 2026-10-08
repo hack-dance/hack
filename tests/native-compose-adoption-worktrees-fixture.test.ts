@@ -4,6 +4,7 @@ import {
   cleanupOwnedAdoptionFixture,
   nativeComposeAdoptionWorktreesScenario,
   ownedAdoptionFixtureObservation,
+  waitForAdoptionFixtureSql,
 } from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
 
 const instance = {
@@ -50,6 +51,77 @@ const rows = {
     createdAt,
   },
 };
+
+test("SQL usability retries a transient initialization refusal before accepting the expected row", async () => {
+  let attempts = 0;
+  let now = 0;
+  await waitForAdoptionFixtureSql({
+    read: () => {
+      attempts++;
+      return attempts === 1
+        ? Promise.reject(new Error(CANARY))
+        : Promise.resolve("1");
+    },
+    expected: "1",
+    timeoutMs: 1000,
+    now: () => now,
+    pause: async () => {
+      now += 500;
+    },
+  });
+  expect(attempts).toBe(2);
+});
+
+test("connection acceptance alone does not establish the expected SQL marker", async () => {
+  let attempts = 0;
+  let now = 0;
+  await waitForAdoptionFixtureSql({
+    read: () =>
+      Promise.resolve(++attempts === 1 ? "accepting connections" : "marker"),
+    expected: "marker",
+    timeoutMs: 1000,
+    now: () => now,
+    pause: async () => {
+      now += 500;
+    },
+  });
+  expect(attempts).toBe(2);
+});
+
+test("a row returned after the SQL deadline refuses", async () => {
+  let now = 0;
+  await expect(
+    waitForAdoptionFixtureSql({
+      read: () => {
+        now = 1000;
+        return Promise.resolve("1");
+      },
+      expected: "1",
+      timeoutMs: 1000,
+      now: () => now,
+    })
+  ).rejects.toThrow(REFUSAL);
+});
+
+test("persistent SQL initialization errors stop at the deadline with fixed diagnostics", async () => {
+  let attempts = 0;
+  let now = 0;
+  await expect(
+    waitForAdoptionFixtureSql({
+      read: () => {
+        attempts++;
+        return Promise.reject(new Error(CANARY));
+      },
+      expected: "1",
+      timeoutMs: 1000,
+      now: () => now,
+      pause: async () => {
+        now += 500;
+      },
+    })
+  ).rejects.toThrow(REFUSAL);
+  expect(attempts).toBe(2);
+});
 
 test("cleanup oracle accepts only the original fixture IDs, canonical mounts and creation facts", () => {
   expect(

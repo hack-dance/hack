@@ -263,10 +263,14 @@ function safeScan(ctx: Context, value: Scan) {
     return {
       service,
       present: row !== undefined,
-      state: row && states.includes(String(row.state)) ? row.state : "unknown",
+      state:
+        row && typeof row.state === "string" && states.includes(row.state)
+          ? row.state
+          : "unknown",
       restartCount:
         typeof row?.restartCount === "number" &&
-        Number.isSafeInteger(row.restartCount)
+        Number.isSafeInteger(row.restartCount) &&
+        row.restartCount >= 0
           ? row.restartCount
           : null,
       imageMatch: row?.image === ctx.image,

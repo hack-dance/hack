@@ -311,6 +311,29 @@ test("malicious observation text is reduced to fixed booleans and unknown state"
   expect(JSON.stringify(report)).not.toContain(canary);
 });
 
+test("malformed state shapes and negative restart counts cannot escape fixed output", async () => {
+  for (const state of [["running"], { value: "running" }, 7, null]) {
+    const selected = fixture({
+      mutate: (_scan, rows) => {
+        const first = rows[0];
+        if (first) {
+          first.state = state;
+          first.restartCount = -1;
+        }
+      },
+    });
+    const report = await captureNativeProcessPolicyStartupDiagnostic({
+      projectRoot: "/fixture",
+      expectedEngineId: engine,
+      dependencies: selected.dependencies,
+    });
+    expect(report.first.services[0]?.state).toBe("unknown");
+    expect(typeof report.first.services[0]?.state).toBe("string");
+    expect(report.first.services[0]?.restartCount).toBeNull();
+    expect(report.second.services[0]?.restartCount).toBeNull();
+  }
+});
+
 test("diagnostic and recording errors cannot replace original failed startup", async () => {
   const selected = fixture({ failProbe: true });
   let recorded = 0;

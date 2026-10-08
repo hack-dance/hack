@@ -223,6 +223,7 @@ test.each([
   let paths: { tempRoot: string; hackHome: string } | undefined;
   try {
     const outcomes = await runScenarios({
+      dockerEnabled: false,
       keepTempDirs: policy.keep,
       scenarios: [
         {

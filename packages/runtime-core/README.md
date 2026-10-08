@@ -98,9 +98,30 @@ records still refuse; they grant no inspection, cleanup or restore authority. A 
 without native input support refuses retained native journals before more graph
 work. Existing Compose v1 codecs, bindings and paths retain their contracts.
 
-The public frontend does not select this library consumer yet. Actual installed
-native execution, frontend ownership/cancellation, interrupted recovery and broader
-source/storage/routing/host contracts remain separate qualification gates.
+The optional feature exposes this bounded consumer through a distinct public CLI:
+`graph native plan --source-file FILE --json`, then
+`graph native run --source-file FILE --expect-review SHA --json`.
+`graph native inspect|cleanup --run-id RUN --json` use its v2 journal. These commands
+are explicit isolated-network prerequisites, not ordinary project startup: container
+networking is disabled. Normal native `hack up` must preserve project/service DNS
+and ordinary outbound access, which remain unimplemented by this consumer.
+
+The stable, absolute source file is a public v2 envelope with
+`kind: "native-graph-source"`, `project`, optional canonical `branch`, 32-hex `run`,
+optional `profiles`, and compiler-owned `env_metadata`. Its `overlay` is `"inherit"`
+(also the omission default), `"base"`, or `{"named":"NAME"}`; null refuses. The source
+and authored files are rechecked before private preparation and effects. It returns
+a native `review_id`; Compose plan IDs and normalized-input fields are not accepted.
+Optional `run --environment-stdin` receives a bounded private pipe envelope with
+`version: 2`, `kind: "native-graph-environment"`, `review`, `run`,
+`lifetime_seconds` (1..300), and selected source-keyed `services`. Public selection
+and review comparison happen before reading this descriptor. The old private v1
+Compose codec remains strict and cannot decode this envelope. Values never enter
+source files, arguments, stdout or journal records.
+
+The Bun project frontend does not select this consumer yet. Actual installed
+native execution, frontend ownership/cancellation, interrupted recovery and full
+network/source/storage/routing/host contracts remain separate qualification gates.
 
 Run its pure regressions with
 `cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --features native-config-plan project::native::tests`.

@@ -8,6 +8,7 @@ import {
   nativeBuildProject,
   verifyNativeBuildEvidence,
   verifyNativeBuildImage,
+  verifyNativeBuildReuse,
   verifyNativeBuildWorkloadState,
   verifyUnsupportedNativeBuild,
 } from "./e2e/scenarios/native-config-build.ts";
@@ -16,6 +17,27 @@ import { composeFixture } from "./helpers/native-compose.ts";
 const OWNER = "b".repeat(32);
 const ID = `sha256:${"c".repeat(64)}`;
 const TAG = "native-fixture-builder:latest";
+
+test("build reuse proof rejects rebuilt omitted-policy jobs and unchanged explicit builds", () => {
+  const first = { builder: ID, defaultfile: `sha256:${"d".repeat(64)}` };
+  const second = {
+    builder: `sha256:${"e".repeat(64)}`,
+    defaultfile: first.defaultfile,
+  };
+  expect(() => verifyNativeBuildReuse({ first, second })).not.toThrow();
+  for (const changed of [
+    null,
+    {},
+    { ...second, defaultfile: ID },
+    { ...second, builder: ID },
+    { ...second, builder: "short-image-id" },
+    { ...second, extra: ID },
+    { ...second, builder: second.defaultfile },
+  ]) {
+    expect(() => verifyNativeBuildReuse({ first, second: changed })).toThrow();
+    expect(() => verifyNativeBuildReuse({ first: changed, second })).toThrow();
+  }
+});
 
 const SAFE_WORKLOAD = {
   service: "builder",
@@ -215,6 +237,7 @@ test("build renderer anchors context, keeps nested Dockerfile and stage without 
   if (!(defaultfile && builder)) {
     throw new Error("Build declarations are missing");
   }
+  expect(Object.hasOwn(defaultfile, "pull_policy")).toBe(false);
   const input = composeFixture({
     services: {
       builder: {

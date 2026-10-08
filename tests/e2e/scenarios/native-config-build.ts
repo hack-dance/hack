@@ -105,6 +105,34 @@ export function verifyNativeBuildWorkloadState(state: unknown): void {
   });
 }
 
+/** Omitted policy reuses its existing image; explicit build rebuilds changed COPY inputs. */
+export function verifyNativeBuildReuse(opts: {
+  readonly first: unknown;
+  readonly second: unknown;
+}): void {
+  const { first, second } = opts;
+  const complete = (value: unknown): value is Record<string, string> =>
+    isRecord(value) &&
+    Object.keys(value).length === 2 &&
+    ["builder", "defaultfile"].every(
+      (name) =>
+        Object.hasOwn(value, name) &&
+        typeof value[name] === "string" &&
+        IMAGE_ID.test(value[name])
+    );
+  expect({
+    that:
+      complete(first) &&
+      complete(second) &&
+      first.defaultfile === second.defaultfile &&
+      first.builder !== second.builder &&
+      first.builder !== first.defaultfile &&
+      second.builder !== second.defaultfile,
+    message:
+      "Omitted build policy must reuse its image while explicit build must replace changed source inputs",
+  });
+}
+
 /** A default final stage, lost argv, or reinitialized data must not pass build acceptance. */
 export function verifyNativeBuildEvidence(opts: {
   readonly evidence: unknown;
@@ -240,7 +268,6 @@ export function nativeBuildProject(opts: {
     jobs: {
       defaultfile: {
         build: { context: "default-context" },
-        pull_policy: "build",
         profiles: ["exercise"],
         entrypoint: { exec: [] },
         command: {
@@ -647,8 +674,11 @@ export const nativeConfigBuildScenario: Scenario = {
         capturedImages.add(id);
       }
     };
-    const verifyWorkloads = async (): Promise<void> => {
+    const verifyWorkloads = async (): Promise<
+      Readonly<Record<string, string>>
+    > => {
       const ids = await list("container");
+      const images: Record<string, string> = {};
       expect({
         that: ids.length === 2,
         message:
@@ -680,7 +710,9 @@ export const nativeConfigBuildScenario: Scenario = {
             "Each built workload must use its exact generated Compose image tag",
         });
         capturedImages.add(state.image);
+        images[String(state.service)] = state.image;
       }
+      return images;
     };
     const readEvidence = async (marker: string): Promise<unknown> => {
       const result = await cli(["exec", "builder", "--", "bun", "-e", READ]);
@@ -767,20 +799,32 @@ export const nativeConfigBuildScenario: Scenario = {
       data(await cli(["--profile", "exercise", "up", "--detach", "--json"]));
       await readIdentity();
       await saveRecovery();
-      await verifyWorkloads();
+      const firstImages = await verifyWorkloads();
       const first = await readEvidence(initial);
       await Bun.write(
         join(ctx.tempRoot, "build-startup-proof.json"),
         JSON.stringify(
-          { owner, identity, first, imageIds: [...capturedImages] },
+          {
+            owner,
+            identity,
+            first,
+            firstImages,
+            imageIds: [...capturedImages],
+          },
           null,
           2
         )
       );
       await cli(["down", "--json"]);
       await writeProject(updated);
+      // Rebuilding this omitted-policy job would now fail its real command.
+      await Bun.write(
+        join(defaultContext, "default-marker"),
+        "cache-must-not-rebuild"
+      );
       data(await cli(["--profile", "exercise", "up", "--detach", "--json"]));
-      await verifyWorkloads();
+      const secondImages = await verifyWorkloads();
+      verifyNativeBuildReuse({ first: firstImages, second: secondImages });
       const second = await readEvidence(updated);
       await captureImages();
       await saveRecovery();
@@ -804,6 +848,10 @@ export const nativeConfigBuildScenario: Scenario = {
             baseId,
             first,
             second,
+            firstImages,
+            secondImages,
+            omittedPolicyReuseVerified: true,
+            explicitBuildRebuildVerified: true,
             imageIds: [...capturedImages],
             cacheBefore,
             cacheAfter,
@@ -821,7 +869,7 @@ export const nativeConfigBuildScenario: Scenario = {
         )
       );
       stage(
-        "actual selected/default Dockerfile builds, argv and retained data verified"
+        "actual selected/default Dockerfile builds, policy reuse/rebuild, argv and retained data verified"
       );
     } catch (error: unknown) {
       failed = true;

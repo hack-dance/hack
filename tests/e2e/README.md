@@ -263,6 +263,10 @@ project builds a selected multistage target through a checkout-anchored context
 with literal dollar characters and a context-relative nested Dockerfile. A second
 job qualifies the default Dockerfile. Actual profile/argv, completed-job readiness,
 changed COPY inputs under `pull_policy: "build"`, and retained data are checked.
+The default-Dockerfile job omits the policy: changed COPY inputs must still reuse
+its original image and marker. Exact workload image IDs independently require
+that reuse and the explicit builder's changed image. This proves build decisions,
+not BuildKit cache efficiency or cache reclamation.
 
 Build arguments, platform(s), additional contexts, cache import/export, no-cache,
 build pull/network options, secrets and SSH remain unsupported. Active and inactive

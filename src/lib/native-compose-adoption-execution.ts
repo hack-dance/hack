@@ -1,8 +1,13 @@
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
 import {
+  type LegacyComposeOrderedRefusal,
+  legacyComposeOrderedError,
+} from "./native-compose-adoption-diagnostics.ts";
+import {
   type LegacyComposeJobAttempt,
   type LegacyComposeJobState,
   legacyComposeFreshJobResult,
+  legacyComposeJobRestartDisabled,
   legacyComposeJobStates,
 } from "./native-compose-adoption-jobs.ts";
 import {
@@ -19,10 +24,17 @@ import {
 import { waitNativeComposeReady } from "./native-compose-wait-ready.ts";
 import { run } from "./shell.ts";
 
-function refuse(): never {
-  throw new Error(
-    "Legacy adoption ordered operation refused or did not become ready; pending ownership retained. Values omitted."
-  );
+function refuse(
+  reason: Extract<
+    LegacyComposeOrderedRefusal,
+    { stage: "ordered-scheduler" }
+  >["reason"] = "selection"
+): never {
+  throw legacyComposeOrderedError({
+    diagnostic: { stage: "ordered-scheduler", reason },
+    message:
+      "Legacy adoption ordered operation refused or did not become ready; pending ownership retained. Values omitted.",
+  });
 }
 const COMPLETION = Symbol("legacy-compose-job-completion");
 export type LegacyComposeJobCompletion = { readonly [COMPLETION]: true };
@@ -64,10 +76,9 @@ function captureJobAttempt(
     prior.paused ||
     !["created", "exited"].includes(prior.status) ||
     prior.health !== "" ||
-    prior.restartPolicy !== "no" ||
-    prior.maximumRetryCount !== 0
+    !legacyComposeJobRestartDisabled(prior)
   ) {
-    refuse();
+    refuse("prior-attempt");
   }
   return Object.freeze({ id: prior.id, priorStartedAt: prior.startedAt });
 }
@@ -130,7 +141,7 @@ export function consumeLegacyComposeJobCompletion(opts: {
   readonly assertFresh: () => Promise<void>;
 }): readonly LegacyComposeJobAttempt[] {
   if (typeof opts.outcome !== "object" || opts.outcome === null) {
-    refuse();
+    refuse("completion-authority");
   }
   const witness = completions.get(opts.outcome);
   if (
@@ -142,7 +153,7 @@ export function consumeLegacyComposeJobCompletion(opts: {
     witness.assertFresh !== opts.assertFresh ||
     Date.now() >= opts.deadline
   ) {
-    refuse();
+    refuse("completion-authority");
   }
   completions.delete(opts.outcome);
   return witness.attempts;
@@ -197,7 +208,7 @@ export async function executeLegacyComposeRetainedPlan(opts: {
   function remaining() {
     const time = Math.floor(deadline - Date.now());
     if (signal?.aborted || time <= 0) {
-      refuse();
+      refuse("deadline");
     }
     return time;
   }
@@ -226,7 +237,7 @@ export async function executeLegacyComposeRetainedPlan(opts: {
     });
     remaining();
     if (!ready) {
-      refuse();
+      refuse("readiness");
     }
   }
   remaining();
@@ -279,7 +290,7 @@ async function executeLegacyComposeRetainedJobs(
   function remaining() {
     const time = Math.floor(deadline - Date.now());
     if (signal?.aborted || time <= 0) {
-      refuse();
+      refuse("deadline");
     }
     return time;
   }
@@ -312,16 +323,19 @@ async function executeLegacyComposeRetainedJobs(
       const id = ids.get(edge.service),
         row = rows.find((item) => item.id === id);
       if (!row) {
-        refuse();
+        refuse("selection");
       }
       if (edge.condition === "completed") {
         const attempt = attempts.get(edge.service);
         if (!attempt) {
-          refuse();
+          refuse("missing-attempt");
         }
         const status = legacyComposeFreshJobResult({ attempt, observed: row });
-        if (status === "failed" || status === "refused") {
-          refuse();
+        if (status === "failed") {
+          refuse("job-failed");
+        }
+        if (status === "refused") {
+          refuse("job-refused");
         }
         return status === "ready";
       }
@@ -344,7 +358,7 @@ async function executeLegacyComposeRetainedJobs(
     });
     await fresh();
     if (!rows) {
-      refuse();
+      refuse("readiness");
     }
   }
   await fresh();
@@ -383,7 +397,7 @@ async function executeLegacyComposeRetainedJobs(
   await wait(required);
   const finalRows = await acquire();
   if (!ready(finalRows, required)) {
-    refuse();
+    refuse("readiness");
   }
   await fresh();
   if (!productionRuns.has(opts)) {

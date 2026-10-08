@@ -16,7 +16,6 @@ import {
   type Scenario,
   type ScenarioContext,
 } from "../harness.ts";
-import { runNativeNetworkFixtureCommand } from "../native-config-networks-acceptance.ts";
 import { completedJobFixtureSources } from "./native-compose-adoption-job-inputs.ts";
 import {
   createAdoptionFixtureProbe,
@@ -488,21 +487,25 @@ function runtime(input: Awaited<ReturnType<typeof prepare>>) {
     requireValue(
       (await probe(["info", "--format", "{{json .ID}}"])) === engineId
     );
+  let commandCapture = 0;
+  const captured = async (argv: readonly string[], cwd: string) => {
+    commandCapture += 1;
+    return await captureCompletedJobFixtureCommand({
+      argv,
+      cwd,
+      env,
+      captures: join(ctx.hackHome, `job-command-${commandCapture}`),
+      timeoutMs: TIMEOUT,
+      onUnconfirmed: settlement.markUnconfirmed,
+    });
+  };
   const effect = async (argv: readonly string[]) => {
     await freshEngine();
-    return successful(
-      await runNativeNetworkFixtureCommand({
-        argv: [engine, ...argv],
-        cwd: fixtureRoot,
-        env,
-        captures: join(ctx.hackHome, "job-captures"),
-        timeoutMs: TIMEOUT,
-      })
-    );
+    return successful(await captured([engine, ...argv], fixtureRoot));
   };
   const cli = async (instance: Instance, args: readonly string[]) => {
     await freshEngine();
-    return await ctx.cli({ args, cwd: instance.root, env, timeoutMs: TIMEOUT });
+    return await captured(resolveCliSpawnArgs(args), instance.root);
   };
   const list = async (instance: Instance, kind: Kind) =>
     (
@@ -824,17 +827,42 @@ async function stop(h: Runtime, instance: Instance, recover = false) {
  * Exit plus both inherited pipe EOFs releases the just-launched group owner.
  * Leader exit alone never authorizes a former-group signal or fixture teardown.
  */
-export async function captureCompletedJobFixtureInterrupt(opts: {
+type CompletedJobCaptureOptions = {
   readonly argv: readonly string[];
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
   readonly captures: string;
   readonly timeoutMs: number;
-  readonly beforeInterrupt: (
+  readonly beforeInterrupt?: (
     admission: InterruptReadAdmission
   ) => Promise<void>;
   readonly onUnconfirmed: () => void;
-}): Promise<void> {
+};
+
+/** Ordinary effects and CLI calls reuse the interruption owner, including exit/EOF and fresh captured-group absence. */
+export async function captureCompletedJobFixtureCommand(
+  opts: Omit<CompletedJobCaptureOptions, "beforeInterrupt">
+): Promise<CliResult> {
+  return await captureCompletedJobFixtureChild({
+    ...opts,
+    beforeInterrupt: undefined,
+  });
+}
+
+export async function captureCompletedJobFixtureInterrupt(
+  opts: CompletedJobCaptureOptions & {
+    readonly beforeInterrupt: NonNullable<
+      CompletedJobCaptureOptions["beforeInterrupt"]
+    >;
+  }
+): Promise<void> {
+  await captureCompletedJobFixtureChild(opts);
+}
+
+async function captureCompletedJobFixtureChild(
+  opts: CompletedJobCaptureOptions
+): Promise<CliResult> {
+  const started = Date.now();
   const snapshot = Object.freeze({
     argv: Object.freeze([...opts.argv]),
     cwd: opts.cwd,
@@ -853,35 +881,53 @@ export async function captureCompletedJobFixtureInterrupt(opts: {
       snapshot.timeoutMs > 0 &&
       snapshot.timeoutMs <= TIMEOUT
   );
+  let ownerStarted = false;
   const output = await open(`${snapshot.captures}.stdout`, "wx", 0o600);
   try {
     const errors = await open(`${snapshot.captures}.stderr`, "wx", 0o600);
     try {
       requireValue(snapshot.deadline > Date.now());
-      await captureInterruptedPipes({
+      ownerStarted = true;
+      const exitCode = await captureInterruptedPipes({
         ...snapshot,
         executable,
         args: argv,
         output,
         errors,
       });
+      const stdout = await readFile(`${snapshot.captures}.stdout`, "utf8"),
+        stderr = await readFile(`${snapshot.captures}.stderr`, "utf8");
+      requireValue(snapshot.deadline > Date.now());
+      return {
+        command: "owned completed-job fixture command",
+        exitCode,
+        stdout,
+        stderr,
+        combined: stdout + stderr,
+        timedOut: false,
+        durationMs: Date.now() - started,
+      };
     } finally {
-      await errors.close();
+      if (!ownerStarted) {
+        errors.close().catch(snapshot.onUnconfirmed);
+      }
     }
   } finally {
-    await output.close();
+    if (!ownerStarted) {
+      output.close().catch(snapshot.onUnconfirmed);
+    }
   }
 }
 
 async function captureInterruptedPipes(
-  opts: Parameters<typeof captureCompletedJobFixtureInterrupt>[0] & {
+  opts: CompletedJobCaptureOptions & {
     readonly deadline: number;
     readonly executable: string;
     readonly args: readonly string[];
     readonly output: Awaited<ReturnType<typeof open>>;
     readonly errors: Awaited<ReturnType<typeof open>>;
   }
-) {
+): Promise<number> {
   const child = spawn(opts.executable, [...opts.args], {
     cwd: opts.cwd,
     env: { ...opts.env },
@@ -892,6 +938,8 @@ async function captureInterruptedPipes(
     stderrStream = child.stderr;
   requireValue(stdoutStream !== null && stderrStream !== null);
   let leaderExited = false;
+  let capturedExitCode: number | null = null;
+  let capturedExitSignal: NodeJS.Signals | null = null;
   let openPipes = 2;
   let settled = false;
   let timedOut = false;
@@ -926,8 +974,10 @@ async function captureInterruptedPipes(
       leaderExited = true;
       reject(new Error("Completed-job capture refused; values omitted."));
     });
-    child.once("exit", (code) => {
+    child.once("exit", (code, signal) => {
       leaderExited = true;
+      capturedExitCode = code;
+      capturedExitSignal = signal;
       resolveExit(code ?? 128);
     });
   });
@@ -1005,41 +1055,76 @@ async function captureInterruptedPipes(
     }
   };
   const confirmSettlement = async () => {
+    const settlementDeadline = Date.now() + 2000;
     let settlementTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        Promise.allSettled([exited, stdout, stderr]),
+        (async () => {
+          await Promise.allSettled([exited, stdout, stderr]);
+          requireValue(settlementDeadline > Date.now());
+          requireValue(
+            leaderExited && openPipes === 0 && !captureFailure && !groupFailure
+          );
+          requireValue(child.pid !== undefined);
+          for (const identity of [child.pid, -child.pid]) {
+            let absent = false;
+            try {
+              // Read-only existence probe; an exited leader grants no former-group signal authority.
+              process.kill(identity, 0);
+            } catch (error: unknown) {
+              if (isRecord(error) && error.code === "ESRCH") {
+                absent = true;
+              } else {
+                throw error;
+              }
+            }
+            requireValue(absent);
+          }
+          // Flush/close the capture handles inside the same settlement budget.
+          await Promise.all([opts.output.close(), opts.errors.close()]);
+          requireValue(settlementDeadline > Date.now());
+          await Bun.write(
+            `${opts.captures}.settlement.json`,
+            JSON.stringify({
+              authority: "observation-only",
+              completionRequires: "successful-return-and-live-settlement-gate",
+              pid: child.pid,
+              pgid: child.pid,
+              exitCode: capturedExitCode,
+              exitSignal: capturedExitSignal,
+              leaderExited,
+              stdoutEof: true,
+              stderrEof: true,
+              capturedLeaderAbsent: true,
+              capturedGroupAbsent: true,
+              scope: "captured-child-group",
+              interrupted: timedOut || oversized,
+              callbackSettled: outstandingPhase === 0,
+            })
+          );
+          requireValue(settlementDeadline > Date.now());
+        })(),
         new Promise<never>((_, reject) => {
           settlementTimer = setTimeout(
             () =>
               reject(
                 new Error("Completed-job settlement refused; values omitted.")
               ),
-            2000
+            Math.max(0, settlementDeadline - Date.now())
           );
         }),
       ]);
-      requireValue(
-        leaderExited && openPipes === 0 && !captureFailure && !groupFailure
-      );
-      if (child.pid !== undefined) {
-        let absent = false;
-        try {
-          process.kill(child.pid, 0);
-        } catch (error: unknown) {
-          if (isRecord(error) && error.code === "ESRCH") {
-            absent = true;
-          } else {
-            throw error;
-          }
-        }
-        requireValue(absent);
-      }
     } catch {
       opts.onUnconfirmed();
       stdoutStream.destroy();
       stderrStream.destroy();
-      await Promise.allSettled([stdout, stderr]);
+      // A FileHandle.write already in progress cannot be canceled by destroying its stream.
+      // Keep its rejection handled, but never extend this settlement deadline to await it.
+      Promise.allSettled([stdout, stderr])
+        .then(() =>
+          Promise.allSettled([opts.output.close(), opts.errors.close()])
+        )
+        .catch(() => undefined);
       throw new Error("Completed-job settlement refused; values omitted.");
     } finally {
       if (settlementTimer !== undefined) {
@@ -1047,6 +1132,7 @@ async function captureInterruptedPipes(
       }
     }
   };
+  let code: number | undefined;
   try {
     requireValue(child.pid !== undefined);
     const readAdmission = Object.freeze({
@@ -1060,26 +1146,30 @@ async function captureInterruptedPipes(
           `${opts.captures}.owner.json`,
           JSON.stringify({
             pid: readAdmission.pid,
+            pgid: readAdmission.pid,
+            executable: opts.executable,
             phase: "captured-child",
             groupAuthority: "live-leader-only",
           })
         )
     );
-    await beforeDeadline(() => opts.beforeInterrupt(readAdmission));
-    requireValue(
-      !(
-        leaderExited ||
-        settled ||
-        timedOut ||
-        oversized ||
-        admission.signal.aborted
-      ) && opts.deadline > Date.now()
-    );
-    child.kill("SIGINT");
-    const code = await Promise.race([all, expired]);
-    requireValue(code !== 0 && !timedOut && !oversized);
+    const beforeInterrupt = opts.beforeInterrupt;
+    if (beforeInterrupt) {
+      await beforeDeadline(() => beforeInterrupt(readAdmission));
+      requireValue(
+        !(
+          leaderExited ||
+          settled ||
+          timedOut ||
+          oversized ||
+          admission.signal.aborted
+        ) && opts.deadline > Date.now()
+      );
+      child.kill("SIGINT");
+    }
+    code = await Promise.race([all, expired]);
+    requireValue((!beforeInterrupt || code !== 0) && !timedOut && !oversized);
   } finally {
-    admission.abort();
     if (outstandingPhase > 0) {
       opts.onUnconfirmed();
     }
@@ -1087,9 +1177,14 @@ async function captureInterruptedPipes(
     try {
       await confirmSettlement();
     } finally {
+      admission.abort();
       clearTimeout(timer);
     }
   }
+  requireValue(
+    code !== undefined && !timedOut && !oversized && opts.deadline > Date.now()
+  );
+  return code;
 }
 
 async function interruptedStart(h: Runtime, instance: Instance) {

@@ -15,6 +15,10 @@ import {
   legacyComposeAdoptionLayoutSupported,
 } from "./native-compose-adoption-contract.ts";
 import {
+  attachLegacyComposeOrderedRefusal,
+  legacyComposeOrderedRefusal,
+} from "./native-compose-adoption-diagnostics.ts";
+import {
   consumeLegacyComposeJobCompletion,
   type LegacyComposeRetainedOutcome,
 } from "./native-compose-adoption-execution.ts";
@@ -170,7 +174,14 @@ function translate(error: unknown, signal?: AbortSignal): never {
   ) {
     refuse("E_LEGACY_ADOPTION_BUSY");
   }
-  refuse();
+  const translated = new LegacyComposeAdoptedGenerationError(
+    "E_LEGACY_ADOPTION_STATE"
+  );
+  const diagnostic = legacyComposeOrderedRefusal(error);
+  if (diagnostic) {
+    attachLegacyComposeOrderedRefusal(translated, diagnostic);
+  }
+  throw translated;
 }
 function hash(text: string) {
   return createHash("sha256").update(text).digest("hex");

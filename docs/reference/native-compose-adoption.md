@@ -110,8 +110,9 @@ jobs in a static authored pair with the original default bridge and binding vers
 1. Names, full container IDs, source/configuration hashes and volume witnesses stay
 unchanged. Generated/managed inputs, typed locals, profiles, custom networks, routes
 and host hooks remain refused for this family before resource effects or value
-acquisition. Jobs require no health check and observed restart policy `no` with zero
-retries; authored restart omission stays omitted. Version 6 is reserved for its
+acquisition. Jobs require no health check and a disabled observed restart policy
+(`no` or the daemon's empty spelling), with zero retries; authored restart omission
+stays omitted. Version 6 is reserved for its
 separate static-network work and grants no job authority.
 
 Start and restart capture each job's prior daemon `StartedAt` immediately before
@@ -133,6 +134,12 @@ cooperative daemon observations do not prove hostile-engine resistance, clock
 authentication or exactly-once business effects. The finite offline job model and
 synthetic owner tests are separate from the required maintained two-worktree SQL,
 interruption and cleanup acceptance.
+
+An ordered observer or scheduler refusal can add a fixed
+`legacy_adoption_refusal: {stage, reason}` to the JSON error detail. The category
+identifies the rejecting boundary without exposing daemon output, resource IDs,
+SQL or environment values. It does not assert which effect occurred; other
+ownership failures keep the existing fixed generic error.
 
 The maintained `native-compose-adoption-dependency-worktrees` selector exercises
 an explicit exec-healthy edge and a short started edge whose target has no health

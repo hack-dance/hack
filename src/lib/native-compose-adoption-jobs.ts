@@ -1,5 +1,9 @@
 import { isRecord } from "./guards.ts";
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
+import {
+  type LegacyComposeOrderedRefusal,
+  legacyComposeOrderedError,
+} from "./native-compose-adoption-diagnostics.ts";
 import type { LegacyComposeReadinessState } from "./native-compose-adoption-readiness.ts";
 
 const ID = /^[a-f0-9]{64}$/;
@@ -11,16 +15,38 @@ export type LegacyComposeJobState = LegacyComposeReadinessState & {
   readonly exitCode: number;
   readonly startedAt: string;
   readonly finishedAt: string;
-  readonly restartPolicy: "no" | "always" | "unless-stopped" | "on-failure";
+  readonly restartPolicy:
+    | ""
+    | "no"
+    | "always"
+    | "unless-stopped"
+    | "on-failure";
   readonly maximumRetryCount: number;
 };
 export type LegacyComposeJobAttempt = {
   readonly id: string;
   readonly priorStartedAt: string;
 };
-function refuse(): never {
-  throw new Error(
-    "Legacy adoption job observation refused; pending ownership retained. Values omitted."
+function refuse(
+  reason: Extract<
+    LegacyComposeOrderedRefusal,
+    { stage: "ordered-observation" }
+  >["reason"]
+): never {
+  throw legacyComposeOrderedError({
+    diagnostic: { stage: "ordered-observation", reason },
+    message:
+      "Legacy adoption job observation refused; pending ownership retained. Values omitted.",
+  });
+}
+
+/** Compose's zero policy and Moby's disabled policy both mean no restart; jobs still require zero retries. */
+export function legacyComposeJobRestartDisabled(
+  observed: LegacyComposeJobState
+): boolean {
+  return (
+    (observed.restartPolicy === "" || observed.restartPolicy === "no") &&
+    observed.maximumRetryCount === 0
   );
 }
 
@@ -90,7 +116,7 @@ function state(value: unknown): value is LegacyComposeJobState {
     typeof value.finishedAt === "string" &&
     legacyComposeTimestampInstant(value.finishedAt) !== undefined &&
     typeof value.restartPolicy === "string" &&
-    ["no", "always", "unless-stopped", "on-failure"].includes(
+    ["", "no", "always", "unless-stopped", "on-failure"].includes(
       value.restartPolicy
     ) &&
     typeof value.maximumRetryCount === "number" &&
@@ -114,10 +140,46 @@ export function legacyComposeJobStates(opts: {
     !Object.values(Object.getOwnPropertyDescriptors(observed)).every((item) =>
       Object.hasOwn(item, "value")
     ) ||
-    observed.length !== opts.binding.containers.length ||
-    !observed.every(state)
+    observed.length !== opts.binding.containers.length
   ) {
-    refuse();
+    refuse("shape");
+  }
+  for (const item of observed) {
+    if (state(item)) {
+      continue;
+    }
+    // Inspect fields only after the closed data-descriptor boundary has excluded getters.
+    if (
+      closed(
+        item,
+        "exitCode,finishedAt,health,id,maximumRetryCount,paused,restartPolicy,running,startedAt,status"
+      )
+    ) {
+      if (
+        typeof item.startedAt !== "string" ||
+        typeof item.finishedAt !== "string" ||
+        legacyComposeTimestampInstant(item.startedAt) === undefined ||
+        legacyComposeTimestampInstant(item.finishedAt) === undefined
+      ) {
+        refuse("timestamp");
+      }
+      if (
+        typeof item.restartPolicy !== "string" ||
+        !["", "no", "always", "unless-stopped", "on-failure"].includes(
+          item.restartPolicy
+        ) ||
+        typeof item.maximumRetryCount !== "number" ||
+        !Number.isInteger(item.maximumRetryCount) ||
+        item.maximumRetryCount < 0 ||
+        item.maximumRetryCount > 4_294_967_295
+      ) {
+        refuse("restart-policy");
+      }
+    }
+    refuse("shape");
+  }
+  if (!observed.every(state)) {
+    refuse("shape");
   }
   const ids = new Set(opts.binding.containers.map((item) => item.id));
   if (
@@ -125,7 +187,7 @@ export function legacyComposeJobStates(opts: {
     new Set(observed.map((item) => item.id)).size !== ids.size ||
     observed.some((item) => !ids.has(item.id))
   ) {
-    refuse();
+    refuse("membership");
   }
   return Object.freeze(observed.map((item) => Object.freeze({ ...item })));
 }
@@ -144,8 +206,7 @@ export function legacyComposeFreshJobResult(opts: {
     observed.paused ||
     observed.status === "dead" ||
     observed.health !== "" ||
-    observed.restartPolicy !== "no" ||
-    observed.maximumRetryCount !== 0
+    !legacyComposeJobRestartDisabled(observed)
   ) {
     return "refused";
   }

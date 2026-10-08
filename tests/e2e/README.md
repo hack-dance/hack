@@ -52,6 +52,28 @@ builds with jobs. Fresh observed job completion plus dependent SQL readback does
 not guarantee exactly-once business effects or atomic exclusion of external Docker
 writers. Cancellation checks captured host child/pipe settlement; uncertain
 callbacks prevent teardown rather than being treated as canceled work.
+Ordinary fixture effects and CLI calls use that same bounded child owner and
+write private PID/PGID plus exit, stdout/stderr EOF and fresh absence receipts.
+These files are observations only: an uncancellable receipt write can finish late.
+Cleanup still requires the capture's successful return and its live settlement
+gate; a failed or uncertain capture permanently withholds teardown authority,
+even if a later file records exit zero and absence.
+Group absence refers to the captured host child's group; it does not establish
+guest Docker worker completion or recursively inventory unrelated child groups.
+
+Retained ordered-command failures may include a fixed `legacy_adoption_refusal`
+stage/reason in the JSON error detail. Observer categories distinguish malformed
+shape, timestamp, restart policy, membership and probe failure; scheduler
+categories distinguish selection, deadline, attempts, job failure, readiness and
+completion authority. They never include daemon output, resource IDs, SQL or env
+values. Unknown ownership errors retain their existing fixed generic refusal.
+The disabled job restart codec accepts both `no` and the empty daemon spelling,
+with zero retries still required. This is an independent compatibility correction,
+not an established explanation for the earlier live startup refusal. Compose
+[v5.1.2's default policy](https://github.com/docker/compose/blob/v5.1.2/pkg/compose/create.go#L551-L575)
+and its pinned Moby API
+[v1.54.1 disabled-policy contract](https://github.com/moby/moby/blob/api/v1.54.1/api/types/container/hostconfig.go#L267-L270)
+define those two spellings.
 
 ## Command-path cache regressions
 

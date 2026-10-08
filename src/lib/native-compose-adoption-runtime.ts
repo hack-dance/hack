@@ -1,6 +1,10 @@
 import { isRecord } from "./guards.ts";
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
 import {
+  legacyComposeOrderedError,
+  legacyComposeOrderedRefusal,
+} from "./native-compose-adoption-diagnostics.ts";
+import {
   type LegacyComposeJobState,
   legacyComposeJobStates,
 } from "./native-compose-adoption-jobs.ts";
@@ -275,7 +279,13 @@ export async function inspectLegacyComposeJobStates(opts: {
       );
     }
     return legacyComposeJobStates({ binding: opts.binding, observed: result });
-  } catch {
-    refuse();
+  } catch (error: unknown) {
+    if (legacyComposeOrderedRefusal(error)) {
+      throw error;
+    }
+    throw legacyComposeOrderedError({
+      diagnostic: { stage: "ordered-observation", reason: "probe" },
+      message: "Legacy adoption runtime inspection refused; values omitted.",
+    });
   }
 }

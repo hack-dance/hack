@@ -3,6 +3,7 @@ import { CliUsageError } from "../cli/command.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
+import { legacyComposeOrderedRefusal } from "./native-compose-adoption-diagnostics.ts";
 import { runLegacyComposeRetainedOperation } from "./native-compose-adoption-execution.ts";
 import {
   LegacyComposeAdoptedGenerationError,
@@ -343,6 +344,13 @@ export async function tryLegacyComposeAdoptedCommand(
         error instanceof LegacyComposeAdoptedGenerationError
           ? error.message
           : "Adopted Compose ownership or execution refused; original data is retained. Values omitted.",
+      ...(legacyComposeOrderedRefusal(error)
+        ? {
+            detail: {
+              legacy_adoption_refusal: legacyComposeOrderedRefusal(error),
+            },
+          }
+        : {}),
     });
   } finally {
     process.off("SIGINT", cancel);

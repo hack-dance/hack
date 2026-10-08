@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type { LegacyComposeVerifiedBinding } from "../src/lib/native-compose-adoption-binding.ts";
+import { legacyComposeOrderedRefusal } from "../src/lib/native-compose-adoption-diagnostics.ts";
 import {
   consumeLegacyComposeJobCompletion,
   executeLegacyComposeRetainedPlan,
@@ -97,6 +98,75 @@ function fixture() {
     },
   };
 }
+
+test.each([
+  "",
+  "no",
+] as const)("disabled job policy %j preserves fresh completion and zero-retry admission", (restartPolicy) => {
+  const observed = {
+    ...row(),
+    restartPolicy,
+    startedAt: START,
+    finishedAt: FINISH,
+  };
+  expect(
+    legacyComposeJobStates({
+      binding,
+      observed: [row(DB), observed, row(APP)],
+    })[1]?.restartPolicy
+  ).toBe(restartPolicy);
+  expect(
+    legacyComposeFreshJobResult({
+      attempt: { id: JOB, priorStartedAt: OLD },
+      observed,
+    })
+  ).toBe("ready");
+  expect(
+    legacyComposeFreshJobResult({
+      attempt: { id: JOB, priorStartedAt: OLD },
+      observed: { ...observed, maximumRetryCount: 1 },
+    })
+  ).toBe("refused");
+  expect(
+    legacyComposeFreshJobResult({
+      attempt: { id: JOB, priorStartedAt: START },
+      observed,
+    })
+  ).toBe("waiting");
+});
+
+test.each([
+  {
+    reason: "timestamp",
+    changed: { startedAt: "synthetic-private-timestamp" },
+  },
+  {
+    reason: "restart-policy",
+    changed: { restartPolicy: "synthetic-private-policy" },
+  },
+  { reason: "shape", changed: { health: null } },
+  { reason: "membership", changed: { id: "f".repeat(64) } },
+] as const)("job observation distinguishes closed $reason without private values", ({
+  reason,
+  changed,
+}) => {
+  let error: unknown;
+  try {
+    legacyComposeJobStates({
+      binding,
+      observed: [row(DB), { ...row(), ...changed }, row(APP)],
+    });
+  } catch (rejection: unknown) {
+    error = rejection;
+  }
+  expect(legacyComposeOrderedRefusal(error)).toEqual({
+    stage: "ordered-observation",
+    reason,
+  });
+  expect(JSON.stringify(legacyComposeOrderedRefusal(error))).not.toContain(
+    "synthetic-private"
+  );
+});
 test("fast exited-zero job gates the consumer; injected scheduler completion carries no production authority", async () => {
   const opts = fixture(),
     outcome = await executeLegacyComposeRetainedPlan(opts);

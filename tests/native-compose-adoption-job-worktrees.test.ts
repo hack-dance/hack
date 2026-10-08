@@ -1,9 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
 import { ChildProcess } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { type FileHandle, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  captureCompletedJobFixtureCommand,
   captureCompletedJobFixtureInterrupt,
   completedJobFixtureAppAttempts,
   completedJobFixtureFreshExit,
@@ -151,13 +152,272 @@ async function waitForAbsent(pid: number) {
   expect(absent(pid)).toBe(true);
 }
 
+test.each([
+  0, 17,
+])("ordinary captured job command records real exit%d, both EOFs and fresh leader/group absence", async (exitCode) => {
+  const root = await mkdtemp(join(tmpdir(), "completed-job-command-"));
+  const captures = join(root, "capture");
+  const originalKill = process.kill.bind(process);
+  const groups: number[] = [];
+  const signals = spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid < 0 && signal !== 0) {
+      groups.push(pid);
+    }
+    return originalKill(pid, signal);
+  });
+  let unconfirmed = false;
+  try {
+    const result = await captureCompletedJobFixtureCommand({
+      argv: [
+        process.execPath,
+        "-e",
+        `console.log('captured-output'); console.error('captured-error'); process.exit(${exitCode});`,
+      ],
+      cwd: root,
+      env: {},
+      captures,
+      timeoutMs: 2000,
+      onUnconfirmed: () => {
+        unconfirmed = true;
+      },
+    });
+    const owner = JSON.parse(await Bun.file(`${captures}.owner.json`).text());
+    const receipt = JSON.parse(
+      await Bun.file(`${captures}.settlement.json`).text()
+    );
+    expect(Number.isSafeInteger(owner.pid) && owner.pid > 0).toBe(true);
+    expect(owner.pgid).toBe(owner.pid);
+    expect(owner.executable).toBe(process.execPath);
+    expect(receipt).toEqual({
+      authority: "observation-only",
+      completionRequires: "successful-return-and-live-settlement-gate",
+      pid: owner.pid,
+      pgid: owner.pgid,
+      exitCode,
+      exitSignal: null,
+      leaderExited: true,
+      stdoutEof: true,
+      stderrEof: true,
+      capturedLeaderAbsent: true,
+      capturedGroupAbsent: true,
+      scope: "captured-child-group",
+      interrupted: false,
+      callbackSettled: true,
+    });
+    expect(result.exitCode).toBe(exitCode);
+    expect(result.stdout).toBe("captured-output\n");
+    expect(result.stderr).toBe("captured-error\n");
+    expect(result.timedOut).toBe(false);
+    expect(absent(owner.pid)).toBe(true);
+    expect(absent(-owner.pgid)).toBe(true);
+    expect(groups).toEqual([]);
+    expect(unconfirmed).toBe(false);
+  } finally {
+    signals.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ordinary capture refuses a still-present captured group even after leader exit and both EOFs", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "completed-job-group-observation-")
+  );
+  const captures = join(root, "capture");
+  const originalKill = process.kill.bind(process);
+  const groups: number[] = [];
+  const signals = spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid < 0 && signal === 0) {
+      return true;
+    }
+    if (pid < 0) {
+      groups.push(pid);
+    }
+    return originalKill(pid, signal);
+  });
+  const settlement = createCompletedJobFixtureSettlement();
+  let cleanup = 0;
+  try {
+    await expect(
+      captureCompletedJobFixtureCommand({
+        argv: [process.execPath, "-e", "process.exit(0)"],
+        cwd: root,
+        env: {},
+        captures,
+        timeoutMs: 2000,
+        onUnconfirmed: settlement.markUnconfirmed,
+      })
+    ).rejects.toThrow("settlement refused");
+    expect(await Bun.file(`${captures}.settlement.json`).exists()).toBe(false);
+    expect(() => {
+      settlement.assertConfirmed();
+      cleanup += 1;
+    }).toThrow("values omitted");
+    expect(cleanup).toBe(0);
+    expect(groups).toEqual([]);
+  } finally {
+    signals.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a delayed capture write cannot extend settlement or release teardown after late completion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completed-job-delayed-write-"));
+  const captures = join(root, "capture");
+  const handle = await open(join(root, "prototype-owner"), "wx", 0o600);
+  // This is the same trusted Node FileHandle prototype used by the real capture handles.
+  const prototype: FileHandle = Object.getPrototypeOf(handle);
+  const originalWrite: (
+    this: FileHandle,
+    buffer: Buffer
+  ) => Promise<{ bytesWritten: number; buffer: Buffer }> = prototype.write;
+  let lateWrite: Promise<unknown> | undefined;
+  let writeFinished = false;
+  function delayedWrite<TBuffer extends NodeJS.ArrayBufferView>(
+    this: FileHandle,
+    buffer: TBuffer,
+    offset?: number | null,
+    length?: number | null,
+    position?: number | null
+  ): Promise<{ bytesWritten: number; buffer: TBuffer }>;
+  function delayedWrite<TBuffer extends Uint8Array>(
+    this: FileHandle,
+    buffer: TBuffer,
+    options?: { offset?: number; length?: number; position?: number }
+  ): Promise<{ bytesWritten: number; buffer: TBuffer }>;
+  function delayedWrite(
+    this: FileHandle,
+    data: string,
+    position?: number | null,
+    encoding?: BufferEncoding | null
+  ): Promise<{ bytesWritten: number; buffer: string }>;
+  function delayedWrite(
+    this: FileHandle,
+    data: unknown,
+    ...rest: unknown[]
+  ): Promise<unknown> {
+    // The owning capture writes only one Buffer argument; unrelated overload calls are outside this control.
+    if (!Buffer.isBuffer(data) || rest.length !== 0) {
+      throw new Error("Synthetic delayed capture write refused");
+    }
+    if (data.toString().includes("delayed-owned-write") && !lateWrite) {
+      const pending = (async () => {
+        await Bun.sleep(2600);
+        return await originalWrite.call(this, data);
+      })().finally(() => {
+        writeFinished = true;
+      });
+      lateWrite = pending;
+      return pending;
+    }
+    return originalWrite.call(this, data);
+  }
+  const writes = spyOn(prototype, "write").mockImplementation(delayedWrite);
+  const settlement = createCompletedJobFixtureSettlement();
+  let cleanup = 0;
+  const started = Date.now();
+  try {
+    await expect(
+      captureCompletedJobFixtureCommand({
+        argv: [process.execPath, "-e", "console.log('delayed-owned-write')"],
+        cwd: root,
+        env: {},
+        captures,
+        timeoutMs: 250,
+        onUnconfirmed: settlement.markUnconfirmed,
+      })
+    ).rejects.toThrow("settlement refused");
+    expect(Date.now() - started).toBeLessThan(2500);
+    expect(lateWrite).toBeDefined();
+    expect(writeFinished).toBe(false);
+    expect(() => {
+      settlement.assertConfirmed();
+      cleanup += 1;
+    }).toThrow("values omitted");
+    expect(cleanup).toBe(0);
+    await lateWrite;
+    expect(writeFinished).toBe(true);
+    expect(() => settlement.assertConfirmed()).toThrow("values omitted");
+    expect(await Bun.file(`${captures}.settlement.json`).exists()).toBe(false);
+  } finally {
+    await lateWrite?.catch(() => undefined);
+    writes.mockRestore();
+    await handle.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a late settlement observation never overrides failed capture or its persistent teardown veto", async () => {
+  const root = await mkdtemp(join(tmpdir(), "completed-job-delayed-receipt-"));
+  const captures = join(root, "capture");
+  const originalWrite = Bun.write;
+  let lateWrite: Promise<number> | undefined;
+  const receipts = spyOn(Bun, "write").mockImplementation(
+    (destination, data, options) => {
+      // This capture publishes JSON strings to private paths with no optional writer settings.
+      if (
+        typeof destination !== "string" ||
+        typeof data !== "string" ||
+        options !== undefined
+      ) {
+        throw new Error("Synthetic delayed settlement write refused");
+      }
+      if (destination === `${captures}.settlement.json` && !lateWrite) {
+        const pending = (async () => {
+          await Bun.sleep(2600);
+          return await originalWrite(destination, data);
+        })();
+        lateWrite = pending;
+        return pending;
+      }
+      return originalWrite(destination, data);
+    }
+  );
+  const settlement = createCompletedJobFixtureSettlement();
+  let cleanup = 0;
+  const started = Date.now();
+  try {
+    await expect(
+      captureCompletedJobFixtureCommand({
+        argv: [process.execPath, "-e", "process.exit(0)"],
+        cwd: root,
+        env: {},
+        captures,
+        timeoutMs: 5000,
+        onUnconfirmed: settlement.markUnconfirmed,
+      })
+    ).rejects.toThrow("settlement refused");
+    expect(Date.now() - started).toBeLessThan(2500);
+    expect(lateWrite).toBeDefined();
+    expect(await Bun.file(`${captures}.settlement.json`).exists()).toBe(false);
+    expect(() => {
+      settlement.assertConfirmed();
+      cleanup += 1;
+    }).toThrow("values omitted");
+    expect(cleanup).toBe(0);
+    await lateWrite;
+    const receipt = JSON.parse(
+      await Bun.file(`${captures}.settlement.json`).text()
+    );
+    expect(receipt.authority).toBe("observation-only");
+    expect(receipt.completionRequires).toBe(
+      "successful-return-and-live-settlement-gate"
+    );
+    expect(receipt.exitCode).toBe(0);
+    expect(() => settlement.assertConfirmed()).toThrow("values omitted");
+  } finally {
+    await lateWrite?.catch(() => undefined);
+    receipts.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("an exited leader with closed pipes receives zero former-group signals", async () => {
   const root = await mkdtemp(join(tmpdir(), "completed-job-exited-"));
   const ready = join(root, "ready");
   const originalKill = process.kill.bind(process),
     groups: number[] = [];
   const signals = spyOn(process, "kill").mockImplementation((pid, signal) => {
-    if (pid < 0) {
+    if (pid < 0 && signal !== 0) {
       groups.push(pid);
     }
     return originalKill(pid, signal);
@@ -200,7 +460,7 @@ test("inherited-pipe descendants withhold cancellation settlement without signal
   const originalKill = process.kill.bind(process),
     groups: number[] = [];
   const signals = spyOn(process, "kill").mockImplementation((pid, signal) => {
-    if (pid < 0) {
+    if (pid < 0 && signal !== 0) {
       groups.push(pid);
     }
     return originalKill(pid, signal);
@@ -322,7 +582,7 @@ test("real SIGINT exit and both EOFs settle without signaling the retired group"
   const originalKill = process.kill.bind(process),
     groups: number[] = [];
   const signals = spyOn(process, "kill").mockImplementation((pid, signal) => {
-    if (pid < 0) {
+    if (pid < 0 && signal !== 0) {
       groups.push(pid);
     }
     return originalKill(pid, signal);
@@ -361,7 +621,7 @@ test("ambiguous final child absence retains ownership and blocks fixture teardow
     if (signal === 0) {
       return true;
     }
-    if (pid < 0) {
+    if (pid < 0 && signal !== 0) {
       groups.push(pid);
     }
     return originalKill(pid, signal);

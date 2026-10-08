@@ -90,6 +90,11 @@ export type NativeComposeStorageXattrTarget = {
   readonly holders: readonly Holder[];
 };
 export type NativeComposeStorageXattrInvocation = {
+  /** Durably pin the exact created carrier before starting it; invocation intent already exists. */
+  readonly recordCreated: (value: {
+    readonly id: string;
+    readonly createdAt: string;
+  }) => Promise<void>;
   readonly invocationId: string;
   readonly artifact: NativeComposeStorageXattrArtifact;
   readonly target: NativeComposeStorageXattrTarget;
@@ -303,6 +308,7 @@ export function checkNativeComposeStorageXattrResult(opts: {
 }): {
   readonly response: NativeComposeStorageXattrResponse;
   readonly responseHash: string;
+  readonly created: { readonly id: string; readonly createdAt: string };
 } {
   const { value, input } = opts;
   const captured = parts(opts.carrier);
@@ -311,10 +317,10 @@ export function checkNativeComposeStorageXattrResult(opts: {
       isRecord(value) &&
       keys(
         value,
-        "artifact,carrierId,containersAfterCleanup,engineId,exitCode,gid,invocationId,outcome,readonly,response,scope,stopped,target,uid"
+        "artifact,carrierCreatedAt,carrierId,containersAfterCleanup,engineId,exitCode,gid,invocationId,outcome,readonly,response,scope,stopped,target,uid"
       ) &&
       value.outcome === "complete" &&
-      value.exitCode === 0 &&
+      (value.exitCode === 0 || value.exitCode === 1) &&
       value.invocationId === input.invocationId &&
       TOKEN.test(input.invocationId) &&
       !captured.invocationIds.has(input.invocationId) &&
@@ -343,7 +349,14 @@ export function checkNativeComposeStorageXattrResult(opts: {
       value.stopped.id === value.carrierId &&
       value.stopped.running === false &&
       value.stopped.pid === 0 &&
-      value.stopped.exitCode === 0 &&
+      value.stopped.exitCode === value.exitCode &&
+      nativeComposeRetainedVolumesValid([
+        {
+          name: "carrier",
+          storage: "carrier",
+          createdAt: value.carrierCreatedAt,
+        },
+      ]) &&
       Array.isArray(value.containersAfterCleanup) &&
       value.containersAfterCleanup.length === 0 &&
       typeof value.response === "string"
@@ -362,19 +375,17 @@ export function checkNativeComposeStorageXattrResult(opts: {
     return refuse();
   }
   const response = parseNativeComposeStorageXattrResponse(value.response);
-  let outcome = "verified";
-  if (input.request.operation === "root") {
-    outcome = "root";
-  } else if (input.request.operation === "seed") {
-    outcome = "seeded";
-  }
-  if (response.outcome !== outcome) {
+  if ((response.outcome === "refused") !== (value.exitCode === 1)) {
     return refuse();
   }
   captured.invocationIds.add(input.invocationId);
   captured.carrierIds.add(value.carrierId);
   return Object.freeze({
     response,
+    created: Object.freeze({
+      id: value.carrierId,
+      createdAt: String(value.carrierCreatedAt),
+    }),
     responseHash: createHash("sha256").update(value.response).digest("hex"),
   });
 }

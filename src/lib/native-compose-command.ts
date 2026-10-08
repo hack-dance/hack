@@ -632,6 +632,7 @@ async function savedCommand(opts: {
   };
   if (options.operation === "down") {
     return await store.withMutation(async (mutation) => {
+      const recoveryState = await store.loadCurrent();
       const saved = await savedRouteDocuments(store);
       const prepared = await prepareSavedStop({
         store,
@@ -652,7 +653,9 @@ async function savedCommand(opts: {
         .runEffect({
           generation,
           operation: "down",
-          recoverPending: options.recover === true && pending !== null,
+          recoverPending:
+            options.recover === true &&
+            (pending !== null || recoveryState.storageWitnessesPending),
           assertOwned,
           captureStorage: prepared.captureStorage,
           assertFresh: hooks?.assertFresh,
@@ -778,7 +781,8 @@ async function savedCommand(opts: {
               data: {
                 composeProject: generation.identity.composeProject,
                 stopped: state.stopped,
-                pending: state.pending !== null,
+                pending:
+                  state.pending !== null || state.storageWitnessesPending,
                 beforeHooksPending: state.beforeHooksPending,
                 hostHookPhase: state.hostHookPhase,
                 services: observed.containers.map(
@@ -798,6 +802,11 @@ async function savedCommand(opts: {
         if (state.beforeHooksPending) {
           process.stderr.write(
             "Native host hook completion remains uncertain; hook recovery is not supported in this slice.\n"
+          );
+        }
+        if (state.storageWitnessesPending) {
+          process.stderr.write(
+            "Native storage continuity or helper completion remains uncertain; saved recovery retains its anchors. Values omitted.\n"
           );
         }
         return await run([...composeArgs(generation), "ps"], {

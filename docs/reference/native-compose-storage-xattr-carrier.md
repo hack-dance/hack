@@ -38,11 +38,12 @@ facts use canonical unsigned 64-bit decimal strings; UID/GID are unsigned
 32-bit integers. Unknown kinds/versions, alternate encodings, duplicate JSON
 keys, trailing data and extra fields refuse. This format cannot be relabeled as
 the foundation's USTAR proof or attached to its version-one completion reference.
-Xattr expectations and references require version two, `kind: "directory-xattr"`,
-and exact image/platform/Bun/libc/helper and kernel-ABI pins. Their version-three
-generation intent requires the carrier tag and those artifact pins even while
-Expected. Older strict owners reject the new required fields; absence of an
-artifact or tag cannot downgrade to USTAR.
+Xattr expectations and references require version three, `kind: "directory-xattr"`,
+exact image/platform/Bun/libc/helper and kernel-ABI pins, and a required private
+carrier-journal token. Their version-three generation intent requires the carrier
+tag, artifact pins and journal token even while Expected. Older strict owners
+reject the new required fields; absence of a journal, artifact or tag cannot
+downgrade to USTAR. The xattr helper wire format remains version one.
 
 The Linux adapter fixes the root at `/hack-storage-witness`. It checks Linux
 arm64 or x64 open constants and fixed architecture-specific glibc paths, uses
@@ -150,13 +151,34 @@ carrier IDs or invocation IDs refuse. These predicates validate an injectable
 contract; they are not proof of actual engine identity or cleanup without the
 qualified transport.
 
-Durable carrier intent, exact image/program/ID labels, fixed mount correspondence,
+The owner initializes a required private `carrier.json` in the anchored witness
+slot before provisioning. Every invocation atomically publishes and synchronizes
+a prospective intent before calling the captured transport. The transport must
+publish the exact created carrier ID and birth through its one-use callback before
+start. A response cannot substitute that pin or omit its publication. Only the
+owner may publish idle after matching that pin with complete stopped and empty
+cleanup observations. No marker values, helper output or commands enter the journal.
+An exact canonical refused response with exit one may clear its proven absent
+finite helper intent; it still rejects the witness and admits no workload or repair.
+The journal changes independently of the generation receipt; the existing exact
+material-binding comparison remains unchanged.
+
+An interrupted prospective or created intent, missing journal or changed anchor
+blocks startup, run and normal down without another helper call. Explicit saved
+recovery may stop saved engine resources, but remains incomplete with its pending
+generation, witness reference and dependent claims retained. It cannot infer helper
+absence from an unpublished ID, replay the invocation or reset the journal. Fresh
+saved checks also precede both final receipt boundaries and material retirement.
+
+Exact image/program/ID labels, fixed mount correspondence,
 no image-declared anonymous volumes, dropped capabilities, no network/ports/socket,
 readonly root filesystem, finite CPU/memory/PID limits and absolute deadline/group
 reaping are mandatory before implementing the engine owner. Cancellation or an
 unknown create/start outcome keeps the anchor. Cleanup must prove the exact helper
 stopped before non-force removal and never remove data, witness, material or
-journals. This source contains no Docker transport or helper cleanup implementation.
+journals. This source contains no Docker transport, host deadline/group owner or
+helper cleanup implementation. Journal bytes validate the owning port contract;
+they do not replace actual stop and absence observations.
 
 ## Evidence limits and remaining gates
 
@@ -166,7 +188,10 @@ one create request, no overwrite/repair requests, missing/wrong witness under
 unchanged metadata, root/credential drift, callback capture and uncertain fsync
 or close; required Expected before cold provisioning; one seed; exact stopped
 adoption; resumed missing/same-birth-empty/foreign-root refusals; artifact,
-holder, context and cleanup drift; cancellation; and retained interrupted state.
+holder, context and cleanup drift; cancellation; retained interrupted state; and
+unknown enrolled-helper refusal through explicit saved recovery. These controls
+also reject an omitted created callback or changed carrier birth despite a
+synthetic successful response.
 They do not execute the Linux adapter or qualify kernel atomicity,
 permissions, xattr persistence, filesystem crash durability or Docker semantics.
 
@@ -181,7 +206,9 @@ Count every helper process, container and query. The first straightforward proof
 needs metadata discovery, a matching-UID read and a fresh metadata observation
 after that read. Initial enrollment adds a discovery and write helper before its
 separate three-invocation read-only proof. Required pre/post/final proofs
-therefore have a real startup cost. No performance improvement or production
+therefore have a real startup cost. Each finite invocation adds three synchronized
+private journal publications (intent, created pin and idle), without weakening the
+existing main receipt comparison. No performance improvement or production
 activation is claimed, and no persistent helper is proposed.
 
 Primary contracts: Linux [fsetxattr](https://man7.org/linux/man-pages/man2/fsetxattr.2.html),

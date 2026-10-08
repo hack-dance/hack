@@ -1,13 +1,23 @@
-import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertNativeComposeMaterialAuthority,
   type NativeComposeGeneration,
   type NativeComposeGenerationStore,
   type NativeComposeMutation,
   openNativeComposeGenerationStore,
 } from "../src/lib/native-compose-generation.ts";
+import * as carrierJournal from "../src/lib/native-compose-storage-carrier-journal.ts";
 import {
   enrollNativeComposeStorageXattrWitness,
   type NativeComposeStorageWitnessEnrollment,
@@ -121,6 +131,9 @@ function fake(store: NativeComposeGenerationStore) {
       | "readonly"
       | "uid"
       | "replay"
+      | "no-created"
+      | "changed-created"
+      | "created-uncertain"
       | null,
     generation: null as NativeComposeGeneration | null,
     afterInvoke: null as
@@ -166,6 +179,21 @@ function fake(store: NativeComposeGenerationStore) {
       if (state.failure === input.request.operation) {
         throw new Error("private child uncertainty");
       }
+      const carrierId = (state.failure === "replay" ? 1 : nextId++)
+        .toString(16)
+        .padStart(64, "0");
+      expect((await store.loadCurrent()).storageWitnessesPending).toBe(true);
+      if (state.failure !== "no-created") {
+        await input.recordCreated({
+          id: carrierId,
+          createdAt: volume.createdAt,
+        });
+      }
+      if (state.failure === "created-uncertain") {
+        throw new Error(
+          "private start uncertainty after exact create publication"
+        );
+      }
       const selectedRoot =
         state.failure === "pinned-root" && input.request.operation === "verify"
           ? { ...state.root, inode: "41" }
@@ -189,9 +217,6 @@ function fake(store: NativeComposeGenerationStore) {
           closeRoot: () => {},
         },
       });
-      const carrierId = (state.failure === "replay" ? 1 : nextId++)
-        .toString(16)
-        .padStart(64, "0");
       state.afterInvoke?.(input);
       return {
         artifact:
@@ -199,6 +224,10 @@ function fake(store: NativeComposeGenerationStore) {
             ? { ...artifact, helperHash: "f".repeat(64) }
             : input.artifact,
         carrierId,
+        carrierCreatedAt:
+          state.failure === "changed-created"
+            ? "2026-10-08T12:01:00Z"
+            : volume.createdAt,
         engineId,
         invocationId: input.invocationId,
         readonly:
@@ -213,7 +242,12 @@ function fake(store: NativeComposeGenerationStore) {
         response: encodeNativeComposeStorageXattrResponse(response),
         outcome: "complete",
         exitCode: response.outcome === "refused" ? 1 : 0,
-        stopped: { id: carrierId, running: false, pid: 0, exitCode: 0 },
+        stopped: {
+          id: carrierId,
+          running: false,
+          pid: 0,
+          exitCode: response.outcome === "refused" ? 1 : 0,
+        },
         containersAfterCleanup: state.failure === "cleanup" ? [carrierId] : [],
       };
     },
@@ -266,7 +300,7 @@ async function active() {
 test("durable tagged Expected precedes one cold provision/seed and fresh proof before workload", async () => {
   const { store, transport, reference } = await active();
   expect(reference).toMatchObject({
-    version: 2,
+    version: 3,
     kind: "directory-xattr",
     artifact,
     volume,
@@ -296,7 +330,7 @@ test("durable tagged Expected precedes one cold provision/seed and fresh proof b
 test("required xattr artifact/kind cannot be removed or relabeled as a legacy USTAR reference", async () => {
   const { store, reference } = await active();
   expect(nativeComposeStorageWitnessReferenceValid(reference)).toBe(true);
-  if (reference.version !== 2) {
+  if (reference.version !== 3) {
     throw new Error("Missing xattr reference");
   }
   const { artifact: ignoredArtifact, ...missingArtifact } = reference;
@@ -312,6 +346,12 @@ test("required xattr artifact/kind cannot be removed or relabeled as a legacy US
   expect(
     nativeComposeStorageWitnessReferenceValid({ ...reference, version: 1 })
   ).toBe(false);
+  expect(
+    nativeComposeStorageWitnessReferenceValid({ ...reference, version: 2 })
+  ).toBe(false);
+  const { carrierJournalToken: ignoredJournal, ...missingJournal } = reference;
+  expect(nativeComposeStorageWitnessReferenceValid(missingJournal)).toBe(false);
+  expect(ignoredJournal).toMatch(/^[a-f0-9]{32}$/);
   const states = (await store.loadCurrent()).storageWitnesses;
   expect(nativeComposeStorageWitnessStatesValid(states)).toBe(true);
   const tagged = states?.[0];
@@ -580,6 +620,238 @@ test("same-birth root replacement while awaiting the final reader cannot publish
   expect((await store.loadCurrent()).storageWitnesses?.[0]?.state).toBe(
     "enrolled"
   );
+});
+
+test("known finite refused marker read clears only its proven absent helper intent and never repairs the witness", async () => {
+  const { store, transport, generation, reference } = await active();
+  transport.attributes.clear();
+  transport.calls.length = 0;
+  let workload = 0;
+  await store.withMutation(async (mutation) => {
+    await expect(
+      mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        storageWitnesses: {
+          kind: "directory-xattr",
+          engineId,
+          carrier: transport.carrier,
+        },
+        effect: async () => {
+          workload++;
+          return { value: 0, outcome: "complete" };
+        },
+      })
+    ).rejects.toThrow("values omitted");
+  });
+  expect(workload).toBe(0);
+  expect(transport.attributes.size).toBe(0);
+  expect(transport.calls).not.toContain("seed");
+  expect(transport.calls).not.toContain("provision");
+  const failed = await store.loadCurrent();
+  expect(failed.storageWitnessesPending).toBe(false);
+  expect(failed.pending).toBeNull();
+  expect(failed.storageWitnesses?.[0]).toMatchObject({
+    state: "enrolled",
+    reference,
+  });
+  await store.withMutation(async (mutation) => {
+    await expect(
+      mutation.runEffect({
+        generation,
+        operation: "down",
+        recoverPending: true,
+        assertOwned: async () => {},
+        effect: async () => {
+          workload++;
+          return { value: 0, outcome: "complete" };
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+    expect(
+      await mutation.runEffect({
+        generation,
+        operation: "down",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => ({ value: 0, outcome: "complete" }),
+      })
+    ).toEqual({ value: 0, outcome: "complete" });
+  });
+  const stopped = await store.loadCurrent();
+  expect(stopped.stopped).toBe(true);
+  expect(stopped.pending).toBeNull();
+  expect(stopped.storageWitnesses?.[0]).toMatchObject({
+    state: "enrolled",
+    reference,
+  });
+});
+
+test.each([
+  "no-created",
+  "changed-created",
+  "created-uncertain",
+  "cleanup",
+] as const)("unknown enrolled helper %s blocks replay and saved retirement without changing the main material receipt", async (failure) => {
+  const { store, transport, generation, reference } = await active();
+  transport.state.failure = failure;
+  transport.calls.length = 0;
+  let workload = 0;
+  await store.withMutation(async (mutation) => {
+    await expect(
+      mutation.runEffect({
+        generation,
+        operation: "run",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        storageWitnesses: {
+          kind: "directory-xattr",
+          engineId,
+          carrier: transport.carrier,
+        },
+        effect: async () => {
+          workload++;
+          return { value: 0, outcome: "complete" };
+        },
+      })
+    ).rejects.toThrow("values omitted");
+  });
+  expect(workload).toBe(0);
+  const unknown = await store.loadCurrent();
+  expect(unknown.generation?.generationId).toBe(generation.generationId);
+  expect(unknown.pending).toBeNull();
+  expect(unknown.storageWitnessesPending).toBe(true);
+  expect(unknown.storageWitnesses?.[0]).toMatchObject({
+    state: "enrolled",
+    reference,
+  });
+  const observed = [...transport.calls];
+  await store.withMutation(async (mutation) => {
+    if (failure === "no-created") {
+      const foreignGeneration = await publish(mutation);
+      await expect(
+        mutation.runEffect({
+          generation: foreignGeneration,
+          operation: "down",
+          recoverPending: true,
+          assertOwned: async () => {},
+          effect: async () => {
+            workload++;
+            return { value: 0, outcome: "complete" };
+          },
+        })
+      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+    }
+    for (const operation of ["up", "down"] as const) {
+      await expect(
+        mutation.runEffect({
+          generation,
+          operation,
+          assertFresh: async () => {},
+          assertOwned: async () => {},
+          effect: async () => {
+            workload++;
+            return { value: 0, outcome: "complete" };
+          },
+        })
+      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+    }
+    const stopped = await mutation.runEffect({
+      generation,
+      operation: "down",
+      recoverPending: true,
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      effect: async () => {
+        workload++;
+        return { value: 0, outcome: "complete" };
+      },
+      beforeComplete: async () => {
+        throw new Error("Unknown helper cannot retire claims");
+      },
+    });
+    expect(stopped).toEqual({ value: 0, outcome: "uncertain" });
+  });
+  expect(workload).toBe(1);
+  expect(transport.calls).toEqual(observed);
+  const retained = await store.loadCurrent();
+  expect(retained.pending?.generationId).toBe(generation.generationId);
+  expect(retained.storageWitnessesPending).toBe(true);
+  expect(retained.storageWitnesses?.[0]).toMatchObject({
+    state: "enrolled",
+    reference,
+  });
+});
+
+test("retirement rereads the original receipt after its final carrier-journal await", async () => {
+  const { store, generation } = await active();
+  const original = carrierJournal.nativeComposeStorageCarriersPending;
+  let pause = false;
+  let enter = () => {};
+  let release = () => {};
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve;
+  });
+  const resumed = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const probe = spyOn(
+    carrierJournal,
+    "nativeComposeStorageCarriersPending"
+  ).mockImplementation(async (opts) => {
+    if (pause) {
+      pause = false;
+      enter();
+      await resumed;
+    }
+    return await original(opts);
+  });
+  try {
+    await store.withMutation(async (mutation) => {
+      expect(
+        await mutation.runEffect({
+          generation,
+          operation: "down",
+          assertOwned: async () => {},
+          effect: async () => {
+            pause = true;
+            const retirement = assertNativeComposeMaterialAuthority({
+              authority: mutation.materialAuthority,
+              generation,
+              phase: "retire",
+            });
+            await entered;
+            // Adversarial substitution only in this isolated synthetic store: same
+            // complete bytes, different inode while the final journal probe awaits.
+            const path = join(
+              store.identity.checkoutRoot,
+              ".hack",
+              ".internal",
+              "native-compose",
+              store.identity.instanceId,
+              "receipt.json"
+            );
+            const bytes = await readFile(path);
+            await writeFile(`${path}.replacement`, bytes, {
+              mode: 0o600,
+              flag: "wx",
+            });
+            await rename(`${path}.replacement`, path);
+            release();
+            await expect(retirement).rejects.toMatchObject({
+              code: "E_NATIVE_COMPOSE_STATE",
+            });
+            return { value: 0, outcome: "uncertain" };
+          },
+        })
+      ).toEqual({ value: 0, outcome: "uncertain" });
+    });
+  } finally {
+    release();
+    probe.mockRestore();
+  }
 });
 
 test("captured artifacts/ports cannot be substituted and cancelled lifetime stops before engine callbacks", async () => {

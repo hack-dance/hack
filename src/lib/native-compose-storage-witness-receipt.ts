@@ -152,7 +152,7 @@ export function createNativeComposeStorageWitnessReceiptProtocol<
     const { verifyNativeComposeStorageWitness } = await import(
       "./native-compose-storage-witness.ts"
     );
-    if (entry.reference.version === 2) {
+    if (entry.reference.version === 3) {
       if (carrier.kind !== "directory-xattr") {
         return refuse();
       }

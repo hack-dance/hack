@@ -27,6 +27,10 @@ import {
   nativeComposeRetainedVolumesValid,
 } from "./native-compose-retained-storage.ts";
 import {
+  beginNativeComposeStorageCarrierIntent,
+  initializeNativeComposeStorageCarrierJournal,
+} from "./native-compose-storage-carrier-journal.ts";
+import {
   encodeNativeComposeStorageWitnessArchive,
   type NativeComposeStorageWitnessMarker,
   nativeComposeStorageWitnessMarkerValid,
@@ -88,9 +92,10 @@ type ExpectationBinding = {
   readonly originalVolume: NativeComposeRetainedVolume | null;
 };
 type XattrExpectation = ExpectationBinding & {
-  readonly version: 2;
+  readonly version: 3;
   readonly kind: "directory-xattr";
   readonly artifact: NativeComposeStorageXattrArtifact;
+  readonly carrierJournalToken: string;
   readonly marker: NativeComposeStorageXattrMarker;
 };
 type Expectation = ExpectationBinding &
@@ -113,7 +118,7 @@ type Completion = CompletionBinding &
   (
     | { readonly version: 1 }
     | {
-        readonly version: 2;
+        readonly version: 3;
         readonly kind: "directory-xattr";
         readonly kernelProof: KernelProof;
       }
@@ -220,11 +225,11 @@ function expectationRecordValid(value: unknown): value is Record<
     isRecord(value) &&
     ((value.version === 1 &&
       keys(value, "admission,binding,marker,originalVolume,version")) ||
-      (value.version === 2 &&
+      (value.version === 3 &&
         value.kind === "directory-xattr" &&
         keys(
           value,
-          "admission,artifact,binding,kind,marker,originalVolume,version"
+          "admission,artifact,binding,carrierJournalToken,kind,marker,originalVolume,version"
         ))) &&
     bindingValid(value.binding) &&
     isRecord(value.marker) &&
@@ -288,9 +293,14 @@ function expectation(text: string): Expectation {
   }
   return {
     ...common,
-    version: 2,
+    version: 3,
     kind: "directory-xattr",
     artifact: captureNativeComposeStorageXattrArtifact(value.artifact),
+    carrierJournalToken:
+      typeof value.carrierJournalToken === "string" &&
+      TOKEN.test(value.carrierJournalToken)
+        ? value.carrierJournalToken
+        : refuse(),
     marker: {
       kind: marker.kind,
       version: marker.version,
@@ -312,7 +322,7 @@ function completion(text: string): Completion {
     !(
       isRecord(value) &&
       ((value.version === 1 && keys(value, "expectationHash,version,volume")) ||
-        (value.version === 2 &&
+        (value.version === 3 &&
           value.kind === "directory-xattr" &&
           keys(value, "expectationHash,kernelProof,kind,version,volume") &&
           isRecord(value.kernelProof) &&
@@ -344,7 +354,7 @@ function completion(text: string): Completion {
   }
   return {
     ...common,
-    version: 2,
+    version: 3,
     kind: "directory-xattr",
     kernelProof: {
       root: { ...value.kernelProof.root },
@@ -451,6 +461,7 @@ async function invokeXattr(opts: {
   readonly volume: NativeComposeRetainedVolume;
   readonly stopped: boolean;
   readonly check: XattrCheck;
+  readonly journal: HeldDirectory;
   readonly request: Parameters<
     typeof decodeNativeComposeStorageXattrRequest
   >[0];
@@ -462,7 +473,7 @@ async function invokeXattr(opts: {
   }
   const current = await opts.check();
   checkNativeComposeStorageXattrCarrierLifetime(opts.carrier);
-  const input: NativeComposeStorageXattrInvocation = Object.freeze({
+  const captured = Object.freeze({
     invocationId: randomBytes(16).toString("hex"),
     artifact: opts.saved.artifact,
     target,
@@ -476,6 +487,21 @@ async function invokeXattr(opts: {
       pendingGenerationId: current.pendingGenerationId,
       pendingToken: current.pendingToken,
     }),
+  });
+  const journal = await beginNativeComposeStorageCarrierIntent({
+    directory: opts.journal,
+    token: opts.saved.carrierJournalToken,
+    check: opts.check,
+    input: captured,
+  });
+  const beforeInvoke = await opts.check();
+  checkNativeComposeStorageXattrCarrierLifetime(opts.carrier);
+  if (JSON.stringify(current) !== JSON.stringify(beforeInvoke)) {
+    return refuse();
+  }
+  const input: NativeComposeStorageXattrInvocation = Object.freeze({
+    ...captured,
+    recordCreated: journal.recordCreated,
   });
   const value = await nativeComposeStorageXattrCarrierPorts(
     opts.carrier
@@ -495,10 +521,18 @@ async function invokeXattr(opts: {
   if (JSON.stringify(after) !== JSON.stringify(target)) {
     return refuse();
   }
+  await journal.complete(result.created);
+  await opts.check();
+  checkNativeComposeStorageXattrCarrierLifetime(opts.carrier);
+  const expectedOutcome = (
+    { root: "root", seed: "seeded", verify: "verified" } as const
+  )[request.operation];
+  if (result.response.outcome !== expectedOutcome) {
+    return refuse();
+  }
   if (
     request.operation !== "root" &&
-    (result.response.outcome === "refused" ||
-      !sameNativeComposeStorageXattrRoot(result.response.root, request.root))
+    !sameNativeComposeStorageXattrRoot(result.response.root, request.root)
   ) {
     return refuse();
   }
@@ -510,6 +544,7 @@ async function observeXattr(opts: {
   readonly volume: NativeComposeRetainedVolume;
   readonly stopped: boolean;
   readonly check: XattrCheck;
+  readonly journal: HeldDirectory;
 }): Promise<{
   readonly volume: NativeComposeRetainedVolume;
   readonly kernelProof: KernelProof;
@@ -563,6 +598,7 @@ async function seedXattr(opts: {
   readonly carrier: NativeComposeStorageXattrCarrier;
   readonly saved: XattrExpectation;
   readonly check: XattrCheck;
+  readonly journal: HeldDirectory;
 }): Promise<{
   readonly volume: NativeComposeRetainedVolume;
   readonly kernelProof: KernelProof;
@@ -725,13 +761,14 @@ async function observeEnrollment(opts: {
     readonly archive: Uint8Array;
   }>;
   readonly check: XattrCheck;
+  readonly journal: HeldDirectory;
 }): Promise<EnrollmentObservation> {
   const { saved, carrier, seed, observe, check } = opts;
-  if (saved.version === 2) {
+  if (saved.version === 3) {
     if (seed || observe || !carrier) {
       return refuse();
     }
-    return await seedXattr({ carrier, saved, check });
+    return await seedXattr({ carrier, saved, check, journal: opts.journal });
   }
   if (!(seed && observe) || carrier) {
     return refuse();
@@ -772,7 +809,8 @@ function expectationMatchesReference(opts: {
     return true;
   }
   return (
-    reference.version === 2 &&
+    reference.version === 3 &&
+    saved.carrierJournalToken === reference.carrierJournalToken &&
     JSON.stringify(saved.artifact) ===
       JSON.stringify(
         captureNativeComposeStorageXattrArtifact(reference.artifact)
@@ -835,9 +873,10 @@ export async function prepareNativeComposeStorageWitness(opts: {
       const record: Expectation = artifact
         ? {
             ...common,
-            version: 2,
+            version: 3,
             kind: "directory-xattr",
             artifact,
+            carrierJournalToken: randomBytes(16).toString("hex"),
             marker: createNativeComposeStorageXattrMarker(),
           }
         : {
@@ -854,7 +893,7 @@ export async function prepareNativeComposeStorageWitness(opts: {
         return refuse();
       }
       await input.assertAdmission();
-      if (input.xattrCarrier && record.version === 2) {
+      if (input.xattrCarrier && record.version === 3) {
         const target = await inspectXattr({
           carrier: input.xattrCarrier,
           saved: record,
@@ -886,8 +925,13 @@ export async function prepareNativeComposeStorageWitness(opts: {
         authority: input.authority,
         generation: input.generation,
         intent:
-          record.version === 2
-            ? { ...intent, carrier: record.kind, artifact: record.artifact }
+          record.version === 3
+            ? {
+                ...intent,
+                carrier: record.kind,
+                artifact: record.artifact,
+                carrierJournalToken: record.carrierJournalToken,
+              }
             : intent,
       });
       const held = await directories({
@@ -909,6 +953,28 @@ export async function prepareNativeComposeStorageWitness(opts: {
         });
         if (!matchesAdmission(binding, latest)) {
           return refuse();
+        }
+        if (record.version === 3) {
+          await initializeNativeComposeStorageCarrierJournal({
+            directory: last(held),
+            token: record.carrierJournalToken,
+            check: async () => {
+              await checkedExpectation(held, anchor({ info, text }));
+              const live = await assertNativeComposeMaterialAuthority({
+                authority: input.authority,
+                generation: input.generation,
+                phase: "effect",
+              });
+              if (!matchesAdmission(binding, live)) {
+                return refuse();
+              }
+              if (input.xattrCarrier) {
+                checkNativeComposeStorageXattrCarrierLifetime(
+                  input.xattrCarrier
+                );
+              }
+            },
+          });
         }
         if (input.xattrCarrier) {
           checkNativeComposeStorageXattrCarrierLifetime(input.xattrCarrier);
@@ -991,6 +1057,7 @@ export async function enrollNativeComposeStorageWitness(opts: {
           seed,
           observe,
           check: live,
+          journal: last(held),
         });
         const volume = parseVolume(observed.volume);
         if (
@@ -1006,7 +1073,7 @@ export async function enrollNativeComposeStorageWitness(opts: {
           saved.version === 1
             ? { version: 1, expectationHash: selected.anchor.hash, volume }
             : {
-                version: 2,
+                version: 3,
                 kind: "directory-xattr",
                 expectationHash: selected.anchor.hash,
                 volume,
@@ -1042,9 +1109,10 @@ export async function enrollNativeComposeStorageWitness(opts: {
             ? { ...anchors, version: 1 as const }
             : {
                 ...anchors,
-                version: 2 as const,
+                version: 3 as const,
                 kind: "directory-xattr" as const,
                 artifact: saved.artifact,
+                carrierJournalToken: saved.carrierJournalToken,
               }
         );
         const proof = Object.freeze({});
@@ -1103,7 +1171,7 @@ export async function verifyNativeComposeStorageWitness(opts: {
     return refuse();
   }
   if (
-    reference.version === 2 &&
+    reference.version === 3 &&
     xattrCarrier &&
     JSON.stringify(
       captureNativeComposeStorageXattrArtifact(reference.artifact)
@@ -1172,6 +1240,7 @@ export async function verifyNativeComposeStorageWitness(opts: {
             saved,
             volume: reference.volume,
             stopped: false,
+            journal: last(held),
             check: async () => {
               await checkedExpectation(held, reference.expectation);
               await readCompletion();

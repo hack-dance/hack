@@ -27,6 +27,7 @@ import {
   nativeComposeRetainedVolumesValid,
 } from "./native-compose-retained-storage.ts";
 import { projectNativeComposeOneOff } from "./native-compose-run-projection.ts";
+import { nativeComposeStorageCarriersPending } from "./native-compose-storage-carrier-journal.ts";
 import { createNativeComposeStorageWitnessReceiptProtocol } from "./native-compose-storage-witness-receipt.ts";
 import {
   type NativeComposeStorageWitnessCompletionProof,
@@ -421,6 +422,15 @@ type Receipt = {
 function witnessPending(state: Receipt): boolean {
   return (
     state.storageWitnesses?.some((entry) => entry.state === "expected") ?? false
+  );
+}
+async function witnessWorkPending(state: Receipt): Promise<boolean> {
+  return (
+    witnessPending(state) ||
+    (await nativeComposeStorageCarriersPending({
+      identity: state.identity,
+      states: state.storageWitnesses,
+    }))
   );
 }
 type FileIdentity = { readonly dev: number; readonly ino: number };
@@ -972,7 +982,8 @@ function hookComplete<T>(result: {
 function admitEffect<T>(
   input: NativeComposeEffectOptions<T>,
   state: Receipt,
-  mode: "prepare" | "saved" | undefined
+  mode: "prepare" | "saved" | undefined,
+  admission: { readonly carrierRecovery: boolean }
 ): void {
   if (!["up", "restart", "run", "down"].includes(input.operation)) {
     refuse();
@@ -1015,7 +1026,11 @@ function admitEffect<T>(
   ) {
     throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
   }
-  if (input.recoverPending && state.pending === null) {
+  if (
+    input.recoverPending &&
+    state.pending === null &&
+    !admission.carrierRecovery
+  ) {
     refuse();
   }
 }
@@ -1521,7 +1536,7 @@ export async function openNativeComposeGenerationStore(opts: {
         await held.file.close();
       }
     };
-    const requireFinalPending = (
+    const requireFinalPending = async (
       latest: Receipt,
       pending: Receipt["pending"],
       operation: NativeComposeOperation,
@@ -1531,7 +1546,7 @@ export async function openNativeComposeGenerationStore(opts: {
         JSON.stringify(latest.pending) !== JSON.stringify(pending) ||
         ((operation !== "down" || hasDownHooks) &&
           latest.beforeHooks !== null) ||
-        witnessPending(latest)
+        (await witnessWorkPending(latest))
       ) {
         refuse();
       }
@@ -1574,7 +1589,7 @@ export async function openNativeComposeGenerationStore(opts: {
       await rememberStorage(input);
       await assertWitnesses();
       let latest = await receipt();
-      requireFinalPending(
+      await requireFinalPending(
         latest,
         pending,
         input.operation,
@@ -1593,7 +1608,7 @@ export async function openNativeComposeGenerationStore(opts: {
         await rememberStorage(input);
         await assertWitnesses();
         latest = await receipt();
-        requireFinalPending(
+        await requireFinalPending(
           latest,
           pending,
           input.operation,
@@ -1632,7 +1647,7 @@ export async function openNativeComposeGenerationStore(opts: {
           storageWitnesses: state.storageWitnesses
             ? structuredClone(state.storageWitnesses)
             : null,
-          storageWitnessesPending: witnessPending(state),
+          storageWitnessesPending: await witnessWorkPending(state),
         };
         Object.defineProperty(result, "retainedStorage", { enumerable: false });
         Object.defineProperty(result, "storageWitnesses", {
@@ -1682,6 +1697,16 @@ export async function openNativeComposeGenerationStore(opts: {
               refuse();
             }
           };
+          const matchesMutationReceipt = (
+            read: Awaited<ReturnType<typeof readPrivate>>
+          ) =>
+            mutationReceipt !== null &&
+            sameFile(read.info, mutationReceipt) &&
+            read.text === mutationReceipt.text;
+          const sameReceiptRead = (
+            left: Awaited<ReturnType<typeof readPrivate>>,
+            right: Awaited<ReturnType<typeof readPrivate>>
+          ) => sameFile(left.info, right.info) && left.text === right.text;
           materialActions.set(materialAuthority, async (run) => {
             requireActive();
             const work = run();
@@ -1763,11 +1788,7 @@ export async function openNativeComposeGenerationStore(opts: {
             requireActive();
             await lease.assertHeld();
             const read = await readPrivate(receiptPath, RECEIPT_LIMIT);
-            if (
-              mutationReceipt === null ||
-              !sameFile(read.info, mutationReceipt) ||
-              read.text !== mutationReceipt.text
-            ) {
+            if (!matchesMutationReceipt(read)) {
               return refuse();
             }
             const state = parseReceipt(
@@ -1779,13 +1800,16 @@ export async function openNativeComposeGenerationStore(opts: {
               selection,
               state
             );
+            if (
+              selection.phase === "retire" &&
+              (await witnessWorkPending(state))
+            ) {
+              return refuse();
+            }
             await lease.assertHeld();
             const latest = await readPrivate(receiptPath, RECEIPT_LIMIT);
             requireActive();
-            if (
-              !sameFile(read.info, latest.info) ||
-              read.text !== latest.text
-            ) {
+            if (!sameReceiptRead(read, latest)) {
               return refuse();
             }
             requireMaterialEffectLive({
@@ -1937,7 +1961,7 @@ export async function openNativeComposeGenerationStore(opts: {
           ) => {
             if (
               result.outcome !== "complete" ||
-              witnessPending(await receipt())
+              (await witnessWorkPending(await receipt()))
             ) {
               // Saved recovery may stop engine resources, but unresolved enrollment keeps its anchor.
               await rememberStorage(input);
@@ -2251,13 +2275,45 @@ export async function openNativeComposeGenerationStore(opts: {
               });
               return await runAction(async () => {
                 requireActive();
+                const admit = async (state: Receipt) => {
+                  const unknown = await witnessWorkPending(state);
+                  if (
+                    unknown &&
+                    !(
+                      input.operation === "down" &&
+                      input.recoverPending === true
+                    )
+                  ) {
+                    throw new NativeComposeGenerationError(
+                      "E_NATIVE_COMPOSE_UNCERTAIN"
+                    );
+                  }
+                  // A read-only preflight can leave required helper intent before a
+                  // main workload intent exists. Only exact saved down recovery may
+                  // arm its stop; all generic empty-pending recovery still refuses.
+                  const carrierRecovery =
+                    unknown &&
+                    state.pending === null &&
+                    !witnessPending(state) &&
+                    input.operation === "down" &&
+                    input.recoverPending === true &&
+                    state.current?.generationId ===
+                      input.generation.generationId &&
+                    (state.storageWitnesses?.some(
+                      (entry) =>
+                        entry.state === "enrolled" &&
+                        entry.reference.version === 3
+                    ) ??
+                      false);
+                  admitEffect(input, state, opts.mode, { carrierRecovery });
+                };
                 let state = await receipt();
-                admitEffect(input, state, opts.mode);
+                await admit(state);
                 await checkEffect(input);
                 // Ownership can publish newly observed births. Never overwrite them
                 // with the pre-observation receipt when arming the effect intent.
                 state = await receipt();
-                admitEffect(input, state, opts.mode);
+                await admit(state);
                 const anchor = knownAnchor(input.generation);
                 const pending = effectPending(state, input, anchor);
                 await save({ ...state, pending });

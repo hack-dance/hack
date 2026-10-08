@@ -27,9 +27,10 @@ export type NativeComposeStorageWitnessReference = ReferenceAnchors &
   (
     | { readonly version: 1 }
     | {
-        readonly version: 2;
+        readonly version: 3;
         readonly kind: "directory-xattr";
         readonly artifact: NativeComposeStorageXattrArtifact;
+        readonly carrierJournalToken: string;
       }
   );
 /** Issued privately by the witness owner. An object copy cannot authorize receipt publication. */
@@ -51,6 +52,7 @@ export type NativeComposeStorageWitnessIntent = IntentBinding &
     | {
         readonly carrier: "directory-xattr";
         readonly artifact: NativeComposeStorageXattrArtifact;
+        readonly carrierJournalToken: string;
       }
   );
 /** Required v3 state: Expected survives every interruption; only this invocation can enroll. */
@@ -93,12 +95,14 @@ export function nativeComposeStorageWitnessReferenceValid(
     isRecord(value) &&
     ((value.version === 1 &&
       keys(value, "completion,directory,expectation,root,version,volume")) ||
-      (value.version === 2 &&
+      (value.version === 3 &&
         keys(
           value,
-          "artifact,completion,directory,expectation,kind,root,version,volume"
+          "artifact,carrierJournalToken,completion,directory,expectation,kind,root,version,volume"
         ) &&
         value.kind === "directory-xattr" &&
+        typeof value.carrierJournalToken === "string" &&
+        TOKEN.test(value.carrierJournalToken) &&
         nativeComposeStorageXattrArtifactValid(value.artifact))) &&
     nativeComposeRetainedVolumesValid([value.volume]) &&
     directoryValid(value.root) &&
@@ -116,9 +120,11 @@ export function nativeComposeStorageWitnessIntentValid(
       (Object.hasOwn(value, "carrier")
         ? keys(
             value,
-            "admission,artifact,carrier,engineId,generationId,name,originalVolume,pendingToken,storage"
+            "admission,artifact,carrier,carrierJournalToken,engineId,generationId,name,originalVolume,pendingToken,storage"
           ) &&
           value.carrier === "directory-xattr" &&
+          typeof value.carrierJournalToken === "string" &&
+          TOKEN.test(value.carrierJournalToken) &&
           nativeComposeStorageXattrArtifactValid(value.artifact)
         : keys(
             value,
@@ -161,7 +167,8 @@ function enrolledReferenceMatches(
   }
   const carrierMatches =
     intent.carrier === "directory-xattr"
-      ? reference.version === 2 &&
+      ? reference.version === 3 &&
+        reference.carrierJournalToken === intent.carrierJournalToken &&
         JSON.stringify(
           captureNativeComposeStorageXattrArtifact(reference.artifact)
         ) ===
@@ -202,7 +209,9 @@ export function nativeComposeStorageWitnessStatesValid(
             "state",
             "storage",
             ...(entry.state === "expected" ? [] : ["reference"]),
-            ...(Object.hasOwn(entry, "carrier") ? ["artifact", "carrier"] : []),
+            ...(Object.hasOwn(entry, "carrier")
+              ? ["artifact", "carrier", "carrierJournalToken"]
+              : []),
           ]
             .sort()
             .join(",")

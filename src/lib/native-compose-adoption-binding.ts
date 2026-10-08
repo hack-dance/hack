@@ -32,7 +32,7 @@ const ROUTING = [
 const formats = {
   container: {
     list: `{"id":{{json .ID}},"name":{{json .Names}},"project":{{json (.Label "${PROJECT}")}}}`,
-    inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT}")}},"native":{{json (index .Config.Labels "${VERSION}")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"number":{{json (index .Config.Labels "com.docker.compose.container-number")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"workingDir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"configFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"mounts":[{{range $i, $m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{json $m.Name}},"source":{{json $m.Source}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}],"networks":[{{$first := true}}{{range $name, $n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}}}{{end}}]}`,
+    inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT}")}},"native":{{json (index .Config.Labels "${VERSION}")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"number":{{json (index .Config.Labels "com.docker.compose.container-number")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"running":{{json .State.Running}},"workingDir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"configFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"mounts":[{{range $i, $m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{json $m.Name}},"source":{{json $m.Source}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}],"networks":[{{$first := true}}{{range $name, $n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}}}{{end}}]}`,
   },
   volume: {
     list: `{"id":{{json .Name}},"name":{{json .Name}},"project":{{json (.Label "${PROJECT}")}}}`,
@@ -343,6 +343,7 @@ function containerRows(
         "service",
         "number",
         "oneoff",
+        "running",
         "workingDir",
         "configFiles",
         "mounts",
@@ -354,6 +355,7 @@ function containerRows(
           !services.has(row.service) &&
           row.number === "1" &&
           (row.oneoff === "False" || row.oneoff === "false") &&
+          typeof row.running === "boolean" &&
           row.workingDir === resolve(opts.root, ".hack") &&
           row.configFiles === resolve(opts.root, ".hack/docker-compose.yml") &&
           typeof row.id === "string" &&
@@ -471,18 +473,28 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
     }),
     opts.intent
   );
-  const containers = containerRows(
-    await inspect({
-      kind: "container",
-      probe,
-      resources: selected.container,
-      project: opts.intent.composeProject,
-    }),
-    { ...opts, volumes, network }
-  );
+  const containerFacts = await inspect({
+    kind: "container",
+    probe,
+    resources: selected.container,
+    project: opts.intent.composeProject,
+  });
+  const containers = containerRows(containerFacts, {
+    ...opts,
+    volumes,
+    network,
+  });
+  // Docker drops stopped endpoints from network inspection. Every original must
+  // still configure this exact NetworkID; active membership is exactly the
+  // currently running originals. This transient state never enters the binding.
   requireValue(
     JSON.stringify([...containerIds].sort()) ===
-      JSON.stringify(containers.map((container) => container.id).sort())
+      JSON.stringify(
+        containerFacts
+          .filter((container) => container.running)
+          .map((container) => container.id)
+          .sort()
+      )
   );
   for (const kind of ["container", "volume", "network"] as const) {
     requireValue(

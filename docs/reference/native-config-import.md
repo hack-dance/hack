@@ -24,15 +24,17 @@ reported as successful.
 | `defaultEnvConfig`, `default_env_config`, `env.defaultOverlay`, `env.default_overlay` | `environment.default_overlay`; all present aliases must select the same overlay |
 | Boolean `worktree.auto_branch` / `autoBranch` and `inherit_local` / `inheritLocal` | The equivalent native worktree policy; conflicting aliases refuse |
 | Optional Compose `name` | Must exactly equal the explicit project name |
-| Image-only services | The same logical service names and image strings |
+| Image-only services and explicit completion jobs | The same logical workload names and image strings |
 | Array or bounded string `command` and `entrypoint` | Explicit native exec arrays; Compose string words are split without an implicit shell, complete `$$` pairs become literal `$` arguments, and an empty entrypoint remains explicit |
 | `working_dir`, boolean `init` | `working_directory`, `init` |
 | `pull_policy` of `always`, `never`, `missing` | The same authored acquisition intent |
-| `restart` of `no`, `always`, `unless-stopped`, `on-failure[:N]` | Native restart intent; retry counts must fit a positive u32 |
+| Service `restart` of `no`, `always`, `unless-stopped`, `on-failure[:N]` | Native restart intent; retry counts must fit a positive u32; jobs accept only explicit `no` or omission |
 | String `stop_signal`, `stop_grace_period` | Native shutdown signal/grace, validated by the compiler |
 | String environment map or `KEY=value` list | Native `default` bindings, preserving managed-value precedence and empty values |
-| Nonempty canonical `profiles` lists | Native service selection and the union of declared profiles |
+| Nonempty canonical `profiles` lists | Native workload selection and the union of declared profiles |
 | Short `depends_on` lists, or long edges with `service_started` / `service_healthy` | Native service `started` / `ready` edges; `required` must be absent/true and `restart` absent/false |
+| Long edges with `service_completed_successfully` | The referenced declaration becomes a native job; the edge becomes `job` / `completed` |
+| Exact `hack.service.one-shot: "true"` label map or singleton `hack.service.one-shot=true` label list | An explicit standalone native job; the known marker is consumed as semantic provenance, without adding resource labels |
 | `healthcheck.test: [CMD, executable, ...args]` with authored positive `interval`, `timeout`, `retries` | Native exec readiness; complete argument dollar pairs decode once, and the compiler validates timings |
 
 Names in this slice use lowercase letters, digits and single hyphen separators.
@@ -55,19 +57,40 @@ rather than inheriting ambient environment. Environment list entries without `=`
 names, nulls and non-string values refuse.
 
 Every unknown field remains a refusal, including fields in inactive profiles.
-Builds, volumes/bind mounts, networks, ports, labels,
+Builds, volumes/bind mounts, networks, ports, other labels,
 routes, host/lifecycle settings, `env_file`, deployment options and extensions
 are outside the first slice. They cannot be silently omitted from a complete
 conversion.
+
+Completion roles are discovered before declarations are converted, including
+inactive declarations. A completed target or explicit one-shot keeps its authored
+argv, entrypoint, environment and other supported fields under `jobs`; original
+field positions remain in the report with native job targets. Unmarked installers,
+command text, service names, `restart: no` and observed exit zero do not infer jobs.
+The same target cannot also satisfy a started or healthy service edge. Undeclared
+completed targets, optional or restart-propagating edges, mixed or noncanonical
+one-shot labels, job health checks and non-`no` job restart policies refuse. Omitted
+job restart stays omitted; no native default is invented. Supported profile fields
+remain authored selection, and unsupported fields in inactive jobs still refuse.
+
+This is pure conversion, not retained-job adoption. Existing retained adoption
+owners still refuse job candidates: their receipt versions do not qualify job
+ordering, completion, recovery or replay. A job import preview does not upgrade a
+receipt, launch or recreate a container, transfer ownership, or qualify application
+migration. Job-aware retained lifecycle and two-worktree data acceptance remain
+separate work.
+
+Custom-network job combinations remain refused; no static-bridge import or
+retained network authority is added by this completed-job conversion.
 
 Health intervals and timeouts must use integer `ms`, `s`, `m` or `h` durations
 that fit the compiler's positive u32 milliseconds. Missing or zero timings,
 `CMD-SHELL`, string probes, `NONE`, disabled probes, `start_period` and
 `start_interval` refuse: image health settings and image `SHELL` are not acquired,
 and the native contract cannot express all of those options. Explicit `disable:
-false` is the default enabled setting. Optional edges, restart propagation and
-`service_completed_successfully` refuse. Completed jobs remain a required later
-conversion and retained execution slice. Unknown HTTP/TCP fields also refuse.
+false` is the default enabled setting. Optional edges and restart propagation
+refuse. Completed-job conversion is supported as described above; retained-job
+execution remains a separate slice. Unknown HTTP/TCP fields also refuse.
 The compiler rejects missing, cyclic or inactive dependency targets and ready
 edges whose target has no explicit readiness. Refusals include inactive profiles.
 

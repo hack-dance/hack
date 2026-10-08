@@ -15,12 +15,15 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as generationOwner from "../src/lib/native-compose-generation.ts";
 import {
+  armNativeComposeStorageWitnessIntent,
   assertNativeComposeMaterialAuthority,
   type NativeComposeGeneration,
   type NativeComposeGenerationStore,
   type NativeComposeMutation,
   openNativeComposeGenerationStore,
+  publishNativeComposeStorageWitnessEnrollment,
 } from "../src/lib/native-compose-generation.ts";
 import { mergeNativeComposeRetainedVolumes } from "../src/lib/native-compose-retained-storage.ts";
 import {
@@ -1221,4 +1224,100 @@ test("witness-bearing before hooks refuse before private acquisition or spawn wh
   expect(acquisitions).toBe(0);
   expect(effects).toBe(0);
   expect((await store.loadCurrent()).beforeHooksPending).toBe(false);
+});
+
+test("a shape-valid fabricated reference and no-op verifier cannot promote Expected", async () => {
+  const store = await fixture();
+  let suppliedVerifiers = 0;
+  await store.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    await mutation.runEffect({
+      generation,
+      operation: "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      effect: async () => {
+        const binding = await assertNativeComposeMaterialAuthority({
+          authority: mutation.materialAuthority,
+          generation,
+          phase: "effect",
+        });
+        if (!binding.pendingToken) {
+          throw new Error("Expected active pending token");
+        }
+        await armNativeComposeStorageWitnessIntent({
+          authority: mutation.materialAuthority,
+          generation,
+          intent: {
+            name: volume.name,
+            storage: volume.storage,
+            engineId,
+            generationId: generation.generationId,
+            pendingToken: binding.pendingToken,
+            admission: "initial-create",
+            originalVolume: null,
+          },
+        });
+        const forged = {
+          authority: mutation.materialAuthority,
+          generation,
+          proof: {},
+          reference: {
+            version: 1 as const,
+            volume,
+            root: { dev: 1, ino: 1 },
+            directory: { dev: 1, ino: 2 },
+            expectation: { dev: 1, ino: 3, hash: "a".repeat(64) },
+            completion: { dev: 1, ino: 4, hash: "b".repeat(64) },
+          },
+          verify: async () => {
+            suppliedVerifiers++;
+          },
+        };
+        await expect(
+          publishNativeComposeStorageWitnessEnrollment(forged)
+        ).rejects.toThrow("values omitted");
+        return { value: 0, outcome: "uncertain" };
+      },
+    });
+  });
+  expect(suppliedVerifiers).toBe(0);
+  const current = await store.loadCurrent();
+  expect(current.storageWitnessesPending).toBe(true);
+  expect(current.storageWitnesses?.[0]?.state).toBe("expected");
+  expect(current.generation).toBeNull();
+  await expect(lstat(slot(store))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("issued completion proof rejects copies, changed authority/generation and reuse without consuming the original", async () => {
+  const originalPublish =
+    generationOwner.publishNativeComposeStorageWitnessEnrollment;
+  let publications = 0;
+  const mocked = spyOn(
+    generationOwner,
+    "publishNativeComposeStorageWitnessEnrollment"
+  ).mockImplementation(async (opts) => {
+    publications++;
+    await expect(
+      originalPublish({ ...opts, proof: { ...opts.proof } })
+    ).rejects.toThrow("values omitted");
+    await expect(originalPublish({ ...opts, authority: {} })).rejects.toThrow(
+      "values omitted"
+    );
+    await expect(
+      originalPublish({ ...opts, generation: { ...opts.generation } })
+    ).rejects.toThrow("values omitted");
+    await originalPublish(opts);
+    await expect(originalPublish(opts)).rejects.toThrow("values omitted");
+  });
+  try {
+    const { store } = await active();
+    expect(publications).toBe(1);
+    const current = await store.loadCurrent();
+    expect(current.storageWitnessesPending).toBe(false);
+    expect(current.storageWitnesses?.[0]?.state).toBe("enrolled");
+    expect(current.pending).toBeNull();
+  } finally {
+    mocked.mockRestore();
+  }
 });

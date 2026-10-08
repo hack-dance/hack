@@ -34,7 +34,10 @@ private reference pins both directory identities and both journal file identitie
 and hashes. A fresh read-only proof precedes attachment of that exact reference as
 `Enrolled` in the version-three receipt. The current generation and pending token
 are rechecked after the final filesystem await immediately before publication.
-Copied, reused or revoked capabilities cannot authorize another seed.
+The owner privately issues and consumes a one-use completion proof bound to that
+same live authority and generation. A fabricated reference or caller-supplied
+no-op verifier cannot publish enrollment. Copied, reused or revoked capabilities
+cannot authorize another seed or completion.
 
 `verifyNativeComposeStorageWitness` reads and compares those records and the
 observed marker. It does not create, write, delete or repair storage. Missing or

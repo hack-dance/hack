@@ -29,11 +29,11 @@ import {
 import { projectNativeComposeOneOff } from "./native-compose-run-projection.ts";
 import { createNativeComposeStorageWitnessReceiptProtocol } from "./native-compose-storage-witness-receipt.ts";
 import {
+  type NativeComposeStorageWitnessCompletionProof,
   type NativeComposeStorageWitnessIntent,
   type NativeComposeStorageWitnessReference,
   type NativeComposeStorageWitnessState,
   nativeComposeStorageWitnessIntentValid,
-  nativeComposeStorageWitnessReferenceValid,
   nativeComposeStorageWitnessStatesValid,
 } from "./native-compose-storage-witness-state.ts";
 
@@ -164,19 +164,23 @@ export async function armNativeComposeStorageWitnessIntent(opts: {
 export async function publishNativeComposeStorageWitnessEnrollment(opts: {
   readonly authority: NativeComposeMaterialAuthority;
   readonly generation: NativeComposeGeneration;
-  readonly reference: NativeComposeStorageWitnessReference;
-  readonly verify: () => Promise<void>;
+  readonly proof: NativeComposeStorageWitnessCompletionProof;
 }): Promise<void> {
-  const { authority, generation, verify } = opts;
-  if (!nativeComposeStorageWitnessReferenceValid(opts.reference)) {
-    return refuse();
-  }
-  const reference = structuredClone(opts.reference);
+  const { authority, generation, proof } = opts;
   const publish = witnessPublications.get(authority) ?? refuse();
   await runNativeComposeMaterialAction({
     authority,
-    run: async () =>
-      await publish(generation, { state: "enrolled", reference, verify }),
+    run: async () => {
+      const { consumeNativeComposeStorageWitnessCompletionProof } =
+        await import("./native-compose-storage-witness.ts");
+      const { reference, verify } =
+        consumeNativeComposeStorageWitnessCompletionProof({
+          authority,
+          generation,
+          proof,
+        });
+      await publish(generation, { state: "enrolled", reference, verify });
+    },
   });
 }
 /** The generation lease remains held until owned material work has settled, even after revocation. */

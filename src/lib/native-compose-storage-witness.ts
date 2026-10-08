@@ -35,6 +35,7 @@ import {
 } from "./native-compose-storage-witness-codec.ts";
 
 import {
+  type NativeComposeStorageWitnessCompletionProof,
   type NativeComposeStorageWitnessReference,
   nativeComposeStorageWitnessReferenceValid,
 } from "./native-compose-storage-witness-state.ts";
@@ -89,6 +90,38 @@ const enrollments = new WeakMap<
   NativeComposeStorageWitnessEnrollment,
   Enrollment
 >();
+const completionProofs = new WeakMap<
+  NativeComposeStorageWitnessCompletionProof,
+  {
+    readonly authority: NativeComposeMaterialAuthority;
+    readonly generation: NativeComposeGeneration;
+    readonly reference: NativeComposeStorageWitnessReference;
+    readonly verify: () => Promise<void>;
+    consumed: boolean;
+  }
+>();
+/** Generation publication consumes an issued proof; arbitrary references or no-op callbacks cannot mint one. */
+export function consumeNativeComposeStorageWitnessCompletionProof(opts: {
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly generation: NativeComposeGeneration;
+  readonly proof: NativeComposeStorageWitnessCompletionProof;
+}): {
+  readonly reference: NativeComposeStorageWitnessReference;
+  readonly verify: () => Promise<void>;
+} {
+  const { authority, generation, proof } = opts;
+  const issued = completionProofs.get(proof);
+  if (
+    !issued ||
+    issued.consumed ||
+    issued.authority !== authority ||
+    issued.generation !== generation
+  ) {
+    return refuse();
+  }
+  issued.consumed = true;
+  return Object.freeze({ reference: issued.reference, verify: issued.verify });
+}
 
 function hash(text: string): string {
   return createHash("sha256").update(text).digest("hex");
@@ -529,10 +562,12 @@ export async function enrollNativeComposeStorageWitness(opts: {
           expectation: selected.anchor,
           completion: anchor({ info, text }),
         });
-        await publishNativeComposeStorageWitnessEnrollment({
+        const proof = Object.freeze({});
+        completionProofs.set(proof, {
           authority: selected.authority,
           generation: selected.generation,
           reference,
+          consumed: false,
           verify: async () => {
             await verifyNativeComposeStorageWitness({
               authority: selected.authority,
@@ -542,6 +577,11 @@ export async function enrollNativeComposeStorageWitness(opts: {
               observe: async () => await observe(),
             });
           },
+        });
+        await publishNativeComposeStorageWitnessEnrollment({
+          authority: selected.authority,
+          generation: selected.generation,
+          proof,
         });
         return reference;
       } finally {

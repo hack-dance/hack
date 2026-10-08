@@ -19,6 +19,10 @@ export type NativeComposeStorageWitnessReference = {
   readonly expectation: Anchor;
   readonly completion: Anchor;
 };
+/** Issued privately by the witness owner. An object copy cannot authorize receipt publication. */
+export type NativeComposeStorageWitnessCompletionProof = Readonly<
+  Record<never, never>
+>;
 export type NativeComposeStorageWitnessIntent = {
   readonly name: string;
   readonly storage: string;

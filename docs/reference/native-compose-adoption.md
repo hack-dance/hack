@@ -37,6 +37,19 @@ version 6 with resource binding version 3. This owner refuses generated managed
 sources, typed local inputs and dependency or health declarations until a
 combined saved-source and lifecycle proof qualifies them. Versions 1–4 do not
 gain custom-bridge authority; an older reader refuses the version 6 receipt.
+Exactly two static project-owned named bridges select private manifest and
+receipt version 11 with resource binding version 5. Every bridge declares an
+explicit `internal` policy, uses the local bridge driver, and has at least one
+closed service attachment. The owner binds each original bridge ID, creation
+record, policy, configured bridge IDs and endpoint aliases, and complete live
+member inventory. It rechecks those identities before retained effects and
+final publication; stopped endpoints may omit aliases but must retain the exact
+configured bridge IDs. Default, external, ingress, third-party and additional
+bridges, as well as generated sources, health dependencies, jobs and other
+unqualified family intersections, still refuse. This version keeps the original
+containers and volumes; it does not silently replace either original bridge.
+Any later newly created native generation needs its own explicit topology and
+data acceptance. Earlier receipt versions retain their narrower authority.
 
 The static retained-container slice also inspects relevant filenames in the
 verified primary checkout when local inheritance is enabled. Managed-env,
@@ -169,7 +182,11 @@ Stopped originals remain bound through their configured network IDs even though
 Docker removes their active endpoints. A stopped version 6 endpoint may expose
 no aliases, but cannot acquire a different configured network ID. This transient
 running state is not saved in the resource binding. Other authored network
-policies remain unsupported. Engine ID, resource inventories and source
+policies remain unsupported. Version 11 applies the same exact per-bridge proof
+to two distinct original named bridges, checking each complete live member set
+and each service's closed one-or-two-bridge attachment and aliases. Neither a
+shared network ID nor a partial member observation can stand in for the other
+bridge. Engine ID, resource inventories and source
 bytes are rechecked, and acquisition compares two complete private observations.
 The Docker routing environment is captured for later comparison. Queries never
 request container environment or image configuration. This retained-resource authority

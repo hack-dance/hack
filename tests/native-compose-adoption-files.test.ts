@@ -24,6 +24,8 @@ import {
   planLegacyComposeAdoption,
   planLegacyComposeRetainedFileAdoption,
 } from "../src/lib/native-compose-adoption-plan.ts";
+import { parseLegacyComposeAdoptionReceipt } from "../src/lib/native-compose-adoption-receipt.ts";
+import { mapLegacyOwnedNetwork } from "../src/lib/native-config-import-network.ts";
 import {
   mapLegacyNativeRetainedFileAdoptionBaseline,
   mapLegacyNativeRetainedFileStorage,
@@ -465,22 +467,37 @@ test("issued private non-enumerable source fields survive both retained-file map
   });
 });
 
-test("file8 preparation stays a distinct closed family from the canonical owned bridge", () => {
+test.each([
+  { networks: { private: { internal: true } }, attached: ["private"] },
+  {
+    networks: { private: { internal: true }, outward: { internal: false } },
+    attached: { private: {}, outward: {} },
+  },
+])("file8 preparation stays separate from one or two canonical owned bridges: %j", ({
+  networks,
+  attached,
+}) => {
   const composeText = JSON.stringify({
     name: "fixture",
-    networks: { private: { internal: true } },
+    networks,
     configs: { settings: { file: "../material/config" } },
     volumes: { data: { name: "fixture_data" } },
     services: {
       app: {
         image: "fixture:pinned",
-        networks: ["private"],
+        networks: attached,
         configs: ["settings"],
         volumes: ["data:/data"],
       },
     },
   });
   const source = { configText: '{"name":"fixture"}', composeText };
+  expect(
+    mapLegacyOwnedNetwork({
+      project: "fixture",
+      compose: JSON.parse(composeText),
+    }).kind
+  ).toBe(Object.keys(networks).length === 1 ? "owned" : "multiple");
   for (const mapped of [
     mapLegacyNativeRetainedFileAdoptionBaseline(source),
     mapLegacyNativeRetainedFileStorage(source),
@@ -499,4 +516,41 @@ test("file8 preparation stays a distinct closed family from the canonical owned 
   expect(planned.report.supported).toBe(false);
   expect(planned.intent).toBeUndefined();
   expect(JSON.stringify(planned)).not.toContain("material/config");
+});
+
+test("shared receipt decoder preserves closed file8 and plural bridge11 versions without granting a mixed owner", () => {
+  const checkout = {
+    root: { dev: 1, ino: 2 },
+    project: { dev: 1, ino: 3 },
+    git: { dev: 1, ino: 4 },
+  };
+  const value = {
+    kind: "legacy-compose-adopted",
+    checkout,
+    prepared: null,
+    publication: null,
+    pendingOperation: null,
+  };
+  for (const version of [1, 3, 4, 5, 6, 8, 10, 11] as const) {
+    expect(
+      parseLegacyComposeAdoptionReceipt(
+        { ...value, adoption_receipt_version: version },
+        checkout
+      ).adoption_receipt_version
+    ).toBe(version);
+  }
+  for (const version of [2, 7, 9, 12, null, "8", "11"]) {
+    expect(() =>
+      parseLegacyComposeAdoptionReceipt(
+        { ...value, adoption_receipt_version: version },
+        checkout
+      )
+    ).toThrow();
+  }
+  expect(() =>
+    parseLegacyComposeAdoptionReceipt(
+      { ...value, adoption_receipt_version: 8, networks: [] },
+      checkout
+    )
+  ).toThrow();
 });

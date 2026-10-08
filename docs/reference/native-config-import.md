@@ -66,9 +66,10 @@ routes, host/lifecycle settings, `env_file`, deployment options and extensions
 are outside the first slice. They cannot be silently omitted from a complete
 conversion.
 
-The network mapping accepts one named non-default, non-ingress bridge only. It
-requires explicit `internal: true` or `false`, optional `driver: bridge`, and
-one explicit attachment per workload, including inactive jobs. Unknown
+The network mapping accepts one or exactly two named non-default, non-ingress
+bridges. Each requires explicit `internal: true` or `false` and optional
+`driver: bridge`; every workload, including inactive jobs, must explicitly
+attach to one or both declared bridges. Each declared bridge must be used. Unknown
 network/attachment fields, custom physical names, external networks, IPAM,
 driver options, implicit or mixed default attachments, and duplicate or
 workload-colliding aliases refuse. Import preview preserves the authored
@@ -99,7 +100,7 @@ before acquiring existing engine resource bindings, even when pure conversion
 can preserve a job's named mounts. Symbolic conversion is not an ownership grant.
 
 Pure preview can preserve a completed job's explicit attachment and aliases on
-the same owned bridge. Retained storage/adoption still refuses custom-network
+these owned bridges. Retained storage/adoption still refuses custom-network
 job combinations: neither the job nor network receipt proves their combined
 ordering, endpoint ownership, recovery or replay.
 

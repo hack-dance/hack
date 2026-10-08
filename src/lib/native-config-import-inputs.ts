@@ -11,6 +11,29 @@ import { inspectProjectInputsAtRoot } from "./project-input-selection.ts";
 import { resolveVerifiedGitCheckoutLocation } from "./worktree-local-config.ts";
 
 const ownedAcquisitions = new WeakSet<object>();
+const privateLocalInputs = new WeakMap<object, NativeConfigImportLocalInput>();
+
+/** Private optional local bytes and identity from the issued source acquisition. Never report. */
+export type NativeConfigImportLocalInput = {
+  readonly text: string | null;
+  readonly proof: {
+    readonly hash: string;
+    readonly info: Pick<
+      NativeConfigImportSourceIdentity,
+      "dev" | "ino" | "mode" | "nlink" | "uid"
+    >;
+  } | null;
+};
+
+/** Ordinary import capabilities have no local authority. Only the adoption factory issues this snapshot. */
+export function privateNativeConfigImportLocalInput(
+  source: NativeConfigImportInputs
+) {
+  if (!ownedAcquisitions.has(source)) {
+    throw failure();
+  }
+  return privateLocalInputs.get(source);
+}
 const privateSourceProofs = new WeakMap<
   object,
   NativeConfigImportSourceProof
@@ -243,6 +266,20 @@ async function markerInfo(path: string): Promise<Stats | null> {
 async function absent(path: string): Promise<boolean> {
   return (await markerInfo(path)) === null;
 }
+async function optionalLocal(root: string, signal?: AbortSignal) {
+  const path = resolve(root, ".hack/hack.local.json");
+  if (await absent(path)) {
+    return null;
+  }
+  const local = await readStable(path, signal);
+  if (
+    local.info.uid !== process.getuid?.() ||
+    (local.info.mode & 0o022) !== 0
+  ) {
+    throw failure();
+  }
+  return local;
+}
 
 /** Only marker types are inspected; linked/separate Git layouts are outside this slice. */
 async function gitLayout(
@@ -340,6 +377,7 @@ async function recheckInputs(opts: {
   readonly dirs: Awaited<ReturnType<typeof directories>>;
   readonly blocked: readonly string[];
   readonly git: Awaited<ReturnType<typeof gitLayout>>;
+  readonly local?: Awaited<ReturnType<typeof readStable>> | null;
 }) {
   const config = await readStable(
     resolve(opts.root, ".hack/hack.config.json"),
@@ -373,6 +411,24 @@ async function recheckInputs(opts: {
   for (const path of opts.blocked) {
     if (!(await absent(path))) {
       throw failure();
+    }
+  }
+  if (opts.local !== undefined) {
+    const path = resolve(opts.root, ".hack/hack.local.json");
+    if (opts.local === null) {
+      if (!(await absent(path))) {
+        throw failure();
+      }
+    } else {
+      const local = await readStable(path, opts.signal);
+      if (
+        !(
+          same(opts.local.info, local.info) &&
+          opts.local.bytes.equals(local.bytes)
+        )
+      ) {
+        throw failure();
+      }
     }
   }
   await recheckGit(opts.root, opts.git, opts.signal);
@@ -416,6 +472,7 @@ async function acquireInputs(opts: {
   readonly projectRoot: string;
   readonly signal?: AbortSignal;
   readonly allowLinkedWorktree?: boolean;
+  readonly allowLocal?: boolean;
 }): Promise<NativeConfigImportInputs> {
   const root = resolve(opts.projectRoot);
   const signal = opts.signal;
@@ -425,7 +482,7 @@ async function acquireInputs(opts: {
   const blocked = [
     resolve(root, ".env"),
     resolve(root, ".hack/.env"),
-    resolve(root, ".hack/hack.local.json"),
+    ...(opts.allowLocal ? [] : [resolve(root, ".hack/hack.local.json")]),
   ];
   for (const path of blocked) {
     if (!(await absent(path))) {
@@ -451,6 +508,7 @@ async function acquireInputs(opts: {
     signal
   );
   const decoder = new TextDecoder("utf-8", { fatal: true });
+  const local = opts.allowLocal ? await optionalLocal(root, signal) : undefined;
   const result = {
     ok: true as const,
     configText: decoder.decode(config.bytes),
@@ -485,6 +543,7 @@ async function acquireInputs(opts: {
           dirs,
           blocked,
           git,
+          local,
           signal: recheckSignal,
         });
         cancelled(signal);
@@ -504,6 +563,28 @@ async function acquireInputs(opts: {
   }
   await result.assertFresh();
   ownedAcquisitions.add(result);
+  if (local !== undefined) {
+    const snapshot = {
+      text: local === null ? null : decoder.decode(local.bytes),
+      proof:
+        local === null
+          ? null
+          : Object.freeze({
+              hash: createHash("sha256").update(local.bytes).digest("hex"),
+              info: Object.freeze({
+                dev: local.info.dev,
+                ino: local.info.ino,
+                mode: local.info.mode,
+                nlink: local.info.nlink,
+                uid: local.info.uid,
+              }),
+            }),
+    };
+    for (const key of Object.keys(snapshot)) {
+      Object.defineProperty(snapshot, key, { enumerable: false });
+    }
+    privateLocalInputs.set(result, Object.freeze(snapshot));
+  }
   const [rootDirectory, projectDirectory] = dirs;
   if (!(rootDirectory && projectDirectory)) {
     throw failure();
@@ -528,12 +609,15 @@ async function acquireInputs(opts: {
 }
 
 /** Private source capability; filesystem and decoder diagnostics remain redacted. */
-export async function acquireNativeConfigImportInputs(opts: {
-  readonly projectRoot: string;
-  readonly signal?: AbortSignal;
-  /** Private adoption owner only; ordinary import preview keeps its existing refusal. */
-  readonly allowLinkedWorktree?: boolean;
-}): Promise<NativeConfigImportInputs> {
+async function validatedAcquisition(
+  opts: {
+    readonly projectRoot: string;
+    readonly signal?: AbortSignal;
+    /** Private adoption owner only; ordinary import preview keeps its existing refusal. */
+    readonly allowLinkedWorktree?: boolean;
+  },
+  allowLocal: boolean
+): Promise<NativeConfigImportInputs> {
   let signal: AbortSignal | undefined;
   try {
     if (!isRecord(opts)) {
@@ -557,8 +641,31 @@ export async function acquireNativeConfigImportInputs(opts: {
     ) {
       throw failure();
     }
-    return await acquireInputs({ projectRoot, signal, allowLinkedWorktree });
+    return await acquireInputs({
+      projectRoot,
+      signal,
+      allowLinkedWorktree,
+      allowLocal,
+    });
   } catch (error: unknown) {
     redactFailure(error, signal);
   }
+}
+
+/** Private source capability; ordinary preview retains local-input refusal. */
+export async function acquireNativeConfigImportInputs(opts: {
+  readonly projectRoot: string;
+  readonly signal?: AbortSignal;
+  readonly allowLinkedWorktree?: boolean;
+}): Promise<NativeConfigImportInputs> {
+  return await validatedAcquisition(opts, false);
+}
+
+/** Adoption-only optional local capture. Reading bytes does not grant mapping, selection or effect authority. */
+export async function acquireLegacyAdoptionSourceInputs(opts: {
+  readonly projectRoot: string;
+  readonly signal?: AbortSignal;
+  readonly allowLinkedWorktree?: boolean;
+}): Promise<NativeConfigImportInputs> {
+  return await validatedAcquisition(opts, true);
 }

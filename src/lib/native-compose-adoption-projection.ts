@@ -14,6 +14,10 @@ import {
   LegacyAdoptionManagedEnvAdmission,
 } from "./native-compose-adoption-env-inputs.ts";
 import {
+  assertSavedLegacyAdoptionLocalInputs,
+  retainLegacyAdoptionLocalRefusal,
+} from "./native-compose-adoption-local.ts";
+import {
   hasCode,
   holdDirectory,
   keys,
@@ -24,6 +28,7 @@ import {
   NativeConfigCompilerError,
 } from "./native-config-compiler.ts";
 import {
+  acquireLegacyAdoptionSourceInputs,
   acquireNativeConfigImportInputs,
   type NativeConfigImportInputs,
   privateNativeConfigImportSourceProof,
@@ -78,6 +83,7 @@ function check(signal?: AbortSignal) {
   }
 }
 function redact(error: unknown): never {
+  retainLegacyAdoptionLocalRefusal(error);
   if (
     error instanceof NativeConfigCompilerError &&
     error.code === "E_COMPILER_CANCELLED"
@@ -146,7 +152,15 @@ function privatePrimaryProof(
   return {
     primary: provenance.primary,
     inheritPrimaryLocal: provenance.inheritPrimaryLocal,
+    ...(provenance.localInputs !== undefined
+      ? { localInputs: provenance.localInputs }
+      : {}),
   };
+}
+function primarySourceFactory(localInputs: unknown) {
+  return localInputs === undefined
+    ? acquireNativeConfigImportInputs
+    : acquireLegacyAdoptionSourceInputs;
 }
 
 /** Validate and snapshot the bounded private envelope before any async recheck. */
@@ -162,9 +176,12 @@ function savedProjectionEnvelope(value: unknown) {
       isRecord(proof) &&
       keys(
         proof,
-        "generated,inheritPrimaryLocal,managedRevision,primary,projection_version"
+        proof.projection_version === 2
+          ? "generated,inheritPrimaryLocal,localInputs,managedRevision,primary,projection_version"
+          : "generated,inheritPrimaryLocal,managedRevision,primary,projection_version"
       ) &&
-      proof.projection_version === 1 &&
+      (proof.projection_version === 1 ||
+        (proof.projection_version === 2 && isRecord(proof.localInputs))) &&
       typeof proof.managedRevision === "string" &&
       typeof proof.inheritPrimaryLocal === "boolean" &&
       isRecord(proof.generated)
@@ -189,6 +206,7 @@ function savedProjectionEnvelope(value: unknown) {
     inheritPrimaryLocal: proof.inheritPrimaryLocal,
     generated: proof.generated,
     primary,
+    localInputs: proof.projection_version === 2 ? proof.localInputs : undefined,
   };
 }
 
@@ -258,7 +276,7 @@ export async function readSavedLegacyComposeAdoptionProjection(opts: {
       refuse();
     }
     const primary = primaryRoot
-      ? await acquireNativeConfigImportInputs({
+      ? await primarySourceFactory(proof.localInputs)({
           projectRoot: primaryRoot,
           signal,
         })
@@ -292,10 +310,20 @@ export async function readSavedLegacyComposeAdoptionProjection(opts: {
       if (primary?.ok) {
         await primary.assertFresh({ signal: current.signal ?? signal });
       }
+      if (proof.localInputs !== undefined) {
+        await assertSavedLegacyAdoptionLocalInputs({
+          projectRoot,
+          primary: primary?.ok ? primary : null,
+          proof: proof.localInputs,
+          signal: current.signal ?? signal,
+          checkOwner,
+        });
+      }
       if (
         !(await legacyComposeAdoptionManagedReadLayoutSupported({
           projectRoot: current.projectRoot,
           signal: current.signal ?? signal,
+          allowTypedLocal: proof.localInputs !== undefined,
         }))
       ) {
         refuse();
@@ -546,12 +574,14 @@ export class LegacyComposeAdoptionProjection {
   static async acquire(opts: {
     readonly source: NativeConfigImportInputs;
     readonly signal?: AbortSignal;
+    readonly binary?: string;
   }): Promise<LegacyComposeAdoptionProjection> {
     try {
       const { source, signal } = opts;
       const admission = await LegacyAdoptionManagedEnvAdmission.acquire({
         source,
         signal,
+        binary: opts.binary,
       });
       if (!source.ok) {
         refuse();
@@ -608,7 +638,7 @@ export class LegacyComposeAdoptionProjection {
     }
     const context = this.#context;
     const result = {
-      projection_version: 1,
+      projection_version: context.admission.localFields.length ? 2 : 1,
       status: "acquired",
       admission: "not_performed",
       files: [
@@ -618,6 +648,9 @@ export class LegacyComposeAdoptionProjection {
         ).map((file) => `.internal/${file}`),
       ],
       metadata: context.env.metadata,
+      ...(context.admission.localFields.length
+        ? { local_fields: context.admission.localFields }
+        : {}),
     };
     freezeImportValue(result);
     return result;
@@ -693,8 +726,9 @@ export class LegacyComposeAdoptionProjection {
         ]),
         globalEnv: values.globalEnv,
         metadata: context.env.metadata,
+        localFields: context.admission.localFields,
         projectionProof: {
-          projection_version: 1,
+          projection_version: context.admission.localFields.length ? 2 : 1,
           managedRevision: privateLegacyAdoptionEnvRevision(context.env),
           ...privatePrimaryProof(
             await context.admission.resolvePrivatePrimaryProof()

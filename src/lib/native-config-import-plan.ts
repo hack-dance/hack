@@ -414,16 +414,136 @@ function staticText(value: unknown): value is string {
     !value.includes("\0")
   );
 }
+function literalComposeArg(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.includes("\0")) {
+    return undefined;
+  }
+  let decoded = "";
+  for (let index = 0; index < value.length; index++) {
+    if (value[index] !== "$") {
+      decoded += value[index];
+      continue;
+    }
+    if (value[index + 1] !== "$") {
+      return undefined;
+    }
+    decoded += "$";
+    index++;
+  }
+  return decoded;
+}
+function composeWordSpace(character: string | undefined): boolean {
+  return (
+    character === " " ||
+    character === "\t" ||
+    character === "\n" ||
+    character === "\r"
+  );
+}
+function composeWordQuote(character: string): character is "'" | '"' {
+  return character === "'" || character === '"';
+}
+function composeWordControl(
+  character: string,
+  quote: string | undefined
+): boolean {
+  return quote === undefined && "&|;<>`()".includes(character);
+}
+function composeWordBoundary(
+  character: string,
+  quote: string | undefined
+): boolean {
+  return quote === undefined && composeWordSpace(character);
+}
+function composeWordEscape(
+  character: string,
+  quote: string | undefined
+): boolean {
+  return character === "\\" && quote !== "'";
+}
+function validComposeWordCharacter(
+  character: string | undefined
+): character is string {
+  return character !== undefined && character !== "\0";
+}
+/** Finite Compose exec-word subset; unquoted shell operators refuse rather than truncate argv. */
+function composeWord(
+  value: string,
+  start: number
+): { readonly word: string; readonly next: number } | undefined {
+  let word = "";
+  let quote: "'" | '"' | undefined;
+  let index = start;
+  while (index < value.length) {
+    const character = value[index];
+    if (!validComposeWordCharacter(character)) {
+      return undefined;
+    }
+    if (composeWordEscape(character, quote)) {
+      const next = value[index + 1];
+      if (!validComposeWordCharacter(next)) {
+        return undefined;
+      }
+      word += next;
+      index += 2;
+      continue;
+    }
+    if (character === quote) {
+      quote = undefined;
+    } else if (quote === undefined && composeWordQuote(character)) {
+      quote = character;
+    } else if (composeWordBoundary(character, quote)) {
+      return { word, next: index };
+    } else if (composeWordControl(character, quote)) {
+      return undefined;
+    } else {
+      word += character;
+    }
+    index++;
+  }
+  return quote ? undefined : { word, next: index };
+}
+function composeStringWords(value: string): string[] | undefined {
+  const words: string[] = [];
+  let index = 0;
+  while (index < value.length) {
+    if (composeWordSpace(value[index])) {
+      index++;
+      continue;
+    }
+    const parsed = composeWord(value, index);
+    if (!parsed) {
+      return undefined;
+    }
+    words.push(parsed.word);
+    index = parsed.next;
+  }
+  return words;
+}
 function argv(value: unknown, empty: boolean): unknown {
-  return Array.isArray(value) &&
-    (empty || value.length > 0) &&
-    (value.length === 0 || value[0] !== "") &&
-    value.every(
-      (part) =>
-        typeof part === "string" && !part.includes("$") && !part.includes("\0")
-    )
-    ? { exec: [...value] }
-    : undefined;
+  let parts = value;
+  if (typeof value === "string") {
+    if (literalComposeArg(value) === undefined) {
+      return undefined;
+    }
+    parts = composeStringWords(value);
+  }
+  if (
+    !Array.isArray(parts) ||
+    (!empty && parts.length === 0) ||
+    (parts.length > 0 && parts[0] === "")
+  ) {
+    return undefined;
+  }
+  const exec: string[] = [];
+  for (const part of parts) {
+    const decoded = literalComposeArg(part);
+    if (decoded === undefined) {
+      return undefined;
+    }
+    exec.push(decoded);
+  }
+  return { exec };
 }
 const SERVICE_RULES: Readonly<Record<string, (value: unknown) => unknown>> = {
   image: (value) => (staticText(value) ? value : undefined),
@@ -464,6 +584,74 @@ function applyServiceValue(
   return property;
 }
 
+function serviceMappingCode(key: string, raw: unknown): string {
+  if (key === "environment") {
+    return "managed_fallback";
+  }
+  if ((key === "command" || key === "entrypoint") && typeof raw === "string") {
+    return "compose_string_exec_argv";
+  }
+  if (
+    (key === "command" || key === "entrypoint") &&
+    Array.isArray(raw) &&
+    raw.some((part) => typeof part === "string" && part.includes("$$"))
+  ) {
+    return "escaped_dollar_literal";
+  }
+  return "exact";
+}
+
+function markServiceValue(opts: {
+  readonly mark: MappingContext["mark"];
+  readonly key: string;
+  readonly raw: unknown;
+  readonly pointer: string;
+  readonly target: string;
+}): void {
+  const code = serviceMappingCode(opts.key, opts.raw);
+  opts.mark("compose", opts.pointer, opts.target, "exact", true);
+  if (code === "exact") {
+    return;
+  }
+  if (code === "managed_fallback") {
+    opts.mark("compose", opts.pointer, opts.target, code, true);
+    return;
+  }
+  opts.mark("compose", opts.pointer, opts.target, code);
+  if (Array.isArray(opts.raw)) {
+    for (const [index, part] of opts.raw.entries()) {
+      if (typeof part === "string" && part.includes("$$")) {
+        opts.mark(
+          "compose",
+          importPointer(opts.pointer, String(index)),
+          `${opts.target}/exec/${index}`,
+          code
+        );
+      }
+    }
+  }
+}
+
+function commandPresence(
+  key: string,
+  raw: unknown
+): "image_default" | "empty_command_unrepresentable" | undefined {
+  if (key !== "command" && key !== "entrypoint") {
+    return undefined;
+  }
+  if (raw === null) {
+    return "image_default";
+  }
+  if (
+    key === "command" &&
+    typeof raw === "string" &&
+    composeStringWords(raw)?.length === 0
+  ) {
+    return "empty_command_unrepresentable";
+  }
+  return undefined;
+}
+
 function mapService(
   opts: Pick<MappingContext, "mark" | "refuse"> & {
     readonly source: Record<string, unknown>;
@@ -478,19 +666,28 @@ function mapService(
       continue;
     }
     const pointer = importPointer(opts.pointer, key);
+    const presence = commandPresence(key, raw);
+    if (presence === "image_default") {
+      opts.mark("compose", pointer, "", "image_default");
+      continue;
+    }
+    if (presence === "empty_command_unrepresentable") {
+      opts.refuse("compose", pointer, "empty_command_unrepresentable");
+      continue;
+    }
     const value = SERVICE_RULES[key]?.(raw);
     if (value === undefined) {
       opts.refuse("compose", pointer, "invalid_or_ambiguous_value");
       continue;
     }
     const property = applyServiceValue(service, key, value);
-    opts.mark(
-      "compose",
+    markServiceValue({
+      mark: opts.mark,
+      key,
+      raw,
       pointer,
-      `${opts.pointer}/${property}`,
-      key === "environment" ? "managed_fallback" : "exact",
-      true
-    );
+      target: `${opts.pointer}/${property}`,
+    });
     if (key === "profiles" && Array.isArray(value)) {
       for (const name of value) {
         if (typeof name === "string") {

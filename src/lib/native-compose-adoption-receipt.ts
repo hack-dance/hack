@@ -17,7 +17,7 @@ export type Checkout = {
 };
 export type Anchor = { readonly id: string; readonly manifest: Artifact };
 export type Receipt = {
-  readonly adoption_receipt_version: 1 | 2 | 3;
+  readonly adoption_receipt_version: 1 | 2 | 3 | 4;
   readonly kind: typeof KIND;
   readonly checkout: Checkout;
   readonly prepared: Anchor | null;
@@ -77,7 +77,8 @@ export function parseLegacyComposeAdoptionReceipt(
         value,
         "adoption_receipt_version,checkout,kind,pendingOperation,prepared,publication"
       ) &&
-      (value.adoption_receipt_version === 3 ||
+      (value.adoption_receipt_version === 4 ||
+        value.adoption_receipt_version === 3 ||
         value.adoption_receipt_version === ("kind" in checkout.git ? 2 : 1)) &&
       value.kind === KIND &&
       JSON.stringify(value.checkout) === JSON.stringify(checkout) &&
@@ -107,9 +108,10 @@ export function parseLegacyComposeAdoptionReceipt(
     refuse();
   }
   const legacyVersion = "kind" in checkout.git ? 2 : 1;
+  const version = value.adoption_receipt_version;
   return {
     adoption_receipt_version:
-      value.adoption_receipt_version === 3 ? 3 : legacyVersion,
+      version === 4 || version === 3 ? version : legacyVersion,
     kind: KIND,
     checkout,
     prepared: value.prepared,

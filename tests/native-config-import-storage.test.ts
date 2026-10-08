@@ -81,7 +81,9 @@ for (const [name, change] of [
   ],
   [
     "shell string",
-    { services: { db: { ...compose.services.db, command: "echo private" } } },
+    {
+      services: { db: { ...compose.services.db, command: "echo ${PRIVATE}" } },
+    },
   ],
   [
     "empty command",

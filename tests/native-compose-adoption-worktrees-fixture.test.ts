@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createNativeComposeProbe } from "../src/lib/native-compose-ownership.ts";
 import {
+  assertAdoptionWorkerArgv,
   cleanupOwnedAdoptionFixture,
   createAdoptionFixtureProbe,
   nativeComposeAdoptionWorktreesScenario,
@@ -55,6 +56,76 @@ const rows = {
     createdAt,
   },
 };
+
+const literalArgv = {
+  id,
+  command: ["command-$NC04_LITERAL", "$$", ""],
+  entrypoint: [
+    "/bin/sh",
+    "-c",
+    "trap 'sleep 10; exit 0' TERM; while true; do sleep 1; done",
+    "entrypoint-${NC04_LITERAL}",
+  ],
+};
+const clearedArgv = {
+  id,
+  command: [
+    "/bin/sh",
+    "-c",
+    "trap 'sleep 10; exit 0' TERM; while true; do sleep 1; done",
+    "command-$NC04_LITERAL",
+    "$$",
+    "",
+  ],
+  entrypoint: [],
+};
+
+test("owned fixture actual argv keeps both dollar forms and an empty argument", () => {
+  expect(() =>
+    assertAdoptionWorkerArgv({ id, row: literalArgv })
+  ).not.toThrow();
+  expect(() =>
+    assertAdoptionWorkerArgv({
+      id,
+      row: literalArgv,
+      mode: "string-entrypoint",
+    })
+  ).not.toThrow();
+});
+
+test("string-form fixture requires an explicitly cleared image entrypoint and exact command words", () => {
+  expect(() =>
+    assertAdoptionWorkerArgv({ id, row: clearedArgv, mode: "string-cleared" })
+  ).not.toThrow();
+  for (const row of [
+    { ...clearedArgv, entrypoint: null },
+    { ...clearedArgv, entrypoint: ["/bin/sh"] },
+    { ...clearedArgv, command: clearedArgv.command.slice(0, -1) },
+    { ...clearedArgv, command: [CANARY] },
+  ]) {
+    expect(() =>
+      assertAdoptionWorkerArgv({ id, row, mode: "string-cleared" })
+    ).toThrow(REFUSAL);
+  }
+});
+
+test.each([
+  ["changed container ID", { ...literalArgv, id: "b".repeat(64) }],
+  ["interpolated command", { ...literalArgv, command: [CANARY, "$$", ""] }],
+  [
+    "missing empty argument",
+    { ...literalArgv, command: ["command-$NC04_LITERAL", "$$"] },
+  ],
+  ["changed entrypoint", { ...literalArgv, entrypoint: ["/bin/sh", "-c"] }],
+  [
+    "interpolated entrypoint",
+    { ...literalArgv, entrypoint: ["/bin/sh", "-c", CANARY, "literal"] },
+  ],
+  ["malformed command", { ...literalArgv, command: null }],
+])("actual argv oracle refuses %s with a fixed diagnostic", (_label, row) => {
+  expect(() => assertAdoptionWorkerArgv({ id, row })).toThrow(REFUSAL);
+  expect(() => assertAdoptionWorkerArgv({ id, row })).not.toThrow(CANARY);
+});
 
 test("later fixture lifecycle reads create independent bounded acquisitions after the original expires", async () => {
   const root = await mkdtemp(join(tmpdir(), "adoption-probe-lifetime-"));

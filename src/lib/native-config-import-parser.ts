@@ -10,7 +10,11 @@ import {
 } from "yaml";
 import { isRecord } from "./guards.ts";
 
-export type ImportDocument = "config" | "compose";
+export type ImportDocument =
+  | "config"
+  | "compose"
+  | "primary_local"
+  | "checkout_local";
 export type ImportField = {
   readonly document: ImportDocument;
   readonly pointer: string;
@@ -49,7 +53,7 @@ function parseSource(opts: {
   const directives = tokens.filter((token) => token.type === "directive");
   const composer = new Composer({
     version: "1.2",
-    schema: opts.document === "config" ? "json" : "core",
+    schema: opts.document === "compose" ? "core" : "json",
     compat: opts.document === "compose" ? "yaml-1.1" : null,
     strict: true,
     uniqueKeys: true,
@@ -174,7 +178,7 @@ export function parseImportDocument(opts: {
       return { fields: [field("", 0, "input_budget")] };
     }
     // JSON.parse owns strict JSON syntax; the AST catches decoded equivalent keys.
-    if (opts.document === "config") {
+    if (opts.document !== "compose") {
       JSON.parse(opts.text);
     }
     const { docs, directives } = parseSource({ ...opts, lines });
@@ -208,7 +212,7 @@ export function parseImportDocument(opts: {
       return { fields };
     }
     const value: unknown =
-      opts.document === "config"
+      opts.document !== "compose"
         ? JSON.parse(opts.text)
         : doc.toJS({ maxAliasCount: 0 });
     return isRecord(value)

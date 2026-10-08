@@ -886,6 +886,9 @@ function refuseUndeclaredJobTargets(
     readonly pointer: string;
   }
 ) {
+  if (!Object.hasOwn(opts.source, "depends_on")) {
+    return;
+  }
   for (const target of legacyComposeCompletedJobTargets(
     opts.source.depends_on
   )) {

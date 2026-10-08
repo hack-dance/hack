@@ -149,7 +149,15 @@ durable native journal after exit; process completion alone does not prove clean
 Its separate `native-authored-project-run` v2 artifact records the original native
 receipt in excluded private storage. It never supplies a Compose plan ID or grants
 cleanup authority; retirement requires unchanged file identity and matching Removed
-evidence. Startup intent, command integration and live frontend acceptance remain gates.
+evidence. Native startup admission additionally holds an exact process-owned lock
+through the foreground lifetime and publishes a separate hash-only
+`native-authored-project-start` v2 intent before spawning the consumer. Ready
+publication must match that unchanged intent. Failed or interrupted starts retain
+it and refuse a new start, including after ready-file retirement. Only a caller
+that authenticated the exact durable Removed journal can retire the intent;
+missing ready files, expired timeouts and dead processes do not grant cleanup or
+replay. The strict Compose v1 reader and its artifact path remain unchanged.
+Command integration and live frontend acceptance remain gates.
 
 The stable, absolute source file is a public v2 envelope with
 `kind: "native-graph-source"`, `project`, optional canonical `branch`, 32-hex `run`,

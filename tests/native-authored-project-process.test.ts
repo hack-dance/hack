@@ -487,30 +487,31 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
   } catch (error) {
     failure = String(error);
   }
-  if (process.env.HACK_NATIVE_STATUS_FIXTURE_DIAGNOSTIC === "1") {
-    console.error(
-      JSON.stringify({
-        kind: "native-status-fixture-stages",
-        receiptObserved,
-        ownedExitCode: ownedExitCode ?? null,
-        nativeFailureObserved,
-        ownerEntered: await Bun.file(
-          join(opts.projectRoot, "fast-owner-entered")
-        ).exists(),
-        statusEntered: await Bun.file(
-          join(opts.projectRoot, "authenticated-status-started")
-        ).exists(),
-        keeperSelected: await Bun.file(
-          join(opts.projectRoot, "keeper-pid")
-        ).exists(),
-        cleanupObserved: await Bun.file(
-          join(opts.projectRoot, "cleanup-complete")
-        ).exists(),
-      })
-    );
-  }
+  const operationElapsedMs = performance.now() - start;
   try {
-    expect(performance.now() - start).toBeLessThan(1500);
+    if (process.env.HACK_NATIVE_STATUS_FIXTURE_DIAGNOSTIC === "1") {
+      console.error(
+        JSON.stringify({
+          kind: "native-status-fixture-stages",
+          receiptObserved,
+          ownedExitCode: ownedExitCode ?? null,
+          nativeFailureObserved,
+          ownerEntered: await Bun.file(
+            join(opts.projectRoot, "fast-owner-entered")
+          ).exists(),
+          statusEntered: await Bun.file(
+            join(opts.projectRoot, "authenticated-status-started")
+          ).exists(),
+          keeperSelected: await Bun.file(
+            join(opts.projectRoot, "keeper-pid")
+          ).exists(),
+          cleanupObserved: await Bun.file(
+            join(opts.projectRoot, "cleanup-complete")
+          ).exists(),
+        })
+      );
+    }
+    expect(operationElapsedMs).toBeLessThan(1500);
     expect(failure).toContain("canceled");
     expect(failure).not.toContain("synthetic-private-keeper-detail");
     expect(published).toBe(false);

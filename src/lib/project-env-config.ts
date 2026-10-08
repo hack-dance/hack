@@ -51,6 +51,7 @@ import {
 } from "./git-worktree.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
 import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
+import { LegacyAdoptionManagedEnvAdmission } from "./native-compose-adoption-env-inputs.ts";
 import {
   NATIVE_CONFIG_INPUT_LIMIT,
   NativeConfigCompilerError,
@@ -1154,14 +1155,33 @@ type NativeEnvAcquisitionObserver = (input: {
   readonly bytes: Uint8Array | undefined;
 }) => void;
 
+type ExplicitManagedEnvInputOwner = {
+  readonly assertRoot: (opts: {
+    readonly projectRoot: string;
+    readonly signal?: AbortSignal;
+  }) => Promise<void>;
+  readonly acquireFile: (opts: {
+    readonly projectRoot: string;
+    readonly filename: string;
+    readonly signal?: AbortSignal;
+  }) => Promise<Uint8Array | undefined>;
+};
+const nativeManagedEnvInputOwner: ExplicitManagedEnvInputOwner = {
+  assertRoot: assertNativeProjectInputRoot,
+  acquireFile: acquireNativeManagedEnvFile,
+};
+
 async function readNativeEnvLayer(opts: {
   readonly projectRoot: string;
   readonly filename: string;
   readonly environment: string;
   readonly signal?: AbortSignal;
   readonly onAcquired?: NativeEnvAcquisitionObserver;
+  readonly inputOwner?: ExplicitManagedEnvInputOwner;
 }): Promise<ProjectEnvConfig | null> {
-  const bytes = await acquireNativeManagedEnvFile(opts);
+  const bytes = await (
+    opts.inputOwner ?? nativeManagedEnvInputOwner
+  ).acquireFile(opts);
   checkNativeEnvCancellation(opts.signal);
   opts.onAcquired?.({
     projectRoot: opts.projectRoot,
@@ -1196,8 +1216,11 @@ async function readNativeLocalBase(opts: {
   readonly projectRoot: string;
   readonly signal?: AbortSignal;
   readonly onAcquired?: NativeEnvAcquisitionObserver;
+  readonly inputOwner?: ExplicitManagedEnvInputOwner;
 }): Promise<ProjectEnvConfig | null> {
-  const bytes = await acquireNativeManagedEnvFile({
+  const bytes = await (
+    opts.inputOwner ?? nativeManagedEnvInputOwner
+  ).acquireFile({
     ...opts,
     filename: "hack.env.local.yaml",
   });
@@ -1235,7 +1258,8 @@ async function readNativeLocalBase(opts: {
  */
 async function readNativeProjectEnvSelection(
   opts: NativeProjectEnvSelectionOptions,
-  onAcquired?: NativeEnvAcquisitionObserver
+  onAcquired?: NativeEnvAcquisitionObserver,
+  inputOwner: ExplicitManagedEnvInputOwner = nativeManagedEnvInputOwner
 ) {
   checkNativeEnvCancellation(opts.signal);
   const overlayName = opts.overlay;
@@ -1253,7 +1277,7 @@ async function readNativeProjectEnvSelection(
     declaredWorkloadNames
   );
   const projectRoot = resolve(opts.projectRoot);
-  await assertNativeProjectInputRoot({ projectRoot, signal: opts.signal });
+  await inputOwner.assertRoot({ projectRoot, signal: opts.signal });
   let primaryRoot: string | null = null;
   if (shouldInheritPrimaryLocalInputs({ inheritLocal })) {
     primaryRoot = await resolveVerifiedPrimaryWorktreeRoot({
@@ -1261,7 +1285,7 @@ async function readNativeProjectEnvSelection(
       signal: opts.signal,
     });
     if (primaryRoot) {
-      await assertNativeProjectInputRoot({
+      await inputOwner.assertRoot({
         projectRoot: primaryRoot,
         signal: opts.signal,
       });
@@ -1279,6 +1303,7 @@ async function readNativeProjectEnvSelection(
       environment: envName ?? "default",
       signal: opts.signal,
       onAcquired,
+      inputOwner,
     });
   };
   const base = await read(projectRoot, null, false);
@@ -1292,12 +1317,18 @@ async function readNativeProjectEnvSelection(
           projectRoot: primaryRoot,
           signal: opts.signal,
           onAcquired,
+          inputOwner,
         })
       : null,
     primaryRoot && overlayName !== null
       ? await read(primaryRoot, overlayName, true)
       : null,
-    await readNativeLocalBase({ projectRoot, signal: opts.signal, onAcquired }),
+    await readNativeLocalBase({
+      projectRoot,
+      signal: opts.signal,
+      onAcquired,
+      inputOwner,
+    }),
     overlayName === null ? null : await read(projectRoot, overlayName, true),
   ];
   const merged = mergeProjectEnvConfigLayers({
@@ -1334,9 +1365,9 @@ async function readNativeProjectEnvSelection(
   if (Buffer.byteLength(JSON.stringify(result)) > NATIVE_CONFIG_INPUT_LIMIT) {
     throw nativeEnvMetadataError();
   }
-  await assertNativeProjectInputRoot({ projectRoot, signal: opts.signal });
+  await inputOwner.assertRoot({ projectRoot, signal: opts.signal });
   if (primaryRoot) {
-    await assertNativeProjectInputRoot({
+    await inputOwner.assertRoot({
       projectRoot: primaryRoot,
       signal: opts.signal,
     });
@@ -1350,6 +1381,7 @@ async function readNativeProjectEnvSelection(
     metadata: result,
     declaredWorkloadNames,
     hostTargets,
+    inputOwner,
   };
 }
 
@@ -1494,12 +1526,12 @@ async function resolveNativeProjectEnvValues(opts: {
       projection: selected.projection,
       values,
     });
-    await assertNativeProjectInputRoot({
+    await selected.inputOwner.assertRoot({
       projectRoot: selected.projectRoot,
       signal: opts.signal,
     });
     if (selected.primaryRoot) {
-      await assertNativeProjectInputRoot({
+      await selected.inputOwner.assertRoot({
         projectRoot: selected.primaryRoot,
         signal: opts.signal,
       });
@@ -1618,12 +1650,27 @@ function redactNativeEnvRevisionError(error: unknown): Error {
 export async function acquireProjectEnvForNativeExecution(
   opts: NativeProjectEnvSelectionOptions
 ): Promise<NativeProjectEnvExecutionAcquisition> {
+  return await acquireExplicitProjectEnvExecution({
+    selection: opts,
+    inputOwner: nativeManagedEnvInputOwner,
+  });
+}
+
+/** Metadata, revision and delivery share one raw-layer acquisition under the admitted input owner. */
+async function acquireExplicitProjectEnvExecution(opts: {
+  readonly selection: NativeProjectEnvSelectionOptions;
+  readonly inputOwner: ExplicitManagedEnvInputOwner;
+  readonly redactError?: (error: unknown) => Error;
+}): Promise<NativeProjectEnvExecutionAcquisition> {
+  const redactError = opts.redactError ?? redactNativeEnvRevisionError;
   try {
-    const selection = snapshotNativeEnvSelection(opts);
+    const selection = snapshotNativeEnvSelection(opts.selection);
+    const inputOwner = opts.inputOwner;
     const recorded = nativeEnvRevisionRecorder();
     const selected = await readNativeProjectEnvSelection(
       selection,
-      recorded.onAcquired
+      recorded.onAcquired,
+      inputOwner
     );
     const revision = recorded.finish(selection, selected);
     const assertFresh = async (current: NativeProjectEnvSelectionOptions) => {
@@ -1632,13 +1679,14 @@ export async function acquireProjectEnvForNativeExecution(
         const rechecked = nativeEnvRevisionRecorder();
         const currentInputs = await readNativeProjectEnvSelection(
           currentSelection,
-          rechecked.onAcquired
+          rechecked.onAcquired,
+          inputOwner
         );
         if (rechecked.finish(currentSelection, currentInputs) !== revision) {
           throw nativeEnvRevisionError();
         }
       } catch (error: unknown) {
-        throw redactNativeEnvRevisionError(error);
+        throw redactError(error);
       }
     };
     const resolveValues = async (valueOpts?: {
@@ -1659,7 +1707,7 @@ export async function acquireProjectEnvForNativeExecution(
         freezeNativeEnvOwnedValue(result);
         return result;
       } catch (error: unknown) {
-        throw redactNativeEnvRevisionError(error);
+        throw redactError(error);
       }
     };
     const acquisition = {
@@ -1671,7 +1719,42 @@ export async function acquireProjectEnvForNativeExecution(
     Object.defineProperty(acquisition, "assertFresh", { enumerable: false });
     return Object.freeze(acquisition);
   } catch (error: unknown) {
-    throw redactNativeEnvRevisionError(error);
+    throw redactError(error);
+  }
+}
+
+function redactLegacyAdoptionEnvError(error: unknown): Error {
+  return error instanceof NativeConfigCompilerError &&
+    error.code === "E_COMPILER_CANCELLED"
+    ? new NativeConfigCompilerError(
+        "E_COMPILER_CANCELLED",
+        "Legacy adoption managed acquisition was cancelled; values omitted."
+      )
+    : new Error(
+        "Legacy adoption managed acquisition refused: selected inputs or key are invalid, unsafe or changed; values omitted."
+      );
+}
+
+/** Private legacy-adoption delivery; native metadata and selection APIs keep their native family fence. */
+export async function acquireProjectEnvForLegacyAdoption(opts: {
+  readonly admission: LegacyAdoptionManagedEnvAdmission;
+}): Promise<NativeProjectEnvExecutionAcquisition> {
+  try {
+    if (
+      !(
+        isRecord(opts) &&
+        opts.admission instanceof LegacyAdoptionManagedEnvAdmission
+      )
+    ) {
+      throw nativeEnvRevisionError();
+    }
+    return await acquireExplicitProjectEnvExecution({
+      selection: opts.admission.selection,
+      inputOwner: opts.admission,
+      redactError: redactLegacyAdoptionEnvError,
+    });
+  } catch (error: unknown) {
+    throw redactLegacyAdoptionEnvError(error);
   }
 }
 

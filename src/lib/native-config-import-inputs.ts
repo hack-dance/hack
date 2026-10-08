@@ -9,6 +9,8 @@ import {
 import { inspectProjectInputsAtRoot } from "./project-input-selection.ts";
 import { resolveVerifiedGitCheckoutLocation } from "./worktree-local-config.ts";
 
+const ownedAcquisitions = new WeakSet<object>();
+
 function cancelled(signal?: AbortSignal) {
   if (signal?.aborted) {
     throw new NativeConfigCompilerError(
@@ -367,6 +369,15 @@ export type NativeConfigImportInputs =
       }) => Promise<void>;
     };
 
+/** Identity-only admission for a private source capability; copied or structural claims grant no authority. */
+export function isOwnedNativeConfigImportAcquisition(
+  input: unknown
+): input is Extract<NativeConfigImportInputs, { readonly ok: true }> {
+  return (
+    typeof input === "object" && input !== null && ownedAcquisitions.has(input)
+  );
+}
+
 /**
  * One exact legacy snapshot for import and adoption prerequisites. Original
  * bytes, pathname identities and marker absences stay in the closure. Rechecks
@@ -464,6 +475,7 @@ async function acquireInputs(opts: {
     Object.defineProperty(result, key, { enumerable: false });
   }
   await result.assertFresh();
+  ownedAcquisitions.add(result);
   return Object.freeze(result);
 }
 

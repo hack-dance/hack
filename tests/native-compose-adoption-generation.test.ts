@@ -433,6 +433,48 @@ boundedTest(
   30_000
 );
 
+for (const linked of [false, true]) {
+  boundedTest(
+    `rolled-back v5 can reprepare a verified plain generation with ${linked ? "linked" : "directory"} checkout receipt version`,
+    async () => {
+      if (linked) {
+        await linkedCheckout();
+      }
+      const worker = await dependencyFixture();
+      const { store, generation } = await prepared();
+      try {
+        const binary = await compiler();
+        await store.publish({ generation, binary });
+        await store.rollback();
+        const composePath = join(projectRoot, ".hack/docker-compose.yml");
+        const authored = JSON.parse(await readFile(composePath, "utf8"));
+        authored.services.web.depends_on = undefined;
+        authored.services.db.healthcheck = undefined;
+        await writeFile(composePath, JSON.stringify(authored));
+        // The synthetic engine config-hash owner continues to attest the new source.
+        const plain = await store.prepare({ binary });
+        expect(plain.report.adoption_generation_version).toBe(1);
+        expect((await readReceipt()).adoption_receipt_version).toBe(
+          linked ? 2 : 1
+        );
+        expect(
+          (await store.loadPrepared())?.report.adoption_generation_version
+        ).toBe(1);
+        await store.publish({ generation: plain, binary });
+        expect(
+          (await store.loadActive())?.report.adoption_generation_version
+        ).toBe(1);
+        expect(await mutationCommands()).toEqual([]);
+        expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
+        expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+      } finally {
+        await store.close();
+      }
+    },
+    30_000
+  );
+}
+
 for (const stage of ["per-effect freshness", "final observation"] as const) {
   boundedTest(
     `v5 remaining aggregate clock terminates held ${stage} and retains pending`,

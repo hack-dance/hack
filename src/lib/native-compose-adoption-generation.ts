@@ -629,22 +629,6 @@ function manifestVersion(
   }
   return projection.projectionProof.projection_version === 2 ? 4 : 3;
 }
-function receiptVersion(
-  manifest: Manifest,
-  prior: Receipt,
-  checkout: Checkout
-): Receipt["adoption_receipt_version"] {
-  if (manifest.adoption_generation_version !== 1) {
-    return manifest.adoption_generation_version;
-  }
-  if (
-    prior.adoption_receipt_version === 6 ||
-    prior.adoption_receipt_version === 5
-  ) {
-    return "kind" in checkout.git ? 2 : 1;
-  }
-  return prior.adoption_receipt_version;
-}
 async function prepare(
   ctx: Context,
   binary: string | undefined
@@ -1349,10 +1333,11 @@ function boundedMutationContext(ctx: Context, deadline: number) {
     }
     return time;
   }
+  const initialRemaining = remaining();
   const controller = new AbortController();
   const abort = () => controller.abort();
   ctx.signal?.addEventListener("abort", abort, { once: true });
-  const timer = setTimeout(abort, remaining());
+  const timer = setTimeout(abort, initialRemaining);
   const bounded: Context = {
     ...ctx,
     signal: controller.signal,
@@ -1372,6 +1357,25 @@ function boundedMutationContext(ctx: Context, deadline: number) {
       ctx.signal?.removeEventListener("abort", abort);
     },
   };
+}
+
+function preparedReceiptVersion(
+  version: Manifest["adoption_generation_version"],
+  prior: Receipt,
+  checkout: Checkout
+): Receipt["adoption_receipt_version"] {
+  if (version !== 1) {
+    return version;
+  }
+  // A rolled-back dependency or topology owner must not label a later plain
+  // generation with its superseded contract.
+  if (
+    prior.adoption_receipt_version === 5 ||
+    prior.adoption_receipt_version === 6
+  ) {
+    return "kind" in checkout.git ? 2 : 1;
+  }
+  return prior.adoption_receipt_version;
 }
 function mutationPublication(
   state: Receipt,
@@ -1786,8 +1790,8 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             await save(
               ctx,
               {
-                adoption_receipt_version: receiptVersion(
-                  loaded.manifest,
+                adoption_receipt_version: preparedReceiptVersion(
+                  loaded.manifest.adoption_generation_version,
                   prior,
                   checkout
                 ),
